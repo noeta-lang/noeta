@@ -4,7 +4,7 @@ Programs span multiple files. Each file declares a `namespace`, imports with `us
 
 ```noeta
 // models.noe
-namespace App.Models;
+namespace App.Models
 
 pub struct User {
     pub name: string
@@ -18,9 +18,9 @@ pub fn greet(u: User): string {
 
 ```noeta check
 // main.noe
-namespace App.Main;
+namespace App.Main
 
-use App.Models.{User, greet};
+use App.Models.{User, greet}
 
 u = User { name: "Ada", id: 7 }
 echo greet(u)
@@ -44,7 +44,7 @@ A file declares its module path with `namespace` — the first statement in the 
 Import a declaration by its full path. Grouped imports share a prefix:
 
 ```noeta check
-namespace App.Main;
+namespace App.Main
 
 use App.Models.User;                       // single import
 use App.Billing.{Invoice, Receipt};        // grouped
@@ -59,7 +59,7 @@ echo customer.name                          // Ada
 A declaration can also be referenced by a **module-qualified name** at any use site — a struct literal, an annotation, a call, an enum construction or pattern, even a first-class function value. Importing a whole module binds its last segment as a navigable handle, and once a module is in scope its spelled-out fully-qualified name works too:
 
 ```noeta check
-namespace App.Main;
+namespace App.Main
 
 use geometry.vec;                              // the whole module: binds `vec`
 
@@ -92,7 +92,7 @@ A whole-module import follows the usual aliasing (`use geometry.vec as gv` → `
 An import can be renamed locally with `as`. This is how a file brings in two types that share a short name from different namespaces — each under its own local name:
 
 ```noeta check
-namespace App.Main;
+namespace App.Main
 
 use App.Money.Amount as Money;      // App.Money.Amount
 use App.Geo.Amount as Distance;     // App.Geo.Amount — a wholly distinct type
@@ -133,7 +133,7 @@ A declaration is **module-private by default**. Only `pub` items can be imported
 - Importing a name the file *also* declares locally (or imports twice) is a collision, E0020.
 
 ```noeta
-namespace App.Models;
+namespace App.Models
 
 pub class User { pub name: string }    // importable
 class Internal { secret: string }      // module-private

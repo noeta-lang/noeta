@@ -408,15 +408,30 @@ impl Checker {
                         .split_once('.')
                         .is_some_and(|(root, _)| self.symbols.types.contains(root))
                 {
-                    self.error(
+                    let diag = self.error(
                         DiagnosticCode::UnknownType,
                         *span,
                         format!("unknown type `{name}`"),
-                    )
-                    .help(
-                        "name a declared type, one imported with `use` (native types too, e.g. \
-                             `use std.id.Uuid`), a generic parameter, or a built-in",
                     );
+                    // `some`/`none`/`Ok`/`Err` are the *constructors* of `Option`/`Result`, not
+                    // types — but they are the obvious thing to reach for in `x is …`, since they
+                    // are exactly what a `match` arm names. Point at the spelling that works
+                    // rather than at the type catalog, which has nothing for the user to find.
+                    match name.as_str() {
+                        "some" | "none" => diag.help(
+                            "`some`/`none` are an optional's values, not types — test one with \
+                             `x != none` / `x == none`, or take it apart with \
+                             `match x { some(v) => …, none => … }`",
+                        ),
+                        "Ok" | "Err" => diag.help(
+                            "`Ok`/`Err` are a `Result`'s values, not types — take it apart with \
+                             `match x { Ok(v) => …, Err(e) => … }`, or propagate it with `?`",
+                        ),
+                        _ => diag.help(
+                            "name a declared type, one imported with `use` (native types too, \
+                             e.g. `use std.id.Uuid`), a generic parameter, or a built-in",
+                        ),
+                    };
                 }
                 // Key-capability gate (extern-types X4): a `Map<K, _>` key / `Set<T>` element
                 // formed from an extern type requires it key-capable — a mutable handle's hash

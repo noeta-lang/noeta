@@ -3342,4 +3342,51 @@ mod tests {
             "the sibling's local type is pulled"
         );
     }
+
+    // --- a sibling module's extension imports ---------------------------------------------------
+
+    /// The `use std.…` of every retained import in `linked`, as `path.name` strings.
+    fn retained_uses(linked: &Linked) -> Vec<String> {
+        linked
+            .program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Use { path, names, .. } => Some(
+                    names
+                        .iter()
+                        .map(|n| format!("{}.{}", path.join("."), n.name))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn a_contributing_siblings_std_import_is_carried_into_the_merged_program() {
+        // A `use` is file-scoped, so a sibling that imports an extension module must get it bound
+        // in the merged program. Before siblings drove their own imports, `twice`'s `math.round(…)`
+        // reached a merged program with no `math` binding and the entry failed with E0005 "cannot
+        // find `math` in this scope" — pointing at a sibling line that checks clean on its own. In
+        // effect a non-entry module could not use the standard library at all.
+        let sibling = module(
+            "helper.noe",
+            "namespace Demo.Helper;\n             use std.math\n             pub fn twice(v: float): int { return math.round(v * 2.0); }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "use Demo.Helper.twice\necho twice(2.5);\n",
+            noeta_lexer::Edition::default(),
+            &[sibling],
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "twice"), "the declaration merges");
+        assert!(
+            retained_uses(&linked).contains(&"std.math".to_string()),
+            "the sibling's `use std.math` must ride along: {:?}",
+            retained_uses(&linked)
+        );
+    }
 }

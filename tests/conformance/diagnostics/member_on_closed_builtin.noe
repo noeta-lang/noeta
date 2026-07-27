@@ -1,0 +1,16 @@
+// A field/method read on a CLOSED built-in type resolves nothing, and for a closed type that is
+// proof it does not exist — the same reasoning the *call* path already applied to `s.nope()`. The
+// member path used to answer `Unknown` in silence, so reading a field through an optional
+// (`p.x` where `p: ?P`) passed `noeta check` and failed only at run time with E0005 "no field `x`
+// on enum": the checker blessed it, the editor showed nothing, and Run broke.
+// expect: error E0007 at 13:42
+// expect: error E0007 at 14:43
+// expect: exit 1
+struct P {
+    x: int
+}
+
+fn through_option(p: ?P): dyn { return p.x; }
+fn on_a_string(s: string): dyn { return s.nope; }
+
+echo through_option(some(P { x: 1 }));

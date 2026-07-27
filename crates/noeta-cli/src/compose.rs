@@ -634,7 +634,30 @@ fn build(
                 cached.display()
             )
         })?;
+    discard_build_scratch(dir, &target_dir);
     Ok(())
+}
+
+/// Delete the compose dir's own cargo target dir now that its artifact has been copied out.
+///
+/// The compose dir owns its artifact and the target dir is a build detail — but it was kept
+/// forever, and it is *enormous* next to what it produces: one composition measured 1.4G of target
+/// beside a 51M artifact, a 27× tail. Nothing evicts compose entries, so a machine that checks a
+/// handful of native-dependency packages accumulates several gigabytes per composition and keeps
+/// them indefinitely (41G observed, which twice filled a 450G disk).
+///
+/// Dropping it costs nothing on the hit path: [`compose_binary`] and its AOT twin test for the
+/// cached *artifact*, never the target dir, so a pruned entry still hits and never rebuilds. It
+/// costs a full rebuild only when the entry misses anyway — which is the same work a cold entry
+/// does. Best-effort: the artifact is already cached, so a failure to remove is not a build error.
+///
+/// **Only ever removes the compose dir's own `target/`.** Under `NOETA_COMPOSE_TARGET_DIR` the dir
+/// belongs to the caller — the e2e tests point it at the workspace's own build directory — and
+/// deleting that would destroy work this function never created.
+fn discard_build_scratch(dir: &Path, target_dir: &Path) {
+    if target_dir == dir.join("target") {
+        let _ = std::fs::remove_dir_all(target_dir);
+    }
 }
 
 /// Generate the composed AOT runtime staticlib project, build it with `cargo rustc … --print
@@ -721,6 +744,7 @@ fn build_aot_archive(
             cached_libs.display()
         )
     })?;
+    discard_build_scratch(dir, &target_dir);
     Ok(())
 }
 
@@ -1650,5 +1674,50 @@ mod tests {
             "the runner base must not call run_cli"
         );
         assert!(!main.contains("command_units"));
+    }
+
+    /// The compose dir's own target dir is build scratch and is dropped once the artifact is
+    /// copied out — a 1.4G tail beside a 51M binary, retained forever by a cache nothing evicts.
+    #[test]
+    fn build_scratch_is_dropped_when_it_is_the_compose_dirs_own() {
+        let dir = std::env::temp_dir().join("noeta_compose_scratch_own");
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = dir.join("target");
+        std::fs::create_dir_all(target.join("release")).expect("create scratch");
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("write manifest");
+
+        discard_build_scratch(&dir, &target);
+
+        assert!(
+            !target.exists(),
+            "the compose dir's own target must be dropped"
+        );
+        assert!(
+            dir.join("Cargo.toml").is_file(),
+            "only the target dir goes — the compose entry itself stays, so the cache still hits"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dangerous half. Under `NOETA_COMPOSE_TARGET_DIR` the target dir belongs to the caller —
+    /// the e2e tests point it at the workspace's own build directory — so it must never be removed.
+    #[test]
+    fn build_scratch_outside_the_compose_dir_is_left_alone() {
+        let dir = std::env::temp_dir().join("noeta_compose_scratch_external");
+        let external = std::env::temp_dir().join("noeta_compose_scratch_external_target");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&external);
+        std::fs::create_dir_all(&dir).expect("create compose dir");
+        std::fs::create_dir_all(&external).expect("create external target");
+
+        discard_build_scratch(&dir, &external);
+
+        assert!(
+            external.is_dir(),
+            "a caller-supplied target dir must survive — deleting it would destroy work this \
+             function never created"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&external);
     }
 }

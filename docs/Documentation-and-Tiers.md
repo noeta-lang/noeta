@@ -44,8 +44,15 @@ $ noeta doc adder.noe
 - No `@doc` blocks → a notice on stderr, exit `0`.
 
 ```text
-noeta doc [OPTIONS] <FILE>
+noeta doc [OPTIONS] [PATH]
 ```
+
+`PATH` (default `.`) is a file or a **directory**. A directory extracts every `.noe` beneath it; a
+file extracts that file **and its sibling modules**, because a `@doc` block belongs to the file it
+sits in and linking merges declarations without the blocks beside them — extracting from the linked
+program alone would silently drop the documentation of every imported symbol. This is the same
+workspace `--out` has always documented, so the two halves of `noeta doc` agree on what "the docs"
+means. A file that does not parse contributes nothing rather than failing the run.
 
 ### Generating a documentation artifact
 

@@ -56,6 +56,28 @@ fn head(xs: List<int>): ?int { return xs.first() }
 echo head([]) ?? -1     // -1
 ```
 
+An optional is **its own reified type**, not a union of `T` and absence — `some(x)` really is a
+wrapper, and `echo` shows it as one. So `x is T` on a `?T` is *always false*: the value's runtime
+head constructor is `some`/`none`, never the payload's. The checker says so (**E0065**, a warning)
+and declines to narrow on such a test, so the unreachable branch does not go on type-checking as the
+payload. `Result<T, E>` behaves identically (`Ok`/`Err` are its head constructors).
+
+```noeta check
+struct P { x: int }
+
+fn f(p: ?P): int {
+    // `p is P` would be E0065 — always false. Take the option apart instead:
+    return match p {
+        some(v) => v.x,
+        none    => 0,
+    }
+}
+echo f(some(P { x: 7 }))    // 7
+```
+
+For mere presence, compare against the value: `p != none`. And `p is none` / `p is some` name
+*constructors*, not types — they are E0013, with the working spelling in the help.
+
 ## Unions — `A | B`
 
 A union is a **closed** dynamic: a value is *one of* a known, finite set of types.

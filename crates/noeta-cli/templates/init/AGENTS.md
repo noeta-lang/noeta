@@ -19,7 +19,7 @@ Use these constantly; they are fast:
 |---|---|
 | `noeta check .` | Type-check everything without running. **Run this before claiming code compiles.** `--format json` for machine-readable diagnostics. |
 | `noeta run src/main.noe` | Type-check and execute. Add `--target development` to compile `@debug` blocks in. |
-| `noeta test src/main.noe` | Run the entry file's `@test` blocks. **Run this before claiming a change works.** |
+| `noeta test` | Run every file's `@test` blocks. **Run this before claiming a change works.** Naming one file (`noeta test src/main.noe`) tests only that file — an entry does not carry its modules' tests. |
 | `noeta fmt .` | Format to the canonical style. Run after editing. |
 | `noeta bench src/main.noe` | Run `@bench` blocks, measured. |
 | `noeta doc src/main.noe` | Extract `@doc` documentation. |

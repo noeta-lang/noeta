@@ -351,3 +351,108 @@ fn doc_unterminated_block_is_reported() {
     let file = temp_program("doc_unterminated", "@doc {\n  # never closed\n");
     lang().arg("doc").arg(&file).assert().failure().code(1);
 }
+
+// --- `noeta doc` over a project (dev-story sweep) ------------------------------------
+
+#[test]
+fn doc_covers_the_entrys_modules_not_just_the_entry() {
+    // A `@doc` block is adjacency-resolved against the file it sits in, and linking merges a
+    // module's *declarations* without the doc blocks beside them — so extraction from the linked
+    // program silently dropped the documentation of every imported symbol. A two-module project
+    // printed the entry's docs and nothing else, even for the module function it calls.
+    let dir = temp_dir(
+        "doc_project",
+        &[
+            (
+                "src/util.noe",
+                "namespace Proj.Util;\n\
+                 @doc {\n    Doubles `n`.\n}\n\
+                 pub fn double(n: int): int { return n * 2; }\n",
+            ),
+            (
+                "src/main.noe",
+                "use Proj.Util.double\n\
+                 @doc {\n    The entry helper.\n}\n\
+                 fn helper(): int { return double(21); }\n\
+                 echo helper();\n",
+            ),
+        ],
+    );
+    lang()
+        .arg("doc")
+        .arg(dir.join("src/main.noe"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("The entry helper.")
+                .and(predicate::str::contains("Doubles `n`."))
+                .and(predicate::str::contains("· double")),
+        );
+}
+
+#[test]
+fn doc_on_a_directory_extracts_every_file() {
+    let dir = temp_dir(
+        "doc_dir",
+        &[
+            (
+                "src/a.noe",
+                "@doc {\n    Alpha.\n}\nfn a(): int { return 1; }\n",
+            ),
+            (
+                "nested/b.noe",
+                "@doc {\n    Beta.\n}\nfn b(): int { return 2; }\n",
+            ),
+        ],
+    );
+    lang()
+        .arg("doc")
+        .arg(&dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Alpha.").and(predicate::str::contains("Beta.")));
+}
+
+#[test]
+fn doc_on_a_directory_skips_a_file_that_does_not_parse() {
+    // Extraction works on a parse alone — that is what makes it useful on work-in-progress code —
+    // so a broken sibling contributes nothing rather than taking the whole run down.
+    let dir = temp_dir(
+        "doc_dir_broken",
+        &[
+            (
+                "src/ok.noe",
+                "@doc {\n    Good.\n}\nfn a(): int { return 1; }\n",
+            ),
+            ("src/broken.noe", "fn ( unbalanced\n"),
+        ],
+    );
+    lang()
+        .arg("doc")
+        .arg(&dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Good."));
+}
+
+#[test]
+fn doc_out_on_a_directory_names_the_entry_it_needs() {
+    // `--out` builds a *package's* artifact, keyed by the `[package]` identity beside its entry, so
+    // it needs that entry named. Extracting to stdout instead would silently drop the flag.
+    let dir = temp_dir(
+        "doc_out_dir",
+        &[(
+            "src/main.noe",
+            "@doc {\n    A.\n}\nfn a(): int { return 1; }\n",
+        )],
+    );
+    lang()
+        .arg("doc")
+        .arg(&dir)
+        .arg("--out")
+        .arg(dir.join("built"))
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("name its entry `.noe` file"));
+}

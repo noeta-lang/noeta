@@ -31,7 +31,36 @@ impl Checker {
         for arm in arms {
             env.push(HashMap::new());
             self.bind_pattern(&arm.pattern, &scrut, env);
-            if let (Some(name), Pattern::IsType { ty, .. }) = (scrut_ident, &arm.pattern) {
+            // An `is T` arm's target is a type annotation like any other — validate it, so an arm
+            // naming a type that does not exist is the same E0013 the expression form
+            // (`d is Nonexistent`) already reported. It used to be accepted in silence purely
+            // because this path never called the validator.
+            if let Pattern::IsType { ty, .. } = &arm.pattern {
+                let before = self.diags.len();
+                self.check_type_ref(ty);
+                // …and, when the target does resolve, the same always-false rule the expression
+                // form applies (E0065): an `is P` arm on an `Option<P>` scrutinee can never be
+                // taken, so it is reported and — below — narrows nothing.
+                if self.diags.len() == before
+                    && let Some(idiom) = self.impossible_type_test(&scrut, ty)
+                {
+                    let target = from_ref_q(ty, &self.imports.extern_types);
+                    self.warn(
+                        DiagnosticCode::ImpossibleTypeTest,
+                        ty.span(),
+                        format!(
+                            "`{scrut}` is its own runtime type, not its payload's; \
+                             this `is {target}` arm can never be taken"
+                        ),
+                    )
+                    .help(idiom);
+                }
+            }
+            // Flow-narrowing applies…except when the test can never hold: an unreachable arm
+            // narrows nothing.
+            if let (Some(name), Pattern::IsType { ty, .. }) = (scrut_ident, &arm.pattern)
+                && self.impossible_type_test(&scrut, ty).is_none()
+            {
                 bind(env, name, from_ref_q(ty, &self.imports.extern_types));
             }
             // The guard (`pattern if cond`) is checked in the arm scope — after the pattern

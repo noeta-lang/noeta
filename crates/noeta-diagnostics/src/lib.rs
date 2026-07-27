@@ -307,6 +307,22 @@ pub enum DiagnosticCode {
     /// surrogate (`0xD800`–`0xDFFF`). The other escapes (`\n \t \r \" \\ \$`) and an unknown
     /// escape (`\q` → `q`) are never this error. Reported at parse time against the escape's span.
     InvalidStringEscape,
+    /// **Warning.** A type test `x is T` whose scrutinee is a **reified container** — an
+    /// `Option<…>` or a `Result<…, …>` — against a target that is not that same container. Both
+    /// carry their own runtime head constructor (`some`/`none`, `Ok`/`Err`), so the tag can never
+    /// be the payload's: `x is P` on an `Option<P>` is statically always false, however much it
+    /// reads like "is it a `P`". The fix is to reach the payload — `match x { some(v) => … }` /
+    /// `Ok(v) => …` — or, for mere presence, `x != none`.
+    ///
+    /// The sibling of [`Self::ErasedWidthNarrow`], and reported for the same reason: the test
+    /// compiles and runs, it simply can never be taken, so the branch is silently dead. The
+    /// checker additionally declines to flow-narrow the scrutinee on such a test — the narrowing
+    /// was the real damage, because it made the dead branch type-check as the payload.
+    ///
+    /// Deliberately *not* reported when the target is open (`dyn`, a `dyn Trait`), is a kind-type
+    /// (`x is Enum` is genuinely **true** for both containers — they are enums at runtime), or is
+    /// a bare type parameter (erased; it may instantiate to the container itself).
+    ImpossibleTypeTest,
 }
 
 impl DiagnosticCode {
@@ -377,6 +393,7 @@ impl DiagnosticCode {
         DiagnosticCode::DirectiveExpansionFailed,
         DiagnosticCode::ErasedWidthNarrow,
         DiagnosticCode::InvalidStringEscape,
+        DiagnosticCode::ImpossibleTypeTest,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -447,6 +464,7 @@ impl DiagnosticCode {
             DiagnosticCode::DirectiveExpansionFailed => "E0062",
             DiagnosticCode::ErasedWidthNarrow => "E0063",
             DiagnosticCode::InvalidStringEscape => "E0064",
+            DiagnosticCode::ImpossibleTypeTest => "E0065",
         }
     }
 

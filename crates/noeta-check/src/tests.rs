@@ -2998,3 +2998,220 @@ fn f(b: Boxx): int { return b.get(); }
 ";
     assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
+
+// ----- E0065 / E0007: reified containers are not their payloads (dev-story sweep) -----
+//
+// `Option` and `Result` carry their own runtime head constructor (`some`/`none`, `Ok`/`Err`), never
+// the payload's — so `x is P` on an `Option<P>` is statically always false. It used to type-check
+// *and flow-narrow*, so the dead branch read the payload's fields and only the runtime disagreed
+// (E0005, "no field `x` on enum"). Now the test warns (E0065, advisory like E0063) and, crucially,
+// narrows nothing — which is what turns a misuse of the branch into a real error.
+
+#[test]
+fn is_payload_on_an_option_warns_impossible() {
+    let src = "\
+struct P { x: int }
+fn f(p: ?P): bool { return p is P; }
+";
+    assert_eq!(warn_codes(src), ["E0065"]);
+}
+
+#[test]
+fn is_payload_on_a_result_warns_impossible() {
+    let src = "fn f(r: Result<int, string>): bool { return r is int; }\n";
+    assert_eq!(warn_codes(src), ["E0065"]);
+}
+
+#[test]
+fn the_impossible_test_diagnostic_is_a_warning_not_an_error() {
+    // Advisory, exactly like E0063: the program is well-formed and still compiles.
+    let src = "fn f(r: Result<int, string>): bool { return r is int; }\n";
+    assert_eq!(codes(src), ["E0065"]);
+}
+
+#[test]
+fn is_the_container_itself_does_not_warn() {
+    // The true test — the value really is an `Option`/`Result`.
+    assert!(codes("fn f(p: ?int): bool { return p is Option<int>; }\n").is_empty());
+    assert!(
+        codes("fn f(r: Result<int, string>): bool { return r is Result<int, string>; }\n")
+            .is_empty()
+    );
+}
+
+#[test]
+fn is_a_kind_type_does_not_warn_because_containers_are_enums() {
+    // `Option`/`Result` ARE enums at runtime, so `x is Enum` is genuinely `true`; flagging it
+    // would be wrong, not merely noisy.
+    assert!(codes("fn f(p: ?int): bool { return p is Enum; }\n").is_empty());
+    assert!(codes("fn f(r: Result<int, string>): bool { return r is Enum; }\n").is_empty());
+}
+
+#[test]
+fn is_an_open_target_does_not_warn() {
+    // `dyn` and a `dyn Trait` membership test are the runtime's call, not a provable constant.
+    assert!(codes("fn f(p: ?int): bool { return p is dyn; }\n").is_empty());
+    let src = "\
+trait Speaks { fn speak(): string }
+fn f(p: ?int): bool { return p is dyn Speaks; }
+";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn is_a_bare_type_parameter_does_not_warn() {
+    // `T` is erased and may instantiate to the container itself.
+    let src = "fn f<T>(p: ?T): bool { return p is T; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn an_impossible_test_narrows_nothing_in_an_if() {
+    // The whole point: the dead branch must stop type-checking as the payload. Reading `p.x`
+    // inside it is now the E0007 the member path reports, not silence.
+    let src = "\
+struct P { x: int }
+fn f(p: ?P): int {
+  if p is P { return p.x; }
+  return 0;
+}
+";
+    assert_eq!(codes(src), ["E0065", "E0007"]);
+}
+
+#[test]
+fn an_impossible_test_narrows_nothing_in_a_match_arm() {
+    let src = "\
+struct P { x: int }
+fn f(p: ?P): int {
+  return match p {
+    is P => p.x,
+    _ => 0,
+  };
+}
+";
+    assert_eq!(codes(src), ["E0065", "E0007"]);
+}
+
+#[test]
+fn a_real_is_narrowing_still_narrows() {
+    // The guard must not disturb the ordinary `dyn`/union narrowing it sits beside.
+    let src = "\
+struct P { x: int }
+fn f(d: dyn): int {
+  if d is P { return d.x; }
+  return 0;
+}
+";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn a_member_on_a_closed_builtin_is_an_error_in_value_position() {
+    // The call path already caught `s.nope()`; the *member* path silently answered `Unknown`, so
+    // `s.nope`, `[1].nope` and `p.x`-through-an-optional passed `check` and failed at run time.
+    assert_eq!(
+        codes("fn f(s: string): dyn { return s.nope; }\n"),
+        ["E0007"]
+    );
+    assert_eq!(
+        codes("fn f(xs: List<int>): dyn { return xs.nope; }\n"),
+        ["E0007"]
+    );
+    let src = "\
+struct P { x: int }
+fn f(p: ?P): dyn { return p.x; }
+";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
+fn a_member_on_an_open_receiver_stays_lenient() {
+    // `dyn` and a user `Named` type keep deferring — a trait impl or runtime dispatch this pass
+    // cannot see may still supply the member.
+    assert!(codes("fn f(d: dyn): dyn { return d.whatever; }\n").is_empty());
+}
+
+#[test]
+fn a_real_member_on_a_closed_builtin_still_resolves() {
+    // The guard fires only when nothing resolved; a genuine built-in method handle is untouched.
+    assert!(codes("fn f(s: string): dyn { return s.upper; }\n").is_empty());
+    assert!(codes("fn f(xs: List<int>): dyn { return xs.len; }\n").is_empty());
+}
+
+#[test]
+fn an_optional_constructor_named_as_a_type_gets_the_idiom() {
+    // `x is none` / `x is Ok` name a *value* constructor. It stays E0013 (there is no such type),
+    // but the help points at the spelling that works instead of at the type catalog — and the
+    // E0065 warning is suppressed, since a second diagnostic about a type that does not exist is
+    // noise.
+    assert_eq!(
+        codes("fn f(p: ?int): bool { return p is none; }\n"),
+        ["E0013"]
+    );
+    assert_eq!(
+        codes("fn f(p: ?int): bool { return p is some; }\n"),
+        ["E0013"]
+    );
+    assert_eq!(
+        codes("fn f(r: Result<int, string>): bool { return r is Ok; }\n"),
+        ["E0013"]
+    );
+}
+
+// ----- E0065: comparing a reified container with its payload (dev-story sweep) -----
+//
+// The trap this closes is reached invisibly: `??=` deliberately *unwraps*, retyping its binding
+// from `Option<int>` to `int` (the documented one-place exception to reassignment stability). A
+// `mut column: ?int` that has been `??=`-assigned once therefore stops comparing equal to the
+// `?int` it is tested against — silently, because `==` is universal and imposes no bound.
+
+#[test]
+fn comparing_an_option_to_its_payload_warns() {
+    let src = "fn f(p: ?int, n: int): bool { return p == n; }\n";
+    assert_eq!(warn_codes(src), ["E0065"]);
+    let src = "fn f(p: ?int, n: int): bool { return n != p; }\n";
+    assert_eq!(warn_codes(src), ["E0065"]);
+}
+
+#[test]
+fn comparing_a_result_to_its_payload_warns() {
+    let src = "fn f(r: Result<int, string>, n: int): bool { return r == n; }\n";
+    assert_eq!(warn_codes(src), ["E0065"]);
+}
+
+#[test]
+fn the_container_compare_diagnostic_is_a_warning_not_an_error() {
+    assert_eq!(
+        codes("fn f(p: ?int, n: int): bool { return p == n; }\n"),
+        ["E0065"]
+    );
+}
+
+#[test]
+fn comparing_two_options_does_not_warn() {
+    // Like with like — including `x == none`, which is *the* presence test.
+    assert!(codes("fn f(a: ?int, b: ?int): bool { return a == b; }\n").is_empty());
+    assert!(codes("fn f(p: ?int): bool { return p == none; }\n").is_empty());
+    assert!(codes("fn f(p: ?int): bool { return p != none; }\n").is_empty());
+    assert!(codes("fn f(p: ?int, n: int): bool { return p == some(n); }\n").is_empty());
+}
+
+#[test]
+fn comparing_a_container_to_an_open_type_does_not_warn() {
+    // A `dyn` operand really could hold the container at runtime.
+    assert!(codes("fn f(p: ?int, d: dyn): bool { return p == d; }\n").is_empty());
+}
+
+#[test]
+fn comparing_a_container_to_a_bare_type_parameter_does_not_warn() {
+    let src = "fn f<T>(p: ?T, t: T): bool { return p == t; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn ordinary_cross_type_equality_is_still_unflagged() {
+    // Deliberately narrow: this rule is about the container/payload confusion, not a general
+    // "these types can never be equal" analysis, which `==`'s universality does not support.
+    assert!(codes("fn f(n: int, s: string): bool { return n == s; }\n").is_empty());
+}

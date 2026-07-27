@@ -2,8 +2,8 @@
 //!
 //! The cache root holds three kinds of derived state: **cached compilations** (top-level `*.noeb`
 //! blobs — the transparent startup cache, M3), **composed toolchains** (`compose/<key>/`,
-//! package-manager Phase 3 — a full cargo build per native-dependency set, easily 1–2 GiB each),
-//! and **fetched package sources** (`pkg/<key>/`, P2.3a). All of it is re-derivable — deleting
+//! package-manager Phase 3 — a full cargo build per native-dependency set), and **fetched package
+//! sources** (`pkg/<key>/`, P2.3a). All of it is re-derivable — deleting
 //! any of it costs at most a recompile, a recompose, or a refetch — so every verb here is safe by
 //! construction. The one invariant is that nothing outside the resolved cache root is ever
 //! touched: every path is built by joining the root, and only the three known categories are
@@ -14,6 +14,12 @@
 //! build's compositions. Each use stamps the entry with the composing binary's identity
 //! ([`crate::compose::COMPOSE_IDENTITY_FILE`]); `clean` removes the entries whose stamp is not
 //! this binary's and reports the bytes reclaimed.
+//!
+//! A *current* entry is small — tens of MiB, the composed binary itself. It used to be 1–2 GiB,
+//! because each entry kept the cargo target dir it was built in: build scratch worth ~27× the
+//! artifact, retained for the entry's whole life and reclaimable only by going stale. `compose`
+//! now drops that scratch once it has copied the artifact out (`compose::discard_build_scratch`),
+//! so what `ls` reports here is the artifact rather than the scaffolding around it.
 
 use std::fs;
 use std::io;

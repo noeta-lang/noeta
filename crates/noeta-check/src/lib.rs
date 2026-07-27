@@ -1978,6 +1978,11 @@ impl Checker {
                 if let Expr::TypeTest { expr, ty, .. } = cond
                     && let Expr::Ident { name, .. } = expr.as_ref()
                     && !reassigns(then_body, name)
+                    // A test that can never hold (E0065 — `x is P` on an `Option<P>`) narrows
+                    // nothing: the branch is unreachable, and narrowing it to the payload is what
+                    // used to let the dead code type-check.
+                    && lookup(env, name)
+                        .is_none_or(|t| self.impossible_type_test(t, ty).is_none())
                 {
                     env.push(HashMap::new());
                     bind(env, name, from_ref_q(ty, &self.imports.extern_types));
