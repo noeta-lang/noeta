@@ -635,7 +635,11 @@ mod tests {
         // AOT ring DCE keeps reqwest. If the group ever recorded the prefix `std.http` in the const
         // pool, `ring_of` would miss and `--native` would ship a binary with no HTTP client. This
         // compiles the group form end-to-end and asserts the client ring is selected.
-        let src = "use std.http\nr = http.client.get(\"https://svc.test/echo\")\necho r.status()\n";
+        // The `?` spends the verb's `Result<Response, HttpError>`; without it `status()` is a
+        // method the Result does not have, which the checker now rejects (it used to slip through
+        // to a runtime E0005, which is how this fixture came to be written without it).
+        let src =
+            "use std.http\nr = http.client.get(\"https://svc.test/echo\")?\necho r.status()\n";
         let source = Source::new(SourceId(0), "<test>", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);

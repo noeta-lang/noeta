@@ -1,0 +1,10 @@
+// The regression this fix was written for. Every `std.http.client` verb returns
+// `Result<Response, HttpError>`, so the request must be spent with `?` before there is a `Response`
+// to ask for a `status()`. Calling straight through used to check CLEAN and only fail on run with
+// E0005 "no method `status` on enum" — an editor showing nothing, a program that dies. `Result` is a
+// closed builtin (its own `Type` variant, not a declared type), so the checker owns this now.
+// expect: error E0007 at 10:6
+// expect: exit 1
+use std.http.client
+r = client.get("https://svc.test/echo")
+echo r.status()

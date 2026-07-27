@@ -1,0 +1,9 @@
+// A closed builtin type's method table is complete at check time, so an unknown method on one is
+// rejected statically (E0007) rather than deferred to the runtime's "no method" (E0005). `string`
+// is closed the same way `int` is: `impl Trait for string` is E0013 ("not a record, class, or enum
+// declared in this module"), so nothing can add `shout` after the fact and the empty lookup is
+// proof, not ignorance. `check` and `run` AGREE — the point of the fix.
+// expect: error E0007 at 9:6
+// expect: exit 1
+s = "hi"
+echo s.shout()

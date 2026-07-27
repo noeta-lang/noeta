@@ -1058,17 +1058,15 @@ impl Checker {
                     return ret;
                 }
                 let ret = self.method_call_return(&recv, name);
-                // A method call on a concrete primitive with no such built-in method is an error,
+                // A method call on a CLOSED builtin type with no such built-in method is an error,
                 // mirroring the non-indexable check (`42[0]`). `dyn`/holes defer (their result is
                 // the deferred type, not `Unknown`), and a user `Named` type may resolve the call
-                // through a trait at runtime — so both are left lenient; only the closed primitives
-                // are flagged.
-                if matches!(ret, Type::Unknown)
-                    && matches!(
-                        recv,
-                        Type::Int | Type::IntN { .. } | Type::Float | Type::Bool | Type::Unit
-                    )
-                {
+                // through a trait at runtime — so both are left lenient; only the closed types are
+                // flagged. Without this the runtime is left to raise E0005 ("no method `x` on
+                // string") on a program the checker called clean — the editor shows nothing and
+                // Run fails, which is exactly how the playground's `client.get(url)` (a `Result`,
+                // missing its `?`) reached production looking correct.
+                if matches!(ret, Type::Unknown) && closed_to_new_methods(&recv) {
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         span,
@@ -1623,6 +1621,43 @@ impl Checker {
             }
         }
     }
+}
+
+/// Whether `ty` is a **closed** builtin type — one whose method table is complete at check time, so
+/// "the lookup found nothing" is proof the method does not exist rather than merely that this pass
+/// could not see it.
+///
+/// Closedness is the language's, not a convenience: `impl Trait for string` (and for every other
+/// type here) is rejected with E0013 — "not a record, class, or enum declared in this module" — so
+/// no user code can add a method to one of these after the fact. Native extensions *can*, but they
+/// register into the same instance registry [`Checker::method_call_return`] already consulted, so
+/// theirs are found too.
+///
+/// Deliberately excluded, and why:
+/// - [`Type::Named`] — a declared or imported type, whose method may still arrive through a trait
+///   impl or a runtime dispatch this pass cannot see. Lenient by design.
+/// - [`Type::Dyn`], [`Type::Unknown`] and the other gradual holes — they never reach here, because
+///   `method_call_return` answers them with the deferred type rather than `Unknown`.
+/// - [`Type::DynTrait`] — resolved against the trait's declared methods, but a trait object's
+///   dispatch is the runtime's call to make.
+fn closed_to_new_methods(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Int
+            | Type::IntN { .. }
+            | Type::Float
+            | Type::F32
+            | Type::F64
+            | Type::Bool
+            | Type::Unit
+            | Type::String
+            | Type::Bytes
+            | Type::List(_)
+            | Type::Map(_, _)
+            | Type::Set(_)
+            | Type::Option(_)
+            | Type::Result(_, _)
+    )
 }
 
 /// A compact human label for a **computed callee** — the expression standing in for a name in an

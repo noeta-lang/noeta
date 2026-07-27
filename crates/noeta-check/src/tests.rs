@@ -209,9 +209,12 @@ fn namespaced_type_resolves_in_type_position() {
 #[test]
 fn namespace_group_binds_and_resolves() {
     // `use std.http` binds `http` as a navigable group; `http.client.get(...)` resolves the client
-    // submodule and type-checks clean (identical to the leaf form `use std.http.client`).
+    // submodule and type-checks clean (identical to the leaf form `use std.http.client`). The `?`
+    // is load-bearing, not decoration: a verb returns `Result<Response, HttpError>`, so without it
+    // `r` is the Result and `status()` is a method it does not have. This fixture asserted the
+    // unspent form was clean until closed-type method resolution started catching that.
     assert!(
-        codes("use std.http;\nr = http.client.get(\"https://x\");\necho r.status();\n").is_empty()
+        codes("use std.http;\nr = http.client.get(\"https://x\")?;\necho r.status();\n").is_empty()
     );
 }
 
