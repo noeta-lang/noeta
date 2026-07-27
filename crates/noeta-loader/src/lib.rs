@@ -1408,6 +1408,29 @@ fn link_core(
                             .is_some_and(|r| reg.is_extension_root(r) || native_roots.contains(r)),
                     };
                     if retained {
+                        // A retained (native) import binds a name in this file just as a resolved
+                        // one does, so it answers the same one-name-one-meaning question. Without
+                        // this it was invisible to the collision table, and a file importing BOTH a
+                        // loaded `.noe` module and a native module of the same leaf name
+                        // (`use pet_proxy.client` + `use std.http.client`) silently kept only the
+                        // `.noe` meaning — `client.new(…)` resolved to the file's own package and
+                        // surfaced much later as a missing function. Import-vs-import only: a
+                        // native import that merely shares a name with a *declaration* is left to
+                        // the checker's own shadowing rules, which already see both.
+                        if canonical_use_binding(reg, path, &name.name).is_some() {
+                            match origins.get(name.local()) {
+                                None => {
+                                    origins.insert(
+                                        name.local().to_string(),
+                                        Origin::Import(path.to_vec()),
+                                    );
+                                }
+                                Some(Origin::Import(p)) if p.as_slice() != path => {
+                                    errors.push(collision_error(entry, path, name));
+                                }
+                                Some(_) => {}
+                            }
+                        }
                         unresolved.push(name.clone());
                     // A namespace that IS declared, by a file that simply failed to parse, is not a
                     // missing module: it is a syntax error the consumer was never shown.

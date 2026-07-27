@@ -243,3 +243,111 @@ fn a_type_reached_through_a_handle_travels_with_it() {
     );
     assert_eq!(stdout, "36\n", "a canonical UUID renders as 36 characters");
 }
+
+/// The symptom that failed at **check** time, and the shortest path to the same root cause: two
+/// files of ONE package importing the SAME module, one of them aliased. Retention deduped on
+/// `(path, imported name)` alone, so the entry's `use std.http.url as codec` swallowed the
+/// sibling's plain `use std.http.url` outright — the sibling's own `url` was never bound, and
+/// `noeta check` reported ``cannot find `url` in this scope`` pointing into a file whose import was
+/// perfectly good. Checking that sibling *alone* was clean, which is the tell: a `use` binds in one
+/// file, and no other file may take that binding away.
+#[test]
+fn one_files_aliased_import_does_not_unbind_a_siblings_plain_one() {
+    let _guard = serialize();
+    let stdout = check_then_run(
+        "use acme.dep.unescape\nuse std.http.url as codec\necho codec.encode(unescape(\"a%20b\"))\n",
+        &[(
+            "dep/mod.noe",
+            decoder("use std.http.url", "url.decode(v)").as_str(),
+        )],
+    );
+    assert_eq!(stdout, "a%20b\n");
+}
+
+/// The mirror of the case above: the **sibling** aliases and the entry imports plainly. Neither
+/// direction may cost the other its binding.
+#[test]
+fn a_siblings_aliased_import_does_not_unbind_the_entrys_plain_one() {
+    let _guard = serialize();
+    let stdout = check_then_run(
+        "use acme.dep.unescape\nuse std.http.url\necho url.encode(unescape(\"a%20b\"))\n",
+        &[(
+            "dep/mod.noe",
+            decoder("use std.http.url as codec", "codec.decode(v)").as_str(),
+        )],
+    );
+    assert_eq!(stdout, "a%20b\n");
+}
+
+/// A **namespace group** handle (`use std.http` → `http.url.decode(…)`) is renamed like a concrete
+/// module's, and its member chain still navigates to the leaf module — the group is the third kind
+/// of value-namespace binding a `use` creates.
+#[test]
+fn a_namespace_group_handle_still_navigates_to_its_leaf_module() {
+    let _guard = serialize();
+    let stdout = check_then_run(
+        "use acme.grp.dec\necho dec(\"a%20b\")\n",
+        &[(
+            "dep/grp.noe",
+            "namespace acme.grp\nuse std.http\npub fn dec(v: string): string {\n  return http.url.decode(v)\n}\n",
+        )],
+    );
+    assert_eq!(stdout, "a b\n");
+}
+
+/// The neighbouring shape with **no** native module in it: two `.noe` packages whose modules share
+/// a leaf name (`alpha.util` and `beta.util`), each imported whole by a different dependency file.
+/// This direction already went through the per-file qualification map; pinning it keeps the two
+/// halves of "a `use` binds in one file" from drifting apart.
+#[test]
+fn two_noe_modules_of_one_leaf_name_stay_apart() {
+    let _guard = serialize();
+    let stdout = check_then_run(
+        "use acme.a.who as a_who\nuse acme.b.who as b_who\necho a_who()\necho b_who()\n",
+        &[
+            (
+                "alpha/util.noe",
+                "namespace alpha.util\npub fn tag(): string {\n  return \"alpha\"\n}\n",
+            ),
+            (
+                "beta/util.noe",
+                "namespace beta.util\npub fn tag(): string {\n  return \"beta\"\n}\n",
+            ),
+            (
+                "a/lib.noe",
+                "namespace acme.a\nuse alpha.util\npub fn who(): string {\n  return util.tag()\n}\n",
+            ),
+            (
+                "b/lib.noe",
+                "namespace acme.b\nuse beta.util\npub fn who(): string {\n  return util.tag()\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(stdout, "alpha\nbeta\n");
+}
+
+/// The mixed direction: one dependency's handle is a **`.noe`** module, another's is a **native**
+/// module, and the two share a leaf name. Neither may answer for the other — the `.noe` side
+/// resolves through the qualified-identity rewrite, the native side through the canonical binding.
+#[test]
+fn a_noe_module_and_a_native_module_of_one_leaf_name_stay_apart() {
+    let _guard = serialize();
+    let stdout = check_then_run(
+        "use acme.native.enc\nuse acme.local.enc as local_enc\necho enc(\"a b\")\necho local_enc(\"a b\")\n",
+        &[
+            (
+                "zeta/url.noe",
+                "namespace zeta.url\npub fn encode(v: string): string {\n  return \"zeta<${v}>\"\n}\n",
+            ),
+            (
+                "native/lib.noe",
+                "namespace acme.native\nuse pkg.url\npub fn enc(v: string): string {\n  return url.encode(v)\n}\n",
+            ),
+            (
+                "local/lib.noe",
+                "namespace acme.local\nuse zeta.url\npub fn enc(v: string): string {\n  return url.encode(v)\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(stdout, "pkg<a b>\nzeta<a b>\n");
+}

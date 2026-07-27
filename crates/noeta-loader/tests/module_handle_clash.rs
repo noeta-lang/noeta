@@ -321,3 +321,80 @@ fn a_local_named_like_the_handle_is_left_alone() {
         "a parameter named `url` shadows the module handle"
     );
 }
+
+/// One file importing **both** a loaded `.noe` module and a **native** module of the same leaf name
+/// is a collision, and now says so. Before, the native import was invisible to the per-file
+/// collision table (only *resolved* imports were recorded), so the `.noe` meaning silently won and
+/// `url.encode(…)` reached the file's own package — surfacing far later as a missing function.
+#[test]
+fn a_native_import_colliding_with_a_noe_import_in_one_file_is_reported() {
+    install();
+    let (_, sibling) = parse(
+        1,
+        "/proj/url.noe",
+        "namespace proj.url\npub fn encode(v: string): string {\n  return v\n}\n",
+    );
+    let (entry_src, entry) = parse(
+        0,
+        "/proj/main.noe",
+        "use proj.url\nuse pkg.url\necho url.encode(\"a b\")\n",
+    );
+    let errors = link_parsed_with_deps(&entry_src, &entry, &[&sibling], &[], &[], None)
+        .expect_err("two imports binding `url` in one file must not link silently");
+    assert!(
+        errors.iter().any(|e| e.diagnostic.code.code() == "E0020"),
+        "the collision must be reported as E0020, got: {:?}",
+        errors
+            .iter()
+            .map(|e| (e.diagnostic.code.code(), &e.diagnostic.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The same file importing the same native module twice binds one name to one meaning, so it is a
+/// no-op — not a collision. (A grouped list can legitimately repeat, and two files sharing an
+/// import always could.)
+#[test]
+fn importing_one_native_module_twice_in_a_file_is_not_a_collision() {
+    install();
+    let (entry_src, entry) = parse(
+        0,
+        "/proj/main.noe",
+        "use pkg.url\nuse pkg.url\necho url.encode(\"a b\")\n",
+    );
+    assert!(
+        link_parsed_with_deps(&entry_src, &entry, &[], &[], &[], None).is_ok(),
+        "a repeated identical import is a no-op"
+    );
+}
+
+/// **The structural invariant**, stated directly: after linking, no bound name maps to two module
+/// identities. That is the property the whole fix rests on — the merged program's flat scope can
+/// only hold one meaning per name, so if two survive under one name the runtime is guessing, which
+/// is exactly what it used to do. Asserted over every spelling, so a future path that reintroduces
+/// a leaf-name binding trips here rather than in production.
+#[test]
+fn no_bound_name_maps_to_two_module_identities() {
+    for (import_line, call) in [
+        ("use std.http.url\n", "url.decode(v)"),
+        ("use std.http.url as codec\n", "codec.decode(v)"),
+        (
+            "use std.http.url.{decode as percent_decode}\n",
+            "percent_decode(v)",
+        ),
+        ("use std.http.url.{decode}\n", "decode(v)"),
+    ] {
+        let program = link_two_packages(import_line, call);
+        let mut claimed: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (path, name, local) in retained_uses(&program) {
+            let identity = format!("{path}.{name}");
+            if let Some(previous) = claimed.insert(local.clone(), identity.clone()) {
+                assert_eq!(
+                    previous, identity,
+                    "`{local}` is bound to two module identities after linking `{import_line}`"
+                );
+            }
+        }
+    }
+}
