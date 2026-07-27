@@ -983,11 +983,22 @@ pub fn packed_named_fields(decl: &StructDecl) -> Option<Vec<Option<String>>> {
 /// The field types a key-capable packed struct may use directly (P-PKEY): the integer family and
 /// `bool`. **Floats are deliberately excluded** — NaN ≠ NaN and `-0.0 == 0.0` make float keys a
 /// footgun; a bit-pattern opt-in can come later.
+///
+/// Decodes through [`BuiltinTy`] and matches exhaustively, so a new built-in scalar must declare
+/// its key capability here rather than silently inheriting "not key-capable".
 fn key_capable_primitive(name: &str) -> bool {
-    matches!(
-        name,
-        "int" | "bool" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
-    )
+    use BuiltinTy::*;
+    match BuiltinTy::from_name_any(name) {
+        Some(Int | IntN { .. } | Bool) => true,
+        // The float family: excluded per above. Everything else can never be a `@packed` field
+        // in the first place (`packed_named_fields` records only bare named field types, and the
+        // layout gate admits only the numeric/bool primitives), so it is not key-capable either.
+        Some(
+            Float | F32 | F64 | Str | Bytes | Unit | Dyn | List | Set | Map | Option | Result
+            | KindEnum | KindStruct | KindClass,
+        )
+        | None => false,
+    }
 }
 
 /// The **key-capable** packed structs of a program (P-PKEY): a `@packed` struct every one of

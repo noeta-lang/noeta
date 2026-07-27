@@ -15,7 +15,7 @@ d = 1_000u32
 
 - There is **no implicit widening** — moving a value between widths is explicit (via the conversion methods below).
 - An untyped literal **coerces** into a fixed-width annotation when it is in range: `x: u16 = 1000`.
-- At runtime a fixed-width value is erased to a 64-bit word, so `type_of(255u8)` reports `Type.Int`.
+- At runtime a fixed-width value is erased to a 64-bit word, so `type_of(255u8)` reports `Type.Int`. Declared-type reflection agrees by construction: a top-level `i32`/`u8` parameter reflects `Type.Int` through `params_of` too (and a top-level `f64` reflects `Type.Float`; `f32` is reified everywhere and reports `Type.F32`). In **container-element position** a width is a real storage slot and is preserved: a `List<i32>` annotation reflects `Type.List(Type.IntN(32, true))`, at any depth. See [Attributes & Reflection](Attributes-and-Reflection#params_ofname-listparaminfo).
 
 Arithmetic **wraps** at the type's width, sign-appropriately:
 

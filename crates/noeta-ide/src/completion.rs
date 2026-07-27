@@ -759,12 +759,24 @@ fn push_methods(members: &mut Vec<Candidate>, methods: &[noeta_ast::FnDecl]) {
     }
 }
 
-/// The built-in type names offered in type-annotation position — the primitives, the container
-/// generics, and the fixed-width integers.
-const BUILTIN_TYPES: &[&str] = &[
-    "int", "float", "f32", "bool", "string", "bytes", "unit", "dyn", "List", "Map", "Set",
-    "Option", "Result", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-];
+/// The built-in type names offered in type-annotation position — every surface spelling the
+/// [`BuiltinTy`] funnel decodes: the primitives, the containers (canonical and bare), `Option`/
+/// `Result`, the abstract kind-types, and the generated fixed-width family. Derived from the
+/// funnel rather than hand-listed, because the hand list this replaces had drifted the way string
+/// tables do (`f64`, `void`, and the kind-types were missing) — a new built-in now reaches
+/// completion without this file knowing about it.
+fn builtin_type_names() -> Vec<String> {
+    use noeta_ast::BuiltinTy;
+    let mut names = Vec::new();
+    for ty in BuiltinTy::all() {
+        if let BuiltinTy::IntN { signed, bits } = ty {
+            names.push(BuiltinTy::int_width_name(signed, bits));
+        } else {
+            names.extend(ty.spellings().iter().map(|s| (*s).to_string()));
+        }
+    }
+    names
+}
 
 /// The type names offered in a type-annotation position (C3): the user-declared `struct`/`class`/
 /// `enum` types (with their precise kinds) followed by the built-in types. De-duplicated by label.
@@ -786,9 +798,9 @@ pub fn type_names(program: &Program) -> Vec<Candidate> {
             detail: None,
         });
     }
-    for name in BUILTIN_TYPES {
+    for name in builtin_type_names() {
         candidates.push(Candidate {
-            label: (*name).to_string(),
+            label: name,
             kind: CandidateKind::Type,
             detail: None,
         });

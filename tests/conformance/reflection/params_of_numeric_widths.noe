@@ -5,35 +5,54 @@
 // route through the one `BuiltinTy` decoder, so the erasure rule is stated once: the fixed-width
 // integers erase to `Type.Int` and `f64` to `Type.Float` (both are bit-identical to their lattice
 // counterpart at runtime), while `f32` keeps its own `Type.F32` variant.
+//
+// This gate covers EVERY scalar width — all eight `iN`/`uN`, both floats, and the lattice pair —
+// as both a declared parameter and a runtime value, so the two reflection surfaces cannot drift on
+// any width without failing here (reflection-drift audit, permanent agreement gate).
 // expect: stdout "a: Type.Int"
 // expect: stdout "b: Type.Int"
 // expect: stdout "c: Type.Int"
-// expect: stdout "d: Type.Float"
-// expect: stdout "e: Type.F32"
+// expect: stdout "d: Type.Int"
+// expect: stdout "e: Type.Int"
 // expect: stdout "f: Type.Int"
-// expect: stdout "g: Type.Float"
+// expect: stdout "g: Type.Int"
+// expect: stdout "h: Type.Int"
+// expect: stdout "i: Type.Float"
+// expect: stdout "j: Type.F32"
+// expect: stdout "k: Type.Int"
+// expect: stdout "l: Type.Float"
 // expect: stdout "v/a: Type.Int"
 // expect: stdout "v/b: Type.Int"
 // expect: stdout "v/c: Type.Int"
-// expect: stdout "v/d: Type.Float"
-// expect: stdout "v/e: Type.F32"
+// expect: stdout "v/d: Type.Int"
+// expect: stdout "v/e: Type.Int"
 // expect: stdout "v/f: Type.Int"
-// expect: stdout "v/g: Type.Float"
+// expect: stdout "v/g: Type.Int"
+// expect: stdout "v/h: Type.Int"
+// expect: stdout "v/i: Type.Float"
+// expect: stdout "v/j: Type.F32"
+// expect: stdout "v/k: Type.Int"
+// expect: stdout "v/l: Type.Float"
 // expect: exit 0
-fn widths(a: i32, b: u8, c: i64, d: f64, e: f32, f: int, g: float): void { return }
+fn widths(a: i8, b: i16, c: i32, d: i64, e: u8, f: u16, g: u32, h: u64, i: f64, j: f32, k: int, l: float): void { return }
 
 for p in params_of("widths") {
     echo "${p.name}: ${p.type}";
 }
 
-// The same seven types as *values*: `type_of` must agree with `params_of` name for name.
-a: i32 = 5
-b: u8 = 5
-c: i64 = 5
-d: f64 = 2.5
-e: f32 = 2.5f32
-f: int = 5
-g: float = 2.5
+// The same twelve types as *values*: `type_of` must agree with `params_of` name for name.
+a: i8 = 5
+b: i16 = 5
+c: i32 = 5
+d: i64 = 5
+e: u8 = 5
+f: u16 = 5
+g: u32 = 5
+h: u64 = 5
+i: f64 = 2.5
+j: f32 = 2.5f32
+k: int = 5
+l: float = 2.5
 echo "v/a: ${type_of(a)}"
 echo "v/b: ${type_of(b)}"
 echo "v/c: ${type_of(c)}"
@@ -41,3 +60,8 @@ echo "v/d: ${type_of(d)}"
 echo "v/e: ${type_of(e)}"
 echo "v/f: ${type_of(f)}"
 echo "v/g: ${type_of(g)}"
+echo "v/h: ${type_of(h)}"
+echo "v/i: ${type_of(i)}"
+echo "v/j: ${type_of(j)}"
+echo "v/k: ${type_of(k)}"
+echo "v/l: ${type_of(l)}"

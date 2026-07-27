@@ -5728,46 +5728,32 @@ type ConstructResolve = (Vec<(String, Span, Value)>, Result<(), String>);
 /// per-type field-name index. Only the numeric primitives (and `bool`) are recognised; anything else
 /// (a nested struct name, a generic) yields `None`, which bars the type from a `vec` bundle.
 fn parse_packed_field(name: &str) -> Option<noeta_stdlib::PackedField> {
+    use noeta_ast::BuiltinTy;
     use noeta_stdlib::PackedField as PF;
-    Some(match name {
-        "int" => PF::Int,
-        "float" => PF::Float,
-        "f32" => PF::F32,
-        "f64" => PF::F64,
-        "bool" => PF::Bool,
-        "i8" => PF::IntN {
-            bits: 8,
-            signed: true,
-        },
-        "i16" => PF::IntN {
-            bits: 16,
-            signed: true,
-        },
-        "i32" => PF::IntN {
-            bits: 32,
-            signed: true,
-        },
-        "i64" => PF::IntN {
-            bits: 64,
-            signed: true,
-        },
-        "u8" => PF::IntN {
-            bits: 8,
-            signed: false,
-        },
-        "u16" => PF::IntN {
-            bits: 16,
-            signed: false,
-        },
-        "u32" => PF::IntN {
-            bits: 32,
-            signed: false,
-        },
-        "u64" => PF::IntN {
-            bits: 64,
-            signed: false,
-        },
-        _ => return None,
+    // Decode through the one `BuiltinTy` funnel and match exhaustively — the string table this
+    // replaces would have silently barred a newly added scalar from the `vec` bundles instead of
+    // failing to compile here.
+    Some(match BuiltinTy::from_name_any(name)? {
+        BuiltinTy::Int => PF::Int,
+        BuiltinTy::Float => PF::Float,
+        BuiltinTy::F32 => PF::F32,
+        BuiltinTy::F64 => PF::F64,
+        BuiltinTy::Bool => PF::Bool,
+        BuiltinTy::IntN { signed, bits } => PF::IntN { bits, signed },
+        // Not scalar element kinds: a nested struct name is resolved by its own layout, and a
+        // container/string/abstract head bars the type from a `vec` bundle, as before.
+        BuiltinTy::Str
+        | BuiltinTy::Bytes
+        | BuiltinTy::Unit
+        | BuiltinTy::Dyn
+        | BuiltinTy::List
+        | BuiltinTy::Set
+        | BuiltinTy::Map
+        | BuiltinTy::Option
+        | BuiltinTy::Result
+        | BuiltinTy::KindEnum
+        | BuiltinTy::KindStruct
+        | BuiltinTy::KindClass => return None,
     })
 }
 

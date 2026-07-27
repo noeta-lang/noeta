@@ -184,6 +184,28 @@ impl BuiltinTy {
     pub fn int_width_name(signed: bool, bits: u8) -> String {
         format!("{}{bits}", if signed { 'i' } else { 'u' })
     }
+
+    /// **Every** built-in constructor, the fixed-width family expanded to its eight members — the
+    /// enumeration companion of [`Self::from_name`], for surfaces that must *list* the vocabulary
+    /// (IDE type-name completion) rather than decode one name.
+    ///
+    /// Like [`crate::reflect::type_adt_variants`], a list cannot be compile-forced the way a
+    /// `match` is — **adding a variant: add it here too**; the `all_spellings_round_trip` test
+    /// keeps the list honest against the decoder (every listed member decodes back to itself, and
+    /// no two members share a spelling).
+    pub fn all() -> Vec<BuiltinTy> {
+        use BuiltinTy::*;
+        let mut out = vec![
+            Int, Float, F32, F64, Bool, Str, Bytes, Unit, Dyn, List, Set, Map, Option, Result,
+            KindEnum, KindStruct, KindClass,
+        ];
+        for signed in [true, false] {
+            for bits in [8u8, 16, 32, 64] {
+                out.push(IntN { signed, bits });
+            }
+        }
+        out
+    }
 }
 
 /// Decode a **fixed-width integer type name** (`i8 i16 i32 i64 u8 u16 u32 u64`) into its
@@ -209,32 +231,35 @@ pub fn parse_int_width(name: &str) -> Option<(bool, u8)> {
 mod tests {
     use super::*;
 
-    /// Every listed spelling round-trips back to the constructor that listed it — the invariant
-    /// that keeps [`BuiltinTy::spellings`] honest against [`BuiltinTy::from_name`], the two halves
-    /// of the funnel.
+    /// Every member of [`BuiltinTy::all`] round-trips through the decoder under each of its
+    /// spellings, no two members share a spelling, and no member is listed twice — the invariant
+    /// that keeps the enumeration and [`BuiltinTy::spellings`] honest against
+    /// [`BuiltinTy::from_name`], the halves of the funnel.
     #[test]
-    fn spellings_round_trip_through_from_name() {
-        use BuiltinTy::*;
-        for ty in [
-            Int, Float, F32, F64, Bool, Str, Bytes, Unit, Dyn, List, Set, Map, Option, Result,
-            KindEnum, KindStruct, KindClass,
-        ] {
-            assert!(
-                !ty.spellings().is_empty(),
-                "{ty:?} lists no spelling; only IntN may"
+    fn all_spellings_round_trip() {
+        let all = BuiltinTy::all();
+        let mut seen_spellings = std::collections::HashMap::new();
+        for &ty in &all {
+            assert_eq!(
+                all.iter().filter(|t| **t == ty).count(),
+                1,
+                "{ty:?} listed twice in all()"
             );
-            for s in ty.spellings() {
-                assert_eq!(BuiltinTy::from_name_any(s), Some(ty), "spelling `{s}`");
-            }
-        }
-        for signed in [true, false] {
-            for bits in [8u8, 16, 32, 64] {
-                let name = BuiltinTy::int_width_name(signed, bits);
-                assert_eq!(
-                    BuiltinTy::from_name_any(&name),
-                    Some(IntN { signed, bits }),
-                    "spelling `{name}`"
+            let spellings: Vec<String> = if let BuiltinTy::IntN { signed, bits } = ty {
+                assert!(ty.spellings().is_empty(), "IntN spellings are generated");
+                vec![BuiltinTy::int_width_name(signed, bits)]
+            } else {
+                assert!(
+                    !ty.spellings().is_empty(),
+                    "{ty:?} lists no spelling; only IntN may"
                 );
+                ty.spellings().iter().map(|s| s.to_string()).collect()
+            };
+            for s in spellings {
+                assert_eq!(BuiltinTy::from_name_any(&s), Some(ty), "spelling `{s}`");
+                if let Some(prev) = seen_spellings.insert(s.clone(), ty) {
+                    panic!("spelling `{s}` claimed by both {prev:?} and {ty:?}");
+                }
             }
         }
     }

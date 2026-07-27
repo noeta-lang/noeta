@@ -575,6 +575,17 @@ fn map_keys_without_a_runtime_key_form_are_rejected_statically() {
     assert!(codes(src).is_empty());
     let src = "fn f(m: Map<int, string>): int { return m.len() }\necho 1\n";
     assert!(codes(src).is_empty(), "{:?}", codes(src));
+    for width in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
+        let src = format!("fn f(m: Map<{width}, string>): int {{ return m.len() }}\necho 1\n");
+        assert!(codes(&src).is_empty(), "{width}: {:?}", codes(&src));
+    }
+    // The whole float family is barred as a key — including `f64`, which the stringly
+    // predecessor of this gate did not know, so `Map<f64, _>` slipped through while
+    // `Map<float, _>` was rejected (the funnel-drift bug class).
+    for float in ["float", "f32", "f64"] {
+        let src = format!("fn f(m: Map<{float}, int>): int {{ return m.len() }}\necho 1\n");
+        assert_eq!(codes(&src), ["E0007"], "float-family key `{float}`");
+    }
 }
 
 #[test]
