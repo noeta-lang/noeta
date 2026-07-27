@@ -38,9 +38,42 @@ A test's return type is optional; both `fn adds()` and `fn adds(): void` work.
 ## Isolation and concurrency
 
 - The activated program is type-checked **once**, so a broken test is one compile error, not one per run.
-- Each test runs as `<shared setup> + <call the test fn>` in a **fresh real-host isolate**, so one test can never observe another's state. The shared setup is the file's declarations and globals with its top-level "main" effects removed — so a top-level `echo` in the file under test does *not* run during `noeta test`.
+- Each test runs as `<shared setup> + <call the test fn>` in a **fresh real-host isolate**, so one test can never observe another's state. The shared setup is the file's declarations and globals with its top-level "main" effects removed — see [Shared setup](#shared-setup) below.
 - Tests run **in parallel** across worker threads (default: the machine's parallelism, capped at the test count). Results are gathered by declaration index and reported in **declaration order**, deterministically, regardless of finish order.
 - By default all tests run even after a failure. `--fail-fast` stops after the first failure and drains the workers.
+
+## Shared setup
+
+There is no fixture attribute — **shared setup is the file's top-level declarations**. A top-level
+binding is part of the setup every test runs on, and because each test gets a fresh isolate, the
+fixture is rebuilt per test: one test mutating it can never leak into another. Named functions do
+not see a top-level binding implicitly — capture it with a `use (…)` clause in the signature (see
+[Functions & Closures](Functions-and-Closures)), in test fns and helpers alike:
+
+```noeta
+users = ["ada", "grace"]                 # shared setup — rebuilt for every test
+
+fn count_users() use (users): int { return users.len() }
+
+echo "starting up"                       # a main effect — does NOT run under `noeta test`
+
+@test {
+    fn sees_fixture(): void { assert(count_users() == 2) }
+    fn sees_fixture_directly() use (users): void { assert(users[0] == "ada") }
+}
+```
+
+```console
+$ noeta test fixtures.noe
+running 2 tests on 2 threads
+  ok    sees_fixture
+  ok    sees_fixture_directly
+
+2 passed, 0 failed, 2 total
+```
+
+Only the file's *main effects* are removed from the shared setup — the top-level `echo` above
+prints nothing under `noeta test` — while the declarations and bindings around them stay live.
 
 ## Metadata attributes
 
@@ -106,20 +139,34 @@ running <N> tests on <J> threads[, <K> skipped]
 <p> passed, <f> failed[, <s> skipped][, <n> not run (stopped early)], <total> total
 ```
 
+A failure prints its message plus any stdout the test produced (prefixed `| `), and the run exits
+`1`:
+
+```console
+$ noeta test math.noe
+running 2 tests on 2 threads
+  ok    adds
+  FAIL  subtracts
+        assertion failed: two plus two
+        | checking subtraction
+
+1 passed, 1 failed, 2 total
+```
+
 ### Exit codes
 
 `0` only when nothing failed and nothing was left un-run (a `#[Skip]` never fails the suite); `1` otherwise. `no tests found` (or an empty `--group`) exits `0`; a file that cannot be read exits `2`.
 
 ## Watch mode
 
-`noeta test --watch app.noe` keeps running and reruns on every save — and it does not blindly rerun everything. Each save is diffed against the sources the previous run observed, the changed definitions are walked backwards through the project's call graph, and **only the impacted tests** rerun (through the same `--name` filter above):
+`noeta test --watch app.noe` keeps running and reruns on every save — narrowed to **only the
+impacted tests**, not everything:
 
-- Edit a leaf function and exactly the tests that transitively call it rerun; edit one test's body and only that test reruns.
-- This works **across module boundaries**: edit a function in an imported module and the entry's tests that reach it rerun — and an edit to a module function nothing imports reruns nothing at all.
+- Edit a leaf function and exactly the tests that transitively call it rerun — across module boundaries; edit one test's body and only that test reruns.
 - An **inert** edit — reformatting between declarations, a comment — runs nothing.
-- Edits the engine cannot attribute to specific declarations fall back to a full rerun, with the reason printed: a signature or layout change, a changed top-level statement (globals and fixtures live there), a new or deleted `.noe` file, a manifest/lockfile change, or code that does not type-check.
+- Edits the engine cannot attribute (a signature change, a changed top-level statement, a new or deleted file, a manifest change, red code) fall back to a full rerun, with the reason printed.
 
-The reachability analysis is static, so tests reached only through dynamic dispatch are matched best-effort (a method call on an untyped receiver is over-approximated by name); rerun without `--watch` occasionally if you lean heavily on reflection-driven dispatch. `--watch` is not specific to `test` — it works on any command (`noeta run --watch`, `noeta bench --watch`, `noeta serve --watch`); see [The CLI](The-CLI) for the full watch story.
+`--watch` works on any command (`noeta run --watch`, `noeta bench --watch`, `noeta serve --watch`); the full watch story — how the impact filter works and its dynamic-dispatch caveat — is at [The CLI](The-CLI#noeta-serve-and---watch).
 
 ## See also
 

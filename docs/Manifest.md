@@ -28,7 +28,7 @@ identity, so it cannot be published.
 | `edition` | no | `"2026"` | The language edition. Defaults to the current edition when omitted. |
 | `toolchain` | no | SemVer requirement | The minimum `noeta` this package works with, e.g. `">=0.2"`. |
 | `native` | no | relative directory | Points at this package's native Rust entry crate. See [Native Extensions](Native-Extensions). |
-| `license` | no | SPDX expression | Recorded with the release and bound into its transparency-log leaf. |
+| `license` | no | SPDX expression | Recorded with the release and bound into its [transparency-log](Package-Provenance) leaf. |
 | `keywords` | no | array of tags | Discovery tags the registry indexes by. |
 | `description` | no | one-line string | The blurb package search shows. |
 
@@ -189,6 +189,24 @@ publish_cooldown = "24h"
 - **`publish_cooldown`** is a duration string — an integer with an optional `s`/`m`/`h`/`d` suffix
   (`"24h"`, `"30m"`, `"7d"`; a bare number is seconds), not a raw number.
 
+### `[trust.advisories]` — per-tier advisory policy
+
+Sets what a **security-advisory hit** does per intake tier (`operator` / `publisher` / `imported` —
+the concept and what each tier means are on
+[Package Provenance](Package-Provenance#security-advisories-and-intake-tiers)). Each tier takes one
+of three actions: `"warn"` (the default — `noeta audit` prints the hit), `"fail"` (the hit fails the
+run, a CI gate), or `"off"` (the tier is ignored).
+
+```toml
+[trust.advisories]
+operator  = "fail"     # a curated advisory breaks the build
+publisher = "fail"     # so does an owner-issued one
+imported  = "warn"     # imported feeds are broader — warn, don't fail
+```
+
+A bare string under `[trust]` — `advisories = "fail"` — sets every tier at once. A key that is not
+one of the three tiers, or an action that is not `"fail"`/`"warn"`/`"off"`, is a manifest error.
+
 ## `[targets]` — build recipes
 
 A target is a named build recipe: it maps a *tier* to the package that *provides* it, and can carry
@@ -216,6 +234,41 @@ tiers = { bench = { package = "std", samples = 100 } }
 
 The target to build is chosen at the command line (`--target`), not in the manifest.
 
+### A worked example
+
+The pair `noeta init` scaffolds is the pattern to copy: a `development` target that makes the four
+std dev tiers live, and an explicit `production` name for the tier-free baseline (any command with
+no `--target` already builds that shape):
+
+```toml
+[package]
+name = "acme/app"
+version = "0.1.0"
+
+[targets.development.tiers]
+test = "std"
+bench = "std"
+doc = "std"
+debug = "std"
+
+[targets.production]
+```
+
+With that manifest, `noeta run src/main.noe --target development` executes `@debug { … }` blocks,
+and `--target` acts as a **gate** on the tier runners — a target that doesn't make the tier live
+no-ops with exit `0`:
+
+```console
+$ noeta test src/main.noe --target production
+tier `test` is not active in target `production`
+$ noeta test src/main.noe --target development
+running 2 tests on 2 threads
+  ok    greets
+  ok    greets_noeta
+
+2 passed, 0 failed, 2 total
+```
+
 ## `[registries]` — routing scopes to registries
 
 Route a scope to the registry its packages resolve from, with an optional `default` for the rest.
@@ -233,6 +286,23 @@ internal = "git:ssh://git.example.com/pkgs"
 A registry source is one of: an `http(s)://` URL (a hosted registry service), `github:<owner>`,
 `gitlab:<group>`, or `git:<url>` (any git remote — a forge *is* an index). Every key other than
 `default` must be a bare scope (`company`) identifier.
+
+## `[db]` — database connection
+
+The project's database connection and migration layout, read by the [para/db](para-db) extension's
+[`noeta migrate`](The-CLI#noeta-migrate) command (and by an app migrating itself at boot). All three
+keys are optional strings — but a present key of the wrong type is a manifest error:
+
+```toml
+[db]
+url = "sqlite:app.db"        # any dsn scheme db.connect accepts (sqlite:… / postgres://…)
+migrations = "migrations"    # the migrations directory (default "migrations")
+seeds = "seeds"              # the seeds directory (default "seeds")
+```
+
+`url` is the **lowest-priority** source of the connection string — the `--db <dsn>` flag, then the
+`DATABASE_URL` environment variable, win over it. The `--dir`/`--seeds-dir` flags override the two
+directories per-invocation.
 
 ## Related tables
 

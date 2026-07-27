@@ -9,6 +9,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, `--native` for machine code, `--wasm`/`--serve` for [WebAssembly](WebAssembly-and-the-Edge)). |
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
 | [`noeta expand`](#noeta-expand) | Print the source that compile-time `@`-directive expansions generated. |
+| [`noeta migrate`](#noeta-migrate) | Apply plain-SQL database migrations — an extension command the [para/db](para-db) package provides. |
 | [`noeta serve`](#noeta-serve) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
 | [`noeta repl`](#noeta-repl) | Interactive REPL. |
 | [`noeta dump`](#noeta-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
@@ -136,7 +137,7 @@ Loads, type-checks, and executes a `.noe` file on the **real host** — real `en
 | `--tier <NAME>` | Activate a dev-tier for this run, e.g. `--tier debug` compiles in `@debug { … }` blocks. Repeatable. Without it, every tier block is stripped. |
 | `--target <NAME>` | Activate the tiers a `noeta.toml` build target makes live. Unioned with any `--tier`. |
 | `--no-cache` | Bypass the [startup cache](#the-startup-cache) for this run — don't read a cached compile and don't write one. Same effect as `NOETA_NO_CACHE`. |
-| `--jit-stats` | After the run, print the Tier-1 JIT compile-coverage summary, a bail-reason histogram, and a declined-loop report to stderr. |
+| `--jit-stats` | After the run, print a summary to stderr of what the Tier-1 JIT compiled and why anything bailed or was declined (see [The Virtual Machine](The-Virtual-Machine#tier-1--the-jit)). |
 
 The active-tier set is the target’s live tiers ∪ any `--tier` flags, resolved *before* loading (a bad target fails fast). With an empty active set — the default — every `@test`/`@bench`/`@doc`/`@debug` block strips away and the program runs as written. See [Documentation & Dev Tiers](Documentation-and-Tiers).
 
@@ -230,62 +231,15 @@ Exit codes match `check`: **0** on success, **1** if any expansion failed (a hoo
 
 ## `noeta migrate`
 
-```text
-noeta migrate [--db <dsn>] [--dir <path>] [--seeds-dir <path>] [--status] [--dry-run] [--seed] [--reset [--yes]]
-noeta migrate new <name> [--seed] [--dir <path>]
-noeta migrate seed [--db <dsn>] [--dir <path>] [--seeds-dir <path>]
-```
-
 Applies a project's **plain-SQL migrations**. `migrate` is **not a core verb** — it is an
 extension-contributed command the **para/db package** provides (the `cargo clippy` model): it is
 available in a project whose manifest depends on `para/db` and trusts its commands
 (`[trust] commands = ["para/db"]`), dispatched through the app's composed toolchain like any other
-extension subcommand. Migrations are `.sql` files in a
-`migrations/` directory, applied in filename-sort order; each runs inside its own transaction, so a
-failure rolls that migration back and stops, naming the file. An applied migration is tracked in a
-`_noeta_migrations` table by a sha256 checksum of its contents — editing an already-applied file, or
-deleting one, is a hard error (history is immutable). Migrations are **forward-only** (no down files):
-`--reset` (plus `--seed`) covers the development loop.
-
-| invocation | effect |
-| --- | --- |
-| `noeta migrate` | apply every pending migration, printing each applied file |
-| `noeta migrate --status` | list which migrations are applied and which are pending |
-| `noeta migrate --dry-run` | list what would be applied, without touching the database |
-| `noeta migrate new <name>` | scaffold `migrations/<UTC-timestamp>_<name>.sql` |
-| `noeta migrate new --seed <name>` | scaffold `seeds/<UTC-timestamp>_<name>.sql` |
-| `noeta migrate --seed` | apply pending migrations, then run the seed files |
-| `noeta migrate seed` | run the seed files ONLY (errors if any migration is pending) |
-| `noeta migrate --reset --yes` | DESTRUCTIVE: drop the schema and re-apply from zero |
-| `noeta migrate --reset --seed --yes` | the full dev loop: reset → migrate → seed |
-
-**Seeds** are re-runnable development data — plain `.sql` files in a `seeds/` directory, ordered like
-migrations and applied *after* them. Unlike migrations they are **never tracked**: they run in
-filename order, each in its own transaction, **every time** they are invoked, so idempotency is the
-seed author's job (`INSERT OR IGNORE` on SQLite / `... ON CONFLICT DO NOTHING` on Postgres makes a
-re-run a no-op). `noeta migrate seed` runs seeds only and refuses when any migration is still pending
-(seeding a stale schema is a footgun).
-
-The **connection string** is resolved, highest priority first: the `--db <dsn>` flag, the
-`DATABASE_URL` environment variable, then a `[db]` table in `noeta.toml`:
-
-```toml
-[db]
-url = "sqlite:app.db"        # any dsn scheme db.connect accepts (sqlite:… / postgres://…)
-migrations = "migrations"    # optional; the migrations directory (default "migrations")
-seeds = "seeds"              # optional; the seeds directory (default "seeds")
-```
-
-`--dir` / `--seeds-dir` override the migrations / seeds directory per-invocation. `--reset` drops and
-recreates the schema — on SQLite it drops every user table/view/trigger; on PostgreSQL it runs `DROP
-SCHEMA public CASCADE; CREATE SCHEMA public` — and refuses to run without `--yes` or an interactive
-`yes` typed at the prompt.
-
-Exit codes: `0` success; `2` for a usage/config problem (no dsn configured, a missing migrations or
-seeds directory, an unconfirmed `--reset`); `1` for a run that failed (connect failure, a SQL error,
-checksum drift, a deleted migration, or seeding while migrations are pending). An app can migrate and
-seed itself at boot off the same engine with `conn.migrate("migrations")` then `conn.seed("seeds")`
-(see the [para-db repo](https://github.com/noeta-lang/para-db)).
+extension subcommand. Forward-only `.sql` migrations apply from a `migrations/` directory,
+re-runnable seeds from `seeds/`, and the connection string resolves from `--db`, then
+`DATABASE_URL`, then the manifest's [`[db]` table](Manifest#db--database-connection). The full
+command reference — every invocation, seed semantics, `--reset`, and exit codes — is on the
+[para/db](para-db) page.
 
 ## `noeta serve` and `--watch`
 
@@ -313,9 +267,8 @@ For the tier runners the watch is **impact-filtered**: `noeta test --watch` (and
 each save against the previous run, walks the reverse call graph from the changed definitions,
 and reruns only the impacted tier fns (via the runners' repeatable `--name` filter) — edit a leaf
 function and exactly its caller-tests rerun; an inert edit (formatting between declarations, a
-comment) runs nothing. The filter is **project-wide**: the watcher holds an incremental (salsa)
-workspace over the entry's directory, so editing an *imported module* narrows to the entry tests
-that transitively reach the change (in the linked program's qualified names — `App.Lib.add`),
+comment) runs nothing. The filter is **project-wide**: editing an *imported module* narrows to the
+entry tests that transitively reach the change,
 and editing a module function nothing imports reruns nothing at all. Edits the engine cannot
 attribute — a signature/layout change, a changed top-level statement (fixtures live there), a
 new or deleted module, a manifest change, red code — degrade to a full rerun *with the reason
@@ -347,12 +300,11 @@ reason printed (`[hot] restart needed: the layout of type \`P\` changed`). After
 open browser page reconnects and re-syncs state but keeps its old markup until refreshed (the
 reload push needs a live server to send it).
 
-**The retention model.** A hot-swapping process deliberately retains superseded artifacts for
-soundness: old code versions (in-flight requests finish on the code they started on), replaced
-reactive nodes an alias might still read, and — when the JIT is armed — retired native code that
-a live frame may still return into. Growth is **bounded per swap** and reclaimed when the process
-exits; an edit marathon costs memory proportional to the number of swaps, never correctness. The
-dev server hot-swaps at tier 1 (the JIT re-warms after each swap); `--no-jit` is unnecessary.
+**Memory during an edit marathon.** A long editing session costs memory proportional to the
+number of swaps, never correctness: each swap retains a bounded amount of superseded code and
+state (in-flight requests finish on the code they started on), all reclaimed when the process
+exits. The machinery behind this — what is retained and why — lives on the
+[architecture pages](Architecture-and-Pipeline).
 
 The same unchanged `fetch` program also deploys to the edge as a `wasi:http` component — see
 [WebAssembly & the Edge](WebAssembly-and-the-Edge).
@@ -478,35 +430,20 @@ Use it to answer "how does this construct actually compile?" — which opcodes a
 
 **Output.** The module's side tables first (shapes, packed schemas, method/destructor tables — only those that are non-empty), then `=== main ===` and each numbered function prototype (`=== proto N ===`). Each prototype lists its parameter/register counts, its constant pool, and its numbered instructions. The text is stable and human-readable — the same form the VM's disassembly snapshot tests assert — so it diffs cleanly across changes.
 
-**Example.** The body of a recursive `fib` shows the two `LoadGlobal "fib"` that resolve the callee and the `Call` frames:
+**Example.** The opening of a recursive `fib`'s prototype — the base-case compare and its branch:
 
 ```console
 $ noeta dump fib.noe
 ...
 === proto 1 ===
 params: 1, registers: 4
-constants:
-  k0 = 2
-  k1 = 1
-  k2 = 2
 code:
     0  LoadConst   r2 <- k0
     1  Binary      r1 <- r0 < r2
     2  RequireCondBool r1 (if)
     3  JumpIfFalse r1 -> 5
     4  Return      r0
-    5  LoadConst   r2 <- k1
-    6  Binary      r1 <- r0 - r2
-    7  LoadGlobal  r3 <- "fib"
-    8  Call        r2 <- r3(r1)
-    9  LoadConst   r3 <- k2
-   10  Binary      r1 <- r0 - r3
-   11  Drop        r0
-   12  LoadGlobal  r3 <- "fib"
-   13  Call        r0 <- r3(r1)
-   14  Binary      r1 <- r2 + r0
-   15  Return      r1
-   16  Halt
+    ...
 ```
 
 The opcode set and prototype/side-table layout are described in [The Virtual Machine](The-Virtual-Machine).
@@ -533,42 +470,29 @@ Dependencies are declared in `noeta.toml` (`[dependencies]`, with elevated grant
 
 ### The manifest: `[package]` and dependency forms
 
-The essentials are below; [The `noeta.toml` Manifest](Manifest) is the complete reference for every
-table and key.
+The orientation you need for the verbs below: `[package]` gives the package its global
+`company/package` identity and SemVer version, and each `[dependencies]` key is the **import root**
+you address the package by (`use util.…`), decoupled from its registry identity. A dependency names
+exactly one source — a local `path`, a `git` URL (pinned `tag`, moving `branch`, or default-branch
+HEAD), or a registry `version` requirement — and **every** form resolves to an exact pin recorded
+in `noeta.lock`, which only [`noeta update`](#noeta-update) moves.
 
 ```toml
 [package]
-name = "acme/app"        # the global identity `company/package` the registry indexes
-version = "0.1.0"        # SemVer
-edition = "2026"         # optional — the language edition this package is written against
-license = "MIT OR Apache-2.0"      # optional — declared SPDX expression, recorded with the release
-keywords = ["image", "simd"]       # optional — up to 5 discovery tags the registry indexes by
-description = "Fast image effects" # optional — one-line blurb shown in package search
+name = "acme/app"
+version = "0.1.0"
 
 [dependencies]
-# A local source tree — no network, no resolver:
-util  = { path = "../util" }
-# A git dependency, pinned to a released tag (the reproducible default):
-http  = { git = "https://github.com/acme/http", tag = "v1.2.0" }
-# A git dependency tracking a branch's tip (re-resolved by `noeta update`):
-gfx   = { git = "https://github.com/acme/gfx", branch = "main" }
-# A git dependency tracking the default branch's HEAD — no tag or branch needed,
-# handy for an in-development or bundled package not yet cut into tagged releases:
-draft = { git = "https://github.com/acme/draft" }
-# A registry dependency by SemVer requirement (`package` is the registry identity):
-json  = { version = "^1.2", package = "acme/json" }
-# A scope dependency — several packages sharing one scope, bound under one key:
-para  = [
-  { version = "^0.1", package = "para/aether" },
-  { version = "^0.1", package = "para/db" },
-]
+util = { path = "../util" }                                      # a local source tree
+http = { git = "https://github.com/acme/http", tag = "v1.2.0" }  # git, pinned to a tag
+json = { version = "^1.2", package = "acme/json" }               # registry, by SemVer requirement
 ```
 
-The **dependency key** (`util`, `http`, …) is the import root you address the package by — `use util.…` — decoupled from its global `company/package` identity (like Rust's `foo = { package = "real-name" }`). A **git** source resolves its ref (`tag`/`branch`/HEAD) to a commit SHA at the remote and records that SHA in `noeta.lock`, so **every** form is reproducible regardless of ref kind — a plain build fetches by the pinned SHA (offline once cached), and only `noeta update` re-resolves a moving `branch`/HEAD ref to its new tip. `tag` and `branch` are mutually exclusive. A **scope** dependency (an array value) binds several packages that share one `company` scope under a single key, so an app can depend on `para/aether` *and* `para/db` without colliding TOML keys; each member is any non-scope source, and all members must share one scope (see [the Manifest](Manifest) for the full rules). A **published** package (`noeta publish`) may depend only via the registry — a `path`/`git` dependency is rejected at publish time, since a consumer couldn't resolve it.
-
-Developing a dependency *against* this app? A root-manifest [`[patch]` table](Manifest#patch--dev-time-path-overrides) re-points a package identity at a local tree for the whole graph — no `[dependencies]` edits, no lock churn, loud on every resolve.
-
-**Editions** pin the language/ABI semantics a package is written against, so a package can evolve on its own cadence and a newer toolchain still compiles it under *its* edition. `edition` is validated against the editions this toolchain understands (an unknown one is a manifest error); omitting it uses the current edition. Each package's edition is recorded in `noeta.lock`, and the toolchain keys its compiled-bytecode cache on it — so switching a package's edition never serves a stale artifact.
+[The `noeta.toml` Manifest](Manifest) is the complete reference — every table and key, the scope
+(array) dependency form, editions, and the exact rules the parser enforces. Developing a dependency
+*against* this app? A root-manifest [`[patch]` table](Manifest#patch--dev-time-path-overrides)
+re-points a package identity at a local tree for the whole graph — no `[dependencies]` edits, no
+lock churn, loud on every resolve.
 
 ### `noeta add`
 

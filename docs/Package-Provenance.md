@@ -16,6 +16,12 @@ Two trust roots exist. Every release carries at most one.
 | Requires | An ambient CI identity at publish time | `noeta key new` + registering the public key |
 | Consumer pins | The signing **identity** (issuer + workflow) | The **public key** |
 
+> [!TIP]
+> **What you should do.** Publish from CI and provenance is automatic — keyless, zero-config.
+> Publishing from a laptop, add `--interactive` (a browser sign-in). Then run
+> `noeta scope require-provenance <scope>` once, so a leaked publish token alone can no longer
+> push a release.
+
 Unsigned releases remain allowed (they resolve, unverified) so provenance can be adopted
 gradually — but see [downgrade protection](#trust-on-first-use-and-downgrade-protection): once a
 scope is pinned, weaker releases are rejected.
@@ -70,7 +76,11 @@ certified identity is your **email address** — that's what consumers pin. On a
 the verification code the page shows. Same ephemeral key, same transparency log, same
 guarantees as the CI flow.
 
-Consumers verify the bundle **fully offline** — no Rekor round-trip:
+### Verifying a release yourself
+
+You never have to do any of this — **resolution verifies every bundle automatically**, and a build
+that succeeds already means every signed release checked out. But the checks are worth knowing,
+because the consumer runs them **fully offline** — no Rekor round-trip:
 
 1. the certificate chains to Fulcio's root (from a trust-root snapshot embedded in the
    toolchain),
@@ -177,36 +187,30 @@ present.
 
 ### Issuing and reporting from the client
 
-- `noeta advisory publish <id> <package> <ranges> <severity> <summary>` — a scope owner issues a
-  **publisher** advisory for their own package. It is keyless-signed with your OIDC identity (ambient
-  CI, or `--interactive` for a laptop browser login) and sent authenticated with the scope's publish
-  token (`NOETA_REGISTRY_TOKEN`). `--withdraw` retracts one (kept in the log, never deleted).
-- `noeta advisory report <package> <summary>` — anyone files a **public report** (rate-limited). It is
-  queued for triage, not published.
-- `noeta advisory reports [--scope <scope>]` — list the reports queued for triage (what's promotable).
-  Without `--scope`, the operator queue (`NOETA_REGISTRY_ADMIN_TOKEN`); with it, the scope owner's own
-  queue (their packages' reports, scope token). Shows `pending` reports by default.
-- `noeta advisory promote <report-id> --id <id> --severity <sev>` — promote a queued report into a
-  signed advisory, **prefilled from the report** (package, ranges, summary, details, url). As an
-  operator (`--operator`, `NOETA_REGISTRY_ADMIN_TOKEN`) it becomes an `operator` advisory; otherwise the
-  report package's scope owner promotes it into a keyless-signed `publisher` advisory — the *same*
-  keyless Sigstore bundle a fresh `advisory publish` produces, so a consumer verifies it identically.
+The whole lifecycle runs through `noeta advisory`. A scope owner **issues** a publisher advisory
+for their own package with `noeta advisory publish` — keyless-signed with their OIDC identity
+(ambient CI, or an interactive browser login) and sent authenticated with the scope's publish
+token; a withdrawal stays in the log, never deleted. Anyone may **file a public report** against
+any package with `noeta advisory report` — rate-limited, queued for triage, never published
+directly. From there, an operator or the scope owner **reviews the queue** (`noeta advisory
+reports`) and **promotes** a report into a signed advisory (`noeta advisory promote`), prefilled
+from the report: promoted with the admin token it becomes an `operator`-tier advisory; promoted by
+the package's scope owner it becomes a keyless-signed `publisher` advisory — the *same* Sigstore
+bundle a fresh `advisory publish` produces, so a consumer verifies it identically. Full flag
+reference at [The CLI](The-CLI#noeta-advisory).
 
 ### Per-tier policy — `[trust.advisories]`
 
-By default every tier **warns**: `noeta audit` prints a matched advisory but does not fail. A project
-opts a tier up to `fail` (a CI gate) or down to `off`:
+By default every tier **warns**: `noeta audit` prints a matched advisory but does not fail. A
+project opts a tier up to `fail` (a CI gate) or down to `off`, per tier or all at once, in the
+manifest's `[trust.advisories]` table — the keys and syntax are on
+[the Manifest page](Manifest#trustadvisories--per-tier-advisory-policy). A sensible hardening is
+`fail` for the `operator` and `publisher` tiers (curated or owner-issued — high confidence) while
+leaving the broader `imported` tier at `warn`.
 
-```toml
-[trust.advisories]
-operator  = "fail"     # a curated advisory breaks the build
-publisher = "fail"     # so does an owner-issued one
-imported  = "warn"     # imported feeds are broader — warn, don't fail
-```
-
-A bare `advisories = "fail"` under `[trust]` sets every tier at once. In the audit report a
-`fail`-level hit is marked `✗` (and fails the run); a `warn`-level hit is marked `⚠`. A publisher
-advisory's line also shows the verified signing identity (`[publisher-verified: …]`).
+In the audit report a `fail`-level hit is marked `✗` (and fails the run); a `warn`-level hit is
+marked `⚠`. A publisher advisory's line also shows the verified signing identity
+(`[publisher-verified: …]`).
 
 ### `noeta watch-scope <scope>` — suppression monitoring
 
