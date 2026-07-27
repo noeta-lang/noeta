@@ -37,7 +37,7 @@ echo User.new("Ada", 7, true).to_json()  // {"name":"Ada","id":7,"active":true}
 | `name: ?T` | decodes to `none` |
 | `name: T = <literal>` | decodes to the declared default |
 | `name: T = <anything else>` (`= now()`, `= helper()`) | **required** — the error says the default is not a literal |
-| `name: T` | **required** — `missing field \`name\` for \`T\`` |
+| `name: T` | **required** — the missing-field error, naming the field and the type |
 
 A default makes the field *optional*, not untyped: a value that **is** present still has to match the field's type, and it always wins over the default.
 
