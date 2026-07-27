@@ -119,6 +119,18 @@ function call(entry, source, ...extra) {
   return JSON.parse(json);
 }
 
+// An IDE request is legal as the engine's FIRST call — this must stay above every other call to
+// keep meaning what it says. The store resolves `std` names against the process-default registry,
+// which only `front_end` (check / run / debug) seeds; the IDE entries used to skip that, so a
+// hover arriving before the page's first diagnostics pass aborted the whole instance on a wasm
+// `unreachable`. That is exactly when a visitor's first hover lands, and only a cold instance can
+// prove it — a native test shares one already-seeded process registry.
+assert.equal(
+  call(noeta_hover, 'x = 1;\necho x;', 1, 5).found,
+  true,
+  'hover must answer on a cold engine, before any check/run',
+);
+
 // A clean program checks clean and runs deterministically.
 const clean = 'use std.random;\nrandom.seed(7);\necho "hello from the browser engine";\necho random.int(0, 100);';
 assert.equal(call(noeta_check, clean).diagnostics.length, 0);
