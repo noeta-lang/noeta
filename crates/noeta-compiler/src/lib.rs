@@ -5144,6 +5144,51 @@ mod tests {
         assert!(main.def_span.is_some());
     }
 
+    /// A closure capturing a **match-arm pattern binding** must compile: the binding is a local of the
+    /// enclosing function (like a `for` variable), so the celling analysis has to promote it to a cell
+    /// at its binding site. It once did not, and the capture then found a plain register — the
+    /// compiler aborted with `Unsupported("a forward capture of a not-yet-celled local")`, surfacing to
+    /// the author as a spanless `noeta: internal error`. Asserted here as well as in the corpus because
+    /// the differential oracle counts an `Unsupported` as *not run* rather than as a failure, so a
+    /// regression would silently drop the conformance cases out of VM coverage instead of failing.
+    #[test]
+    fn a_closure_capturing_a_match_arm_binding_compiles() {
+        let compiles = |src: &str| {
+            let source = Source::new(SourceId::FIRST, "test.noe", src);
+            let lexed = lex(&source);
+            let parsed = parse(&source, &lexed.tokens);
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "must parse cleanly: {:?}",
+                parsed.diagnostics
+            );
+            compile(&parsed.program)
+        };
+        // The reported reproduction: an arm binding captured by a `filter` callback.
+        let m = compiles(
+            "x = some(2)\nys = [1, 2, 3]\necho match x {\n  some(want) => ys.filter(fn(n) => n == want).len(),\n  none => 0,\n}\n",
+        ).expect("a closure over a match-arm binding compiles");
+        // The binding really is celled (not merely tolerated): the arm emits a `MakeCell`.
+        assert!(
+            m.protos
+                .iter()
+                .flat_map(|c| c.code.iter())
+                .any(|op| matches!(op, noeta_bytecode::Op::MakeCell { .. })),
+            "the captured arm binding must be boxed into a cell"
+        );
+        // The same mechanism through the neighbouring pattern shapes.
+        compiles(
+            "fn dig(r: Result<?int, string>): int {\n  return match r {\n    Ok(some(v)) => (fn() => v * 2)(),\n    Ok(none) => -1,\n    Err(e) => -2,\n  }\n}\necho dig(Ok(some(4)))\n",
+        )
+        .expect("a nested variant pattern's binding is capturable");
+        compiles("p = (1, 2)\necho match p {\n  (a, b) => (fn() => a + b)(),\n}\n")
+            .expect("a tuple pattern's bindings are capturable");
+        compiles(
+            "x = some(7)\nf = match x {\n  some(v) => fn(n) => n + v,\n  none => fn(n) => n,\n}\necho f(1)\n",
+        )
+        .expect("a capture escaping the arm compiles");
+    }
+
     #[test]
     fn a_functions_locals_and_params_are_recorded_by_register() {
         // `x`/`y` are locals (declare_local); `p` is a parameter — all should appear, each with a

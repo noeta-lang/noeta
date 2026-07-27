@@ -1,0 +1,52 @@
+// Every *pattern shape* that introduces an arm binding is capturable, not just a one-level variant:
+// a nested variant pattern (`Ok(some(v))`), a tuple pattern, several bindings in one pattern, and a
+// bare binding pattern (which matches anything). All of them bind locals of the enclosing function, so
+// all of them must be celled when a closure in the arm captures them. `call` runs each arm's closure
+// where it is built, so the capture is observed inside the arm; the escaping direction is
+// `match_arm_binding_capture_escapes`.
+// expect: stdout "8"
+// expect: stdout "-1"
+// expect: stdout "3"
+// expect: stdout "30"
+// expect: stdout "7"
+// expect: exit 0
+
+fn call(f: () -> int): int {
+    return f()
+}
+
+// A nested variant pattern: the binding sits two constructors deep.
+fn dig(r: Result<?int, string>): int {
+    return match r {
+        Ok(some(v)) => call(fn() => v * 2),
+        Ok(none) => -1,
+        Err(e) => -2,
+    }
+}
+echo dig(Ok(some(4)))
+echo dig(Ok(none))
+
+// A tuple pattern binding two names, both captured by one closure.
+p = (1, 2)
+echo match p {
+    (a, b) => call(fn() => a + b),
+}
+
+// Several bindings in one variant pattern, captured by separate closures.
+enum Pair {
+    Neither;
+    Both(left: int, right: int);
+}
+fn combine(x: Pair): int {
+    return match x {
+        Pair.Both(a, b) => call(fn() => a * 10) + call(fn() => b * 10),
+        Pair.Neither => 0,
+    }
+}
+echo combine(Pair.Both(1, 2))
+
+// A bare binding pattern (catch-all) is a binding like any other.
+echo match 7 {
+    0 => 0,
+    other => call(fn() => other),
+}
