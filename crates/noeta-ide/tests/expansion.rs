@@ -385,7 +385,10 @@ fn editing_a_field_re_runs_the_expansion() {
 
     let linked = noeta_db::linked_from(&db, ws, src);
     assert_eq!(
-        methods_of(linked.program.as_ref().expect("the entry still links"), "Api"),
+        methods_of(
+            linked.program.as_ref().expect("the entry still links"),
+            "Api"
+        ),
         vec!["tags_type"],
         "the expansion is stale: it still describes the struct's old fields"
     );
