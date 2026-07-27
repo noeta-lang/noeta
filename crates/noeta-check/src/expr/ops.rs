@@ -258,18 +258,41 @@ impl Checker {
         }
     }
 
-    /// Synthesize a pipeline right-hand side `left |> right`, where `piped` is the type of `left`,
-    /// threaded as `right`'s first argument. `right` may be a call (`add(10)` → `add(left, 10)`)
-    /// or a bare callee (`inc` → `inc(left)`).
-    pub(crate) fn synth_piped(&mut self, right: &Expr, piped: Type, env: &mut Env) -> Type {
+    /// Synthesize a pipeline right-hand side `left |> right`, where `piped` is the type `left`
+    /// already synthesized to, threaded as `right`'s first argument. `right` may be a call
+    /// (`add(10)` → `add(left, 10)`) or a bare callee (`inc` → `inc(left)`).
+    ///
+    /// The desugared argument list is materialized in full — the piped expression at index 0, the
+    /// written arguments after it — so it stays parallel to `arg_types` and the ordinary call
+    /// machinery applies to a pipeline unchanged: labels bind, a bare literal adapts into a
+    /// fixed-width parameter, a closure finalizes against its parameter type. Passing no argument
+    /// expressions at all (what this did) silently disabled every one of those.
+    ///
+    /// The call's span is recorded in `piped_calls` first, because binding needs to know that
+    /// argument zero is the piped value before it resolves the labels — see
+    /// [`Checker::bind_positional`].
+    pub(crate) fn synth_piped(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        piped: Type,
+        env: &mut Env,
+    ) -> Type {
+        self.sites.piped_calls.insert(right.span());
+        let piped_arg = noeta_ast::CallArg::positional(left.clone());
         match right {
             Expr::Call { callee, args, .. } => {
+                // Written order, and the piped value first: `left` is evaluated before the
+                // right-hand side's own arguments, which is the order both backends lower.
                 let mut arg_types = vec![piped];
                 arg_types.extend(noeta_ast::CallArg::values(args).map(|a| self.synth(a, env)));
-                self.synth_call(callee, &arg_types, &[], right.span(), env)
+                let mut arg_exprs = Vec::with_capacity(args.len() + 1);
+                arg_exprs.push(piped_arg);
+                arg_exprs.extend(args.iter().cloned());
+                self.synth_call(callee, &arg_types, &arg_exprs, right.span(), env)
             }
             Expr::Ident { .. } | Expr::Member { .. } => {
-                self.synth_call(right, &[piped], &[], right.span(), env)
+                self.synth_call(right, &[piped], &[piped_arg], right.span(), env)
             }
             other => {
                 self.synth(other, env);

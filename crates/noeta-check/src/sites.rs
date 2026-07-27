@@ -251,6 +251,17 @@ pub(crate) struct SiteMaps {
     /// names — and lowering permutes the evaluated atoms, so both backends bind identically by
     /// construction. Absent for a purely positional call, which is already in order.
     pub(crate) arg_orders: HashMap<Span, Vec<Option<usize>>>,
+    /// Call spans reached through a pipeline (`x |> f(…)`), recorded by
+    /// [`Checker::synth_piped`] before it types the desugared call.
+    ///
+    /// Argument binding needs this because the piped value is the one argument with no written
+    /// position: it fills the first parameter no label claimed, rather than parameter zero. A set
+    /// rather than a single "current" span so a pipeline nested in another's arguments
+    /// (`a |> f(b |> g(k: 1))`) marks both calls.
+    ///
+    /// Checker-internal — lowering knows a pipeline from its own AST node, so this is deliberately
+    /// not projected into [`Sites`].
+    pub(crate) piped_calls: HashSet<Span>,
     /// `for` statement spans whose iterable is statically an `Iterator<T>` — the loop streams via
     /// `next()` instead of snapshotting a list (Track I.2). Lowering reads this (via
     /// [`Checked::for_stream_sites`]) to set `Stmt::For.stream`. A pure function of the program; a
