@@ -1496,46 +1496,6 @@ fn link_core(
         }
     }
 
-    // A **sibling** module stays a pure declaration source — its `use`s never drive imports, so its
-    // internal cross-references resolve through the merged closure rather than through a second
-    // import pass. But a declaration merged out of it still needs whatever *extension* modules its
-    // body names: a sibling with `use std.math` contributed `round1`, and the merged program had no
-    // `math` binding for it to reach, so the entry failed with E0005 "cannot find `math` in this
-    // scope" — pointing at the sibling's own line, which reads correctly on its own and checks
-    // clean standalone. In effect a non-entry module could not use the standard library at all.
-    //
-    // So carry over exactly the extension-root half of a contributing sibling's imports, the same
-    // remainder [`RetainPolicy`] keeps for a dependency module. Deliberately narrow on both axes:
-    // only modules that actually contributed a declaration (an untouched sibling's imports are not
-    // this program's business — they would drag extensions into a program that never names them),
-    // and only roots the registry calls an extension (a project-module import stays the sibling's
-    // own error when the sibling is checked, never a confusing one relocated onto the entry).
-    let contributed = |ns: &[String]| {
-        let prefix = format!("{}.", ns.join("."));
-        merged_q.iter().any(|q| q.starts_with(&prefix))
-    };
-    for module in &module_views {
-        if module.namespace.is_empty() || !contributed(&module.namespace) {
-            continue;
-        }
-        for stmt in module.stmts {
-            let Stmt::Use { path, names, span } = stmt else {
-                continue;
-            };
-            if !path.first().is_some_and(|r| reg.is_extension_root(r)) {
-                continue;
-            }
-            let fresh = retain_fresh(&mut seen_retained, path, names.clone());
-            if !fresh.is_empty() {
-                dep_retained.push(Stmt::Use {
-                    path: path.clone(),
-                    names: fresh,
-                    span: *span,
-                });
-            }
-        }
-    }
-
     // **Qualified references require an import.** A dotted reference that missed the entry's QMap
     // but resolves to a loaded module's declaration is a spelled-out FQN with no `use` bringing it
     // in (`geometry.vec.Vec2 { … }` cold). Treating the FQN as its own implicit import was
@@ -3383,7 +3343,7 @@ mod tests {
         );
     }
 
-    // --- a sibling module's extension imports (dev-story sweep) --------------------------------
+    // --- a sibling module's extension imports ---------------------------------------------------
 
     /// The `use std.…` of every retained import in `linked`, as `path.name` strings.
     fn retained_uses(linked: &Linked) -> Vec<String> {
@@ -3406,11 +3366,11 @@ mod tests {
 
     #[test]
     fn a_contributing_siblings_std_import_is_carried_into_the_merged_program() {
-        // A sibling is a pure declaration source — its `use`s never drive imports. But a
-        // declaration merged out of it still needs the extension modules its body names: without
-        // this, `round1`'s `math.round(…)` reached a merged program with no `math` binding and the
-        // entry failed with E0005 "cannot find `math` in this scope", pointing at a sibling line
-        // that checks clean on its own. In effect a non-entry module could not use the stdlib.
+        // A `use` is file-scoped, so a sibling that imports an extension module must get it bound
+        // in the merged program. Before siblings drove their own imports, `twice`'s `math.round(…)`
+        // reached a merged program with no `math` binding and the entry failed with E0005 "cannot
+        // find `math` in this scope" — pointing at a sibling line that checks clean on its own. In
+        // effect a non-entry module could not use the standard library at all.
         let sibling = module(
             "helper.noe",
             "namespace Demo.Helper;\n             use std.math\n             pub fn twice(v: float): int { return math.round(v * 2.0); }\n",
@@ -3426,52 +3386,6 @@ mod tests {
         assert!(
             retained_uses(&linked).contains(&"std.math".to_string()),
             "the sibling's `use std.math` must ride along: {:?}",
-            retained_uses(&linked)
-        );
-    }
-
-    #[test]
-    fn an_untouched_siblings_std_import_is_not_carried() {
-        // Narrow on purpose: a sibling nothing imported is not this program's business, and
-        // dragging its extensions in would pull modules into a program that never names them.
-        let sibling = module(
-            "helper.noe",
-            "namespace Demo.Helper;\n             use std.math\n             pub fn twice(v: float): int { return math.round(v * 2.0); }\n",
-        );
-        let linked = link(
-            "main.noe",
-            "echo 1;\n",
-            noeta_lexer::Edition::default(),
-            &[sibling],
-        )
-        .expect("links");
-        assert!(
-            !retained_uses(&linked).contains(&"std.math".to_string()),
-            "{:?}",
-            retained_uses(&linked)
-        );
-    }
-
-    #[test]
-    fn a_siblings_project_module_import_is_not_relocated_onto_the_entry() {
-        // Only extension roots ride along. A sibling's own project-module import stays its own
-        // concern — relocating a broken one onto the entry would report it against the wrong file.
-        let sibling = module(
-            "helper.noe",
-            "namespace Demo.Helper;\n             use Demo.Missing.thing\n             pub fn twice(v: int): int { return v * 2; }\n",
-        );
-        let linked = link(
-            "main.noe",
-            "use Demo.Helper.twice\necho twice(2);\n",
-            noeta_lexer::Edition::default(),
-            &[sibling],
-        )
-        .expect("links");
-        assert!(
-            !retained_uses(&linked)
-                .iter()
-                .any(|u| u.starts_with("Demo.Missing")),
-            "{:?}",
             retained_uses(&linked)
         );
     }

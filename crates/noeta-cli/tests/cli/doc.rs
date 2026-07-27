@@ -441,7 +441,10 @@ fn doc_out_on_a_directory_names_the_entry_it_needs() {
     // it needs that entry named. Extracting to stdout instead would silently drop the flag.
     let dir = temp_dir(
         "doc_out_dir",
-        &[("src/main.noe", "@doc {\n    A.\n}\nfn a(): int { return 1; }\n")],
+        &[(
+            "src/main.noe",
+            "@doc {\n    A.\n}\nfn a(): int { return 1; }\n",
+        )],
     );
     lang()
         .arg("doc")
