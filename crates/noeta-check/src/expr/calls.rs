@@ -386,7 +386,8 @@ impl Checker {
     /// Unwrap the operand type of a `?` (`Expr::Try`) — the one shared judgment for synthesis and
     /// the check-mode seeding arm (poly-deferrals D1): a `Result` yields its `Ok` payload and runs
     /// the error-position `From`-conversion rule (E0057 / `try_conversion_sites`); an `Option`
-    /// yields its payload; a `dyn`/hole defers; anything else is E0012.
+    /// yields its payload and runs the absence-position rule; a `dyn`/hole defers; anything else is
+    /// E0012.
     pub(crate) fn try_unwrap(&mut self, inner: &Type, span: Span) -> Type {
         match inner {
             Type::Result(ok, err) => {
@@ -397,7 +398,10 @@ impl Checker {
                 self.check_try_error(&err, span);
                 (**ok).clone()
             }
-            Type::Option(some) => (**some).clone(),
+            Type::Option(some) => {
+                self.check_try_option(span);
+                (**some).clone()
+            }
             // A hole carries no info; `dyn` defers to runtime — both accept `?` without a
             // diagnostic, yielding the same deferred type.
             t if t.defers_to_runtime() => t.clone(),

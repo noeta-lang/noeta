@@ -135,6 +135,15 @@ echo first_doubled([3, 4])   // some(6)
 echo first_doubled([])       // none
 ```
 
+**The enclosing function has to be able to return that `none`.** A `?` on an `Option` inside a function declared to return anything other than `?T` is **E0012** — the operator early-returns, so the return type must carry what it returns. Supply a value with `??` instead, or match the `Option` and return your own `Err`. A `dyn` or unannotated return (top level, an inferred closure) defers to the runtime, as everywhere in the gradual checker.
+
+```noeta error
+fn head(xs: List<string>): string {
+    return xs.first()?   // E0012: `?` on an `Option` early-returns `none`, but this returns `string`
+}
+echo head([])
+```
+
 ## Converting errors at `?` — `impl From<Source>`
 
 A pipeline usually crosses error types: `json.try_parse` fails with a `JsonError`, your function returns `Result<T, AppError>`. A `?` whose `Err` payload type differs from the enclosing function's declared error type **converts** it through a declared conversion — the built-in `From` trait, implemented **on the target** error type:

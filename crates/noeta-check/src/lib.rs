@@ -40,7 +40,9 @@
 //!   non-exhaustive error to a compile-time one; the runtime `MatchFail` becomes unreachable
 //!   for checked programs.
 //! - **`?` on a non-fallible value** (`E0012`) — `expr?` where `expr` is concretely neither a
-//!   `Result` nor an `Option`.
+//!   `Result` nor an `Option`. Same code for the **absence-position** rule: `?` on an `Option`
+//!   early-returns `none`, so the enclosing function must be declared to return one — the twin of
+//!   the `Result` error-position rule (`E0057`).
 //! - **Operator type mismatch** (`E0007`) — arithmetic (`+ - * / %`) on a concretely
 //!   non-numeric operand (e.g. `1 + true`). Reuses the existing runtime `TypeMismatch` code at
 //!   the same span, so the static error reads identically to the old runtime one.

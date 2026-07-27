@@ -930,6 +930,33 @@ impl Checker {
         }
     }
 
+    /// The `?` **absence-position rule**: `?` on an `Option` early-returns `none`, so the enclosing
+    /// function has to be able to return one.
+    ///
+    /// Without this, `fn head(xs: List<string>): string { return xs.first()? }` type-checked clean
+    /// and then handed the caller a `none` sitting in a slot the checker had promised was a
+    /// `string` — the same shape of hole as a declared value holding a future. A declared return
+    /// that defers (`dyn`, an inference hole, top-level code, an unannotated closure) still defers,
+    /// and a `?T` return is exactly what the operator is for.
+    pub(crate) fn check_try_option(&mut self, span: Span) {
+        let declared = self.coloring.current_ret.clone();
+        if declared.defers_to_runtime() || matches!(declared, Type::Option(_)) {
+            return;
+        }
+        self.error(
+            DiagnosticCode::InvalidTry,
+            span,
+            format!(
+                "`?` on an `Option` early-returns `none`, but this function returns `{declared}`"
+            ),
+        )
+        .help(
+            "declare the return as `?T` to propagate the absence, or supply a value with \
+             `?? <fallback>` — a `Result`-returning function has to match the `Option` and return \
+             its own `Err`",
+        );
+    }
+
     /// Whether an error-position type is resolved enough for the `?` rule to judge: anything but a
     /// `Named` head that is an in-scope generic type parameter (those defer to the instantiation).
     fn concrete_error_type(&self, ty: &Type) -> bool {
