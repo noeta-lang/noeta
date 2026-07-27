@@ -488,7 +488,7 @@ pub fn link(
 /// through the same [`SourceMap`] as one in a hand-written file.
 fn expand_into(
     program: &mut Program,
-    source_maps: &std::collections::HashMap<SourceId, qualify::QMap>,
+    source_maps: &std::collections::HashMap<SourceId, qualify::UnitMap>,
     sources: &mut Vec<Source>,
     editions: &mut noeta_lexer::EditionMap,
     root_edition: noeta_lexer::Edition,
@@ -544,7 +544,7 @@ fn expand_into(
 /// the link when `diagnostics` is non-empty, but register `reads` either way.
 pub fn run_expansion(
     program: &mut Program,
-    source_maps: &std::collections::HashMap<SourceId, qualify::QMap>,
+    source_maps: &std::collections::HashMap<SourceId, qualify::UnitMap>,
     sources: impl FnOnce() -> Vec<Source>,
     next_id: u32,
     root_edition: noeta_lexer::Edition,
@@ -1231,13 +1231,17 @@ fn link_core(
         import_targets.extend(native_roots.iter().cloned());
     }
 
-    let entry_map = build_module_map(&entry_ns, &entry_program.stmts, &module_views, reg);
-    let module_maps: std::collections::HashMap<Vec<String>, qualify::QMap> = module_views
+    let entry_map = build_module_map(&entry_ns, &entry_program.stmts, &module_views, reg, false);
+    let module_maps: std::collections::HashMap<Vec<String>, qualify::UnitMap> = module_views
         .iter()
         .map(|mv| {
+            // The entry is a resolution candidate in `module_views` too, but it is not a *merged*
+            // unit — its statements are the program's tail, in its own scope — so it keeps its
+            // short handle names (see `build_module_map`).
+            let is_entry = mv.namespace == entry_ns;
             (
                 mv.namespace.clone(),
-                build_module_map(&mv.namespace, mv.stmts, &module_views, reg),
+                build_module_map(&mv.namespace, mv.stmts, &module_views, reg, !is_entry),
             )
         })
         .collect();
@@ -1264,7 +1268,7 @@ fn link_core(
     let mut errors: Vec<LoadDiagnostic> = Vec::new();
     // Retained (unresolved) imports — std imports and opaque-stub fallbacks — deduped by (path, name)
     // across the entry and every dependency so a shared `use std.…` isn't bound twice.
-    let mut seen_retained: HashSet<(Vec<String>, String)> = HashSet::new();
+    let mut seen_retained: HashSet<(Vec<String>, String, String)> = HashSet::new();
     let mut dep_retained: Vec<Stmt> = Vec::new();
     let mut entry_stmts: Vec<Stmt> = Vec::with_capacity(entry_program.stmts.len());
 
@@ -1404,6 +1408,29 @@ fn link_core(
                             .is_some_and(|r| reg.is_extension_root(r) || native_roots.contains(r)),
                     };
                     if retained {
+                        // A retained (native) import binds a name in this file just as a resolved
+                        // one does, so it answers the same one-name-one-meaning question. Without
+                        // this it was invisible to the collision table, and a file importing BOTH a
+                        // loaded `.noe` module and a native module of the same leaf name
+                        // (`use pet_proxy.client` + `use std.http.client`) silently kept only the
+                        // `.noe` meaning — `client.new(…)` resolved to the file's own package and
+                        // surfaced much later as a missing function. Import-vs-import only: a
+                        // native import that merely shares a name with a *declaration* is left to
+                        // the checker's own shadowing rules, which already see both.
+                        if canonical_use_binding(reg, path, &name.name).is_some() {
+                            match origins.get(name.local()) {
+                                None => {
+                                    origins.insert(
+                                        name.local().to_string(),
+                                        Origin::Import(path.to_vec()),
+                                    );
+                                }
+                                Some(Origin::Import(p)) if p.as_slice() != path => {
+                                    errors.push(collision_error(entry, path, name));
+                                }
+                                Some(_) => {}
+                            }
+                        }
                         unresolved.push(name.clone());
                     // A namespace that IS declared, by a file that simply failed to parse, is not a
                     // missing module: it is a syntax error the consumer was never shown.
@@ -1522,9 +1549,26 @@ fn link_core(
     // program, and the second package's import of *its* `Middleware` was reported as a clash.
     for driver in drivers {
         let mut origins = unit_origins(&driver.stmts);
+        // This driver's α-rename table (empty for a namespace-less module, which contributes
+        // nothing to the merged program anyway). Its retained `use`s must be *aliased* to the same
+        // canonical names its merged bodies were rewritten to, so the binding the backends create
+        // and the reference that reads it are one decision, taken here.
+        let handles = module_namespace(driver)
+            .and_then(|ns| module_maps.get(&ns))
+            .map(|m| m.handles.clone())
+            .unwrap_or_default();
         for stmt in &driver.stmts {
             if let Stmt::Use { path, names, span } = stmt {
                 let unresolved = drive_use(path, names, &mut origins, &mut imported, &mut errors);
+                let unresolved = unresolved
+                    .into_iter()
+                    .map(|mut n| {
+                        if let Some(canonical) = handles.get(n.local()) {
+                            n.alias = Some(canonical.clone());
+                        }
+                        n
+                    })
+                    .collect();
                 let fresh = retain_fresh(&mut seen_retained, path, unresolved);
                 if !fresh.is_empty() {
                     dep_retained.push(Stmt::Use {
@@ -1639,7 +1683,7 @@ fn link_core(
     // pass: its generated members are written against the imports of the file the directive sits
     // in, but they are parsed after this function has already qualified everything, so they would
     // otherwise reach the checker with bare names that resolve to nothing.
-    let mut source_maps: std::collections::HashMap<SourceId, qualify::QMap> =
+    let mut source_maps: std::collections::HashMap<SourceId, qualify::UnitMap> =
         std::collections::HashMap::new();
     source_maps.insert(entry.id(), entry_map);
     for mv in &module_views {
@@ -1675,19 +1719,25 @@ pub struct Linkage {
     /// Keyed by the [`SourceId`] of the file the map belongs to. A file with no `namespace` and no
     /// imports has an empty map, which makes qualification a no-op — the correct answer, not a
     /// missing one.
-    pub source_maps: std::collections::HashMap<SourceId, qualify::QMap>,
+    pub source_maps: std::collections::HashMap<SourceId, qualify::UnitMap>,
 }
 
 /// Filter `names` down to those not yet retained under `path`, recording the fresh ones — so a
 /// `use std.…` shared by the entry and several dependencies is retained exactly once.
+///
+/// Keyed on the **binding** as well as the imported name: the entry keeps its short handle names
+/// while every merged unit's are α-renamed to their canonical identity, so `use std.http.url` can
+/// legitimately need two retained forms — one binding `url` for the entry, one binding
+/// `std.http.url` for the dependency bodies that were rewritten to it. Deduping on the imported
+/// name alone dropped the second and left those bodies calling an unbound name.
 fn retain_fresh(
-    seen: &mut HashSet<(Vec<String>, String)>,
+    seen: &mut HashSet<(Vec<String>, String, String)>,
     path: &[String],
     names: Vec<UseName>,
 ) -> Vec<UseName> {
     names
         .into_iter()
-        .filter(|n| seen.insert((path.to_vec(), n.name.clone())))
+        .filter(|n| seen.insert((path.to_vec(), n.name.clone(), n.local().to_string())))
         .collect()
 }
 
@@ -1744,7 +1794,7 @@ fn merge_module_closure(
     path: &[String],
     root: &str,
     module_views: &[ModuleView],
-    module_maps: &std::collections::HashMap<Vec<String>, qualify::QMap>,
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::UnitMap>,
     merged_q: &mut HashSet<String>,
     imported: &mut Vec<Stmt>,
 ) {
@@ -1774,7 +1824,7 @@ fn merge_one_dep(
     name: &str,
     module: &ModuleView,
     path: &[String],
-    module_maps: &std::collections::HashMap<Vec<String>, qualify::QMap>,
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::UnitMap>,
     merged_q: &mut HashSet<String>,
     imported: &mut Vec<Stmt>,
 ) -> bool {
@@ -1805,7 +1855,7 @@ fn expand_module_refs(
     mut work: Vec<String>,
     module: &ModuleView,
     path: &[String],
-    module_maps: &std::collections::HashMap<Vec<String>, qualify::QMap>,
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::UnitMap>,
     merged_q: &mut HashSet<String>,
     imported: &mut Vec<Stmt>,
 ) {
@@ -1862,12 +1912,19 @@ fn module_declares(modules: &[ModuleView], path: &[String], name: &str) -> bool 
 /// - **Imports that resolve to a loaded module** qualify to that module's identity, keyed by the
 ///   import's local (alias-aware) name (`use App.A.User as AUser` → `AUser` → `App.A.User`). An
 ///   extern or opaque-stub import resolves to no module ([`module_declares`] is false) and is skipped.
+///
+/// `canonical_handles` additionally fills [`qualify::UnitMap::handles`] — the α-rename of this
+/// unit's **native** `use` bindings (see [`native_use_handles`]). It is on for every *merged* unit
+/// and off for the entry, because the merged program's flat global scope **is** the entry's scope:
+/// the entry's own short names are already the program's, and every other file's file-scoped
+/// bindings are renamed into it, exactly as their declarations are qualified into it.
 fn build_module_map(
     own_ns: &[String],
     own_stmts: &[Stmt],
     modules: &[ModuleView],
     reg: &noeta_ext_abi::registry::Registry,
-) -> qualify::QMap {
+    canonical_handles: bool,
+) -> qualify::UnitMap {
     let mut map = qualify::QMap::new();
     // Identity entries (`App.Models.User` → itself) look like no-ops but are load-bearing: the
     // member-chain collapse in `qualify` turns a chain into a flat `Ident(FQN)` only on a map
@@ -1907,7 +1964,74 @@ fn build_module_map(
         }
     }
     add_native_attribute_aliases(&mut map, own_stmts, reg);
-    map
+    qualify::UnitMap {
+        names: map,
+        handles: if canonical_handles {
+            native_use_handles(own_stmts, modules, reg)
+        } else {
+            qualify::QMap::new()
+        },
+    }
+}
+
+/// A unit's **native `use` handles**: each import that binds a name in the *value* namespace and
+/// resolves to no loaded file → the canonical name the merged program binds it under.
+///
+/// A `use` binds in one file; the merged program has one flat global scope. A leaf name is
+/// therefore not a usable binding key across units — `use std.http.url` in a dependency and
+/// `use para.url` in a package it never heard of both want to bind `url`, and whichever `use`
+/// executed last used to win for the whole program (silently, and only at run time: the checker
+/// keeps its own table). The identity a native import resolves to is unique, so it is the binding
+/// name: `use std.http.url` binds `std.http.url`, `use std.http.url.{decode as d}` binds
+/// `std.http.url.decode`. Because every canonical name is dotted, it can never collide with the
+/// entry's own short-named bindings either.
+///
+/// [`Registry::classify_use`](noeta_ext_abi::registry::Registry::classify_use) is the classifier —
+/// the same one the checker and both backends consult — so the name recorded here is by
+/// construction the name they resolve the import to. Imports that resolve to a loaded `.noe` module
+/// are excluded: those are merged and rewritten through [`qualify::UnitMap::names`] instead.
+fn native_use_handles(
+    own_stmts: &[Stmt],
+    modules: &[ModuleView],
+    reg: &noeta_ext_abi::registry::Registry,
+) -> qualify::QMap {
+    let mut handles = qualify::QMap::new();
+    for stmt in own_stmts {
+        let Stmt::Use { path, names, .. } = stmt else {
+            continue;
+        };
+        for n in names {
+            if module_declares(modules, path, &n.name)
+                || module_with_namespace(modules, path, &n.name).is_some()
+            {
+                continue;
+            }
+            if let Some(canonical) = canonical_use_binding(reg, path, &n.name) {
+                handles.insert(n.local().to_string(), canonical);
+            }
+        }
+    }
+    handles
+}
+
+/// The canonical binding name of a native import, or `None` when the import binds nothing in the
+/// **value** namespace (a type/enum/class/trait import binds in the type namespace, which the
+/// qualified-identity rewrite already covers, and an unresolvable target binds nothing at all).
+fn canonical_use_binding(
+    reg: &noeta_ext_abi::registry::Registry,
+    path: &[String],
+    name: &str,
+) -> Option<String> {
+    use noeta_ext_abi::registry::UseKind;
+    match reg.classify_use(path, name) {
+        // A whole module (`use std.http.url`) or a navigable namespace group (`use std.http`):
+        // the handle *is* the qualified path.
+        UseKind::Module(qualified) | UseKind::Namespace(qualified) => Some(qualified),
+        // A selective member import (`use std.http.url.{decode}`) binds one function value; its
+        // canonical name is the function's own qualified identity.
+        UseKind::MemberFn { module, func } => Some(format!("{module}.{func}")),
+        _ => None,
+    }
 }
 
 /// Fold a module's native **attribute** imports into its rewrite map, so a `#[Skip]` /

@@ -16,6 +16,12 @@
 //! **Scope.** The map is empty for a module with no `namespace`, so [`qualify_stmt`] is then a no-op
 //! and a non-namespaced file stays byte-identical. Externs (`use std.id.Uuid`) never enter the map
 //! (they resolve to no loaded module), so their references stay bare for the Phase-A extern path.
+//!
+//! **The second table.** A [`UnitMap`] carries a *second* rewrite next to the type map: the
+//! **native `use` handles** a merged unit binds in the value namespace (`url` from `use
+//! std.http.url`, `decode` from `use std.http.url.{decode}`). Those are file-scoped names that the
+//! merged program's one flat global scope cannot keep apart, so the linker rewrites each to the
+//! import's **canonical identity** — see [`UnitMap::handles`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -29,6 +35,36 @@ use noeta_ast::{
 /// from the map is left untouched — a generic type parameter, a builtin (`List`/`int`), a
 /// language-level type (`Iterator`), or a still-bare extern.
 pub type QMap = HashMap<String, String>;
+
+/// One **compilation unit's** rewrite tables — everything the linker must fix up in a file's
+/// statements before flattening them into the merged program's single scope.
+///
+/// Two tables, because a file binds names in two namespaces and the merged program flattens both:
+///
+/// * [`UnitMap::names`] — the type/declaration namespace (the historic [`QMap`]): `User` →
+///   `App.Models.User`.
+/// * [`UnitMap::handles`] — the **value** namespace a native `use` binds: `url` from `use
+///   std.http.url`, `json` from `use std.{json}`, `decode` from `use std.http.url.{decode}`. These
+///   never resolve to a loaded file, so they are absent from `names`, yet they are just as
+///   file-scoped: two packages may each import a *different* native module whose leaf name is
+///   `url`. The merged program has one flat global scope, so the linker α-renames each such handle
+///   to the import's **canonical identity** (`std.http.url`, `std.http.url.decode`) and aliases the
+///   retained `use` to the same name — one binding name, one module, and the checker and both
+///   backends read that one answer off the `use` instead of re-deriving it from a leaf name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnitMap {
+    /// Local type/declaration name → qualified identity.
+    pub names: QMap,
+    /// Local native-`use` binding name → the canonical name the linker binds it under.
+    pub handles: QMap,
+}
+
+impl UnitMap {
+    /// Whether the unit needs no rewriting at all (a non-namespaced file with no native imports).
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty() && self.handles.is_empty()
+    }
+}
 
 /// A **name visitor**: the single action the AST walk below applies at every position that names a
 /// namespace-qualifiable declaration (a type reference, a `Stmt::Fn`/type declaration's own name, an
@@ -110,7 +146,7 @@ fn q_opt_typeref(ty: &mut Option<TypeRef>, visit: &mut NameVisitor) {
 /// Qualify one statement in place: rewrite a declaration's own name and every type/value reference
 /// it and its nested expressions/bodies carry, through `map`. A no-op when the map is empty (a
 /// non-namespaced file stays byte-identical).
-pub fn qualify_stmt(stmt: &mut Stmt, map: &QMap) {
+pub fn qualify_stmt(stmt: &mut Stmt, map: &UnitMap) {
     // Nothing to rewrite and no caller interested in misses: skip the walk, keeping the
     // non-namespaced-file byte-identity fast path.
     if map.is_empty() {
@@ -132,7 +168,7 @@ pub fn qualify_stmt(stmt: &mut Stmt, map: &QMap) {
 /// require an import, so the miss becomes a targeted E0019 with the exact `use` to add.
 pub fn qualify_stmt_scoped(
     stmt: &mut Stmt,
-    map: &QMap,
+    map: &UnitMap,
     outer_bound: &HashSet<String>,
     dotted_misses: &mut Vec<(String, noeta_span::Span)>,
 ) {
@@ -149,25 +185,47 @@ pub fn qualify_stmt_scoped(
     let mut bound = bound_value_names(stmt);
     bound.extend(outer_bound.iter().cloned());
     walk_stmt(stmt, &mut |name, kind, span| {
-        if kind == NameKind::ValueChain
-            && name
-                .split('.')
-                .next()
-                .is_some_and(|root| bound.contains(root))
-        {
+        let shadowed = name
+            .split('.')
+            .next()
+            .is_some_and(|root| bound.contains(root));
+        if kind == NameKind::ValueChain && shadowed {
             return false;
         }
-        if let Some(qualified) = map.get(name.as_str()) {
+        if let Some(qualified) = map.names.get(name.as_str()) {
             *name = qualified.clone();
-            true
-        } else {
-            if name.contains('.')
-                && let Some(span) = span
-            {
-                dotted_misses.push((name.clone(), span));
-            }
-            false
+            return true;
         }
+        // A **type** reference reached *through* a handle — `http.Response` after `use std.http`,
+        // `db.Connection` after `use para.db` — names the module by the handle too, so its root is
+        // renamed in lockstep. Without this the reference would keep pointing at a binding name
+        // that no longer exists (`http.Response` where the import now binds `std.http`), and the
+        // checker's `extern_types` key, derived from the same import, would never match it.
+        if kind == NameKind::Type
+            && let Some((root, rest)) = name.split_once('.')
+            && let Some(canonical) = map.handles.get(root)
+        {
+            *name = format!("{canonical}.{rest}");
+            return true;
+        }
+        // A native `use` handle is a **value** binding, so it is reached as a bare identifier: the
+        // root of `url.decode(v)` (the chain itself missed `names` and recursed into its receiver),
+        // or a member-function import called outright (`decode(v)`). Rewrite it to the canonical
+        // name the linker binds this unit's import under — unless a local of that name shadows it,
+        // in which case the identifier is the local and always was (`fn f(url: string)`).
+        if kind == NameKind::Value
+            && !shadowed
+            && let Some(canonical) = map.handles.get(name.as_str())
+        {
+            *name = canonical.clone();
+            return true;
+        }
+        if name.contains('.')
+            && let Some(span) = span
+        {
+            dotted_misses.push((name.clone(), span));
+        }
+        false
     });
 }
 
@@ -1096,11 +1154,25 @@ mod tests {
         parsed.program.stmts
     }
 
-    fn map(pairs: &[(&str, &str)]) -> QMap {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
+    fn map(pairs: &[(&str, &str)]) -> UnitMap {
+        UnitMap {
+            names: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            handles: QMap::new(),
+        }
+    }
+
+    /// A unit map holding only native-`use` handles (the α-rename table).
+    fn handles(pairs: &[(&str, &str)]) -> UnitMap {
+        UnitMap {
+            names: QMap::new(),
+            handles: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
     }
 
     /// The overwhelmingly common case: an empty map rewrites nothing (a non-namespaced file stays
@@ -1110,7 +1182,7 @@ mod tests {
         let before = parse_one("class Order { id: int }\no = Order { id: 1 };\n");
         let mut after = before.clone();
         for s in &mut after {
-            qualify_stmt(s, &QMap::new());
+            qualify_stmt(s, &UnitMap::default());
         }
         assert_eq!(before, after);
     }
@@ -1357,5 +1429,54 @@ mod tests {
             panic!("construct")
         };
         assert!(matches!(name.dynamic(), Some(Expr::Str { value, .. }) if value == "Todo"));
+    }
+
+    /// A native `use` handle is α-renamed to its canonical identity wherever it is *used as a
+    /// value*: as the receiver of a module call (`url.decode(v)`) and as a bare member-function
+    /// import called outright (`percent_decode(v)`). This is what keeps a dependency's
+    /// `use std.http.url` from being answered by another package's `para.url` once both files are
+    /// flattened into one global scope.
+    #[test]
+    fn native_use_handles_rewrite_to_their_canonical_name() {
+        let m = handles(&[
+            ("url", "std.http.url"),
+            ("percent_decode", "std.http.url.decode"),
+        ]);
+        let mut stmts = parse_one(
+            "fn unescape(v: string): string {\n\
+             \x20 a = url.decode(v);\n\
+             \x20 return percent_decode(a);\n\
+             }\n",
+        );
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        let printed = format!("{:?}", stmts[0]);
+        assert!(
+            printed.contains("std.http.url") && !printed.contains("\"url\""),
+            "the module handle must be rewritten to its canonical identity: {printed}"
+        );
+        assert!(
+            printed.contains("std.http.url.decode"),
+            "the member-function import must be rewritten too: {printed}"
+        );
+    }
+
+    /// A **local** of the same name is the local, not the handle: a parameter named `url` keeps
+    /// `url.slice(…)` a string method call. Same suppression the dotted module-alias rewrite
+    /// already applies — a handle is a value binding, so locals win.
+    #[test]
+    fn a_local_shadows_a_native_use_handle() {
+        let m = handles(&[("url", "std.http.url")]);
+        let mut stmts = parse_one(
+            "fn trim_query(url: string): string {\n\
+             \x20 return url.slice(0);\n\
+             }\n",
+        );
+        let before = stmts.clone();
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        assert_eq!(before, stmts, "a local binding must suppress the rewrite");
     }
 }

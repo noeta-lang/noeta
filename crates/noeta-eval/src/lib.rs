@@ -1926,7 +1926,18 @@ impl Interpreter {
                     }))
                 }
             };
-            self.scope.declare(imported.name.clone(), value, false);
+            // A **value**-namespace import — a module handle or a member function — binds under the
+            // import's LOCAL name (its alias when one is written), matching the checker's
+            // `imports.modules` / `imports.imported_fns` keys and the canonical name the linker
+            // α-renamed a merged unit's references to. Binding the imported short name instead lost
+            // every alias at run time (`use std.http.url as u` left `u` unbound) and made two
+            // packages' same-leaf modules fight over one global. A type-namespace import keeps the
+            // imported short name: that name is also the runtime shape's, which native values stamp.
+            let local = match &value {
+                Value::NativeModule(_) | Value::ModuleFn(..) => imported.local().to_string(),
+                _ => imported.name.clone(),
+            };
+            self.scope.declare(local, value, false);
         }
     }
 
