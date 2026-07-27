@@ -249,7 +249,7 @@ One subtlety worth knowing if you are debugging this path: a turbofish method ca
 
 An extension can register **`@`-directives**: `Extension::directives()` returns `ExtDirective` entries, which add a name to the decorator name-space. Resolution runs after the built-in directives and after the tier name-space, so an extension can never shadow either. Each entry declares where it may attach (`sites`), what arguments it takes (`max_args`, `named_keys`), and the prose the editor shows on hover and in completion.
 
-A directive with an `expand` hook does not merely mark a declaration — it **generates its members**. The hook receives the invocation and returns Noeta source:
+A directive with an `expand` hook does not merely mark a declaration — it **generates its members**. The hook receives the invocation *and the declaration it decorates* (`DirectiveCtx`: `args`, `named`, `target`, `site`, `source_dir`, `fields`) and returns Noeta source:
 
 ```rust
 fn expand_openapi(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
@@ -275,7 +275,23 @@ struct PetStore {
 }
 ```
 
-Five things are worth knowing before writing one.
+Six things are worth knowing before writing one.
+
+**A hook can generate from the declaration's *shape*, not only its name.** `DirectiveCtx::fields` is the decorated declaration's members as `(name, declared type spelling)` pairs, in declaration order — a `struct`'s or `class`'s fields; an `enum`'s **variants**, each with its payload spelling as declared (`"(index: int)"` for a named payload, `"(T)"` for a positional one, and the empty string for a variant that carries none); and empty for a `Function`, `Method` or `Trait` site, which declares no typed members. So a validation directive can emit one check per field, a persistence directive one column accessor per field, and a serializer the round-trip pair — none of which is expressible from a name alone:
+
+```rust
+fn expand_columns(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
+    let mut source = String::new();
+    for (name, ty) in &ctx.fields {
+        source.push_str(&format!("fn {name}_column(): string {{ return \"{name}:{ty}\"; }}\n"));
+    }
+    Ok(Expansion { source, reads: Vec::new() })
+}
+```
+
+A spelling is the **declared surface** one, at full fidelity: `List<int>` arrives as `"List<int>"` and never as `"List"`, and `?User` as `"?User"` and never as `"Option<User>"` — a hook writes source, and source is written in the surface language. The one adjustment is that a namespace-qualified identity renders as its short name (`std.id.Uuid` → `Uuid`), because the linker qualifies an imported type before a hook runs and generated code spelling that identity would name something the consumer's file cannot resolve. An unannotated member reports `dyn`. It is the same derivation the checker hands `ExtDerive::validate`, so a recipe and an expansion hook in one extension always see the same declaration the same way.
+
+This does not widen what a hook can see. The declaration's own fields are part of *what the directive was written on*, and they live in the same source text the memoized link is already keyed on — so editing a field re-runs the expansion, exactly as editing the directive's arguments does. What a hook still cannot see is the surrounding program.
 
 **It is compile-time only, by design.** `@` is the language's codegen half and `#[…]` is the runtime-readable half (see [Attributes and Reflection](Attributes-and-Reflection)). A directive is *not* visible to `attributes_of::<T>()`, and that is deliberate rather than an omission — an extension that wants runtime-visible metadata declares an attribute, and one that wants to consume a resource *dynamically* returns an invocable value instead of reaching for a directive.
 
@@ -291,7 +307,7 @@ Failures are reported as **E0062**, always blamed on the directive rather than o
 
 ## Derive recipes (`ExtDerive`)
 
-An extension can register **derive recipes**: `Extension::derives()` returns `ExtDerive { name, methods, validate }` entries, and `@derive(<Name>)` on a type synthesizes each declared method as a forward into the extension's registered module function — `fn <name>(a1: dyn, …): dyn { return <handler>(self, a1, …) }`, resolved like an expression tier's native handler (no user import). The handler does its real work natively (typically reflecting over the value); the optional `validate` hook can reject unsuitable type shapes at check time (E0050). std's own `Inspect` (`inspect()` → `json.stringify(self)`) is the reference example. Names resolve after built-in traits and the program's user traits, so a recipe can never shadow either.
+An extension can register **derive recipes**: `Extension::derives()` returns `ExtDerive { name, methods, validate }` entries, and `@derive(<Name>)` on a type synthesizes each declared method as a forward into the extension's registered module function — `fn <name>(a1: dyn, …): dyn { return <handler>(self, a1, …) }`, resolved like an expression tier's native handler (no user import). The handler does its real work natively (typically reflecting over the value); the optional `validate` hook can reject unsuitable type shapes at check time (E0050), reading the deriving type's name and its `(field name, declared type spelling)` pairs — the same shape, from the same derivation, that an expanding directive gets as [`DirectiveCtx::fields`](#directives-that-generate-code-extdirectiveexpand). std's own `Inspect` (`inspect()` → `json.stringify(self)`) is the reference example. Names resolve after built-in traits and the program's user traits, so a recipe can never shadow either.
 
 ## Current state
 
