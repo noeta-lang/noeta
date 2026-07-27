@@ -5,6 +5,64 @@
 use crate::*;
 
 impl Checker {
+    /// Warn (E0065) when `==`/`!=` compares a **reified container** — an `Option`/`Result` — with a
+    /// concrete type that is not that container, which can never be equal.
+    ///
+    /// The comparison is well-formed (`==` is universal), so this stays advisory. It earns its
+    /// place because the way into it is invisible: `??=` deliberately *unwraps*, retyping its
+    /// binding from `Option<int>` to `int` (the documented one-place exception to reassignment
+    /// stability), so a `mut column: ?int` that has been `??=`-assigned once silently stops
+    /// comparing equal to the `?int` it is being tested against. `x == none` is untouched — that is
+    /// the presence test, and `none` is an `Option`.
+    fn warn_container_compare(&mut self, op: BinaryOp, lt: &Type, rt: &Type, span: Span) {
+        // Only when exactly one side is the container: two containers compare normally, and
+        // neither being one is not this rule's business.
+        let container = |t: &Type| matches!(t, Type::Option(_) | Type::Result(..));
+        let concrete = |t: &Type| {
+            !t.defers_to_runtime()
+                && !container(t)
+                && !matches!(t, Type::Union(_) | Type::DynTrait(_) | Type::Kind(_))
+        };
+        let (held, other) = match (container(lt), container(rt)) {
+            (true, false) if concrete(rt) => (lt, rt),
+            (false, true) if concrete(lt) => (rt, lt),
+            _ => return,
+        };
+        // A bare type parameter is erased and may instantiate to the container itself.
+        if let Type::Named(p, args) = other
+            && args.is_empty()
+            && self.coloring.type_params.contains_key(p)
+        {
+            return;
+        }
+        let sym = if op == BinaryOp::Eq { "==" } else { "!=" };
+        let verdict = if op == BinaryOp::Eq { "false" } else { "true" };
+        let (payload, wrap, take_apart) = match held {
+            Type::Option(inner) => (
+                (**inner).clone(),
+                "some(y)",
+                "match x { some(v) => …, none => … }",
+            ),
+            Type::Result(ok, _) => (
+                (**ok).clone(),
+                "Ok(y)",
+                "match x { Ok(v) => …, Err(e) => … }",
+            ),
+            _ => return,
+        };
+        let diag = self.warn(
+            DiagnosticCode::ImpossibleTypeTest,
+            span,
+            format!("`{held}` can never equal `{other}`; this `{sym}` is always {verdict}"),
+        );
+        if payload == *other {
+            diag.help(format!(
+                "`{held}` wraps its `{other}` — compare like with like (`x {sym} {wrap}`), or \
+                 take the payload out first (`{take_apart}`)"
+            ));
+        }
+    }
+
     pub(crate) fn synth_binary(
         &mut self,
         op: BinaryOp,
@@ -111,8 +169,13 @@ impl Checker {
                 Type::Bool
             }
             // `==`/`!=` are universal (structural equality fallback) and the logical operators take
-            // bools; none impose a trait bound, so none is checked here.
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::And | BinaryOp::Or => Type::Bool,
+            // bools; none impose a trait bound, so none is checked here. One shape is worth a word
+            // though: comparing a reified container against its own payload type (E0065).
+            BinaryOp::Eq | BinaryOp::Ne => {
+                self.warn_container_compare(op, &lt, &rt, span);
+                Type::Bool
+            }
+            BinaryOp::And | BinaryOp::Or => Type::Bool,
             // `===`/`!==` ask reference identity (*same instance*), meaningful only for the
             // reference kind `class`. A definitely-value operand (scalar, collection, struct/enum,
             // tuple, fn) has no identity → E0034; a `dyn`/hole or class (or a union of them) defers.

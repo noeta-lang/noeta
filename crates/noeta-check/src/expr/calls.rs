@@ -1649,7 +1649,7 @@ impl Checker {
 ///   `method_call_return` answers them with the deferred type rather than `Unknown`.
 /// - [`Type::DynTrait`] — resolved against the trait's declared methods, but a trait object's
 ///   dispatch is the runtime's call to make.
-fn closed_to_new_methods(ty: &Type) -> bool {
+pub(crate) fn closed_to_new_methods(ty: &Type) -> bool {
     matches!(
         ty,
         Type::Int

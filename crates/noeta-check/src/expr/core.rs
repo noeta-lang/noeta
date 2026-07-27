@@ -1161,8 +1161,32 @@ impl Checker {
                 // a single concrete nominal with a known impl (`user_trait_impls` hit), the test is
                 // provably constant-true and could fold or warn — today the runtime test simply
                 // runs (and agrees), so no warning machinery is spent on it.
-                self.synth(expr, env);
+                let scrut = self.synth(expr, env);
+                let before = self.diags.len();
                 self.check_type_ref(ty);
+                // A test against a *reified container's* payload (`x is P` where `x: ?P`) is
+                // statically always false — the value's tag is `some`/`none`, never `P` (E0065,
+                // warning). Reported here; the narrowing sites (`if`, and a `match`'s `is T` arm)
+                // consult the same predicate and decline to narrow, so the dead branch stops
+                // type-checking as the payload.
+                //
+                // Skipped when the target itself did not resolve (`x is none` — E0013, already
+                // reported just above with the constructor-vs-type help): a second diagnostic on
+                // the same span about a type that does not exist is noise, not information.
+                if self.diags.len() == before
+                    && let Some(idiom) = self.impossible_type_test(&scrut, ty)
+                {
+                    let target = from_ref_q(ty, &self.imports.extern_types);
+                    self.warn(
+                        DiagnosticCode::ImpossibleTypeTest,
+                        ty.span(),
+                        format!(
+                            "`{scrut}` is its own runtime type, not its payload's; \
+                             `x is {target}` is always false"
+                        ),
+                    )
+                    .help(idiom);
+                }
                 // A bare-scalar test against an *erased* fixed width (`iN`/`f64`) is statically
                 // always false: a scalar carries no width tag, so `x is i32` can never hold (E0063,
                 // warning). `f32` is exempt (reified — a real narrowing head, Part A) and a
@@ -1828,5 +1852,50 @@ fn erased_scalar_width_base(name: &str) -> Option<&'static str> {
         noeta_ast::BuiltinTy::IntN { .. } => Some("int"),
         noeta_ast::BuiltinTy::F64 => Some("float"),
         _ => None,
+    }
+}
+
+impl Checker {
+    /// Whether `<scrut> is <ty>` is **statically impossible**, and if so the idiom that does what
+    /// the author meant (E0065's help line).
+    ///
+    /// `Option` and `Result` are *reified* containers: each carries its own runtime head
+    /// constructor (`some`/`none`, `Ok`/`Err`), never the payload's. So `x is P` on an
+    /// `Option<P>` is always false — yet it reads exactly like "is it a `P`", which is why it gets
+    /// written. The damage was never the constant test; it was that the checker went on to
+    /// *narrow* `x` to `P` in the branch, so the dead code type-checked and only the runtime
+    /// disagreed.
+    ///
+    /// `None` (i.e. "leave it alone") for every case where the tag genuinely could match:
+    /// - an open target (`dyn`, `dyn Trait`, an inference hole) — the runtime decides;
+    /// - a kind-type target — **both containers are enums at runtime**, so `x is Enum` is `true`
+    ///   and flagging it would be simply wrong;
+    /// - a bare type parameter — erased, and it may instantiate to the container itself;
+    /// - the same container (`x is Option<…>` on an `Option`), which is the true test.
+    pub(crate) fn impossible_type_test(&self, scrut: &Type, ty: &TypeRef) -> Option<String> {
+        let target = from_ref_q(ty, &self.imports.extern_types);
+        if matches!(
+            target,
+            Type::Dyn | Type::Unknown | Type::DynTrait(_) | Type::Kind(_)
+        ) {
+            return None;
+        }
+        if let Type::Named(p, args) = &target
+            && args.is_empty()
+            && self.coloring.type_params.contains_key(p)
+        {
+            return None;
+        }
+        match scrut {
+            Type::Option(inner) if !matches!(target, Type::Option(_)) => Some(format!(
+                "test presence with `x != none`, or reach the `{inner}` with \
+                 `match x {{ some(v) => …, none => … }}`"
+            )),
+            Type::Result(..) if !matches!(target, Type::Result(..)) => Some(
+                "match on it instead: `match x { Ok(v) => …, Err(e) => … }`, or unwrap it with `?`"
+                    .to_string(),
+            ),
+            _ => None,
+        }
     }
 }

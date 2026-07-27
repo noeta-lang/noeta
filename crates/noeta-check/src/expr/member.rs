@@ -2,6 +2,7 @@
 //! bundle-method dispatch (kernel-methods K2), namespace-group resolution, and the full
 //! `synth_member` receiver dispatch. All `Checker` methods moved verbatim out of the crate root.
 
+use crate::expr::calls::closed_to_new_methods;
 use crate::*;
 
 impl Checker {
@@ -659,6 +660,31 @@ impl Checker {
         // A field/member access on a `dyn` (or hole) receiver stays deferred.
         if recv.defers_to_runtime() {
             return recv;
+        }
+        // Nothing resolved. On a CLOSED builtin receiver that is proof the member does not exist —
+        // the same reasoning (and the same predicate) the *call* path already applies to
+        // `s.nope()`. Without it the member path stayed silently `Unknown`, so `p.x` on an
+        // `Option<P>`, `"s".nope`, and `[1].nope` all passed `noeta check` and only failed at run
+        // time with E0005 — precisely the check-vs-run divergence the call-path guard was added to
+        // close, reached through the one spelling it did not cover. `Named`/`dyn`/holes stay
+        // lenient for the reasons documented on `closed_to_new_methods`.
+        if closed_to_new_methods(&recv) {
+            let diag = self.error(
+                DiagnosticCode::TypeMismatch,
+                name_span,
+                format!("type `{recv}` has no field or method `{name}`"),
+            );
+            // The overwhelmingly common way to reach here is reading a field *through* an optional
+            // (`entry.size` where `entry: ?Entry`), so name the unwrap rather than leave the user
+            // to rediscover it.
+            if let Type::Option(inner) = &recv
+                && matches!(inner.as_ref(), Type::Named(..))
+            {
+                diag.help(format!(
+                    "`{recv}` may be `none`; reach the `{inner}` first — \
+                     `match x {{ some(v) => v.{name}, none => … }}`, or `(x ?? fallback).{name}`"
+                ));
+            }
         }
         Type::Unknown
     }
