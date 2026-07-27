@@ -15,7 +15,7 @@ Prefer to poke at it first? The [playground](https://play.noeta.dev) runs Noeta 
 ## A thirty-second taste
 
 ```noeta
-namespace Demo;
+namespace Demo
 
 struct Item { price: float  qty: int }
 
@@ -25,29 +25,29 @@ enum OrderError {
 }
 
 fn total(items: List<Item>): float {
-    return items.map(fn(it) => it.price * it.qty).sum();
+    return items.map(fn(it) => it.price * it.qty).sum()
 }
 
 fn validate(items: List<Item>): Result<void, OrderError> {
     if items.len() == 0 {
-        return Err(OrderError.Empty);
+        return Err(OrderError.Empty)
     }
     for (i, item) in items.enumerate() {
         if item.price < 0 {
-            return Err(OrderError.NegativePrice(index: i));
+            return Err(OrderError.NegativePrice(index: i))
         }
     }
-    return Ok();
+    return Ok()
 }
 
-items = [Item { price: 9.99, qty: 2 }, Item { price: 4.50, qty: 1 }];
+items = [Item { price: 9.99, qty: 2 }, Item { price: 4.50, qty: 1 }]
 echo match validate(items) {
     Ok()   => "total: ${total(items)}",
     Err(e) => match e {
         OrderError.Empty            => "empty order",
         OrderError.NegativePrice(i) => "item ${i} is negative",
     },
-};
+}
 ```
 
 ```console

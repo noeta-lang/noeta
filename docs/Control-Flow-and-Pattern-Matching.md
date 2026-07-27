@@ -155,9 +155,9 @@ An arm may carry a **guard**: `pattern if cond => body`. The guard is a plain `b
 ```noeta
 fn check(n: int): Result<int, string> {
     if n < 0 {
-        return Err("invalid: ${n}");
+        return Err("invalid: ${n}")
     }
-    return Ok(n);
+    return Ok(n)
 }
 
 fn label(n: int): string {
@@ -221,7 +221,7 @@ enum Cmd { Log; Skip; Retry; }
 fn audit(c: Cmd): void { echo "audited"; }
 fn handle(c: Cmd): void { echo "handled"; }
 
-cmd = Cmd.Log;
+cmd = Cmd.Log
 match cmd {
     Cmd.Log => { echo "logging"; audit(cmd); },   // block arm: runs for effect, yields unit
     Cmd.Skip => { },                              // empty block arm
@@ -233,7 +233,7 @@ Because a block yields no value, a block arm is only valid where the `match`'s v
 
 ```noeta error
 // E0055: `2 => { … }` produces no value, but this `match` is bound to `r`.
-x = 2;
+x = 2
 r = match x {
     1 => "one",
     2 => { t = "tw"; t ~ "o" },   // ✗ write `2 => { t = "tw"; t ~ "o" }` as `2 => "two"`

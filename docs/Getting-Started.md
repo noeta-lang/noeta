@@ -38,7 +38,7 @@ Everywhere below, `noeta` means "the installed binary."
 Create `hello.noe`:
 
 ```noeta
-echo "hello";
+echo "hello"
 ```
 
 Run it:

@@ -388,7 +388,7 @@ Split code across files with `namespace` and `use`. Declarations are private unl
 
 ```noeta
 // models.noe
-namespace App.Models;
+namespace App.Models
 
 pub class User {
     pub name: string
@@ -398,8 +398,8 @@ pub class User {
 
 ```noeta check
 // main.noe
-namespace App.Main;
-use App.Models.User;
+namespace App.Main
+use App.Models.User
 
 echo User.new("Ada").name        // Ada
 ```
@@ -445,7 +445,7 @@ concurrent {
 Putting it together — a small order pipeline (this is `examples/orders.noe`, trimmed):
 
 ```noeta
-namespace Demo;
+namespace Demo
 
 struct Item { price: float  qty: int }
 
