@@ -323,6 +323,7 @@ class Order {
     fn new(items: List<Item>): Order { return Order { items: items } }
 }
 
+// sample:start
 fn validate(items: List<Item>): Result<void, OrderError> {
     if items.len() == 0 { return Err(OrderError.Empty) }
     return Ok()

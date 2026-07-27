@@ -22,6 +22,7 @@ fn sum_to(n: int): int {
     return total
 }
 
+// sample:start
 @bench(iterations: 1000) {
     fn sum_100(): void { assert(sum_to(100) == 5050) }
 }
