@@ -1733,6 +1733,14 @@ impl Checker {
                 continue; // unconstrained by the arguments — nothing concrete to check against
             };
             for bound in bounds {
+                // A type parameter that is itself in scope satisfies whatever its OWN declaration
+                // bounds it by — there is no `impl` to look up, the bound is the declaration. This
+                // is what licenses a generic type's methods to call each other: inside
+                // `struct Agent<P: Provider>`, `self.other()` substitutes the callee's `P` with the
+                // receiver's `P`, and the callee also demands `P: Provider`.
+                if self.in_scope_param_satisfies(concrete, bound, subst, tps) {
+                    continue;
+                }
                 // A user-defined trait bound (L1, UT3): satisfied iff `concrete` has a recorded
                 // `impl` of it — and, for an INSTANTIATED bound (`T: Keyed<int>`), an impl at that
                 // instantiation. A bound argument may mention a sibling parameter (`<K, T:
@@ -1785,6 +1793,51 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// Whether `concrete` is a **type parameter currently in scope** whose own declaration already
+    /// carries `bound`.
+    ///
+    /// A parameter is not a nominal type, so it can never have a recorded `impl` — its bounds *are*
+    /// its declaration. Without this, a generic type's methods could not call one another: in
+    /// `struct Agent<P: Provider>`, `self.drive(…)` substitutes the callee's `P` with the caller's
+    /// `P` and then failed the callee's `P: Provider` bound, reporting "type `P` does not satisfy
+    /// the bound `Provider`" against the very declaration that states it does. The same applies to
+    /// built-in bounds (`<T: Comparable>` calling another `<T: Comparable>` helper).
+    ///
+    /// An instantiated bound must match argument-wise (`T: Keyed<int>` does not license a call
+    /// demanding `Keyed<string>`), with the call's own substitution applied to the callee's bound
+    /// arguments first, exactly as the nominal path does.
+    fn in_scope_param_satisfies(
+        &self,
+        concrete: &Type,
+        bound: &BoundReq,
+        subst: &HashMap<String, Type>,
+        tps: &HashSet<String>,
+    ) -> bool {
+        let Type::Named(n, args) = concrete else {
+            return false;
+        };
+        if !args.is_empty() {
+            return false;
+        }
+        let Some(declared) = self.coloring.type_params.get(n) else {
+            return false;
+        };
+        let want: Vec<Type> = bound
+            .args
+            .iter()
+            .map(|a| subst_or_dyn(a, subst, tps))
+            .collect();
+        declared.iter().any(|d| {
+            d.name == bound.name
+                && (want.is_empty()
+                    || (d.args.len() == want.len()
+                        && d.args
+                            .iter()
+                            .zip(&want)
+                            .all(|(a, b)| bound_arg_matches(a, b))))
+        })
     }
 
     /// Whether `ty` satisfies the built-in trait `trait_name`. A `dyn`/inference-hole satisfies
