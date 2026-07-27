@@ -158,6 +158,32 @@ pub trait NativeCtx {
     /// effect — so the two backends are held byte-identical on it.
     fn write_stderr(&mut self, text: &str);
 
+    /// Stream whatever the program has written to stdout/stderr so far straight to the real
+    /// terminal, if the host supports it ([`crate::Console::stream_output`]) — otherwise a no-op
+    /// that leaves the batch buffers untouched.
+    ///
+    /// For a program that *ends*, batch-capturing output and rendering it at teardown is right.
+    /// A long-running one — `noeta serve`, which runs until Ctrl-C — never reaches that teardown,
+    /// so a native driving such a loop should flush at a natural boundary (each pass of the accept
+    /// loop) to make `echo` usable for logging. Under the sandbox host nothing streams and the
+    /// buffers stay authoritative, so the backend differential is unaffected.
+    fn flush_output(&mut self) {}
+
+    /// Drain the runtime diagnostics the backend has recorded so far, rendered one per entry as
+    /// `"[CODE] message"`.
+    ///
+    /// The recovery seam for a native that **drops** a [`CtxError::Abort`] to keep running — the
+    /// way `http.serve` turns a handler abort into a 500 and a websocket session's abort into a
+    /// closed stream. The diagnostic behind that abort is recorded backend-side, but a long-lived
+    /// loop never reaches the program end that would print it, so without draining here the error
+    /// is invisible to the developer *and* accumulates for the life of the process. Callers that
+    /// swallow an abort should drain and report.
+    ///
+    /// Defaults to empty for the harness/test contexts that record no diagnostics.
+    fn drain_runtime_diagnostics(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Render a slot's value to its display string through the backend's **own** `Value::display`
     /// path — the exact one `echo` / `Op::Stringify` use, including a re-entry into a user
     /// `to_string` for a `Display` object or enum. The single canonical rendering: `std.io`'s

@@ -183,6 +183,39 @@ impl NativeCtx for VmCtx<'_, '_> {
         self.vm.out.stderr.push_str(text);
     }
 
+    fn flush_output(&mut self) {
+        // Take-then-restore: a host that does not stream (the sandbox) writes nothing and reports
+        // false, and the text goes back into the batch buffer untouched.
+        for stream in [noeta_stdlib::Stream::Stdout, noeta_stdlib::Stream::Stderr] {
+            let buffer = match stream {
+                noeta_stdlib::Stream::Stdout => &mut self.vm.out.stdout,
+                _ => &mut self.vm.out.stderr,
+            };
+            if buffer.is_empty() {
+                continue;
+            }
+            let text = std::mem::take(buffer);
+            if !self.vm.persist.host.stream_output(stream, &text) {
+                match stream {
+                    noeta_stdlib::Stream::Stdout => self.vm.out.stdout = text,
+                    _ => self.vm.out.stderr = text,
+                }
+            }
+        }
+    }
+
+    fn drain_runtime_diagnostics(&mut self) -> Vec<String> {
+        // Clearing the abort trace as well: the next abort in this long-lived loop is a *new*
+        // failure and must record its own traceback rather than inherit this one's.
+        self.vm.out.abort_trace.clear();
+        self.vm
+            .out
+            .diagnostics
+            .drain(..)
+            .map(|d| format!("[{}] {}", d.code.code(), d.message))
+            .collect()
+    }
+
     fn render(&mut self, slot: Slot) -> CtxResult<String> {
         let v = self.get(slot)?;
         // A user object/enum that defines `to_string` renders through it — re-entering the VM to
