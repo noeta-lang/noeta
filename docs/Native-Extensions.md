@@ -1,13 +1,13 @@
 # Native Extensions
 
-Native modules (like `math`, `json`, `fs`) are not hardcoded into the runtime — they are registered through one uniform seam, and the core `std` modules are the *dogfooded* extension registered *through* that seam rather than special-cased.
+Native modules (like `math`, `json`, `fs`) are not hardcoded into the runtime — they are registered through one uniform seam, and the core `std` modules are themselves an extension registered *through* that seam rather than special-cased.
 
 > [!NOTE]
-> Since package-manager Phase 3, this seam is **open to third-party packages**: a dependency can ship a Rust crate that registers native modules, types, and CLI commands, statically composed into the consumer's toolchain by cargo. See [Writing a native package](#writing-a-native-package) below.
+> This seam is **open to third-party packages**: a dependency can ship a Rust crate that registers native modules, types, and CLI commands, statically composed into the consumer's toolchain by cargo. This page covers the concepts — the registry, the dispatch seams, and the `Host` capability; the author-facing walkthrough (entry crate, manifest, composition, building, publishing) is **[Writing a Native Package](Writing-Native-Packages)**, and the API contract is [Extension Compatibility](Extension-Compatibility).
 
 ## Why a registry
 
-Hardcoding native modules created four parallel seams that could drift: a `NativeModule` enum, per-backend `call_vec`/`call_json`/… dispatch, and checker tables of known modules. The registry dismantles all four into one mechanism — and it makes differential agreement *structural*: one shared dispatch function per module, not two mirrored copies. The design test the work held itself to: *could `vec`/`quat` be deleted from core and re-added as a third-party crate with no API change?*
+Hardcoding native modules created four parallel seams that could drift: a `NativeModule` enum, per-backend `call_vec`/`call_json`/… dispatch, and checker tables of known modules. The registry dismantles all four into one mechanism — and it makes differential agreement *structural*: one shared dispatch function per module, not two mirrored copies. The design test: *could `vec`/`quat` be deleted from core and re-added as a third-party crate with no API change?* (They could — a real out-of-tree proving crate in the composition test suite answers it.)
 
 ## Two crates: `noeta-ext-abi` (the ABI) and `noeta-stdlib` (the batteries)
 
@@ -19,10 +19,9 @@ primitives. Its only dependencies are `compact_str`/`equivalent`/`hashbrown` —
 batteries (no crypto, uuid, JSON, or HTTP client). **`noeta-stdlib`** depends on it, re-exports it
 (`pub use noeta_ext_abi::*` — the `core`/`std` relationship), and layers the concrete `std` modules
 and their heavy deps on top. So a third-party extension (and internal mid-end crates like
-`noeta-ir`) links the lean ABI, not the whole standard library. Since package-manager Phase 3 this
-is the *consumed* boundary too: an out-of-tree entry crate depends on `noeta-ext-abi` alone, and the
-crates are versioned + git-tagged for the composed shim to pin (see
-[Writing a native package](#writing-a-native-package)).
+`noeta-ir`) links the lean ABI, not the whole standard library. This is the *consumed* boundary too:
+an out-of-tree entry crate depends on `noeta-ext-abi` alone, and the crates are versioned +
+git-tagged for the composed shim to pin (see [Writing a Native Package](Writing-Native-Packages)).
 
 ## The seam
 
@@ -32,7 +31,7 @@ router are in `noeta-stdlib`) is built on a **neutral value-marshalling** layer:
 - `NativeValue` — the argument view: `Scalar`, `Str`, `Bytes`, `Object { fields }`, `List`, and so on.
 - `NativeOut` — the result view, including the bulk `Scalars(ScalarVec)` form (one typed vector for a whole reduction result — the `Bytes` idea applied to primitive lists).
 
-Two per-backend functions, written once each — `marshal_native_arg(&Value) -> NativeValue` and `materialize_native(NativeOut, …) -> Value` — replace all the duplicated dispatch. A module function is then just a `DispatchFn = fn(&mut dyn Host, &[NativeValue]) -> Result<NativeOut, StdError>`, **shared across both backends** so the differential holds by construction. The `Host` capability (see below) is threaded through so `fs`/`time`/`random`/`env`/`args` migrate too (pure modules ignore it).
+Two per-backend functions, written once each — `marshal_native_arg(&Value) -> NativeValue` and `materialize_native(NativeOut, …) -> Value` — replace all the duplicated dispatch. A module function is then just a `DispatchFn = fn(&mut dyn Host, &[NativeValue]) -> Result<NativeOut, StdError>`, **shared across both backends** so the differential holds by construction. The `Host` capability (see below) is threaded through so `fs`/`time`/`random`/`env`/`args` work the same way (pure modules ignore it).
 
 Registration is declarative:
 
@@ -52,12 +51,12 @@ trait Extension {
 several in-tree `Extension` units sharing the `"std"` root — `CoreExtension` (always-on) plus one per
 capability with a separable identity (`HttpExtension`, `CryptoExtension`, `IdExtension`, the
 `vec`/`quat` `VecExtension`). Every lookup (`find_module`/`find_type`/`commands`)
-iterates the whole registry filtered by root, so the split is invisible to resolution — it's the
-**dogfood of the multi-extension registry a package plugs into**: a third-party package registers as
-another unit under its own root. The `para` namespace is the first first-party capability to take that
-exit for real — the p2p/local-first stack (`ParaP2pExtension`, root `para`) left `std` to ship as
-the non-default `para/p2p` package (github.com/noeta-lang/para-p2p), alongside the pure-Noeta `para.html`
-liveview package. Each `ExtModule` declares its `ring: Option<&str>` — the single
+iterates the whole registry filtered by root, so the split is invisible to resolution — core `std`
+exercises exactly the multi-extension registry a package plugs into: a third-party package registers
+as another unit under its own root. The `para` namespace is the first first-party capability to take
+that exit for real — the p2p/local-first stack (`ParaP2pExtension`, root `para`) lives outside `std`
+as the non-default `para/p2p` package (github.com/noeta-lang/para-p2p), alongside the pure-Noeta
+`para.html` liveview package. Each `ExtModule` declares its `ring: Option<&str>` — the single
 source of truth for which Cargo feature gates its heavy native deps in a tailored `noeta build
 --native` (`std.http.client` → `ring-http-client`, the ~3 MB reqwest/TLS tree; `None` = always-on
 core). The footprint scan reads it off the registry, so there's no hand-maintained module→ring table.
@@ -76,19 +75,23 @@ Where an `ExtType` is an opaque handle, an **`ExtClass`** is a real language **`
 
 The representation is a real language `Object` with a **class-kind shape** — so identity, reference (aliasing) semantics, RC, and cycle participation come from the object model unchanged; the extension adds no backend collector code. An `ExtClass` declares its `name`, `namespace`, and `fields` (`ExtField { name, ty, is_public, is_mut }`); the checker seeds them exactly like a `.noe` class — `records` (field types), `private_fields` (a non-`pub` field read/set from outside is E0035), `mut_fields` (a non-`mut` field assignment is E0033), and `type_kinds = Class` (reference `==`). A value is produced natively by returning `NativeOut::Instance { class, fields }` (the class-kind twin of `NativeOut::Struct`, which is a *value* struct with no identity), and crosses INTO a dispatch as `NativeValue::Instance`. A pure-data class is also **source-constructible** (`Point { x: 1, y: 2 }`) once imported, exactly like a `.noe` class.
 
-**Native state + destructor.** A class that wraps a Rust resource holds it in a **field typed as an extern handle** (an `ExtType` whose `ExternValue` has a Rust `Drop`). When the object is collected — a last-reference release **or** a destructor-free cycle reclamation — the field's box is dropped and its `Drop` runs the cleanup; this is deterministic and needs no new machinery, because the heap free always drops the payload. (There is no host-coupled finalizer — see *Won't-build* below; a native class's destructor is self-contained RAII, the same discipline `FileHandle` uses.) `std`'s battery declares no `ExtClass`; the `ext_class_seam` fixture is the differential + leak-oracle proof that identity, fields, cycle participation, and destructor firing all hold on both backends.
+**Native state + destructor.** A class that wraps a Rust resource holds it in a **field typed as an extern handle** (an `ExtType` whose `ExternValue` has a Rust `Drop`). When the object is collected — a last-reference release **or** a destructor-free cycle reclamation — the field's box is dropped and its `Drop` runs the cleanup; this is deterministic and needs no new machinery, because the heap free always drops the payload. (There is deliberately no *host-coupled* finalizer: values die in release paths that carry no host, including teardown cascades, so a finalizer with `Host` access at free time has no sound access point — a native class's destructor is self-contained RAII, the same discipline `FileHandle` uses, and buffered types keep an explicit `close()`.) `std`'s battery declares no `ExtClass`; the `ext_class_seam` fixture is the differential + leak-oracle proof that identity, fields, cycle participation, and destructor firing all hold on both backends.
 
 **`ExtStruct` is the value-type twin** (`Extension::structs()`, fielded-unification): the same `name`/`namespace`/`fields` declaration, but structural equality, copy-on-assign, and no identity or destructor — a native-declared value struct, not a class. Both hooks produce the shared `ExtFielded` type, distinguished only by its `FieldedKind`.
 
+## Native enums: `ExtEnum`
+
+An extension declares **enums** — plain, string-/int-backed, and payload-carrying — seeded eagerly into the checker's `symbols.enums` by qualified identity, so a `match` over one is exhaustive (E0011). Values cross both ways (`NativeOut::Variant` / `NativeValue::Variant`, materialized identically on both backends) and are **source-constructible** (`Hue.Red`, `Tag.Labeled(s)`) once imported. Backed `.value()` is a real typed accessor.
+
 ## Async functions: the `ExternIo` seam
 
-An extension implements an **async** function without ever seeing the executor: its dispatch returns *work* (`NativeOut::Spawn(descriptor)`) instead of a value, and the backend tickets the descriptor on its executor and hands back a `Future`. The descriptor has two bodies — `run_sync(host)`, which the deterministic sandbox executor always runs **at spawn** (so an extension's async function is differential-deterministic no matter what its real body does), and an optional real body (a blocking closure for the runtime's blocking pool, or a native future) for true concurrency under `noeta run`. No real body means the real executor degrades to the sync body at spawn — correct, just serial. The `fs.*_async` family is the dogfood: its descriptors live in the same registry crate, and adding `exists_async`/`remove_async`/`list_async` touched no backend code.
+An extension implements an **async** function without ever seeing the executor: its dispatch returns *work* (`NativeOut::Spawn(descriptor)`) instead of a value, and the backend tickets the descriptor on its executor and hands back a `Future`. The descriptor has two bodies — `run_sync(host)`, which the deterministic sandbox executor always runs **at spawn** (so an extension's async function is differential-deterministic no matter what its real body does), and an optional real body (a blocking closure for the runtime's blocking pool, or a native future) for true concurrency under `noeta run`. No real body means the real executor degrades to the sync body at spawn — correct, just serial. The `fs.*_async` family is the proving client: its descriptors live in the same registry crate, and adding `exists_async`/`remove_async`/`list_async` touched no backend code.
 
 ## Higher-order functions: the `NativeCtx` seam
 
 A plain dispatch is value-in/value-out — it cannot take a **closure argument**, call it back, poll futures, or drive the scheduler. Functions that need those register in a module's **ctx table** instead: the dispatch receives its arguments as opaque **slots** (indices into a per-call table of backend values it never sees) and re-enters the backend through one capability trait, `NativeCtx` — `call` a callable slot, `spawn_io`/`timer`/`poll`/`drive` futures, `advance_tasks`/`advance_clock` the scheduler, plus list access and argument probes. Each backend implements the trait once; the slot table owns the refcount discipline centrally (retain on insert, release on free/drop, arguments borrowed from the caller's registers), so a dispatch structurally cannot leak. The dispatch body stays a single shared `fn`, so the differential holds by construction — extended to orchestration code that was previously mirrored per backend as hardcoded `Builtin`s.
 
-The whole former `Builtin` family is the dogfood: `task.sleep`/`all`/`race`/`map_bounded` (drive loops over `call`/`poll`), `server.serve` (the accept→dispatch→reply loop, including the recover-from-abort pattern: a handler abort becomes a 500 and the loop continues), and all of `std.reactive`.
+That whole former `Builtin` family now lives here as ordinary registered dispatches: `task.sleep`/`all`/`race`/`map_bounded` (drive loops over `call`/`poll`), `server.serve` (the accept→dispatch→reply loop, including the recover-from-abort pattern: a handler abort becomes a 500 and the loop continues), and all of `std.reactive`.
 
 ## Persistent state: the retained arena and `ExtState`
 
@@ -96,7 +99,7 @@ An extension that owns **language values across calls** (reactive's graph; a fut
 
 Generic extern types ride on the same signature vocabulary: a constructor returns `SigType::Generic("Cell", &[Var(0)])` and method signatures reference the receiver's type arguments as `Var(i)`, so `Cell<int>.set("x")` is a static E0007 with no checker special-casing. Hot accessors can be **declared**: `ExtType::arena_getter` marks a method as a gated arena read ("this method's whole behavior is: return the receiver's retained entry"), and the backend inlines it at the call site behind a route cache while the extension's **read gate** is open — which is how a migrated `signal.get()` measures *faster* than the hardcoded builtin it replaced. The extension closes the gate for exactly the windows where the full dispatch does more (dependency tracking while a body runs; a stale memo), and the tree-walker always takes the full dispatch, so the differential proves fast ≡ full on every fixture.
 
-`std.cell` (`Cell<T>` with `get`/`set`/`update`) is the minimal Class-3 client; `std.reactive` is the full one — graph, flush loop, coalescing, and the E0045 runaway guard are all ordinary Rust in its dispatches. Neither backend knows reactivity exists.
+`std.cell` (`Cell<T>` with `get`/`set`/`update`) is the minimal client of this machinery; `std.reactive` is the full one — graph, flush loop, coalescing, and the E0045 runaway guard are all ordinary Rust in its dispatches. Neither backend knows reactivity exists.
 
 ## Cross-extension capabilities: the capability-broker seam
 
@@ -112,25 +115,25 @@ The payoff is that `NativeCtx` stops accreting one method per cross-cutting conc
 
 ## Raw buffers: `with_packed` and the bulk-kernel ABI
 
-A `List<packed>` is stored as one contiguous byte buffer, and a bulk kernel (a SIMD-amenable column reduction, an image transform) wants exactly those bytes — with **zero per-element traffic**. Three ctx capabilities provide it (package-manager N3.4):
+A `List<packed>` is stored as one contiguous byte buffer, and a bulk kernel (a SIMD-amenable column reduction, an image transform) wants exactly those bytes — with **zero per-element traffic**. Three ctx capabilities provide it:
 
 - `with_packed(slot, |view, bytes| …)` — borrow the element layout + raw buffer (the `with_extern` shape). The layout arrives as a neutral read-only `PackedView { fields, byte_size, column, count }`, because the backends hold different concrete schema representations — the same reason `NativeValue`/`SigType` exist.
 - `with_packed_mut(slot, |view, bytes| …)` — transform the buffer **preserving value semantics**: the callback gets a uniquely-owned copy-on-write buffer (in place only under proven sole ownership), and the transformed list arrives as a fresh slot; the input value is never observably mutated.
 - `make_packed_like(like, bytes)` — allocate a result list sharing an existing packed slot's element schema (schemas are backend-interned; the seam names them, never builds them).
 
-The element-wise *fallback* (a boxed, non-packed operand) is expressible in the same shared dispatch through the fused structural reads `object_scalars_at`/`make_object_like_element` (one reused scalar buffer, no per-element slots), and a reduction returns its whole result as one typed vector — `NativeOut::Scalars(ScalarVec::F32(…))` — so the backend converts it in a single pass. The dogfood is the `vec.*_all` family: `add_all`/`sub_all`/`scale_all`/`dot_all`/`length_all` were the **last per-backend native intercepts** in either backend; they are now one registered ctx dispatch, perf-gated at or below the old special-cased numbers (`tests/bench/pm-native/`). A third-party crate registering a column kernel for the *consumer's own* `@packed` type is proven end-to-end in the composition test suite.
+The element-wise *fallback* (a boxed, non-packed operand) is expressible in the same shared dispatch through the fused structural reads `object_scalars_at`/`make_object_like_element` (one reused scalar buffer, no per-element slots), and a reduction returns its whole result as one typed vector — `NativeOut::Scalars(ScalarVec::F32(…))` — so the backend converts it in a single pass. The `vec.*_all` family is the proving client: `add_all`/`sub_all`/`scale_all`/`dot_all`/`length_all` were the **last per-backend native intercepts** in either backend; they are now one registered ctx dispatch, perf-gated at or below the old special-cased numbers (`tests/bench/pm-native/`). A third-party crate registering a column kernel for the *consumer's own* `@packed` type is proven end-to-end in the composition test suite.
 
 ## Method bundles: `impl vec.Kernels for Px {}`
 
 Raw-buffer kernels as free functions are structurally connected to the data (`vec.dot_all(xs, ys)`
 accepts any uniform numeric packed list) — invisible to the checker and the editor. A **method
-bundle** is the nominal binding on top (kernel-methods arc), and since the ExtBundle→ExtTrait
-convergence it is no longer its own mechanism: a bundle is a fully-defaulted native **`ExtTrait`**
-(`Extension::traits()`) carrying a structural **`self_constraint`** (`PackedConstraint` — the field
-kinds and arity the implementing type's shape must satisfy), native-derived **`assoc_types`** (the
-element-relative return types, `Self::Wide`/`Self::Float`), and a shared **`dispatch`** answering
-every defaulted method. Each `ExtTraitMethod` marks its receiver `Element` — on a value of the
-bound type — or `Bulk` — on a `List<T>` of it — and a user type opts in explicitly:
+bundle** is the nominal binding on top, and it is not its own mechanism: a bundle is a
+fully-defaulted native **`ExtTrait`** (`Extension::traits()`) carrying a structural
+**`self_constraint`** (`PackedConstraint` — the field kinds and arity the implementing type's shape
+must satisfy), native-derived **`assoc_types`** (the element-relative return types,
+`Self::Wide`/`Self::Float`), and a shared **`dispatch`** answering every defaulted method. Each
+`ExtTraitMethod` marks its receiver `Element` — on a value of the bound type — or `Bulk` — on a
+`List<T>` of it — and a user type opts in explicitly:
 
 ```noe
 use std.{vec}
@@ -154,102 +157,21 @@ type's own methods/fields, a `Bulk` method against built-in list methods). Dispa
 runtime discovery, an empty list receiver works, and the method form measures at parity with the
 module-function form (`tests/bench/kernel-methods/`). The flip side: bundle methods are not
 reachable through a `dyn` receiver (`dyn` stays the escape hatch; a runtime binding table would be
-additive). `std.vec`'s `Kernels`/`SatKernels` are the dogfood; a third-party bundle over the
+additive). `std.vec`'s `Kernels`/`SatKernels` are the first clients; a third-party bundle over the
 consumer's own packed type is proven through toolchain composition in the CLI e2e.
 
-`ExtTrait` is not only the kernel-bundle mechanism, though — it is the general native-trait seam
-(native-extensibility S3): a program `impl`s a plain native trait for its own types and binds on it
-(`fn f<T: NativeTrait>(x: T)`) exactly as for a `.noe` trait, and a native value laundered through
-`dyn NativeTrait` dispatches to its native method with no new runtime plumbing. `self_constraint` is
-what a kernel bundle adds on top — most native traits declare `None` and are shape-agnostic.
+`ExtTrait` is not only the kernel-bundle mechanism, though — it is the general native-trait seam:
+a program `impl`s a plain native trait for its own types and binds on it
+(`fn f<T: NativeTrait>(x: T)`) exactly as for a `.noe` trait (an incomplete impl is E0015), and a
+native value laundered through `dyn NativeTrait` dispatches to its native method with no new runtime
+plumbing. `self_constraint` is what a kernel bundle adds on top — most native traits declare `None`
+and are shape-agnostic.
 
-## Writing a native package
+## Composition: how a package's native code reaches the toolchain
 
-A dependency package ships native code by naming an **entry crate** in its manifest:
+A dependency package names an **entry crate** in its manifest (`native = "…"` in `noeta.toml`); the entry crate depends on `noeta-ext-abi` and exports its units as `pub static NOETA_EXTENSIONS`. When the CLI sees a dependency graph with native crates, it generates a small shim crate aggregating every entry crate's units, builds it with cargo (a `[patch]` section collapses every copy of the toolchain crates onto the consumer's own — Rust type identity demands exactly one), caches the composed binary content-addressed, and exec-delegates to it. The composed binary *is* the app's toolchain: the checker sees the extension's signatures, the LSP its completions, the CLI its commands; a pure-Noeta app never touches any of this. Shipped artifacts (`noeta build --exe`/`--native`) compose a lean runtime-only base instead.
 
-```toml
-# the package's noeta.toml
-[package]
-name = "acme/imgfx"
-version = "1.0.0"
-native = "native"        # relative dir containing the entry crate's Cargo.toml
-```
-
-The entry crate is an ordinary Rust library that depends on `noeta-ext-abi` and exports its extension units as a slice — one crate, any number of units (core's own `std` is five units in one crate):
-
-```rust
-use noeta_ext_abi::registry::{ExtFn, ExtModule, Extension, /* … */};
-
-struct ImgfxExtension;
-impl Extension for ImgfxExtension {
-    fn name(&self) -> &'static str { "imgfx" }          // root defaults to name()
-    fn modules(&self) -> &'static [ExtModule] { /* fx, … */ }
-    fn types(&self) -> &'static [ExtType] { /* … */ }
-    fn commands(&self) -> &'static [ExtCommand] { /* noeta fx-info, … */ }
-}
-
-/// The composition convention: the symbol the composed toolchain links.
-pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)] = &[&ImgfxExtension];
-```
-
-Registration literals should spell only what they use and default the rest — `ExtModule { name, functions, dispatch, ..ExtModule::DEFAULTS }` (same for `ExtType`, `ExtFn`, `ExtCommand`) — so a future optional field is additive rather than breaking.
-
-**What composition does.** The consumer's app never configures any of this: when `noeta run`/`check`/`build`/… sees a dependency graph with native crates, it generates a ~20-line shim crate (depend on the `noeta-cli` *library* + each entry crate; `main` passes the aggregated `NOETA_EXTENSIONS` units into `run_cli`), builds it with cargo, caches the binary content-addressed (keyed on the toolchain's build identity + each entry crate's tree), and **exec-delegates**. The composed binary *is* the app's toolchain: the checker sees the extension's signatures (a wrong-typed argument to a native function is a static error), the LSP its completions, the CLI its commands. A pure-Noeta app never touches any of this. The one requirement composition adds: a consumer of a native-dep package needs a **Rust toolchain** on PATH (the diagnostic says so by name when it's missing) — the composed build then runs once per dependency-set change, and every later invocation is a single exec.
-
-The toolchain's own source resolves in order: `NOETA_TOOLCHAIN_SRC` (a checkout override, hermetic setups) → the workspace the running binary was built in (path deps — the development norm) → a git dependency pinned to the running binary's version tag (`noeta-cli = { git = …, tag = "vX.Y.Z" }` — cargo's own git cache does the fetching).
-
-**Versioning policy (pre-1.0).** The consumed crates (`noeta-ext-abi`, `noeta-cli` as a lib, `noeta-stdlib`) are versioned and git-tagged together (`v0.2.0` first — the ancient `v0.1.0` tag predates the extension ABI). A composed shim resolves every toolchain crate — the extension's `noeta-ext-abi` included, whatever tag the extension pins — onto the consumer binary's own toolchain source, so compatibility is ordinary source-level semver: **pre-1.0, a minor bump may break extension code**; patch releases are additive. `#[non_exhaustive]` is deliberately not used — the `..DEFAULTS` convention is the additive-evolution mechanism (see the N3.6 audit in the package-manager arc ledger, `plans/` git history). The full author-facing compatibility statement — what is stable, what is not, and how versions resolve at consume time — is [Extension Compatibility](Extension-Compatibility).
-
-**Out-of-tree packages need exactly one copy of the toolchain.** A standalone package repo can't path-depend the noeta monorepo, so its entry crate names its toolchain crates by **git on the noeta repo**:
-
-```toml
-# a standalone package's native/Cargo.toml
-[dependencies]
-noeta-ext-abi = { git = "https://github.com/…/noeta", tag = "vX" }
-```
-
-The subtlety is a Rust one: a type's identity includes *which compiled copy of the crate* it came from, so if `noeta-ext-abi` is compiled twice — once for the shim, once for the git entry crate — its `Extension` trait exists **twice** as two unrelated types, and the shim's `units.extend_from_slice(ext0::NOETA_EXTENSIONS)` no longer type-checks (a `dyn Extension` from one copy doesn't satisfy the other). The whole graph must resolve `noeta-ext-abi` to **one** source. Two cases:
-
-- **The consumer runs a released (git-tag) toolchain.** The shim pins the toolchain by the binary's own release tag, and the composer injects a **`[patch]`** on the canonical repo URL that rewrites every `crates/*` member to a cached checkout of that same tag — so the package's pin collapses onto the consumer's toolchain *whatever tag the package declares*. A package pinned at an older release still composes under a newer binary; the pin governs only the package's own repository CI.
-- **The consumer runs a workspace (local-path) toolchain** — the development norm, and while iterating on the toolchain itself. Now the shim's `noeta-ext-abi` is a *path* and the package's is *git* — two sources. The composer closes this by injecting a **`[patch]`** into the shim that rewrites every `crates/*` member of the noeta repo to the consumer's exact path, so the package's git-deps (and their transitive `workspace = true` deps) all collapse onto the one local copy. The patch key is the toolchain's own `repository`, overridable with **`NOETA_TOOLCHAIN_REPO`** for a fork, a private mirror, or a local `file://` clone (it must equal the URL the package's `Cargo.toml` declares). Cargo *does* fetch the git source before applying the patch, so the toolchain repo must be reachable — fine for a public repo.
-
-So a first-party-but-out-of-tree package (the `para` family) uses the git-dep form; the same `[patch]` machinery serves any third-party native package that git-depends `noeta-ext-abi`. In-tree packages keep a path dep and never touch any of this.
-
-**Where heavy dependencies belong.** An extension whose implementation needs a heavy native tree should either put the effectful part **behind the `Host` capability seam** (the runtime side, where `noeta build --native` can gate it behind a ring feature — how `std.http`'s reqwest tree stays out of non-http binaries) or accept that its whole crate is the include/exclude unit. Unconditional heavy deps in an always-linked crate cannot be dead-code-eliminated per-program; core's own `crypto`/`id` (~65 KB of sha2/bcrypt/uuid, unconditional in `noeta-stdlib`) are the recorded won't-do-with-trigger example — the extension-unit split makes gating them mechanical if a size budget ever demands it.
-
-### Composition for a shipped artifact — the lean runner
-
-The composed toolchain above is the *development* binary. A **shipped** artifact is composed differently: when `noeta build` sees native runtime dependencies, it composes a **lean base** carrying your extension's runtime units but **none of the toolchain** — no fmt, no LSP, no DAP, no formatter parsers. The base's form matches the emit:
-
-- **`--exe`** composes a **runner binary** — the same aggregation of `NOETA_EXTENSIONS` units, but the base is the lean `noeta-runner` (not `noeta-cli`), and `main` calls `run_stapled_with_extensions` instead of `run_cli`; the program's bundle staples onto it.
-- **`--native`** composes an **AOT-runtime staticlib** — a `staticlib` shim on `noeta-aot-runtime` (its own C `main` off, your program's stdlib rings forwarded) whose `main` installs the units via `run_embedded_with_extensions`; the `cc` link combines it with the program's AOT machine-code object. So a native-dependency app compiles to a self-contained native binary that still resolves your native modules.
-
-Each composition carries your extension's **runtime** capabilities (modules, types, tier handlers) only. The compositions cache separately by kind; a pure-Noeta app skips composition and uses the stock lean runner / `libnoeta_aot.a`.
-
-### Shipping dev capabilities — gate them behind a feature
-
-An `Extension`'s capabilities split by *kind*: `modules`/`types`/`tiers`/`commands` are **runtime** (needed to run the program); `body_formatters` (the tier-body formatter `noeta fmt` uses) is **dev-only** — it and its parser (a CSS/HTML/… reformatter is a *parser*, i.e. attack surface) must never ride into a production binary. A single crate that ships both a runtime tier handler *and* its formatter is a **mixed package**; keep the formatter out of shipped artifacts by gating it — and any heavy formatting dependency — behind a Cargo feature:
-
-```toml
-# the native crate's Cargo.toml
-[dependencies]
-malva = { version = "…", optional = true }   # a CSS reformatter — a parser
-
-[features]
-fmt = ["dep:malva"]                            # OFF by default
-```
-
-```rust
-impl Extension for MyExtension {
-    fn modules(&self) -> &'static [ExtModule] { … }   // runtime — always compiled
-    fn tiers(&self)   -> &'static [ExtTier]   { … }   // runtime — always compiled
-
-    #[cfg(feature = "fmt")]                            // dev — compiled only when asked
-    fn body_formatters(&self) -> &'static [BodyFormatter] { &[("mylang", reflow)] }
-}
-```
-
-Because the feature is **off by default**, every shipped base (the composed runner *and* the composed AOT runtime, both built with default features) never compiles the formatter or links `malva` — the shipped artifact is lean automatically, with no per-dependency configuration by the app author. The composed **dev toolchain**, by contrast, turns this feature **on**: name it `fmt` (the conventional dev-capability feature) and the toolchain composition enables it automatically, so `noeta fmt` reflows your tier's bodies. Only a feature your crate actually declares is enabled, so the convention is opt-in — a pure-runtime crate that declares no `fmt` feature is untouched. The same shape works for any dev-only capability whose implementation drags in a parser or other heavy tree.
+The full mechanics — the manifest key, the shim, the `[patch]`/type-identity subtlety, lean-runner composition, feature-gating dev capabilities, building, testing, and publishing — are on **[Writing a Native Package](Writing-Native-Packages)**.
 
 ## Extension commands
 
@@ -257,9 +179,9 @@ An extension can contribute a CLI subcommand (`ExtCommand`: name, help, typed `A
 
 ## The `Host` capability
 
-All host-coupled effects — filesystem, clock, PRNG, `env`/`args`, the console (`std.io`'s stdin/tty/prompt seam), the operating system (`os`: subprocess exec + spawn/lifecycle control + system introspection), entropy, ids, the network, and the three telemetry signals — go through one `Host` trait (twelve mandatory capability traits, blanket-impl'd), plus one **policy** seam, `P2pProvider`: a host declares through `real_p2p() -> Option<RealP2pConfig>` whether **real** peer networking is permitted here (and with what app-id) — `RealHost` returns `Some`, the deterministic hosts the default `None`. Note it hands out **no transport**: no host implements `P2p` at all (that moved to the `para.p2p` extension — see below). Two implementations exist: `SandboxHost` (deterministic in-memory VFS, logical clock, seeded RNG, a **pure network responder**, and a scripted exec command set — what the differential always runs) and `RealHost` (real disk, real env, real subprocesses, per-isolate tokio, and a real reqwest client — what `noeta run` uses, never differential-tested).
+All host-coupled effects — filesystem, clock, PRNG, `env`/`args`, the console (`std.io`'s stdin/tty/prompt seam), the operating system (`os`: subprocess exec + spawn/lifecycle control + system introspection), entropy, ids, the network, and the three telemetry signals — go through one `Host` trait (twelve mandatory capability traits, blanket-impl'd), plus one **policy** seam, `P2pProvider`: a host declares through `real_p2p() -> Option<RealP2pConfig>` whether **real** peer networking is permitted here (and with what app-id) — `RealHost` returns `Some`, the deterministic hosts the default `None`. Note it hands out **no transport**: no host implements `P2p` at all (that lives in the `para.p2p` extension — see below). Two implementations exist: `SandboxHost` (deterministic in-memory VFS, logical clock, seeded RNG, a **pure network responder**, and a scripted exec command set — what the differential always runs) and `RealHost` (real disk, real env, real subprocesses, per-isolate tokio, and a real reqwest client — what `noeta run` uses, never differential-tested).
 
-**P2p is a capability an *extension* provides, not the host — the whole transport.** When the p2p stack left `std` for the non-default `para` package, `P2p` stopped being a mandatory arm of `Host`; and the transport itself then moved out of the hosts **entirely** into the `para.p2p` extension. The extension owns one `P2pBackend` (`Arc<Mutex<dyn P2p + Send>>`) in per-run ctx state (`ExtState`), created on first use from the host's `real_p2p()` policy: the **real p2panda node** (shipped with the package) when the host permits real networking *and* the extension is built with its `ring-p2p` feature, otherwise the deterministic **loopback broker** (`noeta_ext_abi::P2pBroker`, dep-free). Both implement `P2p`; the surface reaches either through one `with_p2p` seam. So **no host implements `P2p` at all** — `RealHost` included — and `noeta-host-real` links no p2panda: the entire iroh/QUIC tree travels with the out-of-tree package (a non-`para` `--native` binary is ~4 MB, a `para` one ~27 MB). The wrinkle the seam solves: the async `p2p.receive` leaf is `Send` while `ExtState` is not, so the backend lives behind a `Send` `Arc<Mutex<…>>` the receive descriptor captures at spawn — the ABI that lets an extension own an async-reachable host capability. This is the same "simulate deterministically, deploy real" split as the async executor and isolate scheduler. The network capability (http arc) set the async pattern: `RealHost` overrides `net_spawn` to hand the executor a genuine `RealBody::Async` reqwest future while the sandbox resolves at spawn; `os.exec_async` follows it with a `RealBody::Blocking` subprocess body.
+**P2p is a capability an *extension* provides, not the host — the whole transport.** Because the p2p stack lives in the non-default `para` package, `P2p` is not an arm of `Host` at all; the transport belongs entirely to the `para.p2p` extension. The extension owns one `P2pBackend` (`Arc<Mutex<dyn P2p + Send>>`) in per-run ctx state (`ExtState`), created on first use from the host's `real_p2p()` policy: the **real p2panda node** (shipped with the package) when the host permits real networking *and* the extension is built with its `ring-p2p` feature, otherwise the deterministic **loopback broker** (`noeta_ext_abi::P2pBroker`, dep-free). Both implement `P2p`; the surface reaches either through one `with_p2p` seam. So **no host implements `P2p` at all** — `RealHost` included — and `noeta-host-real` links no p2panda: the entire iroh/QUIC tree travels with the out-of-tree package (a non-`para` `--native` binary is ~4 MB, a `para` one ~27 MB). The wrinkle the seam solves: the async `p2p.receive` leaf is `Send` while `ExtState` is not, so the backend lives behind a `Send` `Arc<Mutex<…>>` the receive descriptor captures at spawn — the ABI that lets an extension own an async-reachable host capability. This is the same "simulate deterministically, deploy real" split as the async executor and isolate scheduler. The network capability set the async pattern: `RealHost` overrides `net_spawn` to hand the executor a genuine `RealBody::Async` reqwest future while the sandbox resolves at spawn; `os.exec_async` follows it with a `RealBody::Blocking` subprocess body.
 
 ## Call-site-typed functions: `module.func::<T>(args)`
 
@@ -323,37 +245,6 @@ ExtType {
 
 One subtlety worth knowing if you are debugging this path: a turbofish method call reaches the checker as **either** `Expr::TypedModuleCall` (bare-identifier receiver with one type argument — `r.json::<T>()`) or `Expr::TypedMethodCall` (anything else — `get(u)?.json::<T>()`). The split is purely syntactic and predates this feature; both spellings mean the same thing and both lower to `Op::TypedMethodCall`. What distinguishes a native typed call from an ordinary **erased** generic-method instantiation is not the syntax but whether the checker found the name in the receiver type's `typed_methods` table and recorded a recipe for that span.
 
-## Status
-
-- **Shipped (Phases A + B):** the registry and neutral marshalling seam; `math`/`random`/`time`/`env`/`args`/`fs`/`vec`/`quat`/`json` all migrated onto it; the old `NativeModule` enum deleted; `json.parse::<T>` working end to end.
-- **Shipped (extern-types arc):** `ExtType`/`ExternValue` first-class types (`Uuid`, and `FileHandle` migrated off its hand-threaded hosting); extern map/set keys (`Map<Uuid, T>`); the `ExternIo` async seam (`fs.*_async` migrated off its per-backend intercepts, async metadata twins added with zero backend edits).
-- **Shipped (crypto arc):** `std.crypto` (digests, HMAC, bcrypt, `random_bytes`) and the incremental `Hasher` — the third extern type, landed with zero backend edits, proving the mutable + host-free corner; `SigType::Union` (`string|bytes` signature positions, mapped onto declared unions).
-- **Shipped (http arc):** the seventh `Host` capability (**Network**) — a pure sandbox responder + a real reqwest/rustls client; `std.http` (sync + async verbs, incl. QUERY) returning a `Response` extern type; the async path drives `RealBody::Async` with a real future; and **general optional-param support** (`SigType::Optional`) for registry functions and extern-type methods.
-- **Shipped (P-NATIVE):** the ABI (registry vocabulary, `Host` seam, `ExternValue`, `MapKey`, the async `ExternIo`/`Executor` seam, and the Ring 1 primitives) extracted into the lean `noeta-ext-abi` crate; `noeta-stdlib` re-exports it and keeps only the concrete `std` modules + their heavy deps. `noeta-ir`/`noeta-bytecode` now build without the crypto/uuid tree. `Uuid` became a newtype in the process — the orphan-rule pattern any extension uses to expose a foreign type.
-- **Shipped (http-server arc):** the **inbound** side of the Network capability (`net_listen`/`net_accept` as an async leaf/`net_reply`), a `Request` extern type, and the `server.serve(port, handler)` construct + `noeta serve` command — a concurrent HTTP server (the sandbox drives a deterministic request script, the real host binds a `TcpListener`).
-- **Shipped (higher-order-abi arc):** the `NativeCtx` higher-order dispatch seam (opaque slots + call/poll/drive/advance, generic-over-ctx dispatches so compiled-in extensions monomorphize while the dyn table serves future dynamic loading); `SigType::Fn` + `Var` type variables with checker bind-and-substitute, and `SigType::Generic` extern types with receiver-seeded methods; the Class-3 machinery (per-run retained arena as an enumerable GC root set + `ExtState`); declared arena reads (`arena_getter`) behind extension-synced gates with a per-call-site route cache; extension CLI commands (`ExtCommand`/`CommandCtx`). **The entire hardcoded `Builtin` orchestration family migrated out of core**: `task.sleep`/`all`/`race`/`map_bounded`, `server.serve`, and all of `std.reactive` (graph and all — `Value::Reactive` and both backends' intercepts deleted; the backends no longer depend on `noeta-reactive`), plus the new `std.cell` (`Cell<T>`), plus `noeta serve` out of the CLI enum. Perf-gated throughout: reads at or below the old intercepts (`signal.get` −6%), write-cycle overhead bounded and recorded (higher-order-abi arc ledger, `plans/` git history).
-- **Shipped (package-manager Phase 3):** third-party native packages end to end — the registry mechanism moved into `noeta-ext-abi` (install-at-assembly; `noeta-stdlib` is a lazily-seeding facade), the manifest `native` key, the composed-toolchain build + delegation, the raw-buffer ABI (`with_packed`/`with_packed_mut`/`make_packed_like`, `PackedView`, `NativeOut::Scalars`, the fused structural element reads) with the `vec.*_all` family migrated off the **last** per-backend intercepts (perf-gated), external `noeta-<cmd>` binaries, and version `0.1.0` + tags. The registry design test ("could `vec`/`quat` be re-added as a third-party crate with no API change?") is answered by a real out-of-tree proving crate in the composition e2e.
-- **Shipped (para-namespace arc):** the first first-party capability to leave `std` for a **non-default package** under a new namespace (`para`). The HTML liveview moved to the pure-Noeta `para/html` package, and the p2p/local-first stack (`crdt`/`p2p`/`synced`) was physically extracted from `noeta-stdlib` into the native `para/p2p` package (`ParaP2pExtension`, root `para`), installed only when a program depends on it and authorizes it in `[trust]`; the AOT footprint scan still links the p2panda tree only when `para.p2p`/`para.synced` are imported. **Reactive extension point (the `ReactiveSource` capability):** `para.synced` is a node in the *same* reactive graph as core `std.reactive`, and it participates through the **capability-broker seam** (below) — the `ReactiveSource` trait in the tiny `noeta-reactive-abi` crate, obtained per-run via `noeta_ext_abi::capability::<dyn ReactiveSource>(ctx)`. Three operations over `NodeId`s + arena cells (`create_source` mints a source node, `read_source` is the reactive `.get`, `wake` is the external-change epilogue that reruns dependents), plus the `view.expose` hook. The engine *implements* the trait; the client never touches its representation (the graph, the gate/flush state) and **depends on nothing of `noeta-stdlib`** — the contract crate is the whole surface. This is what lets the p2p package live fully out of `std`.
-- **Shipped (para out-of-tree follow-on):** the toolchain groundwork for taking a first-party package fully out-of-tree. **Editions** — `[package] edition` is now a validated, per-package pin recorded in `noeta.lock` and folded into the compiled-bytecode cache key (one edition today; the seam for future language/ABI evolution). **`git` deps track a `branch` or HEAD**, not only a tag, so an in-development or bundled package needs no cut release (the lock still pins the resolved SHA). **The P2p transport left the hosts entirely** — `P2p` is no longer a `Host` capability at all: the host only declares a `real_p2p()` policy, and the `para.p2p` extension owns the backend (loopback broker **or** the real p2panda node, chosen at runtime) in ctx state, reached through the `Send`-handle receive ABI (see [The `Host` capability](#the-host-capability)). The p2panda node moved out of `noeta-host-real` into a leaf crate in the package repo, behind the extension's `ring-p2p` feature, so the core runtime links no iroh/QUIC and a non-`para` `--native` binary sheds the whole tree (~4 MB vs ~27 MB). **Out-of-tree native packages build** — the composed toolchain injects a `[patch]` (`NOETA_TOOLCHAIN_REPO`-configurable) that unifies a package's git-referenced toolchain crates onto the consumer's copy, proven end-to-end for `para/p2p`; the pure-source `para/html` split (standalone repo → registry round-trip) is proven too. The `para` packages now live in their own repos under github.com/noeta-lang (para-html, para-cli, para-api, para-db, para-aether, para-aether-db, para-p2p), and all seven are **published on the hosted registry** at [registry.noeta.dev](https://registry.noeta.dev) — keyless Sigstore-signed and transparency-logged — so a consumer adds them as ordinary registry dependencies (see [Using Packages](Using-Packages)).
-- **Shipped (capability-broker seam):** cross-extension collaboration became a **trait discovered by type** rather than a hardcoded method or a concrete-type coupling. A provider declares an `ExtCapability` on `Extension::capabilities()`; a consumer calls `capability::<dyn Trait>(ctx)` and gets a handle that owns a clone of the provider's `ExtState` (so it coexists with `&mut dyn NativeCtx`, releasing its engine borrow before every re-entry). The first contract is `noeta-reactive-abi`'s `ReactiveSource` — `para.synced` now reaches the reactive engine through it and depends on **nothing** of `noeta-stdlib` (the old `extension_point` free-function facade is deleted). Recovery is unsafe-free (a `Box<dyn Trait>` erased as `Box<dyn Any>`, downcast back); `TypeId` is consistent within the one linked program the composed toolchain builds. **And the flat `NativeCtx` god-trait was slimmed:** the scheduler's own cross-cutting services — task-local tracing context, the future-completion hook, the hot-reload channel — moved off it into `TaskContext`/`FutureTracing`/`HotReload` sub-traits reached via `ctx.task_context()`/`.future_tracing()`/`.hot_reload()` (backend returns `self` — no lookup, no `Rc` pessimization of the hot scheduler fields the broker would have forced). Two mechanisms, keyed to who owns the state; both let a consumer move out-of-tree without naming the other side. No regression (reactive/host hot paths benchmarked flat).
-- **Shipped (native-extensibility S1 — `ExtEnum`):** native-declared **enums** — plain, string-/int-backed, and payload-carrying — seeded eagerly into the checker's `symbols.enums` by qualified identity, so a `match` over one is exhaustive (E0011). Values cross both ways (`NativeOut::Variant` / `NativeValue::Variant`, materialized identically on both backends) and are **source-constructible** (`Hue.Red`, `Tag.Labeled(s)`) once imported. Backed `.value()` is a real typed accessor.
-- **Shipped (native-extensibility S2 — `ExtClass`):** native-declared **classes** — true reference types (identity, aliasing, RC + cycle participation) with language-visible fields (`ExtField`, seeded into `records`/`private_fields`/`mut_fields`, E0035/E0033 enforced) and a **RAII destructor** (native state in an extern-handle field whose `Drop` the collector runs on collection, on both the last-reference and cycle-reclamation paths). Values are produced as `NativeOut::Instance` (a real class-kind `Object`, *not* the value-struct `NativeOut::Struct`) and cross IN as `NativeValue::Instance`; a pure-data class is source-constructible. Proven by the `ext_class_seam` differential + leak oracle.
-- **Shipped (native-extensibility S3 — `ExtTrait`):** native-declared **traits** — a contract user
-  types `impl`/bind on exactly like a `.noe` trait (an incomplete impl is E0015), and dynamic
-  dispatch over native values through `dyn NativeTrait`. The same mechanism, generalized further by
-  the ExtBundle→ExtTrait convergence (assoc types, native default bodies, a structural
-  `self_constraint`), is what the kernel bundles (`vec.Kernels`/`vec.SatKernels`, see
-  [Method bundles](#method-bundles-impl-veckernels-for-px-)) are now built on — `ExtBundle` no
-  longer exists as its own type.
-- **Won't-build (recorded):** *Host-coupled finalizers* — a Rust-side resource in an extern box (or an `ExtClass`'s extern-handle field) already finalizes deterministically (RC-zero drops the box, `Drop` runs); a finalizer with `Host` access at free time has no sound access point (values die in release paths carrying no host, including teardown cascades), so buffered types keep explicit `close()`. `ExtType`'s `..DEFAULTS` makes a later `finalizer` field additive if concrete demand appears.
-- **Shipped (ecosystem):** the out-of-tree story is end-to-end in production — the toolchain and registry repos are published, the hosted registry at [registry.noeta.dev](https://registry.noeta.dev) is deployed, and the seven `para/*` packages resolve from it as ordinary registry dependencies. The client side ships in `noeta-pm`: registry routing (`[registries]`, `NOETA_REGISTRY_URL`), `noeta publish`/`noeta claim`, and transparency-log verification. **Deferred:** dynamic loading (the dyn dispatch tables are already in place; every compiled-in extension monomorphizes past them).
-
-## See also
-
-- [Extension Compatibility](Extension-Compatibility) — the API contract for native package authors: the stable surface, what is not stable, and the pre-1.0 policy.
-- [Standard library reference](Std) — the modules registered through this seam.
-- [Concurrency Internals](Concurrency-Internals) — the `Host` capability's role in the deterministic/real split.
-
 ## Directives that generate code (`ExtDirective::expand`)
 
 An extension can register **`@`-directives**: `Extension::directives()` returns `ExtDirective` entries, which add a name to the decorator name-space. Resolution runs after the built-in directives and after the tier name-space, so an extension can never shadow either. Each entry declares where it may attach (`sites`), what arguments it takes (`max_args`, `named_keys`), and the prose the editor shows on hover and in completion.
@@ -400,4 +291,22 @@ Failures are reported as **E0062**, always blamed on the directive rather than o
 
 ## Derive recipes (`ExtDerive`)
 
-An extension can register **derive recipes**: `Extension::derives()` returns `ExtDerive { name, methods, validate }` entries, and `@derive(<Name>)` on a type synthesizes each declared method as a forward into the extension's registered module function — `fn <name>(a1: dyn, …): dyn { return <handler>(self, a1, …) }`, resolved like an expression tier's native handler (no user import). The handler does its real work natively (typically reflecting over the value); the optional `validate` hook can reject unsuitable type shapes at check time (E0050). std's own `Inspect` (`inspect()` → `json.stringify(self)`) is the dogfood. Names resolve after built-in traits and the program's user traits, so a recipe can never shadow either.
+An extension can register **derive recipes**: `Extension::derives()` returns `ExtDerive { name, methods, validate }` entries, and `@derive(<Name>)` on a type synthesizes each declared method as a forward into the extension's registered module function — `fn <name>(a1: dyn, …): dyn { return <handler>(self, a1, …) }`, resolved like an expression tier's native handler (no user import). The handler does its real work natively (typically reflecting over the value); the optional `validate` hook can reject unsuitable type shapes at check time (E0050). std's own `Inspect` (`inspect()` → `json.stringify(self)`) is the reference example. Names resolve after built-in traits and the program's user traits, so a recipe can never shadow either.
+
+## Current state
+
+- **The ABI is its own lean crate**: `noeta-ext-abi` carries the whole registration + dispatch contract (registry vocabulary, `Host` seam, `ExternValue`, `MapKey`, `NativeCtx`, the async `ExternIo`/`Executor` seam, the channel semantics, the p2p broker/policy, the Ring 1 primitives); `noeta-stdlib` re-exports it and layers the concrete `std` modules on top.
+- **All of `std` goes through the seam**: every native module (`math`, `time`, `fs`, `json`, `vec`/`quat`, `crypto`, `id`, `http` client + server, `io`, `os`, `task`, `cell`, `reactive`, …) is a registered extension unit; neither backend contains a native-module enum, hardcoded builtins, or per-module intercepts.
+- **Declaration surfaces**: modules and functions (optional params, unions, generics, call-site-typed functions/methods), extern types (`ExtType`/`ExternValue`), enums (`ExtEnum`), classes and structs (`ExtClass`/`ExtStruct`), traits (`ExtTrait`, including kernel bundles), CLI commands, tiers, attributes, directives (`expand`), derives, body formatters, and broker capabilities.
+- **Higher-order and stateful extensions work**: the `NativeCtx` slot seam, per-run `ExtState`, the retained arena (an enumerable GC root set), declared arena reads, and the raw packed-buffer kernel ABI (`with_packed`/`with_packed_mut`/`make_packed_like`, `NativeOut::Scalars`).
+- **Third-party packages compose end to end**: the manifest `native` key, the composed-toolchain build with `[patch]` unification, lean shipped-artifact composition, and external `noeta-<cmd>` binaries.
+- **Out-of-tree is production reality**: the seven `para/*` packages live in their own repos under github.com/noeta-lang and are published on the hosted registry at [registry.noeta.dev](https://registry.noeta.dev) (keyless Sigstore-signed, transparency-logged), resolved as ordinary registry dependencies.
+- **Deliberately not built**: host-coupled finalizers — a Rust resource in an extern box already finalizes deterministically via `Drop`, and a finalizer with `Host` access at free time has no sound access point, so buffered types keep explicit `close()`.
+- **Deferred**: dynamic loading — the dyn dispatch tables are in place, but every extension today is compiled in and monomorphizes past them.
+
+## See also
+
+- [Writing a Native Package](Writing-Native-Packages) — the author-facing walkthrough: entry crate, manifest, composition, building, testing, publishing.
+- [Extension Compatibility](Extension-Compatibility) — the API contract for native package authors: the stable surface, what is not stable, and the pre-1.0 policy.
+- [Standard library reference](Std) — the modules registered through this seam.
+- [Concurrency Internals](Concurrency-Internals) — the `Host` capability's role in the deterministic/real split.

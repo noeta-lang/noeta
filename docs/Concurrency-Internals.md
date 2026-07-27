@@ -10,9 +10,9 @@ Why stackless is *forced*: coroutines must suspend and resume. A **stackful** mo
 
 The transform's output is ordinary constructs: a closure whose captured **mutable cells** hold the state (a `$state` discriminant plus the locals live across a suspend point), driven by a `loop { match $state { … } }`. The hard compiler content is liveness across suspend points (which locals become state fields vs. stay temporaries) and mapping structured control flow to states. `yield` and `await` are both sugar onto this one primitive, differing only in the *resume driver* and the *suspend value*.
 
-- **Lazy iterators (Track I).** `Iterable` = has `iter() -> Iterator`; `Iterator` = has `next() -> ?T` (reusing `Option`: `some(x)` = element, `none` = end). `for x in src` desugars to `it = src.iter(); loop { match it.next() { some(x) => body, none => break } }`. Adapters (`map`/`filter`/`take`/`zip`/…) are iterator-state variants wrapping a source + closure, fused so no intermediate list is built; `collect()` materializes. Iterators are reference values (calling `next()` mutates, visible to aliases) — reusing the value/reference split, no new value kind.
-- **Generators (Track G).** A function containing `yield` *is* a generator (a syntactic marker, no keyword); it lowers to a closure state machine wrapped in one iterator-state variant, so generators compose with every adapter for free. Typing is clean because pull is one-directional (`next()` takes no argument): the return type is plain `Iterator<T>`, `yield e` is checked `e <: T`, a value in `return` is forbidden.
-- **Async (Track A).** Rides the same state machine; the only difference is the *runtime*.
+- **Lazy iterators.** `Iterable` = has `iter() -> Iterator`; `Iterator` = has `next() -> ?T` (reusing `Option`: `some(x)` = element, `none` = end). `for x in src` desugars to `it = src.iter(); loop { match it.next() { some(x) => body, none => break } }`. Adapters (`map`/`filter`/`take`/`zip`/…) are iterator-state variants wrapping a source + closure, fused so no intermediate list is built; `collect()` materializes. Iterators are reference values (calling `next()` mutates, visible to aliases) — reusing the value/reference split, no new value kind.
+- **Generators.** A function containing `yield` *is* a generator (a syntactic marker, no keyword); it lowers to a closure state machine wrapped in one iterator-state variant, so generators compose with every adapter for free. Typing is clean because pull is one-directional (`next()` takes no argument): the return type is plain `Iterator<T>`, `yield e` is checked `e <: T`, a value in `return` is forbidden.
+- **Async.** Rides the same state machine; the only difference is the *runtime*.
 
 ## The async runtime — an injected capability
 
@@ -24,7 +24,7 @@ The executor is injected as a capability, `trait Executor` (object-safe, held as
 
 This is the FoundationDB / TigerBeetle model: *simulate deterministically, deploy real.* The executor owns only **time**: when a cooperative poll round makes no progress, the backend asks it to `advance` (jump to the next scheduled event) and re-polls. `await` at the async top level polls, and on `Pending` (the NaN-box `TAG_PENDING` sentinel) advances the clock and re-polls; inside an `async fn` the `.await` compiles into a poll-suspend state. Async IO leaves are request/outcome variants the sandbox performs synchronously (deterministic) and the real executor spawns on tokio. `spawn e` / `concurrent { }` register futures as tasks in a structured scope; a `spawn` with no owning scope is a compile error.
 
-A `concurrent { }` block **inside an async fn** is split by the state-machine desugar so its **join is itself a poll-suspend state** (Track A.7), not an in-place drive-to-completion loop: the block lowers to `$sc = scope_begin(); …spawns/awaits…; while !scope_ready($sc) { suspend }; scope_end($sc)`, where `scope_ready` is the per-poll readiness test and the suspend yields `$pending` up to the driver. So an inner scope's tasks interleave with the outer scope's siblings across the driver's rounds — the top-level `drive_future`/`join_scope` loop drives *all* open scopes each round and owns the clock advance and deadlock detection. (A top-level `concurrent`, run directly in the dispatch loop rather than a state machine, keeps its synchronous join — there is nothing outer to interleave with.) Because sibling tasks can each hold an *open* inner scope at once, the scope stack is **stable-indexed with tombstoning**: `scope_begin` appends and returns an index, `scope_end(idx)` closes that specific scope and trims trailing tombstones (the common LIFO case reclaims immediately), so handles stay valid and out-of-order closes never corrupt a sibling. The round-robin/skip-`polling`/close-on-completion **policy is value-model-neutral and mirrored** across both backends (`noeta-vm/src/scheduler.rs` ↔ `noeta-eval`), so the interleaving is byte-identical.
+A `concurrent { }` block **inside an async fn** is split by the state-machine desugar so its **join is itself a poll-suspend state**, not an in-place drive-to-completion loop: the block lowers to `$sc = scope_begin(); …spawns/awaits…; while !scope_ready($sc) { suspend }; scope_end($sc)`, where `scope_ready` is the per-poll readiness test and the suspend yields `$pending` up to the driver. So an inner scope's tasks interleave with the outer scope's siblings across the driver's rounds — the top-level `drive_future`/`join_scope` loop drives *all* open scopes each round and owns the clock advance and deadlock detection. (A top-level `concurrent`, run directly in the dispatch loop rather than a state machine, keeps its synchronous join — there is nothing outer to interleave with.) Because sibling tasks can each hold an *open* inner scope at once, the scope stack is **stable-indexed with tombstoning**: `scope_begin` appends and returns an index, `scope_end(idx)` closes that specific scope and trims trailing tombstones (the common LIFO case reclaims immediately), so handles stay valid and out-of-order closes never corrupt a sibling. The round-robin/skip-`polling`/close-on-completion **policy is value-model-neutral and mirrored** across both backends (`noeta-vm/src/scheduler.rs` ↔ `noeta-eval`), so the interleaving is byte-identical.
 
 ## Isolates and true parallelism
 
@@ -55,11 +55,21 @@ The real scheduler crosses threads by **faithful copy** by default (with a zero-
 
 **Worker teardown mirrors the main heap.** When a worker finishes, it tears its own thread-local heap down exactly like the main heap's `Vm::teardown`: a pre-teardown trace from the still-bound globals, then global destruction in reverse order, then a backup trace from an empty root set — so a reference cycle the worker body stranded (`a.next = b; b.next = a`) is reaped and each member's `__destruct` fires, instead of leaking until the thread dies. Refcounting alone never reclaims a cycle, so without this pass the worker's cycle garbage (and its destructors) were lost.
 
-### Channel semantics (I.4c)
+### Channel semantics
 
-The FIFO / bounded-capacity / rendezvous / close decision is **value-model-neutral**, so it lives once in `noeta-ext-abi::channel` (surfaced as `noeta_stdlib::channel`) and both backends call in — the differential holds by construction. `poll_send(capacity, buffer_len, closed, phase)` returns a `SendAction`, `poll_recv(buffer_len, closed)` a `RecvAction`; each backend then performs the move over its own buffer (`VecDeque<Value>` in the reference interpreter, a mutex-guarded `VecDeque<Wire>` in the VM's cross-thread `ChannelCore`). A **capacity-0 rendezvous** channel uses the buffer as a one-slot hand-off: a fresh `send` *deposits* and parks (its future carries a `SendPhase` so it remembers), completing only once a `recv` drains the slot — the hand-off ordering is therefore observable. **Auto-close** is keyed on **producer-task lifecycle**, not raw sender-value RC: a spawned task/isolate that captures a `Sender` registers a *producer hold* on the channel (counted by scanning the spawned future's captures, or the isolate's args), released when that task completes; when the last hold drops the channel auto-closes. This sidesteps a drop-precision limitation — the enclosing `async`/top-level scope keeps a structural `Sender` alive (as a captured cell or a global) until it ends, too late to signal "no more sends".
+The FIFO / bounded-capacity / rendezvous / close decision is **value-model-neutral**, so it lives once in `noeta-ext-abi::channel` (surfaced as `noeta_stdlib::channel`) and both backends call in — the differential holds by construction. `poll_send(capacity, buffer_len, closed, phase)` returns a `SendAction`, `poll_recv(buffer_len, closed)` a `RecvAction`; each backend then performs the move over its own buffer (`VecDeque<Value>` in the reference interpreter, a mutex-guarded `VecDeque<Wire>` in the VM's cross-thread `ChannelCore`).
 
-**Real-path deadlock detection.** A cooperative stall in the sandbox is a deterministic `E0010`. On the real (parallel) scheduler, the root parent and every isolate worker register in a process-wide `StallRegistry`; when *every* registered scheduler is simultaneously parked at a channel stall with no timer, no pending IO, and no wake during a confirm window, the deadlock is latched (so all parties unwind, not just the detector) and each raises the same `E0010` — instead of the pre-I.4c spin-forever.
+#### Rendezvous (capacity 0)
+
+A **capacity-0 rendezvous** channel uses the buffer as a one-slot hand-off: a fresh `send` *deposits* and parks (its future carries a `SendPhase` so it remembers), completing only once a `recv` drains the slot — the hand-off ordering is therefore observable.
+
+#### Auto-close
+
+**Auto-close** is keyed on **producer-task lifecycle**, not raw sender-value RC: a spawned task/isolate that captures a `Sender` registers a *producer hold* on the channel (counted by scanning the spawned future's captures, or the isolate's args), released when that task completes; when the last hold drops the channel auto-closes. This sidesteps a drop-precision limitation — the enclosing `async`/top-level scope keeps a structural `Sender` alive (as a captured cell or a global) until it ends, too late to signal "no more sends".
+
+#### Deadlock detection
+
+A cooperative stall in the sandbox is a deterministic `E0010`. On the real (parallel) scheduler, the root parent and every isolate worker register in a process-wide `StallRegistry`; when *every* registered scheduler is simultaneously parked at a channel stall with no timer, no pending IO, and no wake during a confirm window, the deadlock is latched (so all parties unwind, not just the detector) and each raises the same `E0010` — instead of spinning forever.
 
 > [!NOTE]
 > **Zero-copy borrow-share (VM).** A `SharedRegion` + a `shared` header bit (where `retain`/`release` are no-ops, so a shared-immutable graph is read cross-thread with no atomic ops, freed wholesale at the scope join) is miri-proven and wired into the **VM**'s real-parallel path: `try_spawn_isolate_real` promotes each promotable argument graph *once* into the parent's `SharedRegion` and hands every worker a zero-copy `IsoArg::Borrowed` root, falling back to a `Wire` copy only for non-promotable arguments (`noeta-vm/src/scheduler.rs`). The old blocker is gone — shapes are process-wide **interned** to a `Copy` `&'static Shape` (`Send + Sync`), so there is no `Rc<Shape>` to make thread-safe. Note also: the CLI's real-parallel path routes through the **VM only** — the reference interpreter's `Rc`-based value is `!Send`, so it stays copy-only and remains the differential reference plus sandbox.
@@ -72,16 +82,16 @@ async substrate wholesale. Accepting a connection is an **async leaf** (like `sl
 — a descriptor the executor drives (`TcpListener::accept().await` on the real host); the serve loop
 polls that accept future *alongside* the in-flight handler futures each round, spawning a handler task
 per connection into a **server-owned reaping set** and replying as each completes. So it is exactly
-the cooperative Tier-1 model: a slow async handler yields at its `await`s while the next connection is
-accepted and other handlers advance (the Node/Deno event-loop shape, on our executor). Both backends
+the cooperative scheduling model: a slow async handler yields at its `await`s while the next connection
+is accepted and other handlers advance (the Node/Deno event-loop shape, on our executor). Both backends
 run the identical poll order, so the interleaving is deterministic and the differential agrees.
 
 Determinism is the **inverse of the client's pure responder**: under the sandbox the accept leaf
 yields a fixed, documented **request script** and then reports the listener closed, so a served
 program drives a known sequence through the handler and *terminates* in-oracle — no socket. The real
-host binds a `TcpListener` and blocks. Multi-core serving (a follow-on) stays isolate-native: an
-acceptor isolate hands each accepted **fd (an int)** to worker isolates over a `Channel<int>` —
-intra-process fds are shared across threads, so no `SO_REUSEPORT`/`socket2` is needed.
+host binds a `TcpListener` and blocks. Multi-core serving (designed, not yet built) stays
+isolate-native: an acceptor isolate hands each accepted **fd (an int)** to worker isolates over a
+`Channel<int>` — intra-process fds are shared across threads, so no `SO_REUSEPORT`/`socket2` is needed.
 
 ## See also
 

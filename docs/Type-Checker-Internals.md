@@ -13,6 +13,16 @@ Subtyping is load-bearing here: `dyn` widening, directional method resolution, a
 
 Signatures are required at named boundaries (which give the checker its expected types); bodies are inferred locally. There is no whole-program reconstruction.
 
+Both modes on one snippet:
+
+```noe
+fn weight(x: float): float { return x * 2.0 }
+
+n = 1.5          // synthesis: no expected type, so the initializer's type flows UP — n: float
+y = weight(n)    // checking: the argument `n` is checked DOWN against the parameter type float;
+                 // the call then synthesizes float, which flows up into y
+```
+
 ## The type lattice
 
 `noeta-types` is the pure-data `Type` lattice: `Int`/`Float`/`Bool`/`String`/`Unit`, `List`/`Map`/`Option`/`Result`, `Named`, `Fn`, unions, and the top `Unknown`. (The Hindley–Milner inference-variable slot was removed once the engine settled on bidirectional-with-subtyping.) `Type::from_ref` structurally desugars surface annotations (including `?T → Option<T>`); predicates like `is_numeric`/`is_gradual` are what the checks key off.
@@ -36,7 +46,9 @@ Signatures are required at named boundaries (which give the checker its expected
 | Conflicting trait impls (coherence) | E0027 |
 | Invalid `.as<T>()` narrow | E0028 |
 
-The inferred-static track layered on required signatures at named boundaries, checked arguments and returns, the E0023 "cannot infer" endpoint, bounded generics, trait coherence, `dyn` narrowing, and declared unions — while tolerating an *interior* inference hole by design. The result is the "inferred-static" contract: no holes at named boundaries, inference in the interior, and `dyn` as the one explicit escape.
+The resulting contract in one line: **no holes at named boundaries, inference in the interior, and `dyn` as the one explicit escape.**
+
+**Where the suppression can surprise you.** Because a check silently stands down on an `Unknown` operand, code in `Unknown`-typed territory gets *runtime* errors where statically-typed code would get compile-time ones: a misspelled method on a `dyn` value, arithmetic on an erased generic's `T`, or a field access downstream of an expression the checker could not type will pass the check and fail (or misbehave) only when it runs. The symptom to recognize is an error that "should have been caught" pointing into code that touches `dyn` or a generic parameter — hover the operands in the editor: if one shows no concrete type, the checker never looked. The boundary rules (E0022/E0023) exist precisely to keep this territory small.
 
 **Generics are erased**: `class Box<T>` parses, checks (a type parameter is treated as `Unknown`), and runs with `T` erased to one shape.
 
