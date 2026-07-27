@@ -303,6 +303,44 @@ impl std::fmt::Debug for LowerOptions {
     }
 }
 
+/// Project a registry's **native trait data** into the plain-data form
+/// [`noeta_ast::reflect::build`] joins with a program's own declarations (the trait-membership
+/// twin of `Registry::native_roles`): every native trait's qualified identity, every native
+/// type/class/struct/enum's ABI-advertised trait impls (keyed by the qualified identity an extern
+/// value reports at runtime), and every native derive recipe's name (excluded from membership —
+/// a recipe synthesizes methods but implements no trait). Shared by both backends' reflection
+/// builds so the membership table agrees across the differential by construction.
+pub fn native_trait_impls(
+    registry: &'static noeta_ext_abi::registry::Registry,
+) -> noeta_ast::reflect::NativeTraitImpls {
+    let traits: Vec<String> = registry.traits().map(|t| t.qualified()).collect();
+    let advertised = |names: &'static [&'static str]| -> Option<Vec<String>> {
+        (!names.is_empty()).then(|| names.iter().map(|n| (*n).to_string()).collect())
+    };
+    let type_impls: Vec<(String, Vec<String>)> = registry
+        .extensions()
+        .iter()
+        .flat_map(|ext| ext.types())
+        .filter_map(|ty| Some((ty.qualified(), advertised(ty.traits)?)))
+        .chain(
+            registry
+                .fielded()
+                .filter_map(|f| Some((f.qualified(), advertised(f.traits)?))),
+        )
+        .chain(
+            registry
+                .enums()
+                .filter_map(|e| Some((e.qualified(), advertised(e.traits)?))),
+        )
+        .collect();
+    let derives: Vec<String> = registry.ext_derives().map(|d| d.name.to_string()).collect();
+    noeta_ast::reflect::NativeTraitImpls {
+        traits,
+        type_impls,
+        derives,
+    }
+}
+
 /// As [`lower`], but driven by the checker's [`LoweringSites`] (all pure functions of the program, so
 /// the optimizations they enable stay invisible to `RunResult`). The production execution paths
 /// (`lang run`, the conformance reference, the bytecode compiler) pass real maps; the REPL and IR
@@ -723,12 +761,28 @@ fn collect_type_aliases(
                 // A native type: narrows against its qualified identity, whichever local name it
                 // was bound to.
                 map.insert(local, ext.qualified());
+            } else if let Some(tr) = registry.find_trait_qualified(&qualified) {
+                // A native trait import (`use fx.Widget`): a `dyn Widget` narrowing target
+                // resolves to the trait's qualified identity — the name the shared membership
+                // table (`ReflectionInfo::trait_impls`) keys the implementor set on.
+                map.insert(local, tr.qualified());
             } else if registry.is_namespace(&qualified) {
                 // A namespace group (`use std.http`): expose its types so a *dotted* narrowing
                 // target (`http.Response`) resolves to the same qualified identity a value carries,
                 // exactly as the checker's import collection does. Aliased groups key on the alias.
                 for (rel, q) in registry.namespace_types(&qualified) {
                     map.insert(format!("{local}.{rel}"), q);
+                }
+                // A module's kernel traits project the same way (`use std.vec` → a dotted
+                // `dyn vec.Kernels` target resolves to `std.vec.Kernels`).
+                for tr in registry.traits() {
+                    let q = tr.qualified();
+                    if let Some(rest) = q.strip_prefix(&qualified)
+                        && let Some(short) = rest.strip_prefix('.')
+                        && !short.contains('.')
+                    {
+                        map.insert(format!("{local}.{short}"), q);
+                    }
                 }
             } else if n.alias.is_some() {
                 // A renamed user (or opaque) import: narrows against the imported leaf name.
@@ -784,9 +838,22 @@ impl Lowerer<'_> {
                 inner: Box::new(self.resolve_type_aliases(inner)),
                 span: *span,
             },
-            // Neither a trait object's trait name nor a `Self::Name` projection is an import alias —
-            // narrowing never targets them (slice 1a).
-            TypeRef::DynTrait { .. } | TypeRef::AssocProjection { .. } => ty.clone(),
+            // A trait object's trait name resolves like a nominal leaf: a native trait's local
+            // `use` spelling (`Widget`, `vec.Kernels`) becomes its qualified identity — the key
+            // the shared membership table uses — so the precise `is dyn Trait` test compares one
+            // canonical string. A `.noe` trait misses the map and keeps its (loader-qualified)
+            // linked name, which is already the table's key.
+            TypeRef::DynTrait { trait_name, span } => TypeRef::DynTrait {
+                trait_name: self
+                    .type_aliases
+                    .get(trait_name)
+                    .cloned()
+                    .unwrap_or_else(|| trait_name.clone()),
+                span: *span,
+            },
+            // A `Self::Name` projection is never an import alias — resolution is per-impl at the
+            // checker (slice 1a).
+            TypeRef::AssocProjection { .. } => ty.clone(),
         }
     }
 
@@ -2389,6 +2456,17 @@ impl Lowerer<'_> {
                 Ok(self.emit(
                     out,
                     Rvalue::FieldsOf {
+                        operand,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            Expr::TraitsOf { value, span } => {
+                let operand = self.lower_expr(value, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::TraitsOf {
                         operand,
                         span: *span,
                     },

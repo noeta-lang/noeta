@@ -2450,6 +2450,16 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `traits_of(value)` — the trait-membership reflection query: the qualified trait names the
+        // value's nominal type has a registered `impl` for, as a sorted `List<string>`. Same
+        // surface shape as `fields_of`.
+        let traits_of = just(T::TraitsOfKw)
+            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
+            .map_with(move |value, e| Expr::TraitsOf {
+                value: Box::new(value),
+                span: ctx.to_span(e.span()),
+            });
+
         // `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>`. Combines the
         // turbofish type argument (like `attributes_of`) with a parenthesized operand (like
         // `type_of`); the element type must be named because the byte buffer is opaque.
@@ -2713,7 +2723,7 @@ where
             attributes_of,
             // One choice-tuple slot for the two value-reflection queries (the tuple is at its
             // arity cap): same surface shape, disjoint keywords.
-            type_of.or(fields_of),
+            type_of.or(fields_of).or(traits_of),
             from_bytes,
             channel,
             roles_of,

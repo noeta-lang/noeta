@@ -1039,6 +1039,11 @@ impl Pretty for Expr {
                 value.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::TraitsOf { value, span: s } => {
+                out.push_str(&format!("(traits_of {}\n", span(*s)));
+                value.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::FromBytes { ty, blob, span: s } => {
                 out.push_str(&format!("(from_bytes {} {}\n", type_ref_str(ty), span(*s)));
                 blob.pretty(out, level + 1);

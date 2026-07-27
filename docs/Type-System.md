@@ -92,6 +92,32 @@ echo kind(5)            // int
 
 An `is` test also **flow-narrows**: inside `if x is T { … }` the checker sees `x` as `T`.
 
+### Trait-object tests are precise membership
+
+**`x is dyn Trait`** (and `.as<dyn Trait>()`) is a *precise membership test*: it is `true` iff the value's runtime nominal type has a **registered implementation** of the trait — a standalone `impl Trait for T`, an in-body `impl Trait { … }` block, a `@derive(Trait)`, or a native type's ABI-declared impl. The test is driven by the same registration data trait-method dispatch resolves through, so `x is dyn Trait` being `true` and "calling a `Trait` method on `x` works" can never disagree. Inside the `true` branch, `x` flow-narrows to `dyn Trait` and its trait methods dispatch.
+
+```noeta
+trait Speaks { fn speak(): string }
+
+struct Dog { name: string }
+impl Speaks for Dog { fn speak(): string { return "woof" } }
+
+struct Silent { name: string }
+
+fn voice(x: dyn): string {
+    if x is dyn Speaks { return x.speak() }
+    return "..."
+}
+echo voice(Dog { name: "Rex" })     // woof
+echo voice(Silent { name: "Sam" }) // ...
+echo voice(42)                      // ...
+```
+
+Two edges worth knowing:
+
+- **Non-nominal values never match.** Scalars, collections, and functions carry no nominal type, so they implement no *declared* trait. `42 is dyn Display` is `false` even though `echo 42` works — the built-in base types' protocol behavior is structural, not a registered `impl`, and only registered impls count. Use the head test (`x is int`) for built-ins.
+- **`Self::Name` projections stay permissive.** A `.as<Self::Item>()`-style associated-type target has no runtime head to test (the binding is per-impl, and the erased value carries no impl identity), so it still matches any value — unlike the now-precise trait-object target.
+
 ## Abstract kind-types
 
 `Struct`, `Class`, `Enum`, and `Record` are supertypes of every declared type of that kind — useful for runtime kind tests against a `dyn`:

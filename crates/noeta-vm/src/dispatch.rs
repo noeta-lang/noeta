@@ -2526,7 +2526,7 @@ impl<'m> Vm<'m> {
                         none_shape,
                     } => {
                         let v = regs[fbase + *src as usize];
-                        let result = if narrow_matches(v, target) {
+                        let result = if narrow_matches(v, target, &self.module.reflection) {
                             retain(v);
                             let shape = self.persist.shapes[*some_shape as usize];
                             Value::enum_value(shape, vec![v])
@@ -2539,7 +2539,8 @@ impl<'m> Vm<'m> {
                     }
                     Op::IsType { dst, src, target } => {
                         let v = regs[fbase + *src as usize];
-                        let result = Value::bool(narrow_matches(v, target));
+                        let result =
+                            Value::bool(narrow_matches(v, target, &self.module.reflection));
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
@@ -2845,6 +2846,11 @@ impl<'m> Vm<'m> {
                     }
                     Op::FieldsOf { dst, src } => {
                         let result = self.materialize_fields(regs[fbase + *src as usize]);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::TraitsOf { dst, src } => {
+                        let result = self.materialize_traits(regs[fbase + *src as usize]);
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }

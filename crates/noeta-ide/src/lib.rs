@@ -2592,7 +2592,12 @@ impl DocumentStore {
             .collect();
         let graph = callgraph::build(program, &ide.expr_types, &texts);
         let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
-        (graph, noeta_ast::reflect::build(program, &native_roles))
+        // Role/manifest/type views only — the trait-membership table is a runtime-narrowing
+        // concern, so the IDE view passes the empty native-trait join.
+        (
+            graph,
+            noeta_ast::reflect::build(program, &native_roles, &Default::default()),
+        )
     }
 
     /// Resolve graph function `idx` to a located [`HierarchyItem`] (roles joined by declaration
@@ -3341,6 +3346,7 @@ fn tier_name_at(
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
             | Expr::FieldsOf { value: expr, .. }
+            | Expr::TraitsOf { value: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => in_expr(expr, offset, source),
             _ => None,
         }

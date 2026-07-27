@@ -1155,6 +1155,12 @@ impl Checker {
                 // A type *test* is always well-formed on any source — even a concrete one (it is
                 // simply a constant `true`/`false`), unlike `.as<T>()` whose narrowing of a known
                 // concrete value is an `E0028`. We only validate the target type names something.
+                //
+                // A `dyn Trait` target is a PRECISE membership test at runtime (the shared
+                // reflection `trait_impls` table). Future work: when the scrutinee's static type is
+                // a single concrete nominal with a known impl (`user_trait_impls` hit), the test is
+                // provably constant-true and could fold or warn — today the runtime test simply
+                // runs (and agrees), so no warning machinery is spent on it.
                 self.synth(expr, env);
                 self.check_type_ref(ty);
                 // A bare-scalar test against an *erased* fixed width (`iN`/`f64`) is statically
@@ -1254,6 +1260,14 @@ impl Checker {
                     noeta_ast::reflect::FIELD_ENTRY.to_string(),
                     Vec::new(),
                 )))
+            }
+            Expr::TraitsOf { value, .. } => {
+                // The trait-membership query: the qualified trait names the value's nominal type
+                // has a registered `impl` for, as a sorted `List<string>` (the same shared table
+                // the precise `is dyn Trait` narrowing tests). A non-nominal value is the empty
+                // list, mirroring `fields_of`.
+                self.synth(value, env);
+                Type::List(Box::new(Type::String))
             }
             Expr::RolesOf { ty, span } => {
                 // The compiler-built role index, surfaced as `List<RoleBinding>`. The optional

@@ -1,0 +1,48 @@
+// Flow-narrowing through a true `x is dyn Trait`: in the then-branch `x` is `dyn Trait`, so a
+// trait-method call on it type-checks and dispatches — and because the runtime test is precise
+// membership, the branch is only ever entered with a value whose type really implements the trait
+// (the call cannot reach a non-implementor). `@derive(Trait)` on a fully-defaulted trait registers
+// membership exactly like a hand-written `impl`.
+// expect: stdout "woof"
+// expect: stdout "hi"
+// expect: stdout "silent"
+// expect: exit 0
+trait Greets {
+    fn hello(): string {
+        return "hi"
+    }
+}
+
+trait Speaks {
+    fn speak(): string
+}
+
+struct Dog {
+    name: string
+}
+
+impl Speaks for Dog {
+    fn speak(): string {
+        return "woof"
+    }
+}
+
+// A derive of a fully-defaulted user trait adopts it wholesale — membership included.
+@derive(Greets)
+struct Robot {
+    id: int
+}
+
+fn describe(x: dyn): string {
+    if x is dyn Speaks {
+        return x.speak()
+    }
+    if x is dyn Greets {
+        return x.hello()
+    }
+    return "silent"
+}
+
+echo describe(Dog { name: "Rex" })
+echo describe(Robot { id: 1 })
+echo describe(3)

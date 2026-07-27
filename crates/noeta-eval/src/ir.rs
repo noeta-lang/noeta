@@ -243,7 +243,10 @@ impl Interpreter {
         // Arm the safepoint-GC trigger for this run (the eval mirror of the VM's arm).
         crate::leak::safepoint_arm(crate::leak::safepoint_step());
         let native_roles = self.reg().native_roles();
-        self.reflection = noeta_ast::reflect::build(ast, &native_roles);
+        // Native trait data joins the membership table (precise `is dyn Trait` / `traits_of`)
+        // through the same registry projection seam as the roles — the VM's compile does the same.
+        let native_traits = noeta_ir::native_trait_impls(self.reg());
+        self.reflection = noeta_ast::reflect::build(ast, &native_roles, &native_traits);
         // Extension attribute shapes ride the artifact (tier-extensions port) — same embed the
         // bytecode path does, so the differential stays green by construction.
         noeta_check::extend_reflection(&mut self.reflection);
@@ -508,7 +511,7 @@ impl Interpreter {
         frame: &mut Frame,
     ) -> Eval<Flow> {
         for arm in arms {
-            if let Some(bindings) = crate::match_pattern(&arm.pattern, &value) {
+            if let Some(bindings) = crate::match_pattern(&arm.pattern, &value, &self.reflection) {
                 let child = crate::Scope::child(&self.scope);
                 for (name, bound) in bindings {
                     child.declare(name, bound, false);
@@ -1412,7 +1415,7 @@ impl Interpreter {
             }
             noeta_ir::Rvalue::As { operand, ty, .. } => {
                 let value = self.eval_ir_atom(operand, frame)?;
-                if crate::runtime_matches(&value, ty) {
+                if crate::runtime_matches(&value, ty, &self.reflection) {
                     Ok(crate::builtin_enum("Option", "some", vec![value]))
                 } else {
                     Ok(crate::builtin_enum("Option", "none", vec![]))
@@ -1420,7 +1423,11 @@ impl Interpreter {
             }
             noeta_ir::Rvalue::TypeTest { operand, ty, .. } => {
                 let value = self.eval_ir_atom(operand, frame)?;
-                Ok(Value::Bool(crate::runtime_matches(&value, ty)))
+                Ok(Value::Bool(crate::runtime_matches(
+                    &value,
+                    ty,
+                    &self.reflection,
+                )))
             }
             noeta_ir::Rvalue::TypeOf { operand, span } => {
                 let v = self.eval_ir_atom(operand, frame)?;
@@ -1432,6 +1439,10 @@ impl Interpreter {
             noeta_ir::Rvalue::FieldsOf { operand, .. } => {
                 let v = self.eval_ir_atom(operand, frame)?;
                 Ok(self.materialize_fields(&v))
+            }
+            noeta_ir::Rvalue::TraitsOf { operand, .. } => {
+                let v = self.eval_ir_atom(operand, frame)?;
+                Ok(self.materialize_traits(&v))
             }
             noeta_ir::Rvalue::FromBytes {
                 blob,
