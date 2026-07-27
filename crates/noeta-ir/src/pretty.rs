@@ -116,7 +116,16 @@ impl Printer<'_> {
                 };
                 self.line(indent, &head);
                 for arm in arms {
-                    self.line(indent + 1, &format!("{} =>", pattern_str(&arm.pattern)));
+                    match &arm.guard {
+                        Some(guard) => {
+                            self.line(indent + 1, &format!("{} if {{", pattern_str(&arm.pattern)));
+                            self.block_body(&guard.block, indent + 2);
+                            self.line(indent + 1, "} =>");
+                        }
+                        None => {
+                            self.line(indent + 1, &format!("{} =>", pattern_str(&arm.pattern)));
+                        }
+                    }
                     self.block_body(&arm.body, indent + 2);
                 }
                 self.line(indent, "}");

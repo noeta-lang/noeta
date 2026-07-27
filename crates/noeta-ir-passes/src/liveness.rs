@@ -64,7 +64,8 @@ pub struct StmtLiveness {
     /// * `If`        → `[then, else?]` (else present only when the `If` has one);
     /// * `While`     → `[cond, body]`;
     /// * `For`       → `[body]`;
-    /// * `Match`     → one per arm, in arm order;
+    /// * `Match`     → per arm, in arm order: the arm's guard block (only when the arm is
+    ///   guarded), then its body;
     /// * `Logical`   → `[right]`;
     /// * `Coalesce`  → `[fallback]`;
     /// * `Decl(Fn)`  → `[body]` (the function body, its own scope);
@@ -258,25 +259,49 @@ fn analyze_stmt(stmt: &Stmt, live: &mut VarSet) -> StmtLiveness {
         } => {
             let live_out = live.clone();
             let mut joined = VarSet::new();
-            let mut sub = Vec::with_capacity(arms.len());
-            for arm in arms {
-                let arm_l = analyze_block(&arm.body, &live_out);
+            // A failed pattern — or a **false guard** — continues at the *next* arm's test, so a
+            // guard's live-out must include every later arm's entry set (a name whose last use
+            // sits in a later arm must survive an earlier guard's evaluation). Walk the arms in
+            // reverse, accumulating the entry sets seen so far; bodies exit the whole `match`, so
+            // they are analyzed against the plain `live_out` as before.
+            let mut fallthrough = live_out.clone();
+            let mut sub_rev: Vec<BlockLiveness> = Vec::with_capacity(arms.len());
+            for arm in arms.iter().rev() {
+                let body_l = analyze_block(&arm.body, &live_out);
                 // Names the arm pattern binds are local to the arm and do not escape it.
                 let bound = pattern_names(&arm.pattern);
-                for name in arm_l.live_in.iter() {
+                let guard_l = arm.guard.as_ref().map(|g| {
+                    // The guard's successors: the arm body (guard true) or the next arm's test
+                    // (guard false, the accumulated `fallthrough`).
+                    let mut g_out = body_l.live_in.clone();
+                    g_out.extend(fallthrough.iter().cloned());
+                    analyze_block(&g.block, &g_out)
+                });
+                let entry = match &guard_l {
+                    Some(g) => &g.live_in,
+                    None => &body_l.live_in,
+                };
+                for name in entry.iter() {
                     if !bound.contains(name) {
                         joined.insert(name.clone());
+                        fallthrough.insert(name.clone());
                     }
                 }
-                sub.push(arm_l);
+                // Reversed per-arm order (body, then guard) so the final reversal below restores
+                // the documented forward order: per arm, guard (when present) then body.
+                sub_rev.push(body_l);
+                if let Some(g) = guard_l {
+                    sub_rev.push(g);
+                }
             }
+            sub_rev.reverse();
             let scrut_uses = atom_uses(scrutinee);
             let dies = deaths(&scrut_uses, &joined);
             *live = joined;
             extend(live, scrut_uses);
             StmtLiveness {
                 dies_here: dies,
-                sub,
+                sub: sub_rev,
             }
         }
         Stmt::Logical { left, right, .. } => {
@@ -451,6 +476,9 @@ fn collect_stmt_vars(stmt: &Stmt, out: &mut VarSet) {
             for arm in arms {
                 for name in pattern_names(&arm.pattern) {
                     out.insert(name);
+                }
+                if let Some(guard) = &arm.guard {
+                    collect_block_vars(&guard.block, out);
                 }
                 collect_block_vars(&arm.body, out);
             }

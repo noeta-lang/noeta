@@ -1,0 +1,10 @@
+// A guarded arm contributes NOTHING to exhaustiveness: the checker cannot prove a guard ever
+// true, so `Ok(x) if x > 0` leaves `Ok` uncovered for when the guard is false — E0011. Adding an
+// unguarded `Ok(_)` (or `_`) arm fixes it.
+// expect: error E0011 at 7:6
+// expect: exit 1
+fn f(): Result<int, string> { return Ok(1); }
+echo match f() {
+    Ok(x) if x > 0 => "pos",
+    Err(_) => "err",
+};

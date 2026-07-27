@@ -1,0 +1,29 @@
+// A guard sees the arm's pattern bindings: `Ok(age) if age >= 18` reads the bound payload.
+// Several guarded arms may share one unguarded arm per variant; the first arm whose pattern AND
+// guard both succeed is taken. The unguarded `Ok(_)` / `Err(e)` arms keep the match exhaustive
+// (guarded arms contribute nothing to coverage).
+// expect: stdout "adult"
+// expect: stdout "teen"
+// expect: stdout "child"
+// expect: stdout "invalid: -3"
+// expect: exit 0
+fn check(n: int): Result<int, string> {
+    if n < 0 {
+        return Err("invalid: ${n}");
+    }
+    return Ok(n);
+}
+
+fn label(n: int): string {
+    return match check(n) {
+        Ok(age) if age >= 18 => "adult",
+        Ok(age) if age >= 13 => "teen",
+        Ok(_) => "child",
+        Err(e) => e,
+    };
+}
+
+echo label(21);
+echo label(15);
+echo label(4);
+echo label(-3);

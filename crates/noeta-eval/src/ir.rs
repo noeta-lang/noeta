@@ -502,6 +502,12 @@ impl Interpreter {
     /// Evaluate an IR `match`: try each arm's pattern in order, bind on the first match, run
     /// that arm's body block in a child scope, and write its value to `dst`. Mirrors
     /// `eval_match`, including the no-arm-matched runtime error.
+    ///
+    /// A guarded arm (`pattern if cond`) evaluates its guard **after** the pattern matches, in
+    /// the arm's child scope (the pattern bindings are visible); a `false` guard abandons the arm
+    /// and falls through to the next one exactly as a failed pattern would. A non-bool guard is
+    /// the same runtime error as a non-bool `if` condition — the VM compiles the guard to the
+    /// identical fused conditional branch (`CondBranch`), so the two backends agree byte for byte.
     fn exec_ir_match(
         &mut self,
         value: Value,
@@ -521,22 +527,42 @@ impl Interpreter {
                 // the enclosing function, a `break`/`continue` the enclosing loop — so the arm
                 // body's flow propagates instead of being a value-position invariant (the VM's
                 // inline codegen gets the same behavior from its jump targets).
-                let result = (|| -> Eval<(Flow, Option<Value>)> {
+                let result = (|| -> Eval<Option<(Flow, Option<Value>)>> {
+                    if let Some(guard) = &arm.guard {
+                        let cond = self.eval_ir_block_value(&guard.block, frame, guard.span)?;
+                        match cond {
+                            Value::Bool(true) => {}
+                            // A false guard: this arm is not taken — fall through.
+                            Value::Bool(false) => return Ok(None),
+                            other => {
+                                return Err(self.runtime_error(
+                                    DiagnosticCode::TypeMismatch,
+                                    guard.span,
+                                    format!(
+                                        "`if` condition must be a bool, found {}",
+                                        other.type_name()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                     match self.exec_ir_stmts(&arm.body.stmts, frame)? {
                         Flow::Normal => {}
-                        flow => return Ok((flow, None)),
+                        flow => return Ok(Some((flow, None))),
                     }
                     let v = match &arm.body.tail {
                         Some(atom) => Some(self.eval_ir_atom(atom, frame)?),
                         None => None,
                     };
-                    Ok((Flow::Normal, v))
+                    Ok(Some((Flow::Normal, v)))
                 })();
                 if matches!(result, Err(Unwind::Abort)) {
                     self.fire_aborted_scope();
                 }
                 self.scope = saved;
-                let (flow, v) = result?;
+                let Some((flow, v)) = result? else {
+                    continue; // guard was false — try the next arm
+                };
                 if !matches!(flow, Flow::Normal) {
                     return Ok(flow);
                 }

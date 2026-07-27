@@ -34,6 +34,26 @@ impl Checker {
             if let (Some(name), Pattern::IsType { ty, .. }) = (scrut_ident, &arm.pattern) {
                 bind(env, name, from_ref_q(ty, &self.imports.extern_types));
             }
+            // The guard (`pattern if cond`) is checked in the arm scope — after the pattern
+            // bindings and any `is`-narrowing above, so `Ok(age) if age >= 18` and
+            // `c is Circle if c.r > 1.0` both resolve. It is a bool position (bidirectional
+            // `check` against `bool`, E0007 on mismatch). It cannot `.await`: the state-machine
+            // lowering cannot suspend between a pattern test and its guard (a hoisted await
+            // would run eagerly, breaking the only-the-taken-arm-evaluates rule).
+            if let Some(guard) = &arm.guard {
+                self.check(guard, &Type::Bool, env);
+                if guard.has_await() {
+                    self.error(
+                        DiagnosticCode::AsyncMisuse,
+                        guard.span(),
+                        "`.await` is not allowed in a `match` guard".to_string(),
+                    )
+                    .help(
+                        "await the value before the `match` and test the result in the guard, \
+                         or move the `.await` into the arm's body",
+                    );
+                }
+            }
             let t = match &arm.body {
                 noeta_ast::ClosureBody::Expr(e) => self.synth(e, env),
                 // A statement-block arm (aether F1): check its statements in the arm scope; the
@@ -68,27 +88,50 @@ impl Checker {
     /// scrutinee's type is a concretely-known enum / `Result` / `Option`. Anything else (an
     /// `int`/`string`/`bool` scrutinee, or a gradual type) has an open or unknown domain and is
     /// left to the runtime backstop — keeping the check free of false positives.
+    ///
+    /// A **guarded** arm (`pattern if cond`) contributes nothing to coverage: the checker cannot
+    /// prove a guard ever true, so its case stays uncovered for when the guard is false. Only
+    /// unguarded arms count below.
     pub(crate) fn check_exhaustive(&mut self, scrut: &Type, arms: &[MatchArm], span: Span) {
-        // A wildcard or bare binding arm catches everything.
+        // A wildcard or bare binding arm catches everything — unless it is guarded.
         if arms.iter().any(|a| {
-            matches!(
-                a.pattern,
-                Pattern::Wildcard { .. } | Pattern::Binding { .. }
-            )
+            a.guard.is_none()
+                && matches!(
+                    a.pattern,
+                    Pattern::Wildcard { .. } | Pattern::Binding { .. }
+                )
         }) {
             return;
         }
+        let guarded = arms.iter().any(|a| a.guard.is_some());
+        let guard_help = |help: &str| {
+            if guarded {
+                format!(
+                    "{help}; a guarded arm (`pattern if cond`) does not count — its case stays \
+                     uncovered when the guard is false"
+                )
+            } else {
+                help.to_string()
+            }
+        };
         // A type-pattern match (`is T` arms): the domain is *types*, not variant names. A union is
         // a closed domain — exhaustive iff every member is covered by some `is` arm; `dyn` is the
         // open top — a finite set of `is` arms can never exhaust it, so it needs a `_`.
         let type_targets: Vec<Type> = arms
             .iter()
             .filter_map(|a| match &a.pattern {
-                Pattern::IsType { ty, .. } => Some(from_ref_q(ty, &self.imports.extern_types)),
+                Pattern::IsType { ty, .. } if a.guard.is_none() => {
+                    Some(from_ref_q(ty, &self.imports.extern_types))
+                }
                 _ => None,
             })
             .collect();
-        if !type_targets.is_empty() {
+        // Any `is` arm (guarded or not) selects the type-domain analysis; only the unguarded
+        // targets collected above count as coverage.
+        let has_is_arms = arms
+            .iter()
+            .any(|a| matches!(&a.pattern, Pattern::IsType { .. }));
+        if has_is_arms {
             let missing: Vec<String> = match scrut {
                 Type::Union(members) => members
                     .iter()
@@ -105,7 +148,9 @@ impl Checker {
                     span,
                     format!("non-exhaustive `match`: missing {}", missing.join(", ")),
                 )
-                .help("add an `is T` arm for each missing type, or a `_` catch-all");
+                .help(guard_help(
+                    "add an `is T` arm for each missing type, or a `_` catch-all",
+                ));
             }
             return;
         }
@@ -121,7 +166,7 @@ impl Checker {
         let covered: HashSet<&str> = arms
             .iter()
             .filter_map(|a| match &a.pattern {
-                Pattern::Variant { variant, .. } => Some(variant.as_str()),
+                Pattern::Variant { variant, .. } if a.guard.is_none() => Some(variant.as_str()),
                 _ => None,
             })
             .collect();
@@ -135,7 +180,9 @@ impl Checker {
                 span,
                 format!("non-exhaustive `match`: missing {}", missing.join(", ")),
             )
-            .help("add an arm for each missing case, or a `_` catch-all");
+            .help(guard_help(
+                "add an arm for each missing case, or a `_` catch-all",
+            ));
         }
     }
 

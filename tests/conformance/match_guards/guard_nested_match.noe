@@ -1,0 +1,19 @@
+// A guard is a full expression: it may itself contain a `match`, and a guarded arm's body may be
+// another `match`. Neither affects the outer match's exhaustiveness (the unguarded `_` covers it).
+// expect: stdout "big even"
+// expect: stdout "big odd"
+// expect: stdout "small"
+// expect: exit 0
+fn shape(n: int): string {
+    return match n {
+        k if match k > 9 { true => true, false => false } => match k % 2 {
+            0 => "big even",
+            _ => "big odd",
+        },
+        _ => "small",
+    };
+}
+
+echo shape(10);
+echo shape(11);
+echo shape(3);

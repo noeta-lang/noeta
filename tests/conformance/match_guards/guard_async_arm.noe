@@ -1,0 +1,32 @@
+// A guard on an arm whose BODY awaits: the async match desugar keeps the (await-free) guard on
+// the Phase-1 selection arm, so pattern + guard still pick the arm — a false guard falls through
+// — and only the selected arm's await runs.
+// expect: stdout "dbl 42"
+// expect: stdout "r1 142"
+// expect: stdout "r2 5"
+// expect: exit 0
+use std.task.{sleep}
+
+async fn dbl(n: int): int {
+    sleep(1).await
+    echo "dbl ${n * 2}"
+    return n * 2
+}
+
+async fn pick(opt: ?int): int {
+    return match opt {
+        some(v) if v > 10 => 100 + dbl(v).await,
+        some(v) => v,
+        none => 0,
+    }
+}
+
+async fn run(): int {
+    a = pick(some(21)).await
+    echo "r1 ${a}"
+    b = pick(some(5)).await
+    echo "r2 ${b}"
+    return a + b
+}
+
+z = run().await

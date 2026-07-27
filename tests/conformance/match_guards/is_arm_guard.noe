@@ -1,0 +1,19 @@
+// Guards compose with `is` arms: the guard runs with the scrutinee identifier narrowed to the
+// arm's type (`is int if x > 9` reads `x` as `int`). Narrowing stays purely pattern-driven — the
+// guard itself narrows nothing. A guarded `is` arm does not count toward the union's closed-domain
+// coverage; the unguarded `is` arms below keep the match exhaustive.
+// expect: stdout "big int 12"
+// expect: stdout "int 3"
+// expect: stdout "len 2"
+// expect: exit 0
+fn describe(x: int | string): string {
+    return match x {
+        is int if x > 9 => "big int ${x}",
+        is int => "int ${x}",
+        is string => "len ${x.len()}",
+    };
+}
+
+echo describe(12);
+echo describe(3);
+echo describe("hi");

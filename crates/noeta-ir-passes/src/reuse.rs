@@ -493,6 +493,10 @@ fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>, bound: &HashSet<String>) -> S
                 .iter()
                 .map(|arm| Arm {
                     pattern: arm.pattern.clone(),
+                    guard: arm.guard.as_ref().map(|g| noeta_ir::Guard {
+                        block: rewrite_block(&g.block, od, bound),
+                        span: g.span,
+                    }),
                     body: rewrite_block(&arm.body, od, bound),
                     span: arm.span,
                 })

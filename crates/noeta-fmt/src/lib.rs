@@ -1302,6 +1302,34 @@ mod tests {
     }
 
     #[test]
+    fn match_guards_round_trip() {
+        // A guarded arm (`pattern if cond => body`) prints back exactly; the safety gate inside
+        // `format_source` proves the guard survives the reparse (a dropped guard would change the
+        // compared AST).
+        let src = "r = match x {\n    Ok(n) if n >= 18 => \"adult\",\n    Ok(_) => \"minor\",\n    Err(e) => e,\n}\n";
+        assert_eq!(fmt(src).unwrap(), src);
+    }
+
+    #[test]
+    fn match_guard_is_part_of_aligned_arrow_column() {
+        // In `match_arm_arrows = "align"` mode the left column is `pattern if guard`, so the
+        // arrows pad past the widest guarded arm.
+        let out = format_source(
+            "test.noe",
+            "r = match x {\n    Ok(n) if n >= 18 => \"adult\",\n    Ok(_) => \"minor\",\n    Err(e) => e,\n}\n",
+            &FmtConfig {
+                match_arm_arrows: ArrowStyle::Align,
+                ..FmtConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "r = match x {\n    Ok(n) if n >= 18 => \"adult\",\n    Ok(_)            => \"minor\",\n    Err(e)           => e,\n}\n"
+        );
+    }
+
+    #[test]
     fn places_leading_trailing_and_dangling_comments() {
         let src = "fn main() {\n    // leading\n    echo 1 // trailing\n    // dangling\n}";
         assert_eq!(

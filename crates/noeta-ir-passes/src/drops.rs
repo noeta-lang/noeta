@@ -410,10 +410,34 @@ fn rewrite_stmt(
             span,
         } => {
             let mut new_arms = Vec::with_capacity(arms.len());
-            for (arm, arm_live) in arms.iter().zip(&sl.sub) {
+            // `sl.sub` holds, per arm in order: the guard block's liveness (only when the arm is
+            // guarded), then the body's — consume it with a cursor rather than a 1:1 zip.
+            let mut subs = sl.sub.iter();
+            for arm in arms {
+                let guard = arm.guard.as_ref().map(|g| noeta_ir::Guard {
+                    block: rewrite_block(
+                        &g.block,
+                        subs.next().expect("a liveness entry per guard block"),
+                        droppable,
+                        owned,
+                        cx,
+                        scopes,
+                        false,
+                    ),
+                    span: g.span,
+                });
                 new_arms.push(Arm {
                     pattern: arm.pattern.clone(),
-                    body: rewrite_block(&arm.body, arm_live, droppable, owned, cx, scopes, false),
+                    guard,
+                    body: rewrite_block(
+                        &arm.body,
+                        subs.next().expect("a liveness entry per arm body"),
+                        droppable,
+                        owned,
+                        cx,
+                        scopes,
+                        false,
+                    ),
                     span: arm.span,
                 });
             }
