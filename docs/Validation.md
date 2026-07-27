@@ -1,9 +1,11 @@
 # Validation
 
 Noeta enforces **data-boundary invariants** with one small vocabulary: the `Validate` trait, its
-automatic enforcement at every typed-decode door, and the `@validated` construction marker. Together
-they let a type guarantee that no value of it is ever ill-formed — whether it is built in code or
-decoded from an untrusted document.
+automatic enforcement at every typed-decode **door** — an entry point like `json.parse::<T>` or
+`from_bytes::<T>` that materializes typed values from raw input (see [Native
+Extensions](Native-Extensions) for the machinery) — and the `@validated` construction marker.
+Together they let a type guarantee that no value of it is ever ill-formed — whether it is built in
+code or decoded from an untrusted document.
 
 ## The `Validate` trait
 
@@ -43,10 +45,14 @@ adopting `Validate` never changes how a value renders. Because `validate()` retu
 composes with `?` — `x.validate()?` short-circuits like any fallible call, converting its error
 through `From` when the enclosing function's error type differs.
 
+Prefer `Validate` over ad-hoc checks in a constructor whenever the type can also arrive through a
+decode door: the invariant is then written once and guards both paths — construction in code and
+untrusted data at the boundary — instead of living only in the constructor a decoder never calls.
+
 ## Automatic enforcement at decode
 
 The point of `Validate` is that it runs **automatically** wherever untrusted data crosses into a typed
-value. When a recipe door materializes a value whose type implements `Validate`, its `validate()` runs
+value. When a decode door materializes a value whose type implements `Validate`, its `validate()` runs
 on the freshly-built value — you never call it by hand at the boundary.
 
 Enforcement is **bottom-up**: a type's fields are decoded and validated before the type's own
@@ -54,22 +60,11 @@ Enforcement is **bottom-up**: a type's fields are decoded and validated before t
 points at the innermost value. A JSON failure is a path-carrying [`JsonError`](std-json)
 reading `field[i]: <message>`.
 
-```noeta
+```noeta ignore
 use std.json
 use std.json.JsonError
 
-struct Port {
-    n: int
-
-    impl Validate {
-        fn validate(): Result<void, string> {
-            if self.n < 1 || self.n > 65535 {
-                return Err("port out of range: ${self.n}")
-            }
-            return Ok()
-        }
-    }
-}
+// … the same `Port` (with its `impl Validate`) as above …
 
 struct Cluster {
     ports: List<Port>
@@ -84,15 +79,17 @@ fn describe(r: Result<Cluster, JsonError>): string {
 
 // The second port is out of range — the error names it exactly.
 echo describe(json.try_parse::<Cluster>("{\"ports\": [{\"n\": 80}, {\"n\": 70000}]}"))
+// ports[1]: port out of range: 70000
 // A well-formed document passes untouched.
 echo describe(json.try_parse::<Cluster>("{\"ports\": [{\"n\": 443}]}"))
+// ok: 1 ports
 ```
 
 Each door decides how a rejection surfaces — the same choice it already makes for a shape mismatch:
 
 | Door | On a validation failure |
 |---|---|
-| `json.parse::<T>(text)` | **Aborts** at the call site (runtime `E0007`), message `json.parse: <path>: <msg>`. |
+| `json.parse::<T>(text)` | **Aborts** at the call site (runtime `E0007`, the general type-mismatch code), message `json.parse: <path>: <msg>`. |
 | `json.try_parse::<T>(text)` | **Recoverable**: `Result.Err(JsonError)` with the path-carrying message. |
 | `json.decode_typed(name, text)` | **Recoverable**: `Result.Err(JsonError)` (the router-facing decode). |
 | `from_bytes::<T>(bytes)` | **Aborts** at `[i]` (runtime `E0007`) — a `@packed` type may `impl Validate`, and each decoded element is checked. |
@@ -104,8 +101,9 @@ A type with no validator pays nothing: the decode walk never re-enters for it.
 Automatic decode-time validation guards the data boundary. To also guarantee that *code* cannot build
 an ill-formed value, mark the type `@validated`. Then literal construction (`T { ... }`, and the
 record-update spread `T { ...base, f: v }`) from **outside** the type's own `impl`/methods is a compile
-error (`E0060`) — a value can only be built through a constructor the type provides, which runs
-`validate()` and returns a `Result`.
+error (`E0060`, the code for a literal that bypasses a `@validated` type's constructors) — a value
+can only be built through a constructor the type provides, which runs `validate()` and returns a
+`Result`.
 
 ```noeta
 @validated

@@ -1,6 +1,6 @@
 # Reactivity
 
-The standard library ships **fine-grained reactivity** — `signal`, `computed`, and `effect` — the same model SolidJS popularized, running server-side. State lives in signals; derivations and side effects declare what they read, and the runtime reruns exactly what a change affects, in a deterministic, glitch-free order. These are ordinary stdlib values (no new keywords), the load-bearing primitive behind the reactive-single-binary story; the transport that carries changes to a browser — the view/diff protocol over the bundled WebSocket server — is covered under [Views](#views--pushing-state-to-a-client) below.
+The standard library ships **fine-grained reactivity** — `signal`, `computed`, and `effect` — the same model SolidJS popularized, running server-side. State lives in signals; derivations and side effects declare what they read, and the runtime reruns exactly what a change affects, in a deterministic, glitch-free order. These are ordinary stdlib values (no new keywords); the transport that carries changes to a browser — the view/diff protocol over the bundled WebSocket server — is covered under [Views](#views--pushing-state-to-a-client) below.
 
 ```noeta
 use std.reactive.{signal, computed, effect}
@@ -114,7 +114,7 @@ effect(fn() { echo "sum is ${plus.get() + times.get()}" })
 base.set(3)       // effect reruns exactly once: "sum is 43" (13 + 30)
 ```
 
-The rerun order is deterministic — ascending creation order within a flush round — so both execution backends produce byte-identical output (the differential oracle checks this on every program).
+The rerun order is deterministic — ascending creation order within a flush round (verified across backends by the [differential oracle](Architecture-and-Pipeline#the-two-backend-differential-oracle)).
 
 ## Batching and coalescing
 
@@ -174,7 +174,29 @@ echo v.diff() ?? "none"  // none — same value, nothing to push
 
 Minimality is enforced twice: the flush records exactly which nodes changed (the set signal plus computeds it transitively dirtied), so `diff()` never inspects untouched bindings; and each candidate's fresh value is compared against the last one pushed, so a write of an equal value — or a recompute that lands on the same result — pushes nothing. Frames are deterministic (name-sorted keys, the `json.stringify` encoding), so a scripted client conversation pins them byte-exactly in tests. The change tracking is pay-for-use: until the first `view()` exists, a hot `set` loop records nothing.
 
-Typically each websocket session creates its own view and sends `snapshot()` on connect and `diff()` after handling each client event — the bundled browser shim (`server.liveview_js()`) applies those frames to the DOM. See [std.http](std-http) and `examples/liveview_counter.noe`.
+Typically each websocket session creates its own view and sends `snapshot()` on connect and `diff()` after handling each client event — the bundled browser shim (`server.liveview_js()`) applies those frames to the DOM. The wiring, as a sketch (the complete runnable version is `examples/liveview_counter.noe`):
+
+```noeta ignore
+// sketch — the session loop of a LiveView server (`noeta serve app.noe`)
+async fn session(sock: Socket) use (count, double): bool {
+    v = view()
+    v.expose("count", count)
+    v.expose("double", double)
+    sock.send(v.snapshot())                  // full state on connect
+    while true {
+        msg = sock.recv().await
+        if msg == none { return true }       // client hung up
+        // …handle the event: count.update(…), count.set(0), …
+        patch = v.diff() ?? ""
+        if patch != "" { sock.send(patch) }  // push only what changed
+    }
+}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/ws" { return server.websocket(session) }
+    return server.response(200, page(), {"content-type": "text/html"})
+}
+```
 
 ## What's next
 

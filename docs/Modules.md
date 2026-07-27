@@ -1,21 +1,43 @@
 # Modules & Visibility
 
-Programs span multiple files. Each file declares a `namespace`, imports with `use`, and exposes only what it marks `pub`.
-
-## Namespaces
-
-A file declares its module path with `namespace`:
+Programs span multiple files. Each file declares a `namespace`, imports with `use`, and exposes only what it marks `pub`. A complete two-file program:
 
 ```noeta
 // models.noe
 namespace App.Models;
 
-pub class User {
+pub struct User {
     pub name: string
     pub id: int
-    fn new(name: string, id: int): User { return User { name: name, id: id } }
+}
+
+pub fn greet(u: User): string {
+    return "hello, ${u.name} (#${u.id})"
 }
 ```
+
+```noeta check
+// main.noe
+namespace App.Main;
+
+use App.Models.{User, greet};
+
+u = User { name: "Ada", id: 7 }
+echo greet(u)
+```
+
+Running the entry file is the whole build step — `noeta run` links every other `.noe` file in the entry's directory automatically:
+
+```console
+$ noeta run main.noe
+hello, Ada (#7)
+```
+
+The sibling scan is flat: files in subdirectories are **not** picked up (a dependency package, by contrast, is walked recursively — see [Using Packages](Using-Packages)). `noeta check`, `build`, and `test` link the same way.
+
+## Namespaces
+
+A file declares its module path with `namespace` — the first statement in the file. The mapping is by **declaration, not path**: the `namespace` line alone names the module, and the filename and directory layout play no part (`models.noe` above could be renamed freely). Each file is one module, and one namespace belongs to one file — two sibling files must not declare the same namespace, since imports resolve a namespace to a single file and the other file's exports would be unreachable.
 
 ## Importing with `use`
 
@@ -53,7 +75,7 @@ r = match s {
 }
 ```
 
-A whole-module import follows the usual aliasing (`use geometry.vec as gv` → `gv.Vec2`) and merges only `pub` declarations. Item imports keep today's precedence: in `use a.b`, an item `b` exported by module `a` wins over a module named `a.b`.
+A whole-module import follows the usual aliasing (`use geometry.vec as gv` → `gv.Vec2`) and merges only `pub` declarations. In `use a.b`, an item `b` exported by module `a` wins over a module named `a.b`.
 
 **Qualified references require an import.** A file's dependency set stays fully readable from its `use` block, so a spelled-out FQN with no import is never a silent implicit import — it is a targeted error carrying the exact line to add:
 
@@ -121,11 +143,7 @@ Field and method visibility inside a type is separate — see [Structs, Classes 
 
 ## How it resolves
 
-When you run an entry file, the loader parses it and its sibling `.noe` modules (each declaring its own `namespace`), resolves the entry's `use` declarations to the real `pub` declarations, and merges everything into one program that runs unchanged. Diagnostics from a merged-in module resolve to *that file's* coordinates.
-
-Qualification happens here, at link time, while each module's namespace and its own imports are still known: every type declaration and every reference to one is rewritten to its qualified identity before the modules are merged. A file with no `namespace` keeps bare names, so single-namespace programs are unchanged.
-
-The module graph is incremental: editing one module recomputes only its dependents (see [Architecture & Pipeline](Architecture-and-Pipeline)).
+The loader parses the entry and its sibling modules, resolves the entry's `use` declarations to the real `pub` declarations (rewriting names to their qualified identities), and merges everything into one program — a diagnostic from a merged-in module still points at that file's own coordinates. The module graph is incremental — editing one module recomputes only its dependents; see [Architecture & Pipeline](Architecture-and-Pipeline) for the pipeline.
 
 ## The standard library
 
