@@ -2319,6 +2319,125 @@ fn function_returning_or_diverging_on_every_path_is_clean() {
     assert!(codes("fn d(n: int): dyn { echo \"hi\" }\n").is_empty());
 }
 
+#[test]
+fn exhaustive_match_whose_arms_all_return_is_a_return() {
+    // `Ok`/`Err` is the whole of `Result` and `some`/`none` the whole of `Option`, so a two-arm
+    // `match` over either is exhaustive: control always enters an arm, and every arm returns.
+    // Blocks never yield values (E0055), so a bailing arm MUST be a block with a `return` — this
+    // is the idiomatic fallible pipeline and needs no unreachable trailing `return`.
+    assert!(
+        codes(
+            "fn f(r: Result<int, string>): int { match r { Ok(v) => { return v }, \
+             Err(_) => { return 0 }, } }\n"
+        )
+        .is_empty()
+    );
+    assert!(
+        codes(
+            "fn g(o: ?int): int { match o { some(v) => { return v }, none => { return 0 }, } }\n"
+        )
+        .is_empty()
+    );
+    // A user enum with every variant covered.
+    assert!(
+        codes(
+            "enum C { A; B }\n\
+             fn f(c: C): int { match c { C.A => { return 1 }, C.B => { return 2 }, } }\n"
+        )
+        .is_empty()
+    );
+    // A `_` catch-all is irrefutable, so even an open `int` domain is exhaustive.
+    assert!(
+        codes("fn f(n: int): int { match n { 1 => { return 1 }, _ => { return 0 }, } }\n")
+            .is_empty()
+    );
+    // An arm that `panic`s diverges just as a returning one does.
+    assert!(
+        codes(
+            "fn f(r: Result<int, string>): int { match r { Ok(v) => { return v }, \
+             Err(_) => { panic(\"no\") }, } }\n"
+        )
+        .is_empty()
+    );
+    // Expression-bodied arms that all diverge.
+    assert!(
+        codes(
+            "fn f(r: Result<int, string>): int { match r { Ok(_) => panic(\"a\"), \
+             Err(_) => panic(\"b\"), } }\n"
+        )
+        .is_empty()
+    );
+    // Nested: a `match` inside a block arm.
+    assert!(
+        codes(
+            "enum C { A; B }\n\
+             fn f(c: C, r: Result<int, string>): int { match c { \
+             C.A => { match r { Ok(v) => { return v }, Err(_) => { return 0 }, } }, \
+             C.B => { return 9 }, } }\n"
+        )
+        .is_empty()
+    );
+    // A `match` in the tail position of an `if` branch: the `if` diverges because both blocks do.
+    assert!(
+        codes(
+            "fn f(b: bool, r: Result<int, string>): int { if b { \
+             match r { Ok(v) => { return v }, Err(_) => { return 0 }, } } else { return 9 } }\n"
+        )
+        .is_empty()
+    );
+    // Inside a `while true`, which never exits normally on its own.
+    assert!(
+        codes(
+            "fn f(r: Result<int, string>): int { while true { \
+             match r { Ok(v) => { return v }, Err(_) => { return 0 }, } } }\n"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn match_that_is_not_provably_exhaustive_still_falls_through_e0048() {
+    // The rule is gated on EXHAUSTIVENESS — the checker's own E0011 judgement, not a second
+    // approximation. Counting a `match` that can fail would let a function fall off its end.
+    //
+    // A guarded arm proves nothing (the guard may be false), so `C.A` stays uncovered: E0011 for
+    // the coverage hole, E0048 for the path it leaves open to the end of the body.
+    assert_eq!(
+        codes(
+            "enum C { A; B }\n\
+             fn f(c: C, hot: bool): int { match c { C.A if hot => { return 1 }, \
+             C.B => { return 2 }, } }\n"
+        ),
+        ["E0011", "E0048"]
+    );
+    // An `int` scrutinee has an open domain and there is no `_`. E0011 stays silent (open domains
+    // are the runtime backstop's job) but the path to the end is real, so E0048 fires.
+    assert_eq!(
+        codes("fn f(n: int): int { match n { 1 => { return 1 }, 2 => { return 2 }, } }\n"),
+        ["E0048"]
+    );
+    // Exhaustive, but one arm falls out of its own block instead of returning.
+    assert_eq!(
+        codes(
+            "enum C { A; B }\n\
+             fn f(c: C): int { match c { C.A => { return 1 }, C.B => { echo \"b\" }, } }\n"
+        ),
+        ["E0048"]
+    );
+    // Exhaustive with expression arms that produce values rather than diverging: the `match` is a
+    // discarded statement, so the body still reaches its end.
+    assert_eq!(
+        codes("fn f(r: Result<int, string>): int { match r { Ok(v) => v, Err(_) => 0, } }\n"),
+        ["E0048"]
+    );
+    // A guarded arm followed by an irrefutable `_` IS total — the `_` covers what the guard
+    // declines — so this one is clean, and the two cases above are not a blanket "guards lose".
+    assert!(
+        codes("fn f(n: int, hot: bool): int { match n { 1 if hot => { return 1 }, _ => { return 0 }, } }\n")
+            .is_empty()
+    );
+}
+
 // --- SessionChecker (session-checker C0/C1): per-entry checking against an accumulated session ---
 
 /// Parse one entry with its own `SourceId` (as the REPL/console assigns them) and check it against

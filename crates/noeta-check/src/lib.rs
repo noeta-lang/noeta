@@ -579,6 +579,10 @@ impl SessionChecker {
         self.checker.coloring.loop_depth = 0;
         self.checker.coloring.current_forwarding.clear();
         self.checker.coloring.index_on_list.clear();
+        // Span-keyed and entry-local: each entry is parsed with its own 0-based offsets, so a
+        // stale entry's exhaustive `match` could otherwise be read as *this* entry's `match` at
+        // the same offsets and wrongly satisfy E0048.
+        self.checker.exhaustive_matches.clear();
     }
 }
 
@@ -1220,6 +1224,18 @@ struct Checker {
     /// all — not checked wrongly, never *visited* — and nothing could have told us. Coverage is now
     /// a thing the checker proves about itself on every run.
     visited_bodies: HashSet<Span>,
+    /// The span of every `match` this run proved **exhaustive** (`MatchCoverage::Total`): its
+    /// unguarded arms cover the scrutinee's whole domain, so control is guaranteed to enter one of
+    /// them. Written by [`Checker::check_exhaustive`] while the `match` is typed, read afterwards
+    /// by the return-flow analysis — a statement-`match` diverges when it is exhaustive *and*
+    /// every arm diverges (`subst::expr_diverges`).
+    ///
+    /// A side table rather than a re-derivation because exhaustiveness needs the scrutinee's
+    /// **type**, which only the typing pass has: `E0048` runs as a walk over the bare AST once the
+    /// body is checked, and a second approximation there could disagree with `E0011` — the exact
+    /// way an unsound "this match always returns" would slip in. Reset per session entry
+    /// (`SessionChecker::reset_scratch`), so a previous entry's spans can never be consulted.
+    exhaustive_matches: HashSet<Span>,
     diags: Vec<Diagnostic>,
 }
 
@@ -2501,7 +2517,9 @@ impl Checker {
         // function would implicitly return `unit` where its signature promised another type, and a
         // caller would silently bind that type to `unit`. (`return`s inside are already checked
         // against the declared type above; this is the complementary "did every path return" check.)
-        if must_return_value && !block_diverges(&decl.body) {
+        // Runs *after* the body is typed, so `exhaustive_matches` already holds this body's
+        // `match` verdicts — an exhaustive `match` whose arms all return counts as returning.
+        if must_return_value && !block_diverges(&decl.body, &self.exhaustive_matches) {
             self.error(
                 DiagnosticCode::MissingReturn,
                 decl.name_span,

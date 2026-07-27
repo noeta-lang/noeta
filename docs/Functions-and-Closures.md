@@ -19,6 +19,28 @@ fn fib(n: int): int {
 
 `return` yields a value. A `void` function may `return;` or simply fall off the end.
 
+### Returning on every path
+
+A non-`void` function must produce its declared type on **every** path — reaching the end of the body without returning is `E0048`. The checker proves a body cannot reach its end from these shapes, nested to any depth:
+
+- a `return`, or a `panic(…)`;
+- an `if`/`else` where *both* blocks do;
+- a `while true { … }` with no `break` targeting it;
+- an **exhaustive** `match` whose every arm does.
+
+The `match` case matters because blocks never yield values in Noeta, so an arm that has to bail out early is written as a block with a `return` in it — which makes an all-returning `match` the ordinary way to write a fallible pipeline, with no unreachable trailing `return` to pad it out:
+
+```noeta
+fn unwrap_or_zero(r: Result<int, string>): int {
+    match r {
+        Ok(v) => { return v },
+        Err(_) => { return 0 },
+    }
+}
+```
+
+"Exhaustive" is the same judgement `E0011` reports on: a `_` (or bare-binding) arm, or an arm for every variant of an enum / `Result` / `Option`. A **guarded** arm (`pattern if cond`) proves nothing — the guard may be false at runtime — so a `match` that relies on one still needs a later irrefutable arm; likewise a `match` over an open domain (an `int` scrutinee, say) needs a `_`. Anything the checker cannot prove exhaustive leaves a path to the end of the body, and `E0048` still fires there.
+
 ## Sealed functions & the `use (…)` capture clause
 
 A named function is **sealed**: its body sees its parameters and the program's *declarations*

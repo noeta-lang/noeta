@@ -143,15 +143,56 @@ impl Checker {
         result
     }
 
-    /// Promote a non-exhaustive `match` to a compile error (`E0011`), but only when the
-    /// scrutinee's type is a concretely-known enum / `Result` / `Option`. Anything else (an
-    /// `int`/`string`/`bool` scrutinee, or a gradual type) has an open or unknown domain and is
-    /// left to the runtime backstop — keeping the check free of false positives.
+    /// Promote a non-exhaustive `match` to a compile error (`E0011`), and record an *exhaustive*
+    /// one in [`Checker::exhaustive_matches`] so the return-flow analysis (`E0048`) can count it.
+    /// The judgement itself lives in [`Self::match_coverage`]; this is only its reporting half.
+    pub(crate) fn check_exhaustive(&mut self, scrut: &Type, arms: &[MatchArm], span: Span) {
+        let (cases, domain) = match self.match_coverage(scrut, arms) {
+            // Control is guaranteed to enter some arm. Remember it by span: the E0048 walk runs
+            // over the bare AST *after* the body is typed and has no scrutinee types of its own,
+            // so this is the only place the answer exists.
+            MatchCoverage::Total => {
+                self.exhaustive_matches.insert(span);
+                return;
+            }
+            // An open or unknown domain — no judgement either way; the runtime `MatchFail`
+            // backstop stands, and E0048 must not count the `match`.
+            MatchCoverage::Unknown => return,
+            MatchCoverage::Missing { cases, domain } => (cases, domain),
+        };
+        // A guarded arm is the usual reason a case looks uncovered, so say so when one is present.
+        let help = if arms.iter().any(|a| a.guard.is_some()) {
+            format!(
+                "{}; a guarded arm (`pattern if cond`) does not count — its case stays \
+                 uncovered when the guard is false",
+                domain.help()
+            )
+        } else {
+            domain.help().to_string()
+        };
+        self.error(
+            DiagnosticCode::NonExhaustiveMatch,
+            span,
+            format!("non-exhaustive `match`: missing {}", cases.join(", ")),
+        )
+        .help(help);
+    }
+
+    /// **The one exhaustiveness judgement.** Whether `arms` cover every value the scrutinee type
+    /// `scrut` admits — answered once and consumed twice: `E0011` reports
+    /// [`MatchCoverage::Missing`], and the `E0048` return-flow analysis counts a
+    /// [`MatchCoverage::Total`] `match` whose arms all diverge as diverging itself.
+    ///
+    /// Only a concretely-known enum / `Result` / `Option` (or a union under `is` arms) has a domain
+    /// the checker can enumerate; anything else (an `int`/`string`/`bool` scrutinee, or a gradual
+    /// type) is [`MatchCoverage::Unknown`] rather than either verdict — keeping E0011 free of false
+    /// positives and E0048 sound in the same stroke.
     ///
     /// A **guarded** arm (`pattern if cond`) contributes nothing to coverage: the checker cannot
     /// prove a guard ever true, so its case stays uncovered for when the guard is false. Only
-    /// unguarded arms count below.
-    pub(crate) fn check_exhaustive(&mut self, scrut: &Type, arms: &[MatchArm], span: Span) {
+    /// unguarded arms count below. (A guarded arm followed by an irrefutable `_` is still total —
+    /// the `_` covers what the guard may decline.)
+    pub(crate) fn match_coverage(&self, scrut: &Type, arms: &[MatchArm]) -> MatchCoverage {
         // A wildcard or bare binding arm catches everything — unless it is guarded.
         if arms.iter().any(|a| {
             a.guard.is_none()
@@ -160,19 +201,8 @@ impl Checker {
                     Pattern::Wildcard { .. } | Pattern::Binding { .. }
                 )
         }) {
-            return;
+            return MatchCoverage::Total;
         }
-        let guarded = arms.iter().any(|a| a.guard.is_some());
-        let guard_help = |help: &str| {
-            if guarded {
-                format!(
-                    "{help}; a guarded arm (`pattern if cond`) does not count — its case stays \
-                     uncovered when the guard is false"
-                )
-            } else {
-                help.to_string()
-            }
-        };
         // A type-pattern match (`is T` arms): the domain is *types*, not variant names. A union is
         // a closed domain — exhaustive iff every member is covered by some `is` arm; `dyn` is the
         // open top — a finite set of `is` arms can never exhaust it, so it needs a `_`.
@@ -191,7 +221,7 @@ impl Checker {
             .iter()
             .any(|a| matches!(&a.pattern, Pattern::IsType { .. }));
         if has_is_arms {
-            let missing: Vec<String> = match scrut {
+            let cases: Vec<String> = match scrut {
                 Type::Union(members) => members
                     .iter()
                     .filter(|m| !type_targets.iter().any(|t| Type::subtype(m, t)))
@@ -199,28 +229,18 @@ impl Checker {
                     .collect(),
                 Type::Dyn => vec!["a `dyn` value (open type domain)".into()],
                 // A concrete or gradual scrutinee with `is` arms is not exhaustiveness-checked.
-                _ => return,
+                _ => return MatchCoverage::Unknown,
             };
-            if !missing.is_empty() {
-                self.error(
-                    DiagnosticCode::NonExhaustiveMatch,
-                    span,
-                    format!("non-exhaustive `match`: missing {}", missing.join(", ")),
-                )
-                .help(guard_help(
-                    "add an `is T` arm for each missing type, or a `_` catch-all",
-                ));
-            }
-            return;
+            return MatchCoverage::from_missing(cases, MatchDomain::Types);
         }
         let all: Vec<String> = match scrut {
             Type::Result(..) => vec!["Ok".into(), "Err".into()],
             Type::Option(..) => vec!["some".into(), "none".into()],
             Type::Named(n, _) => match self.symbols.enums.get(n) {
                 Some(variants) => variants.iter().map(|v| v.name.clone()).collect(),
-                None => return,
+                None => return MatchCoverage::Unknown,
             },
-            _ => return,
+            _ => return MatchCoverage::Unknown,
         };
         let covered: HashSet<&str> = arms
             .iter()
@@ -229,22 +249,61 @@ impl Checker {
                 _ => None,
             })
             .collect();
-        let missing: Vec<String> = all
+        let cases: Vec<String> = all
             .into_iter()
             .filter(|v| !covered.contains(v.as_str()))
             .collect();
-        if !missing.is_empty() {
-            self.error(
-                DiagnosticCode::NonExhaustiveMatch,
-                span,
-                format!("non-exhaustive `match`: missing {}", missing.join(", ")),
-            )
-            .help(guard_help(
-                "add an arm for each missing case, or a `_` catch-all",
-            ));
+        MatchCoverage::from_missing(cases, MatchDomain::Variants)
+    }
+}
+
+/// Which domain a `match`'s arms are being checked against — the shape of the "what is missing"
+/// advice, kept as an enum rather than two loose help strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MatchDomain {
+    /// `is T` type-pattern arms over a union (or the open `dyn` top).
+    Types,
+    /// Enum-variant arms, including `Result`'s `Ok`/`Err` and `Option`'s `some`/`none`.
+    Variants,
+}
+
+impl MatchDomain {
+    fn help(self) -> &'static str {
+        match self {
+            MatchDomain::Types => "add an `is T` arm for each missing type, or a `_` catch-all",
+            MatchDomain::Variants => "add an arm for each missing case, or a `_` catch-all",
         }
     }
+}
 
+/// The checker's verdict on a `match`'s coverage — see [`Checker::match_coverage`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MatchCoverage {
+    /// Every value the scrutinee admits reaches some *unguarded* arm: the `match` cannot fail, so
+    /// control is guaranteed to enter an arm.
+    Total,
+    /// These cases are provably uncovered (`E0011`).
+    Missing {
+        cases: Vec<String>,
+        domain: MatchDomain,
+    },
+    /// The scrutinee's domain is open or not concretely known, so neither verdict is provable.
+    Unknown,
+}
+
+impl MatchCoverage {
+    /// [`MatchCoverage::Total`] for an empty missing-case list, [`MatchCoverage::Missing`]
+    /// otherwise — the one place "nothing missing means exhaustive" is written down.
+    fn from_missing(cases: Vec<String>, domain: MatchDomain) -> MatchCoverage {
+        if cases.is_empty() {
+            MatchCoverage::Total
+        } else {
+            MatchCoverage::Missing { cases, domain }
+        }
+    }
+}
+
+impl Checker {
     // ----- pattern binding -----
 
     pub(crate) fn bind_for_pattern(&mut self, pattern: &ForPattern, iter_ty: &Type, env: &mut Env) {
