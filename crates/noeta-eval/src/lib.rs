@@ -2730,7 +2730,13 @@ impl Interpreter {
             // `MyEnum.try_from(s)` / `MyEnum.from(s)` — construct a payload-free case from its name
             // string (the PHP `tryFrom`/`from` pair). Intercepted before variant construction so the
             // built-in names cannot be shadowed by a same-named variant lookup.
-            if name == "try_from" || name == "from" {
+            //
+            // A **declared** method of that name wins, though: an `impl From<Source>` in the enum's
+            // body hoists a `from` the checker already resolves — for the `?` conversion and for an
+            // explicit `Enum.from(e)` — so routing it to the name-string builtin would type-check
+            // clean and then abort at runtime with "expects a string". The builtin applies only when
+            // the enum declares no such method.
+            if (name == "try_from" || name == "from") && def.method(name).is_none() {
                 return self.enum_from_string(&Rc::clone(def), name, args, span);
             }
             // An associated function `Enum.f(...)` (the unified body, object-model slice 3): resolved
