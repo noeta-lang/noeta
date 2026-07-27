@@ -150,4 +150,4 @@ echo vec.length_all(ps)                 // [5.0, 3.0]     (reduction → f32 lis
 echo vec.add_all(ps, ps)                // a column V3 list, element-wise doubled
 ```
 
-See [Standard-Library Modules](Standard-Library-Modules#vec--quat) for the full `vec`/`quat` surface, and [Performance Techniques](Performance-Techniques) for *why* the column layout beats hand-written SIMD here (LLVM autovectorization).
+See [std.vec](std-vec) and [std.quat](std-quat) for the full `vec`/`quat` surface, and [Performance Techniques](Performance-Techniques) for *why* the column layout beats hand-written SIMD here (LLVM autovectorization).

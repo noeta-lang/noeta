@@ -138,7 +138,7 @@ echo math.sqrt(16.0)
 echo json.stringify([1, 2, 3])
 ```
 
-Unused `std` modules are tree-shaken — you only pay for what you import. The full catalog is on [Standard-Library Modules](Standard-Library-Modules).
+Unused `std` modules are tree-shaken — you only pay for what you import. The full catalog is the [standard library reference](Std).
 
 ## Namespace groups
 
@@ -175,4 +175,4 @@ A single file checked in isolation stays lenient about names its siblings or dep
 ## See also
 
 - [Standard Library](Standard-Library) — the always-available Ring 1 surface (no import needed).
-- [Standard-Library Modules](Standard-Library-Modules) — the `use std.{…}` modules.
+- [Standard library reference](Std) — the generated per-module API pages for `use std.{…}`.

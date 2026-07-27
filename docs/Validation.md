@@ -51,7 +51,7 @@ on the freshly-built value — you never call it by hand at the boundary.
 
 Enforcement is **bottom-up**: a type's fields are decoded and validated before the type's own
 `validate()` runs, so a container only ever validates already-valid fields, and a nested failure
-points at the innermost value. A JSON failure is a path-carrying [`JsonError`](Standard-Library-Modules#json)
+points at the innermost value. A JSON failure is a path-carrying [`JsonError`](std-json)
 reading `field[i]: <message>`.
 
 ```noeta

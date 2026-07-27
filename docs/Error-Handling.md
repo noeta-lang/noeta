@@ -63,7 +63,7 @@ echo match digit("x") {
 }
 ```
 
-`Error` is independent of `Display`: implementing it never changes how the value renders (an `Err(e)` echoes with the payload's ordinary display), and an error type may *also* implement `Display` when its message is the natural rendering. `<E: Error>` works as a generic bound, so helpers can be polymorphic over any error type. The standard library's first implementor is [`JsonError`](Standard-Library-Modules#json), the payload of `json.try_parse::<T>` and `json.decode_typed`.
+`Error` is independent of `Display`: implementing it never changes how the value renders (an `Err(e)` echoes with the payload's ordinary display), and an error type may *also* implement `Display` when its message is the natural rendering. `<E: Error>` works as a generic bound, so helpers can be polymorphic over any error type. The standard library's first implementor is [`JsonError`](std-json), the payload of `json.try_parse::<T>` and `json.decode_typed`.
 
 ### Deriving `Error`
 

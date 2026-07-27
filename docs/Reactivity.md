@@ -153,7 +153,7 @@ Without this, each `outer` run would leave a live child subscribed to `dep`, and
 
 ## Views — pushing state to a client
 
-A `view()` is a named window onto reactive state, built for pushing changes over a wire (the LiveView pattern — see the `http.server` section of [Standard Library Modules](Standard-Library-Modules)). `expose(name, handle)` binds a name to a `Signal`, `Computed`, or `SyncedSignal`; `snapshot()` renders the full state as a JSON frame (and baselines the view); `diff()` renders a frame of **only the bindings whose value changed since** — or `none` when nothing observably changed:
+A `view()` is a named window onto reactive state, built for pushing changes over a wire (the LiveView pattern — see [std.http](std-http)). `expose(name, handle)` binds a name to a `Signal`, `Computed`, or `SyncedSignal`; `snapshot()` renders the full state as a JSON frame (and baselines the view); `diff()` renders a frame of **only the bindings whose value changed since** — or `none` when nothing observably changed:
 
 ```noeta
 use std.reactive.{signal, computed, view}
@@ -174,7 +174,7 @@ echo v.diff() ?? "none"  // none — same value, nothing to push
 
 Minimality is enforced twice: the flush records exactly which nodes changed (the set signal plus computeds it transitively dirtied), so `diff()` never inspects untouched bindings; and each candidate's fresh value is compared against the last one pushed, so a write of an equal value — or a recompute that lands on the same result — pushes nothing. Frames are deterministic (name-sorted keys, the `json.stringify` encoding), so a scripted client conversation pins them byte-exactly in tests. The change tracking is pay-for-use: until the first `view()` exists, a hot `set` loop records nothing.
 
-Typically each websocket session creates its own view and sends `snapshot()` on connect and `diff()` after handling each client event — the bundled browser shim (`server.liveview_js()`) applies those frames to the DOM. See the LiveView section of [Standard Library Modules](Standard-Library-Modules) and `examples/liveview_counter.noe`.
+Typically each websocket session creates its own view and sends `snapshot()` on connect and `diff()` after handling each client event — the bundled browser shim (`server.liveview_js()`) applies those frames to the DOM. See [std.http](std-http) and `examples/liveview_counter.noe`.
 
 ## What's next
 

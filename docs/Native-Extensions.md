@@ -351,7 +351,7 @@ One subtlety worth knowing if you are debugging this path: a turbofish method ca
 ## See also
 
 - [Extension Compatibility](Extension-Compatibility) — the API contract for native package authors: the stable surface, what is not stable, and the pre-1.0 policy.
-- [Standard-Library Modules](Standard-Library-Modules) — the modules registered through this seam.
+- [Standard library reference](Std) — the modules registered through this seam.
 - [Concurrency Internals](Concurrency-Internals) — the `Host` capability's role in the deterministic/real split.
 
 ## Directives that generate code (`ExtDirective::expand`)

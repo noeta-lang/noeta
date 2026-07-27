@@ -95,7 +95,6 @@ The exhaustive reference for syntax, semantics, and the stdlib.
 - [Concurrency](Concurrency)
 - [Reactivity](Reactivity)
 - [Standard Library](Standard-Library)
-- [Standard-Library Modules](Standard-Library-Modules)
 
 ### Concepts & design
 How the implementation actually works — for the curious and the systems-minded. Noeta runs on a

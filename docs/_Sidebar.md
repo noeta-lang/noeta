@@ -36,7 +36,6 @@
 - [Concurrency](Concurrency)
 - [Reactivity](Reactivity)
 - [Standard Library](Standard-Library)
-- [Standard-Library Modules](Standard-Library-Modules)
 
 **Concepts & design**
 - [Architecture & Pipeline](Architecture-and-Pipeline)

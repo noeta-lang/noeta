@@ -1,6 +1,6 @@
 # Standard Library
 
-The always-available surface — strings, lists, maps, sets, options/results, iterators, and integer bit-methods. These need no import. For the `use std.{…}` modules (`math`, `json`, `fs`, …), see [Standard-Library Modules](Standard-Library-Modules).
+The always-available surface — strings, lists, maps, sets, options/results, iterators, and integer bit-methods. These need no import. For the `use std.{…}` modules (`math`, `json`, `fs`, …), see the [standard library reference](Std).
 
 > [!NOTE]
 > **Collections are value-semantic (copy-on-write).** A method like `set`/`add`/`remove` returns a **new** value; the receiver is unchanged. The exceptions — file handles, iterators, and channel endpoints — are *reference* values with a shared mutable cursor. Display forms are deterministic: lists `[1, 2, 3]`, maps `{"a": 1}`, sets `{1, 2, 3}` (sorted, de-duplicated), `some(x)`/`none`, `Ok(x)`/`Err(e)`; whole floats print with one decimal (`2.0`).
@@ -59,7 +59,7 @@ xs[1] = 20             // sugar for  xs = xs.set(1, 20)  (needs a mut binding)
 | `first` | `first() -> ?T` | `[1,2].first()` → `some(1)`; `[].first()` → `none` |
 | `last` | `last() -> ?T` | `[1,2].last()` → `some(2)` |
 | `to_set` | `to_set() -> Set<T>` | `[3,1,2,1].to_set()` → `{1, 2, 3}` |
-| `to_bytes` | `to_bytes() -> bytes` | on a `List<@packed>`, its flat backing buffer (see [packed types](Standard-Library-Modules)) |
+| `to_bytes` | `to_bytes() -> bytes` | on a `List<@packed>`, its flat backing buffer (see [packed types](Fixed-Width-Integers)) |
 | `set` | `set(i: int, v: T) -> List<T>` | `[1,2,3].set(2, 30)` → `[1, 2, 30]` |
 | `len` | `len() -> int` | `[1,2,3].len()` → `3` |
 | `enumerate` | `enumerate() -> List<(int, T)>` | `["a","b"].enumerate()` → `[(0, "a"), (1, "b")]` |

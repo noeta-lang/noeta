@@ -392,7 +392,7 @@ echo math.sqrt(16.0)             // 4.0
 echo json.stringify([1, 2, 3])   // [1,2,3]
 ```
 
-→ [Modules & Visibility](Modules), [Standard-Library Modules](Standard-Library-Modules).
+→ [Modules & Visibility](Modules), the [standard library reference](Std).
 
 ---
 

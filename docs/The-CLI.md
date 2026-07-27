@@ -290,7 +290,7 @@ seed itself at boot off the same engine with `conn.migrate("migrations")` then `
 ## `noeta serve` and `--watch`
 
 `noeta serve app.noe --port 8080` serves the file's top-level `fn fetch(req: Request): Response`
-handler (see the `http.server` section of [Standard Library Modules](Standard-Library-Modules));
+handler (see [std.http](std-http));
 the app defines the handler and must **not** call `server.serve(...)` itself — the command runs
 the file's top-level setup, then drives the handler on the given port. `--host` sets the bind
 address (default `0.0.0.0`, all interfaces; pass `--host 127.0.0.1` for local-only). **Ctrl-C**

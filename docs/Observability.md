@@ -232,5 +232,5 @@ span = tracing.span_from("consume", inbound_traceparent)
 
 - [Concurrency](Concurrency) — `server.serve`, channels, isolates (the boundaries auto-instrumentation traces).
 - [Profiling](Profiling) — the dev-time flamegraph tool (the *other* observability half).
-- [Standard-Library Modules](Standard-Library-Modules#tracing) — the `tracing`/`log`/`metrics` modules in the stdlib reference.
+- [std.tracing](std-tracing), [std.log](std-log), [std.metrics](std-metrics) — the observability modules in the generated stdlib reference.
 - [Native Extensions](Native-Extensions) — the `Tracing`/`Logging`/`Metrics` Host capabilities and the higher-order seam the SDKs dispatch through.
