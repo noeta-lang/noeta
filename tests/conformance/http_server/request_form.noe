@@ -5,6 +5,10 @@
 //
 // The sandbox script's request 6 is `POST /form` with body `title=buy+milk&note=caf%C3%A9`, and
 // request 4 is `GET /users/42?active=true`. Both backends run the identical accept→handle loop.
+// expect: stdout "free title=buy milk fields=2"
+// expect: stdout "decode=a b c"
+// expect: stdout "encode=buy%20milk%20%26%20caf%C3%A9"
+// expect: stdout "roundtrip=café 🦀"
 // expect: stdout "GET / form-fields=0"
 // expect: stdout "GET /health form-fields=0"
 // expect: stdout "POST /echo form-fields=1"
@@ -16,6 +20,16 @@
 // expect: exit 0
 use std.http.server
 use std.http.{Request, Response}
+
+// The codec as free functions, for a caller holding a body string rather than a `Request` — a
+// websocket session delivering a client event, a queue consumer, a test. Without these, every such
+// consumer hand-rolls percent-decoding.
+free = server.parse_form("title=buy+milk&note=caf%C3%A9")
+echo "free title=${free["title"]} fields=${free.len()}"
+echo "decode=${server.url_decode("a%20b+c")}"
+echo "encode=${server.url_encode("buy milk & café")}"
+// `url_encode` is the inverse of `url_decode` over anything it produces, multi-byte included.
+echo "roundtrip=${server.url_decode(server.url_encode("café 🦀"))}"
 
 fn handle(req: Request): Response {
     path = req.path()

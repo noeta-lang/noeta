@@ -1811,6 +1811,28 @@ const HTTP_SERVER_FNS: &[ExtFn] = &[
         params: &[Str, Str],
         ret: Concrete(COOKIE_SIG),
     },
+    // The form/percent codec as free functions, for a caller holding a body string rather than a
+    // `Request` — a websocket session delivering a client event, a queue consumer, a test. Same
+    // parser as `Request.form_all()`; exposing it here is what keeps every consumer from
+    // hand-rolling percent-decoding.
+    ExtFn {
+        param_names: &["body"],
+        name: "parse_form",
+        params: &[Str],
+        ret: Concrete(SigType::Map(&Str, &Str)),
+    },
+    ExtFn {
+        param_names: &["text"],
+        name: "url_decode",
+        params: &[Str],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &["text"],
+        name: "url_encode",
+        params: &[Str],
+        ret: Concrete(Str),
+    },
 ];
 
 /// Read the optional `headers: Map<string, string>` argument at `index`, or an empty list if the
@@ -1887,6 +1909,29 @@ fn http_dispatch(
         return Ok(NativeOut::Extern(crate::ExternBox::new(
             crate::cookie::Cookie::new(name, value)?,
         )));
+    }
+    // The form/percent codec — pure string transforms over the same parser `Request.form_all()`
+    // uses, for callers that hold a body rather than a request.
+    if func == "parse_form" {
+        want_arity(func, args, 1)?;
+        return Ok(NativeOut::Map(
+            crate::net::form_pairs(want_str(func, args, 0)?)
+                .into_iter()
+                .map(|(name, value)| (name, NativeOut::Str(value)))
+                .collect(),
+        ));
+    }
+    if func == "url_decode" {
+        want_arity(func, args, 1)?;
+        return Ok(NativeOut::Str(crate::net::percent_decode(want_str(
+            func, args, 0,
+        )?)));
+    }
+    if func == "url_encode" {
+        want_arity(func, args, 1)?;
+        return Ok(NativeOut::Str(crate::net::percent_encode(want_str(
+            func, args, 0,
+        )?)));
     }
     // The configured-client constructor (http arc H7) — pure, no request performed.
     if func == "new" {
