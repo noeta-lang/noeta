@@ -22,6 +22,9 @@ const {
   ViewColumn,
 } = require("vscode");
 
+/** The language-guide corpus root — `GUIDE_ROOT` in noeta-ide's doc model (ids are `guide/<slug>`). */
+const GUIDE_ROOT = "guide";
+
 /** A little HTML-attribute-safe nonce for the webviews' CSP. */
 function nonce() {
   let text = "";
@@ -215,8 +218,33 @@ class DocsPagePanel {
     this.panel = undefined;
     this.ready = false;
     this.pending = undefined;
+    /** The guide slugs a prose link may target; fetched once — see `guidePageSlugs`. */
+    this.guideSlugs = undefined;
     /** Called when a cross-reference is opened, so the tree can reveal it: (id, sourceUri) => void. */
     this.onNavigate = undefined;
+  }
+
+  /**
+   * The guide pages that exist, so the webview can linkify prose cross-references
+   * (`[Dev Tiers](Dev-Tiers)`) — and only when the target really exists, so a stale link degrades
+   * to plain text instead of opening an empty panel. The corpus is embedded in the server and
+   * workspace-independent, so one fetch per session is enough; a failure means "no page links",
+   * never an error.
+   */
+  async guidePageSlugs() {
+    if (this.guideSlugs) return this.guideSlugs;
+    const client = this.getClient();
+    if (!client) return [];
+    try {
+      const reply = await client.sendRequest("noeta/docsChildren", { uri: "", id: GUIDE_ROOT });
+      this.guideSlugs = ((reply && reply.nodes) || [])
+        .map((n) => String((n && n.id) || ""))
+        .filter((id) => id.startsWith(GUIDE_ROOT + "/"))
+        .map((id) => id.slice(GUIDE_ROOT.length + 1));
+    } catch {
+      this.guideSlugs = [];
+    }
+    return this.guideSlugs;
   }
 
   ensurePanel() {
@@ -267,8 +295,13 @@ class DocsPagePanel {
         this.panel.webview.postMessage({ type: "placeholder", text: "Select a doc to read it here." });
       }
     } else if (msg.type === "navigate") {
-      await this.openById(msg.id, msg.sourceUri);
-      if (this.onNavigate) this.onNavigate(msg.id, msg.sourceUri);
+      // A "see also" xref carries a full doc id; a prose page link carries the guide slug it
+      // pointed at (the webview knows page names, not the doc model's addressing) and, when the
+      // link had a `#fragment`, the heading to land on.
+      const id = msg.id || (msg.page ? `${GUIDE_ROOT}/${msg.page}` : "");
+      if (!id) return;
+      await this.openById(id, msg.sourceUri, undefined, msg.anchor);
+      if (this.onNavigate) this.onNavigate(id, msg.sourceUri);
     } else if (msg.type === "source") {
       const pos = new Position(msg.line, msg.character || 0);
       await commands.executeCommand("vscode.open", Uri.parse(msg.uri), {
@@ -278,8 +311,8 @@ class DocsPagePanel {
     }
   }
 
-  /** Fetch and show the page for a doc id, revealing the panel. */
-  async openById(id, sourceUri, fallbackTitle) {
+  /** Fetch and show the page for a doc id, revealing the panel (optionally at a heading anchor). */
+  async openById(id, sourceUri, fallbackTitle, anchor) {
     const client = this.getClient();
     if (!client) return;
     const panel = this.ensurePanel();
@@ -289,7 +322,8 @@ class DocsPagePanel {
       (reply && reply.page) ||
       { id, title: fallbackTitle || id.split("/").pop(), kind: "section", markdown: "", xrefs: [] };
     const highlights = await fetchHighlights(client, page);
-    const message = { type: "page", page, sourceUri, highlights };
+    const pageSlugs = await this.guidePageSlugs();
+    const message = { type: "page", page, sourceUri, highlights, pageSlugs, anchor };
     if (this.ready) {
       panel.webview.postMessage(message);
     } else {

@@ -121,12 +121,16 @@ fn humanize(slug: &str) -> String {
 }
 
 /// A GitHub-flavored heading anchor: lowercase, spaces → `-`, drop other punctuation.
+///
+/// Underscores are **kept** — GitHub (and the website's rehype-slug) treat `_` as a word
+/// character, so a heading like `` `params_of(name)` `` anchors at `params_ofname`. Dropping it
+/// put every `#…_…` fragment the docs already carry one character off the real target.
 fn github_anchor(heading: &str) -> String {
     heading
         .to_lowercase()
         .chars()
         .filter_map(|c| {
-            if c.is_alphanumeric() {
+            if c.is_alphanumeric() || c == '_' {
                 Some(c)
             } else if c == ' ' || c == '-' {
                 Some('-')
@@ -297,5 +301,16 @@ mod tests {
     #[test]
     fn github_anchor_normalizes_headings() {
         assert_eq!(github_anchor("The `@doc` Tier!"), "the-doc-tier");
+        // `_` is a word character to GitHub's slugger and to the website's — the docs' own
+        // `Attributes-and-Reflection#params_ofname-listparaminfo` link depends on it surviving.
+        assert_eq!(
+            github_anchor("`params_of(name): List<ParamInfo>`"),
+            "params_ofname-listparaminfo"
+        );
+        // Spaces around dropped punctuation each still contribute a dash, as on the website.
+        assert_eq!(
+            github_anchor("Build targets — `noeta.toml`"),
+            "build-targets--noetatoml"
+        );
     }
 }
