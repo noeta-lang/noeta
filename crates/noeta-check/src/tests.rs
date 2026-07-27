@@ -1763,6 +1763,50 @@ fn pipeline_passes_argument_expressions_for_literal_adaptation() {
 }
 
 #[test]
+fn a_label_that_cannot_bind_is_rejected_not_ignored() {
+    // A callee with no parameter names has nothing for a label to name. Every one of these used to
+    // check CLEAN with the label silently discarded, which is the same silent-wrongness that
+    // labelled user calls were fixed for.
+    //
+    // A native module function.
+    assert_eq!(
+        codes("use std.math;\necho math.pow(base: 2.0, exp: 3.0);\n"),
+        ["E0061", "E0061"]
+    );
+    // A built-in method — including a label naming nothing at all.
+    assert_eq!(
+        codes("echo \"abc\".replace(zzz: \"a\", \"b\");\n"),
+        ["E0061"]
+    );
+    assert_eq!(codes("echo [1, 2, 3].map(f: fn(n) => n * 2);\n"), ["E0061"]);
+    // A function VALUE: the closure had parameter names, but `Type::Fn` carries only types, so the
+    // call site cannot see them.
+    assert_eq!(
+        codes("g = fn(a: int, b: int): int => a - b;\necho g(b: 1, a: 10);\n"),
+        ["E0061", "E0061"]
+    );
+    // Through a pipe too — the pipeline reaches the same callees.
+    assert_eq!(
+        codes("use std.math;\necho 2.0 |> math.pow(exp: 3.0);\n"),
+        ["E0061"]
+    );
+}
+
+#[test]
+fn binding_consumes_labels_so_a_bound_call_is_not_rejected() {
+    // The rejection above keys on "a label survived binding", so the callees that DO bind must come
+    // out of `order_arguments` label-free. This is the guard on that: a declared function and
+    // method still accept labels, positionally-out-of-order, skipping a default, and through a pipe.
+    let src = "fn sub(a: int, b: int): int { return a - b; }\n\
+               fn f(a: int, b: int = 2, c: int = 3): int { return a + b + c; }\n\
+               echo sub(b: 1, a: 10);\necho f(1, c: 9);\necho 1 |> sub(a: 10);\n";
+    assert!(codes(src).is_empty());
+    let method = "class Box { pub v: int\n  fn scale(k: int, off: int): int { return self.v * k + off } }\n\
+                  b = Box { v: 3 };\necho b.scale(off: 1, k: 2);\necho 2 |> b.scale(off: 1);\n";
+    assert!(codes(method).is_empty());
+}
+
+#[test]
 fn parameter_default_omitted_at_call_is_clean() {
     // A trailing default makes its argument optional: the call may omit it or supply it.
     let src = "fn greet(name: string, greeting: string = \"Hi\"): string { return greeting ~ name; }\n\

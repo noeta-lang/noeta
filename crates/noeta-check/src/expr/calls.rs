@@ -1574,6 +1574,14 @@ impl Checker {
     /// Check a call's argument count and types against the callable's parameter types, reporting
     /// at `span`. Lenient where either side defers to runtime (`dyn`/hole) and on numeric widening
     /// (`int` where `float` is expected), so polymorphic and numeric calls are not false positives.
+    ///
+    /// **A label that reaches here never bound.** Every callee that *can* honour one resolves its
+    /// binding first, in [`Checker::order_arguments`], which permutes the list into parameter order
+    /// and clears the labels on the way through. So a surviving `name:` means the callee had no
+    /// parameter names to bind it against — a native or built-in function, whose parameters are
+    /// positional — and the only honest answers are to bind it or to refuse it. It used to be
+    /// neither: `math.pow(base: 2.0, exp: 3.0)` ran with both labels discarded, and
+    /// `"abc".replace(zzz: "a", "b")` ran with a label naming nothing at all.
     pub(crate) fn check_args(
         &mut self,
         params: &[Type],
@@ -1583,6 +1591,7 @@ impl Checker {
         span: Span,
         callee: &str,
     ) {
+        self.reject_unbound_labels(arg_exprs, callee);
         if args.len() < required || args.len() > params.len() {
             let expected = if required == params.len() {
                 format!("{}", params.len())

@@ -162,6 +162,38 @@ impl Checker {
 }
 
 impl Checker {
+    /// Reject every label on `args`, for a callee that has no parameter names to bind one against.
+    ///
+    /// Reached from [`Checker::check_args`], after any callee that *can* bind has already consumed
+    /// its labels. Two callees cannot:
+    ///
+    /// - A **native or built-in** function, whose parameters are declared as bare types in the
+    ///   extension registry (`ExtFn::params` is a `&[SigType]`) — there is nothing for `name:` to
+    ///   name.
+    /// - A **function value**, whose [`crate::Type::Fn`] carries parameter types only. The closure
+    ///   it came from had names, but the type it flows through does not, so the call site cannot
+    ///   see them.
+    ///
+    /// Either way a label here could only ever have been ignored, and an ignored label is exactly
+    /// the silent-wrongness this module exists to prevent (see the module docs): `sub(b: 1, a: 10)`
+    /// computing `1 - 10` is the same failure as `math.pow(exp: 3.0, base: 2.0)` computing `3²`.
+    pub(crate) fn reject_unbound_labels(&mut self, args: &[CallArg], callee: &str) {
+        if !CallArg::any_named(args) {
+            return;
+        }
+        for arg in args.iter().filter(|a| a.name.is_some()) {
+            self.error(
+                DiagnosticCode::InvalidArgument,
+                arg.span,
+                format!("`{callee}` does not take named arguments"),
+            )
+            .help(
+                "only functions and methods declared in Noeta carry parameter names for a label \
+                 to bind against; pass these arguments positionally",
+            );
+        }
+    }
+
     /// Normalize a written argument list into **parameter order**, reporting any label that cannot
     /// be honoured, and record the permutation for the backends.
     ///
@@ -242,7 +274,17 @@ impl Checker {
         if !already_positional {
             self.sites.arg_orders.insert(call_span, binding);
         }
-        let ordered: Vec<CallArg> = order.iter().map(|&i| args[i].clone()).collect();
+        // Binding has CONSUMED the labels: the list that comes out is in parameter order, so a
+        // label on it would only be a second, redundant statement of where its value already sits.
+        // Clearing them is what lets [`Checker::check_args`] treat any *surviving* label as proof
+        // that nothing bound it — see the rejection there.
+        let ordered: Vec<CallArg> = order
+            .iter()
+            .map(|&i| CallArg {
+                name: None,
+                ..args[i].clone()
+            })
+            .collect();
         Some((ordered, supplied_params))
     }
 }
