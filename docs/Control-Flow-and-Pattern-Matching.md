@@ -118,9 +118,9 @@ fn label(s: Status): string {
 |---|---|
 | Literal | `0`, `"a"`, `true` |
 | Wildcard | `_` |
-| Binding | `n` (binds the whole value) |
+| Binding | `n` (binds the whole value — matches everything, so it goes last) |
 | Tuple | `(0, 0)`, `(x, y)`, `(1, label, _)`, nested `(n, (s, flag))` |
-| Enum | `Status.Paid`, payload-binding `OrderError.NegativePrice(i)` |
+| Enum | `Status.Paid` (payload-free: **qualify it**), payload-binding `OrderError.NegativePrice(i)` |
 | Option | `some(n)`, `none` |
 | Result | `Ok(v)`, `Err(e)` |
 | Type | `is int`, `is string`, `is Point` (on unions / `dyn`) |
@@ -147,6 +147,40 @@ echo match parse_age("42") {
     Err(e) => e,
 }                              // age 42
 ```
+
+### A payload-free variant must be written qualified
+
+A bare identifier pattern always **binds**: it names the whole scrutinee and matches every value. A payload-carrying variant is call-shaped (`Type.List(inner)`, `some(x)`, `Ok(v)`) and so can never be confused with one — but a **payload-free** variant spelled bare looks exactly like a binding, and is read as one. Write it qualified:
+
+```noeta
+enum Kind { Text; Number }
+
+fn describe(k: Kind): string {
+    return match k {
+        Kind.Text   => "text",        // qualified — matches only this case
+        Kind.Number => "number",
+    }
+}
+echo describe(Kind.Number)            // number
+```
+
+Writing `Text => "text"` instead is **E0067**: that arm binds `Text` to the whole value, answers `"text"` for *every* case, and leaves every arm below it dead. The checker reports it on the arm and names the spelling you meant (`Kind.Text`) — including on a lone first arm, where nothing is unreachable yet but the bug is already there.
+
+### Arm order — an arm after a catch-all is dead (E0066)
+
+An unguarded `_` or bare-identifier arm matches every value, so any arm written after it can never run. That is **E0066**, an error: the arm is dead code no author intends, and (unlike an always-false type test) nothing in the source shows it. Put the catch-all last.
+
+```noeta error
+fn rank(n: int): string {
+    return match n {
+        _ => "many",
+        1 => "one",      // E0066: unreachable — the `_` above matches everything
+    }
+}
+echo rank(1)
+```
+
+A **guarded** arm (`pattern if cond`) is not a catch-all — the checker cannot prove a guard ever true — so arms after it stay reachable. One prelude pattern is worth knowing about here: `none` is a bare binding like any other, so a `none` arm must come *after* the `some(…)` arm it pairs with, never before it.
 
 ### Guards
 

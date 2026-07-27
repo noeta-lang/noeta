@@ -26,7 +26,8 @@ fn launder(v: dyn): dyn { return v; }
 fn present(o: dyn): bool {
     return match o {
         some(_) => true,
-        none => false,
+        // A bare `none` pattern is a binding — it matches every value, so it and the `_` below
+        // cannot both be arms (the second is unreachable, E0066). `_` covers both non-`some` cases.
         _ => false,
     };
 }

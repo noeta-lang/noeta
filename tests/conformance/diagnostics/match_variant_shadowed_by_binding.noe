@@ -1,0 +1,40 @@
+// A payload-free enum variant written BARE in a pattern is a *binding*, not the variant: it matches
+// every value, so `String => …` on a `Type` scrutinee answers "string" for every case and silently
+// kills every arm below it. Nothing in the source looks wrong — a payload-carrying variant
+// (`Type.List(inner)`) is call-shaped and needs no qualification, so the author has no cue that the
+// payload-free one does. E0067 names the arm and the spelling it meant (`Type.String`); E0066 then
+// reports each arm the catch-all swallowed, so the whole class is caught at the first wrong arm
+// rather than at a wrong value far downstream.
+//
+// The hint stands on its own: `lone` has only ONE arm, so nothing is unreachable and E0066 is
+// silent — but a bare `String` arm on a `Type` scrutinee is already the bug, and E0067 says so.
+// expect: error E0067 at 26:9
+// expect: error E0066 at 27:9
+// expect: error E0066 at 28:9
+// expect: error E0066 at 29:9
+// expect: error E0067 at 35:9
+// expect: exit 1
+enum Type {
+    String;
+    Int;
+    Bool;
+    List(inner: string);
+}
+
+fn describe(ty: Type): string {
+    return match ty {
+        String => "string",
+        Int => "int",
+        Bool => "bool",
+        _ => "other",
+    }
+}
+
+fn lone(ty: Type): string {
+    return match ty {
+        String => "string",
+    }
+}
+
+echo describe(Type.Int)
+echo lone(Type.Bool)

@@ -323,6 +323,29 @@ pub enum DiagnosticCode {
     /// (`x is Enum` is genuinely **true** for both containers — they are enums at runtime), or is
     /// a bare type parameter (erased; it may instantiate to the container itself).
     ImpossibleTypeTest,
+    /// A `match` arm that can never run: an earlier **unguarded irrefutable** arm — a `_` wildcard or
+    /// a bare-identifier binding — already matches every value, so control never reaches this one.
+    /// Decidable from the arm list alone, with no type information.
+    ///
+    /// An error rather than a warning, because unlike the always-false type tests
+    /// ([`Self::ErasedWidthNarrow`], [`Self::ImpossibleTypeTest`] — where the *reader* can still see
+    /// which branch is dead) this arm's death is invisible in the source: the catch-all that killed
+    /// it is spelled exactly like the variant patterns around it. The author who wrote
+    /// `String => …, Int => …` on an enum scrutinee gets `"string"` for every value and nothing in
+    /// the text looks wrong. Dead code the author did not intend is never the intent, so it is
+    /// rejected outright — move the catch-all last, or delete the unreachable arm.
+    UnreachableMatchArm,
+    /// A bare-identifier `match` pattern whose name is a **payload-free variant** of the scrutinee's
+    /// own enum — `String => …` where the scrutinee is a `Type` declaring `String;`. Pattern
+    /// resolution is deliberately uniform: a bare identifier always *binds*, so this arm matches
+    /// every value instead of the variant the name so plainly reads as.
+    ///
+    /// A payload-carrying variant is call-shaped (`Type.List(inner)`, `some(x)`) and therefore
+    /// unambiguous; only the payload-free case collides with the binding form, and only there is the
+    /// qualified spelling (`Type.String`) mandatory. Reported even on the *first* arm, where nothing
+    /// is yet unreachable — a lone `String => …` on a `Type` scrutinee is already the whole bug.
+    /// Its sibling [`Self::UnreachableMatchArm`] covers the arms such a pattern silently swallows.
+    VariantShadowedByBinding,
 }
 
 impl DiagnosticCode {
@@ -394,6 +417,8 @@ impl DiagnosticCode {
         DiagnosticCode::ErasedWidthNarrow,
         DiagnosticCode::InvalidStringEscape,
         DiagnosticCode::ImpossibleTypeTest,
+        DiagnosticCode::UnreachableMatchArm,
+        DiagnosticCode::VariantShadowedByBinding,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -465,6 +490,8 @@ impl DiagnosticCode {
             DiagnosticCode::ErasedWidthNarrow => "E0063",
             DiagnosticCode::InvalidStringEscape => "E0064",
             DiagnosticCode::ImpossibleTypeTest => "E0065",
+            DiagnosticCode::UnreachableMatchArm => "E0066",
+            DiagnosticCode::VariantShadowedByBinding => "E0067",
         }
     }
 
@@ -560,6 +587,14 @@ impl Diagnostic {
     /// the diagnostic is already owned by a buffer (e.g. `checker.error(...).help(...)`).
     pub fn help(&mut self, help: impl Into<String>) -> &mut Diagnostic {
         self.help = Some(help.into());
+        self
+    }
+
+    /// Attach a secondary label **in place**, returning `&mut Self` for chaining. The `&mut`
+    /// counterpart of [`with_label`](Diagnostic::with_label), for the same push-then-annotate
+    /// pattern [`help`](Diagnostic::help) serves.
+    pub fn label(&mut self, span: Span, message: impl Into<String>) -> &mut Diagnostic {
+        self.labels.push(Label::new(span, message));
         self
     }
 }

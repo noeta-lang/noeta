@@ -26,9 +26,11 @@ svc_kind = match ps[0].type {
 echo "svc -> ${svc_kind}"
 
 // A bare `dyn` parameter stays `Type.Dyn` (no bound to recover).
+// `Type.Dyn` must be written qualified: a payload-free variant spelled bare is a *binding* that
+// matches every value (E0067), which would have made the `_` arm below unreachable.
 raw_kind = match ps[1].type {
     DynTrait(n) => "trait-${n}",
-    Dyn => "plain-dyn",
+    Type.Dyn => "plain-dyn",
     _ => "other",
 }
 echo "raw -> ${raw_kind}"

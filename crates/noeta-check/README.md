@@ -16,6 +16,8 @@ Every expression gets an inferred `Type`. Signatures are **required at named bou
 ## What it checks (M1.7)
 
 - **Exhaustive `match`** (`E0011`) — a concretely-typed enum / `Result` / `Option` scrutinee missing a variant with no catch-all (promotes M1.5's runtime non-exhaustive error). A **guarded** arm (`pattern if cond`) contributes nothing to coverage — the checker cannot prove a guard ever true — and the guard itself is checked as a `bool` position with the arm's pattern bindings in scope.
+- **Unreachable `match` arm** (`E0066`) — an arm after an unguarded *irrefutable* one (a `_` wildcard or a bare-identifier binding, both of which compile to no test at all). Decidable from the arm list alone, and an error rather than advice: the arm is dead code the author did not intend, and unlike an always-false type test nothing in the source reveals it.
+- **Variant shadowed by a binding** (`E0067`) — a bare-identifier pattern whose name is a **payload-free** variant of the scrutinee's own enum (`String => …` on a `Type` that declares `String;`). Pattern resolution stays uniform — a bare identifier always binds — so the arm matches every value; the diagnostic names the qualified spelling (`Type.String`) that was meant. A payload-carrying variant is call-shaped and therefore never ambiguous, and `Option`/`Result` are exempt (`none` *is* the correct bare spelling). Reported on the first such arm too, where nothing is unreachable yet.
 - **`?` on a non-fallible value** (`E0012`) — `expr?` where `expr` is statically neither `Result` nor `Option`.
 - **Arithmetic type mismatch** (`E0007`) — `+ - * / %` on a concretely non-numeric operand, reusing the runtime `TypeMismatch` code at the same span.
 
