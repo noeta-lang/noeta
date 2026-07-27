@@ -5,12 +5,8 @@
 use crate::*;
 
 impl Checker {
-    /// Type a `match`. `value_used` is `true` when the match stands in value position (its result
-    /// is consumed — a binding RHS, an argument, an operand, a `return`), and `false` only when it
-    /// is the whole of an expression statement (its value discarded). Block-bodied arms (aether F1)
-    /// produce no value — blocks are statement sequences in Noeta — so in value position they are a
-    /// hard error (E0059) rather than silently contributing `unit`; in statement position they are
-    /// the intended side-effect form.
+    /// Type a `match` in *synthesis* position — no expectation reaches the arms, so each arm body
+    /// synthesizes on its own. See [`Self::match_type`] for the full rule.
     pub(crate) fn synth_match(
         &mut self,
         scrutinee: &Expr,
@@ -18,6 +14,33 @@ impl Checker {
         span: Span,
         env: &mut Env,
         value_used: bool,
+    ) -> Type {
+        self.match_type(scrutinee, arms, span, env, value_used, None)
+    }
+
+    /// Type a `match`. `value_used` is `true` when the match stands in value position (its result
+    /// is consumed — a binding RHS, an argument, an operand, a `return`), and `false` only when it
+    /// is the whole of an expression statement (its value discarded). Block-bodied arms (aether F1)
+    /// produce no value — blocks are statement sequences in Noeta — so in value position they are a
+    /// hard error (E0055) rather than silently contributing `unit`; in statement position they are
+    /// the intended side-effect form.
+    ///
+    /// `expected` carries the *bidirectional expectation* the whole `match` was checked against, and
+    /// is threaded into every arm body so an arm is checked against exactly the type the expression
+    /// as a whole is. That is what lets an absorbing literal — a mixed `Map<string, dyn>`, an empty
+    /// `{}`/`[]`, a `.{ … }` — appear directly in an arm instead of having to be lifted into its own
+    /// annotated binding or function. `if c then a else b` desugars to a `match` in the parser, so
+    /// its branches ride the same path. `None` is a genuinely open position (a statement-position
+    /// `match`, or one whose context supplies no type), where every arm synthesizes exactly as
+    /// before.
+    pub(crate) fn match_type(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        span: Span,
+        env: &mut Env,
+        value_used: bool,
+        expected: Option<&Type>,
     ) -> Type {
         let scrut = self.synth(scrutinee, env);
         self.check_exhaustive(&scrut, arms, span);
@@ -84,10 +107,17 @@ impl Checker {
                 }
             }
             let t = match &arm.body {
-                noeta_ast::ClosureBody::Expr(e) => self.synth(e, env),
+                // The arm body inherits the whole `match`'s expectation, so a form that can only be
+                // typed *against* one (a heterogeneous map, an empty collection, `.{ … }`, a bare
+                // numeric literal narrowing to a fixed width) works in an arm exactly as it does
+                // after a `return`. Without an expectation this is plain synthesis.
+                noeta_ast::ClosureBody::Expr(e) => match expected {
+                    Some(exp) => self.check(e, exp, env),
+                    None => self.synth(e, env),
+                },
                 // A statement-block arm (aether F1): check its statements in the arm scope; the
                 // arm's value is `unit`. In value position that is a silent value loss — blocks
-                // never produce values — so reject it (E0059).
+                // never produce values — so reject it (E0055).
                 noeta_ast::ClosureBody::Block(stmts) => {
                     if value_used {
                         self.error(

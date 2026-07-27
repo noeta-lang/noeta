@@ -355,6 +355,32 @@ impl Checker {
                     ret: Box::new(declared.unwrap_or(body_ty)),
                 }
             }
+            // A `match` in a checked position pushes the expectation THROUGH into every arm, so an
+            // arm is checked against exactly the type the whole expression is. Without this the
+            // expectation stopped at the `match` and each arm synthesized blind, so a form that can
+            // only be typed against an expectation — a mixed `{"type": "array", "n": 1}` against
+            // `Map<string, dyn>`, an empty `{}`/`[]`, a `.{ … }` — worked after `return` but not
+            // inside a `match` arm, forcing the author to lift each arm into its own function purely
+            // so the literal had a return type to read.
+            //
+            // `if c then a else b` is parsed as a desugared `match`, so both of its branches ride
+            // this same arm.
+            //
+            // Guarded on a *real* expectation: `Unknown`/`Dyn` is an open position with nothing to
+            // push (the sibling absorbing arms guard identically), and a statement-position `match`
+            // never reaches `check` at all — it routes through `synth_match` with `value_used`
+            // false — so neither behavior changes.
+            Expr::Match {
+                scrutinee,
+                arms,
+                span,
+            } if !matches!(expected, Type::Unknown | Type::Dyn) => {
+                // No outer `subsume` here, deliberately: every arm was just checked against this
+                // same expectation, so a mismatching arm has already reported at ITS span. Re-testing
+                // the joined result would only report the identical mismatch a second time, on the
+                // whole `match` — the exact double-diagnostic the arm-level span is meant to replace.
+                self.match_type(scrutinee, arms, *span, env, true, Some(expected))
+            }
             // A bare numeric literal adapts into a fixed-width context — `x: u8 = 200`, `y: i8 = -5`,
             // `z: f32 = 1.5`, `w: f64 = 1.5` (P-NUM-SYM). Shared with call-argument checking via
             // `try_adapt_literal`; a non-adapting pair falls through to synthesize-and-check.

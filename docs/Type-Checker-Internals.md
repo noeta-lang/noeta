@@ -23,6 +23,25 @@ y = weight(n)    // checking: the argument `n` is checked DOWN against the param
                  // the call then synthesizes float, which flows up into y
 ```
 
+### How far the expectation travels
+
+An expectation is only useful where it *reaches*, and some literal forms have no meaning without one: a heterogeneous `{"type": "array", "n": 1}` is a `Map<string, dyn>` or a type error, an empty `{}`/`[]` has no element type of its own, and a target-typed `.{ … }` has no name at all. So the checking mode pushes the expectation through the forms that merely *choose* between values rather than producing one:
+
+```noe
+fn schema(x: int): Map<string, dyn> {
+    return match x {                              // the return type reaches BOTH arms…
+        1 => {"type": "array", "n": 1},           // …so the mixed literal is a Map<string, dyn>
+        _ => {},                                  // …and the empty one adopts the same type
+    }
+}
+
+fn schema2(x: int): Map<string, dyn> {
+    return if x == 1 then {"type": "array"} else {}   // an `if…then…else` is a desugared `match`
+}
+```
+
+Because the arm is checked against the whole expression's expected type, a mismatching arm reports **on that arm**, not on the `match`. An arm in a position with no expectation — a statement-position `match`, whose value is discarded — synthesizes exactly as it always did.
+
 ## The type lattice
 
 `noeta-types` is the pure-data `Type` lattice: `Int`/`Float`/`Bool`/`String`/`Unit`, `List`/`Map`/`Option`/`Result`, `Named`, `Fn`, unions, and the top `Unknown`. (The Hindley–Milner inference-variable slot was removed once the engine settled on bidirectional-with-subtyping.) `Type::from_ref` structurally desugars surface annotations (including `?T → Option<T>`); predicates like `is_numeric`/`is_gradual` are what the checks key off.

@@ -3215,3 +3215,150 @@ fn ordinary_cross_type_equality_is_still_unflagged() {
     // "these types can never be equal" analysis, which `==`'s universality does not support.
     assert!(codes("fn f(n: int, s: string): bool { return n == s; }\n").is_empty());
 }
+
+// ----- Expectation propagation into `match` arms / `if…then…else` branches -----
+//
+// The bidirectional expectation a `match` expression is checked against now reaches its ARMS. It
+// used to stop at the `match`, so every arm synthesized blind and a form that can only be typed
+// against an expectation — a heterogeneous `Map<string, dyn>`, an empty `{}`/`[]`, a `.{ … }`, a
+// bare numeric literal narrowing to a fixed width — worked after a bare `return` but not inside an
+// arm. `if c then a else b` desugars to a `match`, so its branches ride the same path.
+
+/// Parse `text` and return `(code, span)` for every checker diagnostic, in order.
+fn coded_spans(text: &str) -> Vec<(String, noeta_span::Span)> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "test program must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    check(&parsed.program)
+        .iter()
+        .map(|d| (d.code.to_string(), d.span))
+        .collect()
+}
+
+#[test]
+fn return_position_mixed_map_literal_is_clean() {
+    // The baseline the arms below have to match: a `return` already supplies the expectation.
+    let src = "fn f(): Map<string, dyn> { return {\"type\": \"array\", \"n\": 1}; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn match_arm_absorbs_the_expected_map_value_type() {
+    let src = "fn f(x: int): Map<string, dyn> {\n\
+               \x20   return match x { 1 => {\"type\": \"array\", \"n\": 1}, _ => {\"t\": \"x\"} };\n\
+               }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn if_then_else_branches_absorb_the_expected_map_value_type() {
+    let src = "fn f(x: int): Map<string, dyn> {\n\
+               \x20   return if x == 1 then {\"type\": \"array\", \"n\": 1} else {\"t\": \"x\"};\n\
+               }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn an_empty_map_arm_absorbs_the_expected_map_type() {
+    // The originating repro: the mixed arm needs the expectation to be a `Map<string, dyn>` and the
+    // empty arm needs it to be a map at all.
+    let src = "fn f(x: int): Map<string, dyn> {\n\
+               \x20   return match x { 1 => {\"type\": \"array\", \"n\": 1}, _ => {} };\n\
+               }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn an_empty_map_branch_of_an_if_then_else_absorbs_the_expected_map_type() {
+    let src = "fn f(x: int): Map<string, dyn> {\n\
+               \x20   return if x == 1 then {\"type\": \"array\", \"n\": 1} else {};\n\
+               }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn match_arm_absorbs_the_expected_list_element_type() {
+    let src = "fn f(x: int): List<dyn> { return match x { 1 => [1, \"two\", true], _ => [] }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn match_arm_absorbs_a_fixed_width_numeric_literal() {
+    // `try_adapt_literal` is reached through `check`, so it only fires once the arm has an
+    // expectation — before, `200` synthesized as `int` and failed to subsume into `u8`.
+    let src = "fn f(x: int): u8 { return match x { 1 => 200, _ => 0 }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn match_arm_absorbs_a_target_typed_struct_literal() {
+    let src = "struct Point { x: int; y: int }\n\
+               fn f(k: int): Point { return match k { 1 => .{ x: 1, y: 2 }, _ => .{ x: 0, y: 0 } }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn if_then_else_branches_absorb_a_target_typed_struct_literal() {
+    let src = "struct Point { x: int; y: int }\n\
+               fn f(b: bool): Point { return if b then .{ x: 1, y: 2 } else .{ x: 0, y: 0 }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn match_arm_absorbs_an_expected_option() {
+    // `none` and `some(…)` absorb their expected `Option<T>` in an arm exactly as at a `return`.
+    let src = "fn f(x: int): ?int { return match x { 1 => some(1), _ => none }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn an_ill_typed_match_arm_still_reports_on_the_arm() {
+    // The expectation makes the arm the *reporting* site: E0007 lands on the offending arm body,
+    // not on the whole `match`.
+    let src = "fn f(x: int): Map<string, int> { return match x { 1 => {\"a\": 1}, _ => 5 }; }\n";
+    let diags = coded_spans(src);
+    assert_eq!(
+        diags.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(),
+        ["E0007"],
+        "{diags:?}"
+    );
+    let (_, span) = &diags[0];
+    let text = &src[span.start as usize..span.end as usize];
+    assert_eq!(
+        text, "5",
+        "the diagnostic must point at the arm body, got {text:?}"
+    );
+}
+
+#[test]
+fn a_statement_position_match_still_synthesizes_its_arms() {
+    // No expectation exists there, so nothing changes: a heterogeneous map literal in a
+    // statement-position arm is the same E0007 it always was, reported by map synthesis.
+    let src = "fn f(x: int): void {\n\
+               \x20   match x { 1 => {\"a\": 1, \"b\": \"two\"}, _ => {\"a\": 2} };\n\
+               }\n";
+    assert_eq!(codes(src), ["E0007"], "{:?}", codes(src));
+}
+
+#[test]
+fn a_block_bodied_arm_in_a_checked_position_is_still_not_a_value() {
+    // Value position is unchanged by the expectation: a block arm produces no value (E0055), and it
+    // is the ONLY diagnostic — the expectation is not additionally re-tested against the arm's
+    // `unit`, which would bury the real message under a spurious E0007.
+    let src = "fn f(x: int): int { return match x { 1 => { echo 1; }, _ => 0 }; }\n";
+    assert_eq!(codes(src), ["E0055"], "{:?}", codes(src));
+}
+
+#[test]
+fn an_open_expectation_leaves_match_arms_synthesizing() {
+    // `dyn` is an open position with nothing to push down, so a mixed map in an arm is still the
+    // synthesis-position error — the guard on the new arm keeps `Unknown`/`dyn` behavior identical.
+    let src = "fn f(x: int): dyn { return match x { 1 => {\"a\": 1, \"b\": \"two\"}, _ => 0 }; }\n";
+    assert_eq!(codes(src), ["E0007"], "{:?}", codes(src));
+}
