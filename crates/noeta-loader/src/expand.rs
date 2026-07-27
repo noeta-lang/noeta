@@ -87,7 +87,7 @@ pub struct Expanded {
 /// contract — an `expand` hook only ever sees an invocation that was legal.
 pub fn expand_program(
     program: &mut Program,
-    source_maps: &std::collections::HashMap<SourceId, crate::qualify::QMap>,
+    source_maps: &std::collections::HashMap<SourceId, crate::qualify::UnitMap>,
     sources: &[Source],
     next_id: u32,
     edition: noeta_lexer::Edition,
@@ -253,7 +253,7 @@ fn run_one(
     edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
     sources: &[Source],
-    map: Option<&crate::qualify::QMap>,
+    map: Option<&crate::qualify::UnitMap>,
 ) -> (Vec<String>, Result<Done, Box<LoadDiagnostic>>) {
     // Boxed: a `LoadDiagnostic` carries a whole `Source`, so an unboxed `Err` would make every
     // successful expansion pay for the failure case.

@@ -2209,25 +2209,28 @@ impl<'m> FnCompiler<'m> {
                     // resolved this import against, so binding can never diverge from checking.
                     match self.module.registry.classify_use(path, &imported.name) {
                         noeta_ext_abi::registry::UseKind::Module(qualified) => {
-                            // The bound global keeps the imported name (the last segment); the
-                            // module *value* carries the root-qualified identity so its member
-                            // calls dispatch to the right module (`std.http.client` ≠ a
+                            // The bound global is the import's **local** binding — the alias when
+                            // written (`use std.http.url as u`), else the imported name. That is
+                            // the name the checker bound and the name the linker α-renamed a
+                            // merged unit's references to, so binding and reference are one
+                            // decision. The module *value* carries the root-qualified identity so
+                            // its member calls dispatch to the right module (`std.http.client` ≠ a
                             // third-party `guzzle.http.client`).
                             let value = self.alloc_reg();
                             let k = self.add_const(Const::NativeModule(qualified));
                             self.code.push(Op::LoadConst { dst: value, k });
-                            let global = self.module.intern_global(&imported.name);
+                            let global = self.module.intern_global(imported.local());
                             self.code.push(Op::StoreGlobal { global, src: value });
                         }
                         noeta_ext_abi::registry::UseKind::MemberFn { module, func } => {
-                            // `use std.math.sqrt` — bind `sqrt` to a `(std.math, sqrt)`
-                            // module-function value. An unknown member is left unbound (the
+                            // `use std.math.sqrt` — bind `sqrt` (or its alias) to a `(std.math,
+                            // sqrt)` module-function value. An unknown member is left unbound (the
                             // checker reports it); a bare call then raises E0005 like any
                             // missing name.
                             let value = self.alloc_reg();
                             let k = self.add_const(Const::ModuleFn { module, func });
                             self.code.push(Op::LoadConst { dst: value, k });
-                            let global = self.module.intern_global(&imported.name);
+                            let global = self.module.intern_global(imported.local());
                             self.code.push(Op::StoreGlobal { global, src: value });
                         }
                         _ => {}

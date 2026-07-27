@@ -20,6 +20,15 @@ use App.Billing.{Invoice, Receipt};
 
 Linking is purely additive. A `use` that **no** loaded module provides is left in place, so the runtime falls back to its M0 *opaque-stub* behavior (an imported name with an unknown shape that literals still construct). A single file with no sibling modules therefore links to exactly itself, and the whole existing single-file corpus is unaffected — real resolution lights up only when a sibling module actually provides the imported name, in which case the `use` is trimmed (so no duplicate opaque stub shadows the real declaration).
 
+## One flat scope, so file-scoped names are renamed into it
+
+The merged program has **one global scope**, and that scope is the *entry's*: its own short names are already the program's. Every other unit's file-scoped names are therefore rewritten into it, in both namespaces a file binds:
+
+- **Types and declarations** take their qualified identity (`User` → `App.Models.User`), through a module's `UnitMap::names`.
+- **Native `use` handles** — the value bindings `use std.http.url` (`url`), `use std.{json}` (`json`), `use std.http.url.{decode}` (`decode`) create — take the import's **canonical identity** (`std.http.url`, `std.json`, `std.http.url.decode`), through `UnitMap::handles`. The retained `use` is aliased to the same name, so the binding both backends create and the reference that reads it are one decision, taken here.
+
+Without that second rewrite a leaf name was the binding key across every unit: a dependency's `use std.http.url` and an unrelated package's `use para.url` both claimed the global `url`, last writer won, and the dependency called into a module it had never heard of — while the checker, which keeps its own per-import table, answered correctly. The program checked clean and failed at run time. `Registry::classify_use` is the one classifier all four consumers (checker, both backends, this linker) call, so the canonical name recorded here is by construction the identity they resolve the import to.
+
 ## Diagnostics
 
 Each module keeps its own `Source` (the entry is `SourceId(0)`, siblings follow), so a module's lex/parse diagnostics render against that module. Visibility (`pub`, `E0019`) and unknown-type (`E0013`) are properties of the merged program; **name collision (`E0020`) is not** — a `use` binds in one file, so the collision question is asked per *compilation unit* (the entry, or a pooled module driving its own imports). Two files importing different declarations under the same short name is exactly how two packages sharing an import root coexist, and is never a clash. The module graph is expressed as salsa queries (`noeta-db`'s `Workspace`/`linked`/`linked_checked`/`linked_bytecode`, so editing one module recomputes only its dependents).

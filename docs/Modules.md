@@ -85,6 +85,8 @@ A whole-module import follows the usual aliasing (`use geometry.vec as gv` → `
 
 (and referencing a non-`pub` declaration by qualified name reports `` `secret` is private to module `geometry.vec` ``).
 
+**A handle means what its own file imported.** A `use` binds *in one file*, and that holds across packages: a library that writes `use std.http.url` calls `std.http.url` even when the application also depends on a package whose native extension registers a module `url` of its own. The two never see each other's handles — the linker binds every imported unit's handle under its module's qualified identity, so a leaf name is never the thing two files compete for. The same is true of an alias (`use std.http.url as codec`), which is honored at run time exactly as the checker reads it.
+
 **One name, one meaning.** A value binding may not reuse the local name a `use` binds — `use geometry.vec` followed by `vec = Holder { … }` is a collision (E0020): rename the binding, or alias the import (`use geometry.vec as gv`). So a dotted chain's root is never ambiguous — it is either the module handle or a local, never both. (The same rule governs binders generally — see [no shadowing, E0059](Functions-and-Closures#sealed-functions--the-use--capture-clause).) Type positions are a separate namespace, so a dotted *type* head like `vec.Vec2` never competes with value bindings at all.
 
 ## Aliasing an import — `as`
