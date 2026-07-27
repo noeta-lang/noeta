@@ -284,6 +284,87 @@ fn compose_binary(
 /// The shim's `[[bin]]` name (also the cached binary's file name).
 const BIN_NAME: &str = "noeta-composed";
 
+/// Explain a failed composed-toolchain build. The common cause by far is a **native ABI
+/// mismatch**: an extension crate is compiled from source against *this* toolchain (the composed
+/// build unifies every `noeta-*` crate through `[patch]`), so a package whose release predates a
+/// change to the registration contract — a new [`noeta_ext_abi::registry::ExtFn`] field, a changed
+/// dispatch signature — fails to compile against it. Raw `rustc` output pointing into the package
+/// cache is unactionable on its own, so name the package whose crate failed and say what the
+/// consumer can actually do about it. The full build log still follows: the diagnosis is a header,
+/// never a replacement.
+fn compose_failure(stderr: &str, entries: &[Entry]) -> String {
+    // Which package owns the crate rustc complained about — matched on the crate directory, since
+    // every diagnostic path inside a dependency's tree lies under it.
+    // Match on the owning package's **tree**, not the entry crate's own directory: an entry crate
+    // (`native = "native"`) usually depends on sibling crates in the same package, and it is one of
+    // those that rustc names. The tree root is the nearest ancestor holding the package manifest.
+    let culprits: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| stderr.contains(&package_tree(&e.dir).display().to_string()))
+        .collect();
+    // The signature of an out-of-date registration table: a struct literal that predates a field.
+    let abi_shaped = stderr.contains("E0063")
+        || stderr.contains("E0560")
+        || stderr.contains("missing field")
+        || stderr.contains("no field");
+    let diagnosis = match (&culprits[..], abi_shaped) {
+        ([], _) => String::new(),
+        (owners, true) => {
+            let names: Vec<&str> = owners.iter().map(|e| e.identity.as_str()).collect();
+            format!(
+                "the native code of {} does not compile against this toolchain — its registration \
+                 tables are missing a field the extension ABI now requires, so the release predates \
+                 this `noeta`. An extension is built from source against the exact toolchain, so \
+                 there is no version of it that both can load: update the package (`noeta update`) \
+                 once a release built for this ABI exists, pin a `noeta` matching the release, or \
+                 point the identity at a fixed checkout with `[patch]` in `{}`.\n\n",
+                describe_packages(&names),
+                noeta_pm::manifest::MANIFEST_NAME,
+            )
+        }
+        (owners, false) => {
+            let names: Vec<&str> = owners.iter().map(|e| e.identity.as_str()).collect();
+            format!(
+                "the native code of {} failed to compile. The build log follows — it is that \
+                 package's own build error, not your program's.\n\n",
+                describe_packages(&names),
+            )
+        }
+    };
+    format!("{diagnosis}building the composed toolchain failed:\n{stderr}")
+}
+
+/// The noeta package tree an entry crate belongs to: the nearest ancestor of `crate_dir` holding a
+/// `noeta.toml`. Falls back to `crate_dir` itself when there is none (a bare crate path), which
+/// keeps the caller's substring match as tight as it was.
+fn package_tree(crate_dir: &Path) -> &Path {
+    let mut dir = crate_dir;
+    loop {
+        if dir.join(noeta_pm::manifest::MANIFEST_NAME).is_file() {
+            return dir;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return crate_dir,
+        }
+    }
+}
+
+/// `` `para/db` `` / `` `para/db` and `para/p2p` `` — package identities for a sentence.
+fn describe_packages(names: &[&str]) -> String {
+    match names {
+        [one] => format!("`{one}`"),
+        [rest @ .., last] => format!(
+            "{} and `{last}`",
+            rest.iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        [] => "the native dependencies".to_string(),
+    }
+}
+
 /// One native entry crate, with the cargo-level facts the shim needs.
 struct Entry {
     /// The owning noeta package (`company/package`) — for messages and the compose key.
@@ -538,10 +619,8 @@ fn build(
             )
         })?;
     if !output.status.success() {
-        return Err(format!(
-            "building the composed toolchain failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(compose_failure(&stderr, entries));
     }
     let built = target_dir
         .join(if debug { "debug" } else { "release" })
