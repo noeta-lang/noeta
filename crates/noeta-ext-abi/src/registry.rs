@@ -1986,6 +1986,11 @@ pub struct DirectiveCtx {
     /// Named arguments, already checked against [`ExtDirective::named_keys`], in written order.
     pub named: Vec<(String, String)>,
     /// The decorated declaration's name — the type or function the synthesized members join.
+    ///
+    /// Always a bare **identifier**, never a dotted path, even for a declaration in a file with a
+    /// `namespace`: generated source is spliced into that declaration, and the bare name is the
+    /// only spelling in scope there. A hook can therefore use it verbatim as a type name (a
+    /// constructor's return type, a struct literal) without unqualifying it first.
     pub target: String,
     /// Which kind of declaration that is, so one hook can serve several sites.
     pub site: TierSite,

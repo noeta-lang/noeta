@@ -170,6 +170,50 @@ fn an_expansion_adds_members_after_the_hand_written_ones() {
 }
 
 #[test]
+fn a_namespaced_declaration_expands_and_its_hook_sees_a_bare_name() {
+    // Every file but a single-file program's entry declares a `namespace`, and the linker qualifies
+    // that file's declarations before expansion runs. The generated members are spliced INTO the
+    // declaration, where only the bare name is in scope — and the wrapper the generated text is
+    // parsed inside is `struct <target> { … }`, which a dotted name is not even syntax for. So a
+    // qualified target failed to parse EVERY directive expansion in a multi-file project.
+    let linked = load(
+        r#"
+        namespace shop.main
+        @fx_expand("petstore")
+        struct Api {
+            fn ping(): int { return 0; }
+        }
+        echo 1;
+        "#,
+    )
+    .expect("a namespaced declaration expands");
+
+    // The declaration keeps its qualified identity…
+    assert_eq!(
+        methods_of(&linked, "shop.main.Api"),
+        vec!["ping", "from_petstore", "target_name"]
+    );
+
+    // …while the hook was handed the bare identifier, which is what it must emit to name the type
+    // it is generating members for.
+    let target = linked
+        .program
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            noeta_ast::Stmt::Struct(d) if d.name == "shop.main.Api" => d
+                .methods
+                .iter()
+                .find(|m| m.name == "target_name")
+                .map(|m| format!("{:?}", m.body)),
+            _ => None,
+        })
+        .expect("the generated method is there");
+    assert!(target.contains("Api"), "{target}");
+    assert!(!target.contains("shop.main.Api"), "{target}");
+}
+
+#[test]
 fn a_string_argument_arrives_unquoted_and_named_arguments_stay_separate() {
     let linked = load(
         r#"
