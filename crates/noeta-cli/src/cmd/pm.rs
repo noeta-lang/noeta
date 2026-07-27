@@ -347,6 +347,11 @@ pub(crate) fn cmd_add(
     // The pins before this add — so we can flag a newly-pulled dependency authored by a first-time
     // committer (the committer signal). `add_dependency` only edits the manifest, not the lock.
     let old_lock = lock::Lock::read(manifest_dir);
+    // Whether the key was already bound: adding a second package under it widens the entry into a
+    // scope array, which is worth saying out loud rather than doing silently.
+    let widened_a_scope = manifest::load(&manifest_path)
+        .map(|m| m.dependencies().contains_key(&binding_key))
+        .unwrap_or(false);
     if let Err(err) = manifest::add_dependency(&manifest_path, &binding_key, &value_toml) {
         eprintln!("noeta: {err}");
         return ExitCode::from(1);
@@ -355,11 +360,26 @@ pub(crate) fn cmd_add(
     // here (the manifest edit already succeeded — the entry stays so the user can fix it).
     match graph::resolve_graph(&manifest_path) {
         Ok(resolved) => {
-            println!("added `{binding_key}` to {}", manifest_path.display());
+            let bound: Vec<&noeta_loader::DepPackage> = resolved
+                .packages
+                .iter()
+                .filter(|p| p.key == binding_key)
+                .collect();
+            if widened_a_scope {
+                println!(
+                    "added `{binding_key}` to {} — `{binding_key}` is now a scope binding {n} \
+                     packages under one import root",
+                    manifest_path.display(),
+                    n = bound.len()
+                );
+            } else {
+                println!("added `{binding_key}` to {}", manifest_path.display());
+            }
             // Now that the package is materialized, its *declared* root is authoritative (this also
             // covers `--git`, whose root wasn't known before). If the chosen key differs, the binding
-            // is a deliberate rename — surface it so `use <key>.…` isn't a surprise.
-            if let Some(dep) = resolved.packages.iter().find(|p| p.key == binding_key)
+            // is a deliberate rename — surface it so `use <key>.…` isn't a surprise. A scope binds
+            // several packages under the scope root by design, so re-rooting there is not a rename.
+            if let [dep] = bound[..]
                 && dep.root != binding_key
             {
                 eprintln!(

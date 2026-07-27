@@ -540,7 +540,15 @@ pub fn current_package(manifest_path: &Path) -> Result<(String, semver::Version)
 /// the new entry is inserted under an existing `[dependencies]` header (or a new section is appended),
 /// leaving the rest of the file — comments, ordering, whitespace — untouched. The result is re-parsed
 /// before writing, so a malformed value or an unknown source never corrupts the manifest, and the
-/// write is atomic. Errors if `key` is not an identifier or is already a dependency.
+/// write is atomic. Errors if `key` is not an identifier.
+///
+/// When `key` is **already** a dependency, the entry is widened into a
+/// [scope dependency][`Dependency::Scope`] rather than refused: the existing value and `value_toml`
+/// become the first two members of a `key = [ … ]` array (and a key that is already an array gains
+/// one more member). That is the manifest shape for binding several packages of one scope —
+/// `para/aether` *and* `para/db` — under a single import root, so `noeta add para --package para/db`
+/// after `noeta add para --package para/aether` does the expected thing. Adding the *same* source
+/// twice is still refused.
 pub fn add_dependency(manifest_path: &Path, key: &str, value_toml: &str) -> Result<(), PmError> {
     if !is_identifier(key) {
         return Err(PmError::Manifest(format!(
@@ -551,14 +559,12 @@ pub fn add_dependency(manifest_path: &Path, key: &str, value_toml: &str) -> Resu
         .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", manifest_path.display())))?;
     let manifest = Manifest::parse(&text)
         .map_err(|err| err.map_msg(|m| format!("invalid `{}`: {m}", manifest_path.display())))?;
-    if manifest.dependencies().contains_key(key) {
-        return Err(PmError::Manifest(format!(
-            "dependency `{key}` is already in the manifest"
-        )));
-    }
 
-    let entry = format!("{key} = {value_toml}");
-    let updated = insert_dependency_entry(&text, &entry);
+    let updated = if manifest.dependencies().contains_key(key) {
+        extend_scope_entry(&text, key, value_toml)?
+    } else {
+        insert_dependency_entry(&text, &format!("{key} = {value_toml}"))
+    };
     // Re-parse the edited manifest so a bad value/source fails here rather than corrupting the file.
     Manifest::parse(&updated).map_err(|err| {
         err.map_msg(|m| format!("`noeta add {key}` would make `{MANIFEST_NAME}` invalid: {m}"))
@@ -569,6 +575,146 @@ pub fn add_dependency(manifest_path: &Path, key: &str, value_toml: &str) -> Resu
     std::fs::write(&tmp, &updated)
         .and_then(|()| std::fs::rename(&tmp, manifest_path))
         .map_err(|err| PmError::Io(format!("cannot write `{}`: {err}", manifest_path.display())))
+}
+
+/// Widen `text`'s existing `[dependencies]` entry for `key` into a **scope array** carrying
+/// `value_toml` as one more member (see [`add_dependency`]). A single-source entry becomes a
+/// two-member array; an entry that is already an array gains an element. The existing value's own
+/// text is reused verbatim, so member formatting and any trailing comment survive; only the one
+/// entry is rewritten.
+fn extend_scope_entry(text: &str, key: &str, value_toml: &str) -> Result<String, PmError> {
+    let (span, value_text) = find_dependency_entry(text, key).ok_or_else(|| {
+        // The parse said the key is a dependency, so it is in a `[dependencies]` table we could not
+        // locate textually — a dotted-key or inline-table spelling we do not rewrite.
+        PmError::Manifest(format!(
+            "dependency `{key}` is already in the manifest, and its entry is not in a form \
+             `noeta add` can extend — edit `{MANIFEST_NAME}` by hand to make `{key}` a scope array \
+             (`{key} = [ {{ … }}, {value_toml} ]`)"
+        ))
+    })?;
+
+    // Re-adding the identical source is a mistake, not a scope: an array with two equal members
+    // would resolve one package twice under one root.
+    let members: Vec<String> = match toml::from_str::<toml::Table>(&format!("v = {value_text}"))
+        .ok()
+        .and_then(|t| t.get("v").and_then(|v| v.as_array()).cloned())
+    {
+        // Already an array: keep each member's own text by re-splitting the value, then append.
+        Some(_) => split_array_members(&value_text),
+        None => vec![value_text.trim().to_string()],
+    };
+    if members.iter().any(|m| m == value_toml.trim()) {
+        return Err(PmError::Manifest(format!(
+            "dependency `{key}` already binds this exact source — nothing to add"
+        )));
+    }
+
+    let added = value_toml.trim().to_string();
+    let mut entry = format!("{key} = [\n");
+    for member in members.iter().chain(std::iter::once(&added)) {
+        entry.push_str(&format!("    {member},\n"));
+    }
+    entry.push(']');
+
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    lines.splice(span.clone(), entry.lines().map(str::to_string));
+    let mut out = lines.join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Locate `key`'s entry in `text`'s top-level `[dependencies]` table: its line range and the raw
+/// text of its value (everything right of the `=`, joined across lines for a multi-line array).
+/// `None` when there is no such plain `key = value` entry — including one under a
+/// `[targets.<name>.dependencies]` table, which is a different table and never rewritten here.
+fn find_dependency_entry(text: &str, key: &str) -> Option<(std::ops::Range<usize>, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut in_dependencies = false;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_dependencies = trimmed == "[dependencies]";
+            continue;
+        }
+        if !in_dependencies {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        let Some(value_start) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        // Accumulate lines until the value parses — the cheap way to find where a multi-line array
+        // ends without re-implementing TOML's grammar.
+        let mut value = value_start.trim().to_string();
+        for (j, more) in lines.iter().enumerate().skip(i + 1) {
+            if toml::from_str::<toml::Table>(&format!("v = {value}")).is_ok() {
+                return Some((i..j, value));
+            }
+            value.push('\n');
+            value.push_str(more);
+        }
+        if toml::from_str::<toml::Table>(&format!("v = {value}")).is_ok() {
+            return Some((i..lines.len(), value));
+        }
+        return None;
+    }
+    None
+}
+
+/// Split a TOML array's raw text into its members' own raw texts, so an existing scope array can be
+/// rewritten with one more member without re-serializing (and reformatting) the ones already there.
+/// Commas inside a member's braces, brackets or strings do not split.
+fn split_array_members(array_text: &str) -> Vec<String> {
+    let inner = array_text.trim();
+    let inner = inner
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(inner);
+    let mut members = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string: Option<char> = None;
+    let mut current = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match in_string {
+            Some(quote) => {
+                if ch == '\\' && quote == '"' {
+                    current.push(ch);
+                    if let Some(escaped) = chars.next() {
+                        current.push(escaped);
+                    }
+                    continue;
+                }
+                if ch == quote {
+                    in_string = None;
+                }
+            }
+            None => match ch {
+                '"' | '\'' => in_string = Some(ch),
+                '{' | '[' => depth += 1,
+                '}' | ']' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    let member = current.trim();
+                    if !member.is_empty() {
+                        members.push(member.to_string());
+                    }
+                    current.clear();
+                    continue;
+                }
+                _ => {}
+            },
+        }
+        current.push(ch);
+    }
+    let member = current.trim();
+    if !member.is_empty() {
+        members.push(member.to_string());
+    }
+    members
 }
 
 /// Insert `entry` (a `key = value` line) into `text`'s `[dependencies]` table: right after an
@@ -2546,7 +2692,7 @@ mod tests {
     }
 
     #[test]
-    fn add_dependency_writes_and_rejects_duplicates() {
+    fn add_dependency_writes_and_widens_a_repeated_key_into_a_scope() {
         let dir = std::env::temp_dir().join("noeta_add_test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2557,9 +2703,42 @@ mod tests {
         let m = Manifest::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(matches!(m.dependencies()["http"], Dependency::Git { .. }));
 
-        // A second add of the same key is rejected (and a non-identifier key too).
-        assert!(add_dependency(&path, "http", "\"^1\"").is_err());
+        // A non-identifier key is rejected — it could never be an import root.
         assert!(add_dependency(&path, "bad-key", "\"^1\"").is_err());
+
+        // A second package under one key widens the entry into a scope array rather than failing,
+        // and a third appends to it — the shape that binds `para/aether` *and* `para/db`.
+        let scoped = dir.join("scoped");
+        std::fs::create_dir_all(&scoped).unwrap();
+        let path = scoped.join(MANIFEST_NAME);
+        std::fs::write(&path, "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
+        add_dependency(&path, "para", "{ version = \"^0.1\", package = \"para/aether\" }").unwrap();
+        add_dependency(&path, "para", "{ version = \"^0.1\", package = \"para/html\" }").unwrap();
+        add_dependency(&path, "para", "{ version = \"^0.1\", package = \"para/db\" }").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let m = Manifest::parse(&text).unwrap();
+        let Dependency::Scope(members) = &m.dependencies()["para"] else {
+            panic!("expected a scope dependency, got {:?}", m.dependencies()["para"]);
+        };
+        assert_eq!(members.len(), 3);
+        let packages: Vec<String> = members
+            .iter()
+            .map(|d| match d {
+                Dependency::Registry { package, .. } => {
+                    let p = package.as_ref().expect("package identity");
+                    format!("{}/{}", p.company, p.package)
+                }
+                other => panic!("expected registry members, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(packages, ["para/aether", "para/html", "para/db"]);
+        // The `[package]` table above it is untouched — the edit rewrites only the one entry.
+        assert!(text.starts_with("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n"));
+
+        // Re-adding an identical source is still refused: it would bind one package twice.
+        assert!(
+            add_dependency(&path, "para", "{ version = \"^0.1\", package = \"para/db\" }").is_err()
+        );
     }
 
     #[test]
