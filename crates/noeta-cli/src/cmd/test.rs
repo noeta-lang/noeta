@@ -24,13 +24,20 @@ pub(crate) struct TestOutcome {
     stdout: String,
 }
 
-/// `noeta test <FILE>` — discover the program's `@test` blocks (object-model slice 6) and run each
-/// as an isolated test. Tests run concurrently (one fresh isolate per test) and, by default, **all**
-/// of them run even after a failure; `--fail-fast` stops at the first failure. A test fails when its
-/// fn aborts — a false `assert`/`panic` (or any runtime error) — and passes when it returns normally.
-/// The program's own top-level "main" effects are not run: `noeta test` runs the tests, not the file.
+/// `noeta test [PATH]` — discover `@test` blocks (object-model slice 6) and run each as an isolated
+/// test. Tests run concurrently (one fresh isolate per test) and, by default, **all** of them run
+/// even after a failure; `--fail-fast` stops at the first failure. A test fails when its fn aborts —
+/// a false `assert`/`panic` (or any runtime error) — and passes when it returns normally. The
+/// program's own top-level "main" effects are not run: `noeta test` runs the tests, not the file.
+///
+/// `PATH` (default `.`) is a file or a **directory**, mirroring `noeta check`. A directory is walked
+/// recursively and every `.noe` file is run as its own entry, because that is the only way a
+/// project's tests all run: the linker merges a sibling module's *reachable declarations* into an
+/// entry, never its `@test` blocks, so `noeta test src/main.noe` on a two-module project reported
+/// "4 passed" while a whole module's tests silently never ran — and a directory argument used to be
+/// a raw `Is a directory (os error 21)`, so there was no spelling that did run them.
 pub(crate) fn cmd_test(
-    file: &std::path::Path,
+    path: &std::path::Path,
     fail_fast: bool,
     jobs: Option<usize>,
     group: &Option<String>,
@@ -38,21 +45,182 @@ pub(crate) fn cmd_test(
     json: bool,
     target: &Option<String>,
 ) -> ExitCode {
+    let opts = TestOptions {
+        fail_fast,
+        jobs,
+        group,
+        names,
+        json,
+        target,
+    };
+    if path.is_dir() {
+        return test_directory(path, &opts);
+    }
+    match run_file_tests(path, &opts, None) {
+        FileTests::Ran(code) => code,
+        FileTests::None { any_declared } => {
+            if json {
+                return report_json(&[], &[], 0);
+            }
+            println!("{}", empty_message(any_declared, group, names));
+            ExitCode::SUCCESS
+        }
+        FileTests::Collected {
+            outcomes,
+            skipped,
+            total,
+        } => {
+            if json {
+                report_json(&outcomes, &skipped, total)
+            } else {
+                report(&outcomes, &skipped, total)
+            }
+        }
+    }
+}
+
+/// Everything a test run carries besides the path it runs over — the selection filters, the
+/// concurrency, and how to report. Threaded as one value so the file and directory paths take the
+/// same options without a wall of parameters.
+struct TestOptions<'a> {
+    fail_fast: bool,
+    jobs: Option<usize>,
+    group: &'a Option<String>,
+    names: &'a [String],
+    json: bool,
+    target: &'a Option<String>,
+}
+
+/// Why a file contributed no test outcomes, and what its report should say.
+enum FileTests {
+    /// The tier prologue short-circuited — compose delegation, a `--target` that does not make the
+    /// `test` tier live, or a load/activation/type error already rendered. Carries its exit code.
+    Ran(ExitCode),
+    /// The file ran, but selected no tests. `any_declared` distinguishes "declares none at all"
+    /// from "declares some, and the `--group`/`--name` filters kept none".
+    None { any_declared: bool },
+    /// The file's selected tests ran.
+    Collected {
+        outcomes: Vec<TestOutcome>,
+        skipped: Vec<String>,
+        total: usize,
+    },
+}
+
+/// The message for a run that selected no tests — the three-way wording the single-file report has
+/// always used, kept in one place now that two callers need it.
+fn empty_message(any_declared: bool, group: &Option<String>, names: &[String]) -> String {
+    match (any_declared, group, names.is_empty()) {
+        (true, _, false) => "no tests matching --name".to_string(),
+        (true, Some(g), _) => format!("no tests in group `{g}`"),
+        _ => "no tests found".to_string(),
+    }
+}
+
+/// Run every `.noe` file under `dir` as its own entry, aggregating one report and one exit code.
+///
+/// Each outcome is labelled with the file it came from (`src/human.noe::bytes_stay_bytes`), so a
+/// name that appears in two modules stays distinguishable. A file whose prologue fails (a type
+/// error, say) is reported through its own already-rendered diagnostics and fails the run, but does
+/// not stop the remaining files — a broken module must not hide every other module's results.
+fn test_directory(dir: &std::path::Path, opts: &TestOptions) -> ExitCode {
+    let TestOptions {
+        fail_fast,
+        group,
+        names,
+        json,
+        ..
+    } = *opts;
+    // Probe compose once for the directory rather than once per file: if this project pins a
+    // different toolchain, the delegated run owns the whole directory.
+    if let Err(code) = crate::compose::maybe_delegate(dir) {
+        return code;
+    }
+    let files = crate::cmd::check::noe_files(dir);
+    let mut outcomes: Vec<TestOutcome> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    let mut broken = 0usize;
+    // Whether any file declared tests at all — so a filter that matched nothing reports why
+    // ("no tests in group `x`") rather than the misleading "no tests found".
+    let mut any_declared = false;
+    for file in &files {
+        let label = file
+            .strip_prefix(dir)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .into_owned();
+        match run_file_tests(file, opts, Some(&label)) {
+            FileTests::Ran(code) => {
+                if code != ExitCode::SUCCESS {
+                    broken += 1;
+                }
+            }
+            FileTests::None { any_declared: d } => any_declared |= d,
+            FileTests::Collected {
+                outcomes: o,
+                skipped: s,
+                total: t,
+            } => {
+                outcomes.extend(o);
+                skipped.extend(s);
+                total += t;
+            }
+        }
+        if fail_fast && (broken > 0 || outcomes.iter().any(|o| !o.passed)) {
+            break;
+        }
+    }
+    if total == 0 && broken == 0 {
+        if json {
+            return report_json(&[], &[], 0);
+        }
+        println!("{}", empty_message(any_declared, group, names));
+        return ExitCode::SUCCESS;
+    }
+    let code = if json {
+        report_json(&outcomes, &skipped, total)
+    } else {
+        report(&outcomes, &skipped, total)
+    };
+    if broken > 0 {
+        // Otherwise a run that renders a type error and then prints "0 failed" reads as a
+        // contradiction against its own nonzero exit.
+        eprintln!(
+            "noeta: {broken} file{} failed to check; {} tests did not run",
+            plural(broken),
+            if broken == 1 { "its" } else { "their" }
+        );
+        return ExitCode::from(1);
+    }
+    code
+}
+
+/// Run one file's `@test` blocks. The single-file body of [`cmd_test`], factored out so the
+/// directory walk can reuse it; `label`, when given, prefixes every reported test name with the
+/// file it came from.
+fn run_file_tests(file: &std::path::Path, opts: &TestOptions, label: Option<&str>) -> FileTests {
+    let TestOptions {
+        fail_fast,
+        jobs,
+        group,
+        names,
+        json: quiet,
+        target,
+    } = *opts;
     // The shared tier prologue: compose delegation, the `--target` gate, the dep-aware load,
     // provider dispatch (a `test = "<pkg>"` target hands the tier to that package's runner),
     // activation diagnostics, and the whole-program type check.
     let run = match tier_prologue(file, "test", target) {
-        Prologue::Ran(code) => return code,
+        Prologue::Ran(code) => return FileTests::Ran(code),
         Prologue::Ready(run) => *run,
     };
     let activated = &run.activated;
 
     if activated.tests.is_empty() {
-        if json {
-            return report_json(&[], &[], 0);
-        }
-        println!("no tests found");
-        return ExitCode::SUCCESS;
+        return FileTests::None {
+            any_declared: false,
+        };
     }
 
     // The setup every test shares: the program's declarations (and top-level bindings/globals),
@@ -86,22 +254,14 @@ pub(crate) fn cmd_test(
             .collect()
     };
     if selected.is_empty() {
-        if json {
-            return report_json(&[], &[], 0);
-        }
-        match (group, names.is_empty()) {
-            (_, false) => println!("no tests matching --name"),
-            (Some(g), _) => println!("no tests in group `{g}`"),
-            (None, _) => println!("no tests found"),
-        }
-        return ExitCode::SUCCESS;
+        return FileTests::None { any_declared: true };
     }
 
     // Partition into skipped (`#[Skip]`) and runnable. A skipped test is reported but never run, and
     // never fails the suite (a skipped `#[Data]` test counts as one skip, not one per row).
     let (skipped_refs, runnable): (Vec<&TierFn>, Vec<&TierFn>) =
         selected.into_iter().partition(|t| test_is_skipped(t));
-    let skipped: Vec<String> = skipped_refs.iter().map(|t| skip_label(t)).collect();
+    let mut skipped: Vec<String> = skipped_refs.iter().map(|t| skip_label(t)).collect();
 
     // Expand each runnable test into its case(s): a `#[Data([…])]` test runs once per row (reported
     // `name[row]`); an ordinary test is a single zero-arg case.
@@ -117,15 +277,16 @@ pub(crate) fn cmd_test(
     } else {
         format!(", {} skipped", skipped.len())
     };
-    if !json {
+    if !quiet {
+        let in_file = label.map(|l| format!(" in {l}")).unwrap_or_default();
         println!(
-            "running {run_count} test{} on {jobs} thread{}{skipped_note}",
+            "running {run_count} test{} on {jobs} thread{}{skipped_note}{in_file}",
             plural(run_count),
             plural(jobs),
         );
     }
 
-    let outcomes = run_tests(
+    let mut outcomes = run_tests(
         &setup,
         &run.editions,
         &cases,
@@ -133,10 +294,20 @@ pub(crate) fn cmd_test(
         jobs,
         fail_fast,
     );
-    if json {
-        report_json(&outcomes, &skipped, total)
-    } else {
-        report(&outcomes, &skipped, total)
+    // In a directory run every outcome carries the file it came from, so the same test name in two
+    // modules stays distinguishable in one report.
+    if let Some(l) = label {
+        for outcome in &mut outcomes {
+            outcome.name = format!("{l}::{}", outcome.name);
+        }
+        for name in &mut skipped {
+            *name = format!("{l}::{name}");
+        }
+    }
+    FileTests::Collected {
+        outcomes,
+        skipped,
+        total,
     }
 }
 

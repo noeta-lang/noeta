@@ -328,3 +328,167 @@ fn test_data_type_mismatched_row_fails_that_case() {
                 .and(predicate::str::contains("1 passed, 1 failed, 2 total")),
         );
 }
+
+// --- `noeta test <DIR>` (dev-story sweep): a project's tests, not one file's -------
+
+/// A two-module project: the entry imports a helper module, and **both** declare `@test` blocks.
+/// The linker merges the module's reachable declarations into the entry but never its test blocks,
+/// so testing the entry alone sees only the entry's tests.
+fn two_module_project(name: &str) -> PathBuf {
+    temp_dir(
+        name,
+        &[
+            (
+                "src/util.noe",
+                "namespace Proj.Util;\n\
+                 pub fn double(n: int): int { return n * 2; }\n\
+                 @test {\n\
+                     fn doubles(): void { assert(double(2) == 4); }\n\
+                     fn doubles_zero(): void { assert(double(0) == 0); }\n\
+                 }\n",
+            ),
+            (
+                "src/main.noe",
+                "use Proj.Util.double;\n\
+                 echo double(21);\n\
+                 @test {\n\
+                     fn entry_test(): void { assert(double(3) == 6); }\n\
+                 }\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn test_on_a_directory_runs_every_files_tests() {
+    // The gap this closes: `noeta test src/main.noe` reports "1 passed" on this project and the
+    // module's two tests silently never run, while a directory argument used to be a raw
+    // `Is a directory (os error 21)` — so nothing ran a project's tests. Each outcome is labelled
+    // with the file it came from.
+    let dir = two_module_project("test_dir_all_files");
+    lang().arg("test").arg(&dir).assert().success().stdout(
+        predicate::str::contains("src/util.noe::doubles")
+            .and(predicate::str::contains("src/util.noe::doubles_zero"))
+            .and(predicate::str::contains("src/main.noe::entry_test"))
+            .and(predicate::str::contains("3 passed, 0 failed, 3 total")),
+    );
+    // The entry alone still tests only the entry — the single-file contract is unchanged.
+    lang()
+        .arg("test")
+        .arg(dir.join("src/main.noe"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("1 passed, 0 failed, 1 total")
+                .and(predicate::str::contains("doubles").not()),
+        );
+}
+
+#[test]
+fn test_on_a_directory_fails_when_any_files_test_fails() {
+    let dir = temp_dir(
+        "test_dir_failure",
+        &[
+            (
+                "src/a.noe",
+                "@test { fn passes(): void { assert(true); } }\n",
+            ),
+            (
+                "src/b.noe",
+                "@test { fn breaks(): void { assert(1 == 2); } }\n",
+            ),
+        ],
+    );
+    lang()
+        .arg("test")
+        .arg(&dir)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("FAIL  src/b.noe::breaks")
+                .and(predicate::str::contains("ok    src/a.noe::passes"))
+                .and(predicate::str::contains("1 passed, 1 failed, 2 total")),
+        );
+}
+
+#[test]
+fn test_on_a_directory_reports_a_file_that_does_not_check() {
+    // A module that fails to type-check renders its own diagnostic and fails the run, but must not
+    // hide the files that do check — and the summary must say so, since "0 failed" beside a
+    // nonzero exit otherwise reads as a contradiction.
+    let dir = temp_dir(
+        "test_dir_broken_file",
+        &[
+            (
+                "src/ok.noe",
+                "@test { fn passes(): void { assert(true); } }\n",
+            ),
+            (
+                "src/broken.noe",
+                "namespace Proj.Broken;\npub fn oops(): int { return \"nope\"; }\n",
+            ),
+        ],
+    );
+    lang()
+        .arg("test")
+        .arg(&dir)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("ok    src/ok.noe::passes"))
+        .stderr(
+            predicate::str::contains("E0007")
+                .and(predicate::str::contains("1 file failed to check")),
+        );
+}
+
+#[test]
+fn test_on_a_directory_reports_json_across_files() {
+    let dir = two_module_project("test_dir_json");
+    let assert = lang()
+        .arg("test")
+        .arg(&dir)
+        .arg("--json")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["passed"], 3);
+    assert_eq!(json["total"], 3);
+    let names: Vec<String> = json["tests"]
+        .as_array()
+        .expect("tests array")
+        .iter()
+        .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        names.contains(&"src/util.noe::doubles".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"src/main.noe::entry_test".to_string()),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn test_on_a_directory_keeps_the_filter_messages() {
+    // A filter that matched nothing must say why — "no tests found" would be misleading when the
+    // project does declare tests.
+    let dir = two_module_project("test_dir_filters");
+    lang()
+        .arg("test")
+        .arg(&dir)
+        .args(["--group", "nope"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no tests in group `nope`"));
+    lang()
+        .arg("test")
+        .arg(&dir)
+        .args(["--name", "nope"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no tests matching --name"));
+}

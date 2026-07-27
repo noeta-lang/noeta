@@ -11,6 +11,10 @@ running 2 tests on 8 threads
 2 passed, 0 failed, 2 total
 ```
 
+Bare `noeta test` runs **every** `.noe` file under the current directory — the command to reach for
+in a project, since an entry file does not carry its modules' tests. See the
+[command reference](#command-reference).
+
 ## Writing tests
 
 A test is an ordinary function inside a `@test` block. Assert with the prelude `assert`:
@@ -113,8 +117,23 @@ Notes on `#[Data]`:
 ## Command reference
 
 ```text
-noeta test [OPTIONS] <FILE>
+noeta test [OPTIONS] [PATH]
 ```
+
+`PATH` (default `.`) is a file **or a directory**, exactly like [`noeta check`](The-CLI#noeta-check).
+
+- A **directory** is walked recursively and every `.noe` file runs as its own entry, with the
+  outcomes aggregated into one report and one exit code. Each test is labelled with the file it
+  came from (`src/util.noe::doubles`), so the same name in two modules stays distinguishable.
+- A **file** runs only that file's `@test` blocks.
+
+Run the whole project by default. Naming a single entry file tests *only that file*: linking merges
+a module's reachable declarations into its importer, never its `@test` blocks, so
+`noeta test src/main.noe` on a two-module project reports the entry's tests alone and the module's
+never run — silently, and looking like a green suite.
+
+A file that fails to type-check renders its own diagnostic and fails the run, but does not stop the
+remaining files; the summary names how many were skipped that way.
 
 | Flag | Effect |
 |---|---|

@@ -138,7 +138,12 @@ enum Command {
     },
     /// Discover and run a program's `@test` blocks (object-model slice 6).
     Test {
-        /// Path to a `.noe` file.
+        /// File or directory to test (default: the current directory, walked recursively for
+        /// `.noe` files). A directory runs every file's `@test` blocks as its own entry and
+        /// aggregates one report — the only way a multi-module project's tests all run, since an
+        /// entry links a sibling's declarations but never its test blocks. A file tests just that
+        /// one.
+        #[arg(default_value = ".")]
         file: PathBuf,
         /// Stop after the first failing test instead of running them all.
         #[arg(long)]
