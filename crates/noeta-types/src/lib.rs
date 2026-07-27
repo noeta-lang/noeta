@@ -560,6 +560,88 @@ mod tests {
         assert_eq!(Type::from_ref(&named("void", vec![])), Type::Unit);
     }
 
+    /// One sample of **every** `Type` variant — the census the numeric-set equivalence test below
+    /// runs over. Widths are enumerated because `IntN` is eight distinct types, not one.
+    fn every_variant() -> Vec<Type> {
+        let mut census = vec![
+            Type::Unknown,
+            Type::Dyn,
+            Type::Unit,
+            Type::Int,
+            Type::Float,
+            Type::F32,
+            Type::F64,
+            Type::Bool,
+            Type::String,
+            Type::Bytes,
+            Type::List(Box::new(Type::Int)),
+            Type::Map(Box::new(Type::String), Box::new(Type::Int)),
+            Type::Set(Box::new(Type::Int)),
+            Type::Option(Box::new(Type::Int)),
+            Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+            Type::Named("Order".into(), vec![]),
+            Type::Fn {
+                params: vec![Type::Int],
+                ret: Box::new(Type::Int),
+            },
+            Type::Kind(TypeKind::Struct),
+            Type::Union(vec![Type::Int, Type::String]),
+            Type::Tuple(vec![Type::Int, Type::String]),
+            Type::DynTrait("Show".into()),
+        ];
+        for bits in [8u8, 16, 32, 64] {
+            for signed in [true, false] {
+                census.push(Type::IntN { signed, bits });
+            }
+        }
+        census
+    }
+
+    /// The numeric set has **two** definitions — the predicate [`Type::is_arith_numeric`] and the
+    /// union [`Type::arith_numeric`] — and they must describe the same types.
+    ///
+    /// Nothing in the type system ties them together: the predicate is a `matches!` pattern, the
+    /// union an enumerated list, and a future numeric type (an `f16`, an `i128`) would be added to
+    /// whichever one the author happened to be looking at. The failure would be quiet and nasty —
+    /// a parameter declared `SigType::Numeric` would reject a type the rest of the checker treats as
+    /// a number, or `Display` would stop recognizing the set and print twelve members again.
+    ///
+    /// This is a **tripwire, not a proof**: it can only check the types [`every_variant`] lists. The
+    /// count assertion is what makes it bite — adding a `Type` variant fails here, and fixing the
+    /// count means reading this comment and adding the sample.
+    #[test]
+    fn the_numeric_predicate_and_the_numeric_union_agree() {
+        let census = every_variant();
+        assert_eq!(
+            census
+                .iter()
+                .map(std::mem::discriminant)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            22,
+            "a `Type` variant was added or removed — add a sample to `every_variant` and update this \
+             count, so the numeric-set check below keeps covering the whole lattice"
+        );
+
+        let Type::Union(members) = Type::arith_numeric() else {
+            panic!("`arith_numeric` must be a union");
+        };
+        for t in &census {
+            assert_eq!(
+                members.contains(t),
+                t.is_arith_numeric(),
+                "`{t}` is in one definition of the numeric set but not the other"
+            );
+        }
+        // And the union recognizes itself, which is what `Display` keys on to write `number`.
+        assert!(Type::arith_numeric().is_arith_numeric_union());
+        assert_eq!(Type::arith_numeric().to_string(), "number");
+        // A union that is merely numeric-ish is NOT the set, so it still prints its members.
+        let partial = Type::union([Type::Int, Type::Float]);
+        assert!(!partial.is_arith_numeric_union());
+        assert_eq!(partial.to_string(), "int | float");
+    }
+
     #[test]
     fn optional_is_option() {
         let opt = TypeRef::Optional {
