@@ -523,34 +523,10 @@ fn pattern_str(pattern: &crate::Pattern) -> String {
     }
 }
 
+/// A [`TypeRef`]'s surface spelling for the IR dump, names **verbatim** — an IR dump is about
+/// identity, so a linker-qualified `app.models.User` must not shorten to `User`. The same
+/// `shape::type_source` the AST snapshot printer uses, for the same reason; this was a third
+/// hand-written copy of that walk.
 fn type_ref(ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),
-        TypeRef::AssocProjection { name, .. } => format!("Self::{name}"),
-        TypeRef::Named { name, args, .. } => {
-            if args.is_empty() {
-                name.clone()
-            } else {
-                let args: Vec<String> = args.iter().map(type_ref).collect();
-                format!("{name}<{}>", args.join(", "))
-            }
-        }
-        TypeRef::Optional { inner, .. } => format!("?{}", type_ref(inner)),
-        TypeRef::Union { members, .. } => {
-            members.iter().map(type_ref).collect::<Vec<_>>().join(" | ")
-        }
-        TypeRef::Tuple { elements, .. } => {
-            format!(
-                "({})",
-                elements.iter().map(type_ref).collect::<Vec<_>>().join(", ")
-            )
-        }
-        TypeRef::Fn { params, ret, .. } => {
-            format!(
-                "({}) -> {}",
-                params.iter().map(type_ref).collect::<Vec<_>>().join(", "),
-                type_ref(ret)
-            )
-        }
-    }
+    noeta_ast::shape::type_source(ty)
 }

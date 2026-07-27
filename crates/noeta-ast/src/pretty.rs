@@ -1221,28 +1221,10 @@ impl Pretty for Expr {
 }
 
 /// Render a [`TypeRef`] back to its surface spelling (`int`, `List<int>`, `?User`) for snapshots.
+///
+/// Names stay **verbatim** — a snapshot is about identity, so `app.models.User` must not shorten to
+/// `User` and hide a real difference in a diff. That is `shape::type_source`, the same walk the
+/// extension-facing `shape::type_spelling` runs with a different name transform.
 pub(crate) fn type_ref_str(ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::Optional { inner, .. } => format!("?{}", type_ref_str(inner)),
-        TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),
-        TypeRef::AssocProjection { name, .. } => format!("Self::{name}"),
-        TypeRef::Named { name, args, .. } if args.is_empty() => name.clone(),
-        TypeRef::Named { name, args, .. } => {
-            let args: Vec<String> = args.iter().map(type_ref_str).collect();
-            format!("{name}<{}>", args.join(", "))
-        }
-        TypeRef::Union { members, .. } => members
-            .iter()
-            .map(type_ref_str)
-            .collect::<Vec<_>>()
-            .join(" | "),
-        TypeRef::Tuple { elements, .. } => {
-            let elements: Vec<String> = elements.iter().map(type_ref_str).collect();
-            format!("({})", elements.join(", "))
-        }
-        TypeRef::Fn { params, ret, .. } => {
-            let params: Vec<String> = params.iter().map(type_ref_str).collect();
-            format!("({}) -> {}", params.join(", "), type_ref_str(ret))
-        }
-    }
+    crate::shape::type_source(ty)
 }

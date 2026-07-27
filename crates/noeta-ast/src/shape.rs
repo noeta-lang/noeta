@@ -33,29 +33,35 @@ use crate::{FieldDecl, Param, Stmt, TypeRef, VariantDecl, short_type_name};
 pub const UNANNOTATED: &str = "dyn";
 
 /// Render a [`TypeRef`] back to its declared surface spelling, with every named identity shortened
-/// to the name the author wrote (see the module docs).
+/// to the name the author wrote (see the module docs). What a human, or generated source, should
+/// read.
 pub fn type_spelling(ty: &TypeRef) -> String {
+    render(ty, short_type_name)
+}
+
+/// Render a [`TypeRef`] back to its surface spelling with named identities **verbatim** — the
+/// linker-qualified `app.models.User` stays qualified.
+///
+/// The debug-dump twin of [`type_spelling`]: an AST snapshot and an IR dump are about *identity*, so
+/// shortening two distinct types to one name would make a real difference invisible in a diff.
+pub fn type_source(ty: &TypeRef) -> String {
+    render(ty, |name| name)
+}
+
+/// The one walk behind both renderings. They differ only in what they do with a *name*, so that is
+/// the only thing parameterized — three copies of this match had drifted apart into two contracts
+/// before anyone noticed there were three.
+fn render(ty: &TypeRef, name_of: fn(&str) -> &str) -> String {
+    let rec = |t: &TypeRef| render(t, name_of);
+    let list = |ts: &[TypeRef]| ts.iter().map(rec).collect::<Vec<_>>().join(", ");
     match ty {
-        TypeRef::Named { name, args, .. } if args.is_empty() => short_type_name(name).to_string(),
-        TypeRef::Named { name, args, .. } => {
-            let args: Vec<String> = args.iter().map(type_spelling).collect();
-            format!("{}<{}>", short_type_name(name), args.join(", "))
-        }
-        TypeRef::DynTrait { trait_name, .. } => format!("dyn {}", short_type_name(trait_name)),
-        TypeRef::Optional { inner, .. } => format!("?{}", type_spelling(inner)),
-        TypeRef::Union { members, .. } => members
-            .iter()
-            .map(type_spelling)
-            .collect::<Vec<_>>()
-            .join(" | "),
-        TypeRef::Tuple { elements, .. } => {
-            let elements: Vec<String> = elements.iter().map(type_spelling).collect();
-            format!("({})", elements.join(", "))
-        }
-        TypeRef::Fn { params, ret, .. } => {
-            let params: Vec<String> = params.iter().map(type_spelling).collect();
-            format!("({}) -> {}", params.join(", "), type_spelling(ret))
-        }
+        TypeRef::Named { name, args, .. } if args.is_empty() => name_of(name).to_string(),
+        TypeRef::Named { name, args, .. } => format!("{}<{}>", name_of(name), list(args)),
+        TypeRef::DynTrait { trait_name, .. } => format!("dyn {}", name_of(trait_name)),
+        TypeRef::Optional { inner, .. } => format!("?{}", rec(inner)),
+        TypeRef::Union { members, .. } => members.iter().map(rec).collect::<Vec<_>>().join(" | "),
+        TypeRef::Tuple { elements, .. } => format!("({})", list(elements)),
+        TypeRef::Fn { params, ret, .. } => format!("({}) -> {}", list(params), rec(ret)),
         TypeRef::AssocProjection { name, .. } => format!("Self::{name}"),
     }
 }

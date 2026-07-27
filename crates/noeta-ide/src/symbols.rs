@@ -236,49 +236,17 @@ pub(crate) fn param_detail(param: &Param) -> String {
     }
 }
 
-/// The leaf of a possibly linker-qualified type name: `geometry.vec.Vec2` → `Vec2`, `Vec2` → `Vec2`.
-/// The linker rewrites an imported type reference in the merged program to its fully-qualified
-/// identity; for display we want the name the author wrote. A type identifier never contains a `.`,
-/// so any `.` is unambiguously a module-qualifier separator (mirrors `render_fn_signature`, which
-/// shows a function's leaf name for the same reason).
-fn type_leaf(name: &str) -> &str {
-    name.rsplit('.').next().unwrap_or(name)
-}
-
 /// Render a surface [`TypeRef`] back to compact source syntax for symbol detail (`List<int>`, `?T`,
 /// `A | B`, `(A, B)`, `(A) -> R`). Shared with member completion. A linker-qualified type name is
-/// shown by its leaf (`Vec2`, not `geometry.vec.Vec2`) — see [`type_leaf`].
+/// shown by its leaf (`Vec2`, not `geometry.vec.Vec2`): the linker rewrites an imported type
+/// reference in the merged program to its fully-qualified identity, and for display we want the name
+/// the author wrote.
+///
+/// One line, because that is exactly `noeta_ast::shape::type_spelling` — the same rendering, for the
+/// same reason, that an extension's `ExtDerive::validate` and `DirectiveCtx::fields` are given. Kept
+/// as a named function here so the IDE's call sites read in the IDE's vocabulary.
 pub fn render_type_ref(ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::Named { name, args, .. } => {
-            if args.is_empty() {
-                type_leaf(name).to_string()
-            } else {
-                format!("{}<{}>", type_leaf(name), join(args))
-            }
-        }
-        TypeRef::DynTrait { trait_name, .. } => format!("dyn {}", type_leaf(trait_name)),
-        TypeRef::AssocProjection { name, .. } => format!("Self::{name}"),
-        TypeRef::Optional { inner, .. } => format!("?{}", render_type_ref(inner)),
-        TypeRef::Union { members, .. } => members
-            .iter()
-            .map(render_type_ref)
-            .collect::<Vec<_>>()
-            .join(" | "),
-        TypeRef::Tuple { elements, .. } => format!("({})", join(elements)),
-        TypeRef::Fn { params, ret, .. } => {
-            format!("({}) -> {}", join(params), render_type_ref(ret))
-        }
-    }
-}
-
-/// Render a comma-separated list of type references.
-fn join(types: &[TypeRef]) -> String {
-    types
-        .iter()
-        .map(render_type_ref)
-        .collect::<Vec<_>>()
-        .join(", ")
+    noeta_ast::shape::type_spelling(ty)
 }
 
 #[cfg(test)]
