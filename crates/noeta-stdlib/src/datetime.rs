@@ -627,7 +627,7 @@ const INSTANT_DOCS: &[(&str, &str)] = &[
     ),
     (
         "format",
-        "Format this instant with the given format string.",
+        "Format this instant (in UTC) with a **strftime** format string: `%H:%M:%S`, `%Y-%m-%d`, `%b %e`, `%%` for a literal percent. Anything that is not a `%` escape is copied through verbatim, so a pattern written in another library's vocabulary (`\"HH:mm:ss\"`) is not an error — it renders as that literal text. An *invalid* escape is rejected.",
     ),
     ("unix_ms", "Milliseconds since the Unix epoch."),
 ];
@@ -644,7 +644,7 @@ const ZONED_DOCS: &[(&str, &str)] = &[
     ("zone", "The IANA timezone name."),
     (
         "format",
-        "Format this datetime with the given format string.",
+        "Format this datetime (in its own zone) with a **strftime** format string: `%H:%M:%S`, `%Y-%m-%d`, `%Z` for the zone abbreviation, `%%` for a literal percent. Anything that is not a `%` escape is copied through verbatim, so a pattern written in another library's vocabulary (`\"HH:mm:ss\"`) is not an error — it renders as that literal text. An *invalid* escape is rejected.",
     ),
     ("year", "The year field."),
     ("month", "The month field (1–12)."),
