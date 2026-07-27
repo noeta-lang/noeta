@@ -201,10 +201,24 @@ pub fn read_package_sources(dir: &Path) -> io::Result<Vec<RawModule>> {
 
 /// Recursively gather `.noe` file paths under `dir` into `out`. A subdirectory that can't be read is
 /// skipped (best-effort), matching the sibling scan's tolerance.
+///
+/// **Dotted directories are not descended into.** A package is its checked-out working tree, and a
+/// dotted directory holds tooling state rather than package source: `.git`, and — the case that
+/// actually bites — `.claude/worktrees/`, where a git worktree keeps a SECOND copy of every module
+/// of the package. Without this, adding a dependency by path (or a `[patch]` override) linked an
+/// agent's in-progress branch into the consumer's program alongside the real modules, so a consumer
+/// that never referenced that branch was reported errors from it.
 fn collect_noe_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_dir() {
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'))
+            {
+                continue;
+            }
             let _ = collect_noe_files(&path, out);
         } else if path.is_file() && path.extension().is_some_and(|ext| ext == "noe") {
             out.push(path);

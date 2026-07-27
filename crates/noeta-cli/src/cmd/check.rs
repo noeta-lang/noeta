@@ -327,6 +327,17 @@ pub(crate) fn noe_files(root: &std::path::Path) -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_dir() {
+                // Skip dotted directories, matching `noeta fmt`'s walker. `.git` is the obvious
+                // one, but the case that actually bites is `.claude/worktrees/` — a git worktree
+                // holds a SECOND copy of every module, so checking a package (or a path/patched
+                // dependency) swept an agent's in-progress branch into the same program and
+                // reported its errors against a consumer that never referenced it.
+                if p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.'))
+                {
+                    continue;
+                }
                 dirs.push(p);
             } else if p.extension().is_some_and(|ext| ext == "noe") {
                 out.push(p);
