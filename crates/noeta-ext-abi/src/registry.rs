@@ -303,6 +303,30 @@ pub enum SigType {
     /// the `ListElemWide` analog and nests through the concrete resolution. Under `dyn`/no binding it
     /// degrades to a gradual hole, never a wrong concrete type.
     Assoc(&'static str),
+    /// **`Self`** — the implementing type itself, in a native trait method's *parameter* position.
+    ///
+    /// [`RetTy::SameAsArg(0)`](RetTy::SameAsArg) has always said this on the **return** side, and
+    /// [`Assoc`](Self::Assoc) says "a type derived from `Self`'s element". Neither could say it about
+    /// an argument, so a method taking another value of the implementor's own type — `v.add(other)`
+    /// on a `@packed` vector — had to declare `Dyn` and accept anything: `v.add(5)` type-checked
+    /// clean and failed at runtime. This is the missing half of that vocabulary.
+    ///
+    /// Resolution is receiver-relative, so it is only meaningful where a receiver exists (a trait
+    /// method). `Self` is the **implementor**, not the receiver: an `Element` method's receiver *is*
+    /// `Self`, while a `Bulk` method's is `List<Self>`, and both spell their operand the same way —
+    /// `Self` and `List<Self>` respectively. Outside a trait method it degrades to a gradual hole
+    /// rather than a wrong concrete type, exactly as `Assoc` does.
+    SelfTy,
+    /// **Any numeric scalar** — every type `Type::is_arith_numeric` admits: `int`, `float`, `f32`,
+    /// `f64`, and each `i8`..`u64` width.
+    ///
+    /// The other numeric [`SigType`]s name ONE type each, and there are no fixed-width variants at
+    /// all, so a parameter that genuinely takes any number had no way to say so and was declared
+    /// `Dyn` — which also admits a string, a list, or a whole `@packed` vector. `vec.Kernels::scale`
+    /// is the case in point: its factor is width-agnostic on purpose (`read_factor` converts), so
+    /// `Color` (4×u8) scales by `2.0` as readily as by `2`, and typing it as the element would
+    /// wrongly reject the first. This says exactly what such a parameter accepts, and nothing more.
+    Numeric,
 }
 
 impl SigType {
@@ -367,6 +391,8 @@ impl SigType {
                     .join(", ")
             ),
             SigType::Assoc(name) => format!("Self::{name}"),
+            SigType::SelfTy => "Self".to_string(),
+            SigType::Numeric => "number".to_string(),
         }
     }
 }

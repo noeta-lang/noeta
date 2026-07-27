@@ -1803,10 +1803,42 @@ fn a_named_native_signature_binds_labels() {
 }
 
 #[test]
+fn kernel_operands_are_typed_against_the_implementor() {
+    // `SigType::SelfTy` resolves to the CONCRETE implementor at the call site, so a component-wise
+    // operand must be the same shape and a bulk one a list of it. Both were `Dyn` before, so both of
+    // these reached the runtime to fail there.
+    let prelude = "use std.vec;\n\
+                   @packed struct V3 { x: f32; y: f32; z: f32 }\n\
+                   impl vec.Kernels for V3 {}\n\
+                   a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 };\n\
+                   b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 };\n";
+    assert!(codes(&format!("{prelude}echo a.add(b).x;\n")).is_empty());
+    assert!(codes(&format!("{prelude}echo [a].add_all([b])[0].x;\n")).is_empty());
+    assert_eq!(codes(&format!("{prelude}echo a.add(5).x;\n")), ["E0007"]);
+    assert_eq!(
+        codes(&format!("{prelude}echo [a].add_all(a)[0].x;\n")),
+        ["E0007"]
+    );
+    // `scale` is `SigType::Numeric`, NOT `Self::Elem`: the factor is width-agnostic on purpose, so
+    // every numeric kind is accepted — including one that is not the element's own width — while a
+    // non-number is refused. Typing it as the element would reject the `f32` factor on a `u8` shape
+    // that the corpus relies on.
+    assert!(codes(&format!("{prelude}echo a.scale(2.0f32).x;\n")).is_empty());
+    assert!(codes(&format!("{prelude}echo a.scale(2).x;\n")).is_empty());
+    assert!(codes(&format!("{prelude}echo a.scale(2.0).x;\n")).is_empty());
+    assert!(codes(&format!("{prelude}echo a.scale(2i32).x;\n")).is_empty());
+    assert_eq!(codes(&format!("{prelude}echo a.scale(a).x;\n")), ["E0007"]);
+    assert_eq!(
+        codes(&format!("{prelude}echo a.scale(\"x\").x;\n")),
+        ["E0007"]
+    );
+}
+
+#[test]
 fn kernel_methods_bind_labels() {
-    // A kernel method's parameters are all `SigType::Dyn`, so the names carry the whole distinction
-    // between `scale`'s scalar `factor` and `add`'s whole `other` vector. This path used to pass no
-    // argument expressions at all, so a label was dropped before anything could bind or refuse it.
+    // A kernel method's names carry the ROLE its type cannot: `Self` says `other` must be the same
+    // shape, but only the name says which of `scale`'s two readings is meant. This path used to pass
+    // no argument expressions at all, so a label was dropped before anything could bind or refuse it.
     let prelude = "use std.vec;\n\
                    @packed struct V3 { x: f32; y: f32; z: f32 }\n\
                    impl vec.Kernels for V3 {}\n\
