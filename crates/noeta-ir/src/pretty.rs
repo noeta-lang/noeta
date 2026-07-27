@@ -414,6 +414,7 @@ impl Printer<'_> {
                 None => "roles_of()".to_string(),
             },
             Rvalue::ParamsOf { target, .. } => format!("params_of({})", atom(target)),
+            Rvalue::ReturnsOf { target, .. } => format!("returns_of({})", atom(target)),
             Rvalue::FieldSpecsOf { name, .. } => format!("field_specs_of({})", atom(name)),
             Rvalue::Construct { name, fields, .. } => {
                 format!("construct({}, {})", atom(name), atom(fields))

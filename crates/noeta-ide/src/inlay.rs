@@ -326,7 +326,7 @@ impl Walker<'_> {
             }
             Expr::TypeOf { value, .. } => self.expr(value),
             Expr::FieldsOf { value, .. } | Expr::TraitsOf { value, .. } => self.expr(value),
-            Expr::ParamsOf { target, .. } => self.expr(target),
+            Expr::ParamsOf { target, .. } | Expr::ReturnsOf { target, .. } => self.expr(target),
             Expr::FieldSpecsOf { name, .. } => self.expr(name),
             Expr::Construct { name, fields, .. } => {
                 self.expr(name);

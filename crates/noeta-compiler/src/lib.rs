@@ -3751,6 +3751,14 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::ParamsOf { dst, src });
                 Ok(())
             }
+            Rvalue::ReturnsOf { target, .. } => {
+                // The target is a runtime string; the VM reads the matching signature record from
+                // `Module::reflection` and materializes its return type as a `?Type`. Load the
+                // operand into a register, exactly as `ParamsOf` does.
+                let src = self.atom_reg(target)?;
+                self.code.push(Op::ReturnsOf { dst, src });
+                Ok(())
+            }
             Rvalue::FieldSpecsOf { name, .. } => {
                 // The name is a runtime string; the VM reads the type's field schema from
                 // `Module::reflection` and materializes them. Load the operand into a register.

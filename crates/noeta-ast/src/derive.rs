@@ -877,9 +877,9 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
         Expr::TypeOf { value, .. }
         | Expr::FieldsOf { value, .. }
         | Expr::TraitsOf { value, .. } => visit_expr_types(value, f),
-        Expr::ParamsOf { target, .. } | Expr::FieldSpecsOf { name: target, .. } => {
-            visit_expr_types(target, f)
-        }
+        Expr::ParamsOf { target, .. }
+        | Expr::ReturnsOf { target, .. }
+        | Expr::FieldSpecsOf { name: target, .. } => visit_expr_types(target, f),
         Expr::Construct { name, fields, .. } => {
             visit_expr_types(name, f);
             visit_expr_types(fields, f);

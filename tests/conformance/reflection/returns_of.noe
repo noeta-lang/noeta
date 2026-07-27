@@ -1,0 +1,80 @@
+// `returns_of(target)` surfaces the other half of the compiler-built signature index: the declared
+// RETURN type of the fn/method named by the runtime `target` string, keyed exactly as
+// `params_of(target)` is (a bare fn name, or a qualified `Type.method`). It is the fact a framework
+// deriving an OpenAPI response schema from a controller method needs — before it existed, a
+// signature could be reflected into request bindings but its response was underivable.
+//
+// The result is a `?Type`, deliberately NOT `params_of`'s "empty answer for an unknown target". An
+// empty parameter list is a legitimate answer, so `params_of` can fold "unknown" into it without
+// losing anything; but every callable has a return type — `void` included — so no return value could
+// stand for "no such callable". `none` keeps a mistyped target distinguishable from a `void` method.
+//
+// The `Type` value is built by the same decoder `ParamInfo.type` goes through, so the two queries
+// cannot render a declared type differently; both backends read the shared reflection artifact, so
+// the differential holds by construction.
+// expect: stdout "greet -> Type.String"
+// expect: stdout "count -> Type.Int"
+// expect: stdout "Repo.find -> Type.Option(Type.Int)"
+// expect: stdout "UsersController.create -> Type.List(Type.String)"
+// expect: stdout "UsersController.purge -> Type.Unit"
+// expect: stdout "Kind.label -> Type.String"
+// expect: stdout "Shaped.area -> Type.Float"
+// A declared type reflects kind-agnostically as `Type.Named` here, exactly as the SAME annotation
+// does through `ParamInfo.type` — both go through the one `typeref_to_repr` walk, so a signature's
+// parameters and its return can never disagree about how a nominal spells.
+// expect: stdout "UsersController.new -> Type.Named(UsersController, [])"
+// expect: stdout "nope -> absent"
+// expect: stdout "UsersController.missing -> absent"
+// expect: exit 0
+struct Repo {
+    id: int
+
+    fn find(key: string): ?int { return some(self.id); }
+}
+
+class UsersController {
+    seen: int
+
+    fn new(): UsersController { return UsersController { seen: 0 }; }
+    fn create(req: string): List<string> { return [req]; }
+    // A `void` return is a real answer — `some(Type.Unit)`, never `none`.
+    fn purge(): void { return; }
+}
+
+enum Kind {
+    One
+    Two
+
+    fn label(): string { return "kind"; }
+}
+
+// A trait's abstract method signature is indexed too, under the `Trait.method` convention — the
+// same arm of the reflection builder that records its parameters.
+trait Shaped {
+    fn area(): float;
+}
+
+fn greet(name: string): string { return name; }
+fn count(): int { return 0; }
+
+fn describe(target: string): string {
+    return match returns_of(target) {
+        some(t) => "${t}",
+        none => "absent",
+    };
+}
+
+for target in [
+    "greet",
+    "count",
+    "Repo.find",
+    "UsersController.create",
+    "UsersController.purge",
+    "Kind.label",
+    "Shaped.area",
+    "UsersController.new",
+    "nope",
+    "UsersController.missing",
+] {
+    echo "${target} -> ${describe(target)}";
+}

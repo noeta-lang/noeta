@@ -2037,6 +2037,21 @@ impl Interpreter {
         Value::list(items)
     }
 
+    /// Materialize a callable's declared **return type** from the reflection info into a `?Type` —
+    /// `some(t)` for a known callable, `none` when the target names none. `t` is built by the very
+    /// same `build_type_value` `materialize_params` uses for `ParamInfo.type`, so the two reflection
+    /// surfaces cannot render a declared type differently. The VM materializes it the same way, so
+    /// the values agree across the differential by construction.
+    ///
+    /// `none` for an unknown target rather than a fabricated `Type.Unit`: `void` is a real return
+    /// type, so an unknown callable must be distinguishable from a `void` one.
+    fn materialize_returns(&self, target: &str) -> Value {
+        match self.reflection.returns_for(target) {
+            Some(repr) => builtin_enum("Option", "some", vec![build_type_value(repr)]),
+            None => builtin_enum("Option", "none", Vec::new()),
+        }
+    }
+
     /// Materialize a declared type's field schema into a `List<FieldSpec>` (`{ name, type, optional }`,
     /// declaration order) — the type-level reflection `field_specs_of`. An unknown or non-fielded type
     /// yields the empty list. Each `type` is the field's declared type (precise, from the reflection

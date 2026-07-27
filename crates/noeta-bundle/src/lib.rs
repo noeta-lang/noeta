@@ -111,7 +111,16 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// read — and `NarrowTarget` (in `Module::code`) gained a `DynTrait(String)` variant. Postcard is
 /// not self-describing, so the appended sequence and the new enum variant are both wire breaks by
 /// the same reasoning as every bump above.
-pub const FORMAT_VERSION: u8 = 9;
+///
+/// Bumped to 10 by the `returns_of` arc: `reflect::ParamRecord` (in `Module::reflection`) gained a
+/// trailing `ret: TypeRepr` — a callable's declared return type, the projection the new
+/// `returns_of(target)` query materializes. Postcard writes it back to back after `params` with no
+/// tag, so a version-9 reader decoding a version-10 payload would take the return type's variant
+/// discriminant as the next `ParamRecord`'s target-string length and desynchronise the manifest —
+/// the same wire break as every bump above. `Op` (in `Module::code`) also gained a `ReturnsOf`
+/// variant, declared beside `ParamsOf` rather than at the end, which shifts every discriminant after
+/// it — a wire break on its own by the same non-self-describing-encoding rule.
+pub const FORMAT_VERSION: u8 = 10;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

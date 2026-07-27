@@ -2223,6 +2223,9 @@ impl Printer<'_> {
             Expr::ParamsOf { target, .. } => {
                 Doc::concat([Doc::text("params_of("), self.expr(target)?, Doc::text(")")])
             }
+            Expr::ReturnsOf { target, .. } => {
+                Doc::concat([Doc::text("returns_of("), self.expr(target)?, Doc::text(")")])
+            }
             // The turbofish surface `field_specs_of::<T>()` was lowered to a string operand at parse
             // time, so it is reconstructed here when the operand is a bare type-name literal (the
             // canonical form); a genuinely dynamic operand (a variable, a computed string) prints as

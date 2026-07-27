@@ -154,6 +154,13 @@ pub enum TokenKind {
     /// for symmetry with `type_of`/`roles_of`/`attributes_of`.
     #[token("params_of")]
     ParamsOfKw,
+    /// The reflection keyword `returns_of(target)` — a callable's declared return type, returned as
+    /// `?Type` (`none` when no callable of that name is known). Takes the same runtime `string`
+    /// target `params_of` takes (a bare fn name or `Type.method`). A keyword for symmetry with
+    /// `params_of`/`type_of`; the trailing `_of` also keeps it clear of the `return` statement
+    /// keyword, which is a strict prefix (longest-match wins, as it already does for `type`/`type_of`).
+    #[token("returns_of")]
+    ReturnsOfKw,
     /// The reflection keyword `invoke(recv, name, args)` — the fallible by-name invocation
     /// primitive: dispatch a method (on a value) or an associated function (on a type) by a
     /// runtime string name, returning `Result`. A keyword for symmetry with the other reflection
@@ -431,6 +438,7 @@ impl TokenKind {
             TokenKind::FromBytesKw => "FromBytesKw",
             TokenKind::RolesOfKw => "RolesOfKw",
             TokenKind::ParamsOfKw => "ParamsOfKw",
+            TokenKind::ReturnsOfKw => "ReturnsOfKw",
             TokenKind::InvokeKw => "InvokeKw",
             TokenKind::FieldSpecsOfKw => "FieldSpecsOfKw",
             TokenKind::ConstructKw => "ConstructKw",
@@ -543,6 +551,7 @@ impl TokenKind {
             TokenKind::FromBytesKw => "`from_bytes`",
             TokenKind::RolesOfKw => "`roles_of`",
             TokenKind::ParamsOfKw => "`params_of`",
+            TokenKind::ReturnsOfKw => "`returns_of`",
             TokenKind::InvokeKw => "`invoke`",
             TokenKind::FieldSpecsOfKw => "`field_specs_of`",
             TokenKind::ConstructKw => "`construct`",

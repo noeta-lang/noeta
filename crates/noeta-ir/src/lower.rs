@@ -2659,6 +2659,17 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
+            Expr::ReturnsOf { target, span } => {
+                let target = self.lower_expr(target, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::ReturnsOf {
+                        target,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::FieldSpecsOf { name, span } => {
                 let name = self.lower_expr(name, out)?;
                 Ok(self.emit(out, Rvalue::FieldSpecsOf { name, span: *span }, *span))

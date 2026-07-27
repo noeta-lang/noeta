@@ -1812,6 +1812,14 @@ impl Interpreter {
                 };
                 Ok(self.materialize_params(&target))
             }
+            noeta_ir::Rvalue::ReturnsOf { target, .. } => {
+                // The runtime target string names a fn or method; materialize its declared return.
+                let target = match self.eval_ir_atom(target, frame)? {
+                    Value::Str(s) => s,
+                    _ => String::new(),
+                };
+                Ok(self.materialize_returns(&target))
+            }
             noeta_ir::Rvalue::FieldSpecsOf { name, .. } => {
                 // The runtime name string names a declared type; materialize its field schema.
                 let name = match self.eval_ir_atom(name, frame)? {

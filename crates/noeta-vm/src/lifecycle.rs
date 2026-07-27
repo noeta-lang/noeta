@@ -1009,6 +1009,21 @@ impl<'m> Vm<'m> {
         Value::list(items)
     }
 
+    /// Materialize a callable's declared **return type** from the module's reflection info into a
+    /// `?Type` — `some(t)` for a known callable, `none` when the target names none. `t` is built by
+    /// the very same `build_type_value` `materialize_params` uses for `ParamInfo.type`, so the two
+    /// reflection surfaces cannot render a declared type differently. The tree-walker materializes it
+    /// the same way, so the values agree across the differential by construction.
+    ///
+    /// `none` for an unknown target rather than a fabricated `Type.Unit`: `void` is a real return
+    /// type, so an unknown callable must be distinguishable from a `void` one.
+    pub(crate) fn materialize_returns(&self, target: &str) -> Value {
+        match self.module.reflection.returns_for(target) {
+            Some(repr) => crate::values::make_some(build_type_value(repr)),
+            None => crate::values::make_none(),
+        }
+    }
+
     /// One parameter's `#[...]` attributes, materialized into a `List<dyn>` of attribute-struct
     /// instances. Each instance is built exactly as `materialize_attributes` builds it — same
     /// `attribute_shape`, same `materialize_args` field resolution — so the value a consumer reads

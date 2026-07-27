@@ -607,8 +607,8 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::FieldsOf { operand, .. }
         | Rvalue::TraitsOf { operand, .. }
         | Rvalue::MaskWidth { operand, .. } => f(operand),
-        // `params_of(target)` reads its runtime target-string operand.
-        Rvalue::ParamsOf { target, .. } => f(target),
+        // `params_of(target)` / `returns_of(target)` read their runtime target-string operand.
+        Rvalue::ParamsOf { target, .. } | Rvalue::ReturnsOf { target, .. } => f(target),
         // `field_specs_of(name)` reads its runtime type-name operand.
         Rvalue::FieldSpecsOf { name, .. } => f(name),
         // `construct(name, fields)` reads its type-name and field-list operands.
