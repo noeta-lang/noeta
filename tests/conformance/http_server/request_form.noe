@@ -9,6 +9,7 @@
 // expect: stdout "decode=a b c"
 // expect: stdout "encode=buy%20milk%20%26%20caf%C3%A9"
 // expect: stdout "roundtrip=café 🦀"
+// expect: stdout "built POST /users title=buy milk ct=application/x-www-form-urlencoded"
 // expect: stdout "GET / form-fields=0"
 // expect: stdout "GET /health form-fields=0"
 // expect: stdout "POST /echo form-fields=1"
@@ -30,6 +31,11 @@ echo "decode=${server.url_decode("a%20b+c")}"
 echo "encode=${server.url_encode("buy milk & café")}"
 // `url_encode` is the inverse of `url_decode` over anything it produces, multi-byte included.
 echo "roundtrip=${server.url_decode(server.url_encode("café 🦀"))}"
+
+// A `Request` can be built without a server, so a handler taking one — or a framework routing on
+// one — is exercisable from a test or a script instead of only through the serve loop.
+built = server.incoming("post", "/users", "title=buy+milk", { "content-type": "application/x-www-form-urlencoded" })
+echo "built ${built.method()} ${built.path()} title=${built.form("title") ?? "absent"} ct=${built.header("content-type") ?? "none"}"
 
 fn handle(req: Request): Response {
     path = req.path()

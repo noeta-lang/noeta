@@ -1815,6 +1815,18 @@ const HTTP_SERVER_FNS: &[ExtFn] = &[
     // `Request` — a websocket session delivering a client event, a queue consumer, a test. Same
     // parser as `Request.form_all()`; exposing it here is what keeps every consumer from
     // hand-rolling percent-decoding.
+    // Build an INBOUND `Request` without a server (named `incoming` because the client module's
+    // `request` verb is an outbound call, and the two share one dispatch). The serve loop is
+    // otherwise the only source of one, so a
+    // handler taking a `Request` — or any framework routing on one — could not be exercised from a
+    // test or a script. Carries no connection, so replying to it is a no-op rather than traffic to
+    // a live socket.
+    ExtFn {
+        param_names: &["method", "url", "body", "headers"],
+        name: "incoming",
+        params: &[Str, Str, OPT_BODY, OPT_HEADERS],
+        ret: Concrete(REQUEST_SIG),
+    },
     ExtFn {
         param_names: &["body"],
         name: "parse_form",
@@ -1912,6 +1924,27 @@ fn http_dispatch(
     }
     // The form/percent codec — pure string transforms over the same parser `Request.form_all()`
     // uses, for callers that hold a body rather than a request.
+    if func == "incoming" {
+        want_arity_range(func, args, 2, 4)?;
+        let method = want_str(func, args, 0)?.to_ascii_uppercase();
+        let url = want_str(func, args, 1)?.to_string();
+        let body = match args.get(2) {
+            None => Vec::new(),
+            Some(_) => want_data(func, args, 2)?.to_vec(),
+        };
+        return Ok(NativeOut::Extern(crate::ExternBox::new(
+            crate::net::Request {
+                conn: None,
+                inner: crate::NetRequest {
+                    method,
+                    url,
+                    headers: want_headers(func, args, 3)?,
+                    body,
+                    timeout_ms: None,
+                },
+            },
+        )));
+    }
     if func == "parse_form" {
         want_arity(func, args, 1)?;
         return Ok(NativeOut::Map(
