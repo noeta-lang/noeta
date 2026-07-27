@@ -1852,6 +1852,40 @@ fn http_request(
     }
 }
 
+/// `std.http.url` — the percent-encoder/decoder (RFC 3986). Pure and host-free: no request is
+/// performed, so this module links nothing and is safe in any ring.
+const HTTP_URL_FNS: &[ExtFn] = &[
+    ExtFn {
+        param_names: &["value"],
+        name: "encode",
+        params: &[Str],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &["value"],
+        name: "decode",
+        params: &[Str],
+        ret: Concrete(Str),
+    },
+];
+
+/// `std.http.url`'s dispatch. Its own rather than an arm of [`http_dispatch`], because neither
+/// function touches the [`Host`]: they are string transformations, and routing them through the
+/// request builder would imply otherwise.
+fn http_url_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    want_arity(func, args, 1)?;
+    let value = want_str(func, args, 0)?;
+    match func {
+        "encode" => Ok(NativeOut::Str(crate::url::encode(value))),
+        "decode" => Ok(NativeOut::Str(crate::url::decode(value))),
+        _ => Err(no_function_error("http.url", func)),
+    }
+}
+
 fn http_dispatch(
     func: &str,
     host: &mut dyn Host,
@@ -4490,6 +4524,23 @@ const HTTP_CLIENT_DOCS: &[(&str, &str)] = &[
     ("request_async", "Async `request`."),
 ];
 
+const HTTP_URL_DOCS: &[(&str, &str)] = &[
+    (
+        "encode",
+        "Percent-encode one URL component (RFC 3986), leaving `A-Za-z0-9-_.~` alone. Encoding is \
+         over UTF-8 bytes, so one character may become several `%XX` escapes. Encode the pieces of \
+         a query or path, then join them — encoding the whole thing would escape its separators.",
+    ),
+    (
+        "decode",
+        "Percent-decode one URL component: every `%XX` back to its byte — the exact inverse of \
+         `encode`. A `+` stays a `+` (that it means a space is a *form*-encoding rule, and a plus \
+         in a path is literal); a query parser substitutes it before decoding. Total — a stray `%` \
+         stays a literal `%` and invalid UTF-8 is replaced, so a malformed URL is read rather than \
+         refused.",
+    ),
+];
+
 const HTTP_SERVER_DOCS: &[(&str, &str)] = &[
     (
         "serve",
@@ -6014,6 +6065,22 @@ const HTTP_MODULES: &[ExtModule] = &[
         // no ring. A `use std.http.server` program links no reqwest, precisely (P0.3b split).
         ring: None,
         docs: HTTP_SERVER_DOCS,
+        ..ExtModule::DEFAULTS
+    },
+    ExtModule {
+        // Percent-encoding (RFC 3986). Native because the transformation is over UTF-8 BYTES, which
+        // Noeta's scalar-based string surface does not reach — a `.noe` implementation gets ASCII
+        // right and mangles everything else. It sits under `http` because every consumer is HTTP:
+        // assembling a query string, taking one apart, escaping a path segment.
+        //
+        // No ring and no host: both functions are pure string transformations, so a program that
+        // uses them links no transport at all.
+        name: "http.url",
+        functions: HTTP_URL_FNS,
+        dispatch: http_url_dispatch,
+        deep_marshal: false,
+        ring: None,
+        docs: HTTP_URL_DOCS,
         ..ExtModule::DEFAULTS
     },
 ];

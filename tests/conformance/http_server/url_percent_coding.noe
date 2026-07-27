@@ -1,0 +1,30 @@
+// `std.http.url` — percent-encoding and decoding (RFC 3986).
+//
+// The property that makes this native rather than a `.noe` helper: the transformation is over UTF-8
+// BYTES. One character becomes several `%XX` escapes and has to be reassembled from them, which a
+// scalar-based string surface cannot do — it would get ASCII right and mangle everything else.
+// Pinned here so a future "simplification" into Noeta fails loudly on the non-ASCII rows.
+// expect: stdout "a%20b%26c%3Dd"
+// expect: stdout "a b&c=d"
+// expect: stdout "%C3%A9"
+// expect: stdout "café au lait"
+// expect: stdout "true"
+// expect: stdout "100% sure"
+// expect: stdout "true"
+// expect: exit 0
+use std.http.url
+
+// A component is encoded whole: the separators that would forge extra parameters are escaped.
+echo url.encode("a b&c=d")
+echo url.decode("a%20b%26c%3Dd")
+
+// One character, two escapes — and back again as ONE character, not two.
+echo url.encode("é")
+echo url.decode("caf%C3%A9%20au%20lait")
+echo url.decode("%C3%A9") == "é"
+
+// A stray `%` is data. Refusing a query over one would be worse than reading it as written.
+echo url.decode("100% sure")
+
+// The round trip holds for every shape, including a literal `+` (which travels as `%2B`).
+echo url.decode(url.encode("a+b é/c?d")) == "a+b é/c?d"
