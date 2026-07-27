@@ -512,6 +512,12 @@ fn sig_type_to_repr(sig: &noeta_ext_abi::registry::SigType) -> noeta_ast::reflec
         // A trait associated-type projection (`Self::Wide`, slice 1b) is resolved per-implementor by
         // the checker, not at the declaration site — a permissive hole in a reflected signature.
         SigType::Assoc(_) => TypeRepr::Dyn,
+        // `Self` is likewise receiver-relative: a reflected signature has no receiver to resolve it
+        // against, so it reflects as the same permissive hole rather than a fabricated nominal type.
+        SigType::SelfTy => TypeRepr::Dyn,
+        // "Any number" has no single reflected type — enumerating twelve members here would say
+        // less than the hole does, since reflection consumers read a shape, not a constraint.
+        SigType::Numeric => TypeRepr::Dyn,
     }
 }
 

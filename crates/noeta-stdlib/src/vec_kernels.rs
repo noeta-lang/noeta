@@ -46,13 +46,29 @@ const WIDE: SigType = SigType::Assoc("Wide");
 /// `Self::Float` — the float promotion (`length`), an [`ExtAssocType`] derived from the element.
 const FLOAT: SigType = SigType::Assoc("Float");
 
+/// `Self` — the implementor's own shape, for a component-wise operand.
+///
+/// These kernels zip two byte buffers ([`binop_buf`] walks `chunks_exact(S::BYTES)` over both), so
+/// the operand must be the *same* shape as the receiver: same element width, same arity. Declaring
+/// it `Dyn` let `v.add(5)` reach the runtime to fail there; `Self` is what the operation has always
+/// required.
+const SELF_TY: SigType = SigType::SelfTy;
+/// `List<Self>` — the bulk operand, a second list of the same shape as the receiver's.
+const LIST_SELF: SigType = SigType::List(&SELF_TY);
+/// A scale **factor** is deliberately width-agnostic: [`read_factor`] takes any number and the
+/// kernel converts, so a `Color` (4×u8) scales by `2.0` as readily as by `2`, and an `IVec3` by
+/// `2i32`. Typing it as the element (`Self::Elem`) would be stricter than the operation and would
+/// reject both — so it declares exactly the set the runtime accepts, and nothing wider.
+const FACTOR: SigType = SigType::Numeric;
+
 /// An `ExtTraitMethod` builder (const-fn so the method tables are `&'static`). Every kernel method is
 /// defaulted (answered by the trait's `dispatch`), so a bare `impl vec.Kernels for T {}` adopts them.
 ///
 /// `param_names` is what a `name:` label binds against, and it is worth carrying even here, where
 /// every method takes at most one operand: `v.scale(factor: 2.0)` says which of the two readings of
 /// `scale` is meant, and `xs.dot_all(other: ys)` says the argument is a second *list* rather than a
-/// single vector — both of which the bare types (`SigType::Dyn`) leave ambiguous.
+/// single vector. The types now say so too ([`SELF_TY`] / [`LIST_SELF`] / [`FACTOR`]), so the name
+/// documents the role and the type enforces it — they are not substitutes for each other.
 const fn tfn(
     name: &'static str,
     params: &'static [SigType],
@@ -104,35 +120,35 @@ pub(crate) const VEC_KERNELS: ExtTrait = ExtTrait {
 const KERNELS_METHODS: &[ExtTraitMethod] = &[
     tfn(
         "add",
-        &[SigType::Dyn],
+        &[SELF_TY],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "sub",
-        &[SigType::Dyn],
+        &[SELF_TY],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "scale",
-        &[SigType::Dyn],
+        &[FACTOR],
         &["factor"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "min",
-        &[SigType::Dyn],
+        &[SELF_TY],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "max",
-        &[SigType::Dyn],
+        &[SELF_TY],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
@@ -147,7 +163,7 @@ const KERNELS_METHODS: &[ExtTraitMethod] = &[
     ),
     tfn(
         "dot",
-        &[SigType::Dyn],
+        &[SELF_TY],
         &["other"],
         RetTy::Concrete(WIDE),
         BundleReceiver::Element,
@@ -169,35 +185,35 @@ const KERNELS_METHODS: &[ExtTraitMethod] = &[
     // Bulk forms over a packed `List<T>` (receiver `List<Self>`).
     tfn(
         "add_all",
-        &[SigType::Dyn],
+        &[LIST_SELF],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "sub_all",
-        &[SigType::Dyn],
+        &[LIST_SELF],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "scale_all",
-        &[SigType::Dyn],
+        &[FACTOR],
         &["factor"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "min_all",
-        &[SigType::Dyn],
+        &[LIST_SELF],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "max_all",
-        &[SigType::Dyn],
+        &[LIST_SELF],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
@@ -211,7 +227,7 @@ const KERNELS_METHODS: &[ExtTraitMethod] = &[
     ),
     tfn(
         "dot_all",
-        &[SigType::Dyn],
+        &[LIST_SELF],
         &["other"],
         RetTy::Concrete(SigType::List(&WIDE)),
         BundleReceiver::Bulk,
@@ -245,70 +261,70 @@ pub(crate) const VEC_SAT_KERNELS: ExtTrait = ExtTrait {
 const SAT_METHODS: &[ExtTraitMethod] = &[
     tfn(
         "add",
-        &[SigType::Dyn],
+        &[SELF_TY],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "sub",
-        &[SigType::Dyn],
+        &[SELF_TY],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "scale",
-        &[SigType::Dyn],
+        &[FACTOR],
         &["factor"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "min",
-        &[SigType::Dyn],
+        &[SELF_TY],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "max",
-        &[SigType::Dyn],
+        &[SELF_TY],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "add_all",
-        &[SigType::Dyn],
+        &[LIST_SELF],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "sub_all",
-        &[SigType::Dyn],
+        &[LIST_SELF],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "scale_all",
-        &[SigType::Dyn],
+        &[FACTOR],
         &["factor"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "min_all",
-        &[SigType::Dyn],
+        &[LIST_SELF],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "max_all",
-        &[SigType::Dyn],
+        &[LIST_SELF],
         &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,

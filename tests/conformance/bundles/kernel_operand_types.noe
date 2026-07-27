@@ -1,0 +1,25 @@
+// Kernel operands are typed, not `dyn`: a component-wise operand is `Self`, a bulk one `List<Self>`.
+//
+// Every kernel parameter used to be `SigType::Dyn`, because the ABI could say "the implementor's own
+// type" on the RETURN side (`RetTy::SameAsArg(0)`) and nowhere else. So `v.add(5)` type-checked
+// clean and only failed once the kernel tried to zip a scalar against a byte buffer. `SigType::SelfTy`
+// is the missing half of that vocabulary, resolved against the concrete implementor at the call site
+// — which is why the diagnostic below can name `V3` and `List<V3>` rather than a trait parameter.
+//
+// `scale` is deliberately NOT `Self::Elem`: its factor is width-agnostic (the kernel converts), so a
+// `Color` of `u8` scales by `2.0`. It declares `SigType::Numeric` — every numeric scalar and nothing
+// else — so a whole vector is still refused.
+// expect: error E0007 at 23:6
+// expect: error E0007 at 24:6
+// expect: error E0007 at 25:6
+// expect: exit 1
+use std.vec
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+impl vec.Kernels for V3 {}
+
+a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }
+
+echo a.add(5)             // an int where the same shape is required
+echo a.scale(a)           // a whole vector where a number is required
+echo [a].add_all(a)       // a single vector where a list of them is required
