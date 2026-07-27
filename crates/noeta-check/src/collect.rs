@@ -1372,15 +1372,22 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         | Expr::TraitsOf { value: inner, .. }
         | Expr::ParamsOf { target: inner, .. }
         | Expr::ReturnsOf { target: inner, .. }
-        | Expr::FieldSpecsOf { name: inner, .. }
         | Expr::As { expr: inner, .. }
         | Expr::TypeTest { expr: inner, .. }
         | Expr::FromBytes { blob: inner, .. }
         | Expr::Channel {
             capacity: inner, ..
         } => collect_nested_fns_in_expr(inner, out),
+        // A turbofish operand is a type — no expression, so no nested fn; a dynamic one is ordinary.
+        Expr::FieldSpecsOf { name, .. } => {
+            if let Some(e) = name.dynamic() {
+                collect_nested_fns_in_expr(e, out);
+            }
+        }
         Expr::Construct { name, fields, .. } => {
-            collect_nested_fns_in_expr(name, out);
+            if let Some(e) = name.dynamic() {
+                collect_nested_fns_in_expr(e, out);
+            }
             collect_nested_fns_in_expr(fields, out);
         }
         Expr::Binary { lhs: a, rhs: b, .. }

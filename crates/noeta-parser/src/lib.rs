@@ -34,8 +34,8 @@ use noeta_ast::{
     AssocTypeDecl, AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, ClassDecl,
     ClosureBody, Decorators, DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern,
     ImplBlock, MatchArm, MethodDirective, ObjectLit, PackedDirective, PackedLayout, Param, Pattern,
-    Program, RoleTag, Stmt, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod, TypeParam,
-    TypeRef, UnaryOp, UseName, VariantDecl,
+    Program, RoleTag, Stmt, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod, TypeOperand,
+    TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::Edition;
@@ -83,20 +83,6 @@ enum PrefixOp {
 /// this grammar accepts (never a drifted copy).
 fn is_decorator_directive(name: &str) -> bool {
     BuiltinDirective::from_name(name).is_some()
-}
-
-/// The head name of a turbofish type argument, for lowering `field_specs_of::<T>()` /
-/// `construct::<T>(…)` to the string-keyed node both forms share. A nominal `T` (the only meaningful
-/// argument to these type-level queries) yields its written name — including a dotted qualified name
-/// like `vec.Vec2`, which is exactly the key the reflection registry stores it under. A non-nominal
-/// argument (a container, `?T`, a union) has no single type name; it yields the empty string, so the
-/// runtime query answers with the honest empty result rather than a spurious match.
-fn type_ref_head_name(ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::Named { name, .. } => name.clone(),
-        TypeRef::DynTrait { trait_name, .. } => trait_name.clone(),
-        _ => String::new(),
-    }
 }
 
 /// The chumsky "extra" type used throughout: rich errors over [`TokenKind`](T) tokens
@@ -2664,48 +2650,42 @@ where
 
         // `field_specs_of::<T>()` / `field_specs_of(name)` — the TYPE-level field-schema query. Two
         // disjoint surfaces under one keyword, told apart by the token after it: `::` opens the
-        // turbofish (a static type), `(` opens the dynamic string operand. The turbofish is pure
-        // sugar — its `T` is lowered HERE to the type's name as a string literal, so both forms carry
-        // the same runtime node (a name operand), exactly the string-keyed shape `params_of` takes.
+        // turbofish (a static type), `(` opens the dynamic string operand. They stay disjoint in the
+        // AST as the two arms of `TypeOperand`, and converge only at lowering, on one name-keyed
+        // runtime node — exactly the string-keyed shape `params_of` takes.
+        //
+        // The turbofish `T` is deliberately NOT flattened to a string literal here. Namespace
+        // qualification runs later, in the linker, and rewrites `TypeRef`s — a string would be
+        // invisible to it and `field_specs_of::<Todo>()` under a `namespace` would silently query the
+        // unqualified key. Keeping it a type until lowering is the same convention every other
+        // turbofish in this grammar follows (`attributes_of`, `from_bytes`, `channel`, `roles_of`,
+        // the typed call forms).
         let field_specs_of = just(T::FieldSpecsOfKw)
             .ignore_then(choice((
                 just(T::ColonColon)
                     .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
                     .then_ignore(just(T::LParen))
                     .then_ignore(just(T::RParen))
-                    .map(move |ty| {
-                        let span = ty.span();
-                        Expr::Str {
-                            value: type_ref_head_name(&ty),
-                            span,
-                        }
-                    }),
-                sub.clone().delimited_by(just(T::LParen), just(T::RParen)),
+                    .map(TypeOperand::Static),
+                sub.clone()
+                    .delimited_by(just(T::LParen), just(T::RParen))
+                    .map(|e| TypeOperand::Dynamic(Box::new(e))),
             )))
             .map_with(move |name, e| Expr::FieldSpecsOf {
-                name: Box::new(name),
+                name,
                 span: ctx.to_span(e.span()),
             });
 
         // `construct::<T>(fields)` / `construct(name, fields)` — the dynamic struct constructor. The
-        // turbofish carries the type name (lowered here to a string, like `field_specs_of`) plus a
-        // single `fields` operand; the string form takes the type name and the fields list as two
-        // operands. Both converge on one node `{ name, fields }`.
+        // turbofish carries the type as a `TypeOperand::Static` (like `field_specs_of`, and for the
+        // same qualification reason) plus a single `fields` operand; the string form takes the type
+        // name and the fields list as two operands. Both converge on one node `{ name, fields }`.
         let construct = just(T::ConstructKw)
             .ignore_then(choice((
                 just(T::ColonColon)
                     .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
                     .then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
-                    .map(move |(ty, fields)| {
-                        let span = ty.span();
-                        (
-                            Expr::Str {
-                                value: type_ref_head_name(&ty),
-                                span,
-                            },
-                            fields,
-                        )
-                    }),
+                    .map(|(ty, fields)| (TypeOperand::Static(ty), fields)),
                 sub.clone()
                     .separated_by(just(T::Comma))
                     .at_least(2)
@@ -2715,11 +2695,11 @@ where
                     .map(|mut operands| {
                         let fields = operands.pop().expect("two operands");
                         let name = operands.pop().expect("two operands");
-                        (name, fields)
+                        (TypeOperand::Dynamic(Box::new(name)), fields)
                     }),
             )))
             .map_with(move |(name, fields), e| Expr::Construct {
-                name: Box::new(name),
+                name,
                 fields: Box::new(fields),
                 span: ctx.to_span(e.span()),
             });

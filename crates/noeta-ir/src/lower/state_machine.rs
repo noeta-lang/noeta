@@ -1188,9 +1188,14 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         | Expr::TraitsOf { value: expr, .. }
         | Expr::ParamsOf { target: expr, .. }
         | Expr::ReturnsOf { target: expr, .. }
-        | Expr::FieldSpecsOf { name: expr, .. }
         | Expr::FromBytes { blob: expr, .. } => hoist_in_expr(expr, pre, ctr),
         Expr::Channel { capacity, .. } => hoist_in_expr(capacity, pre, ctr),
+        // A turbofish operand is a type — no expression to hoist; a dynamic one is ordinary.
+        Expr::FieldSpecsOf { name, .. } => {
+            if let Some(e) = name.dynamic_mut() {
+                hoist_in_expr(e, pre, ctr);
+            }
+        }
         Expr::Invoke {
             recv, name, args, ..
         } => {
@@ -1201,7 +1206,9 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
             hoist_in_expr(args, pre, ctr);
         }
         Expr::Construct { name, fields, .. } => {
-            hoist_in_expr(name, pre, ctr);
+            if let Some(e) = name.dynamic_mut() {
+                hoist_in_expr(e, pre, ctr);
+            }
             hoist_in_expr(fields, pre, ctr);
         }
         Expr::TypedModuleCall { recv, args, .. } => {

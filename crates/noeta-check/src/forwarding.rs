@@ -427,7 +427,6 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         | Expr::TraitsOf { value: e, .. }
         | Expr::ParamsOf { target: e, .. }
         | Expr::ReturnsOf { target: e, .. }
-        | Expr::FieldSpecsOf { name: e, .. }
         | Expr::FromBytes { blob: e, .. }
         | Expr::Channel { capacity: e, .. }
         | Expr::TupleIndex { receiver: e, .. }
@@ -505,8 +504,17 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
             rec!(name);
             rec!(args);
         }
+        // A turbofish operand names a *declared* type, never an enclosing type parameter's slot (a
+        // `T` there is erased and reflects as nothing), so it forwards no recipe.
+        Expr::FieldSpecsOf { name, .. } => {
+            if let Some(e) = name.dynamic() {
+                rec!(e);
+            }
+        }
         Expr::Construct { name, fields, .. } => {
-            rec!(name);
+            if let Some(e) = name.dynamic() {
+                rec!(e);
+            }
             rec!(fields);
         }
         Expr::FieldSet {

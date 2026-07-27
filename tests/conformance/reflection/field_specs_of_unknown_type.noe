@@ -1,0 +1,15 @@
+// A turbofish reflection query names a real type, so an unresolvable one is a checker error (E0013)
+// — not a silently empty schema. The turbofish keeps `T` as a genuine type reference all the way
+// through the linker (which is what makes it resolve to a *qualified* identity under a `namespace`),
+// so it is resolved here exactly like any other type annotation, `attributes_of::<T>()` included.
+//
+// The runtime-string surface `field_specs_of(name)` stays lenient by design — its operand's value is
+// only known at runtime, so an unknown name there is the empty list, never an error.
+// expect: error E0013 at 14:26
+// expect: exit 1
+struct Todo {
+    id: int
+}
+
+specs = field_specs_of::<Todoo>()
+echo specs.len()

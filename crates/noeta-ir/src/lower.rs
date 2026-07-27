@@ -27,7 +27,7 @@ use std::collections::HashMap as StdHashMap;
 
 use noeta_ast::{
     BinaryOp, Expr, FnDecl, ForPattern as AstForPattern, Param, Program as AstProgram,
-    Stmt as AstStmt, StrPart, TypeRef,
+    Stmt as AstStmt, StrPart, TypeOperand, TypeRef,
 };
 use noeta_ext_abi::NominalType;
 use noeta_span::Span;
@@ -1566,6 +1566,25 @@ impl Lowerer<'_> {
         })
     }
 
+    /// Lower a reflection surface's type operand to the **type-name atom** both its surfaces share.
+    ///
+    /// This is where the turbofish finally becomes a name, and it is deliberately *here* rather than
+    /// in the parser: lowering runs on the already-linked program, so the [`TypeRef`] now carries its
+    /// **qualified** identity (`app.storage.Todo`) — exactly the key the reflection registry stores
+    /// the type under, and exactly what the dynamic string surface would have been handed. Flattening
+    /// it at parse time instead put it beyond the linker's namespace rewrite, and
+    /// `field_specs_of::<Todo>()` under a `namespace` silently answered with the empty schema.
+    fn lower_type_operand(
+        &mut self,
+        operand: &TypeOperand,
+        out: &mut Vec<Stmt>,
+    ) -> Result<Atom, Unsupported> {
+        match operand {
+            TypeOperand::Static(ty) => Ok(Atom::Const(Const::Str(ty.head_name()))),
+            TypeOperand::Dynamic(e) => self.lower_expr(e, out),
+        }
+    }
+
     /// Lower an expression to an [`Atom`], emitting the `let`s that compute any
     /// sub-expressions into `out` first (A-normal form). Literals and identifiers reduce
     /// directly to an atom with no `let`.
@@ -2671,11 +2690,11 @@ impl Lowerer<'_> {
                 ))
             }
             Expr::FieldSpecsOf { name, span } => {
-                let name = self.lower_expr(name, out)?;
+                let name = self.lower_type_operand(name, out)?;
                 Ok(self.emit(out, Rvalue::FieldSpecsOf { name, span: *span }, *span))
             }
             Expr::Construct { name, fields, span } => {
-                let name = self.lower_expr(name, out)?;
+                let name = self.lower_type_operand(name, out)?;
                 let fields = self.lower_expr(fields, out)?;
                 Ok(self.emit(
                     out,

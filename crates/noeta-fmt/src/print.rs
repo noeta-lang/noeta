@@ -12,8 +12,8 @@
 use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
     FieldDecl, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, ObjectLit,
-    Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod, TypeParam, TypeRef,
-    UseName, VariantDecl,
+    Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod, TypeOperand,
+    TypeParam, TypeRef, UseName, VariantDecl,
 };
 use std::cell::Cell;
 
@@ -2226,29 +2226,32 @@ impl Printer<'_> {
             Expr::ReturnsOf { target, .. } => {
                 Doc::concat([Doc::text("returns_of("), self.expr(target)?, Doc::text(")")])
             }
-            // The turbofish surface `field_specs_of::<T>()` was lowered to a string operand at parse
-            // time, so it is reconstructed here when the operand is a bare type-name literal (the
-            // canonical form); a genuinely dynamic operand (a variable, a computed string) prints as
-            // the call form `field_specs_of(name)`. Both parse back to the same node.
-            Expr::FieldSpecsOf { name, .. } => match turbofish_type_name(name) {
-                Some(tn) => Doc::text(format!("field_specs_of::<{tn}>()")),
-                None => Doc::concat([
-                    Doc::text("field_specs_of("),
-                    self.expr(name)?,
-                    Doc::text(")"),
+            // The turbofish surface `field_specs_of::<T>()` keeps its `T` as a type operand, so it is
+            // reconstructed verbatim; a dynamic operand (a variable, a computed string, a literal)
+            // prints as the call form `field_specs_of(name)`. Both parse back to the same node.
+            Expr::FieldSpecsOf { name, .. } => match name {
+                TypeOperand::Static(ty) => Doc::concat([
+                    Doc::text("field_specs_of::<"),
+                    self.type_ref(ty)?,
+                    Doc::text(">()"),
                 ]),
+                TypeOperand::Dynamic(e) => {
+                    Doc::concat([Doc::text("field_specs_of("), self.expr(e)?, Doc::text(")")])
+                }
             },
             // `construct::<T>(fields)` reconstructs its turbofish likewise; the dynamic form prints
             // both operands as `construct(name, fields)`.
-            Expr::Construct { name, fields, .. } => match turbofish_type_name(name) {
-                Some(tn) => Doc::concat([
-                    Doc::text(format!("construct::<{tn}>(")),
+            Expr::Construct { name, fields, .. } => match name {
+                TypeOperand::Static(ty) => Doc::concat([
+                    Doc::text("construct::<"),
+                    self.type_ref(ty)?,
+                    Doc::text(">("),
                     self.expr(fields)?,
                     Doc::text(")"),
                 ]),
-                None => Doc::concat([
+                TypeOperand::Dynamic(e) => Doc::concat([
                     Doc::text("construct("),
-                    self.expr(name)?,
+                    self.expr(e)?,
                     Doc::text(", "),
                     self.expr(fields)?,
                     Doc::text(")"),
@@ -2978,26 +2981,6 @@ impl Printer<'_> {
 /// postfix-headed expressions are maximal (never need parenthesizing as an operand). Used to insert
 /// the minimum parentheses that preserve the parse — parentheses are not in the AST, so a naive
 /// printer would re-associate `Sub(Shl(a,b),c)` into `a << b - c`.
-/// The type name to reconstruct a `field_specs_of::<T>()` / `construct::<T>(…)` turbofish from — the
-/// operand is a string literal (the parser lowered the turbofish to it) whose value is a valid
-/// type-name token: identifier segments (`[A-Za-z_][A-Za-z0-9_]*`) joined by dots (a qualified name
-/// like `vec.Vec2`). `None` for any other operand (a variable, a computed string, or a literal that
-/// is not a bare type name — a CLI framework's runtime type name), which prints as the call form.
-fn turbofish_type_name(operand: &Expr) -> Option<String> {
-    let Expr::Str { value, .. } = operand else {
-        return None;
-    };
-    if value.is_empty() {
-        return None;
-    }
-    let valid = value.split('.').all(|seg| {
-        let mut chars = seg.chars();
-        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-    });
-    valid.then(|| value.clone())
-}
-
 fn prec(e: &Expr) -> u8 {
     match e {
         Expr::Pipeline { .. } => 1,

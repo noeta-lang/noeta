@@ -8,7 +8,7 @@
 use crate::{
     AttrArg, AttrValue, CallArg, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl,
     ForPattern, ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl,
-    TraitBound, TraitDecl, TypeParam, TypeRef,
+    TraitBound, TraitDecl, TypeOperand, TypeParam, TypeRef,
 };
 use noeta_span::Span;
 
@@ -70,6 +70,26 @@ impl Pretty for CallArg {
                 out.push(')');
             }
             None => self.value.pretty(out, level),
+        }
+    }
+}
+
+/// A reflection surface's type operand. The two arms render **differently** on purpose: the fmt
+/// safety gate compares this form before and after formatting, so a formatter that turned a
+/// turbofish `field_specs_of::<T>()` into the string call `field_specs_of("T")` (or the reverse)
+/// must show up as a diff rather than as an equal-looking `(str "T")` either way.
+impl Pretty for TypeOperand {
+    fn pretty(&self, out: &mut String, level: usize) {
+        match self {
+            TypeOperand::Static(ty) => {
+                indent(out, level);
+                out.push_str(&format!(
+                    "(type-arg {} {})",
+                    type_ref_str(ty),
+                    span(ty.span())
+                ));
+            }
+            TypeOperand::Dynamic(e) => e.pretty(out, level),
         }
     }
 }
