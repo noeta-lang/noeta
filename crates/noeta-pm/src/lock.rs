@@ -606,7 +606,11 @@ mod tests {
         write(&dir, &[git_pkg()], &legacy, None, None).unwrap();
         let lock = Lock::read(&dir);
         assert_eq!(lock.trust_for("acme/greet"), Some(&pin));
-        assert_eq!(lock.scope_trust("acme"), None, "the bare scope pin is re-keyed");
+        assert_eq!(
+            lock.scope_trust("acme"),
+            None,
+            "the bare scope pin is re-keyed"
+        );
 
         // Two packages in the scope: the old pin could only ever have matched one of them, so it
         // is dropped and each package re-pins (verified afresh) on the next resolve.
