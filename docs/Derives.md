@@ -11,7 +11,8 @@
 | `Display` | A structural `to_string` — a **marker**: the structural default you already get, kept so a competing hand-written `impl Display` is a coherence error. |
 | `Error` | `message()` returns `"${self}"` — the type's display story (a hand-written `impl Display`'s `to_string()`, or the structural rendering under `@derive(Display)`). Requires the type to have `Display` at all (E0050 otherwise); `@derive(Error, via: field)` instead forwards `message()` into the field's own `Error` implementation. See [Error Handling](Error-Handling#deriving-error). |
 | `Clone` | A structural clone — a marker like `Display` (value semantics already copy). |
-| `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). |
+| `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). Encoding always writes **every** field — a default is a decode-side notion, so it never omits one. |
+| `Deserialize<Json>` | Registers the type's decode recipe, so JSON decodes into it: `json.parse::<T>` / `json.try_parse::<T>`, `Response.json::<T>()`, and the router-facing `json.decode_typed("T", text)` (which resolves the type by *name* at runtime, and needs this derive). Derivable for a non-generic value `struct` whose fields are all JSON-decodable — numbers, `bool`, `string`, `?T`, `List`, string-keyed `Map`, or another such struct; anything else is E0050. See [which fields may be omitted](#which-json-fields-may-be-omitted) below. |
 
 ```noeta check
 @derive(Equatable, Comparable, Display, Clone)
@@ -26,6 +27,36 @@ echo Point.new(1, 2) < Point.new(1, 3)   // true
 class User { name: string  id: int  active: bool }
 echo User.new("Ada", 7, true).to_json()  // {"name":"Ada","id":7,"active":true}
 ```
+
+## Which JSON fields may be omitted
+
+`@derive(Deserialize<Json>)` reads optionality off the declaration, and the rule is exact:
+
+| Field declaration | An input that omits it |
+|---|---|
+| `name: ?T` | decodes to `none` |
+| `name: T = <literal>` | decodes to the declared default |
+| `name: T = <anything else>` (`= now()`, `= helper()`) | **required** — the error says the default is not a literal |
+| `name: T` | **required** — the missing-field error, naming the field and the type |
+
+A default makes the field *optional*, not untyped: a value that **is** present still has to match the field's type, and it always wins over the default.
+
+```noeta
+use std.json
+
+@derive(Deserialize<Json>)
+struct Pet {
+    id: int
+    name: string = "(unnamed)"
+}
+
+pet = json.parse::<Pet>("{\"id\": 7}")
+echo "${pet.id}: ${pet.name}"      // 7: (unnamed)
+```
+
+The literal cutoff is not arbitrary: a decode is a pure data walk with no access to the running program, so it can only fill a default it carries *as data*. Every in-process constructor — a `T { … }` literal, `construct(name, fields)` — runs the field's compiled default expression instead, which is why those accept a non-literal default where a decode cannot. `field_specs_of::<T>()` reports `optional = true` for any default at all; a decode narrows that to the literal ones and tells you when it did.
+
+The same rule governs request bodies: a web framework decodes a handler's body parameter with `json.decode_typed`, so a body struct with a literal default accepts documents that omit that field rather than rejecting them.
 
 ## Deriving a user trait
 

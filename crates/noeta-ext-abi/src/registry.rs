@@ -501,10 +501,10 @@ pub enum TypeRecipe {
     List(Box<TypeRecipe>),
     /// A string-keyed map; the boxed recipe is the value type (JSON object keys are always strings).
     Map(Box<TypeRecipe>),
-    /// A struct/record type: its name and `(field, recipe)` pairs in the type's declared order.
+    /// A struct/record type: its name and its [`FieldRecipe`]s in the type's declared order.
     Struct {
         name: String,
-        fields: Vec<(String, TypeRecipe)>,
+        fields: Vec<FieldRecipe>,
         /// Whether this type implements the `Validate` built-in trait (validation arc). When set,
         /// a recipe door re-enters the backend to run `validate()` on the freshly-built value
         /// (bottom-up: after all fields are materialized and validated). Resolved by the checker's
@@ -512,6 +512,77 @@ pub enum TypeRecipe {
         /// (zero cost for a non-validated type).
         has_validator: bool,
     },
+}
+
+/// One field of a [`TypeRecipe::Struct`]: its name, the recipe its value decodes through, and what
+/// the decoder does when the input omits it ([`FieldDefault`]).
+///
+/// The default rides *on the field* rather than as a wrapper recipe node so that every consumer that
+/// walks a struct's fields (the decoder, the conformance harnesses, an extension's own recipe walk)
+/// sees the optionality where the field is named, and a nested recipe stays a pure type description.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct FieldRecipe {
+    /// The field's declared name — the key the decoder matches in the input object, and the name it
+    /// emits in the resulting [`NativeOut::Struct`].
+    pub name: String,
+    /// The recipe the field's value decodes through.
+    pub recipe: TypeRecipe,
+    /// What an *omitted* field means: required, or filled from a baked-in literal default.
+    pub default: FieldDefault,
+}
+
+impl FieldRecipe {
+    /// A field the input must supply (no declared default).
+    pub fn required(name: impl Into<String>, recipe: TypeRecipe) -> FieldRecipe {
+        FieldRecipe {
+            name: name.into(),
+            recipe,
+            default: FieldDefault::Required,
+        }
+    }
+
+    /// A field whose declared default is a literal, baked in as the JSON text `json`. An omitted
+    /// field decodes that text through [`Self::recipe`], so a filled default and a supplied value go
+    /// through the identical walk.
+    pub fn with_default(
+        name: impl Into<String>,
+        recipe: TypeRecipe,
+        json: impl Into<String>,
+    ) -> FieldRecipe {
+        FieldRecipe {
+            name: name.into(),
+            recipe,
+            default: FieldDefault::Literal(json.into()),
+        }
+    }
+}
+
+/// What a struct field's declared default means to a **decoder** — the fillable/required boundary,
+/// resolved once by the checker's `type_to_recipe` and baked into the recipe.
+///
+/// The language lets any field declare a default (`name: string = "(unnamed)"`, `at: Time = now()`),
+/// and every *in-process* constructor — a struct literal, the dynamic `construct(name, fields)` —
+/// fills an omitted defaulted field by running its compiled default thunk. A decode has no thunk to
+/// run: it is a pure data walk in `noeta-stdlib`, downstream of the backend that owns the program's
+/// code. So the boundary is **literalness**:
+///
+/// - a default that folds to a constant ([`FieldDefault::Literal`]) is baked into the recipe as JSON
+///   text and filled when the field is absent — exactly the subset `TypeInfo::field_defaults` carries;
+/// - any other default expression ([`FieldDefault::Dynamic`]) cannot be baked, so the field stays
+///   required in JSON and its absence is the ordinary missing-field error, worded to say why.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub enum FieldDefault {
+    /// No declared default: an absent field is a missing-field error.
+    #[default]
+    Required,
+    /// The field's declared default, rendered as **JSON text** (`"\"(unnamed)\""`, `"3"`,
+    /// `"[1, 2]"`). An absent field decodes this text through the field's own recipe, so the filled
+    /// value is built by the same walk — and the same numeric widening — a supplied value is.
+    Literal(String),
+    /// The field declared a default the checker could not fold to a constant (`= now()`,
+    /// `= other_field`). Nothing can be baked, so the field is still required in JSON; the variant
+    /// exists so the decoder can *say* that rather than reporting a bare missing field.
+    Dynamic,
 }
 
 /// One resolved **type-argument bundle** for a forwarded generic instantiation (poly-values F2b):

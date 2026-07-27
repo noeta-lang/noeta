@@ -1141,6 +1141,44 @@ fn resolve_children(
     stmt
 }
 
+/// Render a folded literal ([`noeta_ast::AttrValue`]) as **JSON text**, or `None` when it has no JSON
+/// spelling. The write half of the json-defaults boundary: what this renders is what a decode can
+/// bake into a [`noeta_ext_abi::FieldDefault::Literal`] and fill for an omitted field.
+///
+/// Only the forms a JSON document can carry are rendered — scalars and lists of them. A `Set`/`Map`/
+/// enum/struct/type-reference literal, and a non-finite float (no JSON spelling at all), return
+/// `None`, so the field falls back to [`noeta_ext_abi::FieldDefault::Dynamic`] rather than baking a
+/// value the decoder could not reproduce. The text is decoded through the field's own recipe, so
+/// `1` for a `float` field widens exactly as a supplied `1` would.
+fn attr_value_to_json(value: &noeta_ast::AttrValue) -> Option<String> {
+    use noeta_ast::AttrValue;
+    Some(match value {
+        AttrValue::Str(s) => noeta_ext_abi::json_text::json_string(s),
+        AttrValue::Int(n) => n.to_string(),
+        AttrValue::Float(f) if f.is_finite() => {
+            // Always spell a float with a fractional part so it round-trips as a JSON *number* the
+            // same way the source literal reads (`1.0`, not `1`). Both decode to `float` anyway
+            // (int widens), but the baked text should mirror the declaration.
+            let text = f.to_string();
+            if text.contains(['.', 'e', 'E']) {
+                text
+            } else {
+                format!("{text}.0")
+            }
+        }
+        AttrValue::Bool(b) => b.to_string(),
+        AttrValue::List(items) => {
+            let rendered = items
+                .iter()
+                .map(attr_value_to_json)
+                .collect::<Option<Vec<_>>>()?;
+            format!("[{}]", rendered.join(", "))
+        }
+        // No JSON spelling: a set/map/enum/struct/type literal, or a non-finite float.
+        _ => return None,
+    })
+}
+
 // ----- the checker's tier/semantic-role validation passes (impl Checker, moved from lib.rs) -----
 
 impl Checker {
@@ -1405,12 +1443,25 @@ impl Checker {
                     && self.symbols.type_kinds.get(name)
                         == Some(&noeta_types::TypeKind::Struct) =>
             {
+                let defaults = self.symbols.field_defaults.get(name);
                 let fields = self
                     .symbols
                     .records
                     .get(name)?
                     .iter()
-                    .map(|(fname, fty)| Some((fname.clone(), self.type_to_recipe(fty)?)))
+                    .map(|(fname, fty)| {
+                        Some(noeta_ext_abi::FieldRecipe {
+                            name: fname.clone(),
+                            recipe: self.type_to_recipe(fty)?,
+                            // What an omitted field means (json-defaults): a declared LITERAL
+                            // default is baked in and fills the field; any other default is
+                            // `Dynamic` and stays required. Absent from the table ⇒ `Required`.
+                            default: defaults
+                                .and_then(|d| d.get(fname))
+                                .cloned()
+                                .unwrap_or_default(),
+                        })
+                    })
                     .collect::<Option<Vec<_>>>()?;
                 // Validation arc: a struct implementing `Validate` carries the flag so the recipe
                 // door re-enters to run `validate()` on the freshly-built value (bottom-up).
@@ -1426,6 +1477,32 @@ impl Checker {
             }
             _ => return None,
         })
+    }
+
+    /// Classify one field's declared default for a decode recipe (json-defaults): what
+    /// [`noeta_ext_abi::FieldDefault`] a *missing* input field means for it.
+    ///
+    /// The fillable/required boundary lives here, and it is **literalness**. A decode is a pure data
+    /// walk in `noeta-stdlib` with no access to the program's code, so it can only fill a default it
+    /// carries as data — the literal subset [`noeta_ast::reflect::fold_const_expr`] folds, which is
+    /// exactly the subset `TypeInfo::field_defaults` already reports. A default that folds (or whose
+    /// folded value has no JSON spelling — an untyped `Set`/`Map`/enum literal, a non-finite float)
+    /// is [`noeta_ext_abi::FieldDefault::Dynamic`]: still required in JSON, but named as such in the
+    /// error, so the author is told *why* a field they gave a default is being demanded.
+    pub(crate) fn field_default_recipe(
+        field: &noeta_ast::FieldDecl,
+    ) -> noeta_ext_abi::FieldDefault {
+        use noeta_ext_abi::FieldDefault;
+        let Some(expr) = &field.default else {
+            return FieldDefault::Required;
+        };
+        match noeta_ast::reflect::fold_const_expr(expr)
+            .as_ref()
+            .and_then(attr_value_to_json)
+        {
+            Some(json) => FieldDefault::Literal(json),
+            None => FieldDefault::Dynamic,
+        }
     }
 
     /// Validate a struct's `@role(Enum.Variant)` tags. Each must name a **fieldless** variant of a

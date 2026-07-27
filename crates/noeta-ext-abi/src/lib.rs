@@ -19,7 +19,13 @@
 /// call site binds against a native signature). A registration table written for ABI 1 omits it
 /// and no longer compiles; the composed build reports that as an ABI mismatch naming the package
 /// it belongs to (`compose::compose_failure`) rather than as a bare `rustc` error.
-pub const ABI_VERSION: u32 = 2;
+///
+/// **3** — [`registry::TypeRecipe::Struct`]'s `fields` became `Vec<FieldRecipe>` (from
+/// `Vec<(String, TypeRecipe)>`) so each field carries its [`registry::FieldDefault`] — what an
+/// omitted input field means. A `typed_dispatch` that walks a struct recipe destructures the tuple
+/// and no longer compiles; there is no silent behavior change, and `..DEFAULTS` cannot cover it
+/// (the change is inside a matched enum variant, not an added registration field).
+pub const ABI_VERSION: u32 = 3;
 
 pub mod args;
 pub mod channel;
@@ -59,10 +65,11 @@ pub use registry::{
     ArenaGetter, AssocDerivation, AttrTarget, BundleReceiver, ClassDispatch, ConstraintArity,
     ConstraintField, ConstraintLayout, CtxTypeDispatch, EnumBacking, ExtAssocType, ExtCapability,
     ExtClass, ExtEnum, ExtField, ExtFielded, ExtFn, ExtModule, ExtRoleTag, ExtStruct, ExtTrait,
-    ExtTraitMethod, ExtType, ExtTypeDirective, ExtVariant, Extension, FieldedDispatch, FieldedKind,
-    HiddenArg, ModuleDispatch, NativeOut, NativeValue, Nominal, NominalKind, NominalType,
-    PackedConstraint, PackedLayoutKind, RetTy, Scalar, ScalarVec, SigType, TraitDispatch,
-    TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch, TypedTypeDispatch, VariantValue,
+    ExtTraitMethod, ExtType, ExtTypeDirective, ExtVariant, Extension, FieldDefault, FieldRecipe,
+    FieldedDispatch, FieldedKind, HiddenArg, ModuleDispatch, NativeOut, NativeValue, Nominal,
+    NominalKind, NominalType, PackedConstraint, PackedLayoutKind, RetTy, Scalar, ScalarVec,
+    SigType, TraitDispatch, TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch,
+    TypedTypeDispatch, VariantValue,
 };
 // The Ring 1 bodies moved to `ring1` (audit-2 F8); the glob keeps every existing path
 // (`noeta_ext_abi::Arg`, `noeta_stdlib::string_method`, ...) compiling unchanged. The shared

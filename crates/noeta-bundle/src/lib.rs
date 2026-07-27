@@ -111,7 +111,14 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// read — and `NarrowTarget` (in `Module::code`) gained a `DynTrait(String)` variant. Postcard is
 /// not self-describing, so the appended sequence and the new enum variant are both wire breaks by
 /// the same reasoning as every bump above.
-pub const FORMAT_VERSION: u8 = 9;
+///
+/// Bumped to 10 by the json-defaults arc: `TypeRecipe::Struct::fields` (in `Module::deserialize_recipes`
+/// and in the `Op` variants that carry a call-site recipe) changed from `Vec<(String, TypeRecipe)>` to
+/// `Vec<FieldRecipe>` — each field now also carries its `FieldDefault`, so a JSON decode can fill a
+/// field whose declaration gave it a literal default. Postcard writes the struct's fields back to back
+/// with no tag, so the extra per-field enum shifts every byte after the first field; a version-9 reader
+/// would take the `FieldDefault` discriminant as the next field's name length and desynchronise.
+pub const FORMAT_VERSION: u8 = 10;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a
