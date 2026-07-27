@@ -4986,6 +4986,16 @@ fn narrow_head(name: &str) -> Option<NarrowTarget> {
         BuiltinTy::KindEnum => NarrowTarget::AnyEnum,
         BuiltinTy::KindStruct => NarrowTarget::AnyStruct,
         BuiltinTy::KindClass => NarrowTarget::AnyClass,
+        // `number` is a union, so it narrows through the union machinery (`AnyOf`) rather than
+        // earning a head of its own. Only three heads are listed because the runtime erases the
+        // rest: every fixed-width integer is a `Value::Int` and `f64` is a `Value::Float` (there is
+        // no boxing site to stamp a width on), while `f32` alone is reified — the same erasure the
+        // `Int`/`Float`/`F32` arms above already encode.
+        BuiltinTy::Number => NarrowTarget::AnyOf(vec![
+            NarrowTarget::Int,
+            NarrowTarget::Float,
+            NarrowTarget::F32,
+        ]),
         // `Option`/`Result` are enums whose shape name *is* the type name, so they narrow through
         // the nominal path like a user enum rather than needing a head of their own.
         BuiltinTy::Option | BuiltinTy::Result => return None,

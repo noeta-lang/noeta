@@ -993,9 +993,11 @@ fn key_capable_primitive(name: &str) -> bool {
         // The float family: excluded per above. Everything else can never be a `@packed` field
         // in the first place (`packed_named_fields` records only bare named field types, and the
         // layout gate admits only the numeric/bool primitives), so it is not key-capable either.
+        // `number` is a union, not a storage class — a `@packed` field must have ONE width to lay
+        // out, so it can never be a packed field at all, let alone a key.
         Some(
             Float | F32 | F64 | Str | Bytes | Unit | Dyn | List | Set | Map | Option | Result
-            | KindEnum | KindStruct | KindClass,
+            | KindEnum | KindStruct | KindClass | Number,
         )
         | None => false,
     }

@@ -5763,8 +5763,10 @@ fn parse_packed_field(name: &str) -> Option<noeta_stdlib::PackedField> {
         BuiltinTy::Bool => PF::Bool,
         BuiltinTy::IntN { signed, bits } => PF::IntN { bits, signed },
         // Not scalar element kinds: a nested struct name is resolved by its own layout, and a
-        // container/string/abstract head bars the type from a `vec` bundle, as before.
-        BuiltinTy::Str
+        // container/string/abstract head bars the type from a `vec` bundle, as before. `number` is
+        // barred because a packed field needs ONE width to lay out, and it names twelve.
+        BuiltinTy::Number
+        | BuiltinTy::Str
         | BuiltinTy::Bytes
         | BuiltinTy::Unit
         | BuiltinTy::Dyn
@@ -6096,6 +6098,13 @@ fn runtime_matches(
                     // The `f32` head matches only a reified `f32` — a plain `float` is not a subtype.
                     BuiltinTy::F32 => matches!(value, Value::F32(_)),
                     BuiltinTy::Bool => matches!(value, Value::Bool(_)),
+                    // `number` matches any numeric value. Three arms rather than twelve because the
+                    // runtime erases the widths: every fixed-width integer is a `Value::Int` and
+                    // `f64` a `Value::Float`, with `f32` alone reified — the VM's `narrow_head`
+                    // spells the identical set as an `AnyOf`, and the differential holds them equal.
+                    BuiltinTy::Number => {
+                        matches!(value, Value::Int(_) | Value::Float(_) | Value::F32(_))
+                    }
                     BuiltinTy::Str => matches!(value, Value::Str(_)),
                     BuiltinTy::Bytes => matches!(value, Value::Bytes(_)),
                     BuiltinTy::Unit => matches!(value, Value::Unit),

@@ -513,6 +513,10 @@ impl Checker {
                 // The float family is uniformly barred: NaN ≠ NaN and `-0.0 == 0.0` make float
                 // keys a footgun, and `f64` is `float` under another name.
                 Float | F32 | F64 => Some(false),
+                // `number` is a UNION of scalars, so there is no single key form to hash or order
+                // by — `Map<number, _>` would need one key representation spanning twelve types.
+                // Barred like the float family, by a different route.
+                Number => Some(false),
                 // `bool` splits by role (post derive-soundness: bool is orderable, `false <
                 // true`): a `Set<bool>` is fine — the runtime canonicalizes it like any orderable
                 // element — but a map key needs a `MapKey` kind, which bool deliberately lacks
@@ -586,6 +590,7 @@ fn keyed_container_role(name: &str) -> Option<(&'static str, bool)> {
         | BuiltinTy::Dyn
         | BuiltinTy::KindEnum
         | BuiltinTy::KindStruct
-        | BuiltinTy::KindClass => None,
+        | BuiltinTy::KindClass
+        | BuiltinTy::Number => None,
     }
 }

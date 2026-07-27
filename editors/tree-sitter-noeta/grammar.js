@@ -666,7 +666,7 @@ module.exports = grammar({
       '->', field('return', $._type),
     )),
     primitive_type: _ => choice(
-      'int', 'float', 'f32', 'bool', 'string', 'bytes', 'void', 'unit', 'dyn',
+      'int', 'float', 'f32', 'f64', 'number', 'bool', 'string', 'bytes', 'void', 'unit', 'dyn',
       'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64',
     ),
     generic_type: $ => prec(3, seq(
