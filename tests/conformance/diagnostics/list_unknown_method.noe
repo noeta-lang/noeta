@@ -1,0 +1,8 @@
+// A `List<T>` is closed too, and its real methods still resolve — only the name that exists nowhere
+// is flagged. Guards the fix against the lazy over-correction of rejecting every list method call.
+// expect: error E0007 at 8:6
+// expect: exit 1
+xs = [1, 2, 3]
+echo xs.len()
+echo xs.map(fn(x: int): int { return x * 2 })
+echo xs.nope()
