@@ -418,13 +418,16 @@ pub(crate) fn join_closure_returns(stmts: &[Stmt], mut types: Vec<Type>) -> Type
 /// ever *miss* a diverging path (a false negative), never invent one — it cannot reject a valid
 /// function. A block diverges as soon as *one* of its statements does: everything after an
 /// unconditional divergence is unreachable, so the block's end is too.
-pub(crate) fn block_diverges(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(stmt_diverges)
+pub(crate) fn block_diverges(stmts: &[Stmt], exhaustive: &HashSet<Span>) -> bool {
+    stmts.iter().any(|s| stmt_diverges(s, exhaustive))
 }
 
 /// Whether a single statement unconditionally transfers control away and never falls through to the
 /// statement after it.
-pub(crate) fn stmt_diverges(stmt: &Stmt) -> bool {
+///
+/// `exhaustive` is the set of `match` spans the typing pass proved total (see
+/// [`crate::Checker::exhaustive_matches`]) — the only input this walk cannot derive from the AST.
+pub(crate) fn stmt_diverges(stmt: &Stmt, exhaustive: &HashSet<Span>) -> bool {
     match stmt {
         // `return` leaves the function. (`yield` does not — a generator resumes after it.)
         Stmt::Return { .. } => true,
@@ -434,35 +437,45 @@ pub(crate) fn stmt_diverges(stmt: &Stmt) -> bool {
             then_body,
             else_body: Some(else_body),
             ..
-        } => block_diverges(then_body) && block_diverges(else_body),
+        } => block_diverges(then_body, exhaustive) && block_diverges(else_body, exhaustive),
         // `while true { … }` with no `break` targeting this loop never exits normally.
         Stmt::While { cond, body, .. } => {
             matches!(cond, Expr::Bool { value: true, .. }) && !body_breaks(body)
         }
         // A structured-concurrency scope is a transparent block for control flow: a `return` inside it
         // still leaves the function.
-        Stmt::Concurrent { body, .. } => block_diverges(body),
-        // A bare `panic(...)` (or a `match` all of whose arms diverge) never returns.
-        Stmt::Expr { expr, .. } => expr_diverges(expr),
+        Stmt::Concurrent { body, .. } => block_diverges(body, exhaustive),
+        // A bare `panic(...)`, or an exhaustive `match` all of whose arms diverge.
+        Stmt::Expr { expr, .. } => expr_diverges(expr, exhaustive),
         _ => false,
     }
 }
 
-/// Whether an expression in statement position unconditionally diverges: a `panic(...)` call, or a
-/// `match` whose (non-empty) arms *all* diverge — an arm body is an expression, so it diverges only by
-/// itself being a `panic`/all-diverging `match`, never by a `return` (a statement can't sit there).
-pub(crate) fn expr_diverges(expr: &Expr) -> bool {
+/// Whether an expression in statement position unconditionally diverges: a `panic(...)` call, or an
+/// **exhaustive** `match` whose arms all diverge.
+///
+/// A `match` transfers control into exactly one arm, so it diverges when every arm does — but only
+/// once control is guaranteed to enter an arm at all, which is precisely exhaustiveness. That
+/// judgement belongs to the typing pass (it needs the scrutinee's type); `exhaustive` carries its
+/// answer over by span, so this walk and `E0011` can never disagree. A `match` the typing pass
+/// could not prove total falls out to the statement after it (or trips the runtime `MatchFail`
+/// backstop) and is not counted.
+///
+/// An expression arm diverges only by being a `panic`/all-diverging `match` itself — a statement
+/// cannot sit there. A **block** arm may hold statements, and its `return` exits the *enclosing*
+/// function (arms lower in the same frame, not as closures), so it diverges exactly as the same
+/// statements would inline.
+pub(crate) fn expr_diverges(expr: &Expr, exhaustive: &HashSet<Span>) -> bool {
     match expr {
         Expr::Call { callee, .. } => {
             matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "panic")
         }
-        Expr::Match { arms, .. } => {
-            !arms.is_empty()
+        Expr::Match { arms, span, .. } => {
+            exhaustive.contains(span)
+                && !arms.is_empty()
                 && arms.iter().all(|a| match &a.body {
-                    noeta_ast::ClosureBody::Expr(e) => expr_diverges(e),
-                    // A statement-block arm stays conservative (a `return` there EXITS, but this
-                    // helper answers "diverges", and false only weakens the analysis).
-                    noeta_ast::ClosureBody::Block(_) => false,
+                    noeta_ast::ClosureBody::Expr(e) => expr_diverges(e, exhaustive),
+                    noeta_ast::ClosureBody::Block(stmts) => block_diverges(stmts, exhaustive),
                 })
         }
         _ => false,

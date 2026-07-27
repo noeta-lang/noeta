@@ -1,0 +1,112 @@
+// A `match` STATEMENT whose every arm terminates counts as terminating (E0048). Blocks never
+// yield values in Noeta, so an arm that must bail out early has to be a block with a `return` in
+// it — which makes an all-returning `match` the idiomatic fallible pipeline. The return-flow
+// analysis already understood `if`/`else`; this is the same rule for the language's primary
+// branching form, and it hangs off the checker's own exhaustiveness judgement (the one E0011
+// uses): control is guaranteed to enter *some* arm exactly when the `match` is exhaustive, so an
+// exhaustive `match` with all-diverging arms cannot fall out of its own bottom. None of these
+// functions has a trailing `return`, and none needs one.
+// expect: stdout "1"
+// expect: stdout "0"
+// expect: stdout "2"
+// expect: stdout "0"
+// expect: stdout "10"
+// expect: stdout "0"
+// expect: stdout "-1"
+// expect: stdout "3"
+// expect: stdout "7"
+// expect: stdout "42"
+// expect: stdout "5"
+// expect: stdout "99"
+// expect: stdout "8"
+// expect: exit 0
+
+// `Ok`/`Err` is the whole of `Result`, so the two arms are exhaustive.
+fn unwrap_or_zero(r: Result<int, string>): int {
+    match r {
+        Ok(v) => { return v },
+        Err(_) => { return 0 },
+    }
+}
+echo unwrap_or_zero(Ok(1))
+echo unwrap_or_zero(Err("nope"))
+
+// The same shape on an `?T`: `some`/`none` is the whole of `Option`.
+fn or_zero(o: ?int): int {
+    match o {
+        some(v) => { return v },
+        none => { return 0 },
+    }
+}
+echo or_zero(some(2))
+echo or_zero(none)
+
+// A user enum, every variant covered.
+enum Signal {
+    Go;
+    Wait;
+    Stop
+}
+
+fn code(s: Signal): int {
+    match s {
+        Signal.Go => { return 10 },
+        Signal.Wait => { return 0 },
+        Signal.Stop => { return -1 },
+    }
+}
+echo code(Signal.Go)
+echo code(Signal.Wait)
+echo code(Signal.Stop)
+
+// A `_` catch-all is irrefutable, so an open scrutinee domain (`int`) is exhaustive too — and a
+// guarded arm before it is fine, because the `_` covers whatever the guard declines.
+fn classify(n: int, strict: bool): int {
+    match n {
+        1 if strict => { return 3 },
+        _ => { return 7 },
+    }
+}
+echo classify(1, true)
+echo classify(1, false)
+
+// Nested: a `match` inside a block arm, and an arm that `panic`s rather than returning — both
+// diverge, so the outer `match` does.
+fn dig(s: Signal, r: Result<int, string>): int {
+    match s {
+        Signal.Go => {
+            match r {
+                Ok(v) => { return v },
+                Err(_) => { panic("no value") },
+            }
+        },
+        _ => { return 5 },
+    }
+}
+echo dig(Signal.Go, Ok(42))
+echo dig(Signal.Stop, Err("x"))
+
+// A `match` in the tail position of an `if` branch: the `if` diverges because both of its blocks
+// do, and the `then` block does because of the `match`.
+fn branch(b: bool, r: Result<int, string>): int {
+    if b {
+        match r {
+            Ok(v) => { return v },
+            Err(_) => { return 0 },
+        }
+    } else {
+        return 99
+    }
+}
+echo branch(false, Ok(1))
+
+// Inside a `while true` (which never exits normally on its own), too.
+fn spin(s: Signal): int {
+    while true {
+        match s {
+            Signal.Go => { return 8 },
+            _ => { return 0 },
+        }
+    }
+}
+echo spin(Signal.Go)
