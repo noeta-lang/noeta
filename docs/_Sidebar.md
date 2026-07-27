@@ -4,22 +4,22 @@
 - [Getting Started](Getting-Started)
 - [Language Tour](Language-Tour)
 - [Using Packages](Using-Packages)
-- [Package Quickstart](Quickstart-Packages)
+  - [Package Quickstart](Quickstart-Packages)
 
 **Tools**
 - [The `noeta` CLI](The-CLI)
 - [The `noeta.toml` Manifest](Manifest)
 - [Package Registries](Package-Registries)
-- [Package Provenance](Package-Provenance)
+  - [Package Provenance](Package-Provenance)
 - [Testing](Testing)
-- [Benchmarking](Benchmarking)
+  - [Benchmarking](Benchmarking)
 - [Documentation & Dev Tiers](Documentation-and-Tiers)
 - [Editor & AI Tooling](Editor-and-AI-Tooling)
 - [Debugging](Debugging)
 - [Profiling](Profiling)
 - [Observability](Observability)
 - [WebAssembly & the Edge](WebAssembly-and-the-Edge)
-- [Edge Deployment](Edge-Deployment)
+  - [Edge Deployment](Edge-Deployment)
 
 **Language reference**
 - [Syntax Basics](Syntax-Basics)
@@ -39,13 +39,13 @@
 
 **Concepts & design**
 - [Architecture & Pipeline](Architecture-and-Pipeline)
-- [The Virtual Machine](The-Virtual-Machine)
-- [Memory Management](Memory-Management)
-- [The Type Checker](Type-Checker-Internals)
-- [Concurrency Internals](Concurrency-Internals)
-- [Performance Techniques](Performance-Techniques)
+  - [The Virtual Machine](The-Virtual-Machine)
+  - [Memory Management](Memory-Management)
+  - [The Type Checker](Type-Checker-Internals)
+  - [Concurrency Internals](Concurrency-Internals)
+  - [Performance Techniques](Performance-Techniques)
 - [Native Extensions](Native-Extensions)
-- [Extension Compatibility](Extension-Compatibility)
+  - [Extension Compatibility](Extension-Compatibility)
 
 **Contributing**
 - [Developer Guide](Contributing)
