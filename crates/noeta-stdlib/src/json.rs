@@ -687,8 +687,9 @@ mod tests {
                     TypeRecipe::List(boxed(TypeRecipe::Int)),
                     "[1, 2]",
                 ),
-                // A defaulted OPTIONAL field: absent is still `none` (the `?T` rule wins, so a
-                // decode never wraps a default in a `Some` the declaration did not ask for).
+                // A defaulted OPTIONAL field: the baked default goes through the `Option` recipe
+                // like any value, so a `null` default is `none` — a decode never invents a `Some`
+                // the declaration did not ask for (and a `= "hi"` default would be `Some("hi")`).
                 FieldRecipe::with_default(
                     "note",
                     TypeRecipe::Option(boxed(TypeRecipe::Str)),
