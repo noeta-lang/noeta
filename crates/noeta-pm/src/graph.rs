@@ -868,8 +868,12 @@ impl Walker<'_> {
                 if let Some((url, tag, sha)) = self.lock.registry_coords(&name)
                     && self.lock.locked_version(&name) == Some(&version)
                 {
-                    if let Some(pin) = self.lock.scope_trust(&scope) {
-                        self.scope_trust.insert(scope.clone(), pin.clone());
+                    // Carry both pins the lock may hold for this release forward into the rewrite:
+                    // the scope's key root and this package's own keyless root (see `ScopeTrust`).
+                    for pin_key in [scope.clone(), name.clone()] {
+                        if let Some(pin) = self.lock.scope_trust(&pin_key) {
+                            self.scope_trust.insert(pin_key, pin.clone());
+                        }
                     }
                     let (url, tag, sha) = (url.to_string(), tag.to_string(), sha.to_string());
                     let git_ref = crate::manifest::GitRef::Tag(tag);
@@ -1004,7 +1008,7 @@ impl Walker<'_> {
             )));
         }
         let action = provenance_decision(
-            self.lock.scope_trust(scope),
+            self.lock.trust_for(name),
             release.signature.as_deref(),
             release.bundle.as_deref(),
             served_key,
@@ -1049,9 +1053,12 @@ impl Walker<'_> {
                             err.map_msg(|m| format!("dependency `{key}` (`{name}`): {m}"))
                         })?;
                     // Pin what verification *proved* (== the pin when one existed, since the
-                    // policy enforced it); on first use this is the TOFU identity pin.
+                    // policy enforced it); on first use this is the TOFU identity pin. Keyed by the
+                    // package, not the scope: the certificate names the publishing workflow in this
+                    // package's own repository, so a sibling package of the same scope legitimately
+                    // carries a different identity (see `ScopeTrust`).
                     self.scope_trust.insert(
-                        scope.to_string(),
+                        name.to_string(),
                         crate::lock::ScopeTrust::Keyless {
                             issuer: verified.issuer,
                             identity: verified.identity,
@@ -1066,7 +1073,7 @@ impl Walker<'_> {
                     // so it waits for a CLI resolve.
                     if let Some((issuer, identity)) = pinned {
                         self.scope_trust.insert(
-                            scope.to_string(),
+                            name.to_string(),
                             crate::lock::ScopeTrust::Keyless { issuer, identity },
                         );
                     }
