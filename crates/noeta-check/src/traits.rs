@@ -486,6 +486,18 @@ impl Checker {
                 .resolve_assoc(target, trait_name, name)
                 .unwrap_or(Type::Unknown);
         }
+        // A bare `Self` in the contract means "the implementing type", so resolve it exactly as an
+        // associated projection is resolved. Without this the impl is forced to spell the literal
+        // word `Self` — and a signature written that way is *uncallable*, because the concrete
+        // argument at the call site has nothing to unify a nominal `Self` against. A native trait
+        // declaring `SigType::SelfTy` synthesizes into precisely this shape
+        // (`stdlib::sig_type_ref`), so one fix serves both trait kinds.
+        if let Some(noeta_ast::TypeRef::Named { name, args, .. }) = ty
+            && name == "Self"
+            && args.is_empty()
+        {
+            return Type::Named(target.to_string(), Vec::new());
+        }
         field_type(ty, &self.imports.extern_types)
     }
 
