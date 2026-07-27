@@ -88,6 +88,14 @@ impl Store {
 /// Folding one in creates a feedback loop for a package whose example app lives *inside* its tree
 /// (`examples/<app>/noeta.lock` records the package's tree hash → each resolve rewrites the lock →
 /// the tree hash changes → the next resolve re-pins and, downstream, every compose is a cache miss).
+///
+/// **This walk is deliberately not [`crate::sources`]'s.** That one answers "which files are this
+/// package's *modules*", and prunes nested packages, dot-directories and build output because none
+/// of them belong in a consumer's link. This one answers "is this tree byte-for-byte what was
+/// pinned" — an integrity value a git source is verified against. A package's example app *is* part
+/// of the tree it ships, so a hash that skipped it would report "unchanged" for a tree that changed.
+/// The two questions are different, so the two predicates are, and neither should borrow the
+/// other's.
 pub fn hash_tree(dir: &Path) -> io::Result<String> {
     let mut files: Vec<PathBuf> = Vec::new();
     collect_files(dir, &mut files)?;

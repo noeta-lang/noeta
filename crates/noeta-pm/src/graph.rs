@@ -1837,7 +1837,7 @@ fn assemble(
             .iter()
             .map(|(local_key, children)| (local_key.clone(), global[&children[0]].clone()))
             .collect();
-        let modules = noeta_loader::read_package_sources(&inst.dir).unwrap_or_default();
+        let modules = crate::sources::read_package_sources(&inst.dir).unwrap_or_default();
         packages.push(noeta_loader::DepPackage {
             key,
             root: inst.root_segment.clone(),

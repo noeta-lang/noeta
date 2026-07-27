@@ -22,6 +22,7 @@ pub mod lock;
 pub mod manifest;
 pub mod registry;
 pub mod reserved;
+pub mod sources;
 
 /// The crate's typed error, re-exported at the root — `noeta_pm::PmError` is the name consumers
 /// match on (audit-5 #7 / cross-cutting #3).
