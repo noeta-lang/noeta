@@ -205,6 +205,7 @@ const HANDLE: ExtClass = ExtClass {
     // instance's `label` field off the marshalled receiver and returns a rendered string. Proves a
     // class-kind object's method call routes to the class's native `dispatch` in both backends.
     methods: &[ExtFn {
+        param_names: &[],
         name: "describe",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -269,11 +270,13 @@ const POINT: ExtClass = ExtClass {
     // write the *immutable* `x` and must be rejected at runtime.
     methods: &[
         ExtFn {
+            param_names: &[],
             name: "bump",
             params: &[],
             ret: RetTy::Concrete(SigType::Int),
         },
         ExtFn {
+            param_names: &[],
             name: "bad_bump_x",
             params: &[],
             ret: RetTy::Concrete(SigType::Unit),
@@ -359,12 +362,14 @@ const FX_CLASSES: &[ExtClass] = &[HANDLE, POINT, RES];
 const KIT_FNS: &[ExtFn] = &[
     // Native constructor: returns a real `Handle` instance (return-OUT of a class value).
     ExtFn {
+        param_names: &[],
         name: "open",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Handle")),
     },
     // Takes a `Point` back (arg-IN of a class instance) and reduces its fields.
     ExtFn {
+        param_names: &[],
         name: "sum",
         params: &[SigType::Named("Point")],
         ret: RetTy::Concrete(SigType::Int),
@@ -372,6 +377,7 @@ const KIT_FNS: &[ExtFn] = &[
     // Native constructor for the state-holding `Res` (return-OUT of a class carrying a balanced
     // extern-handle field).
     ExtFn {
+        param_names: &[],
         name: "open_res",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Res")),
@@ -380,6 +386,7 @@ const KIT_FNS: &[ExtFn] = &[
     // marshalled instance. The marshalling `clone_box`es the `bguard` extern-handle field into the
     // seam; with `BalancedGuard` the clone/drop nets zero, so this round-trips leak-free.
     ExtFn {
+        param_names: &[],
         name: "tag",
         params: &[SigType::Named("Res")],
         ret: RetTy::Concrete(SigType::String),

@@ -1,0 +1,14 @@
+// A label on a NAMED native signature is validated exactly like one on a declared function.
+//
+// `math.pow` declares `param_names: &["base", "exp"]`, which is what opts it into named arguments —
+// so `zzz:` is not "this callee takes no labels", it is "this callee has no such parameter", and the
+// diagnostic can suggest the ones it does have. A signature that declares NO names refuses labels
+// instead; both answers are honest, and neither is the old behaviour of dropping the label.
+//
+// This is the negative half of the native-label surface; `named_arguments_native_bind.noe` pins the
+// positive half (binding, reordering, and piping into a named parameter).
+// expect: error E0061 at 14:15
+// expect: exit 1
+use std.math
+
+echo math.pow(zzz: 2.0, exp: 3.0)

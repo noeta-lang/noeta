@@ -103,6 +103,7 @@ const CONFIG: ExtStruct = ExtStruct {
         is_mut: false,
     }],
     methods: &[ExtFn {
+        param_names: &[],
         name: "validate",
         params: &[],
         ret: RetTy::Concrete(SigType::Result(&SigType::Unit, &SigType::String)),
@@ -177,6 +178,7 @@ const LOOSE: ExtStruct = ExtStruct {
 /// code is exempt from E0060, like a `.noe` in-`impl` constructor). Returns a real `Config` value
 /// (`NativeOut::Instance` with `FieldedKind::Struct`).
 const KIT_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "make",
     params: &[SigType::Int],
     ret: RetTy::Concrete(SigType::Named("Config")),

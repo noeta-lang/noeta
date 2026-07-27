@@ -106,6 +106,7 @@ const BUTTON: ExtType = ExtType {
     name: "Button",
     namespace: "fx",
     methods: &[ExtFn {
+        param_names: &[],
         name: "describe",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -125,6 +126,7 @@ const WIDGET: ExtTrait = ExtTrait {
     namespace: "fx",
     methods: &[ExtTraitMethod {
         sig: ExtFn {
+            param_names: &[],
             name: "describe",
             params: &[],
             ret: RetTy::Concrete(SigType::String),
@@ -158,6 +160,7 @@ const PANEL: ExtClass = ExtClass {
         is_mut: false,
     }],
     methods: &[ExtFn {
+        param_names: &[],
         name: "describe",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -222,6 +225,7 @@ const MODE: ExtEnum = ExtEnum {
     ],
     backing: EnumBacking::None,
     methods: &[ExtFn {
+        param_names: &[],
         name: "describe",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -273,6 +277,7 @@ const BADGE: ExtStruct = ExtStruct {
         is_mut: false,
     }],
     methods: &[ExtFn {
+        param_names: &[],
         name: "describe",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -318,21 +323,25 @@ fn badge_dispatch(
 
 const KIT_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "make",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Button")),
     },
     ExtFn {
+        param_names: &[],
         name: "panel",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Panel")),
     },
     ExtFn {
+        param_names: &[],
         name: "mode",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Mode")),
     },
     ExtFn {
+        param_names: &[],
         name: "badge",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Badge")),

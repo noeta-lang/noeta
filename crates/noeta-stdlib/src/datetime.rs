@@ -456,6 +456,7 @@ use SigType::{Int, String as Str};
 /// One duration-constructor signature `<unit>(n: int) -> Duration`.
 const fn dur_fn(name: &'static str) -> ExtFn {
     ExtFn {
+        param_names: &["n"],
         name,
         params: &[Int],
         ret: Concrete(DURATION_SIG),
@@ -464,16 +465,19 @@ const fn dur_fn(name: &'static str) -> ExtFn {
 
 const DATETIME_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "now",
         params: &[],
         ret: Concrete(INSTANT_SIG),
     },
     ExtFn {
+        param_names: &["ms"],
         name: "from_unix_ms",
         params: &[Int],
         ret: Concrete(INSTANT_SIG),
     },
     ExtFn {
+        param_names: &["text"],
         name: "parse",
         params: &[Str],
         ret: Concrete(SigType::Option(&INSTANT_SIG)),
@@ -489,41 +493,49 @@ const DATETIME_FNS: &[ExtFn] = &[
 
 const INSTANT_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "unix_ms",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &["format"],
         name: "format",
         params: &[Str],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &["zone"],
         name: "in_zone",
         params: &[Str],
         ret: Concrete(ZONED_SIG),
     },
     ExtFn {
+        param_names: &["by"],
         name: "add",
         params: &[DURATION_SIG],
         ret: Concrete(INSTANT_SIG),
     },
     ExtFn {
+        param_names: &["by"],
         name: "sub",
         params: &[DURATION_SIG],
         ret: Concrete(INSTANT_SIG),
     },
     ExtFn {
+        param_names: &["other"],
         name: "diff",
         params: &[INSTANT_SIG],
         ret: Concrete(DURATION_SIG),
     },
     ExtFn {
+        param_names: &["other"],
         name: "is_before",
         params: &[INSTANT_SIG],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["other"],
         name: "is_after",
         params: &[INSTANT_SIG],
         ret: Concrete(SigType::Bool),
@@ -533,6 +545,7 @@ const INSTANT_METHODS: &[ExtFn] = &[
 /// A zero-arg `Zoned` field accessor returning `int`.
 const fn zoned_field(name: &'static str) -> ExtFn {
     ExtFn {
+        param_names: &[],
         name,
         params: &[],
         ret: Concrete(Int),
@@ -548,36 +561,43 @@ const ZONED_METHODS: &[ExtFn] = &[
     zoned_field("second"),
     zoned_field("weekday"),
     ExtFn {
+        param_names: &[],
         name: "zone",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &["format"],
         name: "format",
         params: &[Str],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "to_instant",
         params: &[],
         ret: Concrete(INSTANT_SIG),
     },
     ExtFn {
+        param_names: &["by"],
         name: "add",
         params: &[DURATION_SIG],
         ret: Concrete(ZONED_SIG),
     },
     ExtFn {
+        param_names: &["by"],
         name: "sub",
         params: &[DURATION_SIG],
         ret: Concrete(ZONED_SIG),
     },
     ExtFn {
+        param_names: &["other"],
         name: "is_before",
         params: &[ZONED_SIG],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["other"],
         name: "is_after",
         params: &[ZONED_SIG],
         ret: Concrete(SigType::Bool),
@@ -585,6 +605,7 @@ const ZONED_METHODS: &[ExtFn] = &[
 ];
 
 const DURATION_METHODS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "to_string",
     params: &[],
     ret: Concrete(Str),

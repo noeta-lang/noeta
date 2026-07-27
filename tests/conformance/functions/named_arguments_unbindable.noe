@@ -1,19 +1,20 @@
 // A label is honoured or refused — never ignored.
 //
-// Named arguments bind against a callee's declared parameter NAMES. Two kinds of callee have none:
-// a native or built-in function, whose parameters are bare types in the extension registry, and a
-// function *value*, whose type carries parameter types only (the closure had names; `Type::Fn` does
-// not). Both used to accept a label and silently discard it, so `math.pow(exp: 3.0, base: 2.0)`
-// computed 3² and `"abc".replace(zzz: "a", "b")` ran with a label naming nothing — the same silent
-// wrongness that named arguments were introduced to remove from declared calls.
+// Named arguments bind against a callee's declared parameter NAMES. A **function value** has none:
+// the closure it came from had them, but the `(int, int) -> int` type it flows through carries only
+// parameter types, so the call site cannot see them. Unlike a native signature — which opts into
+// labels by declaring `ExtFn::param_names` — no registry entry can ever fix this one, which is what
+// makes it the durable case to pin here.
+//
+// It used to be accepted with the label silently discarded, so this call computed `1 - 10 = -9`
+// while reading as `10 - 1` — the exact failure named arguments exist to remove.
 //
 // The check is "a label survived binding": every callee that CAN bind consumes its labels in
 // `order_arguments`, so anything still labelled by the time argument checking runs had nothing to
-// bind against.
-// Each label is reported on its own — a call with two of them names both.
-// expect: error E0061 at 19:15
-// expect: error E0061 at 19:26
+// bind against. Each surviving label is reported on its own, so this call names both.
+// expect: error E0061 at 20:8
+// expect: error E0061 at 20:14
 // expect: exit 1
-use std.math
+g = fn(a: int, b: int): int => a - b
 
-echo math.pow(base: 2.0, exp: 3.0)
+echo g(b: 1, a: 10)

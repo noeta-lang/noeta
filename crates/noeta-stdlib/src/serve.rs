@@ -59,6 +59,7 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
     // The optional trailing `host` (server-hmr S0) is the bind address, default `0.0.0.0` (the
     // `noeta serve --host` seam threads it here).
     ExtFn {
+        param_names: &["port", "handler", "host"],
         name: "serve",
         params: &[
             SigType::Int,
@@ -73,6 +74,7 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
     // ends when the handler returns, closing the stream). Declared `Response` so a routing
     // handler's signature stays `(Request) -> Response` whether it serves bodies or sockets.
     ExtFn {
+        param_names: &["handler"],
         name: "websocket",
         params: &[SigType::Fn(&[SOCKET_SIG], &SigType::Dyn)],
         ret: RetTy::Concrete(SigType::Named(crate::net::RESPONSE_TYPE_NAME)),
@@ -81,6 +83,7 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
     // push protocol ([`crate::liveview::LIVEVIEW_JS`]); a handler serves it as
     // `application/javascript`. Pure, so it is sandbox-deterministic like any string.
     ExtFn {
+        param_names: &[],
         name: "liveview_js",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -92,16 +95,19 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
 /// (`none` = the peer closed); `close` ends the stream early.
 pub const SOCKET_CTX_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["text"],
         name: "send",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &[],
         name: "recv",
         params: &[],
         ret: RetTy::Concrete(SigType::Future(&OPT_STR)),
     },
     ExtFn {
+        param_names: &[],
         name: "close",
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),

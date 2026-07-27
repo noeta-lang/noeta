@@ -1,0 +1,24 @@
+// Standard-library functions accept named arguments, and reorder by them.
+//
+// A native function's parameters used to be bare types in the extension registry, with no names for
+// a label to bind against — so `math.pow(exp: 3.0, base: 2.0)` bound POSITIONALLY and computed 3²,
+// silently, while reading as 2³. Signatures now declare `param_names`, and the checker binds them
+// through the same `order_arguments` a declared Noeta function uses: same permutation, same
+// recorded binding for lowering, so both backends agree by construction rather than by matching
+// implementations.
+//
+// The pipe composes with it — the piped value fills the first parameter no label claimed — which is
+// what makes `|>` usable with a native function whose subject is not its first parameter.
+// expect: stdout "8.0"
+// expect: stdout "8.0"
+// expect: stdout "8.0"
+// expect: stdout "8.0"
+// expect: stdout "8.0"
+// expect: exit 0
+use std.math
+
+echo math.pow(2.0, 3.0)              // positional, unchanged
+echo math.pow(base: 2.0, exp: 3.0)   // labelled
+echo math.pow(exp: 3.0, base: 2.0)   // labelled, reordered — this used to print 9.0
+echo 2.0 |> math.pow(exp: 3.0)       // piped into `base`
+echo 3.0 |> math.pow(base: 2.0)      // piped into `exp`

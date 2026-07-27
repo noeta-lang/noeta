@@ -48,14 +48,25 @@ const FLOAT: SigType = SigType::Assoc("Float");
 
 /// An `ExtTraitMethod` builder (const-fn so the method tables are `&'static`). Every kernel method is
 /// defaulted (answered by the trait's `dispatch`), so a bare `impl vec.Kernels for T {}` adopts them.
+///
+/// `param_names` is what a `name:` label binds against, and it is worth carrying even here, where
+/// every method takes at most one operand: `v.scale(factor: 2.0)` says which of the two readings of
+/// `scale` is meant, and `xs.dot_all(other: ys)` says the argument is a second *list* rather than a
+/// single vector — both of which the bare types (`SigType::Dyn`) leave ambiguous.
 const fn tfn(
     name: &'static str,
     params: &'static [SigType],
+    param_names: &'static [&'static str],
     ret: RetTy,
     receiver: BundleReceiver,
 ) -> ExtTraitMethod {
     ExtTraitMethod {
-        sig: ExtFn { name, params, ret },
+        sig: ExtFn {
+            name,
+            params,
+            param_names,
+            ret,
+        },
         has_default: true,
         receiver,
     }
@@ -94,49 +105,63 @@ const KERNELS_METHODS: &[ExtTraitMethod] = &[
     tfn(
         "add",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "sub",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "scale",
         &[SigType::Dyn],
+        &["factor"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "min",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "max",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     // `abs` — the incidental gap the old f32 `vec.Kernels` lacked; now every width has it.
-    tfn("abs", &[], RetTy::SameAsArg(0), BundleReceiver::Element),
+    tfn(
+        "abs",
+        &[],
+        &[],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
     tfn(
         "dot",
         &[SigType::Dyn],
+        &["other"],
         RetTy::Concrete(WIDE),
         BundleReceiver::Element,
     ),
     tfn(
         "length",
         &[],
+        &[],
         RetTy::Concrete(FLOAT),
         BundleReceiver::Element,
     ),
     tfn(
         "normalize",
+        &[],
         &[],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
@@ -145,42 +170,55 @@ const KERNELS_METHODS: &[ExtTraitMethod] = &[
     tfn(
         "add_all",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "sub_all",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "scale_all",
         &[SigType::Dyn],
+        &["factor"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "min_all",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "max_all",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
-    tfn("abs_all", &[], RetTy::SameAsArg(0), BundleReceiver::Bulk),
+    tfn(
+        "abs_all",
+        &[],
+        &[],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Bulk,
+    ),
     tfn(
         "dot_all",
         &[SigType::Dyn],
+        &["other"],
         RetTy::Concrete(SigType::List(&WIDE)),
         BundleReceiver::Bulk,
     ),
     tfn(
         "length_all",
+        &[],
         &[],
         RetTy::Concrete(SigType::List(&FLOAT)),
         BundleReceiver::Bulk,
@@ -208,60 +246,70 @@ const SAT_METHODS: &[ExtTraitMethod] = &[
     tfn(
         "add",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "sub",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "scale",
         &[SigType::Dyn],
+        &["factor"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "min",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "max",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Element,
     ),
     tfn(
         "add_all",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "sub_all",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "scale_all",
         &[SigType::Dyn],
+        &["factor"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "min_all",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),
     tfn(
         "max_all",
         &[SigType::Dyn],
+        &["other"],
         RetTy::SameAsArg(0),
         BundleReceiver::Bulk,
     ),

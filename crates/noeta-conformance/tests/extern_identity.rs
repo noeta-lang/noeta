@@ -61,11 +61,13 @@ impl ExternValue for Counter {
 
 const COUNTER_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "bump",
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &[],
         name: "value",
         params: &[],
         ret: RetTy::Concrete(SigType::Int),
@@ -106,6 +108,7 @@ fn counter_method_dispatch(
 // either spelling).
 
 const ACME_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "counter",
     params: &[SigType::Int],
     ret: RetTy::Concrete(SigType::Named("acme.metrics.Counter")),
@@ -163,6 +166,7 @@ static ACME: AcmeExtension = AcmeExtension;
 // --- Unit B: `bcorp.stats` — bump += 2, value = n * 10 -----------------------------------------
 
 const BCORP_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "counter",
     params: &[SigType::Int],
     ret: RetTy::Concrete(SigType::Named("bcorp.stats.Counter")),

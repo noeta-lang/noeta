@@ -108,17 +108,24 @@ A label must name a parameter of the callee (an unknown one is E0061, with the c
 
 ### Where labels can be used
 
-A label binds against the callee's declared parameter **names**, so it works wherever those names are visible: functions, methods, and associated functions declared in Noeta. Two kinds of callee have no names to bind against, and a label on either is refused (E0061) rather than ignored:
+A label binds against the callee's declared parameter **names**, so it works wherever those names are visible. That covers functions, methods, and associated functions declared in Noeta, and **standard-library functions**, whose signatures declare names too:
 
-- **Native and built-in functions** — `math.pow`, `"s".replace`, `xs.map`. Their parameters are declared as bare types in the extension registry, so there is nothing for `name:` to name.
-- **Function values** — a closure stored in a binding, field, or parameter. The closure literal had parameter names, but the `(int, int) -> int` type it flows through carries only types, so the call site cannot see them.
-
-```noeta error
+```noeta
 use std.math
-echo math.pow(base: 2.0, exp: 3.0)   // E0061 — `pow` does not take named arguments
+
+// sample:start
+echo math.pow(2.0, 3.0)              // 8.0 — positional
+echo math.pow(base: 2.0, exp: 3.0)   // 8.0 — labelled
+echo math.pow(exp: 3.0, base: 2.0)   // 8.0 — labelled, reordered
+// sample:end
 ```
 
-Both cases used to be accepted with the label silently discarded, which meant `math.pow(exp: 3.0, base: 2.0)` computed 3² and a label naming nothing at all — `"abc".replace(zzz: "a", "b")` — ran without complaint. A label is now honoured or refused, never ignored.
+Where a label **cannot** bind it is refused (E0061) rather than ignored:
+
+- A **function value** — a closure stored in a binding, field, or parameter. The closure literal had parameter names, but the `(int, int) -> int` type it flows through carries only types, so the call site cannot see them. No signature can fix this one.
+- A **built-in method** on a primitive or collection (`"s".replace`, `xs.map`), and any native signature that has not declared names. These resolve from the receiver's type rather than a named signature.
+
+All of this used to be accepted with the label silently discarded, which meant `math.pow(exp: 3.0, base: 2.0)` computed 3² and a label naming nothing at all — `"abc".replace(zzz: "a", "b")` — ran without complaint. A label is now honoured or refused, never ignored.
 
 > [!NOTE]
 > Only the first 64 parameters can be *skipped* by name; a call that skips one beyond that is rejected. Reordering and labelling are unaffected.
@@ -273,7 +280,7 @@ echo 5 |> g(6, c: 9)     // 569 — `c` is named, so `a` and `b` are free: piped
 
 Evaluation order is unchanged by any of this: the left operand runs first, then the right-hand side's arguments in the order written, however the binding permutes them. A method binds the same way, with the receiver staying the receiver — `10 |> box.scale(k: 4)` calls `box.scale(4, 10)`.
 
-This needs a callee whose parameter names are visible, so it applies to functions and methods declared in Noeta — piping into a native function like `math.pow` still means its first parameter, and a label there is refused ([where labels can be used](#where-labels-can-be-used)).
+This needs a callee whose parameter names are visible ([where labels can be used](#where-labels-can-be-used)) — which includes the standard library, so `2.0 |> math.pow(exp: 3.0)` pipes into `base` and gives `8.0`.
 
 Without a label there is no way to thread the value into a later parameter, and there is no placeholder syntax (`_` is not a piped-value hole). Use a closure when the target parameter has nothing to name it by:
 

@@ -28,6 +28,7 @@ const VAR_A: SigType = SigType::Var(0);
 
 /// `cell.new(v: A) -> Cell<A>` — the module's one function.
 pub const CELL_CTX_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &["value"],
     name: "new",
     params: &[VAR_A],
     ret: RetTy::Concrete(SigType::Generic(CELL_TYPE_NAME, &[VAR_A])),
@@ -37,17 +38,20 @@ pub const CELL_CTX_FNS: &[ExtFn] = &[ExtFn {
 /// also calls a closure back), so they live in the ctx table.
 pub const CELL_CTX_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "get",
         params: &[],
         ret: RetTy::Concrete(VAR_A),
     },
     ExtFn {
+        param_names: &["value"],
         name: "set",
         params: &[VAR_A],
         ret: RetTy::Concrete(SigType::Unit),
     },
     // `update(f)` applies `f` to the held value, stores the result, and returns it.
     ExtFn {
+        param_names: &["f"],
         name: "update",
         params: &[SigType::Fn(&[VAR_A], &VAR_A)],
         ret: RetTy::Concrete(VAR_A),

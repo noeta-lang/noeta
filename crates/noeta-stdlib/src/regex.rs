@@ -347,11 +347,13 @@ const REGEX_FNS: &[ExtFn] = &[
     // The module's only fallible function, and the only way to get a `Pattern`: compiling is
     // explicit precisely so it cannot happen accidentally inside a loop.
     ExtFn {
+        param_names: &["pattern"],
         name: "compile",
         params: &[SigType::String],
         ret: Concrete(PATTERN_SIG),
     },
     ExtFn {
+        param_names: &["text"],
         name: "escape",
         params: &[SigType::String],
         ret: Concrete(SigType::String),
@@ -360,36 +362,43 @@ const REGEX_FNS: &[ExtFn] = &[
 
 const PATTERN_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["haystack"],
         name: "is_match",
         params: &[SigType::String],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["haystack"],
         name: "find",
         params: &[SigType::String],
         ret: Concrete(OPT_MATCH),
     },
     ExtFn {
+        param_names: &["haystack"],
         name: "find_all",
         params: &[SigType::String],
         ret: Concrete(SigType::List(&MATCH_SIG)),
     },
     ExtFn {
+        param_names: &["haystack", "replacement"],
         name: "replace",
         params: &[SigType::String, SigType::String],
         ret: Concrete(SigType::String),
     },
     ExtFn {
+        param_names: &["haystack", "replacement"],
         name: "replace_all",
         params: &[SigType::String, SigType::String],
         ret: Concrete(SigType::String),
     },
     ExtFn {
+        param_names: &["haystack"],
         name: "split",
         params: &[SigType::String],
         ret: Concrete(SigType::List(&SigType::String)),
     },
     ExtFn {
+        param_names: &[],
         name: "source",
         params: &[],
         ret: Concrete(SigType::String),
@@ -398,32 +407,38 @@ const PATTERN_METHODS: &[ExtFn] = &[
 
 const MATCH_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "text",
         params: &[],
         ret: Concrete(SigType::String),
     },
     // Character indices, so `subject.slice(m.start(), m.end()) == m.text()`.
     ExtFn {
+        param_names: &[],
         name: "start",
         params: &[],
         ret: Concrete(SigType::Int),
     },
     ExtFn {
+        param_names: &[],
         name: "end",
         params: &[],
         ret: Concrete(SigType::Int),
     },
     ExtFn {
+        param_names: &["n"],
         name: "group",
         params: &[SigType::Int],
         ret: Concrete(OPT_STR),
     },
     ExtFn {
+        param_names: &["name"],
         name: "named",
         params: &[SigType::String],
         ret: Concrete(OPT_STR),
     },
     ExtFn {
+        param_names: &[],
         name: "groups",
         params: &[],
         ret: Concrete(SigType::List(&OPT_STR)),

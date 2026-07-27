@@ -45,6 +45,7 @@ const REDUCE: ExtTrait = ExtTrait {
     methods: &[
         ExtTraitMethod {
             sig: ExtFn {
+                param_names: &[],
                 name: "sum",
                 params: &[],
                 ret: RetTy::Concrete(SigType::Assoc("Wide")),
@@ -54,6 +55,7 @@ const REDUCE: ExtTrait = ExtTrait {
         },
         ExtTraitMethod {
             sig: ExtFn {
+                param_names: &[],
                 name: "length",
                 params: &[],
                 ret: RetTy::Concrete(SigType::Assoc("Mag")),
@@ -63,6 +65,7 @@ const REDUCE: ExtTrait = ExtTrait {
         },
         ExtTraitMethod {
             sig: ExtFn {
+                param_names: &[],
                 name: "widen_all",
                 params: &[],
                 // `List<Self::Wide>` — the `RetTy::ListElemWide` analog; the concrete resolution must
@@ -118,16 +121,19 @@ const ACCUM: ExtStruct = ExtStruct {
     ],
     methods: &[
         ExtFn {
+            param_names: &[],
             name: "sum",
             params: &[],
             ret: RetTy::Concrete(SigType::Assoc("Wide")),
         },
         ExtFn {
+            param_names: &[],
             name: "length",
             params: &[],
             ret: RetTy::Concrete(SigType::Assoc("Mag")),
         },
         ExtFn {
+            param_names: &[],
             name: "widen_all",
             params: &[],
             ret: RetTy::Concrete(SigType::List(&SigType::Assoc("Wide"))),
@@ -187,6 +193,7 @@ fn accum_dispatch(
 // --- The module that constructs the native value -------------------------------------------------
 
 const KIT_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "accum",
     params: &[SigType::Int, SigType::Int, SigType::Int],
     ret: RetTy::Concrete(SigType::Named("Accum")),
