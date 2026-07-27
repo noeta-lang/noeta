@@ -202,7 +202,12 @@ fn plan_user_trait_via(
         .filter(|tm| !existing.iter().any(|e| e.name == tm.sig.name))
         .map(|tm| {
             let m = &tm.sig;
-            // fn m(a: T, …): R { return self.<via>.m(a, …) }
+            // fn m(a: T, …): R { return self.<via>.m(a, …) }        — or, for an `async` method,
+            // async fn m(a: T, …): R { return self.<via>.m(a, …).await }
+            //
+            // `via:` delegates the WHOLE trait through the field, so the field's type implements the
+            // trait and its `m` has the trait's `async`-ness by the impl-conformance rule (E0015).
+            // The forwarder therefore awaits exactly when the trait declares the method `async`.
             let call = Expr::Call {
                 callee: Box::new(member(
                     member(ident("self", spec.span), via_field, spec.span),
@@ -216,6 +221,7 @@ fn plan_user_trait_via(
                     .collect(),
                 span: spec.span,
             };
+            let call = maybe_await(call, m.is_async, spec.span);
             synth_fn(m, ret_stmt(call, spec.span), spec.span)
         })
         .collect())
@@ -263,8 +269,26 @@ fn bridge_to_target(
             span,
         ));
     }
-    if existing.iter().any(|e| e.name == target) {
-        // fn m(a: T, …): R { return self.<target>(a, …) }
+    if let Some(t) = existing.iter().find(|e| e.name == target) {
+        // A SYNC trait method cannot bridge to an `async` one: the bridge would return the target's
+        // `Future<R>` under a declared `R`, and there is no legal place to `.await` it (the
+        // synthesized body is not an async context). The reverse is fine — an `async` trait method
+        // bridging to a sync target is just a value the `async` wrapper wraps.
+        if t.is_async && !m.is_async {
+            return Err(DerivePlanError::new(
+                format!(
+                    "`{target}` is an `async fn`, but `{trait_name}.{}` is not",
+                    m.name
+                ),
+                format!(
+                    "bind `{}` to a synchronous method, or declare `async fn {}` on `{trait_name}`",
+                    m.name, m.name
+                ),
+            ));
+        }
+        // fn m(a: T, …): R { return self.<target>(a, …) }         — awaiting the call when the
+        // bridged-to method is itself `async` (an `async fn m` forwarding to an `async` target
+        // must unwrap the target's future before returning `R`).
         let call = Expr::Call {
             callee: Box::new(member(ident("self", span), target, span)),
             args: m
@@ -274,6 +298,7 @@ fn bridge_to_target(
                 .collect(),
             span,
         };
+        let call = maybe_await(call, t.is_async, span);
         return Ok(synth_fn(m, ret_stmt(call, span), span));
     }
     Err(DerivePlanError::new(
@@ -975,12 +1000,35 @@ fn empty_fn(name: &str, span: Span) -> FnDecl {
     }
 }
 
-/// A synthesized method carrying `template`'s signature (name/params/return) and the given body.
+/// A synthesized method carrying `template`'s signature (name/params/return/`async`) and the given
+/// body.
+///
+/// `is_async` is as much a part of a signature as the return type — a call to an `async fn m(): T`
+/// is typed `Future<T>` everywhere — so a synthesized method that dropped the flag declared a
+/// *different* method than the trait it stands in for, while its body forwarded to a real
+/// implementation that does hand back a future. That is how `@derive(Fetcher, via: inner)` over a
+/// trait with an `async fn` produced a synchronous `fn` whose value was a `<future>`.
 fn synth_fn(template: &FnDecl, body: Vec<Stmt>, span: Span) -> FnDecl {
     FnDecl {
         params: template.params.clone(),
         ret: template.ret.clone(),
+        is_async: template.is_async,
         body,
         ..empty_fn(&template.name, span)
+    }
+}
+
+/// `expr` or `expr.await`, per `unwrap_future` — a forwarding body calls *another* callable, and an
+/// `async` one hands back a `Future<T>` the forwarder must unwrap before returning `T`. (The
+/// reverse needs nothing: an `async fn` whose body produces a plain value is exactly what `async`
+/// wraps.)
+fn maybe_await(expr: Expr, unwrap_future: bool, span: Span) -> Expr {
+    if unwrap_future {
+        Expr::Await {
+            expr: Box::new(expr),
+            span,
+        }
+    } else {
+        expr
     }
 }

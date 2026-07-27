@@ -1,0 +1,26 @@
+// An `async` trait method reached through a **trait object** is a `Future<T>`, exactly as it is
+// through a bound: `dyn` dispatch changes who answers the call, not what the call produces. The
+// checker used to forget the `async` on this one path — it typed `f.fetch(url)` as `string`,
+// accepted `return f.fetch(url)` from a `fn …: string`, and the program printed `<future>`.
+// expect: stdout "body:one"
+// expect: exit 0
+use std.task.{sleep}
+
+trait Fetcher {
+    async fn fetch(url: string): string
+}
+
+struct Http {
+    impl Fetcher {
+        async fn fetch(url: string): string {
+            sleep(1).await
+            return "body:" ~ url
+        }
+    }
+}
+
+async fn via_dyn(f: dyn Fetcher): string {
+    return f.fetch("one").await
+}
+
+echo via_dyn(Http {}).await

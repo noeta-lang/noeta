@@ -1,0 +1,27 @@
+// A trait's DEFAULT method body is checked with `self` bound to `dyn <Trait>`, so it reached the
+// trait-object typing hole from the inside: `self.fetch(url)` typed as `string` while the hoisted
+// body really held a `Future<string>`, and the default printed `<future>!`. With the `dyn` path
+// wrapping the return, the default awaits it like any other future.
+// expect: stdout "body!"
+// expect: exit 0
+use std.task.{sleep}
+
+trait Fetcher {
+    async fn fetch(url: string): string
+
+    async fn shout(url: string): string {
+        got = self.fetch(url).await
+        return got ~ "!"
+    }
+}
+
+struct Http {
+    impl Fetcher {
+        async fn fetch(url: string): string {
+            sleep(1).await
+            return "body"
+        }
+    }
+}
+
+echo Http {}.shout("u").await

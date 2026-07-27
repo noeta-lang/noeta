@@ -118,6 +118,25 @@ impl Checker {
             ));
             return;
         }
+        // No built-in trait declares an `async` method — the runtime invokes these protocols
+        // (`to_string`, `compare`, `add`, `call`, …) for a value, not for a future. An `async`
+        // implementation would hand the protocol a `Future<T>` where it reads a `T`, the same
+        // contract break a user trait's `async` mismatch is (E0015, below), so it is refused for the
+        // same reason: the caller's typing comes from the trait, never from the body.
+        for m in methods.iter().filter(|m| m.is_async) {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                m.name_span,
+                format!(
+                    "`{}` cannot be `async`: `{trait_name}` is a built-in trait",
+                    m.name
+                ),
+            )
+            .help(
+                "the runtime invokes a built-in protocol for a value, not a future; drop `async` \
+                 and await inside the caller instead",
+            );
+        }
         let Some((req_name, req_arity)) = t.required_method() else {
             return; // a marker trait (e.g. `Clone`, `Attribute`) imposes no hand-written method
         };
@@ -317,10 +336,11 @@ impl Checker {
     }
 
     /// Validate that an `impl` of a user trait provides its contract (L1, UT2): every **required**
-    /// (non-default) trait method must be present with matching arity and — when both sides annotate
-    /// them — matching parameter and return types. Default methods may be omitted (their fallback
-    /// body lands in UT5). Extra methods beyond the trait are allowed (inherent methods). Shares the
-    /// E0015 `InvalidImpl` code with the built-in path.
+    /// (non-default) trait method must be present, and every method the impl provides — required or
+    /// an override of a defaulted one — must match the trait's arity, its `async`-ness, and (when
+    /// both sides annotate them) its parameter and return types. Default methods may be *omitted*
+    /// (their fallback body lands in UT5). Extra methods beyond the trait are allowed (inherent
+    /// methods). Shares the E0015 `InvalidImpl` code with the built-in path.
     fn check_user_trait_impl(
         &mut self,
         target: &str,
@@ -379,22 +399,54 @@ impl Checker {
             }
         }
         for tm in &decl.methods {
-            if tm.has_default {
-                continue; // a default method is optional for an implementor
-            }
             let req_name = &tm.sig.name;
             let Some(m) = methods.iter().find(|m| &m.name == req_name) else {
-                self.error(
-                    DiagnosticCode::InvalidImpl,
-                    trait_span,
-                    format!("`impl {}` must define `fn {}`", decl.name, req_name),
-                )
-                .help(format!(
-                    "the `{}` trait requires `fn {}`",
-                    decl.name, req_name
-                ));
+                // A default method is optional for an implementor; a required one is not.
+                if !tm.has_default {
+                    self.error(
+                        DiagnosticCode::InvalidImpl,
+                        trait_span,
+                        format!("`impl {}` must define `fn {}`", decl.name, req_name),
+                    )
+                    .help(format!(
+                        "the `{}` trait requires `fn {}`",
+                        decl.name, req_name
+                    ));
+                }
                 continue;
             };
+            // A method the impl DOES provide is checked against the trait's signature whether or not
+            // the trait defaults it. The `has_default` skip used to sit above this whole block, so an
+            // *override* of a defaulted method was exempt from every conformance rule — it could take
+            // different parameters, return a different type, or (see below) differ in `async`-ness,
+            // while `dyn Trait` and every bound kept typing it by the trait's declaration.
+            //
+            // `async` is part of the contract, not a private implementation detail: the return type a
+            // caller sees is `Future<T>` for an `async fn` and `T` otherwise, and every receiver form
+            // — bound, trait object, concrete — types the call from *some* signature. If the two sides
+            // may disagree, then typing a `dyn Trait` call by the trait's declaration is unsound (an
+            // `async` declaration reached a synchronous body, or the reverse). Pinning it here is what
+            // makes the trait-object typing above a promise the runtime keeps.
+            if tm.sig.is_async != m.is_async {
+                let (want, got) = if tm.sig.is_async {
+                    ("async fn", "fn")
+                } else {
+                    ("fn", "async fn")
+                };
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    m.name_span,
+                    format!(
+                        "`{req_name}` is declared `{got}`, but trait `{}` declares it `{want}`",
+                        decl.name
+                    ),
+                )
+                .help(format!(
+                    "an implementation must match the trait's `async`-ness — a call through \
+                     `dyn {}` or a `<T: {}>` bound is typed from the trait's declaration",
+                    decl.name, decl.name
+                ));
+            }
             if m.params.len() != tm.sig.params.len() {
                 self.error(
                     DiagnosticCode::InvalidImpl,

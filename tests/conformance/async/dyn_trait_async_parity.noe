@@ -1,0 +1,45 @@
+// Parity: the three receiver forms that can reach an `async` trait method — a `<F: Fetcher>` bound,
+// a `dyn Fetcher` trait object (declared, and narrowed from `dyn` with `is`), and the concrete type
+// — all type the call as `Future<string>` and all produce the same value. The standalone
+// `impl Fetcher for T` spelling is used here so the standalone half is covered too.
+// expect: stdout "body:bound"
+// expect: stdout "body:dyn"
+// expect: stdout "body:narrow"
+// expect: stdout "body:concrete"
+// expect: exit 0
+use std.task.{sleep}
+
+trait Fetcher {
+    async fn fetch(url: string): string
+}
+
+class Http {
+    fn new(): Http { return Http {} }
+}
+
+impl Fetcher for Http {
+    async fn fetch(url: string): string {
+        sleep(1).await
+        return "body:" ~ url
+    }
+}
+
+async fn via_bound<F: Fetcher>(f: F): string {
+    return f.fetch("bound").await
+}
+
+async fn via_dyn(f: dyn Fetcher): string {
+    return f.fetch("dyn").await
+}
+
+async fn via_narrow(x: dyn): string {
+    if x is dyn Fetcher {
+        return x.fetch("narrow").await
+    }
+    return "no"
+}
+
+echo via_bound(Http.new()).await
+echo via_dyn(Http.new()).await
+echo via_narrow(Http.new()).await
+echo Http.new().fetch("concrete").await

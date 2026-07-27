@@ -1,0 +1,16 @@
+// A `dyn Trait` call is typed by the trait's contract on the way out, so its arguments are checked
+// against that same contract on the way in — exactly as a bound receiver's are. A trait object used
+// to be the one receiver whose arguments nothing checked at all. E0007.
+// expect: error E0007 at 14:45
+// expect: exit 1
+trait Greeter { fn greet(who: string): string }
+
+struct En {
+    impl Greeter {
+        fn greet(who: string): string { return "hi " ~ who }
+    }
+}
+
+fn welcome(g: dyn Greeter): string { return g.greet(42) }
+
+echo welcome(En {})

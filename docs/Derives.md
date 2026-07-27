@@ -91,9 +91,11 @@ struct Money { amount: int }
 
 The synthesized bridge is mechanical (`fn value(): int { return self.amount }`) and fully checked. With no explicit binding, deduction is deterministic: a field with the **same name** as the required method wins; else a **unique** type-compatible field; anything else is E0050 *listing the candidates*. A binding can also target an existing method (forwarded with the trait's arguments).
 
+A bridge carries the trait method's **`async`-ness**: an `async` trait method synthesizes an `async` bridge, and a bridge onto an `async` method awaits it. The one refused combination is a *synchronous* trait method bound to an `async` method (E0050) — the bridge would hand back the target's `Future<T>` under a declared `T`, and its body is not an async context, so there is nowhere legal to await it.
+
 ## Delegating through a field (`via:`)
 
-`@derive(Trait, via: field)` forwards the whole trait through a field — the newtype pattern without boilerplate. For a user trait, every method forwards into the field's own implementation (the field's type must implement the trait). For the built-ins, a template table covers `Equatable`/`Comparable`/`Display` (compare/render the fields) and the operator traits `Add`/`Sub`/`Mul`/`Div`/`Concat` (unwrap-op-rewrap; single-field types only, since the result must construct a new value):
+`@derive(Trait, via: field)` forwards the whole trait through a field — the newtype pattern without boilerplate. For a user trait, every method forwards into the field's own implementation (the field's type must implement the trait), `async` methods included — the forwarder is `async` and awaits the field's future, so a delegated `async fn` is a `Future<T>` at the call site exactly like the one it forwards to. For the built-ins, a template table covers `Equatable`/`Comparable`/`Display` (compare/render the fields) and the operator traits `Add`/`Sub`/`Mul`/`Div`/`Concat` (unwrap-op-rewrap; single-field types only, since the result must construct a new value):
 
 ```noeta check
 @derive(Comparable, via: cents)

@@ -193,7 +193,41 @@ echo add10(5)     // 15
 
 There is also a **standalone** `impl Trait for T { ... }`, which must target a type declared in the same module — an orphan target is E0013, a wrong or missing required method is E0015. A standalone impl of a **user** trait may carry method bodies (hoisted onto the target type); an impl of a **built-in** trait must stay an empty-body marker (a body is E0015 — those methods live in the type's own body).
 
-**Default methods fall back.** A user trait's method *with* a body is a **default**: an implementor may omit it, and the omitted method falls back to the trait's default body — hoisted onto the implementing type, so it dispatches like any method (a default that mentions `self` is an instance method and may call the trait's required methods; a self-less default is an associated fn, called on the type). A method the impl provides always overrides its default. A **generic** trait implements at an instantiation — `impl Keyed<int> { … }`, `impl Keyed<string> for Tag { … }`, `@derive(Keyed<string>)` — and its defaults substitute the type parameters through their signatures and bodies before hoisting; a bare `impl Keyed`/`@derive(Keyed)` on a generic trait is an arity error naming the parameters.
+**Default methods fall back.** A user trait's method *with* a body is a **default**: an implementor may omit it, and the omitted method falls back to the trait's default body — hoisted onto the implementing type, so it dispatches like any method (a default that mentions `self` is an instance method and may call the trait's required methods; a self-less default is an associated fn, called on the type). A method the impl provides always overrides its default — and an override is held to the trait's signature exactly like a required method is. A **generic** trait implements at an instantiation — `impl Keyed<int> { … }`, `impl Keyed<string> for Tag { … }`, `@derive(Keyed<string>)` — and its defaults substitute the type parameters through their signatures and bodies before hoisting; a bare `impl Keyed`/`@derive(Keyed)` on a generic trait is an arity error naming the parameters.
+
+**A method the impl *provides* is an instance method**, whatever its body happens to mention. A trait method that does not need `self` (`fn greet(who: string): string { return "hi " ~ who }`) is still part of the trait's instance interface and is called on a value; the in-body and standalone spellings agree on this. (Only an *omitted* default is classified from its body, per the rule above.)
+
+**The signature is the contract, `async` included.** An implementation must match the trait's declaration in arity, parameter types, return type, *and* `async`-ness; a mismatch is E0015. `async` belongs on that list because every receiver form types a call from *some* signature and they must all agree: an `async fn m(): T` is called for a `Future<T>` and a plain `fn m(): T` for a `T`, so a synchronous method satisfying an `async` declaration (or the reverse) would make a bound's and a trait object's typing a promise the implementation does not keep.
+
+## Trait objects
+
+A `dyn Trait` parameter or binding accepts any implementor and dispatches on the value's concrete type at run time, while typing statically from the trait's declaration — return type, parameter types, arity, and whether the method is `async`:
+
+```noeta
+use std.task.{sleep}
+
+trait Fetcher {
+    async fn fetch(url: string): string
+}
+
+struct Http {
+    impl Fetcher {
+        async fn fetch(url: string): string {
+            sleep(1).await
+            return "body:" ~ url
+        }
+    }
+}
+
+async fn via_dyn(f: dyn Fetcher): string {
+    return f.fetch("one").await     // Future<string>, exactly as through a `<F: Fetcher>` bound
+}
+echo via_dyn(Http {}).await         // body:one
+```
+
+The bound and the trait object agree by construction: both read the trait's declaration, so a call is typed identically whether the receiver is a bound parameter, a declared `dyn Trait`, a `dyn` narrowed with `x is dyn Trait`, or the concrete type. A wrong argument type or arity through `dyn` is E0007, just as it is through a bound.
+
+`dyn` on a **generic** trait erases its parameters — there is no `dyn Trait<...>` surface form, so, as with a bare `<T: Store>` bound, the parameters instantiate permissively to `dyn` and those positions defer to run time. Name the instantiation with a bound (`<S: Store<int>>`) when you need them typed.
 
 ## `@derive` — synthesized implementations
 
