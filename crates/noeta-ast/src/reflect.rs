@@ -616,6 +616,22 @@ pub fn build(
                         .collect(),
                 });
             }
+            // A **standalone** `impl Trait for T { … }`'s methods, keyed by the same `Type.method`
+            // convention, so an attribute on one is discoverable and joins with `params_of`.
+            //
+            // This is the one method carrier the walk above cannot reach: an *in-body* `impl Trait
+            // { … }` block's methods are flattened by the parser into the type's own `methods` (and
+            // so are already scanned through the struct/class/enum arms), but a standalone impl is
+            // its own top-level statement. Its bodies are checked and its methods really dispatch,
+            // so an `#[...]` on one type-checked and then silently did not exist — exactly the
+            // asymmetry the `Stmt::Struct` arm had before it gained its own `push_attrs`.
+            Stmt::Impl(decl) => {
+                for method in &decl.methods {
+                    let target = format!("{}.{}", decl.target, method.name);
+                    push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
+                    push_params(&mut manifest, &mut params, target, method);
+                }
+            }
             _ => {}
         }
     }

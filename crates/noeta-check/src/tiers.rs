@@ -754,11 +754,17 @@ pub fn resolve_texts_with_registry(
     // `Decl` target keyed by the method's own `name_span` — every consumer (hover, the docs browser,
     // the `#[Doc]` stamp) already resolves prose by `name_span` and already visits member name-spans,
     // so a method's `@doc` lights up the same paths as a top-level one with no consumer change.
+    //
+    // A type's `methods` already contains the flattened copy of every in-body `impl Trait { … }`
+    // method (the parser clones them there so dispatch resolves them), so walking `impls` as well
+    // would emit each of those twice. A **standalone** `impl Trait for T { … }` is the one method
+    // carrier that is not flattened anywhere, so it is walked on its own.
     for stmt in &program.stmts {
         let methods = match stmt {
             Stmt::Struct(d) => &d.methods,
             Stmt::Class(d) => &d.methods,
             Stmt::Enum(d) => &d.methods,
+            Stmt::Impl(d) => &d.methods,
             _ => continue,
         };
         for method in methods {
@@ -869,26 +875,35 @@ pub fn activate_tiers_with(
     );
     if !doc_stamps.is_empty() {
         for stmt in &mut stmts {
-            let (name_span, attrs) = match stmt {
-                Stmt::Fn(d) => (d.name_span, &mut d.attrs),
-                Stmt::Struct(d) => (d.name_span, &mut d.decorators.attrs),
-                Stmt::Class(d) => (d.name_span, &mut d.decorators.attrs),
-                Stmt::Enum(d) => (d.name_span, &mut d.decorators.attrs),
-                _ => continue,
-            };
-            if let Some(text) = doc_stamps.get(&name_span)
-                && !attrs.iter().any(|a| a.name == TIER_ATTR_DOC)
-            {
-                attrs.push(Attribute {
-                    name: TIER_ATTR_DOC.to_string(),
-                    name_span,
-                    args: vec![AttrArg {
-                        name: Some("text".to_string()),
-                        value: noeta_ast::AttrValue::Str(text.clone()),
-                        span: name_span,
-                    }],
-                    span: name_span,
-                });
+            // The declaration's own prose (`@doc` above a `fn`/`struct`/`class`/`enum`/`trait` —
+            // exactly the four `TierSite`s the `doc` tier declares, no more).
+            match stmt {
+                Stmt::Fn(d) => stamp_doc(&doc_stamps, d.name_span, &mut d.attrs),
+                Stmt::Struct(d) => stamp_doc(&doc_stamps, d.name_span, &mut d.decorators.attrs),
+                Stmt::Class(d) => stamp_doc(&doc_stamps, d.name_span, &mut d.decorators.attrs),
+                Stmt::Enum(d) => stamp_doc(&doc_stamps, d.name_span, &mut d.decorators.attrs),
+                // A trait is a documentable site (`TierSite::Trait`) and `resolve_texts` has
+                // resolved prose above one to the trait since traits joined the site model — but
+                // this stamping match had no arm for it, so the resolved text was dropped on the
+                // floor. `reflect::build` already keys a trait's attributes by its bare name.
+                Stmt::Trait(d) => stamp_doc(&doc_stamps, d.name_span, &mut d.decorators.attrs),
+                _ => {}
+            }
+            // …and its members' prose. A method's `@doc` rides on `FnDecl::directives` rather than
+            // a statement wrapper, so it never reached the walk above; the stamp lands on the
+            // method's own `attrs`, which `reflect::build` keys `Type.method` — the same target
+            // convention `params_of`/`returns_of` use, so the rows join on one key.
+            //
+            // Every carrier a method can sit in is covered: the type's own `methods` (which the
+            // parser has already flattened each in-body `impl Trait { … }` method into), the
+            // retained `impls` blocks (so the two copies of a flattened method do not disagree
+            // about their attributes), and a standalone `impl Trait for T { … }`.
+            match stmt {
+                Stmt::Struct(d) => stamp_doc_methods(&doc_stamps, &mut d.methods, &mut d.impls),
+                Stmt::Class(d) => stamp_doc_methods(&doc_stamps, &mut d.methods, &mut d.impls),
+                Stmt::Enum(d) => stamp_doc_methods(&doc_stamps, &mut d.methods, &mut d.impls),
+                Stmt::Impl(d) => stamp_doc_methods(&doc_stamps, &mut d.methods, &mut []),
+                _ => {}
             }
         }
     }
@@ -946,6 +961,58 @@ pub fn activate_tiers_with(
         texts,
         registry,
         diagnostics,
+    }
+}
+
+/// Stamp `#[std.doc.Doc(text: "…")]` onto one declaration's attribute list, when the `doc` tier
+/// resolved prose for the declaration named at `name_span`.
+///
+/// The name-span is the join key throughout: it is what [`resolve_docs`] reports as the target of a
+/// `@doc` block and it survives activation's inlining, so every declaration kind — a top-level
+/// `fn`, a type, a trait, a method — stamps through this one function rather than repeating the
+/// construction per site (which is how a site came to be missing in the first place). A
+/// hand-written `#[std.doc.Doc]` already on the declaration wins.
+fn stamp_doc(
+    stamps: &std::collections::HashMap<Span, String>,
+    name_span: Span,
+    attrs: &mut Vec<Attribute>,
+) {
+    let Some(text) = stamps.get(&name_span) else {
+        return;
+    };
+    if attrs.iter().any(|a| a.name == TIER_ATTR_DOC) {
+        return;
+    }
+    attrs.push(Attribute {
+        name: TIER_ATTR_DOC.to_string(),
+        name_span,
+        args: vec![AttrArg {
+            name: Some("text".to_string()),
+            value: noeta_ast::AttrValue::Str(text.clone()),
+            span: name_span,
+        }],
+        span: name_span,
+    });
+}
+
+/// [`stamp_doc`] over a type's methods and the `impl Trait { … }` blocks retained beside them.
+///
+/// The parser flattens an in-body impl block's methods into the type's own `methods` (so dispatch
+/// resolves them) *and* keeps the block, so the same method exists twice in the AST. Both copies are
+/// stamped: `reflect::build` reads the flattened one, but leaving the block's copy unstamped would
+/// leave two records of one method disagreeing about its attributes.
+fn stamp_doc_methods(
+    stamps: &std::collections::HashMap<Span, String>,
+    methods: &mut [FnDecl],
+    impls: &mut [noeta_ast::ImplBlock],
+) {
+    for method in methods.iter_mut() {
+        stamp_doc(stamps, method.name_span, &mut method.attrs);
+    }
+    for block in impls.iter_mut() {
+        for method in &mut block.methods {
+            stamp_doc(stamps, method.name_span, &mut method.attrs);
+        }
     }
 }
 
@@ -1892,6 +1959,161 @@ mod tests {
         let inactive = activate_tiers(&program, &[]);
         assert!(doc_attr_of(&inactive).is_none());
         assert_eq!(inactive.program.stmts.len(), 1);
+    }
+
+    /// A program exercising every declaration kind a `@doc` block may legally attach to, so the
+    /// stamping tests below all read from one source of truth about what "legal" is.
+    ///
+    /// The set is exactly the `doc` tier's four declared `TierSite`s: a function, a type
+    /// (struct/class/enum), a trait, and a method — the last in each of its three carriers (a
+    /// type's own body, an in-body `impl Trait { … }` block, and a standalone `impl Trait for T`).
+    /// A field, an enum variant and a trait method *signature* are absent because the grammar has
+    /// no directive position on them at all, so a `@doc` there never reaches the checker.
+    const EVERY_DOC_SITE: &str = "@doc { A function. }\n\
+         fn top(): int { return 1; }\n\
+         @doc { A class. }\n\
+         class K {\n\
+             @doc { A class method. }\n\
+             fn m(): int { return 2; }\n\
+         }\n\
+         @doc { A struct. }\n\
+         struct S {\n\
+             x: int\n\
+             @doc { A struct method. }\n\
+             fn sm(): int { return 3; }\n\
+         }\n\
+         @doc { An enum. }\n\
+         enum E {\n\
+             A;\n\
+             @doc { An enum method. }\n\
+             fn em(): int { return 4; }\n\
+         }\n\
+         @doc { A trait. }\n\
+         trait T { fn area(): int }\n\
+         class C {\n\
+             impl T {\n\
+                 @doc { An in-body impl method. }\n\
+                 fn area(): int { return 5; }\n\
+             }\n\
+         }\n\
+         struct P { y: int }\n\
+         impl T for P {\n\
+             @doc { A standalone impl method. }\n\
+             fn area(): int { return self.y; }\n\
+         }\n";
+
+    /// Every `(target, prose)` pair the reflection manifest carries for the `Doc` attribute, which
+    /// is what `attributes_of::<std.doc.Doc>()` surfaces at runtime.
+    fn doc_manifest(program: &Program) -> Vec<(String, String)> {
+        noeta_ast::reflect::build(program, &[], &Default::default())
+            .manifest
+            .iter()
+            .filter(|r| r.name == TIER_ATTR_DOC)
+            .map(|r| {
+                let noeta_ast::AttrValue::Str(text) = &r.args[0].value else {
+                    panic!("Doc text is a string literal");
+                };
+                (r.target.clone(), text.trim().to_string())
+            })
+            .collect()
+    }
+
+    /// The stamp reaches **every** declaration kind a `@doc` may attach to, keyed by the reflection
+    /// manifest's own target convention (`Type.method` for a member, the bare name otherwise) — so a
+    /// method's prose joins with `params_of`/`returns_of` on one key.
+    ///
+    /// A method was the reported gap: its `@doc` resolved (`noeta doc` extracted it) but the
+    /// stamping walk only visited top-level statements, so a framework reading a handler's
+    /// documentation — every handler is a method — got nothing. A trait was the same gap one step
+    /// further back: the resolver had learned to attach prose to a trait, and this walk had no arm
+    /// for it.
+    #[test]
+    fn the_doc_stamp_reaches_every_legal_declaration_kind() {
+        let program = parse_program(EVERY_DOC_SITE);
+        let active = activate_tiers(&program, &["doc"]);
+        assert!(active.diagnostics.is_empty(), "{:?}", active.diagnostics);
+        let mut docs = doc_manifest(&active.program);
+        docs.sort();
+        assert_eq!(
+            docs,
+            vec![
+                ("C.area".to_string(), "An in-body impl method.".to_string()),
+                ("E".to_string(), "An enum.".to_string()),
+                ("E.em".to_string(), "An enum method.".to_string()),
+                ("K".to_string(), "A class.".to_string()),
+                ("K.m".to_string(), "A class method.".to_string()),
+                (
+                    "P.area".to_string(),
+                    "A standalone impl method.".to_string()
+                ),
+                ("S".to_string(), "A struct.".to_string()),
+                ("S.sm".to_string(), "A struct method.".to_string()),
+                ("T".to_string(), "A trait.".to_string()),
+                ("top".to_string(), "A function.".to_string()),
+            ]
+        );
+        // Every stamped attribute passes the ordinary construction gate — the stamp is a normal
+        // attribute application, not a privileged one.
+        assert!(crate::check_all(&active.program).diagnostics.is_empty());
+    }
+
+    /// With the tier inactive nothing is stamped **anywhere** — production carries no doc text for
+    /// a method any more than for a top-level fn.
+    #[test]
+    fn an_inactive_doc_tier_stamps_no_declaration_kind() {
+        let program = parse_program(EVERY_DOC_SITE);
+        let inactive = activate_tiers(&program, &[]);
+        assert_eq!(doc_manifest(&inactive.program), Vec::new());
+    }
+
+    /// An in-body `impl Trait { … }` method exists twice in the AST — the parser flattens it into
+    /// the type's own `methods` so dispatch resolves it, and keeps the block for the checker. Both
+    /// copies are stamped, so the two records of one method cannot disagree about its attributes.
+    #[test]
+    fn both_copies_of_a_flattened_impl_method_are_stamped() {
+        let program = parse_program(
+            "trait T { fn area(): int }\n\
+             class C {\n\
+                 impl T {\n\
+                     @doc { Its area. }\n\
+                     fn area(): int { return 5; }\n\
+                 }\n\
+             }\n",
+        );
+        let active = activate_tiers(&program, &["doc"]);
+        let class = active
+            .program
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Class(d) => Some(d),
+                _ => None,
+            })
+            .expect("the class survives activation");
+        let stamped = |m: &FnDecl| m.attrs.iter().any(|a| a.name == TIER_ATTR_DOC);
+        assert!(class.methods.iter().all(stamped), "flattened copy");
+        assert!(
+            class.impls.iter().flat_map(|b| &b.methods).all(stamped),
+            "impl-block copy"
+        );
+    }
+
+    /// A hand-written `#[std.doc.Doc(…)]` on a method wins over the block's prose, exactly as it
+    /// does on a top-level fn — the stamp never overwrites what the author wrote.
+    #[test]
+    fn an_explicit_doc_attribute_on_a_method_wins_over_the_stamp() {
+        let program = parse_program(
+            "class K {\n\
+                 @doc { From the block. }\n\
+                 #[std.doc.Doc(text: \"From the attribute.\")]\n\
+                 fn m(): int { return 2; }\n\
+             }\n",
+        );
+        let active = activate_tiers(&program, &["doc"]);
+        assert_eq!(
+            doc_manifest(&active.program),
+            vec![("K.m".to_string(), "From the attribute.".to_string())]
+        );
     }
 
     /// A `@bench(iterations: N)` block's directive args are stamped onto each contained fn as the

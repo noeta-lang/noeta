@@ -20,13 +20,41 @@ fn add(a: int, b: int): int { return a + b }
 
 ### Attachment — docs belong to declarations
 
-A `@doc` block **attaches by adjacency**: immediately above a declaration (`fn`/`struct`/`class`/`enum`), it documents that declaration. A non-attached block (above the `use` header, between sections, or standing alone) is the **module doc** if it is the file's first such block, else free-floating section prose. No new syntax — position decides.
+A `@doc` block **attaches by adjacency**: immediately above a declaration (`fn`/`struct`/`class`/`enum`/`trait`), it documents that declaration. A non-attached block (above the `use` header, between sections, or standing alone) is the **module doc** if it is the file's first such block, else free-floating section prose. No new syntax — position decides.
+
+A **method** is documented the same way — the block leads the method inside the body it is declared in:
+
+```noeta ignore
+class Users {
+    @doc { List every user, newest first. }
+    fn list(): List<User> { … }
+}
+```
+
+This works in all three places a method can be written: a type's own body, an in-body `impl Trait { … }` block, and a standalone `impl Trait for Type { … }`. A field, an enum variant and a `trait`'s bodiless method *signature* take no `@doc` — the grammar has no directive position on them.
 
 Attachment feeds the whole toolchain from one resolution:
 
 - **Hover** (LSP): hovering a documented symbol — its declaration or any call site — shows the doc prose under the type.
 - **`noeta doc`**: an attached block's source header carries the symbol (see below).
 - **Runtime docstrings**: with the `doc` tier live (`noeta run --tier doc`), the attached block is stamped as the prelude `#[Doc(text: "…")]` attribute on its declaration, so `attributes_of::<Doc>()` surfaces it at runtime — Python-style docstrings, opt-in. On a normal build nothing is stamped and the blocks strip as always, so **production carries no doc text**.
+
+A stamped record is keyed by the same target convention as the rest of [reflection](Attributes-and-Reflection): a bare name for a top-level `fn`/type/`trait`, and `Type.method` for a method — so a method's prose joins with `params_of` / `returns_of` / `attributes_of` on one key. This is how a framework reads documentation the author wrote once: `para/api` derives an operation's `description` from its handler's `@doc` block rather than asking for it again in an attribute.
+
+```noeta
+use std.doc.Doc
+
+@doc { Adds two ints. }
+fn add(a: int, b: int): int { return a + b }
+
+class Users {
+    @doc { List every user. }
+    fn list(): List<string> { return [] }
+}
+
+for d in attributes_of::<Doc>() { echo "${d.target}: ${d.value.text.trim()}" }
+// --tier doc → "add: Adds two ints." then "Users.list: List every user."
+```
 
 Extract every `@doc` block to stdout:
 
