@@ -5,18 +5,13 @@ dependency from the hosted registry, grant it what it needs, and run. The refere
 each step: [the `noeta.toml` Manifest](Manifest), [Package Registries](Package-Registries), and
 [Package Provenance](Package-Provenance).
 
+Want the five-command version? See the [Package Quickstart](Quickstart-Packages).
+
 ## 1 · Install `noeta`
 
-One line on Linux or macOS (x86_64/aarch64 — the platforms with prebuilt binaries at alpha):
-
-```sh
-curl -fsSL https://noeta.dev/install | sh
-```
-
-Later releases are one `noeta upgrade` away. On macOS the binaries are not Apple-notarized: if
-Gatekeeper blocks a browser-downloaded copy, clear the quarantine flag with
-`xattr -d com.apple.quarantine <path-to>/noeta`. Details and the build-from-source path for other
-platforms: [Getting Started](Getting-Started#1--install-the-toolchain).
+One line — `curl -fsSL https://noeta.dev/install | sh` — installs the toolchain on Linux or
+macOS; the details (pinning a version, macOS Gatekeeper, building from source on other
+platforms) are in [Getting Started](Getting-Started#1--install-the-toolchain).
 
 ## 2 · Scaffold a project
 
@@ -45,30 +40,30 @@ echo greet("packages")
 
 ## 3 · Add a dependency
 
-Dependencies live in the manifest's `[dependencies]` table. The first-party `para/*` packages —
-`para/aether` (web framework), `para/db` (database drivers), `para/html` (LiveView), `para/api`,
-`para/cli`, `para/aether_db`, `para/p2p` — are published on the hosted registry at
-[registry.noeta.dev](https://registry.noeta.dev), so a version requirement is all it takes.
-Several packages of the same scope bind under **one** key as a **scope array**:
+Dependencies live in the manifest's `[dependencies]` table, and `noeta add` makes the edit for
+you. The first-party `para/*` packages — `para/aether` (web framework), `para/db` (database
+drivers), `para/html` (LiveView), `para/api`, `para/cli`, `para/aether_db`, `para/p2p` — are
+published on the hosted registry at [registry.noeta.dev](https://registry.noeta.dev), so a
+version requirement is all it takes:
+
+```console
+$ noeta add para --version "^0.1" --package para/aether
+added `para` to /home/you/hello/noeta.toml
+warning: `para` binds a package whose own module root is `aether` — imports resolve as `para.…`, not `aether.…`
+```
+
+The first argument (`para`) is the import root — the name you write after `use` — and
+`--package` is the registry identity. The manifest now reads:
 
 ```toml
 [dependencies]
-para = [
-  { version = "^0.1", package = "para/aether" },
-  { version = "^0.1", package = "para/db" },
-]
+para = { version = "^0.1", package = "para/aether" }
 ```
 
-Every member of the array must share the scope (`para`), and the key is the import root — you
-write `use para.aether.…` and `use para.db.…`. A single package needs no array:
-`para = [ { version = "^0.1", package = "para/aether" } ]` and
-`aether = { version = "^0.1", package = "para/aether" }` both work (the second binds under the
-key `aether`). `noeta add --version "^0.1" --package para/aether` makes the edit for you.
-
 The other source forms — a local `{ path = "…" }` tree, a git repo pinned to a
-`{ git = "…", tag = "…" }` release or tracking a `branch`/HEAD — are covered in
-[the Manifest](Manifest); mix them freely during development, but a *published* package may
-depend only via the registry.
+`{ git = "…", tag = "…" }` release or tracking a `branch`/HEAD, and binding several packages of
+one scope under a single key (a **scope array**) — are covered in [the Manifest](Manifest); mix
+them freely during development, but a *published* package may depend only via the registry.
 
 ## 4 · `[trust]` — when a package is native or adds commands
 

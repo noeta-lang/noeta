@@ -13,7 +13,7 @@ installing noeta v0.2.0 for x86_64-unknown-linux-gnu
 installed …/bin/noeta
 ```
 
-The script downloads the latest release, verifies its checksum, and installs to `~/.local/bin` by default (this run overrode the destination with `NOETA_INSTALL_DIR`; `--to <dir>` works too). If the destination is not on your `PATH`, the script prints the exact line to add for your shell. Later, `noeta upgrade` updates the binary in place.
+The script downloads the latest release, verifies its checksum, and installs to `~/.local/bin` by default — to install elsewhere, pass `--to <dir>` (or set `NOETA_INSTALL_DIR`). If the destination is not on your `PATH`, the script prints the exact line to add for your shell. Later, `noeta upgrade` updates the binary in place.
 
 ```sh
 noeta --version
@@ -145,6 +145,7 @@ The `.noeb` bundle is the compiled program; `noeta build --native` produces a st
 ## Where to go next
 
 - [Getting Started](Getting-Started) — the language itself, from hello world up
+- [Using Packages](Using-Packages) — the full walkthrough: `[trust]` grants, the lockfile, `noeta update` and `noeta audit`
 - [Manifest](Manifest) — everything `noeta.toml` can express
 - [Package Registries](Package-Registries) — path, git, and registry dependencies in depth
 - [Package Provenance](Package-Provenance) — how signing, the transparency log, and trust gates work
