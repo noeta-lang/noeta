@@ -2946,6 +2946,21 @@ const REQUEST_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::Bytes),
     },
+    // The `application/x-www-form-urlencoded` body, decoded — the same wire format `query` parses,
+    // read from the body instead of the URL. `form(name)`/`form_all()` mirror `cookie`/`cookies`:
+    // the single lookup is the common case, the map is there when you want to iterate.
+    ExtFn {
+        param_names: &["name"],
+        name: "form",
+        params: &[Str],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "form_all",
+        params: &[],
+        ret: Concrete(SigType::Map(&Str, &Str)),
+    },
     ExtFn {
         param_names: &[],
         name: "url",
@@ -3033,6 +3048,25 @@ fn request_method_dispatch(
         "body_bytes" => {
             want_arity(method, args, 0)?;
             Ok(NativeOut::Bytes(req.body.clone()))
+        }
+        "form" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            let body = String::from_utf8_lossy(&req.body);
+            Ok(match crate::net::form_value(&body, name) {
+                Some(value) => NativeOut::Some(Box::new(NativeOut::Str(value))),
+                None => NativeOut::None,
+            })
+        }
+        "form_all" => {
+            want_arity(method, args, 0)?;
+            let body = String::from_utf8_lossy(&req.body);
+            Ok(NativeOut::Map(
+                crate::net::form_pairs(&body)
+                    .into_iter()
+                    .map(|(name, value)| (name, NativeOut::Str(value)))
+                    .collect(),
+            ))
         }
         "url" => {
             want_arity(method, args, 0)?;

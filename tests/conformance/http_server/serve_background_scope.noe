@@ -13,6 +13,8 @@
 // expect: stdout "[bg] ran a job"
 // expect: stdout "queued /users/42"
 // expect: stdout "[bg] ran a job"
+// expect: stdout "queued /form"
+// expect: stdout "[bg] ran a job"
 // expect: stdout "queued /ws"
 // expect: stdout "[bg] ran a job"
 // expect: exit 0

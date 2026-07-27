@@ -12,8 +12,9 @@
 pub use noeta_ext_abi::net::{
     HTTP_ERROR_TYPE_IDENTITY, HTTP_ERROR_TYPE_NAME, NetError, NetErrorKind, NetFetchIo, NetRequest,
     NetResponse, REQUEST_TYPE_IDENTITY, REQUEST_TYPE_NAME, RESPONSE_TYPE_IDENTITY,
-    RESPONSE_TYPE_NAME, Request, WS_ACCEPT_GUID, accept_outcome, fetch_outcome, query_value,
-    request_header, request_path, ws_recv_outcome,
+    RESPONSE_TYPE_NAME, Request, WS_ACCEPT_GUID, accept_outcome, fetch_outcome, form_pairs,
+    form_value, percent_decode, percent_encode, query_value, request_header, request_path,
+    ws_recv_outcome,
 };
 
 use serde_json::json;
@@ -29,7 +30,10 @@ use serde_json::json;
 ///   3. `POST /echo`  body `hello`  header `content-type: text/plain`  — a body + a header
 ///   4. `GET /users/42?active=true`            — a path segment + a query string
 ///   5. `DELETE /users/42`                     — a non-GET/POST verb
-///   6. `GET /ws`  headers `upgrade: websocket`, `sec-websocket-key: <fixed>`  — a websocket
+///   6. `POST /form`  body `title=buy+milk&note=caf%C3%A9`  header
+///      `content-type: application/x-www-form-urlencoded` — a form submission whose fields need
+///      percent-decoding, including a multi-byte character (`req.form(name)`/`form_all()`)
+///   7. `GET /ws`  headers `upgrade: websocket`, `sec-websocket-key: <fixed>`  — a websocket
 ///      upgrade request (server-hmr L0). A handler that upgrades it is driven by the fixed
 ///      client conversation ([`sandbox_ws_client_frames`]); one that responds normally treats
 ///      it as any other GET.
@@ -55,6 +59,12 @@ pub fn sandbox_request_script() -> Vec<NetRequest> {
         ),
         req("GET", "/users/42?active=true", "", vec![]),
         req("DELETE", "/users/42", "", vec![]),
+        req(
+            "POST",
+            "/form",
+            "title=buy+milk&note=caf%C3%A9",
+            vec![("content-type", "application/x-www-form-urlencoded")],
+        ),
         req(
             "GET",
             "/ws",

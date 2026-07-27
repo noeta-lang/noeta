@@ -1,0 +1,42 @@
+// Form bodies and query strings are the SAME wire format (`application/x-www-form-urlencoded`),
+// read from two places — so one parser backs both. `req.form(name)`/`form_all()` are the body twins
+// of `query(name)`/`cookies()`, and every value is percent-decoded: `+` is a space and a run of
+// `%XX` is one multi-byte character (decoding per-escape would split `café` into fragments).
+//
+// The sandbox script's request 6 is `POST /form` with body `title=buy+milk&note=caf%C3%A9`, and
+// request 4 is `GET /users/42?active=true`. Both backends run the identical accept→handle loop.
+// expect: stdout "GET / form-fields=0"
+// expect: stdout "GET /health form-fields=0"
+// expect: stdout "POST /echo form-fields=1"
+// expect: stdout "GET /users/42 query-active=true"
+// expect: stdout "DELETE /users/42 form-fields=0"
+// expect: stdout "POST /form title=[buy milk] note=[café] fields=2 missing=absent"
+// expect: stdout "GET /ws form-fields=0"
+// expect: stdout "served"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response}
+
+fn handle(req: Request): Response {
+    path = req.path()
+    if path == "/form" {
+        // Both halves decoded: `buy+milk` → `buy milk`, `caf%C3%A9` → `café`.
+        title = req.form("title") ?? "absent"
+        note = req.form("note") ?? "absent"
+        // `form_all()` is the map when you want to iterate, `form(name)` the common single lookup.
+        fields = req.form_all().len()
+        missing = req.form("nope") ?? "absent"
+        echo "POST /form title=[${title}] note=[${note}] fields=${fields} missing=${missing}"
+    } else if path == "/users/42" && req.method() == "GET" {
+        // The query string is decoded by the same parser.
+        echo "GET /users/42 query-active=${req.query("active") ?? "absent"}"
+    } else {
+        // A body that is not form-encoded simply yields no usable fields rather than failing:
+        // `hello` parses as one valueless key, an empty body as none at all.
+        echo "${req.method()} ${path} form-fields=${req.form_all().len()}"
+    }
+    return server.response(200, "ok")
+}
+
+server.serve(8080, handle)
+echo "served"
