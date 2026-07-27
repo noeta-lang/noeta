@@ -227,6 +227,24 @@ pub trait Network {
         Box::new(crate::net::WsRecvIo { conn })
     }
 
+    /// Build the **timed** recv descriptor — resolves to `?string`, `None` = nothing arrived
+    /// within `_ms` (or the peer closed; [`Self::net_ws_is_closed`] tells the two apart).
+    ///
+    /// This is the primitive a session needs to act on its own schedule. Racing a plain `recv`
+    /// against a timer is not a substitute: the race cancels the losing recv, and a message it had
+    /// *already consumed* dies with the cancelled task — measured at every client message dropped
+    /// against a 700ms tick. A deadline handled inside the read has nothing to cancel, so nothing
+    /// can be lost.
+    fn net_ws_recv_timeout(&self, conn: u64, _ms: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::net::WsRecvTimeoutIo { conn })
+    }
+
+    /// Whether `conn`'s peer has closed — what distinguishes a *timed-out*
+    /// [`Self::net_ws_recv_timeout`] (`None`, keep looping) from a *finished* one (`None`, stop).
+    fn net_ws_is_closed(&self, _conn: u64) -> bool {
+        true
+    }
+
     /// Build the send descriptor. Default via [`Self::net_ws_send_now`]; `RealHost` overrides
     /// with an async frame write.
     fn net_ws_send(&self, conn: u64, text: String) -> Box<dyn crate::ExternIo> {

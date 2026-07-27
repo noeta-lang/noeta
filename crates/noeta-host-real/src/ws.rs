@@ -283,6 +283,55 @@ impl ExternIo for RealWsUpgradeIo {
     }
 }
 
+/// Timed receive descriptor: one message off the read half, or `none` once `ms` elapses.
+///
+/// The deadline wraps the read rather than racing it. That distinction is the whole point: a
+/// `race(recv, timer)` cancels the losing recv, and a message it had already consumed is lost with
+/// the cancelled task. Here the timeout expires *inside* the read, and because [`ReadSide`] buffers
+/// every byte it pulls, expiring part-way through a frame keeps that frame's bytes for the next
+/// call. Nothing is dropped either way — a partial frame or a whole message.
+#[derive(Debug)]
+pub(crate) struct RealWsRecvTimeoutIo {
+    pub(crate) ws_conns: WsConns,
+    pub(crate) conn: u64,
+    pub(crate) ms: u64,
+}
+
+impl ExternIo for RealWsRecvTimeoutIo {
+    fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
+        Err(runtime_only("websocket receive"))
+    }
+
+    fn run_real(&mut self) -> Option<RealBody> {
+        let ws_conns = self.ws_conns.clone();
+        let conn = self.conn;
+        let ms = self.ms;
+        Some(RealBody::Async(Box::pin(async move {
+            let Some(ws) = ws_conns.lock().unwrap().get(&conn).cloned() else {
+                return Ok(ws_recv_outcome(None));
+            };
+            let mut read = ws.read.lock().await;
+            let waited = tokio::time::timeout(
+                std::time::Duration::from_millis(ms),
+                read_message(&mut read, &ws.write),
+            )
+            .await;
+            match waited {
+                // The deadline passed with no complete message. Whatever bytes arrived stay in the
+                // read buffer, so the next call resumes the same frame.
+                Err(_) => Ok(ws_recv_outcome(None)),
+                Ok(result) => {
+                    let message = result?;
+                    if message.is_none() {
+                        ws_conns.lock().unwrap().remove(&conn);
+                    }
+                    Ok(ws_recv_outcome(message))
+                }
+            }
+        })))
+    }
+}
+
 /// Receive descriptor: one message off the read half (ponging pings via the write half).
 #[derive(Debug)]
 pub(crate) struct RealWsRecvIo {

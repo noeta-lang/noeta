@@ -687,6 +687,20 @@ impl Network for RealHost {
         })
     }
 
+    fn net_ws_recv_timeout(&self, conn: u64, ms: u64) -> Box<dyn ExternIo> {
+        Box::new(ws::RealWsRecvTimeoutIo {
+            ws_conns: self.ws_conns.clone(),
+            conn,
+            ms,
+        })
+    }
+
+    fn net_ws_is_closed(&self, conn: u64) -> bool {
+        // The entry is removed the moment a recv observes the close (or `close` runs), so its
+        // absence *is* "the peer is gone" — no second piece of state to keep in sync.
+        !self.ws_conns.lock().unwrap().contains_key(&conn)
+    }
+
     fn net_ws_send(&self, conn: u64, text: String) -> Box<dyn ExternIo> {
         Box::new(ws::RealWsSendIo {
             ws_conns: self.ws_conns.clone(),

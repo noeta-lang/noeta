@@ -528,6 +528,20 @@ impl Network for SandboxHost {
         }
     }
 
+    /// Whether the scripted conversation on `conn` is spent — the sandbox's "the peer closed", and
+    /// what a session polling with `recv_timeout` checks to decide it is done. Deterministic: it
+    /// reads the same cursor `net_ws_recv_next` advances, so a timed session terminates in-oracle
+    /// exactly where an untimed one does.
+    fn net_ws_is_closed(&self, conn: u64) -> bool {
+        let Some(state) = self.inbound.as_ref() else {
+            return true;
+        };
+        match state.ws_conns.get(&conn) {
+            Some(cursor) => *cursor >= crate::net::sandbox_ws_client_frames().len(),
+            None => true,
+        }
+    }
+
     /// Record the handler's outbound frame (test introspection; the differential observes the
     /// handler's own output, exactly like replies).
     fn net_ws_send_now(&mut self, conn: u64, text: &str) -> Result<(), StdError> {

@@ -40,6 +40,29 @@ fn shutdown_requested() -> bool {
     SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The `noeta serve` startup banner, held until the listener is actually bound.
+///
+/// The CLI knows the text (it chose the port and host) but not the moment — it hands the program
+/// off and cannot see the bind, which happens inside the serve loop below. Printing it at hand-off
+/// announced a server that might never exist: a port clash or a type error in the program printed
+/// `listening on …` first and the real failure after. So the CLI *arms* the banner here and the
+/// loop emits it once `net_listen` has succeeded.
+///
+/// Process-wide like [`SHUTDOWN`], and for the same reason: it is set only by the CLI's own serve
+/// command, never by the sandbox or a plain `server.serve(…)` call in user code — which arms
+/// nothing and so prints nothing, exactly as before.
+static SERVE_BANNER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Arm the startup banner for the next `http.serve` bind (the CLI's `serve` command).
+pub fn arm_serve_banner(text: String) {
+    *SERVE_BANNER.lock().expect("banner lock") = Some(text);
+}
+
+/// Take the armed banner, if any — one bind announces itself once.
+fn take_serve_banner() -> Option<String> {
+    SERVE_BANNER.lock().expect("banner lock").take()
+}
+
 pub(crate) const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
 
 /// The websocket session handle's type name (server-hmr L0).
@@ -105,6 +128,28 @@ pub const SOCKET_CTX_METHODS: &[ExtFn] = &[
         name: "recv",
         params: &[],
         ret: RetTy::Concrete(SigType::Future(&OPT_STR)),
+    },
+    // `recv_timeout(ms) -> Future<?string>` — the next message, or `none` if none arrived within
+    // `ms`. The door to a session that acts on its own schedule (push a periodic update, poll a
+    // server-side source) instead of only when the client speaks. `closed()` separates the two
+    // `none`s.
+    //
+    // Deliberately a deadline *inside* the read rather than `race(recv, timer)`: a race cancels
+    // the losing recv, and a message that recv had already consumed is lost with the cancelled
+    // task — every client message, against a 700ms tick.
+    ExtFn {
+        param_names: &["ms"],
+        name: "recv_timeout",
+        params: &[SigType::Int],
+        ret: RetTy::Concrete(SigType::Future(&OPT_STR)),
+    },
+    // `closed() -> bool` — whether the peer has closed, so a `recv_timeout` yielding `none` reads
+    // as "nothing yet" rather than "we are done".
+    ExtFn {
+        param_names: &[],
+        name: "closed",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Bool),
     },
     ExtFn {
         param_names: &[],
@@ -316,6 +361,20 @@ pub fn socket_ctx_method_dispatch(
             let io = ctx.host().net_ws_recv(conn);
             Ok(CtxOut::Slot(ctx.spawn_io(io)))
         }
+        "recv_timeout" => {
+            ctx_arity(method, args, 1)?;
+            let ms = match ctx.view(args[0])? {
+                NativeValue::Scalar(Scalar::Int(ms)) => ms.max(0) as u64,
+                _ => return Err(noeta_ext_abi::type_error("recv_timeout", "int").into()),
+            };
+            let io = ctx.host().net_ws_recv_timeout(conn, ms);
+            Ok(CtxOut::Slot(ctx.spawn_io(io)))
+        }
+        "closed" => {
+            ctx_arity(method, args, 0)?;
+            let closed = ctx.host().net_ws_is_closed(conn);
+            Ok(CtxOut::Out(NativeOut::Scalar(Scalar::Bool(closed))))
+        }
         "close" => {
             ctx_arity(method, args, 0)?;
             let io = ctx.host().net_ws_close(conn);
@@ -401,6 +460,13 @@ pub fn http_ctx_dispatch(
             };
             let addr = format!("{host}:{port}");
             let listener = ctx.host().net_listen(&addr)?;
+            // Only now is the claim true. The CLI used to print this before running the program at
+            // all, so a bind clash or a type error announced the server first and explained the
+            // failure second — `listening on …` followed by `cannot bind …`.
+            if let Some(banner) = take_serve_banner() {
+                ctx.write_stderr(&format!("{banner}\n"));
+                ctx.flush_output();
+            }
             // Auto-instrumentation gate: only wrap requests in a SERVER span when telemetry is
             // actually configured, so an unconfigured `noeta serve` does zero span work per request.
             let tracing = ctx.host().tel_enabled();
