@@ -18,7 +18,8 @@ sq = fn(n) => n * n                             // inferred (int) -> int
 
 | Form | Meaning |
 |---|---|
-| `int` `float` `f32` `f64` `bool` `string` `void` | Primitives. |
+| `int` `float` `f32` `f64` `bool` `string` `bytes` `void` | Primitives. |
+| `number` | Any numeric scalar — `int`, `float`, `f32`, `f64`, and every [fixed width](Fixed-Width-Integers). |
 | `List<T>` `Map<K, V>` `Set<T>` | Collections. |
 | `?T` | Optional (`Option<T>`). |
 | `Result<T, E>` | Fallible result. |
@@ -27,6 +28,24 @@ sq = fn(n) => n * n                             // inferred (int) -> int
 | `A \| B` | Union (a *closed* dynamic). |
 | `dyn` | The open top — any value. |
 | `Struct` `Class` `Enum` | Abstract kind-types (see below). |
+
+## `number` — any numeric scalar
+
+`number` names the set every numeric type belongs to, so a function that genuinely accepts any of them says so in one word instead of a twelve-member union:
+
+```noeta
+fn scaled(x: number, by: number): number { return x }
+
+// sample:start
+echo scaled(2, 3)          // int
+echo scaled(2.5, 3.0)      // float
+echo scaled(2.0f32, 3i16)  // the strict fixed widths, mixed freely
+// sample:end
+```
+
+It is a **union**, not a thirteenth scalar — `number` *is* `int | float | f32 | f64 | i8 | … | u64`, written short. So it behaves like any other union: a value of any member widens into it, `x is number` narrows out of a `dyn`, and the strict fixed-width rules are untouched (`number` does not make an `f32` and an `int` add together — each member keeps its own arithmetic).
+
+Because it is a set rather than a storage class, it cannot be a `@packed` field or a map key: both need one concrete width to lay out or hash by.
 
 ## Optionals — `?T`
 

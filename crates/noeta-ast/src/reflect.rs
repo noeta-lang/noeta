@@ -1471,6 +1471,10 @@ fn builtin_repr(
         BuiltinTy::Map => TypeRepr::Map(arg(0), arg(1)),
         BuiltinTy::Option => TypeRepr::Option(arg(0)),
         BuiltinTy::Result => TypeRepr::Result(arg(0), arg(1)),
+        // `number` is a union of scalars, so it has no single reflected shape — and no *value* ever
+        // has it (every number is an `int`, an `f32`, …). Like the abstract kind-types above, it is
+        // a static-only type with no reflection descriptor rather than a wrong concrete one.
+        BuiltinTy::Number => return None,
         BuiltinTy::KindEnum | BuiltinTy::KindStruct | BuiltinTy::KindClass => return None,
     })
 }

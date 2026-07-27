@@ -457,6 +457,12 @@ impl Type {
                     BuiltinTy::KindEnum => Type::Kind(TypeKind::Enum),
                     BuiltinTy::KindStruct => Type::Kind(TypeKind::Struct),
                     BuiltinTy::KindClass => Type::Kind(TypeKind::Class),
+                    // The one built-in that desugars to a UNION rather than a lattice variant. That
+                    // is what makes `number` a name for a set the lattice already had, instead of a
+                    // thirteenth scalar the lattice would then have to relate to the other twelve —
+                    // assignability, narrowing and widening all come from `Type::Union` unchanged.
+                    // `Display` maps the union back to this spelling, so the round trip closes.
+                    BuiltinTy::Number => Type::arith_numeric(),
                 }
             }
         }
@@ -636,6 +642,12 @@ mod tests {
         // And the union recognizes itself, which is what `Display` keys on to write `number`.
         assert!(Type::arith_numeric().is_arith_numeric_union());
         assert_eq!(Type::arith_numeric().to_string(), "number");
+        // The name ROUND-TRIPS: the surface spelling desugars to the union, and the union prints
+        // back as the spelling. This is what makes `number` a declared type rather than a rendering
+        // convention — break either direction and the two stop agreeing here.
+        let from_surface = Type::from_ref(&named("number", vec![]));
+        assert_eq!(from_surface, Type::arith_numeric());
+        assert_eq!(from_surface.to_string(), "number");
         // A union that is merely numeric-ish is NOT the set, so it still prints its members.
         let partial = Type::union([Type::Int, Type::Float]);
         assert!(!partial.is_arith_numeric_union());

@@ -65,6 +65,16 @@ pub enum BuiltinTy {
     KindStruct,
     /// The abstract kind-type `Class`.
     KindClass,
+    /// `number` — **any numeric scalar**: `int`, `float`, `f32`, `f64`, and every `i8`..`u64` width.
+    ///
+    /// The one built-in name that resolves to a **union** rather than to a single lattice type, and
+    /// deliberately so: it names a set the language already reasons about internally
+    /// (`Type::is_arith_numeric`) and that a native signature can already declare
+    /// (`SigType::Numeric`), but that a *user* previously had to spell as a twelve-member union by
+    /// hand. Naming it here rather than in a renderer is what makes it a real type: `fn f(x: number)`
+    /// is writable, and `number` is what the type prints as because that is its canonical spelling,
+    /// not because a formatter recognized a familiar-looking union.
+    Number,
 }
 
 /// Which spelling of a built-in name was written. Only the collections have two, and only
@@ -98,6 +108,7 @@ impl BuiltinTy {
             "bool" => (Bool, Canonical),
             "string" => (Str, Canonical),
             "bytes" => (Bytes, Canonical),
+            "number" => (Number, Canonical),
             "void" | "unit" => (Unit, Canonical),
             "dyn" | "Any" => (Dyn, Canonical),
             "List" => (List, Canonical),
@@ -147,7 +158,8 @@ impl BuiltinTy {
             | Dyn
             | KindEnum
             | KindStruct
-            | KindClass => 0,
+            | KindClass
+            | Number => 0,
             List | Set | Option => 1,
             Map | Result => 2,
         }
@@ -167,6 +179,7 @@ impl BuiltinTy {
             Bool => &["bool"],
             Str => &["string"],
             Bytes => &["bytes"],
+            Number => &["number"],
             Unit => &["void", "unit"],
             Dyn => &["dyn", "Any"],
             List => &["List", "list"],
@@ -197,7 +210,7 @@ impl BuiltinTy {
         use BuiltinTy::*;
         let mut out = vec![
             Int, Float, F32, F64, Bool, Str, Bytes, Unit, Dyn, List, Set, Map, Option, Result,
-            KindEnum, KindStruct, KindClass,
+            KindEnum, KindStruct, KindClass, Number,
         ];
         for signed in [true, false] {
             for bits in [8u8, 16, 32, 64] {
