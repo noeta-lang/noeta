@@ -178,6 +178,40 @@ impl Type {
         )
     }
 
+    /// [`Self::is_arith_numeric`]'s set **as a type** — the union of every numeric scalar, in a
+    /// stable order (`int`, `float`, the strict floats, then the widths ascending).
+    ///
+    /// A native signature declaring `SigType::Numeric` — a parameter that takes any number, like a
+    /// kernel's scale factor — resolves to this, which is what makes such a parameter accept every
+    /// numeric kind and reject everything else. It is a union rather than a distinct variant because
+    /// that is what it *is*: adding a `Type::Numeric` would put a second spelling of the same set
+    /// into every match in the checker.
+    pub fn arith_numeric() -> Type {
+        let widths = [8u8, 16, 32, 64]
+            .into_iter()
+            .flat_map(|bits| [true, false].map(move |signed| Type::IntN { signed, bits }));
+        Type::union(
+            [Type::Int, Type::Float, Type::F32, Type::F64]
+                .into_iter()
+                .chain(widths),
+        )
+    }
+
+    /// Whether this is exactly [`Self::arith_numeric`] — every numeric scalar and nothing else.
+    ///
+    /// Both its renderings key off this: `Display` writes the short name `number` rather than
+    /// spelling twelve members, and a diagnostic about such a parameter can expand it on demand. It
+    /// compares as a SET, so it does not depend on `Type::union`'s ordering staying put.
+    pub fn is_arith_numeric_union(&self) -> bool {
+        let Type::Union(members) = self else {
+            return false;
+        };
+        let Type::Union(all) = Type::arith_numeric() else {
+            return false;
+        };
+        members.len() == all.len() && all.iter().all(|t| members.contains(t))
+    }
+
     /// This numeric type's rank in the widening lattice `int (0) < float (1)`. Arithmetic over two
     /// **lattice** numerics yields the higher-ranked type (`int + float → float`). The strict
     /// fixed-width numerics (`IntN`, `f32`, `f64`) have no rank — they do not widen (P-NUM-SYM).
@@ -477,6 +511,12 @@ impl std::fmt::Display for Type {
                 }
                 write!(f, ") -> {ret}")
             }
+            // "Every numeric scalar" has a name, and printing it beats spelling twelve members in
+            // the middle of a sentence — `not assignable to `number`` says the same thing as
+            // `not assignable to `int | float | f32 | f64 | i8 | u8 | …`` and can be read at a
+            // glance. The full membership is still available where it helps: a diagnostic about
+            // such a parameter expands it in its help line.
+            _ if self.is_arith_numeric_union() => f.write_str("number"),
             Type::Union(members) => {
                 for (i, m) in members.iter().enumerate() {
                     if i > 0 {
