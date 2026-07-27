@@ -199,40 +199,6 @@ pub fn load_with_deps(
     Ok(link_with_deps(&name, &text, root_edition, &siblings, deps))
 }
 
-/// Read every `.noe` file **under `dir` recursively** as a [`RawModule`], in sorted order (so
-/// SourceId assignment stays deterministic). A dependency package is a directory *tree*, not the
-/// single flat directory the entry's siblings live in, so this walks subdirectories. Names are the
-/// files' display paths (for diagnostics). Unreadable files are skipped.
-pub fn read_package_sources(dir: &Path) -> io::Result<Vec<RawModule>> {
-    let mut paths = Vec::new();
-    collect_noe_files(dir, &mut paths)?;
-    paths.sort();
-    Ok(paths
-        .into_iter()
-        .filter_map(|p| {
-            let text = std::fs::read_to_string(&p).ok()?;
-            Some(RawModule {
-                name: p.display().to_string(),
-                text,
-            })
-        })
-        .collect())
-}
-
-/// Recursively gather `.noe` file paths under `dir` into `out`. A subdirectory that can't be read is
-/// skipped (best-effort), matching the sibling scan's tolerance.
-fn collect_noe_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            let _ = collect_noe_files(&path, out);
-        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "noe") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
 /// A dependency package's sources, to be linked into the entry under the consumer's import root
 /// (package-manager P2.1, model R1). `root` is the package's own namespace root segment (the
 /// `package` half of its `[package] name`); `key` is the consumer's dependency-table key. The loader
@@ -385,10 +351,13 @@ fn read_siblings(entry_path: &Path) -> Vec<RawModule> {
     modules
 }
 
-/// Read every `.noe` file directly in `dir` (flat — the sibling scan's scope, unlike
-/// [`read_package_sources`]'s recursive package walk) as a [`RawModule`], in sorted order.
-/// A directory that cannot be read yields no modules; unreadable files are skipped — both
-/// matching [`read_siblings`]'s tolerance (it is this scan minus the entry).
+/// Read every `.noe` file directly in `dir` (flat — the sibling scan's scope) as a [`RawModule`],
+/// in sorted order. A directory that cannot be read yields no modules; unreadable files are skipped
+/// — both matching [`read_siblings`]'s tolerance (it is this scan minus the entry).
+///
+/// A *dependency package* is a directory tree, not one flat directory, and deciding which of its
+/// files are its source needs to know what a package is (a `noeta.toml`) — knowledge this crate
+/// sits below. That walk therefore lives in the package manager, `noeta_pm::sources`.
 pub fn read_dir_modules(dir: &Path) -> Vec<RawModule> {
     // A bare relative entry (`noeta test app.noe`) has parent `""` — the current directory —
     // but `read_dir("")` errors, which silently dropped every sibling: an E0019 from the very
