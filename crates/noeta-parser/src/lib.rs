@@ -2609,6 +2609,16 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `returns_of(target)` — the return-type reflection query. Same surface shape as
+        // `params_of`: a keyword + one parenthesized runtime `string` operand naming a fn or method.
+        // Yields `?Type` — the option is what tells a mistyped target apart from a `void` return.
+        let returns_of = just(T::ReturnsOfKw)
+            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
+            .map_with(move |target, e| Expr::ReturnsOf {
+                target: Box::new(target),
+                span: ctx.to_span(e.span()),
+            });
+
         // `invoke(...)` — the fallible by-name invocation primitive, in two arities:
         //   `invoke(recv, name, args)` dispatches a method on a value or an associated function on a
         //   bare type name; `invoke(name, args)` dispatches a **top-level function**. Both yield
@@ -2736,9 +2746,10 @@ where
             channel,
             roles_of,
             // The tuple is at its arity cap, so each keyword-led reflection query shares a slot with
-            // a disjoint sibling: `params_of(target)` with the type-level `field_specs_of`, and the
-            // by-name `invoke` with the by-name `construct`. All four commit on their leading keyword.
-            params_of.or(field_specs_of),
+            // a disjoint sibling: the two signature queries `params_of`/`returns_of` with the
+            // type-level `field_specs_of`, and the by-name `invoke` with the by-name `construct`. All
+            // five commit on their leading keyword.
+            params_of.or(returns_of).or(field_specs_of),
             invoke.or(construct),
             // One choice-tuple slot for the two user turbofish forms (the tuple is at its arity
             // cap): the module form (`json.parse::<T>(s)`, needs a `.`) wins over the free-function
@@ -5744,6 +5755,15 @@ mod tests {
         // `invoke(recv, name, args)` — a keyword + three parenthesized, comma-separated operands —
         // parses to a dedicated reflection node carrying the receiver, name, and argument list.
         insta::assert_snapshot!(pretty("x = invoke(obj, \"area\", [1, 2]);"));
+    }
+
+    #[test]
+    fn returns_of_parses() {
+        // `returns_of(target)` — a keyword + one parenthesized runtime-string operand — parses to
+        // its own reflection node, the return-type half of the signature index. Pinned alongside
+        // `roles_of`/`invoke` because the keyword is a strict superstring of the `return` statement
+        // keyword: this is what proves the lexer's longest-match rule picks the reflection query.
+        insta::assert_snapshot!(pretty("x = returns_of(\"Api.list\");"));
     }
 
     #[test]

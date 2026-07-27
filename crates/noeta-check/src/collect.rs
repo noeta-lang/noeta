@@ -1371,6 +1371,7 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         | Expr::FieldsOf { value: inner, .. }
         | Expr::TraitsOf { value: inner, .. }
         | Expr::ParamsOf { target: inner, .. }
+        | Expr::ReturnsOf { target: inner, .. }
         | Expr::FieldSpecsOf { name: inner, .. }
         | Expr::As { expr: inner, .. }
         | Expr::TypeTest { expr: inner, .. }

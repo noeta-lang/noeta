@@ -551,6 +551,11 @@ pub enum Rvalue {
     /// `params_of(target)` — the declared parameter list of the fn/method named by the runtime
     /// `target` string, materialized as `List<ParamInfo>`.
     ParamsOf { target: Atom, span: Span },
+    /// `returns_of(target)` — the declared return type of the fn/method named by the runtime
+    /// `target` string, materialized as a `?Type`: `some(t)` for a known callable, `none` when no
+    /// callable of that name is known. Reads the SAME signature record `ParamsOf` reads, so the two
+    /// queries agree about which callables exist.
+    ReturnsOf { target: Atom, span: Span },
     /// `field_specs_of::<T>()` / `field_specs_of(name)` — the declared field schema of the struct/class
     /// named by the runtime `name` string, materialized as `List<FieldSpec>` (empty for an unknown or
     /// non-fielded type). The turbofish form reaches here identically — the parser lowered `T` to its

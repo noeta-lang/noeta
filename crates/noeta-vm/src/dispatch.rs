@@ -2815,6 +2815,13 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
+                    Op::ReturnsOf { dst, src } => {
+                        // The runtime target string names a fn or method; materialize its return.
+                        let target = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                        let result = self.materialize_returns(&target);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
                     Op::FieldSpecsOf { dst, src } => {
                         // The runtime name string names a declared type; materialize its field schema.
                         let name = regs[fbase + *src as usize].as_string().unwrap_or_default();

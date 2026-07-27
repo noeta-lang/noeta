@@ -1335,6 +1335,32 @@ impl Checker {
                     Vec::new(),
                 )))
             }
+            Expr::ReturnsOf { target, span } => {
+                // The other half of the compiler-built signature index, surfaced as `?Type`. Same
+                // runtime `string` target as `params_of` (a bare fn name or `Type.method`), and the
+                // same leniency about *what* it names — an unknown callable is a runtime `none`, not
+                // a static error, because the target is generally computed (a framework walks
+                // `roles_of()` and asks about each controller method it finds).
+                //
+                // The result is an OPTION where `params_of` answers an empty list, and the asymmetry
+                // is deliberate: an empty parameter list is a legitimate answer, so `params_of` can
+                // fold "unknown target" into it, but every callable has a return type — `void`
+                // included — so there is no return value that could stand for "no such callable".
+                // Folding them would make a typo indistinguishable from a `void` method.
+                let target_ty = self.synth(target, env);
+                if !matches!(target_ty, Type::String) && !target_ty.defers_to_runtime() {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("`returns_of` expects a `string` target, found `{target_ty}`"),
+                    )
+                    .help("pass a fn name or `Type.method` string");
+                }
+                Type::Option(Box::new(Type::Named(
+                    noeta_ast::reflect::TYPE_ENUM.to_string(),
+                    Vec::new(),
+                )))
+            }
             Expr::FieldSpecsOf { name, span } => {
                 // The type-level field schema, surfaced as `List<FieldSpec>`. The `name` operand is a
                 // runtime `string` naming a declared struct/class type (a turbofish `::<T>()` was

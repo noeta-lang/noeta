@@ -23,12 +23,12 @@ expression: out
 ───╯
 
 ================ E0003 unexpected token ================
-[E0003] Error: found `;` expected `!`, `#`, `(`, `-`, `.{`, `@`, `[`, `attributes_of`, `construct`, `false`, `field_specs_of`, `fields_of`, `fn`, `from_bytes`, `if`, `invoke`, `isolate`, `match`, `params_of`, `roles_of`, `spawn`, `traits_of`, `true`, `type_of`, `{`, a fixed-width integer literal, a float literal, a raw string literal, a string literal, a template string literal, an f32 literal, an f64 literal, an identifier, or an integer literal
+[E0003] Error: found `;` expected `!`, `#`, `(`, `-`, `.{`, `@`, `[`, `attributes_of`, `construct`, `false`, `field_specs_of`, `fields_of`, `fn`, `from_bytes`, `if`, `invoke`, `isolate`, `match`, `params_of`, `returns_of`, `roles_of`, `spawn`, `traits_of`, `true`, `type_of`, `{`, a fixed-width integer literal, a float literal, a raw string literal, a string literal, a template string literal, an f32 literal, an f64 literal, an identifier, or an integer literal
    ╭─[ snippet.noe:1:6 ]
    │
  1 │ echo ;
    │      ┬  
-   │      ╰── found `;` expected `!`, `#`, `(`, `-`, `.{`, `@`, `[`, `attributes_of`, `construct`, `false`, `field_specs_of`, `fields_of`, `fn`, `from_bytes`, `if`, `invoke`, `isolate`, `match`, `params_of`, `roles_of`, `spawn`, `traits_of`, `true`, `type_of`, `{`, a fixed-width integer literal, a float literal, a raw string literal, a string literal, a template string literal, an f32 literal, an f64 literal, an identifier, or an integer literal
+   │      ╰── found `;` expected `!`, `#`, `(`, `-`, `.{`, `@`, `[`, `attributes_of`, `construct`, `false`, `field_specs_of`, `fields_of`, `fn`, `from_bytes`, `if`, `invoke`, `isolate`, `match`, `params_of`, `returns_of`, `roles_of`, `spawn`, `traits_of`, `true`, `type_of`, `{`, a fixed-width integer literal, a float literal, a raw string literal, a string literal, a template string literal, an f32 literal, an f64 literal, an identifier, or an integer literal
 ───╯
 
 ================ E0004 unexpected end of input ================

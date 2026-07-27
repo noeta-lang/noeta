@@ -121,6 +121,24 @@ impl ReflectionInfo {
             .unwrap_or(&[])
     }
 
+    /// The **return type** declared for `target`, or `None` if the target names no known callable —
+    /// the projection `returns_of(target)` materializes into a `?Type`.
+    ///
+    /// Deliberately an `Option` where [`params_for`](Self::params_for) answers an empty slice for the
+    /// same unknown target, and the difference is not an inconsistency: an empty parameter list is a
+    /// *legitimate answer* (`fn tick(): void` really does take no parameters), so `params_of` can
+    /// fold "unknown" into it without losing information, while there is no return type that means
+    /// "this callable does not exist" — `void` is a real return type. Folding the two would make a
+    /// typo in a target string indistinguishable from a `void` method, which is exactly the
+    /// vanishing-route failure a reflection-driven framework must be able to detect. So the
+    /// missing case gets its own `none`, and the caller has to look at it.
+    pub fn returns_for(&self, target: &str) -> Option<&TypeRepr> {
+        self.params
+            .iter()
+            .find(|p| p.target == target)
+            .map(|p| &p.ret)
+    }
+
     /// The data attributes attached to one **parameter** of `callable`, in source order.
     ///
     /// The join that makes `ParamInfo.attrs` a *view* of the attribute manifest rather than a second
@@ -305,15 +323,30 @@ pub struct RoleRecord {
     pub variant: String,
 }
 
-/// One callable's declared parameter list — a top-level fn or a method — keyed by the same target
+/// One callable's declared **signature** — a top-level fn or a method — keyed by the same target
 /// convention as the attribute manifest (a bare fn name, or a qualified `Type.method`). `params_of()`
-/// materializes each into a `List<ParamInfo>` (each `{ name: string, type: Type, optional: bool }`).
+/// materializes the parameters into a `List<ParamInfo>` (each `{ name: string, type: Type, optional:
+/// bool }`); `returns_of()` materializes [`ParamRecord::ret`] into a `?Type`.
+///
+/// Parameters and return type live in ONE record because they are one declaration: a callable cannot
+/// be present in the parameter index and absent from the return index, so the two queries can never
+/// disagree about which callables exist.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ParamRecord {
     /// The callable's target: a top-level fn's bare name, or a method's qualified `Type.method` name.
     pub target: String,
     /// The declared parameters, in source order.
     pub params: Vec<ParamSig>,
+    /// The declared **return type** as a reflection [`TypeRepr`] — what `returns_of(target)`
+    /// surfaces, and what a framework deriving a response schema from a controller method needs.
+    ///
+    /// A callable that declares no return type records [`TypeRepr::Unit`], the same repr the
+    /// explicit `void`/`unit` spelling maps to: the two spellings mean one thing, so reflection must
+    /// not make them distinguishable. (A named fn must declare a return type anyway — E0022 — so an
+    /// absent one only reaches here from a program that never runs.) Deliberately NOT `Dyn`: `Dyn` is
+    /// the honest answer for an *unannotated parameter*, whose type is genuinely unknown, whereas an
+    /// omitted return type is a known thing spelled by omission.
+    pub ret: TypeRepr,
 }
 
 /// One declared parameter — its name, the reflection [`TypeRepr`] of its annotated type, and
@@ -468,13 +501,15 @@ pub fn build(
                         ));
                     }
                 }
+                // A method's attributes are keyed by its qualified `Struct.method` name, exactly as
+                // the class and enum arms key theirs — the checker validates a struct method's
+                // `#[...]` through the same `check_fn`, so omitting the record here made a
+                // well-formed `#[Get("/users")]` on a struct method type-check and then vanish from
+                // `attributes_of::<Get>()` with no diagnostic.
                 for method in &decl.methods {
-                    push_params(
-                        &mut manifest,
-                        &mut params,
-                        format!("{}.{}", decl.name, method.name),
-                        &method.params,
-                    );
+                    let target = format!("{}.{}", decl.name, method.name);
+                    push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
+                    push_params(&mut manifest, &mut params, target, method);
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -499,7 +534,7 @@ pub fn build(
                 for method in &decl.methods {
                     let target = format!("{}.{}", decl.name, method.name);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
-                    push_params(&mut manifest, &mut params, target, &method.params);
+                    push_params(&mut manifest, &mut params, target, method);
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -518,7 +553,7 @@ pub fn build(
                 // their decorators into `Decorators`. A `fn` carries `#[...]` attributes and a
                 // `@tier(...)` declaration, neither of which is a type decorator.
                 push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
-                push_params(&mut manifest, &mut params, decl.name.clone(), &decl.params);
+                push_params(&mut manifest, &mut params, decl.name.clone(), decl);
             }
             // A trait carries `#[...]` data attributes keyed by its name (UT6), like a type —
             // surfaced via `attributes_of` (and inheriting a role transitively when annotated with a
@@ -540,7 +575,7 @@ pub fn build(
                         &mut manifest,
                         &mut params,
                         format!("{}.{}", decl.name, method.sig.name),
-                        &method.sig.params,
+                        &method.sig,
                     );
                 }
             }
@@ -562,7 +597,7 @@ pub fn build(
                 for method in &decl.methods {
                     let target = format!("{}.{}", decl.name, method.name);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
-                    push_params(&mut manifest, &mut params, target, &method.params);
+                    push_params(&mut manifest, &mut params, target, method);
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -740,11 +775,8 @@ fn collect_trait_impls(program: &Program, native: &NativeTraitImpls) -> Vec<Trai
     records
 }
 
-/// Project a callable's declared parameters onto their reflection [`ParamSig`]s — each parameter's
-/// name paired with the [`TypeRepr`] of its annotated type (an unannotated parameter is
-/// [`TypeRepr::Dyn`]) and its optionality. Shared by every callable arm of [`build`] so a fn,
-/// method, and trait method sig all surface their parameters identically.
-/// Record one callable's parameters — **both** of the renderings they have, from one walk.
+/// Record one callable's **signature** — its parameters (in both of the renderings they have) and
+/// its declared return type — from one walk.
 ///
 /// A callable's parameter list reaches reflection twice: as the [`ParamRecord`] `params_of(target)`
 /// materializes, and as attribute-manifest rows keyed [`param_attr_target`] so `attributes_of::<T>()`
@@ -756,13 +788,19 @@ fn collect_trait_impls(program: &Program, native: &NativeTraitImpls) -> Vec<Trai
 /// carrying its own copy of the attributes — see `ParamSig`, which is deliberately unchanged. That
 /// is what keeps the two renderings a projection of one table instead of two tables that must be
 /// kept in step.
+///
+/// The return type rides here for the same reason: it is part of the *same declaration*, so taking
+/// the whole [`crate::FnDecl`] (rather than a loose parameter slice) means a caller cannot record a
+/// callable's parameters while forgetting its return type. Shared by every callable arm of [`build`],
+/// so a top-level fn, a struct/class/enum method, and a trait method signature all surface their
+/// signature identically.
 fn push_params(
     manifest: &mut Vec<AttributeRecord>,
     params: &mut Vec<ParamRecord>,
     target: String,
-    decls: &[crate::Param],
+    decl: &crate::FnDecl,
 ) {
-    for p in decls {
+    for p in &decl.params {
         push_attrs(
             manifest,
             &param_attr_target(&target, &p.name),
@@ -772,8 +810,19 @@ fn push_params(
     }
     params.push(ParamRecord {
         target,
-        params: param_sigs(decls),
+        params: param_sigs(&decl.params),
+        ret: fn_ret_repr(decl),
     });
+}
+
+/// A callable's declared return type as a reflection [`TypeRepr`] — the one place the "no declared
+/// return type" case is decided, so every callable arm of [`build`] answers it the same way. See
+/// [`ParamRecord::ret`] for why the absent case is [`TypeRepr::Unit`] and not [`TypeRepr::Dyn`].
+fn fn_ret_repr(decl: &crate::FnDecl) -> TypeRepr {
+    decl.ret
+        .as_ref()
+        .map(typeref_to_repr)
+        .unwrap_or(TypeRepr::Unit)
 }
 
 fn param_sigs(params: &[crate::Param]) -> Vec<ParamSig> {
@@ -1910,6 +1959,40 @@ mod tests {
         assert!(info.type_implements("Dog", "Speaks"));
         assert!(!info.type_implements("Dog", "Purrs"));
         assert!(!info.type_implements("Unknown", "Speaks"));
+    }
+
+    /// The deliberate asymmetry between the two signature queries, pinned as data: `params_for`
+    /// folds an unknown target into the empty slice (an empty parameter list is a legitimate
+    /// answer), while `returns_for` keeps it as `None` — a `void` callable answers `Some(Unit)`, so
+    /// collapsing the two would make a mistyped target indistinguishable from a `void` method.
+    #[test]
+    fn returns_for_distinguishes_a_void_callable_from_an_unknown_one() {
+        let info = ReflectionInfo {
+            params: vec![
+                ParamRecord {
+                    target: "tick".to_string(),
+                    params: Vec::new(),
+                    ret: TypeRepr::Unit,
+                },
+                ParamRecord {
+                    target: "Api.list".to_string(),
+                    params: Vec::new(),
+                    ret: TypeRepr::List(boxed(TypeRepr::Str)),
+                },
+            ],
+            ..Default::default()
+        };
+        // A `void` callable and an unknown one both have no parameters — `params_of` cannot tell
+        // them apart, which is exactly why `returns_of` must.
+        assert!(info.params_for("tick").is_empty());
+        assert!(info.params_for("nope").is_empty());
+        assert_eq!(info.returns_for("tick"), Some(&TypeRepr::Unit));
+        assert_eq!(
+            info.returns_for("Api.list"),
+            Some(&TypeRepr::List(boxed(TypeRepr::Str)))
+        );
+        assert_eq!(info.returns_for("nope"), None);
+        assert_eq!(info.returns_for("Api.missing"), None);
     }
 
     /// `accumulate` supersedes a redeclared type's membership rows wholesale (REPL latest-wins) and

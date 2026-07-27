@@ -110,6 +110,9 @@ fn is_keyword(kind: TokenKind) -> bool {
             | FromBytesKw
             | RolesOfKw
             | ParamsOfKw
+            | ReturnsOfKw
+            | FieldSpecsOfKw
+            | ConstructKw
             | InvokeKw
     )
 }

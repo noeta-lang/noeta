@@ -112,12 +112,24 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// not self-describing, so the appended sequence and the new enum variant are both wire breaks by
 /// the same reasoning as every bump above.
 ///
+/// Bumped to 10 by two arcs landing together — one bump, because version 9 was never released and
+/// either change alone is a wire break.
+///
 /// Bumped to 10 by the json-defaults arc: `TypeRecipe::Struct::fields` (in `Module::deserialize_recipes`
 /// and in the `Op` variants that carry a call-site recipe) changed from `Vec<(String, TypeRecipe)>` to
 /// `Vec<FieldRecipe>` — each field now also carries its `FieldDefault`, so a JSON decode can fill a
 /// field whose declaration gave it a literal default. Postcard writes the struct's fields back to back
 /// with no tag, so the extra per-field enum shifts every byte after the first field; a version-9 reader
 /// would take the `FieldDefault` discriminant as the next field's name length and desynchronise.
+///
+/// Bumped to 10 by the `returns_of` arc: `reflect::ParamRecord` (in `Module::reflection`) gained a
+/// trailing `ret: TypeRepr` — a callable's declared return type, the projection the new
+/// `returns_of(target)` query materializes. Postcard writes it back to back after `params` with no
+/// tag, so a version-9 reader decoding a version-10 payload would take the return type's variant
+/// discriminant as the next `ParamRecord`'s target-string length and desynchronise the manifest —
+/// the same wire break as every bump above. `Op` (in `Module::code`) also gained a `ReturnsOf`
+/// variant, declared beside `ParamsOf` rather than at the end, which shifts every discriminant after
+/// it — a wire break on its own by the same non-self-describing-encoding rule.
 pub const FORMAT_VERSION: u8 = 10;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's

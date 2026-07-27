@@ -1,0 +1,9 @@
+---
+source: crates/noeta-parser/src/lib.rs
+assertion_line: 5766
+expression: "pretty(\"x = returns_of(\\\"Api.list\\\");\")"
+---
+(program @0..27
+  (binding x @0..27
+    (returns_of @4..26
+      (str "Api.list" @15..25))))

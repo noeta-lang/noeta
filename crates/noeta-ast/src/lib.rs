@@ -1718,6 +1718,22 @@ pub enum Expr {
     /// keying the attribute manifest. Built from the same compiler-built parameter index both
     /// backends read; surfaces a controller method's declared parameter types for dependency injection.
     ParamsOf { target: Box<Expr>, span: Span },
+    /// The reflection query `returns_of(target)` — a callable's declared **return type**, returned as
+    /// a `?Type`. `target` is a runtime `string` naming a function or method, keyed exactly as
+    /// [`Expr::ParamsOf`]'s is (a bare fn name, or a qualified `Type.method`), and read from the same
+    /// compiler-built signature index, so reflecting a callable's parameters and its return type is
+    /// two projections of one record.
+    ///
+    /// The result is an **option**, unlike `params_of`'s "empty list for an unknown target": an empty
+    /// parameter list is a legitimate answer, but there is no return type that means "no such
+    /// callable" — `void` is a real return type — so the missing case needs its own `none`. That is
+    /// what lets a framework deriving response schemas notice a mistyped target instead of silently
+    /// deriving a `void` response.
+    ///
+    /// An `async fn f(): T` reports `T`, the type written in the declaration, not the `Future<T>` a
+    /// call to it evaluates to — reflection reports declared types throughout (a parameter's type is
+    /// its annotation, too).
+    ReturnsOf { target: Box<Expr>, span: Span },
     /// The reflection invocation `invoke(recv, name, args)` / `invoke(name, args)` — fallible
     /// by-name dispatch. `name` is a runtime `string`; `args` is a runtime `List`. Evaluates to
     /// `Result<dyn, dyn>` — `Ok(retval)` on a hit, `Err(msg)` when the name is unknown or the arity
@@ -2096,6 +2112,7 @@ impl Expr {
             | Expr::TypedMethodCall { span, .. }
             | Expr::RolesOf { span, .. }
             | Expr::ParamsOf { span, .. }
+            | Expr::ReturnsOf { span, .. }
             | Expr::Invoke { span, .. }
             | Expr::FieldSpecsOf { span, .. }
             | Expr::Construct { span, .. }
@@ -2197,6 +2214,7 @@ impl Expr {
             | Expr::FieldsOf { value: expr, .. }
             | Expr::TraitsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
+            | Expr::ReturnsOf { target: expr, .. }
             | Expr::FieldSpecsOf { name: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
             Expr::Channel { capacity, .. } => capacity.mentions(name),
@@ -2311,6 +2329,7 @@ impl Expr {
             | Expr::FieldsOf { value: expr, .. }
             | Expr::TraitsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
+            | Expr::ReturnsOf { target: expr, .. }
             | Expr::FieldSpecsOf { name: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
             Expr::Channel { capacity, .. } => capacity.has_await(),

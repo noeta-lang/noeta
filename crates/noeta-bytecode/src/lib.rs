@@ -794,6 +794,16 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// `returns_of(target)`: `dst = ?Type` — the declared return type of the fn/method named by the
+    /// runtime `string` in `src`, read from the module's reflection info and materialized through the
+    /// same `build_type_value` decoder `ParamsOf` uses for `ParamInfo.type`, so the two can never
+    /// disagree about how a declared type renders. `Option::some(t)` for a known callable;
+    /// `Option::none` when the name matches no callable — an empty answer would be indistinguishable
+    /// from a `void` return. Reads `Module::reflection`.
+    ReturnsOf {
+        dst: Reg,
+        src: Reg,
+    },
     /// `field_specs_of::<T>()` / `field_specs_of(name)`: `dst = List<FieldSpec>` — the declared field
     /// schema (`{ name, type, optional }`, declaration order) of the struct/class named by the runtime
     /// string in `src`; the empty list for an unknown or non-fielded type. The type-level twin of
@@ -1912,6 +1922,7 @@ fn op_repr(
             None => format!("RolesOf     r{dst} <- roles_of()"),
         },
         Op::ParamsOf { dst, src } => format!("ParamsOf    r{dst} <- params_of(r{src})"),
+        Op::ReturnsOf { dst, src } => format!("ReturnsOf   r{dst} <- returns_of(r{src})"),
         Op::FieldSpecsOf { dst, src } => {
             format!("FieldSpecsOf r{dst} <- field_specs_of(r{src})")
         }

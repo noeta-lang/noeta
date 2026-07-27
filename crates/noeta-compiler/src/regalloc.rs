@@ -492,7 +492,7 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.extend(dynamic.iter().copied());
         }
         Op::RolesOf { dst, .. } => f.def = Some(*dst),
-        Op::ParamsOf { dst, src } => {
+        Op::ParamsOf { dst, src } | Op::ReturnsOf { dst, src } => {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
@@ -1017,7 +1017,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             }
         }
         Op::RolesOf { dst, .. } => m(dst),
-        Op::ParamsOf { dst, src } => {
+        Op::ParamsOf { dst, src } | Op::ReturnsOf { dst, src } => {
             m(dst);
             m(src);
         }

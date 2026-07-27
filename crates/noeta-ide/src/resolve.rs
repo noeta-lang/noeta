@@ -823,7 +823,9 @@ impl Resolver {
             Expr::Spawn { future, .. } => self.walk_expr(future),
             Expr::TypeOf { value, .. } => self.walk_expr(value),
             Expr::FieldsOf { value, .. } | Expr::TraitsOf { value, .. } => self.walk_expr(value),
-            Expr::ParamsOf { target, .. } => self.walk_expr(target),
+            Expr::ParamsOf { target, .. } | Expr::ReturnsOf { target, .. } => {
+                self.walk_expr(target)
+            }
             Expr::FieldSpecsOf { name, .. } => self.walk_expr(name),
             Expr::Construct { name, fields, .. } => {
                 self.walk_expr(name);
