@@ -32,7 +32,8 @@ fn admin_handler(): void { /* handle the request */ }
 - Using an unmarked struct as an attribute is E0029. Writing `@attribute` itself on a class or
   enum is a misplaced directive, E0054.
 - Placement can be constrained by listing target kinds — `@attribute(Method, Function)` — and a misplaced attribute is E0030. The kinds are `Struct`, `Class`, `Enum`, `Function`, `Method`, `Field`, `Variant`.
-- Arguments are a **constant literal tree** — scalars, lists, maps, sets, enum values, nested struct literals, and a bare type name (which becomes a reflection `Type` value). A non-literal argument (e.g. `1 + 2`) is E0003.
+- Arguments are a **constant literal tree** — scalars, lists, maps, sets, enum values, nested struct literals, and a type reference (which becomes a reflection `Type` value). A non-literal argument (e.g. `1 + 2`) is E0003.
+- A type-reference argument keeps its **generic arguments** at full fidelity — `#[Builds(target: List<int>)]` reflects as `Type.List(Type.Int)`, not an erased `Type.List(Type.Dyn)` — and is validated exactly like a type annotation anywhere else: an unknown name inside it is E0013, and a built-in constructor applied at the wrong arity (`List<int, string>`) is E0058.
 
 The `#[Skip]` / `#[Name]` / `#[Group]` / `#[Data]` attributes used by the [test runner](Testing) are exactly such prelude `@attribute` structs.
 
@@ -96,7 +97,25 @@ echo match type_of(5) {
 }
 ```
 
-`Type` variants include `Type.Int`, `Type.Float`, `Type.Bool`, `Type.String`, `Type.Bytes`, `Type.Dyn`, `Type.List(inner)`, `Type.Map(k, v)`, `Type.Option(inner)`, `Type.Struct(name, _)`, `Type.Enum(name, _)`, `Type.Class(name, _)`, and `Type.Named(name, _)`. Collection literals carry their resolved element type as a runtime tag that survives a `dyn` launder (a content-changing op like `.set` drops the tag to head-only).
+`Type` variants include the scalars `Type.Int`, `Type.Float`, `Type.F32`, `Type.F64`, `Type.IntN(bits, signed)`, `Type.Bool`, `Type.String`, `Type.Bytes`, `Type.Unit`, `Type.Dyn`; the containers `Type.List(inner)`, `Type.Set(inner)`, `Type.Map(k, v)`, `Type.Option(inner)`, `Type.Result(ok, err)`; `Type.Fn(params, ret)` and `Type.Union(members)`; the trait object `Type.DynTrait(name)`; and the nominals `Type.Struct(name, args)`, `Type.Enum(name, args)`, `Type.Class(name, args)`, `Type.Named(name, args)`. Collection literals carry their resolved element type as a runtime tag that survives a `dyn` launder (a content-changing op like `.set` drops the tag to head-only).
+
+### `params_of(name): List<ParamInfo>`
+
+Reflects a **top-level function's signature** by name — one `ParamInfo` per parameter, in declaration order: `{ name: string, type: Type, optional: bool, attrs: List<dyn> }`. `type` is the parameter's *declared* type as the same `Type` ADT `type_of` returns, `optional` reports whether a call may omit the parameter (it declared a default), and `attrs` holds the parameter's own `#[...]` attribute instances:
+
+```noeta
+fn scale(factor: f64, xs: List<f32>, ns: List<i32>, label: string = "x"): void { return }
+
+for p in params_of("scale") {
+    echo "${p.name}: ${p.type} optional=${p.optional}"
+}
+// factor: Type.Float optional=false
+// xs: Type.List(Type.F32) optional=false
+// ns: Type.List(Type.IntN(32, true)) optional=false
+// label: Type.String optional=true
+```
+
+**Declared types and fixed widths.** `params_of` and `type_of` answer with the *same* `Type` for the same declared type — they share one decoder, so they cannot drift. A runtime scalar carries no width tag, so at **top level** a declared fixed-width scalar erases exactly as its value does: every `iN`/`uN` parameter reflects `Type.Int` and `f64` reflects `Type.Float`, while `f32` is reified and keeps `Type.F32`. In **container-element position** a width is a physically distinct storage slot and is preserved at any depth: `List<i32>` reflects `Type.List(Type.IntN(32, true))`. The practical consequence: matching a signature from `params_of` against runtime values (dependency injection, CLI/router derivation) works for every scalar width — `type_of(5)` is `Type.Int`, and so is an `i32` parameter's `type`. See [Fixed-Width Integers](Fixed-Width-Integers) for the erasure model.
 
 ### `attributes_of::<T>(): List<Attributed<T>>`
 
@@ -112,6 +131,20 @@ fn list_users(): string { return "…" }
 routes = attributes_of::<Route>()
 for r in routes {
     echo "${r.target} -> ${r.value.path}"
+}
+```
+
+A type-reference argument arrives as a full reflection `Type` value, generic arguments intact — what a codegen or DI consumer needs to reconstruct the declared type, not just its head:
+
+```noeta
+@attribute
+struct Builds { target: Type }
+
+#[Builds(target: List<int>)]
+fn make_list(): List<int> { return [] }
+
+for b in attributes_of::<Builds>() {
+    echo "${b.target}: ${b.value.target}"    // make_list: Type.List(Type.Int)
 }
 ```
 
