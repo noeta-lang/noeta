@@ -1,0 +1,54 @@
+// A named `async fn` is SEALED: its body reaches an outer binding only through `use (…)`, so a
+// bare `x = …` naming anything else is a fresh local — a module global of the same name is
+// unrelated. The state-machine desugar has to agree with that, because it decides which names get
+// hoisted into cells: it excludes the globals a body may *store* to (a bare `g = …` against one is
+// a global store, not a local), and it used to take that set as every global regardless of the seal.
+//
+// The result was a name that read two different values inside one function: the binding wrote a
+// local, the reads inside the loop — which live in later machine states, and so resolve through the
+// step closure — loaded the global. Before the fix this printed
+//
+//     before: local-tally | in loop: global-tally | in loop: global-tally
+//
+// The stakes are higher than one file. A program's globals include everything the linker merged in,
+// so a *dependency package's* async fn had its locals decided against the **consuming program's**
+// top-level names — para/html's session binds a local `page`, and any app declaring `fn page()`
+// (as its own examples do) broke it. A package author cannot see or defend against those names.
+// expect: stdout "before: local-tally | in loop: local-tally | in loop: local-tally"
+// expect: stdout "global still: global-tally"
+// expect: stdout "reachable: reached-through-use"
+// expect: exit 0
+
+tally = "global-tally"
+
+mut reachable = "untouched"
+
+async fn tick(n: int): int {
+    return n + 1
+}
+
+// `tally` is this function's own local, read identically before and inside the loop.
+async fn work(): string {
+    tally = "local-tally"
+    mut out = "before: ${tally}"
+    mut n = 0
+    while n < 2 {
+        out = out ~ " | in loop: ${tally}"
+        n = tick(n).await
+    }
+    return out
+}
+
+// The other half of the rule: a global named in `use (…)` IS reachable, and a store to it across a
+// suspend still lands on the global — the seal is what decides, not the mere existence of the name.
+async fn touch() use (reachable): void {
+    n = tick(0).await
+    if n == 1 {
+        reachable = "reached-through-use"
+    }
+}
+
+echo work().await
+echo "global still: ${tally}"
+touch().await
+echo "reachable: ${reachable}"

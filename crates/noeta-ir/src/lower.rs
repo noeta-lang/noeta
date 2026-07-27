@@ -1388,6 +1388,39 @@ impl Lowerer<'_> {
     /// rejected by the checker (E0039, "not yet supported — Track G.2") and never reaches a *run*; if
     /// one survives in a check-failed program it stays a `Stmt::Yield` inside a segment and lowers
     /// through the interim discard arm, keeping lowering total.
+    /// The module globals a state machine's body may actually **store** to — what
+    /// [`desugar_state_machine`] excludes from cell-hoisting, because a bare `g = …` against one is
+    /// a global store rather than a fresh local.
+    ///
+    /// The seal decides this, exactly as it decides bare-assignment locality everywhere else. A
+    /// named `async fn`/generator is SEALED: its body reaches an outer binding only through
+    /// `use (…)`, so a bare `x = …` naming anything *not* in that allow-list is a fresh local — a
+    /// module global of the same name is unrelated and unreachable. Only an auto-capturing closure
+    /// (no armed seal) keeps the outward rule over the whole global set.
+    ///
+    /// Taking every global as storable regardless — what this did before — made a coroutine's
+    /// locality disagree with the synchronous path's, and the disagreement is not confined to one
+    /// file: a program's globals include everything the **linker merged in**, so a *dependency
+    /// package's* `async fn` had its locals decided against its **consumer's** top-level names. A
+    /// package binding `page = render_page()` silently became a store to whatever `page` the
+    /// consuming program happened to declare, and the reads that followed loaded that global. The
+    /// package author cannot see, predict, or defend against those names.
+    fn storable_globals(&self) -> HashSet<String> {
+        match &self.synth_step_captures {
+            // Sealed: only the globals the function explicitly named in `use (…)`.
+            Some(allow) => {
+                let allowed: HashSet<&str> = allow.iter().map(String::as_str).collect();
+                self.module_globals
+                    .iter()
+                    .filter(|g| allowed.contains(g.as_str()))
+                    .cloned()
+                    .collect()
+            }
+            // An auto-capturing closure keeps the full outward rule.
+            None => self.module_globals.clone(),
+        }
+    }
+
     fn lower_generator(
         &mut self,
         stmts: &[AstStmt],
@@ -1398,12 +1431,13 @@ impl Lowerer<'_> {
         // at each `yield`, so a declaration left below one lands in a later state than its callers.
         // Same rule every other scope gets (see [`hoisted_fn_order`]).
         let hoisted: Vec<AstStmt> = hoisted_fn_order(stmts).cloned().collect();
+        let storable = self.storable_globals();
         let desugar = desugar_state_machine(
             &hoisted,
             span,
             self.sites.for_stream_sites,
             SuspendMode::Gen,
-            &self.module_globals,
+            &storable,
             params,
         );
         // The sealed step closure must keep writing the machine's PERSISTENT locals — the
@@ -1457,12 +1491,13 @@ impl Lowerer<'_> {
         // Same declaration-hoist the generator gets: the flattener cuts at each `.await`, so a
         // nested `fn` must be declared before the first cut to be visible to every state.
         let hoisted: Vec<AstStmt> = hoisted_fn_order(stmts).cloned().collect();
+        let storable = self.storable_globals();
         let desugar = desugar_state_machine(
             &hoisted,
             span,
             self.sites.for_stream_sites,
             SuspendMode::Async,
-            &self.module_globals,
+            &storable,
             params,
         );
         // The sealed step closure must keep writing the machine's PERSISTENT locals — the
