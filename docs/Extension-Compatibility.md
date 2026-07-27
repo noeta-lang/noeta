@@ -35,7 +35,7 @@ none of core's batteries—and it contains the whole registration and dispatch c
 - **The registration vocabulary**—`ExtModule`/`ExtFn` with `SigType`/`RetTy` signatures (including
   `SigType::Optional` trailing-optionals, `SigType::Fn` callables, `SigType::Generic` + `Var` type
   variables), and the call-site-typed surface (`typed_functions`/`typed_methods`, `TypeArgWrap`,
-  `TypeRecipe`).
+  `TypeRecipe`/`FieldRecipe`).
 - **The marshalling layer**—`NativeValue` in, `NativeOut` out (including the bulk
   `NativeOut::Scalars(ScalarVec)` form and the class/struct twins `Instance`/`Struct`), plus
   `StdError`/`ErrorKind` and the canonical error builders (`arity_error`, `type_error`, …) that keep

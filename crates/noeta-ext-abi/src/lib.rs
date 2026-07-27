@@ -19,7 +19,13 @@
 /// call site binds against a native signature). A registration table written for ABI 1 omits it
 /// and no longer compiles; the composed build reports that as an ABI mismatch naming the package
 /// it belongs to (`compose::compose_failure`) rather than as a bare `rustc` error.
-pub const ABI_VERSION: u32 = 2;
+///
+/// **3** — [`registry::TypeRecipe::Struct`]'s `fields` became `Vec<FieldRecipe>` (from
+/// `Vec<(String, TypeRecipe)>`) so each field carries its [`registry::FieldDefault`] — what an
+/// omitted input field means. A `typed_dispatch` that walks a struct recipe destructures the tuple
+/// and no longer compiles; there is no silent behavior change, and `..DEFAULTS` cannot cover it
+/// (the change is inside a matched enum variant, not an added registration field).
+pub const ABI_VERSION: u32 = 3;
 
 pub mod args;
 pub mod channel;

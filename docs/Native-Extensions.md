@@ -210,7 +210,7 @@ ExtModule {
 }
 ```
 
-**The recipe contract.** The grammar `module.func::<T>(args)` is an atom (`Expr::TypedModuleCall`). The checker resolves `T` into a neutral `TypeRecipe` (scalar / unit / option / list / string-keyed map / declared-order struct — *no* enum/class/unconstrained generic, which have no recipe and are a compile-time error at the call), records it at the call site, and a shared lowering bakes it into a `TypedModuleCall` IR node the VM transcribes to `Op::TypedModuleCall`. At dispatch, both backends marshal the arguments, look up the module's `typed_dispatch`, and call it threaded the `&TypeRecipe`:
+**The recipe contract.** The grammar `module.func::<T>(args)` is an atom (`Expr::TypedModuleCall`). The checker resolves `T` into a neutral `TypeRecipe` (scalar / unit / option / list / string-keyed map / declared-order struct — *no* enum/class/unconstrained generic, which have no recipe and are a compile-time error at the call), records it at the call site, and a shared lowering bakes it into a `TypedModuleCall` IR node the VM transcribes to `Op::TypedModuleCall`. A struct's fields arrive as `FieldRecipe`s — name, recipe, and a `FieldDefault` saying what an *omitted* field means (required, or a literal default baked in as JSON text), which is how a decode fills a defaulted field without re-entering the program. At dispatch, both backends marshal the arguments, look up the module's `typed_dispatch`, and call it threaded the `&TypeRecipe`:
 
 ```rust
 fn build_typed_dispatch(func: &str, host: &mut dyn Host, args: &[NativeValue], recipe: &TypeRecipe)

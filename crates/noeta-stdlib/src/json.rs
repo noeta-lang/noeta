@@ -458,8 +458,8 @@ fn fill_absent_field(
     match &field.default {
         FieldDefault::Literal(json) => {
             // The baked text is produced by the checker from a folded literal, so it parses and
-            // matches the field's recipe by construction; a malformed one is reported at the field's
-            // own path rather than silently dropped.
+            // matches the field's recipe by construction; a malformed one is reported (at the
+            // object's path, naming the field — the missing-field shape) rather than swallowed.
             let mut default_path = String::new();
             push_member(&mut default_path, &field.name);
             let value = parse(json).map_err(|_| {
