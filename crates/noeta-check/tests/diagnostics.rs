@@ -56,3 +56,39 @@ fn checker_diagnostic_gallery() {
     }
     insta::assert_snapshot!(out);
 }
+
+/// The `match`-arm pair gets its own gallery. E0066 is the first diagnostic in the catalog to carry
+/// **two** labels — the arm that died and the pattern that killed it — so its rendered shape (both
+/// carets in one snippet, in source order) is worth pinning rather than assumed. E0067 belongs
+/// beside it because the two are only useful together: "unreachable arm" alone never tells an author
+/// *why* their bare `String` arm swallowed everything.
+#[test]
+fn match_arm_gallery() {
+    noeta_stdlib::registry::default_seeded();
+    let type_enum = "enum Type { String; Int; List(inner: string) }\n";
+    let cases = [
+        (
+            "E0066 unreachable arm after a wildcard",
+            "fn rank(n: int): string {\n    return match n {\n        _ => \"many\",\n        1 => \"one\",\n    }\n}".to_string(),
+        ),
+        (
+            "E0066 unreachable arm after a bare `none`",
+            "fn show(o: ?int): string {\n    return match o {\n        none => \"empty\",\n        some(v) => \"${v}\",\n    }\n}".to_string(),
+        ),
+        (
+            "E0067 a payload-free variant spelled bare",
+            format!("{type_enum}fn describe(t: Type): string {{\n    return match t {{\n        String => \"string\",\n    }}\n}}"),
+        ),
+        (
+            "E0067 + E0066 the arms a shadowed variant swallows",
+            format!("{type_enum}fn describe(t: Type): string {{\n    return match t {{\n        String => \"string\",\n        Int => \"int\",\n    }}\n}}"),
+        ),
+    ];
+    let mut out = String::new();
+    for (label, src) in cases {
+        out.push_str(&format!("================ {label} ================\n"));
+        out.push_str(&render_checks(&src));
+        out.push('\n');
+    }
+    insta::assert_snapshot!(out);
+}
