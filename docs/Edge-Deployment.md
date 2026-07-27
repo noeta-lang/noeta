@@ -35,12 +35,12 @@ fn handle(req: Request): Response {
 server.serve(8080, handle)
 ```
 
-The `port` argument to `server.serve` is inert at the edge — the platform owns the socket and invokes your component per request — but it is what `noeta run app.noe` binds locally, so the one program serves both ways. (The `noeta serve` CLI subcommand is a different convenience — it expects a top-level `fn fetch` and drives its own `--port`; a program that calls `server.serve` itself, as here, is run directly with `noeta run`.) Routing (`req.path()`), reading the request (`req.method()`, `req.header(name)`, `req.body()`), and building the reply (`server.response(status, body, headers?)`, `Response.with_header`) are all just code; there is no framework or runtime hook to learn. See [std.http](std-http) for the full API.
+The `port` argument to `server.serve` is inert at the edge — the platform owns the socket and invokes your component per request — but it is what `noeta run app.noe` binds locally, so the one program serves both ways. Don't confuse this with the similarly named CLI verb: `noeta serve` is a separate convenience that expects a top-level `fn fetch(req: Request): Response` and drives its own `--port`. A program that calls `server.serve` itself, like this one, is run directly with `noeta run`. Routing (`req.path()`), reading the request (`req.method()`, `req.header(name)`, `req.body()`), and building the reply (`server.response(status, body, headers?)`, `Response.with_header`) are all just code; there is no framework or runtime hook to learn. See [std.http](std-http) for the full API.
 
 ## Building the artifact
 
 ```sh
-noeta build --serve hello.noe          # → hello.serve.wasm (~3 MiB)
+noeta build --serve hello.noe          # → hello.serve.wasm (~4.3 MiB today; the size tracks the embedded runtime)
 noeta build --serve hello.noe -o out/app.wasm   # explicit output path
 ```
 
@@ -148,5 +148,5 @@ with a `fastly.toml` naming the prebuilt component as the artifact.
 The emitted component is the correct shape and runs on Spin unmodified — verified. The gap to a literal one-command deploy is **packaging, not mechanics**:
 
 - **The prebuilt serve component isn't shipped with the toolchain yet.** `noeta build --serve` resolves the generic component to staple into via a ladder: the `NOETA_WASM_SERVE` environment variable → a `noeta-wasm-serve.wasm` sitting next to the `noeta` binary → **an on-demand `cargo build` of the `noeta-wasm-serve` crate** (`wasm32-wasip2`). A developer checkout hits the third rung transparently (it just needs `rustup target add wasm32-wasip2`), but a binary-only released toolchain has none of the first two in place today, so `--serve` cannot build offline there. Packaging the prebuilt component beside the toolchain (the same distribution decision already pending for the native AOT runtime and the wasip1 runner) closes this. Tracked in [`plans/backlog.md`](https://github.com/noeta-lang/noeta/blob/main/plans/backlog.md).
-- **Fastly Compute is unverified** (see above) — a second proven platform beyond Spin needs an account and a real deploy.
-- **The hosted deploy itself needs an account.** `spin deploy` (or `fastly compute publish`) is inherently a user action — this guide and the example script take you to the edge of it; the final push, and the screenshot/notes that prove it, are yours to run once an account exists.
+- **Fastly Compute is unverified** (see above) — proving a second platform beyond Spin needs an account and a real deploy.
+- **The hosted deploy itself needs an account.** `spin deploy` (or `fastly compute publish`) authenticates as *you*, so no guide can run it for you. Everything up to that point — build, manifest, local smoke test — is covered above and scripted in the example's `deploy.sh`; once you have an account, the final push is one command.

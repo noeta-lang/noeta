@@ -47,7 +47,7 @@ server.serve(8080, handle)
 ```
 
 ```sh
-noeta build --serve app.noe                    # → app.serve.wasm (~2.7 MiB)
+noeta build --serve app.noe                    # → app.serve.wasm (~4.3 MiB today; the size tracks the embedded runtime)
 wasmtime serve -S cli=y app.serve.wasm         # serving on http://0.0.0.0:8080/
 ```
 
@@ -79,34 +79,7 @@ Note that edge platforms typically **allowlist outbound hosts** — under Spin, 
 
 ### Running under Spin (and Spin-class clouds)
 
-The same artifact runs under [Spin](https://spinframework.dev) unmodified — verified against Spin 4:
-
-```toml
-# spin.toml
-spin_manifest_version = 2
-
-[application]
-name = "my-app"
-version = "0.1.0"
-
-[[trigger.http]]
-route = "/..."
-component = "app"
-
-[component.app]
-source = "app.serve.wasm"
-# Outbound calls are allowlisted per component:
-allowed_outbound_hosts = ["https://api.example.com"]
-```
-
-```sh
-spin up                    # serve locally
-spin deploy                # deploy to a Spin-compatible cloud (Fermyon et al.; needs an account)
-```
-
-Any host that speaks the `wasi:http` proxy world can serve the component — that is the point of targeting the standard interface rather than a vendor SDK.
-
-For a step-by-step deployment walkthrough — the `spin.toml` fields, routing/env/outbound limits, the full edge capability table, a troubleshooting matrix, and Fastly Compute as a secondary target — see [Edge Deployment](Edge-Deployment). A complete buildable example lives in `examples/edge-hello/`.
+The same artifact runs under [Spin](https://spinframework.dev) unmodified — verified against Spin 4 — and any host that speaks the `wasi:http` proxy world can serve the component; that is the point of targeting the standard interface rather than a vendor SDK. The step-by-step walkthrough — the `spin.toml` manifest, `spin up`/`spin deploy`, routing/env/outbound limits, the full edge capability table, a troubleshooting matrix, and Fastly Compute as a secondary target — lives on [Edge Deployment](Edge-Deployment), with a complete buildable example in `examples/edge-hello/`.
 
 ### What a handler world looks like
 
@@ -114,14 +87,7 @@ Per request, the program gets a fresh deterministic-by-default world with the re
 
 ## The browser playground
 
-The playground (the separate `noeta-playground` repo, live at play.noeta.dev) is not a transpiler or a service — it is the **real toolchain compiled to WebAssembly**, running in the visitor's tab. It embeds this repo's `noeta-playground` engine crate (the wasm cdylib + its `(ptr, len)` ABI), which it builds from a lang checkout:
-
-- **Check / Run / Format** through the same lexer → parser → type checker → compiler → VM as `noeta run`, executing on the deterministic sandbox — playground output is oracle-grade.
-- **The language smarts are the LSP's**: hover types (with `@packed` layout notes), completion, go-to-definition, and signature help come from the same engine `noeta lsp` adapts over, running client-side with no server.
-- **A "real host" mode** backs entropy, wall clock, and `std.http` fetches with the browser's own APIs; on browsers with JSPI (stack switching), concurrent `*_async` fan-out genuinely overlaps.
-- The engine runs in a Web Worker; an infinite loop is stopped by terminating the worker — the page stays responsive.
-
-Serving it needs only static hosting plus the engine artifact — the toolchain runs entirely client-side, with no backend.
+The playground (the separate `noeta-playground` repo, live at play.noeta.dev) is not a transpiler or a service — it is the **real toolchain compiled to WebAssembly**, running client-side in a Web Worker with no backend. Check / Run / Format go through the same pipeline as `noeta run` on the deterministic sandbox (playground output is oracle-grade), and hover, completion, go-to-definition, and signature help come from the same engine `noeta lsp` adapts over. A "real host" mode backs entropy, wall clock, and `std.http` fetches with the browser's own APIs, and an infinite loop is stopped by terminating the worker — the page stays responsive.
 
 ## Limits, plainly
 

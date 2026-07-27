@@ -10,6 +10,10 @@ separate "debug interpreter" — the same bytecode pipeline `noeta run` uses exe
 with the JIT unarmed so every frame is inspectable and a compile flag that keeps variable names.
 What you observe under the debugger is what ships.
 
+One scope note, also worth knowing up front: the debugger is **launch-only** — it always starts the
+program itself. There is no attaching to an already-running process (see
+[Current limitations](#current-limitations)).
+
 ## Quick start (VS Code / VSCodium)
 
 The bundled extension in [`editors/vscode-noeta/`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta)
@@ -29,6 +33,38 @@ a `launch.json`:
 
 `program` is the entry file (its `use` imports resolve as in `noeta run`); `stopOnEntry: true`
 pauses before the first instruction.
+
+## Neovim (`nvim-dap`)
+
+The adapter is the same one VS Code spawns: the `noeta` binary run as `noeta dap`, speaking DAP on
+stdio, with a launch request carrying `program` (and optionally `stopOnEntry`) — so the
+[nvim-dap](https://github.com/mfussenegger/nvim-dap) wiring is:
+
+```lua
+local dap = require("dap")
+
+dap.adapters.noeta = {
+  type = "executable",
+  command = "noeta",          -- or an absolute path to the binary
+  args = { "dap" },
+}
+
+dap.configurations.noeta = {
+  {
+    type = "noeta",
+    request = "launch",
+    name = "Debug Noeta file",
+    program = "${file}",
+    stopOnEntry = false,
+  },
+}
+```
+
+`dap.configurations` is keyed by *filetype*, so make sure `.noe` files carry one — e.g.
+`vim.filetype.add({ extension = { noe = "noeta" } })` — and the key above matches it. The adapter
+invocation and launch arguments are taken from the adapter's own source and the VS Code extension's
+wiring; the snippet itself has not been exercised end-to-end in Neovim — if it misbehaves for you,
+please open an issue.
 
 ## What works
 
@@ -51,7 +87,7 @@ pauses before the first instruction.
 
 A watch or console entry is not interpreted by a side evaluator — it is **compiled by the same
 compiler that built your program**, into the program's own id-spaces, and run against the paused
-frame. That has three practical consequences:
+frame. That has four practical consequences:
 
 **1. The full language works.** Calls, methods, closures, statements:
 

@@ -5,26 +5,51 @@ tree-sitter grammars), a **language server** (`noeta lsp`), a **debugger** (`noe
 page: [Debugging](Debugging)), and an **agent surface** (`noeta mcp`) — a Model Context Protocol
 server that hands AI coding agents the same compiler ground truth the editor gets.
 
-## Syntax highlighting
+## Installing, per editor
 
-A TextMate grammar and VS Code extension live in
-[`editors/vscode-noeta/`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta). The
-grammar is **static** — it colorizes without running the compiler, instantly and offline — and
-covers the whole surface: keywords, the three string forms with `${…}` interpolation, every numeric
-literal form, primitive and container types, PascalCase user types, `@directive`/tier blocks,
-`#[attribute]`s, and the full operator set. Install the extension with
-[`noeta ide --vscode`](The-CLI#noeta-ide): it downloads the `.vsix` matching your toolchain's
-version from the GitHub release, verifies it, and installs it into VS Code or VSCodium — a
-marketplace listing is still pending, but the release asset ships today, and this path also covers
-VSCodium and offline installs; re-run it after `noeta upgrade` so the extension moves in step with
-the toolchain. From a source checkout, symlink the folder into `~/.vscode/extensions/` instead
-(VSCodium works identically); the extension's README has details and a `sample.noe` exercising
-every construct.
+### VS Code / VSCodium
 
-For **Neovim / Helix / Zed**, a
-[tree-sitter grammar](https://github.com/noeta-lang/noeta/tree/main/editors/tree-sitter-noeta)
-parses ≈99% of the conformance corpus and models Noeta's newline-terminated statements and
-case-insensitive identifiers faithfully (run `tree-sitter generate` there first; see its README).
+The extension in [`editors/vscode-noeta/`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta)
+bundles everything on this page: the static TextMate grammar, the language server, the debugger
+type, the profiler view, and MCP auto-registration.
+
+1. Run [`noeta ide --vscode`](The-CLI#noeta-ide). It downloads the `.vsix` matching your
+   toolchain's version from the GitHub release, verifies it against the release's checksums, and
+   installs it into the first of `code` / `codium` / `code-insiders` on your PATH (pick one
+   explicitly with `--bin <NAME|PATH>`). A marketplace listing is still pending; this path also
+   covers VSCodium and offline installs.
+2. Open a `.noe` file — highlighting is immediate, and the extension starts `noeta lsp`
+   automatically (set `noeta.server.path` if the binary isn't on your PATH).
+3. After a `noeta upgrade`, re-run `noeta ide --vscode` so the extension moves in step with the
+   toolchain.
+
+From a source checkout, symlink the folder into `~/.vscode/extensions/` instead (VSCodium works
+identically); the extension's README has details and a `sample.noe` exercising every construct.
+
+The TextMate grammar is **static** — it colorizes without running the compiler, instantly and
+offline — and covers the whole surface: keywords, the three string forms with `${…}` interpolation,
+every numeric literal form, primitive and container types, PascalCase user types,
+`@directive`/tier blocks, `#[attribute]`s, and the full operator set.
+
+### Neovim, Helix, Zed
+
+There is no one-command installer for these yet — you wire the two pieces (grammar + language
+server) with your editor's own mechanisms:
+
+1. Clone the [tree-sitter grammar](https://github.com/noeta-lang/noeta/tree/main/editors/tree-sitter-noeta)
+   and run `tree-sitter generate` in it (the generated parser is not committed; see its README).
+   It parses ≈99% of the conformance corpus and models Noeta's newline-terminated statements and
+   case-insensitive identifiers faithfully.
+2. Register the grammar for the `.noe` extension the way your editor takes a local tree-sitter
+   grammar — Neovim: an nvim-treesitter parser config entry; Helix: a `[[grammar]]` with a path
+   source plus a `[[language]]` entry in `languages.toml`; Zed: a local extension wrapping the
+   grammar.
+3. Point your editor's LSP client at `noeta lsp` (stdio) for `.noe` files — diagnostics, hover,
+   completion, and the rest of the [server's feature table](#the-language-server-noeta-lsp) work in
+   any LSP client.
+4. (Neovim) Optionally wire `noeta dap` into nvim-dap for debugging — config snippet on the
+   [Debugging](Debugging) page.
+
 For a project with third-party text tiers (`@tier(<name>, text: "<lang>")`), `noeta grammar
 tree-sitter --out <dir>` emits a per-project overlay so those `@<name> { … }` bodies parse and
 highlight as their language — the static grammar's `@doc` → markdown rule is the fallback.
@@ -48,7 +73,7 @@ What it does today:
 | **Signature help** | Parameter hints while typing a call — free functions and methods. |
 | **Document outline** | Types, functions, methods for the breadcrumb/symbol views. |
 | **Semantic tokens** | Compiler-accurate token coloring layered over the static grammar. |
-| **Inlay hints** | rust-analyzer style: the inferred type of every un-annotated binding (`mut xs`&nbsp;`: List<int>`&nbsp;`= …`) and of inference-typed closure parameters. Nominal types show their in-scope **short** name (`: Vec2`, recursively — `: List<Vec2>`), while hover keeps the fully-qualified identity (`geometry.vec.Vec2`) for disambiguation; parameter **names** at call sites (`scale(`&nbsp;`factor:`&nbsp;`2, …)`). Annotated bindings, reassignments, same-named identifier arguments, and uninferred (`dyn`) params show nothing. Packed storage is marked compactly on the type label (`: Vec3 · packed`, `: List<Vec3> · flat`, `: List<Cell> · SoA`); byte sizes stay hover-only. Toggle with VS Code's `editor.inlayHints.enabled`. |
+| **Inlay hints** | rust-analyzer style: the inferred type of every un-annotated binding (`mut xs`&nbsp;`: List<int>`&nbsp;`= …`) and of inference-typed closure parameters, plus parameter **names** at call sites. Types show their in-scope short name (hover keeps the fully-qualified identity); packed storage is marked compactly on the label (`: Vec3 · packed`, `: List<Cell> · SoA`). Annotated bindings, reassignments, and same-named arguments show nothing. Toggle with VS Code's `editor.inlayHints.enabled`. |
 
 Under load the server stays honest about *which* version it answers for: every open document in
 a directory shares one salsa workspace (one parse per file, however many tabs are open), the
@@ -68,7 +93,10 @@ the **production VM** — same bytecode, JIT unarmed. See [Debugging](Debugging)
 
 ## Tracing the architecture
 
-Every `@role`-bearing declaration gets a **CodeLens** (`⚑ Layer.Handler · trace call paths`);
+Every `@role`-bearing declaration — `@role` is the decorator that confers a typed architectural
+role (entry point, handler layer, persistence boundary, …) on the declarations an attribute
+annotates; see [Attributes & Reflection](Attributes-and-Reflection) — gets a **CodeLens**
+(`⚑ Layer.Handler · trace call paths`);
 running it — or **Trace Call Paths from Here** in the Architecture sidebar's context menu, or
 **Noeta: Trace Call Paths** from the palette for the whole role surface — opens the **trace view**:
 the same static call-graph walk `noeta mcp`'s `trace` tool serves, rendered as a role-colored
