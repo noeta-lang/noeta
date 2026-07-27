@@ -148,8 +148,59 @@ echo match parse_age("42") {
 }                              // age 42
 ```
 
-> [!NOTE]
-> There are **no match guards** — `pat if cond => …` is not part of the grammar (the `if` is a parse error). Branch inside the arm instead, with the `if … then … else` expression or a nested `if`:
+### Guards
+
+An arm may carry a **guard**: `pattern if cond => body`. The guard is a plain `bool` expression, evaluated only after the pattern structurally matches — with the pattern's bindings in scope. A `false` guard **falls through to the next arm**, exactly as a failed pattern would:
+
+```noeta
+fn check(n: int): Result<int, string> {
+    if n < 0 {
+        return Err("invalid: ${n}");
+    }
+    return Ok(n);
+}
+
+fn label(n: int): string {
+    return match check(n) {
+        Ok(age) if age >= 18 => "adult",
+        Ok(age) if age >= 13 => "teen",
+        Ok(_) => "child",         // the guarded arms fall through to here
+        Err(e) => e,
+    }
+}
+
+echo label(21)                 // adult
+echo label(15)                 // teen
+echo label(4)                  // child
+```
+
+Guards narrow nothing — narrowing stays purely pattern-driven — but they compose with `is` arms, where the guard already sees the scrutinee narrowed to the arm's type:
+
+```noeta
+fn describe(x: int | string): string {
+    return match x {
+        is int if x > 9 => "big int ${x}",
+        is int => "int ${x}",
+        is string => "len ${x.len()}",
+    }
+}
+
+echo describe(12)              // big int 12
+echo describe(3)               // int 3
+```
+
+A guarded arm contributes **nothing to exhaustiveness**: the checker cannot prove a guard ever true, so the arm's case stays uncovered for when the guard is false. A `match` whose only `Ok` arm is guarded is non-exhaustive (E0011) — add an unguarded arm for the case (or a `_` catch-all):
+
+```noeta error
+// E0011: non-exhaustive — `Ok(x) if x > 0` does not cover `Ok` (its guard may be false).
+fn f(): Result<int, string> { return Ok(1); }
+echo match f() {
+    Ok(x) if x > 0 => "pos",
+    Err(_) => "err",
+}
+```
+
+A guard chooses an *arm*; when both outcomes share one arm, branching inside it with the `if … then … else` expression still reads well:
 
 ```noeta
 n = 5
