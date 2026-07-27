@@ -75,6 +75,7 @@ pub mod task;
 pub mod template;
 pub mod tiers;
 pub mod tracing;
+pub mod url;
 pub mod vec3;
 pub mod vec_kernels;
 
