@@ -1,0 +1,20 @@
+// Guard evaluation order is observable: a guard runs only when its arm's pattern matched, guards
+// run in arm order, and evaluation stops at the first arm whose guard is true — a later guard
+// must never run once an earlier arm is taken. The `0` arm between the guarded ones shows a
+// failed *pattern* skips the arm without touching anything. Identical order in both backends.
+// expect: stdout "guard a"
+// expect: stdout "guard b"
+// expect: stdout "took b"
+// expect: exit 0
+fn noisy(name: string, result: bool): bool {
+    echo "guard ${name}";
+    return result;
+}
+
+echo match 7 {
+    n if noisy("a", false) => "took a",
+    0 => "took zero",
+    n if noisy("b", true) => "took b",
+    n if noisy("c", true) => "took c",
+    _ => "took none",
+};

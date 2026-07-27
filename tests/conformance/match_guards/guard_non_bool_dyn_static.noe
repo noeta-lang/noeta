@@ -1,0 +1,10 @@
+// A guard is a bool position: the checker checks it bidirectionally against `bool` (with the
+// pattern bindings in scope), so a `dyn` guard is the standard expected/found mismatch (E0007)
+// at the guard expression — same shape as any other bool-position mismatch.
+// expect: error E0007 at 8:10
+// expect: exit 1
+fn truthy(): dyn { return 1; }
+echo match 5 {
+    n if truthy() => "yes",
+    _ => "no",
+};

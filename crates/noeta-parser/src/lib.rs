@@ -959,11 +959,13 @@ fn desugar_if_then_else(cond: Expr, then_expr: Expr, else_expr: Expr, span: Span
         arms: vec![
             MatchArm {
                 pattern: then_pat,
+                guard: None,
                 body: noeta_ast::ClosureBody::Expr(Box::new(then_expr)),
                 span,
             },
             MatchArm {
                 pattern: else_pat,
+                guard: None,
                 body: noeta_ast::ClosureBody::Expr(Box::new(else_expr)),
                 span,
             },
@@ -2262,11 +2264,17 @@ where
             .or(recovering_list(stmt.clone())
                 .delimited_by(just(T::LBrace), just(T::RBrace))
                 .map(noeta_ast::ClosureBody::Block));
+        // An arm may carry a **guard**: `pattern if cond => body`. The guard is a plain
+        // expression (evaluated after the pattern matches, with the pattern's bindings in
+        // scope); `if` after a pattern is unambiguous — a pattern never continues with `if` —
+        // and the guard expression stops at `=>` like any other expression operand.
         let arm = pattern_parser(ctx)
+            .then(just(T::IfKw).ignore_then(sub.clone()).or_not())
             .then_ignore(just(T::FatArrow))
             .then(arm_body)
-            .map_with(move |(pattern, body), e| MatchArm {
+            .map_with(move |((pattern, guard), body), e| MatchArm {
                 pattern,
+                guard,
                 body,
                 span: ctx.to_span(e.span()),
             });
@@ -4724,6 +4732,26 @@ mod tests {
         let parsed = parse_str("x = f()\n.to_string()\n");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         assert_eq!(parsed.program.stmts.len(), 1, "{:?}", parsed.program.stmts);
+    }
+
+    #[test]
+    fn match_arm_guards_parse() {
+        // `pattern if cond => body` — the guard lands on the arm (visible as `(guard …)` in the
+        // pretty form) and sits between the pattern and the arrow for every pattern shape.
+        let dump = pretty(
+            "x = match n {\n    k if k < 0 => \"neg\",\n    Ok(v) if v > 1 => v,\n    is int if n > 9 => \"big\",\n    _ => \"rest\",\n}\n",
+        );
+        assert_eq!(dump.matches("(guard").count(), 3, "{dump}");
+
+        // The guard expression may itself be an `if … then … else` conditional (it desugars to a
+        // nested match) and still stops at the `=>`.
+        let dump =
+            pretty("x = match n {\n    k if if k > 0 then true else false => 1,\n    _ => 0,\n}\n");
+        assert_eq!(dump.matches("(guard").count(), 1, "{dump}");
+
+        // An unguarded arm carries no `(guard …)` node — the grammar is unchanged without `if`.
+        let dump = pretty("x = match n { 1 => 2, _ => 0 }\n");
+        assert!(!dump.contains("(guard"), "{dump}");
     }
 
     #[test]

@@ -4697,6 +4697,12 @@ impl<'m> FnCompiler<'m> {
     /// pattern (jumping to the next arm on mismatch), binds, evaluates its body, and jumps to the
     /// end. A value matching no arm hits `MatchFail` (E0007). In expression position (`dst`
     /// `Some`) each arm body is a value block whose tail is moved into the destination.
+    ///
+    /// A guarded arm (`pattern if cond`) evaluates its guard block after the pattern test and
+    /// bindings, still inside the arm scope (the guard sees the bindings), then branches with the
+    /// same fused `CondBranch` an `if`/`while` condition compiles to: false jumps to the next
+    /// arm's test (fall-through, exactly like a failed pattern), a non-bool raises the
+    /// `if`-condition E0007 — matching the reference interpreter byte for byte.
     fn match_stmt(
         &mut self,
         scrutinee: &Atom,
@@ -4712,6 +4718,10 @@ impl<'m> FnCompiler<'m> {
             self.scopes.push(HashMap::new());
             self.emit_pattern(&arm.pattern, s, &mut fail_jumps);
             let body = (|| {
+                if let Some(guard) = &arm.guard {
+                    let g = self.value_block(&guard.block)?;
+                    fail_jumps.push(self.push_cond_branch(g, guard.span));
+                }
                 self.hoist_nested_fn_cells(&arm.body.stmts);
                 for stmt in &arm.body.stmts {
                     self.stmt(stmt)?;

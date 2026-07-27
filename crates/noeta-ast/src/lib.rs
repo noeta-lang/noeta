@@ -1844,6 +1844,12 @@ pub struct FieldInit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: Pattern,
+    /// The arm's **guard**: `pattern if cond => body`. Evaluated only after the pattern
+    /// structurally matches, with the pattern's bindings in scope; a `false` guard falls through
+    /// to the next arm exactly as a failed pattern would. Must type-check as `bool`. A guarded
+    /// arm contributes **nothing** to exhaustiveness (E0011) — the checker cannot prove a guard
+    /// ever true.
+    pub guard: Option<Expr>,
     /// The arm's body: a value expression (`pattern => expr`, the common form) or a statement
     /// block (`pattern => { stmts }`, aether F1) whose value is `unit` — side-effectful arms
     /// without an artificial expression. `{ … }` parses as an EXPRESSION first (map/set literals
@@ -2169,7 +2175,13 @@ impl Expr {
             }),
             Expr::Match {
                 scrutinee, arms, ..
-            } => scrutinee.mentions(name) || arms.iter().any(|arm| arm.body.mentions(name)),
+            } => {
+                scrutinee.mentions(name)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(|g| g.mentions(name))
+                            || arm.body.mentions(name)
+                    })
+            }
             Expr::Object(lit) => {
                 lit.fields.iter().any(|f| f.value.mentions(name))
                     || lit.spread.as_ref().is_some_and(|s| s.mentions(name))
@@ -2275,7 +2287,16 @@ impl Expr {
             }),
             Expr::Match {
                 scrutinee, arms, ..
-            } => scrutinee.has_await() || arms.iter().any(|arm| arm.body.has_await()),
+            } => {
+                scrutinee.has_await()
+                    || arms.iter().any(|arm| {
+                        // A guard is evaluated at this callable level; an `.await` inside one is
+                        // rejected by the checker (the state-machine lowering cannot suspend
+                        // between a pattern test and its guard), but it still counts here so the
+                        // coloring analysis can never miss it.
+                        arm.guard.as_ref().is_some_and(Expr::has_await) || arm.body.has_await()
+                    })
+            }
             Expr::Object(lit) => {
                 lit.fields.iter().any(|f| f.value.has_await())
                     || lit.spread.as_ref().is_some_and(|s| s.has_await())

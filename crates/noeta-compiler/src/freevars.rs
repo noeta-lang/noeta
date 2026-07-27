@@ -205,6 +205,9 @@ fn collect_bindings_stmt(stmt: &Stmt, outer: &HashSet<String>, local: &mut HashS
         Stmt::Match { arms, .. } => {
             for arm in arms {
                 pattern_names(&arm.pattern, local);
+                if let Some(guard) = &arm.guard {
+                    collect_bindings_block(&guard.block, outer, local);
+                }
                 collect_bindings_block(&arm.body, outer, local);
             }
         }
@@ -323,11 +326,14 @@ fn collect_refs_stmt(
         } => {
             atom_ref(scrutinee, out);
             for arm in arms {
-                // Names the arm pattern binds are local to the arm — collect the body's refs,
-                // then remove them so they are not reported as free.
+                // Names the arm pattern binds are local to the arm — collect the guard's and
+                // body's refs, then remove them so they are not reported as free.
                 let mut bound = HashSet::new();
                 pattern_names(&arm.pattern, &mut bound);
                 let mut arm_refs = BTreeSet::new();
+                if let Some(guard) = &arm.guard {
+                    collect_refs_block(&guard.block, enclosing, globals, &mut arm_refs);
+                }
                 collect_refs_block(&arm.body, enclosing, globals, &mut arm_refs);
                 out.extend(arm_refs.into_iter().filter(|n| !bound.contains(n)));
             }
@@ -439,6 +445,9 @@ fn collect_nested_frees_stmt(
                 let mut bound = HashSet::new();
                 pattern_names(&arm.pattern, &mut bound);
                 let mut arm_refs = BTreeSet::new();
+                if let Some(guard) = &arm.guard {
+                    collect_nested_frees_block(&guard.block, enclosing, globals, &mut arm_refs);
+                }
                 collect_nested_frees_block(&arm.body, enclosing, globals, &mut arm_refs);
                 out.extend(arm_refs.into_iter().filter(|n| !bound.contains(n)));
             }

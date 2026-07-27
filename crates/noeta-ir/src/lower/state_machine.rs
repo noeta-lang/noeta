@@ -1528,8 +1528,11 @@ fn desugar_match_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         let arm_span = arm.span;
         if !arm.body.has_await() {
             // Non-awaiting arm: assign its value to the result cell, verbatim (no await inside).
+            // The guard (await-free by the checker's guard rule) selects the arm exactly as in
+            // the source.
             phase1_arms.push(MatchArm {
                 pattern: arm.pattern,
+                guard: arm.guard,
                 body: ClosureBody::Block(arm_body_to_result(&mr, arm.body, arm_span)),
                 span: arm_span,
             });
@@ -1552,8 +1555,12 @@ fn desugar_match_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
             rebind.push(mut_binding(bname, ident(&cell, *bspan), *bspan));
         }
         select.push(bare_assign_expr(&md, int_expr(disc, arm_span), arm_span));
+        // The guard (await-free by the checker's guard rule) stays on the Phase-1 selection arm:
+        // pattern + guard together decide whether this arm's discriminant is flipped, so a false
+        // guard falls through to the next Phase-1 arm exactly as in the source.
         phase1_arms.push(MatchArm {
             pattern: arm.pattern,
+            guard: arm.guard,
             body: ClosureBody::Block(select),
             span: arm_span,
         });
@@ -1640,6 +1647,7 @@ fn block_arm_expr(body: ClosureBody, span: Span) -> Expr {
         scrutinee: Box::new(int_expr(0, span)),
         arms: vec![MatchArm {
             pattern: noeta_ast::Pattern::Wildcard { span },
+            guard: None,
             body,
             span,
         }],
@@ -1758,11 +1766,13 @@ fn is_some_test(opt: Expr, span: Span) -> Expr {
                     bindings: vec![noeta_ast::Pattern::Wildcard { span }],
                     span,
                 },
+                guard: None,
                 body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Bool { value: true, span })),
                 span,
             },
             noeta_ast::MatchArm {
                 pattern: noeta_ast::Pattern::Wildcard { span },
+                guard: None,
                 body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Bool { value: false, span })),
                 span,
             },

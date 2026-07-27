@@ -856,6 +856,9 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
         } => {
             visit_expr_types(scrutinee, f);
             for arm in arms.iter_mut() {
+                if let Some(guard) = &mut arm.guard {
+                    visit_expr_types(guard, f);
+                }
                 match &mut arm.body {
                     crate::ClosureBody::Expr(e) => visit_expr_types(e, f),
                     crate::ClosureBody::Block(stmts) => {

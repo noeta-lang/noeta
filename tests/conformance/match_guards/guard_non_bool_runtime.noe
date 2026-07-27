@@ -1,0 +1,11 @@
+// A guard whose static type is a gradual hole (here: a payload bound from a `dyn` scrutinee)
+// passes the static bool check, so its bool-ness is enforced at runtime — the same E0007 an `if`
+// condition raises, reported at the guard, identical in both backends (the VM compiles a guard to
+// the same fused conditional branch as an `if`/`while` condition).
+// expect: error E0007 at 9:16
+// expect: exit 1
+fn get(): dyn { return some(1); }
+echo match get() {
+    some(b) if b => "yes",
+    _ => "no",
+};

@@ -2532,6 +2532,10 @@ impl Printer<'_> {
         if arms.len() != 2 || !self.source_starts_with_if(span) {
             return Ok(None);
         }
+        // The desugar never produces guarded arms; a guard means a literal (guarded) `match`.
+        if arms.iter().any(|a| a.guard.is_some()) {
+            return Ok(None);
+        }
         let cond = match (&arms[0].pattern, &arms[1].pattern) {
             (Pattern::Bool { value: true, .. }, Pattern::Bool { value: false, .. }) => {
                 self.restricted_head(scrutinee, false)?
@@ -2837,18 +2841,27 @@ impl Printer<'_> {
         if arms.is_empty() {
             return Ok(Doc::concat([head, Doc::text(" {}")]));
         }
-        // Optional column alignment of the `=>` arrows (config): pad each pattern to the widest.
+        // The arm's left column is `pattern` or `pattern if guard` — the guard is part of the
+        // column, so the `align` mode pads the whole of it to the widest.
+        let arm_left = |a: &MatchArm| -> Result<Doc, FmtError> {
+            let pat = self.pattern(&a.pattern)?;
+            Ok(match &a.guard {
+                Some(guard) => Doc::concat([pat, Doc::text(" if "), self.expr(guard)?]),
+                None => pat,
+            })
+        };
+        // Optional column alignment of the `=>` arrows (config): pad each left column to the widest.
         let arrow_col = if self.config.match_arm_arrows == ArrowStyle::Align {
             let mut widths = Vec::new();
             for a in arms {
-                widths.push(pattern_width(self.pattern(&a.pattern)?));
+                widths.push(pattern_width(arm_left(a)?));
             }
             widths.into_iter().max().unwrap_or(0)
         } else {
             0
         };
         let render_arm = |a: &MatchArm| -> Result<Doc, FmtError> {
-            let pat = self.pattern(&a.pattern)?;
+            let pat = arm_left(a)?;
             let pad = if self.config.match_arm_arrows == ArrowStyle::Align {
                 " ".repeat(arrow_col.saturating_sub(pattern_width_ref(&pat)))
             } else {

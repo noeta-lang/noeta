@@ -781,7 +781,20 @@ pub enum Stmt {
 #[derive(Debug, Clone)]
 pub struct Arm {
     pub pattern: Pattern,
+    /// The arm's guard (`pattern if cond => …`), if any. Evaluated **only after** the pattern
+    /// structurally matches, with the pattern's bindings bound; a `false` guard falls through to
+    /// the next arm exactly as a failed pattern would. Its block's `tail` is the guard's bool.
+    pub guard: Option<Guard>,
     pub body: Block,
+    pub span: Span,
+}
+
+/// A match-arm guard: the lazily-evaluated value block computing the guard's bool (tail `Some`),
+/// plus the guard expression's source span — a [`Block`] carries no span of its own, and the
+/// runtime non-bool error (both backends, identical) is reported at the guard.
+#[derive(Debug, Clone)]
+pub struct Guard {
+    pub block: Block,
     pub span: Span,
 }
 
@@ -805,7 +818,7 @@ impl Block {
 
 impl Stmt {
     /// Visit each **control-flow child block** of this statement: the two arms of `if`, the
-    /// `while` condition and body, the `for` body, each `match` arm's body, and the lazy
+    /// `while` condition and body, the `for` body, each `match` arm's guard and body, and the lazy
     /// `right`/`fallback` operand of `&&`/`||`/`??`. Leaf statements have none.
     ///
     /// Deliberately does **not** descend into a `Decl` (a nested `fn`/`class` is a *separate*
@@ -834,6 +847,9 @@ impl Stmt {
             Stmt::For { body, .. } => f(body),
             Stmt::Match { arms, .. } => {
                 for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        f(&guard.block);
+                    }
                     f(&arm.body);
                 }
             }

@@ -1,0 +1,15 @@
+// `.await` is not allowed in a `match` guard (E0040): the state-machine lowering cannot suspend
+// between a pattern test and its guard — a hoisted await would run eagerly, breaking the
+// only-the-taken-arm-evaluates rule. Await before the `match`, or in the arm's body.
+// expect: error E0040 at 10:14
+// expect: exit 1
+async fn flag(): bool { return true; }
+
+async fn pick(n: int): int {
+    return match n {
+        k if flag().await => k,
+        _ => 0,
+    };
+}
+
+z = pick(1).await

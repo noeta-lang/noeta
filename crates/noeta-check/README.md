@@ -15,7 +15,7 @@ Every expression gets an inferred `Type`. Signatures are **required at named bou
 
 ## What it checks (M1.7)
 
-- **Exhaustive `match`** (`E0011`) — a concretely-typed enum / `Result` / `Option` scrutinee missing a variant with no catch-all (promotes M1.5's runtime non-exhaustive error).
+- **Exhaustive `match`** (`E0011`) — a concretely-typed enum / `Result` / `Option` scrutinee missing a variant with no catch-all (promotes M1.5's runtime non-exhaustive error). A **guarded** arm (`pattern if cond`) contributes nothing to coverage — the checker cannot prove a guard ever true — and the guard itself is checked as a `bool` position with the arm's pattern bindings in scope.
 - **`?` on a non-fallible value** (`E0012`) — `expr?` where `expr` is statically neither `Result` nor `Option`.
 - **Arithmetic type mismatch** (`E0007`) — `+ - * / %` on a concretely non-numeric operand, reusing the runtime `TypeMismatch` code at the same span.
 

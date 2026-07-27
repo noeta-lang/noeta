@@ -673,6 +673,7 @@ fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
         span,
     };
     let arm = |variant: &str, body: Expr| noeta_ast::MatchArm {
+        guard: None,
         pattern: noeta_ast::Pattern::Variant {
             type_name: None,
             variant: variant.to_string(),
@@ -2280,6 +2281,19 @@ impl Lowerer<'_> {
                 let scrut = self.lower_expr(scrutinee, out)?;
                 let mut ir_arms = Vec::with_capacity(arms.len());
                 for arm in arms {
+                    // The guard lowers to a lazily-evaluated value block (tail = the bool), run
+                    // by the backends only after the pattern matches — like a `while` condition,
+                    // it must not be hoisted into the pre-computed statement stream.
+                    let guard = arm
+                        .guard
+                        .as_ref()
+                        .map(|g| {
+                            Ok::<_, Unsupported>(crate::Guard {
+                                block: self.lower_value_block(g)?,
+                                span: g.span(),
+                            })
+                        })
+                        .transpose()?;
                     // An expression arm's value block yields its value; a statement-block arm
                     // (aether F1) lowers its statements in the SAME frame (so `return` exits the
                     // enclosing function) and yields `unit`.
@@ -2300,6 +2314,7 @@ impl Lowerer<'_> {
                     };
                     ir_arms.push(crate::Arm {
                         pattern: arm.pattern.clone(),
+                        guard,
                         body,
                         span: arm.span,
                     });

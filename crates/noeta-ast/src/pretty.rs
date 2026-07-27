@@ -964,6 +964,12 @@ impl Pretty for Expr {
                     out.push('\n');
                     indent(out, level + 1);
                     out.push_str(&format!("(arm {}\n", pattern_str(&arm.pattern)));
+                    if let Some(guard) = &arm.guard {
+                        indent(out, level + 2);
+                        out.push_str("(guard\n");
+                        guard.pretty(out, level + 3);
+                        out.push_str(")\n");
+                    }
                     match &arm.body {
                         ClosureBody::Expr(e) => e.pretty(out, level + 2),
                         ClosureBody::Block(stmts) => {
