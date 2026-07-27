@@ -1,0 +1,48 @@
+// A closure capturing a match-arm binding that **outlives the arm**: returned as the match's value,
+// stored in a list, or returned out of the function entirely. The capture is a real cell, so the
+// value survives after the arm (and the frame) is gone — the same guarantee `returned_stateful_closure`
+// makes for a `mut` local, now for a pattern binding. Each arm gets its own cell, so two arms binding
+// the same name stay independent.
+// expect: stdout "8"
+// expect: stdout "7"
+// expect: stdout "8"
+// expect: stdout "11"
+// expect: stdout "9"
+// expect: stdout "42"
+// expect: exit 0
+
+// The arm's value *is* the closure: it escapes the arm and is called afterward.
+x = some(7)
+f = match x {
+    some(v) => fn(n) => n + v,
+    none => fn(n) => n,
+}
+echo f(1)
+
+// Several closures over the same binding, stored in a list that outlives the arm.
+fs = match x {
+    some(v) => [fn() => v, fn() => v + 1],
+    none => [],
+}
+echo fs[0]()
+echo fs[1]()
+
+// Two arms binding the same name: each capture is its own cell.
+fn adjust(r: Result<int, int>): dyn {
+    return match r {
+        Ok(v) => fn() => v + 1,
+        Err(v) => fn() => v - 1,
+    }
+}
+echo adjust(Ok(10))()
+echo adjust(Err(10))()
+
+// A sealed nested `fn` capturing the arm binding through its `use (…)` allow-list.
+y = some(21)
+match y {
+    some(v) => {
+        fn double() use (v): int { return v * 2 }
+        echo double()
+    },
+    none => {},
+}

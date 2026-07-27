@@ -441,15 +441,19 @@ fn collect_nested_frees_stmt(
         }
         Stmt::For { body, .. } => collect_nested_frees_block(body, enclosing, globals, out),
         Stmt::Match { arms, .. } => {
+            // An arm's pattern bindings are locals of *this* function (`collect_bindings_stmt`
+            // records them), exactly like a `for` variable — so a closure in the arm that captures
+            // one must make it celled. They are therefore NOT subtracted here: this collector feeds
+            // the celling decision, and filtering them out left the binding uncelled while the
+            // closure still captured it (the compiler then had no cell to source the capture from).
+            // The mirror collector `collect_refs_stmt` *does* subtract them, because there the
+            // question is which names escape to an *enclosing* function — and an arm binding never
+            // does.
             for arm in arms {
-                let mut bound = HashSet::new();
-                pattern_names(&arm.pattern, &mut bound);
-                let mut arm_refs = BTreeSet::new();
                 if let Some(guard) = &arm.guard {
-                    collect_nested_frees_block(&guard.block, enclosing, globals, &mut arm_refs);
+                    collect_nested_frees_block(&guard.block, enclosing, globals, out);
                 }
-                collect_nested_frees_block(&arm.body, enclosing, globals, &mut arm_refs);
-                out.extend(arm_refs.into_iter().filter(|n| !bound.contains(n)));
+                collect_nested_frees_block(&arm.body, enclosing, globals, out);
             }
         }
         Stmt::Logical { right, .. } => collect_nested_frees_block(right, enclosing, globals, out),

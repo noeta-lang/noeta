@@ -1,0 +1,51 @@
+// A closure that captures a **match-arm pattern binding**. An arm binding is a local of the
+// enclosing function exactly like a `for` variable, so a closure in the arm body captures it as an
+// ordinary upvalue — the binding must therefore be celled at its binding site. The celling decision
+// used to subtract an arm's pattern names, so the binding stayed a plain register while the closure
+// still captured it, and the compiler aborted with an internal error ("a forward capture of a
+// not-yet-celled local") on this shape — an author writing `match done { some(want) => xs.filter(fn(n)
+// => n.done == want), … }` got a spanless ICE. Covered here at the top level, inside a function,
+// inside a method (alongside a `self` capture), and under a guard (the guard runs in the arm scope,
+// so the same binding is live for it).
+// expect: stdout "1"
+// expect: stdout "1"
+// expect: stdout "1"
+// expect: stdout "5"
+// expect: exit 0
+
+// Top level: the arm binding `want` is captured by the `filter` callback.
+x = some(2)
+ys = [1, 2, 3]
+echo match x {
+    some(want) => ys.filter(fn(n) => n == want).len(),
+    none => 0,
+}
+
+// The same shape inside a function body.
+fn count(o: ?int, xs: List<int>): int {
+    return match o {
+        some(want) => xs.filter(fn(n) => n == want).len(),
+        none => 0,
+    }
+}
+echo count(some(2), ys)
+
+// Inside a method, where the closure captures the arm binding *and* `self`.
+struct Threshold {
+    step: int
+    fn matches(o: ?int, xs: List<int>): int {
+        return match o {
+            some(want) => xs.filter(fn(n) => n == want + self.step).len(),
+            none => 0,
+        }
+    }
+}
+echo Threshold { step: 1 }.matches(some(1), ys)
+
+// A guard is evaluated inside the arm scope, so a closure there captures the binding too.
+g = some(5)
+gs = [1, 5, 9]
+echo match g {
+    some(want) if gs.filter(fn(n) => n == want).len() > 0 => want,
+    _ => 0,
+}
