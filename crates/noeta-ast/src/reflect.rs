@@ -916,7 +916,26 @@ impl TypeRepr {
             | TypeRepr::Struct(_, args)
             | TypeRepr::Class(_, args)
             | TypeRepr::Named(_, args) => args.iter().collect(),
-            _ => Vec::new(),
+            // The scalars have no arguments. Exhaustive on purpose (no `_`): a new `TypeRepr`
+            // variant must decide here whether the R3 matcher sees into it, rather than silently
+            // inheriting "no arguments" — the same guard every `BuiltinTy` site carries.
+            TypeRepr::Int
+            | TypeRepr::Float
+            | TypeRepr::F32
+            | TypeRepr::F64
+            | TypeRepr::IntN { .. }
+            | TypeRepr::Bool
+            | TypeRepr::Str
+            | TypeRepr::Bytes
+            | TypeRepr::Unit
+            | TypeRepr::Dyn => Vec::new(),
+            // A trait object's trait name is identity, not a type argument — `arg_matches`
+            // compares it by name in its own arm.
+            TypeRepr::DynTrait(_) => Vec::new(),
+            // A function type's parameters/return and a union's members are structural
+            // components, not R3 type arguments: neither is a narrowable tagged container, and
+            // `arg_matches` handles unions member-wise in its own arms. Deliberately empty.
+            TypeRepr::Fn(_, _) | TypeRepr::Union(_) => Vec::new(),
         }
     }
 
