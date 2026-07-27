@@ -1,0 +1,25 @@
+// `field_specs_of::<T>()` / `construct::<T>(…)` on a type imported from another namespace: the
+// turbofish is written with the LOCAL name the `use` binds (`Todo`), and must resolve to the
+// declaring module's qualified identity (`app.storage.Todo`) — the key the reflection registry
+// actually holds.
+//
+// The sibling-module case is the sharper one: the entry has no namespace of its own to blame, so
+// nothing but the linker's import map can supply the qualification. The parser used to flatten the
+// turbofish to the string `"Todo"` before that map was ever consulted, which made both queries
+// silently answer as if the type had no fields.
+// expect: stdout "id: Type.Int"
+// expect: stdout "title: Type.String"
+// expect: stdout "built: Todo {id: 1, title: \"a\"}"
+// expect: exit 0
+use app.storage.Todo;
+
+for spec in field_specs_of::<Todo>() {
+    echo "${spec.name}: ${spec.type}";
+}
+
+fields: Map<string, dyn> = {"id": 1, "title": "a"};
+built = match construct::<Todo>(fields) {
+    Ok(v) => "built: ${v}",
+    Err(e) => "failed: ${e}",
+};
+echo built;

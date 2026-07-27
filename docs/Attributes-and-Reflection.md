@@ -172,7 +172,7 @@ The `Type` comes out of the same decoder `ParamInfo.type` goes through, so a sig
 
 The **type-level** field schema of a declared struct or class — one `FieldSpec` per field in declaration order: `{ name: string, type: Type, optional: bool }`. It is the declaration-side twin of `fields_of`: that one reflects an *instance*'s field **values** (and so sees the runtime-erased type), this one reflects the **declaration**, so `type` is precise and `optional` reports whether the field declared a default. An unknown name, or an enum, yields the empty list.
 
-Two surfaces, one node: the turbofish `field_specs_of::<T>()` when you know the type statically, and `field_specs_of(name)` when you hold it only as a runtime string (a `Type.Struct(name, _)` you just reflected). The turbofish is sugar — the parser lowers `T` to its name — so both behave identically.
+Two surfaces, one node: the turbofish `field_specs_of::<T>()` when you know the type statically, and `field_specs_of(name)` when you hold it only as a runtime string (a `Type.Struct(name, _)` you just reflected). They converge on one name-keyed query, so both behave identically — including under a `namespace`, where the turbofish resolves `T` to the same **qualified** identity `type_of` reports (`field_specs_of::<Todo>()` inside `namespace app.storage` asks for `app.storage.Todo`). The string surface takes the name verbatim, so it wants that qualified name too.
 
 ```noeta
 struct ServerOpts {
@@ -191,7 +191,7 @@ for spec in field_specs_of::<ServerOpts>() {
 
 ### `construct::<T>(fields): Result<dyn, string>` / `construct(name, fields): Result<dyn, string>`
 
-Builds a struct or class value **at runtime** from field values, through the *same* construction path a `T { … }` literal takes — so field defaults and full-initialization are honored identically, and a type that appears in no literal anywhere in the program still constructs. Like `field_specs_of` it has a turbofish and a runtime-string surface; like `invoke` it is fallible by construction, returning a `Result` rather than aborting. Both surfaces are typed `Result<dyn, string>` — the turbofish only spells the type *name*, so narrow the `Ok` payload back with `.as<T>()` when you need the static type.
+Builds a struct or class value **at runtime** from field values, through the *same* construction path a `T { … }` literal takes — so field defaults and full-initialization are honored identically, and a type that appears in no literal anywhere in the program still constructs. Like `field_specs_of` it has a turbofish and a runtime-string surface (with the same qualified-identity resolution under a `namespace`); like `invoke` it is fallible by construction, returning a `Result` rather than aborting. Both surfaces are typed `Result<dyn, string>` — the turbofish only spells the type *name*, so narrow the `Ok` payload back with `.as<T>()` when you need the static type.
 
 `fields` accepts either shape:
 

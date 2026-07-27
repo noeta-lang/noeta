@@ -120,3 +120,24 @@ fn resugared_output_is_idempotent() {
     let twice = format_source("resugar.noe", &once, &FmtConfig::default()).expect("formats");
     assert_eq!(once, twice);
 }
+
+// --- the two reflection surfaces stay distinct ---
+
+#[test]
+fn reflection_turbofish_round_trips() {
+    preserved(
+        "struct T {\n    a: int\n}\n\nspecs = field_specs_of::<T>()\nv = construct::<T>([1])\n",
+    );
+}
+
+#[test]
+fn authored_reflection_string_is_not_sugared() {
+    // The dynamic surface takes a runtime `string`, and a literal that happens to spell a local
+    // type name is still that string — printing it back as `field_specs_of::<T>()` would change
+    // what the program asks for, because the turbofish resolves to the type's *qualified* identity
+    // while the string is taken verbatim. The two surfaces were previously one `Expr::Str` operand,
+    // so the printer could not tell them apart and rewrote this into the turbofish form.
+    preserved(
+        "struct T {\n    a: int\n}\n\nspecs = field_specs_of(\"T\")\nv = construct(\"T\", [1])\n",
+    );
+}

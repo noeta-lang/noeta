@@ -29,7 +29,7 @@
 use crate::pretty::type_ref_str;
 use crate::{
     BinaryOp, CallArg, DeriveSpec, Expr, FieldDecl, FieldInit, FnDecl, ObjectLit, Param, Stmt,
-    StrPart, TraitDecl, TypeRef,
+    StrPart, TraitDecl, TypeOperand, TypeRef,
 };
 use noeta_span::Span;
 
@@ -719,6 +719,15 @@ fn visit_stmt_types(stmt: &mut Stmt, f: &mut impl FnMut(&mut TypeRef)) {
     }
 }
 
+/// Apply `f` to a reflection surface's type operand: the turbofish arm IS a [`TypeRef`], the
+/// dynamic arm an ordinary expression to recurse into.
+fn visit_type_operand_types(op: &mut TypeOperand, f: &mut impl FnMut(&mut TypeRef)) {
+    match op {
+        TypeOperand::Static(ty) => f(ty),
+        TypeOperand::Dynamic(e) => visit_expr_types(e, f),
+    }
+}
+
 /// Apply `f` to every [`TypeRef`] reachable from `expr`. Exhaustive over the expression grammar.
 fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
     match expr {
@@ -877,11 +886,14 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
         Expr::TypeOf { value, .. }
         | Expr::FieldsOf { value, .. }
         | Expr::TraitsOf { value, .. } => visit_expr_types(value, f),
-        Expr::ParamsOf { target, .. }
-        | Expr::ReturnsOf { target, .. }
-        | Expr::FieldSpecsOf { name: target, .. } => visit_expr_types(target, f),
+        Expr::ParamsOf { target, .. } | Expr::ReturnsOf { target, .. } => {
+            visit_expr_types(target, f)
+        }
+        // A turbofish operand IS a type reference (and the only one the derive rewrite can reach
+        // here); a dynamic one is an ordinary expression.
+        Expr::FieldSpecsOf { name, .. } => visit_type_operand_types(name, f),
         Expr::Construct { name, fields, .. } => {
-            visit_expr_types(name, f);
+            visit_type_operand_types(name, f);
             visit_expr_types(fields, f);
         }
         Expr::TierExpr { holes, .. } => holes.iter_mut().for_each(|h| visit_expr_types(h, f)),

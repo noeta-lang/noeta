@@ -5,7 +5,7 @@
 //! left this file are only the delegated siblings (`ops`/`calls`/`member`/`patterns`).
 
 use crate::*;
-use noeta_ast::{CallArg, ObjectLit};
+use noeta_ast::{CallArg, ObjectLit, TypeOperand};
 
 impl Checker {
     // ----- bidirectional judgments -----
@@ -552,6 +552,45 @@ impl Checker {
             self.sites.expr_types.insert(expr.span(), repr);
         }
         ty
+    }
+
+    /// Check a name-keyed reflection surface's type operand (`field_specs_of`, `construct`).
+    ///
+    /// The **turbofish** arm carries a real `TypeRef`, so it is resolved like any other type
+    /// annotation — a name that resolves to nothing is an E0013, not a silent empty schema. That is
+    /// only possible because the type stays a `TypeRef` through the linker: the checker runs on the
+    /// already-qualified program, so `field_specs_of::<Todo>()` under `namespace app.storage` looks
+    /// up `app.storage.Todo` and a native extern spelled by its qualified path
+    /// (`field_specs_of::<std.test.Skip>()`) resolves without a `use`, exactly as
+    /// `attributes_of::<T>()` already did. Leniency about the *answer* is untouched: a type that
+    /// resolves but has no field schema (an enum, a `dyn` trait) still yields the empty list.
+    ///
+    /// The **dynamic** arm is an ordinary expression that must be a `string`. Nothing is resolved
+    /// there — its value is only known at runtime, which is the whole point of the surface.
+    fn check_type_operand(
+        &mut self,
+        operand: &TypeOperand,
+        env: &mut Env,
+        span: noeta_span::Span,
+        surface: &str,
+        help: &str,
+    ) {
+        let e = match operand {
+            TypeOperand::Static(ty) => {
+                self.check_type_ref(ty);
+                return;
+            }
+            TypeOperand::Dynamic(e) => e,
+        };
+        let name_ty = self.synth(e, env);
+        if !matches!(name_ty, Type::String) && !name_ty.defers_to_runtime() {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("`{surface}` expects a `string` type name, found `{name_ty}`"),
+            )
+            .help(help.to_string());
+        }
     }
 
     pub(crate) fn synth_inner(&mut self, expr: &Expr, env: &mut Env) -> Type {
@@ -1414,19 +1453,17 @@ impl Checker {
                 )))
             }
             Expr::FieldSpecsOf { name, span } => {
-                // The type-level field schema, surfaced as `List<FieldSpec>`. The `name` operand is a
-                // runtime `string` naming a declared struct/class type (a turbofish `::<T>()` was
-                // already lowered to that name by the parser). Lenient like `params_of`: an unknown
-                // type is a runtime empty list, not a static error.
-                let name_ty = self.synth(name, env);
-                if !matches!(name_ty, Type::String) && !name_ty.defers_to_runtime() {
-                    self.error(
-                        DiagnosticCode::TypeMismatch,
-                        *span,
-                        format!("`field_specs_of` expects a `string` type name, found `{name_ty}`"),
-                    )
-                    .help("pass a struct or class type name, or use the turbofish `field_specs_of::<T>()`");
-                }
+                // The type-level field schema, surfaced as `List<FieldSpec>`. The turbofish surface
+                // names the type statically (so an unresolvable `T` is an E0013); the dynamic surface
+                // takes a runtime `string` naming a declared struct/class type, and stays lenient
+                // like `params_of` — an unknown name there is a runtime empty list, not an error.
+                self.check_type_operand(
+                    name,
+                    env,
+                    *span,
+                    "field_specs_of",
+                    "pass a struct or class type name, or use the turbofish `field_specs_of::<T>()`",
+                );
                 Type::List(Box::new(Type::Named(
                     noeta_ast::reflect::FIELD_SPEC.to_string(),
                     Vec::new(),
@@ -1437,15 +1474,13 @@ impl Checker {
                 // runtime `List<dyn>` of field values in declaration order. Fallible by construction
                 // (unknown type / arity / type-mismatch / missing required field are runtime `Err`),
                 // so both operands are synthesized leniently and the result is `Result<dyn, string>`.
-                let name_ty = self.synth(name, env);
-                if !matches!(name_ty, Type::String) && !name_ty.defers_to_runtime() {
-                    self.error(
-                        DiagnosticCode::TypeMismatch,
-                        *span,
-                        format!("`construct` expects a `string` type name, found `{name_ty}`"),
-                    )
-                    .help("pass a struct or class type name, or use the turbofish `construct::<T>(fields)`");
-                }
+                self.check_type_operand(
+                    name,
+                    env,
+                    *span,
+                    "construct",
+                    "pass a struct or class type name, or use the turbofish `construct::<T>(fields)`",
+                );
                 self.synth(fields, env);
                 Type::Result(Box::new(Type::Dyn), Box::new(Type::String))
             }

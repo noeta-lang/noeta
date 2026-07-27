@@ -1465,6 +1465,84 @@ impl TypeRef {
             | TypeRef::Fn { span, .. } => *span,
         }
     }
+
+    /// The **head name** of this type reference, as the reflection registry keys it.
+    ///
+    /// A nominal type (the only meaningful argument to the type-level reflection queries) yields its
+    /// name — after the linker has run, that is the *qualified* identity (`app.storage.Todo`), which
+    /// is exactly the key `field_specs_of`/`construct` look up. A non-nominal reference (a container,
+    /// `?T`, a union, a tuple, a fn type) has no single type name and yields the empty string, so the
+    /// query answers with the honest empty result rather than a spurious match.
+    pub fn head_name(&self) -> String {
+        match self {
+            TypeRef::Named { name, .. } => name.clone(),
+            TypeRef::DynTrait { trait_name, .. } => trait_name.clone(),
+            _ => String::new(),
+        }
+    }
+}
+
+/// **How a name-keyed reflection surface names its type** — the two disjoint arms of
+/// `field_specs_of` and `construct`, which each spell one query under one keyword in two ways.
+///
+/// Both arms end at the same runtime node (a type *name*, because the reflection registries are
+/// name-keyed), but they must stay distinguishable all the way through the compiler, and the static
+/// arm must stay a **type**:
+///
+/// * Namespace qualification runs in the *linker*, long after parsing, and it rewrites [`TypeRef`]s.
+///   A turbofish `T` flattened to a string literal in the parser is invisible to it, so
+///   `field_specs_of::<Todo>()` under `namespace app.storage` would query the unqualified key `Todo`
+///   and silently answer with the empty schema. Keeping `T` a [`TypeRef`] until lowering puts it on
+///   the one path that qualifies every other type reference — the same convention
+///   [`Expr::FromBytes`], [`Expr::Channel`] and [`Expr::AttributesOf`] already follow.
+/// * The dynamic arm is a genuine runtime `string` (a framework holding a `Type.Struct(name, _)` it
+///   just reflected). It must NOT be qualified — a literal `field_specs_of("Todo")` that happens to
+///   spell a local type name means the string `Todo`, and nothing else. Modelling the two as one
+///   overloaded operand would make that distinction a guess; here it is a discriminant.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeOperand {
+    /// The turbofish surface: `field_specs_of::<T>()` / `construct::<T>(fields)`. Lowering (which
+    /// runs post-qualification) takes [`TypeRef::head_name`] — the *qualified* identity, exactly the
+    /// key the reflection registry stores the type under.
+    Static(TypeRef),
+    /// The runtime-string surface: `field_specs_of(name)` / `construct(name, fields)`. Any
+    /// expression; the checker requires it to be a `string`.
+    Dynamic(Box<Expr>),
+}
+
+impl TypeOperand {
+    /// The turbofish type, or `None` for the dynamic surface.
+    pub fn static_type(&self) -> Option<&TypeRef> {
+        match self {
+            TypeOperand::Static(ty) => Some(ty),
+            TypeOperand::Dynamic(_) => None,
+        }
+    }
+
+    /// The runtime-string operand, or `None` for the turbofish surface. The walks that recurse into
+    /// sub-*expressions* (free variables, awaits, nested fns, qualification) use this: the static
+    /// arm holds no expression at all.
+    pub fn dynamic(&self) -> Option<&Expr> {
+        match self {
+            TypeOperand::Static(_) => None,
+            TypeOperand::Dynamic(e) => Some(e),
+        }
+    }
+
+    /// [`TypeOperand::dynamic`], mutably — for the rewriting walks.
+    pub fn dynamic_mut(&mut self) -> Option<&mut Expr> {
+        match self {
+            TypeOperand::Static(_) => None,
+            TypeOperand::Dynamic(e) => Some(e),
+        }
+    }
+
+    pub fn span(&self) -> Span {
+        match self {
+            TypeOperand::Static(ty) => ty.span(),
+            TypeOperand::Dynamic(e) => e.span(),
+        }
+    }
 }
 
 /// An expression.
@@ -1764,8 +1842,9 @@ pub enum Expr {
     /// whether it declared a default. `name` is a runtime `string` naming the type — the same
     /// string-keyed shape [`Expr::ParamsOf`] takes — so a framework holding a type name only as a
     /// runtime string (`Type.Struct(name, _)`) can query it. The turbofish surface
-    /// `field_specs_of::<T>()` is sugar the parser lowers to this node with `T`'s name as the string.
-    FieldSpecsOf { name: Box<Expr>, span: Span },
+    /// `field_specs_of::<T>()` names the type statically; the two surfaces are the two arms of
+    /// [`TypeOperand`], and both converge on one name-keyed runtime node.
+    FieldSpecsOf { name: TypeOperand, span: Span },
     /// The reflection constructor `construct::<T>(fields)` / `construct(name, fields)` — build a
     /// struct value from field values at runtime, reusing the SAME construction path as a `T { … }`
     /// literal (field defaults and full-initialization honored). `name` is a runtime `string` naming
@@ -1773,10 +1852,10 @@ pub enum Expr {
     /// (a list shorter than the field count fills the remaining fields from their defaults). Evaluates
     /// to a `Result<dyn, string>` — `Ok(value)` on success, `Err(msg)` for an unknown type, an
     /// arity/type-mismatch, or a missing non-defaulted field — recoverable like [`Expr::Invoke`]. The
-    /// turbofish surface `construct::<T>(fields)` is sugar the parser lowers to this node with `T`'s
-    /// name as the string.
+    /// turbofish surface `construct::<T>(fields)` names the type statically — the two surfaces are
+    /// the two arms of [`TypeOperand`].
     Construct {
-        name: Box<Expr>,
+        name: TypeOperand,
         fields: Box<Expr>,
         span: Span,
     },
@@ -2215,12 +2294,13 @@ impl Expr {
             | Expr::TraitsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
             | Expr::ReturnsOf { target: expr, .. }
-            | Expr::FieldSpecsOf { name: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
             Expr::Channel { capacity, .. } => capacity.mentions(name),
+            // A turbofish operand is a type, never a value binding; only a dynamic one can mention.
+            Expr::FieldSpecsOf { name: n, .. } => n.dynamic().is_some_and(|e| e.mentions(name)),
             Expr::Construct {
                 name: n, fields, ..
-            } => n.mentions(name) || fields.mentions(name),
+            } => n.dynamic().is_some_and(|e| e.mentions(name)) || fields.mentions(name),
             Expr::Invoke {
                 recv,
                 name: n,
@@ -2330,10 +2410,12 @@ impl Expr {
             | Expr::TraitsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
             | Expr::ReturnsOf { target: expr, .. }
-            | Expr::FieldSpecsOf { name: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
             Expr::Channel { capacity, .. } => capacity.has_await(),
-            Expr::Construct { name, fields, .. } => name.has_await() || fields.has_await(),
+            Expr::FieldSpecsOf { name, .. } => name.dynamic().is_some_and(Expr::has_await),
+            Expr::Construct { name, fields, .. } => {
+                name.dynamic().is_some_and(Expr::has_await) || fields.has_await()
+            }
             Expr::Invoke {
                 recv, name, args, ..
             } => {

@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use noeta_ast::{
     AttrValue, Attribute, CallArg, ClosureBody, Expr, FieldDecl, FnDecl, ImplBlock, ImplDecl,
-    Param, Pattern, Stmt, StrPart, TypeParam, TypeRef, VariantDecl,
+    Param, Pattern, Stmt, StrPart, TypeOperand, TypeParam, TypeRef, VariantDecl,
 };
 
 /// A module's qualification map: a **local** type name (an in-module declaration's short name, or an
@@ -63,6 +63,15 @@ enum NameKind {
     /// kind the local-binding suppression applies to, because module aliases are lowercase and
     /// collide with ordinary locals.
     ValueChain,
+}
+
+/// Rewrite a reflection surface's type operand: the turbofish arm is a genuine type reference (so it
+/// qualifies), the dynamic arm a runtime-string expression (so it does not).
+fn q_type_operand(op: &mut TypeOperand, visit: &mut NameVisitor) {
+    match op {
+        TypeOperand::Static(ty) => q_typeref(ty, visit),
+        TypeOperand::Dynamic(e) => q_expr(e, visit),
+    }
 }
 
 /// Rewrite every named type inside a [`TypeRef`], recursively — so `List<User>`, `?User`,
@@ -385,15 +394,22 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
         | Expr::TraitsOf { value: inner, .. }
         | Expr::ParamsOf { target: inner, .. }
         | Expr::ReturnsOf { target: inner, .. }
-        | Expr::FieldSpecsOf { name: inner, .. }
         | Expr::As { expr: inner, .. }
         | Expr::TypeTest { expr: inner, .. }
         | Expr::FromBytes { blob: inner, .. }
         | Expr::Channel {
             capacity: inner, ..
         } => bound_in_expr(inner, names),
+        // A turbofish operand is a type, never a binding; a dynamic one is an ordinary expression.
+        Expr::FieldSpecsOf { name, .. } => {
+            if let Some(e) = name.dynamic() {
+                bound_in_expr(e, names);
+            }
+        }
         Expr::Construct { name, fields, .. } => {
-            bound_in_expr(name, names);
+            if let Some(e) = name.dynamic() {
+                bound_in_expr(e, names);
+            }
             bound_in_expr(fields, names);
         }
         Expr::Binary { lhs: a, rhs: b, .. }
@@ -913,11 +929,15 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         Expr::FieldsOf { value, .. } | Expr::TraitsOf { value, .. } => q_expr(value, visit),
         // The target is a runtime string, not a type, so nothing to qualify beyond the operand expr.
         Expr::ParamsOf { target, .. } | Expr::ReturnsOf { target, .. } => q_expr(target, visit),
-        // The type name is already a string operand (the turbofish desugar captured the written name),
-        // so there is no `TypeRef` to qualify — just walk the operand expressions.
-        Expr::FieldSpecsOf { name, .. } => q_expr(name, visit),
+        // The two name-keyed reflection surfaces. A *turbofish* operand is a real type reference, so
+        // it qualifies here like any other — that is what makes `field_specs_of::<Todo>()` under
+        // `namespace app.storage` query `app.storage.Todo` rather than silently answering with the
+        // empty schema. A *dynamic* operand is a runtime string and is walked as the ordinary
+        // expression it is: a literal `field_specs_of("Todo")` means the string `Todo`, and rewriting
+        // it because it happens to spell a local type name would be a different bug.
+        Expr::FieldSpecsOf { name, .. } => q_type_operand(name, visit),
         Expr::Construct { name, fields, .. } => {
-            q_expr(name, visit);
+            q_type_operand(name, visit);
             q_expr(fields, visit);
         }
         Expr::Invoke {
@@ -1273,5 +1293,69 @@ mod tests {
         assert_eq!(decl.attrs[0].name, "para.cli.Command");
         // The parameter's attribute qualified (the fix — previously left bare as `Arg`).
         assert_eq!(decl.params[0].attrs[0].name, "para.cli.Arg");
+    }
+
+    /// The **turbofish** surfaces of the two name-keyed reflection queries qualify their type.
+    ///
+    /// Regression: the parser used to flatten `field_specs_of::<Todo>()`'s `T` into an `Expr::Str`
+    /// at PARSE time — before this rewrite runs — so the operand was a string literal the qualifier
+    /// explicitly treats as a leaf. Under any `namespace` the query then asked for the unqualified
+    /// key `Todo`, which the reflection registry (keyed on `app.storage.Todo`) does not hold, and
+    /// answered with the empty schema / `Err` and **no diagnostic**.
+    #[test]
+    fn turbofish_reflection_types_qualify() {
+        let m = map(&[("Todo", "app.storage.Todo")]);
+        let mut stmts =
+            parse_one("a = field_specs_of::<Todo>();\nb = construct::<Todo>(fields);\n");
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        let Stmt::Binding { value, .. } = &stmts[0] else {
+            panic!("binding")
+        };
+        let Expr::FieldSpecsOf { name, .. } = value else {
+            panic!("field_specs_of")
+        };
+        assert!(
+            matches!(name.static_type(), Some(TypeRef::Named { name, .. }) if name == "app.storage.Todo")
+        );
+        let Stmt::Binding { value, .. } = &stmts[1] else {
+            panic!("binding")
+        };
+        let Expr::Construct { name, .. } = value else {
+            panic!("construct")
+        };
+        assert!(
+            matches!(name.static_type(), Some(TypeRef::Named { name, .. }) if name == "app.storage.Todo")
+        );
+    }
+
+    /// The **dynamic** surfaces are runtime strings and must stay untouched — including a string
+    /// literal that happens to spell a local type name. This is why the turbofish is modelled as a
+    /// distinct `TypeOperand` arm rather than sniffed out of the operand: a qualifier that rewrote
+    /// any `Expr::Str` under these nodes would silently change what `field_specs_of("Todo")` asks
+    /// for, which a framework passing a type name it computed at runtime would never expect.
+    #[test]
+    fn dynamic_reflection_operands_are_not_qualified() {
+        let m = map(&[("Todo", "app.storage.Todo")]);
+        let mut stmts =
+            parse_one("a = field_specs_of(\"Todo\");\nb = construct(\"Todo\", fields);\n");
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        let Stmt::Binding { value, .. } = &stmts[0] else {
+            panic!("binding")
+        };
+        let Expr::FieldSpecsOf { name, .. } = value else {
+            panic!("field_specs_of")
+        };
+        assert!(matches!(name.dynamic(), Some(Expr::Str { value, .. }) if value == "Todo"));
+        let Stmt::Binding { value, .. } = &stmts[1] else {
+            panic!("binding")
+        };
+        let Expr::Construct { name, .. } = value else {
+            panic!("construct")
+        };
+        assert!(matches!(name.dynamic(), Some(Expr::Str { value, .. }) if value == "Todo"));
     }
 }
