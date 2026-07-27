@@ -178,6 +178,40 @@ impl Type {
         )
     }
 
+    /// [`Self::is_arith_numeric`]'s set **as a type** — the union of every numeric scalar, in a
+    /// stable order (`int`, `float`, the strict floats, then the widths ascending).
+    ///
+    /// A native signature declaring `SigType::Numeric` — a parameter that takes any number, like a
+    /// kernel's scale factor — resolves to this, which is what makes such a parameter accept every
+    /// numeric kind and reject everything else. It is a union rather than a distinct variant because
+    /// that is what it *is*: adding a `Type::Numeric` would put a second spelling of the same set
+    /// into every match in the checker.
+    pub fn arith_numeric() -> Type {
+        let widths = [8u8, 16, 32, 64]
+            .into_iter()
+            .flat_map(|bits| [true, false].map(move |signed| Type::IntN { signed, bits }));
+        Type::union(
+            [Type::Int, Type::Float, Type::F32, Type::F64]
+                .into_iter()
+                .chain(widths),
+        )
+    }
+
+    /// Whether this is exactly [`Self::arith_numeric`] — every numeric scalar and nothing else.
+    ///
+    /// Both its renderings key off this: `Display` writes the short name `number` rather than
+    /// spelling twelve members, and a diagnostic about such a parameter can expand it on demand. It
+    /// compares as a SET, so it does not depend on `Type::union`'s ordering staying put.
+    pub fn is_arith_numeric_union(&self) -> bool {
+        let Type::Union(members) = self else {
+            return false;
+        };
+        let Type::Union(all) = Type::arith_numeric() else {
+            return false;
+        };
+        members.len() == all.len() && all.iter().all(|t| members.contains(t))
+    }
+
     /// This numeric type's rank in the widening lattice `int (0) < float (1)`. Arithmetic over two
     /// **lattice** numerics yields the higher-ranked type (`int + float → float`). The strict
     /// fixed-width numerics (`IntN`, `f32`, `f64`) have no rank — they do not widen (P-NUM-SYM).
@@ -423,6 +457,12 @@ impl Type {
                     BuiltinTy::KindEnum => Type::Kind(TypeKind::Enum),
                     BuiltinTy::KindStruct => Type::Kind(TypeKind::Struct),
                     BuiltinTy::KindClass => Type::Kind(TypeKind::Class),
+                    // The one built-in that desugars to a UNION rather than a lattice variant. That
+                    // is what makes `number` a name for a set the lattice already had, instead of a
+                    // thirteenth scalar the lattice would then have to relate to the other twelve —
+                    // assignability, narrowing and widening all come from `Type::Union` unchanged.
+                    // `Display` maps the union back to this spelling, so the round trip closes.
+                    BuiltinTy::Number => Type::arith_numeric(),
                 }
             }
         }
@@ -477,6 +517,12 @@ impl std::fmt::Display for Type {
                 }
                 write!(f, ") -> {ret}")
             }
+            // "Every numeric scalar" has a name, and printing it beats spelling twelve members in
+            // the middle of a sentence — `not assignable to `number`` says the same thing as
+            // `not assignable to `int | float | f32 | f64 | i8 | u8 | …`` and can be read at a
+            // glance. The full membership is still available where it helps: a diagnostic about
+            // such a parameter expands it in its help line.
+            _ if self.is_arith_numeric_union() => f.write_str("number"),
             Type::Union(members) => {
                 for (i, m) in members.iter().enumerate() {
                     if i > 0 {
@@ -518,6 +564,94 @@ mod tests {
         assert_eq!(Type::from_ref(&named("int", vec![])), Type::Int);
         assert_eq!(Type::from_ref(&named("string", vec![])), Type::String);
         assert_eq!(Type::from_ref(&named("void", vec![])), Type::Unit);
+    }
+
+    /// One sample of **every** `Type` variant — the census the numeric-set equivalence test below
+    /// runs over. Widths are enumerated because `IntN` is eight distinct types, not one.
+    fn every_variant() -> Vec<Type> {
+        let mut census = vec![
+            Type::Unknown,
+            Type::Dyn,
+            Type::Unit,
+            Type::Int,
+            Type::Float,
+            Type::F32,
+            Type::F64,
+            Type::Bool,
+            Type::String,
+            Type::Bytes,
+            Type::List(Box::new(Type::Int)),
+            Type::Map(Box::new(Type::String), Box::new(Type::Int)),
+            Type::Set(Box::new(Type::Int)),
+            Type::Option(Box::new(Type::Int)),
+            Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+            Type::Named("Order".into(), vec![]),
+            Type::Fn {
+                params: vec![Type::Int],
+                ret: Box::new(Type::Int),
+            },
+            Type::Kind(TypeKind::Struct),
+            Type::Union(vec![Type::Int, Type::String]),
+            Type::Tuple(vec![Type::Int, Type::String]),
+            Type::DynTrait("Show".into()),
+        ];
+        for bits in [8u8, 16, 32, 64] {
+            for signed in [true, false] {
+                census.push(Type::IntN { signed, bits });
+            }
+        }
+        census
+    }
+
+    /// The numeric set has **two** definitions — the predicate [`Type::is_arith_numeric`] and the
+    /// union [`Type::arith_numeric`] — and they must describe the same types.
+    ///
+    /// Nothing in the type system ties them together: the predicate is a `matches!` pattern, the
+    /// union an enumerated list, and a future numeric type (an `f16`, an `i128`) would be added to
+    /// whichever one the author happened to be looking at. The failure would be quiet and nasty —
+    /// a parameter declared `SigType::Numeric` would reject a type the rest of the checker treats as
+    /// a number, or `Display` would stop recognizing the set and print twelve members again.
+    ///
+    /// This is a **tripwire, not a proof**: it can only check the types [`every_variant`] lists. The
+    /// count assertion is what makes it bite — adding a `Type` variant fails here, and fixing the
+    /// count means reading this comment and adding the sample.
+    #[test]
+    fn the_numeric_predicate_and_the_numeric_union_agree() {
+        let census = every_variant();
+        assert_eq!(
+            census
+                .iter()
+                .map(std::mem::discriminant)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            22,
+            "a `Type` variant was added or removed — add a sample to `every_variant` and update this \
+             count, so the numeric-set check below keeps covering the whole lattice"
+        );
+
+        let Type::Union(members) = Type::arith_numeric() else {
+            panic!("`arith_numeric` must be a union");
+        };
+        for t in &census {
+            assert_eq!(
+                members.contains(t),
+                t.is_arith_numeric(),
+                "`{t}` is in one definition of the numeric set but not the other"
+            );
+        }
+        // And the union recognizes itself, which is what `Display` keys on to write `number`.
+        assert!(Type::arith_numeric().is_arith_numeric_union());
+        assert_eq!(Type::arith_numeric().to_string(), "number");
+        // The name ROUND-TRIPS: the surface spelling desugars to the union, and the union prints
+        // back as the spelling. This is what makes `number` a declared type rather than a rendering
+        // convention — break either direction and the two stop agreeing here.
+        let from_surface = Type::from_ref(&named("number", vec![]));
+        assert_eq!(from_surface, Type::arith_numeric());
+        assert_eq!(from_surface.to_string(), "number");
+        // A union that is merely numeric-ish is NOT the set, so it still prints its members.
+        let partial = Type::union([Type::Int, Type::Float]);
+        assert!(!partial.is_arith_numeric_union());
+        assert_eq!(partial.to_string(), "int | float");
     }
 
     #[test]

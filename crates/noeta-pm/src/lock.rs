@@ -44,12 +44,20 @@ pub const LOCK_NAME: &str = "noeta.lock";
 /// reading a lock whose editions it wouldn't understand.
 const LOCK_VERSION: i64 = 2;
 
-/// The **pinned trust root** of a scope (`company`), recorded trust-on-first-use in `noeta.lock`.
-/// Two roots exist (Phase 4 #2 / Phase 5) and the pin remembers *which* — that memory is the
-/// downgrade defense: a scope pinned [`ScopeTrust::Keyless`] refuses a later key-signed or
-/// unsigned release, so a registry compromise can't quietly step a scope down to a weaker root.
-/// This type is deliberately crypto-free (plain strings): the lock layer — like the LSP — reasons
-/// about trust *shapes* without linking any verification stack.
+/// A **pinned trust root**, recorded trust-on-first-use in `noeta.lock`. Two roots exist (Phase 4
+/// #2 / Phase 5) and the pin remembers *which* — that memory is the downgrade defense: something
+/// pinned [`ScopeTrust::Keyless`] refuses a later key-signed or unsigned release, so a registry
+/// compromise can't quietly step it down to a weaker root. This type is deliberately crypto-free
+/// (plain strings): the lock layer — like the LSP — reasons about trust *shapes* without linking any
+/// verification stack.
+///
+/// **What a pin is keyed by follows what the root actually identifies.** A registry registers one
+/// signing key per *scope*, so [`ScopeTrust::Key`] pins the scope (`para`). A keyless certificate
+/// certifies the CI workflow that published the release — which lives in the *package's own*
+/// repository (`…/para-html/.github/workflows/release.yml`) — so [`ScopeTrust::Keyless`] pins the
+/// package identity (`para/html`). Pinning keyless at the scope would make a scope's second package
+/// unresolvable: `para/aether` and `para/html` release from different repos, so no single identity
+/// can match both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopeTrust {
     /// The key root: the scope's registered Ed25519 public key (hex). Signatures verify against
@@ -108,10 +116,12 @@ pub struct Lock {
     /// update`/`add` can diff old→new and surface a new committer (namespace-protection, committer
     /// signal). Keyed by identity because a version bump changes the tag, so `(url, tag)` won't match.
     shas: BTreeMap<String, String>,
-    /// scope (`company`) → **pinned** trust root, trust-on-first-use (Phase 4 #2 / Phase 5): once
-    /// a scope's root is recorded here, a later registry serving a different key, a different
-    /// keyless identity, or a *weaker root* (keyless → key/unsigned) is rejected — so a registry
-    /// compromised *after* first use can't forge releases or downgrade a scope's trust.
+    /// **pinned** trust roots, trust-on-first-use (Phase 4 #2 / Phase 5): once a root is recorded
+    /// here, a later registry serving a different key, a different keyless identity, or a *weaker
+    /// root* (keyless → key/unsigned) is rejected — so a registry compromised *after* first use
+    /// can't forge releases or downgrade trust. Keyed by scope (`para`) for a key root and by
+    /// package identity (`para/html`) for a keyless one — see [`ScopeTrust`]. The two never collide:
+    /// a package identity always contains a `/`, a scope never does.
     scope_trust: BTreeMap<String, ScopeTrust>,
     /// The pinned transparency-log head (namespace-protection #1, TLog), if recorded.
     log_trust: Option<LogTrust>,
@@ -180,7 +190,7 @@ impl Lock {
             for entry in scopes {
                 let Some(s) = entry.as_table() else { continue };
                 let get = |k: &str| s.get(k).and_then(|v| v.as_str());
-                let Some(scope) = get("name") else { continue };
+                let Some(name) = get("name") else { continue };
                 // The entry's shape says which trust root is pinned: `public_key` = the key root,
                 // `issuer` + `identity` = the keyless root. An entry with neither is ignored.
                 let trust = match (get("public_key"), get("issuer"), get("identity")) {
@@ -191,9 +201,10 @@ impl Lock {
                     },
                     _ => continue,
                 };
-                lock.scope_trust.insert(scope.to_string(), trust);
+                lock.scope_trust.insert(name.to_string(), trust);
             }
         }
+        lock.migrate_legacy_keyless_pins();
         if let Some(l) = table.get("log").and_then(|v| v.as_table()) {
             let get = |k: &str| l.get(k).and_then(|v| v.as_str());
             if let (Some(public_key), Some(size), Some(root_hash)) = (
@@ -264,10 +275,54 @@ impl Lock {
         self.shas.get(identity).map(String::as_str)
     }
 
-    /// The pinned trust root for `scope`, if the lock records one (provenance TOFU, Phase 4 #2 /
-    /// Phase 5).
-    pub fn scope_trust(&self, scope: &str) -> Option<&ScopeTrust> {
-        self.scope_trust.get(scope)
+    /// The pinned trust root recorded under `key` — a scope (`para`) for a key root, a package
+    /// identity (`para/html`) for a keyless one (provenance TOFU, Phase 4 #2 / Phase 5).
+    pub fn scope_trust(&self, key: &str) -> Option<&ScopeTrust> {
+        self.scope_trust.get(key)
+    }
+
+    /// The pinned trust root to verify a release of `identity` against: the package's own keyless
+    /// pin if it has one, else its scope's key pin. Checking the package first is what lets one
+    /// scope hold packages that release from different repositories (see [`ScopeTrust`]).
+    pub fn trust_for(&self, identity: &str) -> Option<&ScopeTrust> {
+        let scope = identity.split('/').next().unwrap_or(identity);
+        self.scope_trust
+            .get(identity)
+            .or_else(|| self.scope_trust.get(scope))
+    }
+
+    /// Re-key a lock written before keyless pins moved from the scope to the package
+    /// ([`ScopeTrust`]). A bare-scope keyless entry names an identity that was certified for one
+    /// specific package's repository; when the lock records **exactly one** package in that scope,
+    /// that package is unambiguously the one it was pinned from, so the pin moves onto it.
+    ///
+    /// Any other shape — several packages in the scope, or a lock recording none at all — leaves
+    /// the entry **exactly where it is**, still enforced through [`Self::trust_for`]'s scope
+    /// fallback. A pin is a security control, so an ambiguity about who it belongs to is never
+    /// grounds for silently dropping it: that would turn a downgrade the pin exists to catch into
+    /// an accepted release. The stale spelling costs nothing — a resolve records per-package pins
+    /// for what it resolves, so the entry is gone from the next lock the toolchain writes.
+    fn migrate_legacy_keyless_pins(&mut self) {
+        let legacy: Vec<String> = self
+            .scope_trust
+            .iter()
+            .filter(|(name, trust)| {
+                !name.contains('/') && matches!(trust, ScopeTrust::Keyless { .. })
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        for scope in legacy {
+            let mut in_scope = self
+                .versions
+                .keys()
+                .filter(|identity| identity.split('/').next() == Some(scope.as_str()));
+            let (Some(only), None) = (in_scope.next().cloned(), in_scope.next()) else {
+                continue;
+            };
+            if let Some(trust) = self.scope_trust.remove(&scope) {
+                self.scope_trust.entry(only).or_insert(trust);
+            }
+        }
     }
 
     /// The pinned transparency-log head, if the lock records one (namespace-protection #1, TLog).
@@ -508,17 +563,78 @@ mod tests {
                     .to_string(),
         };
         let mut scope_trust = BTreeMap::new();
-        scope_trust.insert("acme".to_string(), pin.clone());
-        // A second scope stays on the key root — the two coexist in one lock.
+        // A keyless pin is keyed by the *package* — the certificate names that package's own
+        // release workflow, so a sibling package of the scope carries a different identity.
+        scope_trust.insert("acme/greet".to_string(), pin.clone());
+        // A scope on the key root keys by the scope — a registry registers one key per scope. The
+        // two coexist in one lock, and never collide (a package identity always has a `/`).
         scope_trust.insert("legacy".to_string(), ScopeTrust::Key("c".repeat(64)));
         write(&dir, &[git_pkg()], &scope_trust, None, None).unwrap();
 
         let lock = Lock::read(&dir);
-        assert_eq!(lock.scope_trust("acme"), Some(&pin));
+        assert_eq!(lock.scope_trust("acme/greet"), Some(&pin));
         assert_eq!(
             lock.scope_trust("legacy"),
             Some(&ScopeTrust::Key("c".repeat(64)))
         );
+        // `trust_for` is the resolve-time lookup: a package's own keyless pin, else its scope key.
+        assert_eq!(lock.trust_for("acme/greet"), Some(&pin));
+        assert_eq!(
+            lock.trust_for("legacy/thing"),
+            Some(&ScopeTrust::Key("c".repeat(64)))
+        );
+        // A sibling package of the keyless scope is unpinned — it TOFUs its own identity rather
+        // than being measured against `acme/greet`'s workflow (which it could never match).
+        assert_eq!(lock.trust_for("acme/other"), None);
+    }
+
+    #[test]
+    fn a_legacy_scope_keyless_pin_migrates_to_its_package() {
+        let pin = ScopeTrust::Keyless {
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+            identity:
+                "https://github.com/acme/imgfx/.github/workflows/release.yaml@refs/heads/main"
+                    .to_string(),
+        };
+        // A lock written when keyless pinned the scope: one package in `acme`, so the pin
+        // unambiguously belongs to it and is carried over intact.
+        let dir = std::env::temp_dir().join("noeta_lock_test_legacy_pin_one");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut legacy = BTreeMap::new();
+        legacy.insert("acme".to_string(), pin.clone());
+        write(&dir, &[git_pkg()], &legacy, None, None).unwrap();
+        let lock = Lock::read(&dir);
+        assert_eq!(lock.trust_for("acme/greet"), Some(&pin));
+        assert_eq!(lock.scope_trust("acme"), None, "the bare scope pin is re-keyed");
+
+        // Two packages in the scope: the old pin could only ever have matched one of them, so it
+        // is dropped and each package re-pins (verified afresh) on the next resolve.
+        let dir = std::env::temp_dir().join("noeta_lock_test_legacy_pin_many");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, &[git_pkg(), path_pkg()], &legacy, None, None).unwrap();
+        let lock = Lock::read(&dir);
+        // Ambiguous which package it was pinned from, so it stays a scope entry and keeps being
+        // enforced through the scope fallback — dropping a pin would accept the very downgrade it
+        // exists to catch. Each package re-pins onto itself on the next resolve.
+        assert_eq!(lock.trust_for("acme/greet"), Some(&pin));
+        assert_eq!(lock.trust_for("acme/local"), Some(&pin));
+
+        // The same holds for a lock that records the pin but no packages at all.
+        let dir = std::env::temp_dir().join("noeta_lock_test_legacy_pin_none");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(LOCK_NAME),
+            format!(
+                "version = {LOCK_VERSION}\n\n[[scope]]\nname = \"acme\"\n\
+                 issuer = \"https://token.actions.githubusercontent.com\"\n\
+                 identity = \"https://github.com/acme/imgfx/.github/workflows/release.yaml@refs/heads/main\"\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(Lock::read(&dir).trust_for("acme/anything"), Some(&pin));
     }
 
     #[test]

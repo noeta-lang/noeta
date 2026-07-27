@@ -303,6 +303,30 @@ pub enum SigType {
     /// the `ListElemWide` analog and nests through the concrete resolution. Under `dyn`/no binding it
     /// degrades to a gradual hole, never a wrong concrete type.
     Assoc(&'static str),
+    /// **`Self`** — the implementing type itself, in a native trait method's *parameter* position.
+    ///
+    /// [`RetTy::SameAsArg(0)`](RetTy::SameAsArg) has always said this on the **return** side, and
+    /// [`Assoc`](Self::Assoc) says "a type derived from `Self`'s element". Neither could say it about
+    /// an argument, so a method taking another value of the implementor's own type — `v.add(other)`
+    /// on a `@packed` vector — had to declare `Dyn` and accept anything: `v.add(5)` type-checked
+    /// clean and failed at runtime. This is the missing half of that vocabulary.
+    ///
+    /// Resolution is receiver-relative, so it is only meaningful where a receiver exists (a trait
+    /// method). `Self` is the **implementor**, not the receiver: an `Element` method's receiver *is*
+    /// `Self`, while a `Bulk` method's is `List<Self>`, and both spell their operand the same way —
+    /// `Self` and `List<Self>` respectively. Outside a trait method it degrades to a gradual hole
+    /// rather than a wrong concrete type, exactly as `Assoc` does.
+    SelfTy,
+    /// **Any numeric scalar** — every type `Type::is_arith_numeric` admits: `int`, `float`, `f32`,
+    /// `f64`, and each `i8`..`u64` width.
+    ///
+    /// The other numeric [`SigType`]s name ONE type each, and there are no fixed-width variants at
+    /// all, so a parameter that genuinely takes any number had no way to say so and was declared
+    /// `Dyn` — which also admits a string, a list, or a whole `@packed` vector. `vec.Kernels::scale`
+    /// is the case in point: its factor is width-agnostic on purpose (`read_factor` converts), so
+    /// `Color` (4×u8) scales by `2.0` as readily as by `2`, and typing it as the element would
+    /// wrongly reject the first. This says exactly what such a parameter accepts, and nothing more.
+    Numeric,
 }
 
 impl SigType {
@@ -367,6 +391,8 @@ impl SigType {
                     .join(", ")
             ),
             SigType::Assoc(name) => format!("Self::{name}"),
+            SigType::SelfTy => "Self".to_string(),
+            SigType::Numeric => "number".to_string(),
         }
     }
 }
@@ -525,6 +551,17 @@ pub enum HiddenArg {
 pub struct ExtFn {
     pub name: &'static str,
     pub params: &'static [SigType],
+    /// The parameter **names**, positionally parallel to [`Self::params`] — what a `name:` label at
+    /// a call site binds against, and what tooling shows instead of a bare type.
+    ///
+    /// Empty means "this function does not accept named arguments", and a label on a call to it is
+    /// refused rather than silently ignored (see `Checker::reject_unbound_labels`). That is the
+    /// honest state for a signature nobody has named yet: a label is a compatibility surface, so a
+    /// name here is a commitment, and inventing one is a decision rather than a formality.
+    ///
+    /// A partially-named list is a declaration bug — name every parameter or none. Length is
+    /// checked against `params` by the registry's own conformance test.
+    pub param_names: &'static [&'static str],
     pub ret: RetTy,
 }
 
@@ -533,24 +570,35 @@ impl ExtFn {
     /// out-of-tree table written as `ExtFn { name, params, ret, ..ExtFn::DEFAULTS }` keeps
     /// compiling when a future optional field (a doc string, a deprecation note, …) lands here.
     pub const DEFAULTS: ExtFn = ExtFn {
+        param_names: &[],
         name: "",
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),
     };
 
-    /// The whole signature in surface syntax — `fn split(string, string): List<string>`. Native
-    /// parameters carry no names in the registry, so parameters render as their types positionally.
+    /// The whole signature in surface syntax — `fn split(sep: string, limit: int): List<string>`,
+    /// or `fn split(string, int): List<string>` for a function whose parameters are unnamed.
     pub fn render(&self) -> String {
+        let params: Vec<String> = self
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| match self.param_names.get(i) {
+                Some(n) => format!("{n}: {}", ty.render()),
+                None => ty.render(),
+            })
+            .collect();
         format!(
             "fn {}({}): {}",
             self.name,
-            self.params
-                .iter()
-                .map(SigType::render)
-                .collect::<Vec<_>>()
-                .join(", "),
+            params.join(", "),
             self.ret.render(self.params)
         )
+    }
+
+    /// Whether this signature can bind a `name:` label — i.e. whether it declares parameter names.
+    pub fn has_param_names(&self) -> bool {
+        !self.param_names.is_empty()
     }
 }
 
@@ -4138,6 +4186,7 @@ mod render_tests {
     #[test]
     fn ext_fn_render_is_the_full_surface_signature() {
         let f = ExtFn {
+            param_names: &[],
             name: "get",
             params: &[
                 SigType::String,
@@ -4148,6 +4197,7 @@ mod render_tests {
         assert_eq!(f.render(), "fn get(string, Map<string, string>?): Response");
 
         let same_as = ExtFn {
+            param_names: &[],
             name: "add",
             params: &[SigType::Named("vec3"), SigType::Named("vec3")],
             ret: RetTy::SameAsArg(0),
@@ -4202,6 +4252,7 @@ mod runtime_registry_tests {
         methods: &[
             ExtTraitMethod {
                 sig: ExtFn {
+                    param_names: &[],
                     name: "dot",
                     params: &[SigType::Dyn],
                     ret: RetTy::Concrete(SigType::Assoc("Wide")),
@@ -4211,6 +4262,7 @@ mod runtime_registry_tests {
             },
             ExtTraitMethod {
                 sig: ExtFn {
+                    param_names: &[],
                     name: "scale_all",
                     params: &[SigType::F32],
                     ret: RetTy::SameAsArg(0),
@@ -4990,6 +5042,7 @@ mod runtime_registry_tests {
             name: "Cellish",
             namespace: "k",
             ctx_methods: &[ExtFn {
+                param_names: &[],
                 name: "get",
                 ..ExtFn::DEFAULTS
             }],
@@ -5009,6 +5062,7 @@ mod runtime_registry_tests {
         const M_NO_DISPATCH: ExtModule = ExtModule {
             name: "orphan",
             ctx_functions: &[ExtFn {
+                param_names: &[],
                 name: "go",
                 ..ExtFn::DEFAULTS
             }],
@@ -5027,6 +5081,7 @@ mod runtime_registry_tests {
         // Routing consults the plain table first, so a doubly-declared name would silently never
         // reach its ctx dispatch.
         const F_GO: ExtFn = ExtFn {
+            param_names: &[],
             name: "go",
             ..ExtFn::DEFAULTS
         };
@@ -5051,6 +5106,7 @@ mod runtime_registry_tests {
         const M_BAD_TAIL: ExtModule = ExtModule {
             name: "tail",
             functions: &[ExtFn {
+                param_names: &[],
                 name: "f",
                 params: &[SigType::Optional(&SigType::Int), SigType::String],
                 ..ExtFn::DEFAULTS
@@ -5218,6 +5274,7 @@ mod elem_retty {
         // A migrated kernel `dot(dyn): Self::Wide` renders end-to-end through `SigType::Assoc` — the
         // signature surface the folded-in `vec.Kernels` now exposes (was `ElemWide`).
         let f = ExtFn {
+            param_names: &[],
             name: "dot",
             params: &[SigType::Dyn],
             ret: RetTy::Concrete(SigType::Assoc("Wide")),

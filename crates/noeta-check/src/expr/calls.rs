@@ -584,6 +584,10 @@ impl Checker {
                 if let Some(params) = stdlib::module_params(self.reg(), module, func, args) {
                     let required =
                         stdlib::module_required(self.reg(), module, func).unwrap_or(params.len());
+                    let bound = self.bind_native_args(
+                        module, func, arg_exprs, &params, required, args, span, call_span,
+                    );
+                    let arg_exprs = bound.as_deref().unwrap_or(arg_exprs);
                     self.finalize_closure_args(&params, args, arg_exprs, env);
                     self.check_args(&params, required, args, arg_exprs, span, func);
                 }
@@ -691,6 +695,10 @@ impl Checker {
                     if let Some(params) = stdlib::module_params(self.reg(), &module, &func, args) {
                         let required = stdlib::module_required(self.reg(), &module, &func)
                             .unwrap_or(params.len());
+                        let bound = self.bind_native_args(
+                            &module, &func, arg_exprs, &params, required, args, span, call_span,
+                        );
+                        let arg_exprs = bound.as_deref().unwrap_or(arg_exprs);
                         self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, &func);
                     }
@@ -804,6 +812,10 @@ impl Checker {
                     if let Some(params) = stdlib::module_params(self.reg(), &qm, name, args) {
                         let required =
                             stdlib::module_required(self.reg(), &qm, name).unwrap_or(params.len());
+                        let bound = self.bind_native_args(
+                            &qm, name, arg_exprs, &params, required, args, span, call_span,
+                        );
+                        let arg_exprs = bound.as_deref().unwrap_or(arg_exprs);
                         self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, name);
                     }
@@ -1054,7 +1066,9 @@ impl Checker {
                 // route is recorded at the call span for lowering to bake in — so dispatch is
                 // call-site-resolved (an empty list receiver works) and a `dyn` receiver simply
                 // never reaches here (the documented escape-hatch behavior).
-                if let Some(ret) = self.bundle_method_call(&recv, name, args, span, call_span) {
+                if let Some(ret) =
+                    self.bundle_method_call(&recv, name, args, arg_exprs, span, call_span)
+                {
                     return ret;
                 }
                 let ret = self.method_call_return(&recv, name);
@@ -1622,11 +1636,19 @@ impl Checker {
                 continue;
             }
             if !self.arg_assignable(arg, param) {
-                self.error(
+                let d = self.error(
                     DiagnosticCode::TypeMismatch,
                     span,
                     format!("argument of type `{arg}` is not assignable to `{param}`"),
                 );
+                // `number` is the one parameter type whose name does not list its members, so say
+                // what it admits — once, here, rather than in the message every call site prints.
+                if param.is_arith_numeric_union() {
+                    d.help(
+                        "`number` is any numeric scalar: `int`, `float`, `f32`, `f64`, and the \
+                         fixed widths `i8`…`u64`",
+                    );
+                }
             }
         }
     }

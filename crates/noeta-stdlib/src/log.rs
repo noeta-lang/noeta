@@ -36,52 +36,62 @@ const ATTR_MAP: SigType = SigType::Map(&SigType::String, &ATTR_VALUE);
 /// message.
 pub const LOG_CTX_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["severity", "message"],
         name: "log",
         params: &[SigType::String, SigType::String],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["message"],
         name: "debug",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["message"],
         name: "info",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["message"],
         name: "warn",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["message"],
         name: "error",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Unit),
     },
     // Structured-attribute forms: a `Map<string, string|int|float|bool>` of extra attributes.
     ExtFn {
+        param_names: &["severity", "message", "attrs"],
         name: "log_with",
         params: &[SigType::String, SigType::String, ATTR_MAP],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["message", "attrs"],
         name: "debug_with",
         params: &[SigType::String, ATTR_MAP],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["message", "attrs"],
         name: "info_with",
         params: &[SigType::String, ATTR_MAP],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["message", "attrs"],
         name: "warn_with",
         params: &[SigType::String, ATTR_MAP],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["message", "attrs"],
         name: "error_with",
         params: &[SigType::String, ATTR_MAP],
         ret: RetTy::Concrete(SigType::Unit),

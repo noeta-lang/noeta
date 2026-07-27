@@ -49,6 +49,7 @@ const LANES: ExtTrait = ExtTrait {
     namespace: "nm",
     methods: &[ExtTraitMethod {
         sig: ExtFn {
+            param_names: &[],
             name: "sum",
             params: &[],
             ret: RetTy::Concrete(SigType::Assoc("Wide")),
@@ -93,6 +94,7 @@ const DUO: ExtStruct = ExtStruct {
         },
     ],
     methods: &[ExtFn {
+        param_names: &[],
         name: "sum",
         params: &[],
         ret: RetTy::Concrete(SigType::Assoc("Wide")),
@@ -141,6 +143,7 @@ fn duo_dispatch(
 // --- The module that constructs the native value -------------------------------------------------
 
 const KIT_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "duo",
     params: &[SigType::Int, SigType::Int],
     ret: RetTy::Concrete(SigType::Named("Duo")),

@@ -62,6 +62,7 @@ const POINT2: ExtStruct = ExtStruct {
         // does NOT mutate the receiver), proving a struct method dispatches to native code and its
         // return crosses back as a fresh struct value.
         ExtFn {
+            param_names: &[],
             name: "shifted",
             params: &[SigType::Int, SigType::Int],
             ret: RetTy::Concrete(SigType::Named("Point2")),
@@ -70,6 +71,7 @@ const POINT2: ExtStruct = ExtStruct {
         // which is CLASS-ONLY. Both backends must reject it at runtime for a struct receiver — a value
         // type has no in-place mutation. Proves the `FieldedKind::Struct` in-place-mutation guard.
         ExtFn {
+            param_names: &[],
             name: "bad_mutate",
             params: &[],
             ret: RetTy::Concrete(SigType::Unit),
@@ -140,12 +142,14 @@ fn new_point2(x: i64, y: i64) -> NativeOut {
 const KIT_FNS: &[ExtFn] = &[
     // Native constructor: returns a real `Point2` value at the origin (return-OUT of a struct value).
     ExtFn {
+        param_names: &[],
         name: "origin",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Point2")),
     },
     // Native constructor with args.
     ExtFn {
+        param_names: &[],
         name: "make",
         params: &[SigType::Int, SigType::Int],
         ret: RetTy::Concrete(SigType::Named("Point2")),
@@ -154,6 +158,7 @@ const KIT_FNS: &[ExtFn] = &[
     // value-struct marshals INTO a dispatch as a `NativeValue::Instance` (the registry-gated struct
     // arm), exactly like a class does, and NOT as a lossy scalar `Object`.
     ExtFn {
+        param_names: &[],
         name: "sum",
         params: &[SigType::Named("Point2")],
         ret: RetTy::Concrete(SigType::Int),
@@ -162,6 +167,7 @@ const KIT_FNS: &[ExtFn] = &[
     // the **marshal split** (R1): a native fielded struct must cross as `Instance`, while a *user*
     // value-struct (not in the registry) must keep crossing as the all-scalar `Object`, unchanged.
     ExtFn {
+        param_names: &[],
         name: "describe_arg",
         params: &[SigType::Dyn],
         ret: RetTy::Concrete(SigType::String),

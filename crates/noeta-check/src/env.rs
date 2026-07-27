@@ -125,6 +125,10 @@ pub(crate) fn builtin_receiver_type(name: &str) -> Option<Type> {
         | BuiltinTy::Dyn
         | BuiltinTy::Option
         | BuiltinTy::Result => return None,
+        // `number` names a SET of scalars, not a receiver: no value *is* a `number` (each is an
+        // `int`, an `f32`, …), and the members that do have method tables are handle-able by their
+        // own names.
+        BuiltinTy::Number => return None,
         // The abstract kind-types are static-only: no value *is* an `Enum`, so none is a receiver.
         BuiltinTy::KindEnum | BuiltinTy::KindStruct | BuiltinTy::KindClass => return None,
     })

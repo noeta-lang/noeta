@@ -451,21 +451,25 @@ const CORE_TYPES: &[ExtType] = &[
 /// `file_handle_method`/`file_handle_params` tables used to hardcode.
 const FILE_HANDLE_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "read_line",
         params: &[],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["count"],
         name: "read",
         params: &[Int],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["contents"],
         name: "write",
         params: &[Str],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &[],
         name: "close",
         params: &[],
         ret: Concrete(SigType::Unit),
@@ -1147,75 +1151,89 @@ fn want_tag<'a>(func: &str, args: &'a [NativeValue], index: usize) -> Result<&'a
 
 const CRYPTO_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["data"],
         name: "sha256",
         params: &[STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     ExtFn {
+        param_names: &["data"],
         name: "sha512",
         params: &[STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     // Interop-only digests (UUID v5, legacy checksums) — documented as not collision-resistant.
     ExtFn {
+        param_names: &["data"],
         name: "sha1",
         params: &[STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     ExtFn {
+        param_names: &["data"],
         name: "md5",
         params: &[STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     ExtFn {
+        param_names: &["key", "message"],
         name: "hmac_sha256",
         params: &[STR_OR_BYTES, STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     ExtFn {
+        param_names: &["key", "message"],
         name: "hmac_sha512",
         params: &[STR_OR_BYTES, STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     // Constant-time verification (C7): tag comparison must not short-circuit like `bytes ==`.
     ExtFn {
+        param_names: &["key", "message", "tag"],
         name: "hmac_sha256_verify",
         params: &[STR_OR_BYTES, STR_OR_BYTES, SigType::Bytes],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["key", "message", "tag"],
         name: "hmac_sha512_verify",
         params: &[STR_OR_BYTES, STR_OR_BYTES, SigType::Bytes],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "constant_time_eq",
         params: &[STR_OR_BYTES, STR_OR_BYTES],
         ret: Concrete(SigType::Bool),
     },
     // Incremental hashing (C3): per-algorithm constructors, one `Hasher` type.
     ExtFn {
+        param_names: &[],
         name: "sha256_hasher",
         params: &[],
         ret: Concrete(HASHER_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "sha512_hasher",
         params: &[],
         ret: Concrete(HASHER_SIG),
     },
     // Password hashing + crypto-grade randomness (C4) — the module's Host-entropy corner.
     ExtFn {
+        param_names: &["password", "cost"],
         name: "bcrypt_hash",
         params: &[Str, Int],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &["password", "hash"],
         name: "bcrypt_verify",
         params: &[Str, Str],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["count"],
         name: "random_bytes",
         params: &[Int],
         ret: Concrete(SigType::Bytes),
@@ -1230,11 +1248,13 @@ const HASHER_SIG: SigType = SigType::Named(crate::crypto::HASHER_TYPE_NAME);
 /// non-destructive read (interim digests keep flowing).
 const HASHER_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["data"],
         name: "update",
         params: &[STR_OR_BYTES],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &[],
         name: "digest",
         params: &[],
         ret: Concrete(SigType::Bytes),
@@ -1435,76 +1455,91 @@ const HTTP_CLIENT_FNS: &[ExtFn] = &[
     // The configured door (http arc H7): `client.new(base?)` mints a `Client` carrying base URL,
     // headers, auth, and a deadline. The free verbs below stay the one-shot door.
     ExtFn {
+        param_names: &["base"],
         name: "new",
         params: &[SigType::Optional(&Str)],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "get",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "head",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "delete",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "post",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "put",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "query",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["method", "url", "headers"],
         name: "request",
         params: &[Str, Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "get_async",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "head_async",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "delete_async",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "post_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "put_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "query_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["method", "url", "headers"],
         name: "request_async",
         params: &[Str, Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
@@ -1518,16 +1553,19 @@ const HTTP_CLIENT_FNS: &[ExtFn] = &[
 /// are the HTTP convenience over it, so a handler never touches a token or a cookie by hand.
 const SESSION_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["secrets"],
         name: "keyring",
         params: &[SigType::List(&Str)],
         ret: Concrete(KEYRING_SIG),
     },
     ExtFn {
+        param_names: &["data", "keys", "max_age"],
         name: "encode",
         params: &[SESSION_DATA_SIG, KEYRING_SIG, Int],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &["token", "keys"],
         name: "decode",
         params: &[Str, KEYRING_SIG],
         ret: Concrete(SigType::Option(&SESSION_DATA_SIG)),
@@ -1536,6 +1574,7 @@ const SESSION_FNS: &[ExtFn] = &[
     // it to rebuild the `Session` currency from a row it read, so a handler consumes a stored
     // session exactly as it does a cookie one. Clean so a pure read never provokes a row write.
     ExtFn {
+        param_names: &["data"],
         name: "of",
         params: &[SESSION_DATA_SIG],
         ret: Concrete(SESSION_SIG),
@@ -1543,6 +1582,7 @@ const SESSION_FNS: &[ExtFn] = &[
     // Read the session off a request. Never fails: an absent, forged, or expired cookie all yield
     // an empty session, because a caller has one correct response to all three.
     ExtFn {
+        param_names: &["request", "keys"],
         name: "open",
         params: &[REQUEST_SIG, KEYRING_SIG],
         ret: Concrete(SESSION_SIG),
@@ -1555,6 +1595,7 @@ const SESSION_FNS: &[ExtFn] = &[
     // credentials over cleartext. Both failures are quiet, so the choice is the caller's to make
     // out loud: `true` in production, `false` only for local development.
     ExtFn {
+        param_names: &["response", "session", "keys", "max_age", "secure"],
         name: "attach",
         params: &[RESPONSE_SIG, SESSION_SIG, KEYRING_SIG, Int, SigType::Bool],
         ret: Concrete(RESPONSE_SIG),
@@ -1757,6 +1798,7 @@ fn want_response<'a>(
 /// ctx function. None of these pull reqwest — a `use std.http.server` program links no client ring.
 const HTTP_SERVER_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["status", "body", "headers"],
         name: "response",
         params: &[Int, OPT_BODY, OPT_HEADERS],
         ret: Concrete(RESPONSE_SIG),
@@ -1764,6 +1806,7 @@ const HTTP_SERVER_FNS: &[ExtFn] = &[
     // The `Set-Cookie` builder (cookie arc C1). Server-side: a client sends cookies back through
     // the `Cookie:` header, which `Request.cookies()` reads, so only the reply side builds one.
     ExtFn {
+        param_names: &["name", "value"],
         name: "cookie",
         params: &[Str, Str],
         ret: Concrete(COOKIE_SIG),
@@ -1915,26 +1958,31 @@ const CLIENT_SIG: SigType = SigType::Named(crate::http_client::CLIENT_TYPE_NAME)
 /// paginator can hand back an absolute `next` link through a based client.
 const CLIENT_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["name", "value"],
         name: "header",
         params: &[Str, Str],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &["token"],
         name: "bearer",
         params: &[Str],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &["user", "password"],
         name: "basic",
         params: &[Str, Str],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &["ms"],
         name: "timeout",
         params: &[Int],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &["max", "base_ms", "on"],
         name: "retry",
         params: &[
             Int,
@@ -1944,11 +1992,13 @@ const CLIENT_METHODS: &[ExtFn] = &[
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "retry_non_idempotent",
         params: &[],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "base_url",
         params: &[],
         ret: Concrete(Str),
@@ -1957,6 +2007,7 @@ const CLIENT_METHODS: &[ExtFn] = &[
     // Resolves the path against the base URL and applies the client's headers, so what the outermost
     // middleware sees is the request as configured, not a half-formed one.
     ExtFn {
+        param_names: &["method", "path", "body", "headers"],
         name: "prepare",
         params: &[Str, Str, SigType::Optional(&STR_OR_BYTES), OPT_HEADERS],
         ret: Concrete(REQUEST_SIG),
@@ -1967,41 +2018,49 @@ const CLIENT_METHODS: &[ExtFn] = &[
     // deliberately does not compose chains itself, because doing so would mean holding user
     // closures inside a native value.
     ExtFn {
+        param_names: &["request"],
         name: "send",
         params: &[REQUEST_SIG],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["path", "headers"],
         name: "get",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["path", "headers"],
         name: "head",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["path", "headers"],
         name: "delete",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["path", "body", "headers"],
         name: "post",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["path", "body", "headers"],
         name: "put",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["path", "body", "headers"],
         name: "query",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["method", "path", "headers"],
         name: "request",
         params: &[Str, Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
@@ -2238,26 +2297,31 @@ fn client_method_dispatch(
 /// registration, so `?` converts it through `From` and `${e}` interpolates the sentence.
 const HTTP_ERROR_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "message",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "to_string",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "kind",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "url",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "retryable",
         params: &[],
         ret: Concrete(SigType::Bool),
@@ -2315,31 +2379,37 @@ fn http_error_method_dispatch(
 /// The `Response` instance methods (http arc H2): all pure reads over the wrapped response.
 const RESPONSE_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "status",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "ok",
         params: &[],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &[],
         name: "body",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "body_bytes",
         params: &[],
         ret: Concrete(SigType::Bytes),
     },
     ExtFn {
+        param_names: &["name"],
         name: "header",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["name", "value"],
         name: "with_header",
         params: &[Str, Str],
         ret: Concrete(RESPONSE_SIG),
@@ -2351,6 +2421,7 @@ const RESPONSE_METHODS: &[ExtFn] = &[
     // generic multi-value write. `header` answers with the first match only, which is a lossy
     // question to ask of a repeated header. Empty when absent.
     ExtFn {
+        param_names: &["name"],
         name: "headers_all",
         params: &[Str],
         ret: Concrete(SigType::List(&Str)),
@@ -2364,6 +2435,7 @@ const RESPONSE_METHODS: &[ExtFn] = &[
     // detail no caller reasons about. A generic append was the rejected alternative: it would have
     // been a second, subtly-different header operation existing to serve exactly one header.
     ExtFn {
+        param_names: &["cookie"],
         name: "with_cookie",
         params: &[COOKIE_SIG],
         ret: Concrete(RESPONSE_SIG),
@@ -2372,16 +2444,19 @@ const RESPONSE_METHODS: &[ExtFn] = &[
     // into the `Err` arm, for callers who want a 404 to short-circuit like a transport failure.
     // Kept explicit rather than folded into the verbs, so `?` on a request keeps one meaning.
     ExtFn {
+        param_names: &[],
         name: "error_for_status",
         params: &[],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "url",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "links",
         params: &[],
         ret: Concrete(SigType::Map(&Str, &Str)),
@@ -2395,6 +2470,7 @@ const RESPONSE_METHODS: &[ExtFn] = &[
 /// value you can handle, never an abort. The aborting spelling stays available as
 /// `json.parse::<T>(resp.body())` for callers who genuinely want a malformed body to be fatal.
 const RESPONSE_TYPED_METHODS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "json",
     params: &[],
     ret: TypeArg(TypeArgWrap::Result(SigType::Named("JsonError"))),
@@ -2554,31 +2630,37 @@ fn response_method_dispatch(
 /// aliased handle mutated underneath.
 const SESSION_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["name"],
         name: "get",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["name", "value"],
         name: "set",
         params: &[Str, Str],
         ret: Concrete(SESSION_SIG),
     },
     ExtFn {
+        param_names: &["name"],
         name: "remove",
         params: &[Str],
         ret: Concrete(SESSION_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "clear",
         params: &[],
         ret: Concrete(SESSION_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "dirty",
         params: &[],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &[],
         name: "data",
         params: &[],
         ret: Concrete(SESSION_DATA_SIG),
@@ -2587,6 +2669,7 @@ const SESSION_METHODS: &[ExtFn] = &[
     // change, so it does NOT mark the session dirty; and it rides alongside the data rather than in
     // it, so it never shows through `data()`.
     ExtFn {
+        param_names: &["id"],
         name: "with_id",
         params: &[Str],
         ret: Concrete(SESSION_SIG),
@@ -2594,6 +2677,7 @@ const SESSION_METHODS: &[ExtFn] = &[
     // The opaque server-side id a stored backend tagged this session with, or none. Survives
     // `clear()`, so a logout can still name the row to delete after the data is gone.
     ExtFn {
+        param_names: &[],
         name: "id",
         params: &[],
         ret: Concrete(SigType::Option(&Str)),
@@ -2666,56 +2750,67 @@ fn session_method_dispatch(
 /// new `Cookie` only after validating it, so an unserializable cookie is unrepresentable.
 const COOKIE_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "name",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "value",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &["value"],
         name: "with_value",
         params: &[Str],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["path"],
         name: "with_path",
         params: &[Str],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["domain"],
         name: "with_domain",
         params: &[Str],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["seconds"],
         name: "with_max_age",
         params: &[Int],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["enabled"],
         name: "with_http_only",
         params: &[SigType::Bool],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["enabled"],
         name: "with_secure",
         params: &[SigType::Bool],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["policy"],
         name: "with_same_site",
         params: &[Str],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "expired",
         params: &[],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "to_header",
         params: &[],
         ret: Concrete(Str),
@@ -2816,36 +2911,43 @@ fn cookie_method_dispatch(
 /// The `Request` instance methods (http-server S2): all pure reads over the wrapped inbound request.
 const REQUEST_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "method",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "path",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &["name"],
         name: "query",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["name"],
         name: "header",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &[],
         name: "body",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "body_bytes",
         params: &[],
         ret: Concrete(SigType::Bytes),
     },
     ExtFn {
+        param_names: &[],
         name: "url",
         params: &[],
         ret: Concrete(Str),
@@ -2853,11 +2955,13 @@ const REQUEST_METHODS: &[ExtFn] = &[
     // Copy-modify (the `Response.with_header` shape). A middleware layer above std — para/api —
     // rewrites a request before passing it on, so `Request` needs builders, not just accessors.
     ExtFn {
+        param_names: &["name", "value"],
         name: "with_header",
         params: &[Str, Str],
         ret: Concrete(REQUEST_SIG),
     },
     ExtFn {
+        param_names: &["url"],
         name: "with_url",
         params: &[Str],
         ret: Concrete(REQUEST_SIG),
@@ -2868,6 +2972,7 @@ const REQUEST_METHODS: &[ExtFn] = &[
     // attributes are write-only, never echoed back — so a `Cookie` here would carry six fields the
     // client never sent, each a plausible-looking lie. Empty when the header is absent.
     ExtFn {
+        param_names: &[],
         name: "cookies",
         params: &[],
         ret: Concrete(SigType::Map(&Str, &Str)),
@@ -2875,6 +2980,7 @@ const REQUEST_METHODS: &[ExtFn] = &[
     // One cookie by name — `cookies()[name]` without materializing the map, and the spelling that
     // matches `header`/`query` for the overwhelmingly common single lookup.
     ExtFn {
+        param_names: &["name"],
         name: "cookie",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
@@ -3181,21 +3287,25 @@ fn shell_quote(s: &str) -> String {
 /// `Response` accessor model.
 const EXEC_RESULT_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "status",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "ok",
         params: &[],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &[],
         name: "stdout",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "stderr",
         params: &[],
         ret: Concrete(Str),
@@ -3228,27 +3338,32 @@ fn exec_result_dispatch(
 /// each routing to the `Os` seam by the handle's id.
 const PROCESS_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "pid",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "wait",
         params: &[],
         ret: Concrete(EXEC_RESULT_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "try_wait",
         params: &[],
         ret: Concrete(SigType::Option(&EXEC_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &[],
         name: "kill",
         params: &[],
         ret: Concrete(SigType::Unit),
     },
     // Signalling (process-signals arc): the general form of `kill` — send a named OS signal.
     ExtFn {
+        param_names: &["name"],
         name: "signal",
         params: &[Str],
         ret: Concrete(SigType::Unit),
@@ -3256,6 +3371,7 @@ const PROCESS_METHODS: &[ExtFn] = &[
     // `wait_async` (process-signals arc): the awaitable twin of `wait` — yields a
     // `Future<ExecResult>`. Deterministic in the sandbox; genuinely overlapping on the real host.
     ExtFn {
+        param_names: &[],
         name: "wait_async",
         params: &[],
         ret: Concrete(SigType::Future(&EXEC_RESULT_SIG)),
@@ -3264,26 +3380,31 @@ const PROCESS_METHODS: &[ExtFn] = &[
     // the child runs, read stderr, and feed / close its stdin. `wait` still returns the whole
     // captured output.
     ExtFn {
+        param_names: &[],
         name: "read_line",
         params: &[],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["count"],
         name: "read",
         params: &[Int],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &[],
         name: "read_err_line",
         params: &[],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["contents"],
         name: "write",
         params: &[Str],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &[],
         name: "close_stdin",
         params: &[],
         ret: Concrete(SigType::Unit),
@@ -3759,66 +3880,79 @@ use SigType::{Dyn, Float, Int, String as Str};
 
 const MATH_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "pi",
         params: &[],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &[],
         name: "e",
         params: &[],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "sqrt",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["base", "exp"],
         name: "pow",
         params: &[Float, Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "sin",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "cos",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "tan",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "floor",
         params: &[Float],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &["x"],
         name: "ceil",
         params: &[Float],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &["x"],
         name: "round",
         params: &[Float],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &["x"],
         name: "abs",
         params: &[Dyn],
         ret: NumericPreserving,
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "min",
         params: &[Dyn, Dyn],
         ret: NumericPreserving,
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "max",
         params: &[Dyn, Dyn],
         ret: NumericPreserving,
@@ -3826,66 +3960,79 @@ const MATH_FNS: &[ExtFn] = &[
     // The transcendental family — real-valued like `sqrt`, so params pin to `Float` and the
     // return is always a float.
     ExtFn {
+        param_names: &["x"],
         name: "asin",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "acos",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "atan",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["y", "x"],
         name: "atan2",
         params: &[Float, Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "ln",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x", "base"],
         name: "log",
         params: &[Float, Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "log2",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "log10",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "exp",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x", "y"],
         name: "hypot",
         params: &[Float, Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "sinh",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "cosh",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "tanh",
         params: &[Float],
         ret: Concrete(Float),
@@ -4883,16 +5030,19 @@ const SPAN_METHOD_DOCS: &[(&str, &str)] = &[
 
 const RANDOM_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["seed"],
         name: "seed",
         params: &[Int],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["low", "high"],
         name: "int",
         params: &[Int, Int],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "float",
         params: &[],
         ret: Concrete(Float),
@@ -4901,11 +5051,13 @@ const RANDOM_FNS: &[ExtFn] = &[
 
 const TIME_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "monotonic",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &["ms"],
         name: "sleep",
         params: &[Int],
         ret: Concrete(SigType::Unit),
@@ -4914,6 +5066,7 @@ const TIME_FNS: &[ExtFn] = &[
 
 const ID_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "next_id",
         params: &[],
         ret: Concrete(Int),
@@ -4922,43 +5075,51 @@ const ID_FNS: &[ExtFn] = &[
     // explicit opt-in. Both return the first-class `Uuid` (extern-types X2), which displays in
     // canonical hyphenated lowercase.
     ExtFn {
+        param_names: &[],
         name: "uuid",
         params: &[],
         ret: Concrete(UUID_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "uuid_v7",
         params: &[],
         ret: Concrete(UUID_SIG),
     },
     ExtFn {
+        param_names: &["text"],
         name: "parse",
         params: &[Str],
         ret: Concrete(SigType::Option(&UUID_SIG)),
     },
     // Name-based UUIDs (crypto arc C5): pure — same namespace + name = same UUID, everywhere.
     ExtFn {
+        param_names: &["namespace", "name"],
         name: "uuid_v5",
         params: &[UUID_SIG, Str],
         ret: Concrete(UUID_SIG),
     },
     // The RFC 9562 well-known namespaces, as zero-arg constructors (a module has no constants).
     ExtFn {
+        param_names: &[],
         name: "namespace_dns",
         params: &[],
         ret: Concrete(UUID_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "namespace_url",
         params: &[],
         ret: Concrete(UUID_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "namespace_oid",
         params: &[],
         ret: Concrete(UUID_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "namespace_x500",
         params: &[],
         ret: Concrete(UUID_SIG),
@@ -4973,16 +5134,19 @@ const UUID_SIG: SigType = SigType::Named(crate::id::TYPE_NAME);
 /// carries a timestamp (v7) — the Option IS the version distinction.
 const UUID_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "to_string",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "version",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "timestamp_ms",
         params: &[],
         ret: Concrete(SigType::Option(&SigType::Int)),
@@ -5025,11 +5189,13 @@ const STR_MAP: SigType = SigType::Map(&Str, &Str);
 
 const ENV_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["name"],
         name: "get",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &[],
         name: "keys",
         params: &[],
         ret: Concrete(SigType::List(&Str)),
@@ -5037,11 +5203,13 @@ const ENV_FNS: &[ExtFn] = &[
     // `.env` support folded into the same namespace (F5): a pure parser and a file loader that
     // applies a `.env`'s defaults under real-env-wins precedence.
     ExtFn {
+        param_names: &["text"],
         name: "parse",
         params: &[Str],
         ret: Concrete(STR_MAP),
     },
     ExtFn {
+        param_names: &["path"],
         name: "load",
         params: &[SigType::Optional(&Str)],
         ret: Concrete(STR_MAP),
@@ -5049,6 +5217,7 @@ const ENV_FNS: &[ExtFn] = &[
     // `set(key, value)` writes the program's view of the environment (stdlib-gaps): sandbox
     // fixture map, or `RealHost`'s thread-safe overlay (children via `os.exec` observe it).
     ExtFn {
+        param_names: &["name", "value"],
         name: "set",
         params: &[Str, Str],
         ret: Concrete(SigType::Unit),
@@ -5056,6 +5225,7 @@ const ENV_FNS: &[ExtFn] = &[
 ];
 
 const ARGS_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "all",
     params: &[],
     ret: Concrete(SigType::List(&Str)),
@@ -5070,59 +5240,70 @@ const PROCESS_SIG: SigType = SigType::Named(crate::os::PROCESS_TYPE_NAME);
 /// The `os` module (stdlib-gaps): system introspection leaves + subprocess execution + exit.
 const OS_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "platform",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "arch",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "hostname",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "cpus",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "cwd",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "pid",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &["command", "args"],
         name: "exec",
         params: &[Str, SigType::Optional(&SigType::List(&Str))],
         ret: Concrete(EXEC_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["command", "args"],
         name: "exec_async",
         params: &[Str, SigType::Optional(&SigType::List(&Str))],
         ret: Concrete(SigType::Future(&EXEC_RESULT_SIG)),
     },
     // `spawn(command, args?)` — start a child and return a controllable `Process` handle.
     ExtFn {
+        param_names: &["command", "args"],
         name: "spawn",
         params: &[Str, SigType::Optional(&SigType::List(&Str))],
         ret: Concrete(PROCESS_SIG),
     },
     // `exit(code?)` types as unit; it never actually returns.
     ExtFn {
+        param_names: &["code"],
         name: "exit",
         params: &[SigType::Optional(&Int)],
         ret: Concrete(SigType::Unit),
     },
     // `shell_quote(s)` — POSIX-shell-safe quoting for the explicit `sh -c` escape hatch.
     ExtFn {
+        param_names: &["text"],
         name: "shell_quote",
         params: &[Str],
         ret: Concrete(Str),
@@ -5131,32 +5312,38 @@ const OS_FNS: &[ExtFn] = &[
 
 const FS_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["path", "contents"],
         name: "write",
         params: &[Str, Str],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["path", "contents"],
         name: "append",
         params: &[Str, Str],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["path", "contents"],
         name: "write_bytes",
         params: &[Str, SigType::Bytes],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["path"],
         name: "read_bytes",
         params: &[Str],
         ret: Concrete(SigType::Bytes),
     },
     // A.10 residue: the async twin of `read_bytes` — a `Future<bytes>`.
     ExtFn {
+        param_names: &["path"],
         name: "read_bytes_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Bytes)),
     },
     ExtFn {
+        param_names: &["path"],
         name: "read",
         params: &[Str],
         ret: Concrete(Str),
@@ -5165,16 +5352,19 @@ const FS_FNS: &[ExtFn] = &[
     // async context `.await`s. On the sandbox they resolve deterministically (in-oracle); on the real
     // executor they suspend and the IO runs concurrently on tokio (CLI-only, out-of-oracle).
     ExtFn {
+        param_names: &["path"],
         name: "read_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&Str)),
     },
     ExtFn {
+        param_names: &["path", "contents"],
         name: "write_async",
         params: &[Str, Str],
         ret: Concrete(SigType::Future(&SigType::Unit)),
     },
     ExtFn {
+        param_names: &["path", "contents"],
         name: "append_async",
         params: &[Str, Str],
         ret: Concrete(SigType::Future(&SigType::Unit)),
@@ -5182,42 +5372,50 @@ const FS_FNS: &[ExtFn] = &[
     // The async metadata twins (extern-types X6) — pure `FsIo` additions: no backend code
     // changed to add these, which is the point of the open seam.
     ExtFn {
+        param_names: &["path"],
         name: "exists_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Bool)),
     },
     ExtFn {
+        param_names: &["path"],
         name: "remove_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Bool)),
     },
     // Trailing-optional dir, like the sync `list` (package-manager N3.4).
     ExtFn {
+        param_names: &["path"],
         name: "list_async",
         params: &[SigType::Optional(&Str)],
         ret: Concrete(SigType::Future(&SigType::List(&Str))),
     },
     ExtFn {
+        param_names: &["path"],
         name: "read_lines",
         params: &[Str],
         ret: Concrete(SigType::List(&Str)),
     },
     ExtFn {
+        param_names: &["path"],
         name: "exists",
         params: &[Str],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["path"],
         name: "remove",
         params: &[Str],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["path"],
         name: "is_dir",
         params: &[Str],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["path"],
         name: "mkdir",
         params: &[Str],
         ret: Concrete(SigType::Unit),
@@ -5225,11 +5423,13 @@ const FS_FNS: &[ExtFn] = &[
     // A.10 residue: the async directory twins — `is_dir_async` → `Future<bool>`, `mkdir_async`
     // → `Future<void>`. `list_async` already covers directory listing.
     ExtFn {
+        param_names: &["path"],
         name: "is_dir_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Bool)),
     },
     ExtFn {
+        param_names: &["path"],
         name: "mkdir_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Unit)),
@@ -5237,11 +5437,13 @@ const FS_FNS: &[ExtFn] = &[
     // `list([dir])` — the directory argument is trailing-optional (the http-arc H4 machinery,
     // which post-dates this function's old "checker special-cases the arity" note).
     ExtFn {
+        param_names: &["path"],
         name: "list",
         params: &[SigType::Optional(&Str)],
         ret: Concrete(SigType::List(&Str)),
     },
     ExtFn {
+        param_names: &["path", "mode"],
         name: "open",
         params: &[Str, Str],
         ret: Concrete(SigType::Named("FileHandle")),
@@ -5253,71 +5455,85 @@ const FS_FNS: &[ExtFn] = &[
 // dispatch); object results are `SameAsArg` (same shape as the indicated argument).
 const VEC_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["a", "b"],
         name: "add",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "sub",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "cross",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["v", "normal"],
         name: "reflect",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "min",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "max",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["v"],
         name: "abs",
         params: &[Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["v"],
         name: "normalize",
         params: &[Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["v", "factor"],
         name: "scale",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b", "t"],
         name: "lerp",
         params: &[Dyn, Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["v", "lo", "hi"],
         name: "clamp",
         params: &[Dyn, Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "dot",
         params: &[Dyn, Dyn],
         ret: Concrete(SigType::F32),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "distance",
         params: &[Dyn, Dyn],
         ret: Concrete(SigType::F32),
     },
     ExtFn {
+        param_names: &["v"],
         name: "length",
         params: &[Dyn],
         ret: Concrete(SigType::F32),
@@ -5326,37 +5542,44 @@ const VEC_FNS: &[ExtFn] = &[
 
 const QUAT_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["a", "b"],
         name: "mul",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["q"],
         name: "conjugate",
         params: &[Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["q"],
         name: "normalize",
         params: &[Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b", "t"],
         name: "slerp",
         params: &[Dyn, Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "dot",
         params: &[Dyn, Dyn],
         ret: Concrete(SigType::F32),
     },
     ExtFn {
+        param_names: &["q"],
         name: "length",
         params: &[Dyn],
         ret: Concrete(SigType::F32),
     },
     // `rotate_vec3(q, v)` returns the *vector* (its second argument's shape).
     ExtFn {
+        param_names: &["q", "v"],
         name: "rotate_vec3",
         params: &[Dyn, Dyn],
         ret: SameAsArg(1),
@@ -5372,11 +5595,13 @@ const QUAT_FNS: &[ExtFn] = &[
 
 const JSON_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["text"],
         name: "parse",
         params: &[Str],
         ret: Concrete(Dyn),
     },
     ExtFn {
+        param_names: &["value"],
         name: "stringify",
         params: &[Dyn],
         ret: Concrete(Str),
@@ -5391,11 +5616,13 @@ const JSON_FNS: &[ExtFn] = &[
 // tree threaded with the checker-resolved recipe.
 const JSON_TYPED_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["text"],
         name: "parse",
         params: &[Str],
         ret: TypeArg(TypeArgWrap::Plain),
     },
     ExtFn {
+        param_names: &["text"],
         name: "try_parse",
         params: &[Str],
         ret: TypeArg(TypeArgWrap::Result(SigType::Named("JsonError"))),
@@ -5458,31 +5685,37 @@ fn json_typed_dispatch(
 /// composed message the value also displays as.
 const JSON_ERROR_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "message",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "to_string",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "kind",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "path",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "line",
         params: &[],
         ret: Concrete(SigType::Option(&Int)),
     },
     ExtFn {
+        param_names: &[],
         name: "column",
         params: &[],
         ret: Concrete(SigType::Option(&Int)),

@@ -16,6 +16,30 @@ use crate::cmd::run::{p2p_app_namespace, run_program};
 use crate::output::emit_diagnostics_mapped;
 use crate::{compose, watch};
 
+/// The request-handler function `noeta serve` drives — the one name a served program must define.
+const HANDLER: &str = "fetch";
+
+/// The name a synthesized entry call must use to reach the program's `name` function — `name`
+/// itself, or the **qualified** spelling the linker gave it. An entry file that declares a
+/// `namespace` has its own top-level declarations rewritten to qualified identities (`fn fetch`
+/// becomes `todo.main.fetch`), so a trailing `server.serve(port, fetch, host)` naming the bare
+/// identifier resolves to nothing — which surfaced as "cannot find `fetch` in this scope" pointing
+/// at a file whose `fn fetch` is right there. Falls back to `name` when nothing matches, so a
+/// genuinely missing handler still reports against the name the user is expected to define.
+fn entry_ident(program: &noeta_ast::Program, name: &str) -> String {
+    let suffix = format!(".{name}");
+    program
+        .stmts
+        .iter()
+        .filter_map(|stmt| match stmt {
+            noeta_ast::Stmt::Fn(decl) => Some(decl.name.as_str()),
+            _ => None,
+        })
+        .find(|decl| *decl == name || decl.ends_with(&suffix))
+        .unwrap_or(name)
+        .to_string()
+}
+
 pub(crate) fn ext_command_clap(ext: &'static noeta_stdlib::ExtCommand) -> clap::Command {
     let mut cmd = clap::Command::new(ext.name).about(ext.about);
     for spec in ext.args {
@@ -265,13 +289,15 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                         }],
                         ret: None,
                         body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
-                            callee: Box::new(ident(name)),
+                            callee: Box::new(ident(&entry_ident(&loaded.program, name))),
                             args: vec![noeta_ast::CallArg::positional(ident("req"))],
                             span: sp,
                         })),
                         span: sp,
                     },
-                    noeta_stdlib::EntryArg::Ident(name) => ident(name),
+                    noeta_stdlib::EntryArg::Ident(name) => {
+                        ident(&entry_ident(&loaded.program, name))
+                    }
                 })
                 .collect();
             let call = Expr::Call {
@@ -385,14 +411,14 @@ pub(crate) fn serve_parallel_impl(
             }],
             ret: None,
             body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
-                callee: Box::new(ident("fetch")),
+                callee: Box::new(ident(&entry_ident(&loaded.program, HANDLER))),
                 args: vec![noeta_ast::CallArg::positional(ident("req"))],
                 span: sp,
             })),
             span: sp,
         }
     } else {
-        ident("fetch")
+        ident(&entry_ident(&loaded.program, HANDLER))
     };
     let call = Expr::Call {
         callee: Box::new(Expr::Member {

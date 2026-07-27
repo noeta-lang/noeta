@@ -65,18 +65,21 @@ pub const REACTIVE_CTX_FNS: &[ExtFn] = &[
     // under the language's `==`** (opt-in; the default and an omitted flag keep the always-fire
     // behavior). See [`signal_ctx_method_dispatch`].
     ExtFn {
+        param_names: &["value", "dedupe"],
         name: "signal",
         params: &[VAR_A, OPT_BOOL],
         ret: RetTy::Concrete(SigType::Generic(SIGNAL_TYPE_NAME, &[VAR_A])),
     },
     // `computed(fn() -> A) -> Computed<A>` — a lazy memoized derivation.
     ExtFn {
+        param_names: &["f"],
         name: "computed",
         params: &[SigType::Fn(&[], &VAR_A)],
         ret: RetTy::Concrete(SigType::Generic(COMPUTED_TYPE_NAME, &[VAR_A])),
     },
     // `effect(fn) -> Effect` — an eager side effect; the body's return (if any) is discarded.
     ExtFn {
+        param_names: &["f"],
         name: "effect",
         params: &[SigType::Fn(&[], &SigType::Dyn)],
         ret: RetTy::Concrete(SigType::Named(EFFECT_TYPE_NAME)),
@@ -84,6 +87,7 @@ pub const REACTIVE_CTX_FNS: &[ExtFn] = &[
     // `view() -> View` — a named window onto reactive state for the diff-push transport
     // (server-hmr L1); see [`view_ctx_method_dispatch`] for the protocol.
     ExtFn {
+        param_names: &[],
         name: "view",
         params: &[],
         ret: RetTy::Concrete(SigType::Named(VIEW_TYPE_NAME)),
@@ -92,16 +96,19 @@ pub const REACTIVE_CTX_FNS: &[ExtFn] = &[
 
 pub const SIGNAL_CTX_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "get",
         params: &[],
         ret: RetTy::Concrete(VAR_A),
     },
     ExtFn {
+        param_names: &["value"],
         name: "set",
         params: &[VAR_A],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["f"],
         name: "update",
         params: &[SigType::Fn(&[VAR_A], &VAR_A)],
         ret: RetTy::Concrete(SigType::Unit),
@@ -109,12 +116,14 @@ pub const SIGNAL_CTX_METHODS: &[ExtFn] = &[
 ];
 
 pub const COMPUTED_CTX_METHODS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "get",
     params: &[],
     ret: RetTy::Concrete(VAR_A),
 }];
 
 pub const EFFECT_CTX_METHODS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "dispose",
     params: &[],
     ret: RetTy::Concrete(SigType::Unit),
@@ -126,6 +135,7 @@ pub const VIEW_CTX_METHODS: &[ExtFn] = &[
     // `expose(name, handle)` — bind `name` to a `Signal` or `Computed` (anything else is a
     // runtime error). Re-exposing a name replaces its binding (the hot-swap re-run path).
     ExtFn {
+        param_names: &["name", "handle"],
         name: "expose",
         params: &[SigType::String, SigType::Dyn],
         ret: RetTy::Concrete(SigType::Unit),
@@ -135,12 +145,14 @@ pub const VIEW_CTX_METHODS: &[ExtFn] = &[
     // leaves the key set is unexposed, tearing down its per-row reactive scope). A no-op for an
     // unknown name.
     ExtFn {
+        param_names: &["name"],
         name: "unexpose",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Unit),
     },
     // `snapshot() -> string` — the full-state frame; also the baseline diffs are minimal against.
     ExtFn {
+        param_names: &[],
         name: "snapshot",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -148,6 +160,7 @@ pub const VIEW_CTX_METHODS: &[ExtFn] = &[
     // `diff() -> ?string` — a patch frame of bindings whose value changed since the last
     // snapshot/diff, or `none` when nothing (observably) changed.
     ExtFn {
+        param_names: &[],
         name: "diff",
         params: &[],
         ret: RetTy::Concrete(OPT_STR),

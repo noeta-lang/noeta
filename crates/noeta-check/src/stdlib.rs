@@ -153,6 +153,23 @@ pub(crate) fn sig_to_typeref(
             name: (*n).to_string(),
             span: sp,
         },
+        // `Self` carries into the synthesized `TraitDecl` under the name a `.noe` trait spells it
+        // with — the parser produces a plain `TypeRef::Named { name: "Self" }` for a bare `Self`
+        // (only `Self::Name` becomes an `AssocProjection`) — so the user-trait machinery sees the
+        // native and declared spellings as one thing.
+        SigType::SelfTy => named("Self"),
+        // "Any number" as a declared type is the union of every numeric scalar — the same set
+        // `arith_numeric_union` builds for the lattice side, spelled in the AST's type language.
+        // "Any number" as a declared type is the union of every numeric scalar, spelled in the AST's
+        // type language. The members come from `Type::arith_numeric` rather than a second literal
+        // list, so the two vocabularies cannot drift apart.
+        SigType::Numeric => TypeRef::Union {
+            members: match Type::arith_numeric() {
+                Type::Union(members) => members.iter().map(|t| named(&t.to_string())).collect(),
+                other => vec![named(&other.to_string())],
+            },
+            span: sp,
+        },
     }
 }
 
@@ -243,6 +260,11 @@ fn sig_to_type_bound(
         // type — it is resolved per-implementor against `trait_assoc` at the concrete call site
         // (`Checker::native_method_assoc_return`), so here it is a gradual hole.
         SigType::Assoc(_) => Type::Unknown,
+        // `Self` is receiver-relative and this resolver has no receiver — a bundle/trait method call
+        // routes through `bundle_method_params` instead, which does. A gradual hole here, for the
+        // same reason `Assoc` is one: better an un-inferred argument than a confidently wrong type.
+        SigType::SelfTy => Type::Unknown,
+        SigType::Numeric => Type::arith_numeric(),
     }
 }
 
@@ -1115,16 +1137,61 @@ pub(super) fn typed_type_method(
 /// A bundle method's parameter types under the receiver-at-0 convention (kernel-methods K2):
 /// the receiver is NOT in `params` (it rides as ctx slot 0), so binding and substitution run
 /// over the call's own arguments exactly like a module function's.
+///
+/// The **receiver-relative** parameter forms resolve here, against the concrete implementor, which
+/// is the whole reason this exists apart from [`sig_to_type_bound`]: `Self` is `self_ty` and
+/// `Self::Name` folds the trait's [`registry::ExtAssocType`] over the bound element — the same two
+/// resolutions [`bundle_method_return`] performs, now available on the argument side. Before this,
+/// every kernel operand was declared `Dyn`, so `v.add(5)` and `v.scale(some_vector)` both checked
+/// clean and only misbehaved at runtime.
 pub(super) fn bundle_method_params(
     reg: &registry::Registry,
     f: &registry::ExtFn,
     args: &[Type],
+    self_ty: &Type,
+    assoc_types: &[registry::ExtAssocType],
+    elem: Option<&Type>,
 ) -> Vec<Type> {
     let bindings = bind_params(f.params, args);
     f.params
         .iter()
-        .map(|p| sig_to_type_bound(reg, p, &bindings))
+        .map(|p| sig_to_type_bundle(reg, p, &bindings, self_ty, assoc_types, elem))
         .collect()
+}
+
+/// [`sig_to_type_bound`] plus the two receiver-relative forms, which it cannot resolve because it
+/// has no receiver: `Self` and `Self::Name`. Everything else defers to it unchanged, so there is one
+/// signature-to-type mapping with a receiver-aware wrapper — not two that must be kept in step.
+///
+/// Recurses through `List`/`Optional` so a bulk method's `List<Self>` operand resolves as precisely
+/// as an element method's bare `Self`.
+fn sig_to_type_bundle(
+    reg: &registry::Registry,
+    sig: &registry::SigType,
+    bindings: &[Option<Type>],
+    self_ty: &Type,
+    assoc_types: &[registry::ExtAssocType],
+    elem: Option<&Type>,
+) -> Type {
+    use registry::SigType;
+    match sig {
+        SigType::SelfTy => self_ty.clone(),
+        SigType::Assoc(name) => resolve_bundle_assoc(name, assoc_types, elem),
+        SigType::List(inner) => Type::List(Box::new(sig_to_type_bundle(
+            reg,
+            inner,
+            bindings,
+            self_ty,
+            assoc_types,
+            elem,
+        ))),
+        // A trailing-optional's type IS the wrapped type; the optionality rides in the required
+        // count, exactly as in `sig_to_type_bound`.
+        SigType::Optional(inner) => {
+            sig_to_type_bundle(reg, inner, bindings, self_ty, assoc_types, elem)
+        }
+        other => sig_to_type_bound(reg, other, bindings),
+    }
 }
 
 /// A bundle method's return type under the receiver-at-0 convention (kernel-methods K2):

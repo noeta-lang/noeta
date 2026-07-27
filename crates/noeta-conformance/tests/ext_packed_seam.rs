@@ -117,6 +117,7 @@ const KIT_FNS: &[ExtFn] = &[
     // storage is a property of the *list*, so this crosses back as the same boxed `Object` a source
     // `Pt { .. }` literal builds).
     ExtFn {
+        param_names: &[],
         name: "make",
         params: &[SigType::Int, SigType::Int],
         ret: RetTy::Concrete(SigType::Named("Pt")),
@@ -124,6 +125,7 @@ const KIT_FNS: &[ExtFn] = &[
     // Takes a `Pt` back and sums its fields — proves a native `@packed` struct marshals INTO a dispatch
     // as a `NativeValue::Instance` (boxed), like any native struct.
     ExtFn {
+        param_names: &[],
         name: "sum",
         params: &[SigType::Named("Pt")],
         ret: RetTy::Concrete(SigType::Int),
@@ -145,6 +147,7 @@ const KIT_CTX_FNS: &[ExtFn] = &[
     // `make_pts(n)`: element `i` = `Pt { x: i, y: i*2 }`, packed ROW-major into a fresh `List<Pt>`
     // resolved by the qualified name `geo.Pt`.
     ExtFn {
+        param_names: &[],
         name: "make_pts",
         params: &[SigType::Int],
         ret: RetTy::Concrete(PT_LIST),
@@ -152,6 +155,7 @@ const KIT_CTX_FNS: &[ExtFn] = &[
     // `make_grids(n)`: element `i` = `Grid { u: i, v: i*10 }`, packed COLUMN-major (`geo.Grid` is
     // `@packed(Column)`) — the producer lays the buffer out column-major to match the schema.
     ExtFn {
+        param_names: &[],
         name: "make_grids",
         params: &[SigType::Int],
         ret: RetTy::Concrete(GRID_LIST),
@@ -159,6 +163,7 @@ const KIT_CTX_FNS: &[ExtFn] = &[
     // `make_segments(n)`: element `i` = `Segment { a: Pt{i, i}, b: Pt{i*2, i*2} }` — a nested-packed
     // producer, 32 bytes/element.
     ExtFn {
+        param_names: &[],
         name: "make_segments",
         params: &[SigType::Int],
         ret: RetTy::Concrete(SEGMENT_LIST),
@@ -167,18 +172,21 @@ const KIT_CTX_FNS: &[ExtFn] = &[
     // exposed THROUGH the program so both backends assert it uniformly (`with_packed` is `Ok(true)`
     // only for a `List<packed>`).
     ExtFn {
+        param_names: &[],
         name: "is_flat",
         params: &[PT_LIST],
         ret: RetTy::Concrete(SigType::Bool),
     },
     // Same, over a `List<Grid>` (the `is_flat` receiver type is nominal per call).
     ExtFn {
+        param_names: &[],
         name: "is_flat_grid",
         params: &[GRID_LIST],
         ret: RetTy::Concrete(SigType::Bool),
     },
     // Same, over a `List<Segment>`.
     ExtFn {
+        param_names: &[],
         name: "is_flat_seg",
         params: &[SEGMENT_LIST],
         ret: RetTy::Concrete(SigType::Bool),
@@ -186,6 +194,7 @@ const KIT_CTX_FNS: &[ExtFn] = &[
     // The error path: `make_packed` on a type with no interned packed schema — a clean ctx error,
     // never a panic. Returns `List<Pt>` in signature; it never actually produces one.
     ExtFn {
+        param_names: &[],
         name: "make_unknown",
         params: &[],
         ret: RetTy::Concrete(PT_LIST),

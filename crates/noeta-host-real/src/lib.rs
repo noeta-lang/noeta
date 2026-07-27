@@ -1780,6 +1780,28 @@ impl Console for RealHost {
         let _ = err.flush();
         self.stdin_read_line()
     }
+
+    fn stream_output(&mut self, stream: noeta_stdlib::Stream, text: &str) -> bool {
+        use std::io::Write;
+        // Written and flushed now, so a server's log line appears while the server is still up
+        // rather than at Ctrl-C. Each stream goes to its real counterpart; the caller sequences
+        // stdout before stderr, exactly as the end-of-run batch render does.
+        match stream {
+            noeta_stdlib::Stream::Stdout => {
+                let mut out = std::io::stdout();
+                let _ = out.write_all(text.as_bytes());
+                let _ = out.flush();
+            }
+            noeta_stdlib::Stream::Stderr => {
+                let mut err = std::io::stderr();
+                let _ = err.write_all(text.as_bytes());
+                let _ = err.flush();
+            }
+            // Not an output stream — nothing written, so the caller keeps its buffer.
+            noeta_stdlib::Stream::Stdin => return false,
+        }
+        true
+    }
 }
 
 impl Tracing for RealHost {

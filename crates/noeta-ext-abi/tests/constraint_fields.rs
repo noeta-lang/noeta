@@ -101,6 +101,7 @@ impl Row {
 
 const CHECK_DIRECTIVES: &str = "crates/noeta-check/src/directives.rs";
 const CHECK_STDLIB: &str = "crates/noeta-check/src/stdlib.rs";
+const CHECK_ARGS: &str = "crates/noeta-check/src/args.rs";
 const CHECK_PRELUDE: &str = "crates/noeta-check/src/prelude.rs";
 const EVAL_LIB: &str = "crates/noeta-eval/src/lib.rs";
 const CHECK_TRAITS: &str = "crates/noeta-check/src/traits.rs";
@@ -139,6 +140,21 @@ const TABLE: &[Row] = &[
             Anchor(
                 "tests/conformance/diagnostics/optional_param_arity.noe",
                 "expect: error E0007",
+            ),
+        ),
+    ),
+    // Declaring names is what opts a native function into NAMED arguments, and each name then
+    // states a rule about every call site: `name:` binds to the parameter it names (so the call may
+    // reorder), and a label naming no parameter is E0061 rather than a silently discarded one.
+    // Declaring none is the opt-out, and a label on such a callee is refused by the same code.
+    Row(
+        "ExtFn",
+        "param_names",
+        Constraint(
+            Anchor(CHECK_ARGS, "fn bind_sig_args("),
+            Anchor(
+                "tests/conformance/functions/named_arguments_native.noe",
+                "expect: error E0061",
             ),
         ),
     ),

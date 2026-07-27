@@ -140,7 +140,8 @@ impl Checker {
         &mut self,
         recv: &Type,
         name: &str,
-        args: &[Type],
+        args: &mut [Type],
+        arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         call_span: Span,
     ) -> Option<Type> {
@@ -165,21 +166,48 @@ impl Checker {
                 .find(|m| m.sig.name == name && m.receiver == receiver_kind)
                 .map(|m| (b.bundle.qualified(), m, b.bundle.assoc_types))
         })?;
-        let params = stdlib::bundle_method_params(self.reg(), &method.sig, args);
+        // `Self` is the IMPLEMENTOR — the bound `@packed` struct — not the receiver: an `Element`
+        // method's receiver is `Self` while a `Bulk` method's is `List<Self>`, and both spell their
+        // operand relative to the same type. The uniform element backs `Self::Name` projections
+        // (`dot` → `int` for an i16 vector, `f32` for an f32 one). Both are resolved BEFORE the
+        // parameter types, which now depend on them.
+        let self_ty = Type::Named(type_name.clone(), vec![]);
+        let elem = self
+            .packed_layout(&self_ty)
+            .and_then(|layout| stdlib::packed_elem_type(&layout));
+        let params = stdlib::bundle_method_params(
+            self.reg(),
+            &method.sig,
+            args,
+            &self_ty,
+            assoc_types,
+            elem.as_ref(),
+        );
         let required = noeta_ext_abi::SigType::required_count(method.sig.params);
-        self.check_args(&params, required, args, &[], span, name);
+        // A kernel method's declared parameter names bind a label here, through the same
+        // `order_arguments` a declared call uses — `v.scale(factor: 2.0)`. Passing the argument
+        // EXPRESSIONS (this used to pass `&[]`) is also what lets `check_args` see a label it
+        // cannot bind and refuse it, instead of the list arriving label-free and the label being
+        // silently dropped on the floor.
+        let bound = self.bind_sig_args(
+            &method.sig,
+            arg_exprs,
+            &params,
+            required,
+            args,
+            span,
+            call_span,
+        );
+        let arg_exprs = bound.as_deref().unwrap_or(arg_exprs);
+        self.check_args(&params, required, args, arg_exprs, span, name);
         // Record the `(trait, method)` route: the fold-in unified the bundle runtime route onto the
         // trait route, so every kernel method dispatches through `Registry::dispatch_trait_method`.
         self.sites
             .trait_call_sites
             .insert(call_span, (trait_q, name.to_string()));
-        // Resolve the bound shape's uniform element type, so a `Self::Wide` / `Self::Float` return
-        // types against the concrete field kind of the struct this trait was `impl`-bound to — `dot`
-        // → `int` for an i16 vector, `f32` for an f32 vector. The bound struct is the receiver's own
-        // `@packed` type; `SameAsArg(0)` returns are `Self` (element) / `List<Self>` (bulk).
-        let elem = self
-            .packed_layout(&Type::Named(type_name.clone(), vec![]))
-            .and_then(|layout| stdlib::packed_elem_type(&layout));
+        // The same `elem` resolved above types the `Self::Wide` / `Self::Float` returns against the
+        // concrete field kind of the struct this trait was `impl`-bound to; `SameAsArg(0)` returns
+        // are `Self` (element) / `List<Self>` (bulk).
         Some(stdlib::bundle_method_return(
             self.reg(),
             &method.sig,

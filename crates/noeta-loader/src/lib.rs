@@ -220,9 +220,9 @@ fn collect_noe_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Resul
 /// module's `namespace` and its intra-package `use`s — so the consumer addresses the package as
 /// `use <key>.<sub>.Name` while the package's own imports (written against `root`) keep resolving.
 ///
-/// Unlike a sibling, a dependency module's own `use`s **drive** imports (a package is a closed unit:
-/// its internal cross-references must resolve), whereas same-app siblings stay pure decl-sources — so
-/// wiring dependencies never changes single-package linking.
+/// A dependency module's own `use`s **drive** imports, exactly as a sibling's do (a package is a
+/// closed unit: its internal cross-references must resolve) — the re-rooting above is what makes its
+/// intra-package `use`s address the same modules the consumer's key does.
 ///
 /// **Transitive dependencies** (package-manager P2.4). A package's own modules import *its own*
 /// dependencies by *its own* local keys (`use jsonlib.parse.X`), which collide across packages (two
@@ -1094,7 +1094,7 @@ pub fn link_parsed(
         entry,
         entry_program,
         modules,
-        &[],
+        modules,
         broken,
         RetainPolicy::Lenient,
     )
@@ -1103,8 +1103,8 @@ pub fn link_parsed(
 /// The cross-package variant (package-manager P2.1): like [`link_parsed`], but `dep_modules` are the
 /// re-rooted source modules of the entry's dependency packages. They are **both** resolution
 /// candidates *and* import drivers — a package is a closed unit, so its own `use`s (already re-rooted
-/// to the consumer's key) resolve its internal cross-references, unlike same-app siblings which stay
-/// pure decl-sources. `dep_modules` must already be re-rooted (see [`reroot_program`]); the caller
+/// to the consumer's key) resolve its internal cross-references, the same way a sibling's do.
+/// `dep_modules` must already be re-rooted (see [`reroot_program`]); the caller
 /// ([`link_with_deps`]) does that. Every std import inside a dependency (`use std.…`) resolves against
 /// no module here and is retained (deduped) so the compiler binds it downstream, exactly as an
 /// entry's std imports are.
@@ -1123,7 +1123,9 @@ pub fn link_parsed_with_deps(
     broken: &[&BrokenModule],
     native_roots: Option<&[String]>,
 ) -> Result<Linkage, Vec<LoadDiagnostic>> {
-    // Dependency modules join the resolution pool; only they (not siblings) also drive imports.
+    // Sibling and dependency modules alike join the resolution pool *and* drive imports: a `use` is
+    // file-scoped, so a module that writes `use std.{env}` must get `env` bound in the merged
+    // program whether it is a sibling of the entry or a file inside a package.
     let pool: Vec<&Program> = siblings.iter().chain(dep_modules).copied().collect();
     let native: HashSet<String> = native_roots.unwrap_or_default().iter().cloned().collect();
     let retain = match native_roots {
@@ -1132,7 +1134,7 @@ pub fn link_parsed_with_deps(
         },
         None => RetainPolicy::Lenient,
     };
-    link_core(entry, entry_program, &pool, dep_modules, broken, retain)
+    link_core(entry, entry_program, &pool, &pool, broken, retain)
 }
 
 /// Where a merged top-level name came from — its local declaration, or the namespace an import
@@ -1144,17 +1146,19 @@ enum Origin {
     Import(Vec<String>),
 }
 
-/// The shared linking core: resolve the entry's imports (and any `dep_drivers`' imports) against the
+/// The shared linking core: resolve the entry's imports (and any `drivers`' imports) against the
 /// `pool`, merging each resolved declaration once and retaining every unresolved `use` (deduped) for
-/// the compiler's downstream binding. `dep_drivers` is empty for single-package linking, so that path
+/// the compiler's downstream binding. `drivers` is empty for single-package linking, so that path
 /// is unchanged bar one refinement: a duplicate *identical* import (same namespace + name) is now
-/// skipped rather than flagged, which a closed dependency unit needs and no well-formed program relied
-/// on erroring.
+/// skipped rather than flagged, which a closed dependency unit needs and no well-formed program
+/// relied on erroring. `drivers` is normally the `pool` itself: a `use` is file-scoped, so every
+/// loaded module's own imports must be honored, or a module that writes `use std.{env}` finds `env`
+/// unbound in the merged program while the entry's imports leak in to cover for it.
 fn link_core(
     entry: &Source,
     entry_program: &Program,
     pool: &[&Program],
-    dep_drivers: &[&Program],
+    drivers: &[&Program],
     broken: &[&BrokenModule],
     retain: RetainPolicy,
 ) -> Result<Linkage, Vec<LoadDiagnostic>> {
@@ -1163,8 +1167,15 @@ fn link_core(
     // seeded by the assembling driver (audit-6 F2) — is the lens.
     let reg = noeta_ext_abi::registry::single_registry_process();
     // A module contributes only if it declares a namespace to resolve against.
+    // The **entry** is a resolution candidate alongside the pool: it declares a namespace like any
+    // other module, and a sibling may legitimately `use` it (two files of one project importing each
+    // other). Leaving it out made such a `use` an "unknown module" error the moment sibling imports
+    // started resolving. Its declarations are already in the program, so resolving to one merges
+    // nothing — see the `Origin::Local` arm in `drive_use`.
     let module_views: Vec<ModuleView> = pool
         .iter()
+        .copied()
+        .chain(std::iter::once(entry_program))
         .filter_map(|prog| {
             module_namespace(prog).map(|namespace| ModuleView {
                 namespace,
@@ -1252,6 +1263,7 @@ fn link_core(
     // origin); unresolved names are collected for retention. Returns the still-unresolved names.
     let mut drive_use = |path: &[String],
                          names: &[UseName],
+                         from_entry: bool,
                          imported: &mut Vec<Stmt>,
                          errors: &mut Vec<LoadDiagnostic>|
      -> Vec<UseName> {
@@ -1286,6 +1298,12 @@ fn link_core(
                     }
                     // Same declaration re-imported (same namespace) — merge once, ignore the rest.
                     Some(Origin::Import(p)) if p.as_slice() == path => {}
+                    // A **module** importing a name the entry declares itself: the same declaration
+                    // reached from its own namespace, already in the program. Merging it again would
+                    // duplicate it, and it is not a clash — a `use` is file-scoped, so a sibling
+                    // naming the entry's export says nothing about the entry's own scope. (The
+                    // entry's own `use` shadowing its own declaration IS still a clash, below.)
+                    Some(Origin::Local) if !from_entry => {}
                     // A different declaration under the same local name — ambiguous.
                     Some(_) => errors.push(collision_error(entry, path, name)),
                 },
@@ -1412,7 +1430,7 @@ fn link_core(
     // meaning. Checked per unit (the `use` is file-scoped), for the entry and every dependency
     // driver alike; only imports that actually resolve to a loaded module or item fire, so a
     // retained extern `use` (std — the checker's tables cover it) is not double-reported.
-    for stmts in std::iter::once(&entry_program.stmts).chain(dep_drivers.iter().map(|d| &d.stmts)) {
+    for stmts in std::iter::once(&entry_program.stmts).chain(drivers.iter().map(|d| &d.stmts)) {
         let unit_bound: HashSet<String> =
             stmts.iter().flat_map(qualify::bound_value_names).collect();
         for stmt in stmts.iter() {
@@ -1435,7 +1453,7 @@ fn link_core(
     for stmt in &entry_program.stmts {
         match stmt {
             Stmt::Use { path, names, span } => {
-                let unresolved = drive_use(path, names, &mut imported, &mut errors);
+                let unresolved = drive_use(path, names, true, &mut imported, &mut errors);
                 let fresh = retain_fresh(&mut seen_retained, path, unresolved);
                 if !fresh.is_empty() {
                     entry_stmts.push(Stmt::Use {
@@ -1462,10 +1480,10 @@ fn link_core(
 
     // Each dependency module's `use`s also drive imports (closed unit); their unresolved remainder
     // (std imports) is retained up front, ahead of the entry's statements.
-    for driver in dep_drivers {
+    for driver in drivers {
         for stmt in &driver.stmts {
             if let Stmt::Use { path, names, span } = stmt {
-                let unresolved = drive_use(path, names, &mut imported, &mut errors);
+                let unresolved = drive_use(path, names, false, &mut imported, &mut errors);
                 let fresh = retain_fresh(&mut seen_retained, path, unresolved);
                 if !fresh.is_empty() {
                     dep_retained.push(Stmt::Use {

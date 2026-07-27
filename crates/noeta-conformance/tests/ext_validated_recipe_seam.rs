@@ -50,6 +50,7 @@ const PERCENT: ExtStruct = ExtStruct {
         is_mut: false,
     }],
     methods: &[ExtFn {
+        param_names: &[],
         name: "validate",
         params: &[],
         // The `Validate` contract's shape: `Result<void, string>` (Ok on a valid value, Err(message)

@@ -24,6 +24,7 @@ pub const TASK_CTX_FNS: &[ExtFn] = &[
     // `sleep(ms) -> Future<void>` (Track A.2): a leaf timer future, ready once the executor's
     // clock reaches `now + ms`.
     ExtFn {
+        param_names: &["ms"],
         name: "sleep",
         params: &[SigType::Int],
         ret: RetTy::Concrete(SigType::Future(&SigType::Unit)),
@@ -31,6 +32,7 @@ pub const TASK_CTX_FNS: &[ExtFn] = &[
     // `all(List<Future<A>>) -> List<A>` (Track A.9): await every future concurrently, results in
     // list order.
     ExtFn {
+        param_names: &["futures"],
         name: "all",
         params: &[SigType::List(&FUT_A)],
         ret: RetTy::Concrete(SigType::List(&VAR_A)),
@@ -38,6 +40,7 @@ pub const TASK_CTX_FNS: &[ExtFn] = &[
     // `race(List<Future<A>>) -> A` (Track A.9 + A.8): first ready result wins, losers cancelled;
     // ties break deterministically by list order.
     ExtFn {
+        param_names: &["futures"],
         name: "race",
         params: &[SigType::List(&FUT_A)],
         ret: RetTy::Concrete(VAR_A),
@@ -45,6 +48,7 @@ pub const TASK_CTX_FNS: &[ExtFn] = &[
     // `map_bounded(List<A>, int, Fn(A) -> Future<B>) -> List<B>` (Track A.9): apply async `f` to
     // each item with at most `n` futures in flight, results in item order.
     ExtFn {
+        param_names: &["items", "limit", "f"],
         name: "map_bounded",
         params: &[
             SigType::List(&VAR_A),

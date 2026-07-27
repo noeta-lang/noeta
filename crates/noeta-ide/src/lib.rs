@@ -2988,7 +2988,7 @@ enum ResolvedCallable<'a> {
 }
 
 impl ResolvedCallable<'_> {
-    /// The signature line, e.g. `fn abs(dyn): int | float`.
+    /// The signature line, e.g. `fn abs(x: dyn): int | float`.
     fn signature(&self) -> String {
         match self {
             ResolvedCallable::Source(decl) => render_fn_signature(decl),
@@ -3613,7 +3613,7 @@ mod tests {
         let (item, _) = store
             .hover_use("file:///a.noe", Position::new(0, 14), enc)
             .expect("hover on the imported name");
-        assert!(item.contains("fn sqrt(float): float"), "got: {item}");
+        assert!(item.contains("fn sqrt(x: float): float"), "got: {item}");
         // A path segment: the module it names, with members.
         let (module, _) = store
             .hover_use("file:///a.noe", Position::new(0, 9), enc)
@@ -4336,11 +4336,11 @@ mod tests {
             );
             assert_eq!(
                 sig(&store, "file:///nat.noe", 1, 4).as_deref(),
-                Some("fn abs(dyn): int | float")
+                Some("fn abs(x: dyn): int | float")
             );
             let hover = md(&store, "file:///nat.noe", 1, 4).expect("hover on native call");
             assert!(
-                hover.contains("fn abs(dyn): int | float"),
+                hover.contains("fn abs(x: dyn): int | float"),
                 "native call shows its signature: {hover}"
             );
             assert!(

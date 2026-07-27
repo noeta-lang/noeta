@@ -57,21 +57,25 @@ const ATTR_MAP: SigType = SigType::Map(&SigType::String, &ATTR_VALUE);
 /// each returning its instrument's handle type.
 pub const METRICS_CTX_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["name"],
         name: "counter",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named(COUNTER_TYPE_NAME)),
     },
     ExtFn {
+        param_names: &["name"],
         name: "up_down_counter",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named(COUNTER_TYPE_NAME)),
     },
     ExtFn {
+        param_names: &["name"],
         name: "histogram",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named(HISTOGRAM_TYPE_NAME)),
     },
     ExtFn {
+        param_names: &["name"],
         name: "gauge",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named(GAUGE_TYPE_NAME)),
@@ -81,11 +85,13 @@ pub const METRICS_CTX_FNS: &[ExtFn] = &[
 /// `Counter` methods (Counter + UpDownCounter): `add`, and `add_with` for attributed measurements.
 pub const COUNTER_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["value"],
         name: "add",
         params: &[NUM_VALUE],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["value", "attrs"],
         name: "add_with",
         params: &[NUM_VALUE, ATTR_MAP],
         ret: RetTy::Concrete(SigType::Unit),
@@ -95,11 +101,13 @@ pub const COUNTER_METHODS: &[ExtFn] = &[
 /// `Histogram`/`Gauge` methods: `record`, and `record_with` for attributed measurements.
 pub const RECORD_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["value"],
         name: "record",
         params: &[NUM_VALUE],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["value", "attrs"],
         name: "record_with",
         params: &[NUM_VALUE, ATTR_MAP],
         ret: RetTy::Concrete(SigType::Unit),

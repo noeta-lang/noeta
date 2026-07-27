@@ -719,7 +719,9 @@ mod tests {
         );
         let sqrt = items.iter().find(|i| i["name"] == "sqrt").unwrap();
         assert_eq!(sqrt["kind"], "fn");
-        assert_eq!(sqrt["signature"], "fn sqrt(float): float");
+        // A rendered signature names its parameters wherever the native declaration does — the
+        // same `param_names` a `name:` label at a call site binds against.
+        assert_eq!(sqrt["signature"], "fn sqrt(x: float): float");
         assert!(sqrt["doc"].as_str().unwrap().contains("square root"));
         assert_eq!(sqrt["public"], true);
 

@@ -19,6 +19,17 @@ use crate::Checker;
 /// list for parameter `p`, or `None` when the parameter is omitted (and must have a default).
 pub(crate) type Binding = Vec<Option<usize>>;
 
+/// The same arguments with their labels cleared — a recovery list for a call already diagnosed,
+/// so nothing downstream reports a *second* complaint about the labels.
+fn strip_labels(args: &[CallArg]) -> Vec<CallArg> {
+    args.iter()
+        .map(|a| CallArg {
+            name: None,
+            ..a.clone()
+        })
+        .collect()
+}
+
 impl Checker {
     /// Bind `args` to `param_names`, reporting every label that cannot be honoured.
     ///
@@ -165,14 +176,14 @@ impl Checker {
     /// Reject every label on `args`, for a callee that has no parameter names to bind one against.
     ///
     /// Reached from [`Checker::check_args`], after any callee that *can* bind has already consumed
-    /// its labels. Two callees cannot:
+    /// its labels. What is left declares no parameter names:
     ///
-    /// - A **native or built-in** function, whose parameters are declared as bare types in the
-    ///   extension registry (`ExtFn::params` is a `&[SigType]`) — there is nothing for `name:` to
-    ///   name.
+    /// - A **native function whose registry signature is unnamed** (`ExtFn::param_names` empty).
+    ///   Naming a signature is what opts it into labelled calls, so named and unnamed native
+    ///   functions coexist and this is the unnamed half.
     /// - A **function value**, whose [`crate::Type::Fn`] carries parameter types only. The closure
     ///   it came from had names, but the type it flows through does not, so the call site cannot
-    ///   see them.
+    ///   see them — no registry entry can fix this one.
     ///
     /// Either way a label here could only ever have been ignored, and an ignored label is exactly
     /// the silent-wrongness this module exists to prevent (see the module docs): `sub(b: 1, a: 10)`
@@ -188,10 +199,99 @@ impl Checker {
                 format!("`{callee}` does not take named arguments"),
             )
             .help(
-                "only functions and methods declared in Noeta carry parameter names for a label \
-                 to bind against; pass these arguments positionally",
+                "this callee declares no parameter names for a label to bind against; pass these \
+                 arguments positionally",
             );
         }
+    }
+
+    /// Bind a **native module function's** labelled arguments, when its registry signature declares
+    /// parameter names.
+    ///
+    /// Returns the list in parameter order with its labels consumed, or `None` to leave the call
+    /// exactly as written — which happens for an unlabelled call (nothing to do) and for a
+    /// signature that declares no names (the label cannot bind, and `check_args` refuses it).
+    /// `arg_types` is permuted in place to stay parallel, as for a declared call.
+    ///
+    /// This is what puts a native call on the *same* binding path as a declared one, rather than a
+    /// parallel implementation of it: same permutation, same supplied mask, same `arg_orders` entry
+    /// for lowering, so `math.pow(exp: 3.0, base: 2.0)` reorders by the mechanism `sub(b:, a:)`
+    /// already used.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bind_native_args(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[CallArg],
+        param_types: &[crate::Type],
+        required: usize,
+        arg_types: &mut [crate::Type],
+        span: Span,
+        call_span: Span,
+    ) -> Option<Vec<CallArg>> {
+        if !CallArg::any_named(args) {
+            return None;
+        }
+        let sig = self.reg().find_function_sig(module, func)?;
+        self.bind_sig_args(sig, args, param_types, required, arg_types, span, call_span)
+    }
+
+    /// The signature-keyed core of [`Self::bind_native_args`], for callers that already hold the
+    /// [`ExtFn`] — a kernel/trait method, resolved from the receiver rather than a module path.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bind_sig_args(
+        &mut self,
+        sig: &noeta_ext_abi::registry::ExtFn,
+        args: &[CallArg],
+        param_types: &[crate::Type],
+        required: usize,
+        arg_types: &mut [crate::Type],
+        span: Span,
+        call_span: Span,
+    ) -> Option<Vec<CallArg>> {
+        if !CallArg::any_named(args) || !sig.has_param_names() {
+            return None;
+        }
+        let func = sig.name;
+        let names: Vec<String> = sig.param_names.iter().map(|n| (*n).to_string()).collect();
+        let bound = self.order_arguments(
+            args,
+            &names,
+            param_types,
+            required,
+            func,
+            arg_types,
+            span,
+            call_span,
+        );
+        // A label may REORDER a native call but never SKIP a parameter of one. A declared function
+        // carries a supplied mask to its own prologue, which then runs the default for each
+        // parameter the mask leaves clear; a native function has no prologue — its dispatch takes a
+        // positional slice — so a hole would hand it a compacted list and shift every argument
+        // after the gap onto the wrong parameter. Refuse the call instead, and drop the recorded
+        // permutation so lowering does not act on a binding the callee cannot honour.
+        if let Some(binding) = self.sites.arg_orders.get(&call_span)
+            && let Some(hole) = binding.iter().position(Option::is_none)
+            && binding[hole..].iter().any(Option::is_some)
+        {
+            let missing = names.get(hole).cloned().unwrap_or_default();
+            self.sites.arg_orders.remove(&call_span);
+            self.error(
+                DiagnosticCode::InvalidArgument,
+                span,
+                format!("`{func}` cannot skip `{missing}` — a native function has no defaults to fall back on"),
+            )
+            .help("pass every parameter up to the last one you supply, or stop the argument list earlier");
+            return Some(strip_labels(args));
+        }
+        // A binding that FAILED (an unknown or duplicated label) has already said so precisely.
+        // Handing the labelled list back would let `check_args` add "does not take named
+        // arguments" on top — which is both redundant and false, since this signature does. Return
+        // the arguments label-free so the recovery path stays quiet about labels.
+        Some(match bound {
+            Some((ordered, _)) => ordered,
+            None => strip_labels(args),
+        })
     }
 
     /// Normalize a written argument list into **parameter order**, reporting any label that cannot

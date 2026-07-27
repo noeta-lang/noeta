@@ -61,11 +61,13 @@ const ADDER_METHODS: &[ExtFn] = &[
     // The `Callable` protocol's method. Nothing marks it special at registration — the protocol
     // is structural, exactly as it is for a user type's `impl Callable`.
     ExtFn {
+        param_names: &[],
         name: "call",
         params: &[SigType::Int, SigType::Int],
         ret: RetTy::Concrete(SigType::Int),
     },
     ExtFn {
+        param_names: &[],
         name: "base",
         params: &[],
         ret: RetTy::Concrete(SigType::Int),
@@ -97,6 +99,7 @@ fn adder_dispatch(
 }
 
 const MAKE_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "adder",
     params: &[SigType::Int],
     ret: RetTy::Concrete(SigType::Named("Adder")),

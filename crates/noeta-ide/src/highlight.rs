@@ -57,7 +57,9 @@ pub struct HlSpan {
 fn is_primitive_type_name(word: &str) -> bool {
     use noeta_ast::BuiltinTy::*;
     match noeta_ast::BuiltinTy::from_name_any(word) {
-        Some(Int | Float | F32 | F64 | IntN { .. } | Bool | Str | Bytes | Unit | Dyn) => true,
+        Some(Int | Float | F32 | F64 | IntN { .. } | Bool | Str | Bytes | Unit | Dyn | Number) => {
+            true
+        }
         Some(List | Set | Map | Option | Result | KindEnum | KindStruct | KindClass) | None => {
             false
         }

@@ -14,7 +14,12 @@
 /// ABI break is a compile error and this constant is *recorded*, not yet *checked* — it exists
 /// so the future dynamically-loaded-extension path has a handshake to refuse a mismatch with,
 /// instead of undefined behavior through a stale `TypeId`/layout (audit-2 F10).
-pub const ABI_VERSION: u32 = 1;
+///
+/// **2** — [`registry::ExtFn`] gained the required `param_names` field (so a `name:` label at a
+/// call site binds against a native signature). A registration table written for ABI 1 omits it
+/// and no longer compiles; the composed build reports that as an ABI mismatch naming the package
+/// it belongs to (`compose::compose_failure`) rather than as a bare `rustc` error.
+pub const ABI_VERSION: u32 = 2;
 
 pub mod args;
 pub mod channel;

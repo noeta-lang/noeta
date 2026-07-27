@@ -32,12 +32,14 @@ use noeta_ext_abi::{CtxError, CtxOut, ErrorKind, Host, Slot, StdError};
 
 const KERN_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "noop",
         params: &[],
         ret: RetTy::Concrete(SigType::Int),
     },
     // Returns a value of the backed enum below, so a program has something to call `.value()` on.
     ExtFn {
+        param_names: &[],
         name: "tone",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Tone")),
@@ -45,6 +47,7 @@ const KERN_FNS: &[ExtFn] = &[
     // Returns an instance of the native class below, so a program has one to access fields on
     // (the visibility/mutability constraints under test are on *field access*).
     ExtFn {
+        param_names: &[],
         name: "widget",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Widget")),
@@ -149,6 +152,7 @@ const COLS_BUNDLE: ExtTrait = ExtTrait {
     namespace: "fx.kern",
     methods: &[ExtTraitMethod {
         sig: ExtFn {
+            param_names: &[],
             name: "sum_all",
             params: &[],
             ret: RetTy::Concrete(SigType::F32),
@@ -196,6 +200,7 @@ const NUM_BUNDLE: ExtTrait = ExtTrait {
     methods: &[
         ExtTraitMethod {
             sig: ExtFn {
+                param_names: &[],
                 name: "dot",
                 params: &[SigType::Dyn],
                 ret: RetTy::Concrete(SigType::Assoc("Wide")),
@@ -205,6 +210,7 @@ const NUM_BUNDLE: ExtTrait = ExtTrait {
         },
         ExtTraitMethod {
             sig: ExtFn {
+                param_names: &[],
                 name: "length",
                 params: &[],
                 ret: RetTy::Concrete(SigType::Assoc("Float")),
@@ -214,6 +220,7 @@ const NUM_BUNDLE: ExtTrait = ExtTrait {
         },
         ExtTraitMethod {
             sig: ExtFn {
+                param_names: &[],
                 name: "sum",
                 params: &[],
                 ret: RetTy::Concrete(SigType::Assoc("Elem")),
@@ -279,6 +286,7 @@ const FX_TRAITS: &[ExtTrait] = &[
         namespace: "fx",
         methods: &[ExtTraitMethod {
             sig: ExtFn {
+                param_names: &[],
                 name: "render",
                 params: &[],
                 ret: RetTy::Concrete(SigType::String),
@@ -303,6 +311,7 @@ const FX_TRAITS: &[ExtTrait] = &[
         namespace: "fx",
         methods: &[ExtTraitMethod {
             sig: ExtFn {
+                param_names: &[],
                 name: "lane_count",
                 params: &[],
                 ret: RetTy::Concrete(SigType::Int),
