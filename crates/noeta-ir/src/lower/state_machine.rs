@@ -576,6 +576,52 @@ impl Flattener<'_> {
                 };
                 self.new_block()
             }
+            // A nested `fn` declaration binds a name in this scope exactly as a local does, so it is
+            // a hoist candidate for the same reason: the declaration executes in ONE state, and
+            // every later state must still see the name. Without this the name never entered
+            // `binds`, so it was never a cell and died at the first suspend — `fn helper()` declared
+            // above a `yield` was gone below it (E0005), while the equivalent
+            // `helper = fn() => …` worked, because that spelling *is* a `Binding`.
+            //
+            // It is rewritten into the binding form `name = fn(params) { body }` — a `Binding` of a
+            // closure — because that spelling already works across suspends today, for exactly the
+            // reason the declaration form does not: a `Binding` is a hoist candidate, so liveness
+            // makes it a prelude cell and `rewrite_hoisted` turns it into an assignment against
+            // that cell. Registering the name without rewriting is not enough — the declaration
+            // would still shadow the cell inside its own state and leave it unset.
+            //
+            // Sound because a named fn is SEALED: its body sees its parameters and statics, never
+            // the enclosing scope implicitly. A capture-free one therefore has nothing an
+            // auto-capturing closure could newly bind, so no program that compiles today changes
+            // meaning. `mut_decl: false` matches the hand-written spelling and lands the name on
+            // the always-hoist path.
+            //
+            // Anything the closure form cannot faithfully carry stays on the old path (declared
+            // in-state, unusable after a suspend as before, rather than silently mis-lowered): a
+            // capturing fn (`use (x)`, whose upvalues are themselves cells here), an `async fn`, a
+            // generic fn, and a nested generator.
+            AstStmt::Fn(decl)
+                if decl.captures.is_empty()
+                    && !decl.is_async
+                    && decl.type_params.is_empty()
+                    && !body_has_yield(&decl.body) =>
+            {
+                self.record(&decl.name, false, true);
+                self.blocks[cur].stmts.push(AstStmt::Binding {
+                    mut_decl: false,
+                    name: decl.name.clone(),
+                    name_span: decl.name_span,
+                    ty: None,
+                    value: Expr::Closure {
+                        params: decl.params.clone(),
+                        ret: decl.ret.clone(),
+                        body: ClosureBody::Block(decl.body.clone()),
+                        span: decl.span,
+                    },
+                    span: decl.span,
+                });
+                cur
+            }
             // A flattened-level local: record it as a hoist candidate, preserving its original
             // declaration form (`mut x` vs bare `x =`). Liveness later decides whether it becomes a
             // captured cell (used across a state) or stays a block-local (used within one state); a
