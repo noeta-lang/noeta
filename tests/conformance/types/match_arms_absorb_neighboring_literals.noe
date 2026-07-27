@@ -1,0 +1,54 @@
+// The expectation pushed into a `match` arm / `if…then…else` branch is the SAME mechanism every
+// other absorbing form already rides ([`Checker::check_inner`]), so covering the arms covers all of
+// them at once: an empty or mixed `List<dyn>`, a target-typed `.{ … }` struct literal, a bare
+// numeric literal narrowing to a fixed width, and `some`/`none` against an expected `?T`.
+// expect: stdout "3"
+// expect: stdout "0"
+// expect: stdout "1"
+// expect: stdout "9"
+// expect: stdout "200"
+// expect: stdout "0"
+// expect: stdout "1"
+// expect: stdout "none"
+// expect: exit 0
+
+struct Point { x: int; y: int }
+
+// A mixed list and an empty list, each absorbing `List<dyn>`.
+fn items(k: int): List<dyn> {
+    return match k {
+        1 => [1, "two", true],
+        _ => [],
+    }
+}
+
+// `.{ … }` absorbs the expected type's NAME through the arm.
+fn corner(k: int): Point {
+    return match k {
+        1 => .{ x: 1, y: 2 },
+        _ => .{ x: 9, y: 9 },
+    }
+}
+
+// A bare numeric literal adapts to the expected fixed width inside an arm (`try_adapt_literal` is
+// only reachable through `check`, so it needs the expectation to get there).
+fn level(k: int): u8 {
+    return if k == 1 then 200 else 0
+}
+
+// `some`/`none` absorb an expected `?T`.
+fn maybe(k: int): ?int {
+    return match k {
+        1 => some(1),
+        _ => none,
+    }
+}
+
+echo items(1).len()
+echo items(2).len()
+echo corner(1).x
+echo corner(2).y
+echo level(1)
+echo level(2)
+echo maybe(1) ?? 0
+echo if maybe(2) == none then "none" else "some"

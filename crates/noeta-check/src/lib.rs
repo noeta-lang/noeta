@@ -1900,8 +1900,9 @@ impl Checker {
             Stmt::Expr { expr, .. } => {
                 // A `match` that is the whole of an expression statement has its value discarded, so
                 // block-bodied arms (aether F1) are legitimate here (side effects). Route it through
-                // `synth_match` with `value_used` false so it is not flagged E0059; any other
-                // expression is checked normally.
+                // `synth_match` with `value_used` false so it is not flagged E0055; any other
+                // expression is checked normally. `synth_match` also means **no expectation** reaches
+                // the arms, which is exactly right here: a discarded value has no expected type.
                 if let Expr::Match {
                     scrutinee,
                     arms,

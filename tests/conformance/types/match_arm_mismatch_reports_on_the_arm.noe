@@ -1,0 +1,14 @@
+// Pushing the expectation into the arms makes the ARM the reporting site: a genuinely ill-typed arm
+// is E0007 at the arm's own body, not at the whole `match`. It is reported exactly once — the joined
+// result is deliberately not re-subsumed at the `match`, which would duplicate the same mismatch on
+// a span covering every (correct) arm too.
+// expect: error E0007 at 10:14
+// expect: exit 1
+fn describe(x: int): Map<string, int> {
+    return match x {
+        1 => {"a": 1},
+        _ => 5,
+    }
+}
+
+echo describe(1).len();
