@@ -121,6 +121,20 @@ fn pipeline(path: string): Result<Report, Error> {
 }
 ```
 
+`?` works the same on an **Option**: it unwraps a `some`, or early-returns the `none` from the enclosing (Option-returning) function:
+
+```noeta
+fn head(xs: List<int>): ?int { return xs.first() }
+
+fn first_doubled(xs: List<int>): ?int {
+    n = head(xs)?          // a `none` short-circuits out of the function here
+    return some(n * 2)
+}
+
+echo first_doubled([3, 4])   // some(6)
+echo first_doubled([])       // none
+```
+
 ## Converting errors at `?` — `impl From<Source>`
 
 A pipeline usually crosses error types: `json.try_parse` fails with a `JsonError`, your function returns `Result<T, AppError>`. A `?` whose `Err` payload type differs from the enclosing function's declared error type **converts** it through a declared conversion — the built-in `From` trait, implemented **on the target** error type:
@@ -152,7 +166,7 @@ echo load("{ nope")
 The rules keep the language explicit:
 
 - **`?` is the only implicit conversion position.** A `return Err(jsonErr)` or an assignment with a mismatched error type stays the plain type mismatch (E0007) it always was; write `Err(AppError.from(e))` there — `from` is an ordinary associated function, callable anywhere as `Target.from(x)`.
-- **Exactly one conversion path.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which the orphan rule would bar from carrying your impl). A type carries at most one `From` impl — a second, whatever its source, is a coherence conflict (E0027) — and conversions never chain.
+- **Exactly one conversion path.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which the [orphan rule](Generics-and-Traits#coherence) would bar from carrying your impl). A type carries at most one `From` impl — a second, whatever its source, is a coherence conflict (E0027) — and conversions never chain.
 - **No conversion, no propagation.** A `?` whose `Err` type neither matches the declared error type nor has a `From` conversion is E0057. (A `dyn`/unannotated context defers to runtime, as everywhere in the gradual checker.)
 - `from` is an **associated** conversion: it builds a new target value from its argument, so a body referencing `self` is rejected (E0015), as is a parameter that disagrees with the declared source.
 
@@ -160,8 +174,14 @@ The rules keep the language explicit:
 
 `expr ?? fallback` unwraps a `some`, or evaluates the fallback for a `none`/absent value. It short-circuits — the fallback runs only when needed:
 
-```noeta check
-echo find(false) ?? "guest"      // "guest" if find returns none
+```noeta
+fn find(hit: bool): ?string {
+    if hit { return some("ada") }
+    return none
+}
+fn compute(): ?int { return some(9) }
+
+echo find(false) ?? "guest"      // guest  (find returned none)
 
 mut present = some(5)
 present ??= compute()            // ??= is  present = present ?? compute()
