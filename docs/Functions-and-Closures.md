@@ -106,6 +106,20 @@ Named arguments work the same on methods and associated functions (`m.f(1, c: 9)
 
 A label must name a parameter of the callee (an unknown one is E0061, with the closest match suggested), and no parameter may be filled twice — once positionally and again by name.
 
+### Where labels can be used
+
+A label binds against the callee's declared parameter **names**, so it works wherever those names are visible: functions, methods, and associated functions declared in Noeta. Two kinds of callee have no names to bind against, and a label on either is refused (E0061) rather than ignored:
+
+- **Native and built-in functions** — `math.pow`, `"s".replace`, `xs.map`. Their parameters are declared as bare types in the extension registry, so there is nothing for `name:` to name.
+- **Function values** — a closure stored in a binding, field, or parameter. The closure literal had parameter names, but the `(int, int) -> int` type it flows through carries only types, so the call site cannot see them.
+
+```noeta error
+use std.math
+echo math.pow(base: 2.0, exp: 3.0)   // E0061 — `pow` does not take named arguments
+```
+
+Both cases used to be accepted with the label silently discarded, which meant `math.pow(exp: 3.0, base: 2.0)` computed 3² and a label naming nothing at all — `"abc".replace(zzz: "a", "b")` — ran without complaint. A label is now honoured or refused, never ignored.
+
 > [!NOTE]
 > Only the first 64 parameters can be *skipped* by name; a call that skips one beyond that is rejected. Reordering and labelling are unaffected.
 
@@ -258,6 +272,8 @@ echo 5 |> g(6, c: 9)     // 569 — `c` is named, so `a` and `b` are free: piped
 ```
 
 Evaluation order is unchanged by any of this: the left operand runs first, then the right-hand side's arguments in the order written, however the binding permutes them. A method binds the same way, with the receiver staying the receiver — `10 |> box.scale(k: 4)` calls `box.scale(4, 10)`.
+
+This needs a callee whose parameter names are visible, so it applies to functions and methods declared in Noeta — piping into a native function like `math.pow` still means its first parameter, and a label there is refused ([where labels can be used](#where-labels-can-be-used)).
 
 Without a label there is no way to thread the value into a later parameter, and there is no placeholder syntax (`_` is not a piped-value hole). Use a closure when the target parameter has nothing to name it by:
 

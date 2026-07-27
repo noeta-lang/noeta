@@ -1,0 +1,19 @@
+// A label is honoured or refused — never ignored.
+//
+// Named arguments bind against a callee's declared parameter NAMES. Two kinds of callee have none:
+// a native or built-in function, whose parameters are bare types in the extension registry, and a
+// function *value*, whose type carries parameter types only (the closure had names; `Type::Fn` does
+// not). Both used to accept a label and silently discard it, so `math.pow(exp: 3.0, base: 2.0)`
+// computed 3² and `"abc".replace(zzz: "a", "b")` ran with a label naming nothing — the same silent
+// wrongness that named arguments were introduced to remove from declared calls.
+//
+// The check is "a label survived binding": every callee that CAN bind consumes its labels in
+// `order_arguments`, so anything still labelled by the time argument checking runs had nothing to
+// bind against.
+// Each label is reported on its own — a call with two of them names both.
+// expect: error E0061 at 19:15
+// expect: error E0061 at 19:26
+// expect: exit 1
+use std.math
+
+echo math.pow(base: 2.0, exp: 3.0)
