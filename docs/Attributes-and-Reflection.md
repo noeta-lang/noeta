@@ -84,6 +84,21 @@ struct User { name: string; id: int }
 
 A handful of prelude functions expose type and metadata at runtime.
 
+### `traits_of(value): List<string>` — trait-membership reflection
+
+`traits_of(value)` returns the trait names the value's nominal type has a **registered implementation** for — a standalone `impl Trait for T`, an in-body `impl` block, a `@derive(Trait)`, or a native type's ABI-declared impl — as a sorted, deduped `List<string>`. It reads the same membership table the precise `x is dyn Trait` test consults, so the two can never disagree. Names are **qualified**: a `.noe` trait keeps its linked name (bare for a program-local trait, `App.Models.Trait` for a namespaced module's), and a native trait reports its qualified identity (`std.vec.Kernels`). Built-in traits appear under their bare names (`Comparable`, `Display`) when a type registers an impl or derive of them; built-in *base* types (int, string, `List`, …) carry no declared impls, so `traits_of(42)` is `[]` even though built-in protocol behavior (echo, `<`) works on them. A non-nominal value (scalar, collection, function) yields the empty list — the same "nothing to report" answer `fields_of` gives a non-object.
+
+```noeta
+trait Speaks { fn speak(): string }
+
+@derive(Comparable)
+struct Dog { age: int }
+impl Speaks for Dog { fn speak(): string { return "woof" } }
+
+echo traits_of(Dog { age: 3 })   // ["Comparable", "Speaks"]
+echo traits_of(42)               // []
+```
+
 ### `type_of(value): Type`
 
 Returns the value's runtime head-constructor as the prelude `Type` ADT, which you can `match`:

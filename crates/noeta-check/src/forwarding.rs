@@ -424,6 +424,7 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         | Expr::TypeTest { expr: e, .. }
         | Expr::TypeOf { value: e, .. }
         | Expr::FieldsOf { value: e, .. }
+        | Expr::TraitsOf { value: e, .. }
         | Expr::ParamsOf { target: e, .. }
         | Expr::FieldSpecsOf { name: e, .. }
         | Expr::FromBytes { blob: e, .. }

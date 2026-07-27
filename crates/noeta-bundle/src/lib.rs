@@ -104,7 +104,14 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// decoding a version-8 payload would read their length prefixes as the next `TypeInfo`'s bytes and
 /// desynchronise the manifest. (`field_specs_of` / `construct` add new `Op` variants too, but those
 /// only appear in bundles this reader also produced.)
-pub const FORMAT_VERSION: u8 = 8;
+///
+/// Bumped to 9 by the precise-trait-narrowing arc: `reflect::ReflectionInfo` (in
+/// `Module::reflection`) gained a trailing `trait_impls: Vec<TraitImplRecord>` — the membership
+/// table the now-precise `x is dyn Trait` / `x.as<dyn Trait>()` and the new `traits_of(value)`
+/// read — and `NarrowTarget` (in `Module::code`) gained a `DynTrait(String)` variant. Postcard is
+/// not self-describing, so the appended sequence and the new enum variant are both wire breaks by
+/// the same reasoning as every bump above.
+pub const FORMAT_VERSION: u8 = 9;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

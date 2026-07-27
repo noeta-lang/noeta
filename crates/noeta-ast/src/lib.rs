@@ -1625,6 +1625,13 @@ pub enum Expr {
     /// structural behavior over `self` without a macro system. A non-object value yields the
     /// empty list.
     FieldsOf { value: Box<Expr>, span: Span },
+    /// The reflection query `traits_of(value)` — the qualified trait names the value's nominal
+    /// type has a registered `impl` for (user `impl`/`@derive` and native ABI-advertised impls
+    /// alike), as a sorted, deduped `List<string>`. Reads the same shared membership table
+    /// (`ReflectionInfo::trait_impls`) the precise `x is dyn Trait` narrowing tests, so the two
+    /// surfaces cannot disagree. A non-nominal value (scalar/collection/function) yields the
+    /// empty list, mirroring `fields_of`'s non-object answer.
+    TraitsOf { value: Box<Expr>, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>` (P-PACK 4.4). `ty` is
     /// the element type (turbofish; must be a `@packed` struct), `blob` the `bytes` operand. The byte
     /// buffer is opaque, so the element type must be named at the call site.
@@ -2062,6 +2069,7 @@ impl Expr {
             | Expr::AttributesOf { span, .. }
             | Expr::TypeOf { span, .. }
             | Expr::FieldsOf { span, .. }
+            | Expr::TraitsOf { span, .. }
             | Expr::FromBytes { span, .. }
             | Expr::Channel { span, .. }
             | Expr::TypedModuleCall { span, .. }
@@ -2162,6 +2170,7 @@ impl Expr {
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
             | Expr::FieldsOf { value: expr, .. }
+            | Expr::TraitsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
             | Expr::FieldSpecsOf { name: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
@@ -2266,6 +2275,7 @@ impl Expr {
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
             | Expr::FieldsOf { value: expr, .. }
+            | Expr::TraitsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
             | Expr::FieldSpecsOf { name: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),

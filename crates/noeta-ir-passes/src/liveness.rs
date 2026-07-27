@@ -577,6 +577,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::TypeTest { operand, .. }
         | Rvalue::TypeOf { operand, .. }
         | Rvalue::FieldsOf { operand, .. }
+        | Rvalue::TraitsOf { operand, .. }
         | Rvalue::MaskWidth { operand, .. } => f(operand),
         // `params_of(target)` reads its runtime target-string operand.
         Rvalue::ParamsOf { target, .. } => f(target),

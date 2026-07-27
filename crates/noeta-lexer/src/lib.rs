@@ -134,6 +134,12 @@ pub enum TokenKind {
     /// `type_of` (derive layer 3). A keyword for symmetry with the other reflection surfaces.
     #[token("fields_of")]
     FieldsOfKw,
+    /// The reflection keyword `traits_of(value)` — the qualified trait names the value's nominal
+    /// type has a registered `impl` for, as a sorted, deduped `List<string>`. Reads the same
+    /// membership table the precise `x is dyn Trait` narrowing tests, so the two surfaces cannot
+    /// disagree. A keyword for symmetry with `fields_of`/`type_of`.
+    #[token("traits_of")]
+    TraitsOfKw,
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer back into a `List<T>` (P-PACK 4.4). A
     /// keyword so the turbofish type argument parses unambiguously; generic over any declared
     /// `@packed` struct (no hardcoded type list — extension-friendly).
@@ -421,6 +427,7 @@ impl TokenKind {
             TokenKind::AttributesOfKw => "AttributesOfKw",
             TokenKind::TypeOfKw => "TypeOfKw",
             TokenKind::FieldsOfKw => "FieldsOfKw",
+            TokenKind::TraitsOfKw => "TraitsOfKw",
             TokenKind::FromBytesKw => "FromBytesKw",
             TokenKind::RolesOfKw => "RolesOfKw",
             TokenKind::ParamsOfKw => "ParamsOfKw",
@@ -532,6 +539,7 @@ impl TokenKind {
             TokenKind::AttributesOfKw => "`attributes_of`",
             TokenKind::TypeOfKw => "`type_of`",
             TokenKind::FieldsOfKw => "`fields_of`",
+            TokenKind::TraitsOfKw => "`traits_of`",
             TokenKind::FromBytesKw => "`from_bytes`",
             TokenKind::RolesOfKw => "`roles_of`",
             TokenKind::ParamsOfKw => "`params_of`",

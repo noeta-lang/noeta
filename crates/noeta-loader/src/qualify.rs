@@ -382,6 +382,7 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
         | Expr::Spawn { future: inner, .. }
         | Expr::TypeOf { value: inner, .. }
         | Expr::FieldsOf { value: inner, .. }
+        | Expr::TraitsOf { value: inner, .. }
         | Expr::ParamsOf { target: inner, .. }
         | Expr::FieldSpecsOf { name: inner, .. }
         | Expr::As { expr: inner, .. }
@@ -908,7 +909,7 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_expr(fallback, visit);
         }
         Expr::TypeOf { value, .. } => q_expr(value, visit),
-        Expr::FieldsOf { value, .. } => q_expr(value, visit),
+        Expr::FieldsOf { value, .. } | Expr::TraitsOf { value, .. } => q_expr(value, visit),
         // The target is a runtime string, not a type, so nothing to qualify beyond the operand expr.
         Expr::ParamsOf { target, .. } => q_expr(target, visit),
         // The type name is already a string operand (the turbofish desugar captured the written name),

@@ -189,6 +189,13 @@ pub enum NarrowTarget {
     Fn,
     Dyn,
     Named(String),
+    /// A **trait-object** target (`x is dyn Trait` / `x.as<dyn Trait>()`): matches iff the value's
+    /// nominal type (shape name / extern qualified identity) has a REGISTERED impl of the trait in
+    /// the module's reflection membership table (`ReflectionInfo::trait_impls`) — the same
+    /// declarations trait-method dispatch resolves through. The carried name is the trait's
+    /// canonical identity (loader-qualified `.noe` name, or a native trait's qualified
+    /// `namespace.name`), resolved at lowering. A non-nominal value never matches.
+    DynTrait(String),
     /// A union target (`x.as<int | string>()`): matches if the value matches **any** member.
     AnyOf(Vec<NarrowTarget>),
     /// An abstract kind-type target (`x.as<Enum>()` / `x is Struct`): matches any value of that
@@ -820,6 +827,14 @@ pub enum Op {
     /// `{ name, value }` pairs in declaration order (derive layer 3); the empty list for any other
     /// value.
     FieldsOf {
+        dst: Reg,
+        src: Reg,
+    },
+    /// `traits_of(value)`: `dst = List<string>` — the qualified trait names the nominal type of
+    /// the value in `src` has a registered `impl` for, sorted and deduped, off the module
+    /// reflection's `trait_impls` membership table (the same table `NarrowTarget::DynTrait`
+    /// tests); the empty list for a non-nominal value.
+    TraitsOf {
         dst: Reg,
         src: Reg,
     },
@@ -1905,6 +1920,7 @@ fn op_repr(
         } => format!("Construct   r{dst} <- construct(r{name}, r{fields})"),
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::FieldsOf { dst, src } => format!("FieldsOf    r{dst} <- fields_of(r{src})"),
+        Op::TraitsOf { dst, src } => format!("TraitsOf    r{dst} <- traits_of(r{src})"),
         Op::FromBytes {
             dst, src, schema, ..
         } => {

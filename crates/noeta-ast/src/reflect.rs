@@ -27,6 +27,14 @@ pub struct ReflectionInfo {
     /// This is what `params_of(target)` surfaces for a web framework's dependency injection, built
     /// beside the attribute manifest from the same AST so both backends agree by construction.
     pub params: Vec<ParamRecord>,
+    /// Every **declared trait implementation**, in source order: which trait each nominal type
+    /// implements, from standalone `impl Trait for T`, in-body `impl Trait { … }` blocks,
+    /// `@derive(Trait)`, and a native type's ABI-advertised impls (the registry projection a caller
+    /// passes to [`build`]). Both the runtime `x is dyn Trait` / `x.as<dyn Trait>()` membership
+    /// test and the `traits_of(value)` reflection query read this ONE table — the same declarations
+    /// that make trait-method dispatch resolve — so "is" and "would a trait method call work"
+    /// cannot disagree. See [`TraitImplRecord`] for the naming discipline.
+    pub trait_impls: Vec<TraitImplRecord>,
 }
 
 impl ReflectionInfo {
@@ -85,6 +93,10 @@ impl ReflectionInfo {
             let base = param_base(&p.target);
             !redeclared.contains(base) && !param_bases.contains(base)
         });
+        // A redeclared type's trait impls are superseded wholesale — the fragment's own records
+        // (re-collected from its `impl`s/derives) land below, exactly like its `TypeInfo`.
+        self.trait_impls
+            .retain(|r| !redeclared.contains(r.type_name.as_str()));
         drop(redeclared);
         drop(param_bases);
         drop(fragment_callables);
@@ -92,6 +104,11 @@ impl ReflectionInfo {
         self.manifest.extend(fragment.manifest);
         self.roles.extend(fragment.roles);
         self.params.extend(fragment.params);
+        for record in fragment.trait_impls {
+            if !self.trait_impls.contains(&record) {
+                self.trait_impls.push(record);
+            }
+        }
     }
 
     /// The parameter list declared for `target`, or empty if the target names no known callable — the
@@ -177,6 +194,32 @@ impl ReflectionInfo {
         typeref_repr_with(ty, &|n, a| self.nominal_repr(n, a), true)
     }
 
+    /// The **qualified trait names** the nominal type `type_name` implements — sorted and deduped,
+    /// the exact list `traits_of(value)` materializes. An unknown or impl-less type yields the
+    /// empty list (the same "nothing to report" answer `fields_of`/`params_of` give), so a
+    /// framework can probe any value without a guard. Both backends read this one accessor, so the
+    /// materialized `List<string>` agrees across the differential by construction.
+    pub fn traits_for(&self, type_name: &str) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .trait_impls
+            .iter()
+            .filter(|r| r.type_name == type_name)
+            .map(|r| r.trait_name.as_str())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    /// Whether the nominal type `type_name` has a **registered** `impl` of `trait_name` — the
+    /// membership test behind a precise `x is dyn Trait` / `x.as<dyn Trait>()`. Reads the same
+    /// [`Self::trait_impls`] table `traits_of` surfaces, so the two can never disagree.
+    pub fn type_implements(&self, type_name: &str, trait_name: &str) -> bool {
+        self.trait_impls
+            .iter()
+            .any(|r| r.type_name == type_name && r.trait_name == trait_name)
+    }
+
     /// Classify a **declared** nominal name by its kind, carrying `args` through. The one half of
     /// the type-ref projection that needs the type registry — everything else is shared with
     /// [`typeref_to_repr`] via [`named_repr`].
@@ -188,6 +231,46 @@ impl ReflectionInfo {
             None => TypeRepr::Named(name.to_string(), args),
         }
     }
+}
+
+/// One declared trait implementation: `type_name implements trait_name`.
+///
+/// `type_name` is the implementing type's **runtime tag**: the linked declaration name a value's
+/// shape carries (qualified for a namespaced module's type, bare for an entry-file type), or a
+/// native type's qualified identity (`std.p2p.GCounter`) for an ABI-advertised impl — exactly the
+/// name `runtime_matches`/`narrow_matches` compare a nominal narrowing against.
+///
+/// `trait_name` is the trait's **canonical identity**: the linked `.noe` trait name (qualified by
+/// the loader for a namespaced module's trait), a native [`ExtTrait`]'s qualified `namespace.name`
+/// identity (`std.vec.Kernels` — a local `use` alias is resolved through the program's own `use`
+/// statements at [`build`] time), or a built-in trait's bare name (`Comparable`). This is the same
+/// identity a lowered `dyn Trait` narrowing target resolves to, so the membership test is a string
+/// comparison with no second normalization pass.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TraitImplRecord {
+    pub type_name: String,
+    pub trait_name: String,
+}
+
+/// The registry projection of **native** trait data [`build`] joins with a program's own
+/// declarations — plain data because this crate cannot see the extension registry (the same seam
+/// as `native_roles`). Assembled by `noeta_ir::native_trait_impls` from the lowering's registry;
+/// `Default::default()` is the pure-`.noe` path (byte-identical result to before it existed).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NativeTraitImpls {
+    /// Every registered native [`ExtTrait`]'s qualified identity (`std.vec.Kernels`), so a local
+    /// `use`-bound spelling (`Kernels`, `vec.Kernels`) written in an `impl`/`@derive` resolves to
+    /// the one identity an implementing value's membership is keyed on.
+    pub traits: Vec<String>,
+    /// Native type advertisements: each native type's qualified identity paired with the trait
+    /// names its ABI declares (`ExtType::traits` / `ExtFielded::traits` / `ExtEnum::traits`, as
+    /// written — a short or qualified native-trait name, or a built-in trait name).
+    pub type_impls: Vec<(String, Vec<String>)>,
+    /// Every native **derive recipe**'s name (`ExtDerive` — `@derive(Inspect)`). A recipe
+    /// synthesizes methods but implements no trait, so a derive naming one is *excluded* from the
+    /// membership table (every other derive a runnable program carries names a real trait — the
+    /// checker rejected the rest).
+    pub derives: Vec<String>,
 }
 
 /// One `#[Name(args)]` attached to a declaration. Semantically a struct instance attached as
@@ -346,9 +429,14 @@ pub struct VariantInfo {
 /// native attribute application carries — so an in-program application of a native role-bearing
 /// attribute confers the role exactly as a `.noe` one does. Pass `&[]` for the pure `.noe` path; the
 /// result is then byte-identical to before this parameter existed.
+/// `native_traits` is the same plain-data seam for **trait membership** (the precise `is dyn
+/// Trait` test and `traits_of`): [`collect_trait_impls`] joins it with the program's own
+/// `impl`/`@derive` declarations. Pass `&NativeTraitImpls::default()` for the registry-less path —
+/// the program's own declarations are still recorded.
 pub fn build(
     program: &Program,
     native_roles: &[(String, Vec<(String, String)>)],
+    native_traits: &NativeTraitImpls,
 ) -> ReflectionInfo {
     let mut manifest = Vec::new();
     let mut types = Vec::new();
@@ -527,7 +615,129 @@ pub fn build(
         types,
         roles,
         params,
+        trait_impls: collect_trait_impls(program, native_traits),
     }
+}
+
+/// Build the **trait-membership table** ([`ReflectionInfo::trait_impls`]) — every `(type, trait)`
+/// pair the program registers an implementation for, from the same declarations that make trait
+/// dispatch resolve:
+///
+/// - a standalone `impl Trait for T { … }`,
+/// - an in-body `impl Trait { … }` block on a struct/class/enum,
+/// - a `@derive(Trait)` (built-in and user traits alike; a native *derive recipe* is excluded —
+///   it synthesizes methods but implements no trait),
+/// - a native type's ABI-advertised impls (`native.type_impls`, keyed by qualified identity).
+///
+/// Trait names are canonicalized: a native trait's local `use` spelling (`Kernels`,
+/// `vec.Kernels`) resolves to its qualified identity (`std.vec.Kernels`) through the program's own
+/// `use` statements; every other name is recorded as the linked AST spells it (the loader already
+/// qualified a namespaced module's traits, and a built-in trait is its bare name). Pure and
+/// deterministic like the rest of [`build`], so both backends agree by construction.
+fn collect_trait_impls(program: &Program, native: &NativeTraitImpls) -> Vec<TraitImplRecord> {
+    use crate::ImplBlock;
+    // Local spelling → canonical native-trait identity, from the program's `use` statements: a
+    // leaf import (`use std.vec.Kernels [as K]`) binds its local name; a module/namespace import
+    // (`use std.vec`) binds the dotted projection (`vec.Kernels`).
+    let mut aliases: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for stmt in &program.stmts {
+        let Stmt::Use { path, names, .. } = stmt else {
+            continue;
+        };
+        let prefix = path.join(".");
+        for n in names {
+            let local = n.local();
+            let qualified = format!("{prefix}.{}", n.name);
+            for q in &native.traits {
+                if *q == qualified {
+                    aliases.insert(local.to_string(), q);
+                } else if let Some(rest) = q.strip_prefix(&qualified)
+                    && let Some(short) = rest.strip_prefix('.')
+                    && !short.contains('.')
+                {
+                    aliases.insert(format!("{local}.{short}"), q);
+                }
+            }
+        }
+    }
+    let canon = |name: &str| -> String {
+        aliases
+            .get(name)
+            .map(|q| (*q).to_string())
+            .unwrap_or_else(|| name.to_string())
+    };
+    let mut records: Vec<TraitImplRecord> = Vec::new();
+    fn push(records: &mut Vec<TraitImplRecord>, type_name: &str, trait_name: String) {
+        let record = TraitImplRecord {
+            type_name: type_name.to_string(),
+            trait_name,
+        };
+        if !records.contains(&record) {
+            records.push(record);
+        }
+    }
+    let is_recipe = |name: &str| native.derives.iter().any(|d| d == name);
+    let body = |records: &mut Vec<TraitImplRecord>,
+                type_name: &str,
+                impls: &[ImplBlock],
+                derives: &[crate::DeriveSpec]| {
+        for block in impls {
+            push(records, type_name, canon(&block.trait_name));
+        }
+        for spec in derives {
+            // A native derive recipe implements no trait; every other derive a runnable program
+            // carries names a real trait (built-in, user, or native — the checker gated the rest).
+            if !is_recipe(&spec.name) {
+                push(records, type_name, canon(&spec.name));
+            }
+        }
+    };
+    for stmt in &program.stmts {
+        match stmt {
+            Stmt::Impl(decl) => push(&mut records, &decl.target, canon(&decl.trait_name)),
+            Stmt::Struct(d) => body(&mut records, &d.name, &d.impls, &d.decorators.derives),
+            Stmt::Class(d) => body(&mut records, &d.name, &d.impls, &d.decorators.derives),
+            Stmt::Enum(d) => body(&mut records, &d.name, &d.impls, &d.decorators.derives),
+            _ => {}
+        }
+    }
+    // Native advertisements: an ABI-declared name resolves against the registered native traits
+    // (exact qualified spelling, or a unique short name); anything else — a built-in trait name
+    // like `"Comparable"`/`"Mergeable"` — is recorded as written.
+    //
+    // Each row is keyed by the native type's QUALIFIED identity (what an extern value's
+    // `type_identity()` reports) — and ALSO by its short name when no `.noe` declaration in this
+    // program claims it, because a native fielded/enum instance's runtime shape carries whatever
+    // name the extension materialized it under (often the short name). The declared-name guard
+    // keeps a user type from inheriting a same-short-named native type's advertisements.
+    let declared: std::collections::HashSet<&str> = program
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Struct(d) => Some(d.name.as_str()),
+            Stmt::Class(d) => Some(d.name.as_str()),
+            Stmt::Enum(d) => Some(d.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    for (type_name, advertised) in &native.type_impls {
+        for name in advertised {
+            let canonical = native
+                .traits
+                .iter()
+                .find(|q| *q == name || q.rsplit('.').next() == Some(name))
+                .cloned()
+                .unwrap_or_else(|| name.clone());
+            push(&mut records, type_name, canonical.clone());
+            if let Some(short) = type_name.rsplit('.').next()
+                && short != type_name
+                && !declared.contains(short)
+            {
+                push(&mut records, short, canonical);
+            }
+        }
+    }
+    records
 }
 
 /// Project a callable's declared parameters onto their reflection [`ParamSig`]s — each parameter's
@@ -1639,6 +1849,70 @@ mod tests {
 
     fn boxed(t: TypeRepr) -> Box<TypeRepr> {
         Box::new(t)
+    }
+
+    fn record(type_name: &str, trait_name: &str) -> TraitImplRecord {
+        TraitImplRecord {
+            type_name: type_name.to_string(),
+            trait_name: trait_name.to_string(),
+        }
+    }
+
+    /// `traits_for` sorts and dedups; `type_implements` is the same rows read as a predicate — the
+    /// two surfaces cannot disagree because they read one table.
+    #[test]
+    fn traits_for_is_sorted_deduped_and_agrees_with_type_implements() {
+        let info = ReflectionInfo {
+            trait_impls: vec![
+                record("Dog", "Speaks"),
+                record("Dog", "Comparable"),
+                record("Dog", "Speaks"), // duplicate — one row survives the query
+                record("Cat", "Purrs"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(info.traits_for("Dog"), vec!["Comparable", "Speaks"]);
+        assert_eq!(info.traits_for("Cat"), vec!["Purrs"]);
+        assert!(info.traits_for("Unknown").is_empty());
+        assert!(info.type_implements("Dog", "Speaks"));
+        assert!(!info.type_implements("Dog", "Purrs"));
+        assert!(!info.type_implements("Unknown", "Speaks"));
+    }
+
+    /// `accumulate` supersedes a redeclared type's membership rows wholesale (REPL latest-wins) and
+    /// leaves other types' rows in place — mirroring the `TypeInfo` purge.
+    #[test]
+    fn accumulate_supersedes_a_redeclared_types_trait_impls() {
+        let mut base = ReflectionInfo {
+            types: vec![TypeInfo {
+                name: "Dog".to_string(),
+                kind: TypeKind::Struct,
+                fields: Vec::new(),
+                field_types: Vec::new(),
+                field_optional: Vec::new(),
+                field_defaults: Vec::new(),
+                variants: Vec::new(),
+            }],
+            trait_impls: vec![record("Dog", "Speaks"), record("Cat", "Purrs")],
+            ..Default::default()
+        };
+        // The fragment redeclares `Dog` WITHOUT the impl: the old membership must not survive.
+        let fragment = ReflectionInfo {
+            types: vec![TypeInfo {
+                name: "Dog".to_string(),
+                kind: TypeKind::Struct,
+                fields: Vec::new(),
+                field_types: Vec::new(),
+                field_optional: Vec::new(),
+                field_defaults: Vec::new(),
+                variants: Vec::new(),
+            }],
+            trait_impls: vec![record("Dog", "Fetches")],
+            ..Default::default()
+        };
+        base.accumulate(fragment);
+        assert_eq!(base.traits_for("Dog"), vec!["Fetches"]);
+        assert_eq!(base.traits_for("Cat"), vec!["Purrs"]);
     }
 
     #[test]

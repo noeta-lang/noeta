@@ -1,0 +1,63 @@
+// `traits_of(value)` — the trait-membership reflection query: the trait names the value's nominal
+// type has a registered `impl` for (standalone `impl`, in-body `impl` block, and `@derive` alike —
+// built-in and user traits both appear, because both are registered impls), as a sorted, deduped
+// `List<string>`. It reads the SAME membership table the precise `is dyn Trait` narrowing tests,
+// so the two surfaces cannot disagree. A non-nominal value (scalar/collection/function) yields the
+// empty list — mirroring `fields_of`'s non-object answer — and a `dyn`-laundered value reports its
+// RUNTIME type's traits (reflection reads the value, not the annotation). Built-in base types
+// (int, string, List, …) carry no *declared* impls, so their protocol behavior (echo, `<`, …)
+// never appears here.
+// expect: stdout "[\"Comparable\", \"Speaks\"]"
+// expect: stdout "[\"Display\"]"
+// expect: stdout "[\"Speaks\"]"
+// expect: stdout "[]"
+// expect: stdout "[]"
+// expect: stdout "[\"Comparable\", \"Speaks\"]"
+// expect: exit 0
+trait Speaks {
+    fn speak(): string
+}
+
+@derive(Comparable)
+struct Dog {
+    age: int
+}
+
+impl Speaks for Dog {
+    fn speak(): string {
+        return "woof"
+    }
+}
+
+class Cart {
+    pub total: int
+
+    impl Display {
+        fn to_string(): string {
+            return "cart(${self.total})"
+        }
+    }
+}
+
+enum Coin {
+    Heads
+    Tails
+
+    impl Speaks {
+        fn speak(): string {
+            return "clink"
+        }
+    }
+}
+
+echo traits_of(Dog { age: 3 })
+echo traits_of(Cart { total: 9 })
+echo traits_of(Coin.Tails)
+echo traits_of(42)
+echo traits_of([1, 2, 3])
+
+// A dyn-laundered value reports its runtime type's memberships.
+fn probe(x: dyn): List<string> {
+    return traits_of(x)
+}
+echo probe(Dog { age: 5 })

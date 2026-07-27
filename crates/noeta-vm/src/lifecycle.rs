@@ -169,12 +169,30 @@ pub(crate) fn try_classify(v: Value) -> Option<TryOutcome> {
     }
 }
 
+/// The **nominal runtime tag** a value carries, if any: a shape's name (user struct/class/enum)
+/// or an extern value's qualified identity — the key the trait-membership table
+/// (`ReflectionInfo::trait_impls`) and `traits_of` use. `None` for every non-nominal value
+/// (scalars, collections, functions), which therefore implements no declared trait. Mirrors the
+/// tree-walker's `value_nominal_name`.
+pub(crate) fn vm_nominal_name(v: &Value) -> Option<String> {
+    if v.is_extern() {
+        return Some(v.with_extern(|e| e.type_identity().to_string()));
+    }
+    v.shape().map(|s| s.name.clone())
+}
+
 /// Whether a value matches a narrowing target (`x.as<T>()`). Generics are erased, so only the
 /// runtime **head constructor** is tested. The primitive/collection kinds compare against
 /// [`Value::type_name`] — the same canonical strings the M0 tree-walker matches on, so both
 /// backends decide a narrowing identically; `Named` (a user struct/class/enum, or the built-in
-/// `Option`/`Result`) matches by shape name; `Dyn` always matches (no-op narrowing).
-pub(crate) fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
+/// `Option`/`Result`) matches by shape name; `Dyn` always matches (no-op narrowing); `DynTrait`
+/// tests the value's nominal type against `reflection`'s trait-membership table (the same shared
+/// table the tree-walker consults, so the two backends agree by construction).
+pub(crate) fn narrow_matches(
+    v: Value,
+    target: &NarrowTarget,
+    reflection: &noeta_ast::reflect::ReflectionInfo,
+) -> bool {
     let kind = match target {
         NarrowTarget::Int => "int",
         // Subtype edge `F32 <: float`: a plain `float` OR a reified `f32` value matches `float`.
@@ -204,8 +222,15 @@ pub(crate) fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
             }
             return v.shape().is_some_and(|s| &s.name == name);
         }
+        // A trait object matches iff the value's nominal type has a REGISTERED impl of the trait —
+        // the module reflection's membership table, built from the same `impl`/`@derive`/ABI
+        // declarations trait-method dispatch resolves through. A non-nominal value implements no
+        // declared trait and never matches. Mirrors the tree-walker's `TypeRef::DynTrait` arm.
+        NarrowTarget::DynTrait(trait_name) => {
+            return vm_nominal_name(&v).is_some_and(|n| reflection.type_implements(&n, trait_name));
+        }
         NarrowTarget::AnyOf(members) => {
-            return members.iter().any(|m| narrow_matches(v, m));
+            return members.iter().any(|m| narrow_matches(v, m, reflection));
         }
         // Abstract kind-types match any value of that declaration kind, by the value's shape kind.
         NarrowTarget::AnyEnum => {
@@ -222,7 +247,7 @@ pub(crate) fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         // match `args` (a `dyn` on either side is a wildcard). An untagged value classifies its args
         // to `dyn`, so `vm_type_repr` yields `dyn` arguments and the check passes head-only.
         NarrowTarget::Generic { head, args } => {
-            return narrow_matches(v, head)
+            return narrow_matches(v, head, reflection)
                 && noeta_ast::reflect::narrow_args_match(args, &vm_type_repr(&v));
         }
     };
@@ -1011,6 +1036,26 @@ impl<'m> Vm<'m> {
                 Value::object(t_shape, values)
             })
             .collect();
+        Value::list(items)
+    }
+
+    /// Materialize the qualified trait names a value's nominal type implements into a sorted,
+    /// deduped `List<string>` — the reflection `traits_of(value)`. Reads the SAME membership table
+    /// (`Module::reflection.trait_impls`) `NarrowTarget::DynTrait` tests, so the query and the
+    /// narrowing cannot disagree; a non-nominal value yields the empty list (mirroring
+    /// `fields_of`'s non-object answer). The tree-walker reads the identical shared table, so the
+    /// values agree across the differential by construction.
+    pub(crate) fn materialize_traits(&self, value: Value) -> Value {
+        let items: Vec<Value> = vm_nominal_name(&value)
+            .map(|n| {
+                self.module
+                    .reflection
+                    .traits_for(&n)
+                    .into_iter()
+                    .map(Value::string)
+                    .collect()
+            })
+            .unwrap_or_default();
         Value::list(items)
     }
 

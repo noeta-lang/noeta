@@ -273,7 +273,8 @@ fn compile_inner(
     opts: CompileOptions,
 ) -> Result<Module, Unsupported> {
     let native_roles = opts.registry.native_roles();
-    let mut reflection = noeta_ast::reflect::build(program, &native_roles);
+    let native_traits = noeta_ir::native_trait_impls(opts.registry);
+    let mut reflection = noeta_ast::reflect::build(program, &native_roles, &native_traits);
     // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
     // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
     // registry now, not the AST.
@@ -377,7 +378,8 @@ pub fn compile_session_with(
         .cloned()
         .collect();
     let native_roles = opts.registry.native_roles();
-    let mut reflection = noeta_ast::reflect::build(program, &native_roles);
+    let native_traits = noeta_ir::native_trait_impls(opts.registry);
+    let mut reflection = noeta_ast::reflect::build(program, &native_roles, &native_traits);
     // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
     // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
     // registry now, not the AST.
@@ -755,8 +757,12 @@ impl SessionCompiler {
         // type declared in an earlier entry resolves — the tree-walker `Session` accumulates the same
         // way, keeping the session differential green.
         let native_roles = self.mc.registry.native_roles();
-        self.reflection
-            .accumulate(noeta_ast::reflect::build(entry, &native_roles));
+        let native_traits = noeta_ir::native_trait_impls(self.mc.registry);
+        self.reflection.accumulate(noeta_ast::reflect::build(
+            entry,
+            &native_roles,
+            &native_traits,
+        ));
         // Re-embed extension attribute shapes: `accumulate` purges a redeclared name's records, and
         // the extension shapes must survive every entry (idempotent for names already present).
         noeta_check::extend_reflection(&mut self.reflection);
@@ -3702,6 +3708,11 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::FieldsOf { dst, src });
                 Ok(())
             }
+            Rvalue::TraitsOf { operand, .. } => {
+                let src = self.atom_reg(operand)?;
+                self.code.push(Op::TraitsOf { dst, src });
+                Ok(())
+            }
             Rvalue::AttributesOf { ty, dynamic, .. } => {
                 // The attribute type is resolved at compile time (closed-world); the VM reads the
                 // matching manifest entries from `Module::reflection` and materializes them. A
@@ -4986,11 +4997,17 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
             NarrowTarget::AnyOf(members.iter().map(narrow_target).collect())
         }
         TypeRef::Optional { .. } => NarrowTarget::Named("Option".to_string()),
-        // Narrowing to a trait object reduces to the dynamic top (a permissive over-approximation;
-        // `x.as<dyn Trait>()` is a rare corner and a precise implementor test is future work).
-        TypeRef::DynTrait { .. } => NarrowTarget::Dyn,
-        // A `Self::Name` projection has no static runtime head (resolution is per-impl at the checker);
-        // narrowing to one reduces to the permissive dynamic top, like a trait object (slice 1a).
+        // A trait object narrows PRECISELY: the target carries the trait's canonical identity
+        // (resolved at lowering by `resolve_type_aliases`), and the VM's `narrow_matches` tests the
+        // value's nominal type against the module reflection's membership table — mirroring the
+        // tree-walker's `runtime_matches` on the same shared table, so the differential holds by
+        // construction.
+        TypeRef::DynTrait { trait_name, .. } => NarrowTarget::DynTrait(trait_name.clone()),
+        // A `Self::Name` projection has no static runtime head (resolution is per-impl at the
+        // checker); narrowing to one stays the permissive dynamic top — deliberately, and now
+        // UNLIKE the precise `dyn Trait` above: a projection names a concrete per-impl type, not a
+        // trait, and the erased value carries no impl identity to reconstruct that binding from
+        // (slice 1a).
         TypeRef::AssocProjection { .. } => NarrowTarget::Dyn,
         TypeRef::Tuple { .. } => NarrowTarget::Tuple,
         // Function types are erased: narrowing to one is a head-constructor "is callable" test
@@ -5307,14 +5324,41 @@ mod tests {
         // same embedding to the raw builder output.
         // `compile` builds reflection against the process-global registry (`CompileOptions::default`),
         // so the parity comparison must feed the raw builder the same native-role table.
-        let native_roles = noeta_ext_abi::registry::single_registry_process().native_roles();
-        let mut from_builder = noeta_ast::reflect::build(&parsed.program, &native_roles);
+        let registry = noeta_ext_abi::registry::single_registry_process();
+        let native_roles = registry.native_roles();
+        let native_traits = noeta_ir::native_trait_impls(registry);
+        let mut from_builder =
+            noeta_ast::reflect::build(&parsed.program, &native_roles, &native_traits);
         noeta_check::extend_reflection(&mut from_builder);
         assert_eq!(from_module, from_builder);
         // Deterministic: the same AST always yields the same artifact.
-        let mut again = noeta_ast::reflect::build(&parsed.program, &native_roles);
+        let mut again = noeta_ast::reflect::build(&parsed.program, &native_roles, &native_traits);
         noeta_check::extend_reflection(&mut again);
         assert_eq!(from_builder, again);
+    }
+
+    /// The membership table behind the precise `is dyn Trait` / `traits_of`: a standalone
+    /// `impl Trait for T`, an in-body `impl` block, and a `@derive` (built-in and user traits
+    /// alike) all register — and a type with none registers nothing (the row-absence that makes
+    /// the runtime test answer `false` where it used to answer `true`).
+    #[test]
+    fn reflection_records_trait_impls_from_every_declaration_form() {
+        let src = "trait Speaks { fn speak(): string }\n\
+                   trait Greets { fn hello(): string { return \"hi\"; } }\n\
+                   struct Dog { name: string }\n\
+                   impl Speaks for Dog { fn speak(): string { return \"woof\"; } }\n\
+                   @derive(Greets)\n\
+                   struct Robot { id: int  impl Display { fn to_string(): string { return \"r\"; } } }\n\
+                   struct Plain { n: int }\n";
+        let source = Source::new(SourceId::FIRST, "t.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let reflection = compile(&parsed.program).expect("compiles").reflection;
+        assert_eq!(reflection.traits_for("Dog"), vec!["Speaks"]);
+        assert_eq!(reflection.traits_for("Robot"), vec!["Display", "Greets"]);
+        assert!(reflection.traits_for("Plain").is_empty());
+        assert!(reflection.type_implements("Dog", "Speaks"));
+        assert!(!reflection.type_implements("Plain", "Speaks"));
     }
 
     #[test]

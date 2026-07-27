@@ -51,6 +51,7 @@ mod pretty;
 pub use lower::{
     LowerOptions, LoweringSites, Unsupported, hoist_impl_methods_with_registry,
     hoist_standalone_impl_methods, lower, lower_with_sites, lower_with_sites_opts,
+    native_trait_impls,
 };
 pub use pretty::dump;
 
@@ -514,6 +515,10 @@ pub enum Rvalue {
     /// `fields_of(value)` — a struct/class instance's fields as `List<FieldEntry>` (derive
     /// layer 3); the empty list for any other value.
     FieldsOf { operand: Atom, span: Span },
+    /// `traits_of(value)` — the qualified trait names the value's nominal type has a registered
+    /// `impl` for, as a sorted, deduped `List<string>` (the shared membership table the precise
+    /// `is dyn Trait` narrowing tests); the empty list for a non-nominal value.
+    TraitsOf { operand: Atom, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4).
     /// `blob` is the byte operand; `layout` is element `T`'s packed layout (looked up by the lowering
     /// in the `packed_list_sites` channel — the same one list literals use). `None` if the checker

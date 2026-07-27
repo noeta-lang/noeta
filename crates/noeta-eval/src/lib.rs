@@ -252,9 +252,12 @@ impl Session {
         let ir = noeta_ir_passes::insert_drops(&ir, None);
         let ir = noeta_ir_passes::thread_reuse(&ir);
         let native_roles = self.interp.reg().native_roles();
-        self.interp
-            .reflection
-            .accumulate(noeta_ast::reflect::build(&lowerable, &native_roles));
+        let native_traits = noeta_ir::native_trait_impls(self.interp.reg());
+        self.interp.reflection.accumulate(noeta_ast::reflect::build(
+            &lowerable,
+            &native_roles,
+            &native_traits,
+        ));
         let flow = self.interp.run_ir_batch(&ir);
         // **Remove** (not clone) the sentinel so an evaluated trailing value never lingers in scope.
         // Keeping it bound would hold a reference to the value across entries, which would both leak
@@ -2167,6 +2170,25 @@ impl Interpreter {
                 Value::Object(Rc::new(ObjectValue::new(def, slots)))
             })
             .collect();
+        Value::list(items)
+    }
+
+    /// Materialize the qualified trait names a value's nominal type implements into a sorted,
+    /// deduped `List<string>` — the reflection `traits_of(value)`. Reads the SAME membership table
+    /// (`ReflectionInfo::trait_impls`) the precise `is dyn Trait` narrowing tests, so the two
+    /// surfaces cannot disagree; a non-nominal value yields the empty list (mirroring
+    /// `fields_of`'s non-object answer). The VM reads the identical table off its module
+    /// reflection, so the values agree across the differential by construction.
+    fn materialize_traits(&self, value: &Value) -> Value {
+        let items: Vec<Value> = value_nominal_name(value)
+            .map(|n| {
+                self.reflection
+                    .traits_for(&n)
+                    .into_iter()
+                    .map(|t| Value::Str(t.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
         Value::list(items)
     }
 
@@ -6012,23 +6034,55 @@ fn attr_value_to_eval(
     }
 }
 
+/// The **nominal runtime tag** a value carries, if any: a user object's shape name, an enum's
+/// type name, or an extern value's qualified identity — the same names `runtime_matches`'s
+/// `Named` arm compares against, and the key the trait-membership table
+/// ([`noeta_ast::reflect::ReflectionInfo::trait_impls`]) and `traits_of` use. `None` for every
+/// non-nominal value (scalars, collections, functions), which therefore implements no trait.
+/// Mirrors the VM's `vm_nominal_name`.
+fn value_nominal_name(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(o) => Some(o.def.name().to_string()),
+        Value::Enum(e) => Some(e.enum_name.clone()),
+        Value::Extern(e) => Some(e.borrow().type_identity().to_string()),
+        _ => None,
+    }
+}
+
 /// Whether a runtime value matches a narrowing target type `ty` (`x.as<T>()`). Generics are
 /// erased, so only the **head constructor** is tested — `List<int>` checks "is a list", trusting
 /// the element type from the annotation. Keyed on the same canonical kind names the VM uses
 /// (`Value::type_name` and the enum/object shape name), so both backends decide identically.
-fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
+/// `reflection` supplies the trait-membership table a `dyn Trait` target tests against.
+fn runtime_matches(
+    value: &Value,
+    ty: &TypeRef,
+    reflection: &noeta_ast::reflect::ReflectionInfo,
+) -> bool {
     match ty {
         // A union target matches if the value matches any member (`x.as<int | string>()`).
-        TypeRef::Union { members, .. } => members.iter().any(|m| runtime_matches(value, m)),
+        TypeRef::Union { members, .. } => members
+            .iter()
+            .any(|m| runtime_matches(value, m, reflection)),
         // `?T` is `Option<T>`: matches any `Option` value (its payload is not re-checked).
         TypeRef::Optional { .. } => {
             matches!(value, Value::Enum(e) if e.enum_name == "Option")
         }
-        // Narrowing to a trait object matches any value (the permissive over-approximation, matching
-        // the VM's `NarrowTarget::Dyn`); a precise implementor test is future work.
-        TypeRef::DynTrait { .. } => true,
-        // A `Self::Name` projection has no static runtime head; narrowing to one is permissive like a
-        // trait object, matching the VM's `NarrowTarget::Dyn` (slice 1a).
+        // A trait object matches iff the value's nominal type has a REGISTERED impl of the trait —
+        // the shared membership table both backends' reflection carries, built from the same
+        // `impl`/`@derive`/ABI declarations that make trait-method dispatch resolve — so `is`
+        // can never disagree with "would a trait method call work". A non-nominal value (scalar,
+        // collection, function) implements no declared trait and never matches; the trait name was
+        // canonicalized at lowering (`resolve_type_aliases`), so this is one string comparison.
+        // Mirrors the VM's `NarrowTarget::DynTrait`.
+        TypeRef::DynTrait { trait_name, .. } => {
+            value_nominal_name(value).is_some_and(|n| reflection.type_implements(&n, trait_name))
+        }
+        // A `Self::Name` projection has no static runtime head (resolution is per-impl at the
+        // checker), so narrowing to one stays the permissive dynamic top — deliberately, and now
+        // UNLIKE the precise `dyn Trait` above: a projection names a concrete per-impl type, not a
+        // trait, and reconstructing that binding at runtime would need impl identity the erased
+        // value no longer carries. Matches the VM's `NarrowTarget::Dyn` (slice 1a).
         TypeRef::AssocProjection { .. } => true,
         // A tuple target matches any tuple value — head-constructor only, arity/elements erased
         // (object-model slice 4), exactly like `List` ignoring its element type.
@@ -6852,8 +6906,13 @@ fn try_branch(value: &Value) -> Option<TryBranch> {
 }
 
 /// Try to match `pattern` against `value`. Returns the bindings it introduces on
-/// success, or `None` if the pattern does not match.
-fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
+/// success, or `None` if the pattern does not match. `reflection` feeds the `is`-pattern's
+/// [`runtime_matches`] (the precise `dyn Trait` membership test).
+fn match_pattern(
+    pattern: &Pattern,
+    value: &Value,
+    reflection: &noeta_ast::reflect::ReflectionInfo,
+) -> Option<Vec<(String, Value)>> {
     match pattern {
         Pattern::Wildcard { .. } => Some(Vec::new()),
         Pattern::Binding { name, .. } => Some(vec![(name.clone(), value.clone())]),
@@ -6894,13 +6953,13 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
             }
             let mut all = Vec::new();
             for (sub, data) in bindings.iter().zip(&enum_value.data) {
-                all.extend(match_pattern(sub, data)?);
+                all.extend(match_pattern(sub, data, reflection)?);
             }
             Some(all)
         }
         // `is T` matches on the head constructor (same erased test as `x.as<T>()`), binding
         // nothing — the narrowed value is referred to by the scrutinee's own name.
-        Pattern::IsType { ty, .. } => runtime_matches(value, ty).then(Vec::new),
+        Pattern::IsType { ty, .. } => runtime_matches(value, ty, reflection).then(Vec::new),
         // A tuple pattern `(p, q, …)` matches a tuple of the same arity, destructuring each position
         // against its sub-pattern (object-model slice 4b); refutable on kind, arity, and elements.
         Pattern::Tuple { elements, .. } => {
@@ -6912,7 +6971,7 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
             }
             let mut all = Vec::new();
             for (sub, item) in elements.iter().zip(items.iter()) {
-                all.extend(match_pattern(sub, item)?);
+                all.extend(match_pattern(sub, item, reflection)?);
             }
             Some(all)
         }

@@ -1,0 +1,58 @@
+// `x is dyn Trait` is a PRECISE membership test: a value matches iff its nominal type has a
+// registered `impl Trait` — the same declarations trait-method dispatch resolves through, read off
+// the shared reflection membership table, so `is` can never disagree with "would a trait method
+// call work". It used to be a permissive always-true test; the `Silent` cases pin the fix (they
+// answered `true` before). A non-nominal value (int, string, list) implements no declared trait
+// and never matches. Both backends read the same table (the differential oracle).
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: exit 0
+trait Speaks {
+    fn speak(): string
+}
+
+struct Dog {
+    name: string
+}
+
+impl Speaks for Dog {
+    fn speak(): string {
+        return "woof"
+    }
+}
+
+// Same shape, no impl — the case the permissive test answered `true` for.
+struct Silent {
+    name: string
+}
+
+// An enum implements the trait through an in-body `impl` block.
+enum Coin {
+    Heads
+    Tails
+
+    impl Speaks {
+        fn speak(): string {
+            return "clink"
+        }
+    }
+}
+
+fn probe(x: dyn): bool {
+    return x is dyn Speaks
+}
+
+echo probe(Dog { name: "Rex" })
+echo probe(Silent { name: "Mute" })
+echo probe(Coin.Heads)
+// Non-nominal values never match a trait target.
+echo probe(42)
+echo probe("woof")
+echo probe([1, 2])
+// The test also runs directly on a concretely-typed value (a type TEST is always well-formed).
+echo Dog { name: "Rex" } is dyn Speaks

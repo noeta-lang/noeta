@@ -2217,6 +2217,9 @@ impl Printer<'_> {
             Expr::FieldsOf { value, .. } => {
                 Doc::concat([Doc::text("fields_of("), self.expr(value)?, Doc::text(")")])
             }
+            Expr::TraitsOf { value, .. } => {
+                Doc::concat([Doc::text("traits_of("), self.expr(value)?, Doc::text(")")])
+            }
             Expr::ParamsOf { target, .. } => {
                 Doc::concat([Doc::text("params_of("), self.expr(target)?, Doc::text(")")])
             }
