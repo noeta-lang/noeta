@@ -31,12 +31,14 @@ fn sum_to(n: int): int {
 
 ### Iteration count
 
-The block directive is **distribution sugar**: `@bench(iterations: N) { … }` stamps the `std.bench.Bench` attribute (`#[Bench(iterations: N)]`) onto each contained fn — validated like any attribute construction, visible to reflection, and stamped already-qualified so the block form needs no `use`. A fn can carry its own `#[Bench(…)]` to override the block's, but writing the attribute yourself needs `use std.bench.Bench` (or the qualified form, `#[std.bench.Bench(iterations: 50)]`) — it is not prelude. The count comes from the first of these that is set:
+Fix a benchmark's iteration count on the block — `@bench(iterations: 1000) { … }`, as in the example above — or leave it off and let calibration pick one. Positional `@bench(1000)` and named `@bench(iterations: 1000)` are equivalent, and a single fn can carry its own `#[Bench(iterations: N)]` attribute to override the block's. The count each fn runs with comes from the first of these that is set:
 
 1. `--iterations N` on the command line (overrides everything).
 2. The fn's own `#[Bench(iterations: N)]` attribute.
-3. The block's `@bench(iterations: N)` directive — positional `@bench(1000)` and named `@bench(iterations: 1000)` are equivalent.
+3. The block's `@bench(iterations: N)` directive.
 4. **Calibration**: a short probe grows the count until one measurement run takes ~50ms, so fast and slow bodies alike get a statistically meaningful count automatically.
+
+Under the hood the block directive is **distribution sugar**: `@bench(iterations: N) { … }` stamps the `std.bench.Bench` attribute (`#[Bench(iterations: N)]`) onto each contained fn — validated like any attribute construction, visible to reflection, and stamped already-qualified so the block form needs no `use`. Writing the attribute yourself is what needs `use std.bench.Bench` (or the qualified form, `#[std.bench.Bench(iterations: 50)]`) — it is not prelude.
 
 ## How timing works
 
@@ -74,6 +76,16 @@ running <N> benchmarks
 ```
 
 Exit `0` when nothing failed, `1` otherwise. `no benchmarks found` exits `0`.
+
+With `--baseline`, each line gains the delta against the named baseline:
+
+```console
+$ noeta bench sort.noe --baseline main
+running 1 benchmark
+  sum_100                          2.55 µs/iter  (1000 iterations)  (-5.2% vs main)
+
+1 ran, 0 failed, 1 total
+```
 
 > [!NOTE]
 > `noeta bench` measures *your program's* `@bench` blocks. It is unrelated to the `criterion` benches the compiler developers run against the VM itself (`cargo bench -p noeta-vm`) — those are covered in the [Contributing guide](Contributing).
