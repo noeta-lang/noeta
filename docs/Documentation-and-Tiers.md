@@ -98,6 +98,17 @@ reading.
 
 Mark the interesting region and the rest folds away:
 
+```text
+struct Email { addr: string }     ← context: compiled, folded away
+// sample:start
+e = Email { addr: "a@b.com" }     ← the sample: what the page shows
+echo e.addr
+// sample:end
+```
+
+Which renders as the two marked lines, with the whole program behind the expander — this block is
+the live article, so open it to see the `struct` the sample needs:
+
 ```noeta
 struct Email { addr: string }
 
