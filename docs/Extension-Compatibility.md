@@ -2,8 +2,9 @@
 
 This page is the compatibility statement for **native package authors**—the answer to "what may my
 Rust code depend on, what happens to that dependency when a consumer builds against a different
-toolchain release, and how do I find out I broke before my users do?" The mechanics of *writing* an
-extension live in [Native Extensions](Native-Extensions); this page is only about the contract.
+toolchain release, and how do I find out I broke before my users do?" The concepts behind the seam
+live in [Native Extensions](Native-Extensions) and the authoring walkthrough in
+[Writing a Native Package](Writing-Native-Packages); this page is only about the contract.
 
 The short version:
 
@@ -65,7 +66,7 @@ so an ABI change surfaces as an ordinary compile error and the constant is *reco
 it exists as the handshake a future dynamic-loading path would refuse a mismatch with.
 
 A minimal entry crate, for orientation (see
-[Writing a native package](Native-Extensions#writing-a-native-package) for the full walkthrough):
+[Writing a Native Package](Writing-Native-Packages) for the full walkthrough):
 
 ```rust
 use noeta_ext_abi::registry::{ExtModule, Extension};
@@ -190,8 +191,10 @@ noeta-stdlib      = { git = "https://github.com/noeta-lang/noeta", tag = "v0.2.0
 
 ## See also
 
-- [Native Extensions](Native-Extensions)—how to write an extension: the registry, types, classes,
-  traits, directives, and the composed-toolchain build.
+- [Writing a Native Package](Writing-Native-Packages)—the authoring walkthrough: entry crate,
+  manifest, composition, building, testing, publishing.
+- [Native Extensions](Native-Extensions)—the concepts: the registry, types, classes, traits,
+  directives, and the dispatch seams.
 - [Manifest](Manifest)—the `native` and `toolchain` keys, and the dependency table.
 - [Package Registries](Package-Registries) and [Package Provenance](Package-Provenance)—publishing,
   scopes, and signing.

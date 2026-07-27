@@ -45,11 +45,19 @@ Static analysis is an **optimization input, never a soundness requirement**. Cor
 
 **Deterministic `__destruct` at last use.** When an object's last reference drops — at the precise IR point liveness identified, not at scope end — its destructor runs synchronously. Children are destroyed container-before-contained in declared order (fields, then enum payloads, then collection elements), the *same* order both backends walk because they walk the same IR.
 
-**Verification.** Every phase is gated by: a **leak oracle** (heap residency must be 0 at clean exit, both backends, whole corpus, empty allowlist); a **static-≤-dynamic** property test (the analysis may never claim a death before the real one); the reference-interpreter ↔ VM differential; and miri on every refcount/collector path.
+**Verification.** Every phase is gated by the same oracles [Contributing](Contributing#testing-architecture) describes:
+
+| Gate | What it asserts |
+|---|---|
+| The leak oracle | heap residency is 0 at clean exit — both backends, whole corpus, empty allowlist |
+| The refcount-anomaly oracle | every unreachable object's refcount equals its in-edges from the garbage set, so a skipped retain/release is caught |
+| The static-≤-dynamic property test | the analysis never claims a death before the real one |
+| The differential oracle | reference interpreter ↔ VM output is byte-for-byte identical |
+| miri | every refcount/collector `unsafe` path is UB-free |
 
 ## Cycle collection
 
-Reference counting cannot reclaim reference cycles. Under value semantics an ordinary object *can't* form one (a shared mutation copies) — the only cycles are closure/scope self-captures, which become reachable once mutable fields exist. So a backup collector (`noeta-gc`) is load-bearing, running only at safepoints.
+Reference counting cannot reclaim reference cycles. Under value semantics an ordinary object *can't* form one (a shared mutation copies) — the only cycles are closure/scope self-captures, which become reachable once mutable fields exist. So a backup collector (`noeta-gc`) is load-bearing, running only at *safepoints* — designated execution points (loop back-edges, frame transfers, scheduler rounds) where the heap is in a consistent, collectable state; see [In-run safepoint collection](#in-run-safepoint-collection) below.
 
 `noeta-gc` owns the *policy* (`retain`/`release` and the collection algorithm); the `unsafe` refcount/graph *mechanism* lives in `noeta-value`'s heap. Two collectors were built and benchmarked head to head:
 
@@ -66,7 +74,11 @@ Reference counting cannot reclaim reference cycles. Under value semantics an ord
 
 Collection also runs **during** execution, so a program building cycles in a loop has *bounded* peak residency instead of growing until exit. The trigger is allocation pressure — a thread-local watermark over the live count (`Trace`) or the candidate buffer's growth (`TrialDeletion`), step `NOETA_GC_THRESHOLD` (default 10k objects), re-armed geometrically so genuinely-live residency pays a vanishing collection frequency. The VM polls one thread-local bool at taken loop back-edges, frame transfers, and each scheduler drive round (so a program parked on `.await` still collects); tier-1 native code never polls — it rejoins those sites at every bail, call, and return, so compiled frames are never interrupted at an unsafe point. Trigger state is thread-local, so every worker isolate collects its own heap at its own safepoints.
 
-The semantic rule that keeps this invisible: **a safepoint collection never runs a destructor.** A `destruct` block is the only observable memory-management effect, and its firing is tied to the last owning release — an event cyclic garbage never produces, so cycle-destructor timing belongs to the collector and stays where it always was: the exit collection. A dead component containing any destructor-bearing member (partitioned at weakly-connected-component granularity, so no reclaimed member can reference a deferred one) is left allocated for exit, which reclaims it with the same members, the same reverse-`seq` order, and the same output as before. Destructor-free garbage reclaims immediately — unobservably, which is also why the two backends need no synchronized collection points: the VM traces from its enumerated roots (register windows, upvalues, globals, channel buffers, extension arena, embed handles, scheduler-held tasks); the reference interpreter runs trial deletion over the `Rc` graph seeded from its weak candidate registries (every Rust-held value is a counted owner, so any interpreter point is safe). Each side carries a hard safety net: the VM aborts any collection whose garbage set does not exactly refcount-balance its internal in-edges (a missed root costs liveness until exit, never a use-after-free), and eval verifies the dead set's strong counts the same way.
+The semantic rule that keeps this invisible: **a safepoint collection never runs a destructor.** A `destruct` block is the only observable memory-management effect, and its firing is tied to the last owning release — an event cyclic garbage never produces — so cycle-destructor timing belongs to the collector and stays where it always was: the exit collection. Destructor-free garbage reclaims immediately and unobservably.
+
+A dead component that *does* contain a destructor-bearing member is **deferred to exit**: garbage is partitioned at weakly-connected-component granularity (so no reclaimed member can reference a deferred one), and the deferred component is left allocated for the exit collection, which reclaims it with the same members, the same reverse-`seq` order, and the same output it would always have produced.
+
+Because immediate reclamation is unobservable, the two backends need no synchronized collection points — each collects its own way, and each carries a hard safety net. The VM traces from its enumerated roots (register windows, upvalues, globals, channel buffers, extension arena, embed handles, scheduler-held tasks) and **aborts any collection whose garbage set does not exactly refcount-balance its internal in-edges** — a missed root costs liveness until exit, never a use-after-free. The reference interpreter runs trial deletion over the `Rc` graph seeded from its weak candidate registries (every Rust-held value is a counted owner, so any interpreter point is safe) and verifies the dead set's strong counts the same way.
 
 The bounding proof lives in `noeta-conformance/tests/safepoint_residency.rs`: a 3000-iteration cycle-building loop peaks at ~260 live objects armed vs ~12,000 disarmed, on both backends, with exit residency unchanged.
 

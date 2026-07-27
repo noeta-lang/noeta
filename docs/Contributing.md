@@ -2,7 +2,7 @@
 
 This page is the developer's entry point to *building* the language — the compiler, not programs in it. It complements the in-repo `AGENTS.md` (the exhaustive conventions reference) and `ARCHITECTURE.md` (the technical overview); this page orients you and points at them.
 
-Noeta is a pre-alpha, not-yet-public implementation built primarily through agentic engineering, so the discipline below is written to be followed by humans and AI agents alike.
+Noeta is a young pre-1.0 implementation — public, with tagged releases (v0.2.x at the time of writing) — built primarily through agentic engineering, so the discipline below is written to be followed by humans and AI agents alike.
 
 ## Orientation
 
@@ -21,6 +21,8 @@ cargo build                                  # build the workspace + the `noeta`
 cargo test                                   # unit + snapshot + conformance + property tests
 cargo run -p noeta-cli -- run file.noe       # run a program (or use ./target/debug/noeta)
 cargo run -p noeta-conformance -- --differential   # the differential oracle (dev harness)
+cargo run -p noeta-conformance -- --file hello.noe # one conformance fixture — `--file` matches by
+                                                   # path suffix (e.g. `--file gc/class_self_cycle.noe`)
 ```
 
 You need a recent stable Rust (1.95+).
@@ -57,7 +59,8 @@ A language feature is added as a **vertical slice**, in this order:
 - **The leak oracle** — heap residency must be 0 at clean exit, both backends, whole corpus.
 - **The refcount-anomaly oracle** — during cycle collection, every unreachable object's refcount must equal its in-edges from the garbage set (unreachable garbage can only reference itself), so a *skipped* retain or release is caught even when teardown's backup sweep would have absorbed the orphan. Runs inside the leak and JIT oracles.
 - **The JIT oracle** (`--jit-differential`, `jit` feature) — every corpus program through the interpreter and the forced-Tier-1 JIT: byte-identical `RunResult`, zero residency, zero anomalies. This is the gate for native-code refcount contracts that miri cannot see.
-- **miri** — covers the quarantined `unsafe` that can execute under it (`noeta-value`, `noeta-gc`, the `noeta-db` newtype, a `noeta-stdlib` reinterpret, the test-only `noeta-alloc-probe`); the Tier-1 seam's `unsafe` (`noeta-jit`, the VM's `jit`-feature helpers) executes as generated native code, which miri can't run — the JIT oracle is its gate. The compiler and the default-feature interpreter paths are `unsafe`-free.
+- **miri** — covers the quarantined `unsafe` that can execute under it: `noeta-value`, `noeta-gc`, the `noeta-db` newtype, a `noeta-stdlib` reinterpret, and the test-only `noeta-alloc-probe`. The compiler and the default-feature interpreter paths are `unsafe`-free.
+- **What miri cannot see — the JIT oracle covers it.** The Tier-1 seam's `unsafe` (`noeta-jit`, the VM's `jit`-feature helpers) executes as generated native code, which miri can't run; the JIT oracle above is that code's gate for memory and refcount correctness.
 - **Coverage** — measured with `cargo-llvm-cov` (never tarpaulin, which can't see the subprocess-driven CLI tests). `cargo llvm-cov --workspace --summary-only`.
 - **Benchmarks** — `cargo bench -p noeta-vm` runs the `criterion` benches over the VM hot paths; a VM-touching change should check for no regression.
 
