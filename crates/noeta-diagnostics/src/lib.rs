@@ -335,17 +335,12 @@ pub enum DiagnosticCode {
     /// the text looks wrong. Dead code the author did not intend is never the intent, so it is
     /// rejected outright — move the catch-all last, or delete the unreachable arm.
     UnreachableMatchArm,
-    /// A bare-identifier `match` pattern whose name is a **payload-free variant** of the scrutinee's
-    /// own enum — `String => …` where the scrutinee is a `Type` declaring `String;`. Pattern
-    /// resolution is deliberately uniform: a bare identifier always *binds*, so this arm matches
-    /// every value instead of the variant the name so plainly reads as.
-    ///
-    /// A payload-carrying variant is call-shaped (`Type.List(inner)`, `some(x)`) and therefore
-    /// unambiguous; only the payload-free case collides with the binding form, and only there is the
-    /// qualified spelling (`Type.String`) mandatory. Reported even on the *first* arm, where nothing
-    /// is yet unreachable — a lone `String => …` on a `Type` scrutinee is already the whole bug.
-    /// Its sibling [`Self::UnreachableMatchArm`] covers the arms such a pattern silently swallows.
-    VariantShadowedByBinding,
+    // `E0067` (`VariantShadowedByBinding`) is **retired**. It reported a bare-identifier pattern
+    // naming a payload-free variant of the scrutinee's own enum (`String => …` on a `Type`
+    // declaring `String;`), back when a bare identifier always bound. That spelling now *resolves*
+    // to the variant, so what the code reported is the meaning — there is nothing left to report.
+    // The number stays burned: code assignments are append-only and permanent, so E0067 is never
+    // reused for anything else.
     /// The bytecode backend could not compile a program the type checker accepted — an **internal
     /// invariant break**, not a mistake in the source.
     ///
@@ -429,7 +424,6 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidStringEscape,
         DiagnosticCode::ImpossibleTypeTest,
         DiagnosticCode::UnreachableMatchArm,
-        DiagnosticCode::VariantShadowedByBinding,
         DiagnosticCode::InternalCompilerError,
     ];
 
@@ -503,7 +497,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidStringEscape => "E0064",
             DiagnosticCode::ImpossibleTypeTest => "E0065",
             DiagnosticCode::UnreachableMatchArm => "E0066",
-            DiagnosticCode::VariantShadowedByBinding => "E0067",
+            // "E0067" is retired (see the enum) and deliberately skipped — never reassigned.
             DiagnosticCode::InternalCompilerError => "E0068",
         }
     }

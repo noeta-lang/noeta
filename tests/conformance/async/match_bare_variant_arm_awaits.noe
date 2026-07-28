@@ -1,0 +1,35 @@
+// A bare payload-free variant arm inside an `async fn` whose body AWAITS. The await-hoist splits
+// such a `match` in two — Phase 1 selects the arm and captures whatever its pattern bound into
+// `$`-cells, Phase 2 re-binds them and runs the awaiting body — and it runs on the surface AST,
+// *before* the lowering rewrites a resolved bare identifier into a variant test. A resolved arm
+// binds nothing, so nothing may be captured: capturing "the value of `Idle`" would synthesize a
+// read of a name that never exists. This case is what holds the two passes in agreement.
+// expect: stdout "2"
+// expect: stdout "100"
+// expect: stdout "42"
+// expect: exit 0
+enum State {
+    Idle;
+    Busy;
+    Job(id: int);
+}
+
+async fn fetch(n: int): int {
+    return n * 2
+}
+
+async fn handle(s: State): int {
+    return match s {
+        Idle => fetch(1).await,
+        Busy => 100,
+        Job(id) => fetch(id).await,
+    }
+}
+
+async fn run(): int {
+    echo handle(State.Idle).await
+    echo handle(State.Busy).await
+    echo handle(State.Job(21)).await
+    return 0
+}
+run().await

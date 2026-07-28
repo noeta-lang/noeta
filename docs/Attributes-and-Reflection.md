@@ -108,11 +108,13 @@ Returns the value's runtime head-constructor as the prelude `Type` ADT, which yo
 
 ```noeta
 echo match type_of(5) {
-    Type.Int    => "int",
-    Type.String => "string",
-    _           => "other",
+    Int    => "int",
+    String => "string",
+    _      => "other",
 }
 ```
+
+The payload-free cases are spelled **bare** here: the scrutinee is a `Type`, so `Int` and `String` resolve to that enum's own cases rather than binding the whole value (see [pattern matching](Control-Flow-and-Pattern-Matching#a-bare-identifier-is-a-variant-when-the-scrutinees-enum-has-one)). `Type.Int` still works and means the same; reach for it when the short name would read ambiguously. The payload-carrying cases are call-shaped and never needed the qualifier: `List(inner)`, `IntN(bits, signed)`, `Struct(name, args)`.
 
 `Type` variants include the scalars `Type.Int`, `Type.Float`, `Type.F32`, `Type.F64`, `Type.IntN(bits, signed)`, `Type.Bool`, `Type.String`, `Type.Bytes`, `Type.Unit`, `Type.Dyn`; the containers `Type.List(inner)`, `Type.Set(inner)`, `Type.Map(k, v)`, `Type.Option(inner)`, `Type.Result(ok, err)`; `Type.Fn(params, ret)` and `Type.Union(members)`; the trait object `Type.DynTrait(name)`; and the nominals `Type.Struct(name, args)`, `Type.Enum(name, args)`, `Type.Class(name, args)`, `Type.Named(name, args)`. Collection literals carry their resolved element type as a runtime tag that survives a `dyn` launder (a content-changing op like `.set` drops the tag to head-only).
 
