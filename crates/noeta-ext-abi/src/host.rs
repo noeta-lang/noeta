@@ -258,6 +258,115 @@ pub trait Network {
     fn net_ws_close(&self, conn: u64) -> Box<dyn crate::ExternIo> {
         Box::new(crate::net::WsCloseIo { conn })
     }
+
+    // --- Streaming bodies (http-streaming arc). The outbound half reads a response body
+    // *incrementally* instead of buffering it whole; the inbound half serves an event stream
+    // instead of one reply-and-close. Determinism follows the same discipline as everything above:
+    // the sandbox decodes a **pure, finite scripted body** (a function of the request, like
+    // `sandbox_respond`) so a streaming program terminates in-oracle, and the real host overrides
+    // the descriptor builders with genuinely async reqwest/socket bodies. ---
+
+    /// Open `request`'s response body as an incremental stream cut with `framing`, returning a
+    /// stream id passed to [`Self::net_stream_recv`] / [`Self::net_stream_close`].
+    ///
+    /// Synchronous, and deliberately so: opening a stream is "send the request and read the
+    /// response **head**", which is exactly the point where a transport failure is still a
+    /// [`crate::NetError`] the caller can handle. Once the head is in, failures belong to the body
+    /// and surface as the stream ending. That split is what lets `stream(...)` return a
+    /// `Result<FrameStream, HttpError>` whose `Err` means "the request never got off the ground",
+    /// the same contract the one-shot verbs have.
+    ///
+    /// The default is an honest capability error, so a host with no streaming transport (WASI, the
+    /// browser) stays compiling and a program reaching the surface is told why.
+    fn net_stream_open(
+        &mut self,
+        request: crate::NetRequest,
+        _framing: crate::stream::Framing,
+    ) -> Result<u64, crate::NetError> {
+        Err(crate::NetError::new(
+            crate::NetErrorKind::Other,
+            request.url,
+            "this host does not support streaming response bodies",
+        ))
+    }
+
+    /// The next decoded frame on `stream` for the default recv descriptor — `None` once the body
+    /// has ended and every buffered frame has been taken.
+    fn net_stream_recv_next(
+        &mut self,
+        _stream: u64,
+    ) -> Result<Option<crate::stream::Frame>, StdError> {
+        Err(StdError {
+            kind: ErrorKind::Io,
+            message: "this host does not support streaming response bodies".to_string(),
+        })
+    }
+
+    /// Build the async recv descriptor for `stream`. Default: a
+    /// [`StreamRecvIo`](crate::stream::StreamRecvIo) resolving through
+    /// [`Self::net_stream_recv_next`] at spawn (deterministic in the sandbox, where the whole
+    /// scripted body is decoded at open; serial-but-correct on any host). `RealHost` overrides it
+    /// with a genuine chunk read off the live connection.
+    fn net_stream_recv(&self, stream: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::stream::StreamRecvIo { stream })
+    }
+
+    /// Release `stream` and its underlying connection.
+    ///
+    /// Idempotent: closing an already-closed (or never-opened) stream is `Ok`, because a program
+    /// that closes a stream it has already drained is doing the right thing, not an error. A
+    /// stream the program **abandons** without closing is released when the host is torn down —
+    /// there is no host-coupled finalizer to do it sooner (see `docs/Native-Extensions.md`), which
+    /// is exactly why `close()` exists on the surface.
+    fn net_stream_close(&mut self, _stream: u64) -> Result<(), StdError> {
+        Ok(())
+    }
+
+    /// Begin an event-stream response on `conn`: write the `200 text/event-stream` head and hold
+    /// the connection open for [`Self::net_sse_send_now`] frames.
+    ///
+    /// The inbound mirror of [`Self::net_stream_open`], and the exact analogue of
+    /// [`Self::net_ws_upgrade_now`] — a connection leaving one-reply-and-close for a persistent
+    /// stream. Unlike a websocket this needs no handshake key: SSE is a plain HTTP response whose
+    /// body never ends, so any request can be answered with one.
+    fn net_sse_start_now(&mut self, _conn: u64) -> Result<(), StdError> {
+        Err(StdError {
+            kind: ErrorKind::Io,
+            message: "this host does not serve event streams".to_string(),
+        })
+    }
+
+    /// Write already-encoded event-stream bytes on `conn` for the default send descriptor.
+    ///
+    /// Takes **wire text**, not a [`crate::stream::Frame`], so the one encoder
+    /// ([`crate::stream::Frame::to_sse_wire`]) serves every host and a `comment` heartbeat — which
+    /// is not a frame at all — rides the same leaf instead of needing its own.
+    fn net_sse_send_now(&mut self, _conn: u64, _wire: &str) -> Result<(), StdError> {
+        Err(StdError {
+            kind: ErrorKind::Io,
+            message: "this host does not serve event streams".to_string(),
+        })
+    }
+
+    /// End the event stream on `conn` and release it. Idempotent, like
+    /// [`Self::net_stream_close`].
+    fn net_sse_close_now(&mut self, _conn: u64) -> Result<(), StdError> {
+        Ok(())
+    }
+
+    /// Build the SSE send descriptor. Default via [`Self::net_sse_send_now`]; `RealHost` overrides
+    /// it with an async socket write.
+    fn net_sse_send(&self, conn: u64, wire: String) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::stream::SseSendIo {
+            conn,
+            wire: Some(wire),
+        })
+    }
+
+    /// Build the SSE close descriptor. Default via [`Self::net_sse_close_now`].
+    fn net_sse_close(&self, conn: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::stream::SseCloseIo { conn })
+    }
 }
 
 /// **Host introspection** capability (M2.2). `env_keys` is sorted. The sandbox presents a fixed
