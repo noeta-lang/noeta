@@ -116,6 +116,59 @@ fn bare_relative_entry_still_links_siblings() {
 }
 
 #[test]
+fn a_cross_module_coherence_conflict_renders_both_files() {
+    // E0027 across a module boundary must be *locatable*. It used to name only the later impl and
+    // say the other was "already implemented above" — pointing the reader at a file that does not
+    // contain it. Both sites are labelled now, and the multi-file `ariadne` report renders each
+    // against its own source.
+    let dir = temp_dir(
+        "coherence_two_sites",
+        &[
+            (
+                "types.noe",
+                "namespace pkg.types;\npub trait Decoder { fn step(): string }\n\
+                 pub class Target { fn new(): Target { return Target {} } }\n",
+            ),
+            (
+                "first.noe",
+                "namespace pkg.first;\nuse pkg.types.{Decoder, Target};\n\
+                 impl Decoder for Target { fn step(): string { return \"first\" } }\n",
+            ),
+            (
+                "second.noe",
+                "namespace pkg.second;\nuse pkg.types.{Decoder, Target};\n\
+                 impl Decoder for Target { fn step(): string { return \"second\" } }\n",
+            ),
+            (
+                "main.noe",
+                "namespace pkg.main;\nuse pkg.types.{Decoder, Target};\n\
+                 fn want(x: dyn Decoder): string { return x.step() }\necho want(Target.new())\n",
+            ),
+        ],
+    );
+    let out = lang()
+        .arg("check")
+        .arg(dir.join("main.noe"))
+        .assert()
+        .failure()
+        .code(1);
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("E0027"), "{stderr}");
+    assert!(
+        stderr.contains("first.noe") && stderr.contains("second.noe"),
+        "both competing implementations are located:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("first implemented here"),
+        "the earlier impl carries a secondary label:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("above"),
+        "the positional wording is gone — the other site is in another file:\n{stderr}"
+    );
+}
+
+#[test]
 fn check_empty_directory_exits_2() {
     let dir = temp_dir("check_empty", &[]);
     lang()

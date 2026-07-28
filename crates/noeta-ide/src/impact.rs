@@ -509,6 +509,7 @@ impl ImpactSession {
                 // precise than the member-name fallback alone) — cheap at dev-loop rate.
                 record_expr_types: true,
                 editions: noeta_db::workspace_editions(&self.db, cache.workspace),
+                packages: noeta_db::workspace_packages(&self.db, cache.workspace),
                 ..noeta_check::CheckOptions::default()
             },
         );

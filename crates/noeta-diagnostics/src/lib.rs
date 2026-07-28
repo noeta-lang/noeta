@@ -370,6 +370,23 @@ pub enum DiagnosticCode {
     /// function called from it) printed nothing after the `?`, produced no diagnostic, and **exited
     /// 0** — a broken program CI reported as green.
     UnhandledError,
+    /// A standalone `impl Trait for Type` in a package that declares **neither** the trait nor the
+    /// type — the **package orphan rule**.
+    ///
+    /// Coherence's uniqueness half ([`Self::ConflictingTraitImpl`]) is a whole-program question and
+    /// always answerable; this is the half that says *who may ask it*. Without it, a transitive
+    /// dependency can implement someone else's trait for someone else's type, and the behavior
+    /// appears in an application that imports both and names neither: `t is dyn Speaks` becomes
+    /// true, and `t.speak()` runs code from a package the author never wrote down. Two such packages
+    /// in one graph then collide as an E0027 the end user cannot fix — they own neither impl and can
+    /// remove neither.
+    ///
+    /// An `impl` must therefore be written where one of the two things it joins lives: with the
+    /// trait, or with the type. Neither in-body `impl Trait { }` nor `@derive(Trait)` can violate it
+    /// (both sit on the type's own declaration), and a *cross-module* impl inside one package is
+    /// unaffected — the boundary is the package, not the file. The escape hatch is the newtype: wrap
+    /// the foreign type in a local one and `@derive(Trait, via: field)`.
+    OrphanImpl,
 }
 
 impl DiagnosticCode {
@@ -444,6 +461,7 @@ impl DiagnosticCode {
         DiagnosticCode::UnreachableMatchArm,
         DiagnosticCode::InternalCompilerError,
         DiagnosticCode::UnhandledError,
+        DiagnosticCode::OrphanImpl,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -519,6 +537,7 @@ impl DiagnosticCode {
             // "E0067" is retired (see the enum) and deliberately skipped — never reassigned.
             DiagnosticCode::InternalCompilerError => "E0068",
             DiagnosticCode::UnhandledError => "E0069",
+            DiagnosticCode::OrphanImpl => "E0070",
         }
     }
 

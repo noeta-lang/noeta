@@ -28,6 +28,21 @@ fn type_of_reprs(text: &str) -> Vec<TypeRepr> {
         .collect()
 }
 
+/// Parse `text` and return the checker's diagnostics themselves, for the assertions that pin a
+/// message, a help line, or a diagnostic's secondary labels rather than just its code.
+fn diagnostics(text: &str) -> Vec<noeta_diagnostics::Diagnostic> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "test program must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    check(&parsed.program)
+}
+
 /// Parse `text` and return the checker's diagnostic codes (wire form), in order.
 fn codes(text: &str) -> Vec<String> {
     seed_std();
@@ -697,6 +712,44 @@ fn standalone_impl_counts_toward_coherence() {
     // same trait for one type conflict, just like two derives or two in-body impls.
     let src = "@derive(Clone)\nstruct Route { path: string }\nimpl Clone for Route {}\n";
     assert_eq!(codes(src), ["E0027"]);
+}
+
+#[test]
+fn a_coherence_conflict_labels_both_implementations() {
+    // E0027 must be *locatable*: it labels the offending site AND the one it collides with, so a
+    // reader can find both. It used to name only the later occurrence and describe the other as
+    // "above" — false the moment the two live in different modules (or packages), which is the
+    // common case now that coherence runs over the whole linked program.
+    let src = "@derive(Clone)\nstruct Route { path: string }\nimpl Clone for Route {}\n";
+    let diagnostics = diagnostics(src);
+    let conflict = diagnostics
+        .iter()
+        .find(|d| d.code == noeta_diagnostics::DiagnosticCode::ConflictingTraitImpl)
+        .expect("the duplicate implementation is E0027");
+    assert_eq!(
+        conflict.labels.len(),
+        2,
+        "both sites are labelled: {:?}",
+        conflict.labels
+    );
+    // The primary span is the offending (later) site, and it is also the first label — so the
+    // rendered report's header and its first group agree with every non-rendered consumer.
+    assert_eq!(conflict.labels[0].span, conflict.span);
+    assert!(
+        conflict.labels[0].message.contains("standalone `impl"),
+        "the later site names its own spelling: {:?}",
+        conflict.labels[0]
+    );
+    assert!(
+        conflict.labels[1].message.contains("`@derive`"),
+        "the first site names its own spelling: {:?}",
+        conflict.labels[1]
+    );
+    let help = conflict.help.as_deref().unwrap_or_default();
+    assert!(
+        !help.contains("above"),
+        "the positional wording is gone — the other site may be in another file: {help}"
+    );
 }
 
 #[test]

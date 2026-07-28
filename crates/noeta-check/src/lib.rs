@@ -75,7 +75,7 @@ use noeta_ast::{
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::{Edition, EditionMap};
 use noeta_ext_abi::NominalType;
-use noeta_span::Span;
+use noeta_span::{PackageMap, PackageOrigin, Span};
 use noeta_types::{BuiltinTrait, Type};
 
 mod args;
@@ -145,7 +145,11 @@ pub struct Checked {
 /// ([`check_all_with`]) instead of the checker growing a `_with_types_and_editions_and_registry`
 /// combinatorial family. `Default` is an ordinary compile-path check (no type index, process-global
 /// registry, every declaration at [`Edition::DEFAULT`]) — identical to [`check_all`].
-#[derive(Default)]
+/// `Clone` so a driver can carry one configured value alongside the program it describes — the CLI's
+/// tier verbs re-check *synthesized* programs (a per-test case, a bench loop) against the parent
+/// workspace's options, and pairing the fields by hand at each of those call sites is exactly how
+/// editions and provenance would drift apart.
+#[derive(Clone, Default)]
 pub struct CheckOptions {
     /// Record every expression's inferred type into [`Checked::expr_types`] — the span→type index the
     /// IDE hover path reads. Off on the compile path (it pays nothing for the index).
@@ -157,6 +161,11 @@ pub struct CheckOptions {
     /// Which language [`Edition`] governs each source, keyed by `SourceId` (editions arc): the loader
     /// builds it per merged program. Empty means every declaration is [`Edition::DEFAULT`].
     pub editions: EditionMap,
+    /// Which **package** each source was read from, keyed by `SourceId` (the package orphan rule):
+    /// the loader builds it per merged program. Empty means provenance is unknown everywhere, and
+    /// the orphan rule stands down — the right answer for a single-file check or a synthetic
+    /// program, which have no package graph to judge against.
+    pub packages: PackageMap,
 }
 
 impl std::fmt::Debug for CheckOptions {
@@ -166,6 +175,7 @@ impl std::fmt::Debug for CheckOptions {
             // The registry is a `&'static` handle whose contents aren't `Debug`; report only presence.
             .field("registry", &self.registry.is_some())
             .field("editions", &self.editions)
+            .field("packages", &self.packages)
             .finish()
     }
 }
@@ -177,13 +187,7 @@ impl std::fmt::Debug for CheckOptions {
 pub fn check_all_with(program: &Program, opts: CheckOptions) -> Checked {
     // The batch/tool entry never cancels: cancellation is a salsa-incremental concern, wired only by
     // [`check_all_cancellable`] (which the `checked` query calls with salsa's revision poll).
-    check_all_impl(
-        program,
-        opts.record_expr_types,
-        opts.registry,
-        opts.editions,
-        &|| {},
-    )
+    check_all_impl(program, opts, &|| {})
 }
 
 /// Type-check a program once, returning both its diagnostics and its resolved-type map. This is
@@ -248,27 +252,17 @@ pub fn check_all_with_registry(
 /// (`salsa::Cancelled`), which the checker lets propagate. `record_expr_types` selects the IDE hover
 /// index exactly as [`CheckOptions::record_expr_types`] does, so the ide-flavored linked query wires
 /// the same poll. Every non-salsa caller uses the plain entries and never cancels.
-pub fn check_all_cancellable(
-    program: &Program,
-    editions: EditionMap,
-    record_expr_types: bool,
-    cancel: &dyn Fn(),
-) -> Checked {
-    check_all_impl(program, record_expr_types, None, editions, cancel)
+pub fn check_all_cancellable(program: &Program, opts: CheckOptions, cancel: &dyn Fn()) -> Checked {
+    check_all_impl(program, opts, cancel)
 }
 
-fn check_all_impl(
-    program: &Program,
-    record_expr_types: bool,
-    registry: Option<&'static noeta_ext_abi::registry::Registry>,
-    editions: EditionMap,
-    cancel: &dyn Fn(),
-) -> Checked {
+fn check_all_impl(program: &Program, opts: CheckOptions, cancel: &dyn Fn()) -> Checked {
     let mut checker = Checker {
         config: Config {
-            record_expr_types,
-            registry,
-            editions,
+            record_expr_types: opts.record_expr_types,
+            registry: opts.registry,
+            editions: opts.editions,
+            packages: opts.packages,
             ..Config::default()
         },
         ..Checker::default()
@@ -454,6 +448,7 @@ impl SessionChecker {
                 record_expr_types: opts.record_expr_types,
                 registry: opts.registry,
                 editions: opts.editions,
+                packages: opts.packages,
             },
             ..Checker::default()
         };
@@ -975,6 +970,20 @@ struct Symbols {
     /// Built-in names and in-scope generic parameters are *not* stored here — they are checked
     /// separately (a built-in via [`Type::is_builtin_name`], a parameter via [`Checker::type_params`]).
     types: HashSet<String>,
+    /// Where each declared type was **declared**: type name → its name span. The span's `SourceId`
+    /// is what the package orphan rule resolves a type's package from — the symbol tables otherwise
+    /// keep only a type's shape, and a merged program's statement list says nothing about which file
+    /// (and so which package) a declaration arrived from. Only `.noe` declarations appear: a native
+    /// `ExtType`/`ExtEnum` is registered from the registry and has no source, so its package is
+    /// (correctly) unknown.
+    type_decl_spans: HashMap<String, Span>,
+    /// Traits that came from the **extension registry** rather than a `.noe` `trait` declaration
+    /// ([`Checker::seed_ext_traits`]). Their synthesized [`noeta_ast::TraitDecl`]s carry a
+    /// placeholder `Span::new(0, 0)`, which points at the *entry* source and would make a native
+    /// trait look like a root-package declaration. Membership here means "declared by no package",
+    /// so the orphan rule requires such an impl to live with its **type** — the same judgement a
+    /// built-in trait gets.
+    native_traits: HashSet<String>,
     /// Standalone `impl Trait for T {}` declarations, grouped by target type name, as
     /// `(trait_name, trait_span)` occurrences. Collected in pass 1 so each type's coherence check
     /// (`check_coherence`) counts standalone impls alongside its `@derive`s and in-body `impl`s.
@@ -1191,6 +1200,11 @@ struct Config {
     /// editions arc's S3 (the first edition-gated behaviour); until then this is threaded and
     /// per-span-queryable but consulted by no rule.
     editions: EditionMap,
+    /// Which **package** each source of the merged program came from, keyed by `SourceId`. The
+    /// loader builds this from the dependency graph it linked; the checker recovers a declaration's
+    /// package from its span via [`Checker::package_at`]. Empty — the default — means provenance is
+    /// unknown, and the package orphan rule ([`Checker::check_package_orphan`]) does not fire.
+    packages: PackageMap,
 }
 
 // `Clone` so a [`SessionChecker`] entry is transactional (clone-before, restore-on-error) —
@@ -1284,6 +1298,18 @@ impl Checker {
     #[allow(dead_code)]
     fn edition_at(&self, span: Span) -> Edition {
         self.config.editions.at(span)
+    }
+
+    /// The **package** that declared whatever `span` points at — resolved from the per-source
+    /// [`PackageMap`] the loader threaded in, via the span's `SourceId`.
+    ///
+    /// `None` means *unknown*, never "the root package": a single-file check, a REPL fragment, a
+    /// synthetic span, and compile-time generated code all land here, and the package orphan rule
+    /// treats every one of them as unjudgeable rather than guessing. This is the whole reason
+    /// provenance is a side-table and not a namespace-prefix heuristic — a namespace is declared per
+    /// file and says nothing about which package shipped it.
+    fn package_at(&self, span: Span) -> Option<&PackageOrigin> {
+        self.config.packages.at(span)
     }
 
     /// Record an error diagnostic, returning `&mut` to the just-pushed diagnostic so a help line can

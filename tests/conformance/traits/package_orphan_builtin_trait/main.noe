@@ -1,0 +1,9 @@
+// The orphan rule over a **built-in** trait. `Clone` is part of the language, not of any package,
+// so `impl Clone for <foreign type>` from a third package is an orphan exactly as a user trait's
+// would be — the same judgement Rust makes about `impl std::fmt::Display for ForeignType`. Written
+// in `b` (the type's own package) it would be fine.
+// expect: error E0070 at 8:6
+// expect: exit 1
+use b.thing.{Thing};
+
+echo Thing { id: 1 }.id

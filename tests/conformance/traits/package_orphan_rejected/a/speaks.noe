@@ -1,0 +1,5 @@
+namespace a.speaks;
+
+pub trait Speaks {
+    fn speak(): string
+}

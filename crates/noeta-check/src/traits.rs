@@ -216,18 +216,21 @@ impl Checker {
         }
     }
 
-    /// Validate a standalone `impl Trait for T {}` declaration. Two checks beyond the shared
-    /// trait-side validation ([`Self::check_trait_impl`], also run): the **orphan rule** — `T` must
-    /// be a struct, class, or enum **the program declares**, not a built-in or an unresolved name
-    /// (E0013) — and the **built-in body restriction** — a *user* trait's standalone impl may carry
-    /// method bodies (hoisted onto the target), but a built-in trait's must stay an empty-body
-    /// marker (E0015).
+    /// Validate a standalone `impl Trait for T {}` declaration. Three checks beyond the shared
+    /// trait-side validation ([`Self::check_trait_impl`], also run): `T` must be a struct, class, or
+    /// enum **the program declares**, not a built-in or an unresolved name (E0013); the **package
+    /// orphan rule** ([`Self::check_package_orphan`], E0070); and the **built-in body restriction** —
+    /// a *user* trait's standalone impl may carry method bodies (hoisted onto the target), but a
+    /// built-in trait's must stay an empty-body marker (E0015).
     ///
     /// "The program declares" is the whole linked program, not the one file: the checker runs
     /// downstream of the linker, so an imported type is a declared type like any other and a module
-    /// may implement a trait for a sibling's or a dependency's type. Nothing is lost by that — one
-    /// program is linked at a time, so coherence is whole-program **uniqueness**, enforced together
-    /// with the target's `@derive`s/in-body impls in [`Self::check_coherence`] (E0027).
+    /// may implement a trait for a **sibling's** type. That stays true and is deliberately
+    /// unrestricted — the orphan rule's boundary is the *package*, not the file, so cross-module
+    /// impls within one package are as legal as they ever were. What the rule adds is that the
+    /// package writing the impl must be the one that declares the trait or the type. Uniqueness —
+    /// the other half of coherence — is enforced separately, together with the target's `@derive`s
+    /// and in-body impls, in [`Self::check_coherence`] (E0027).
     pub(crate) fn check_standalone_impl(&mut self, decl: &ImplDecl, env: &mut Env) {
         // A dotted trait path is a method-bundle binding (kernel-methods K1) with its own
         // validation — bundle resolution, packed-target + constraint checks, conflict rules. But a
@@ -264,6 +267,7 @@ impl Checker {
                      where the type is defined",
             );
         }
+        self.check_package_orphan(decl);
         // A standalone `impl` with a method body is supported for **user traits** (L1, UT2 — its
         // methods are hoisted onto the target type by the loader). A built-in trait's standalone
         // impl is still marker-only: its operator/protocol methods live in the type's own body.
@@ -292,6 +296,123 @@ impl Checker {
             &decl.assoc_bindings,
         );
         self.check_standalone_impl_bodies(decl, env);
+    }
+
+    /// The **package orphan rule** (E0070): a standalone `impl Trait for Type` must live in the same
+    /// package as the trait **or** as the type.
+    ///
+    /// Noeta links one whole program at a time, so coherence's *uniqueness* half is always
+    /// answerable and needs no orphan rule to be decidable. This rule exists for a different reason:
+    /// without it a **transitive dependency** can implement one package's trait for another
+    /// package's type, and that behavior shows up in an application that imports both and mentions
+    /// the implementing package nowhere — `t is dyn Speaks` silently becomes true and `t.speak()`
+    /// runs code the author never wrote down. Two such packages in one graph then collide as an
+    /// E0027 the end user cannot fix: they own neither impl, so they can remove neither. The cost of
+    /// the feature is global and invisible; its value — attaching behavior to a foreign type — is
+    /// already served ergonomically by the newtype (`@derive(Trait, via: field)`), which is what the
+    /// help points at.
+    ///
+    /// **Provenance, not a heuristic.** The judgement reads the loader's per-source
+    /// [`noeta_span::PackageMap`] ([`Checker::package_at`]). A `namespace` would be the tempting
+    /// proxy and is the wrong one — it is declared per file with no required relationship to the
+    /// package that shipped it, so it would both admit real orphans and reject legitimate
+    /// same-package impls. Where provenance is *unknown* the rule stands down entirely: a
+    /// single-file check, a REPL fragment, a synthesized program, and compile-time generated code
+    /// are never judged.
+    ///
+    /// **What counts as "local".** The type is local when it is declared in a source belonging to
+    /// the impl's package. The trait is local on the same terms — but a **built-in** trait
+    /// (`Display`, `Comparable`, …) and a **native** trait seeded from the extension registry belong
+    /// to no package at all, so neither can make an impl local; such an impl must live with its
+    /// type. That is the same judgement Rust makes about `impl std::fmt::Display for ForeignType`.
+    /// Method-bundle bindings (`impl vec.Kernels for T {}`) return before this point: they are a
+    /// native kernel-binding mechanism with their own conflict rules, not trait impls.
+    pub(crate) fn check_package_orphan(&mut self, decl: &ImplDecl) {
+        // Unknown provenance ⇒ no judgement. Cloned so the `&mut self` diagnostic below does not
+        // conflict with the borrow of `self.config.packages`.
+        let Some(impl_pkg) = self.package_at(decl.span).cloned() else {
+            return;
+        };
+        let type_span = self
+            .symbols
+            .type_decl_spans
+            .get(decl.target.as_str())
+            .copied();
+        let Some(type_pkg) = type_span.and_then(|s| self.package_at(s)).cloned() else {
+            return;
+        };
+        // Same package as the type: legal, whichever module either sits in.
+        if impl_pkg == type_pkg {
+            return;
+        }
+        // A trait that resolves to nothing at all is already E0014 at this same impl; reporting an
+        // orphan on top would cascade *and* describe a trait that does not exist as "built into the
+        // language". Only a real trait — a built-in or a declared one — is judged.
+        if BuiltinTrait::from_name(decl.trait_name.as_str()).is_none()
+            && !self
+                .symbols
+                .user_traits
+                .contains_key(decl.trait_name.as_str())
+        {
+            return;
+        }
+        let trait_span = self.trait_decl_span(decl.trait_name.as_str());
+        let trait_pkg = trait_span.and_then(|s| self.package_at(s)).cloned();
+        // Same package as the trait: equally legal — that is the "or" in the rule.
+        if trait_pkg.as_ref() == Some(&impl_pkg) {
+            return;
+        }
+        let trait_name = decl.trait_name.as_str();
+        let target = decl.target.as_str();
+        // A trait belonging to no package is not "unknown" — it is a built-in or a native trait,
+        // which no package can claim, so it can never make an impl local.
+        let trait_where = match &trait_pkg {
+            Some(pkg) => pkg.to_string(),
+            None => "no package (it is built into the language, or provided by a native extension)"
+                .to_string(),
+        };
+        // The impl HEADER (`Trait for Type`), not the whole block: a tight one-line caret, and the
+        // same shape E0027 points at.
+        let header = decl.trait_span.merge(decl.target_span);
+        let d = self.error(
+            DiagnosticCode::OrphanImpl,
+            header,
+            format!(
+                "`impl {trait_name} for {target}` is an orphan: the trait comes from {trait_where}, \
+                 the type from {type_pkg}, but this implementation is in {impl_pkg}"
+            ),
+        );
+        d.label(header, format!("written in {impl_pkg}"));
+        if let Some(span) = trait_span {
+            d.label(span, format!("`{trait_name}` is declared in {trait_where}"));
+        }
+        if let Some(span) = type_span {
+            d.label(span, format!("`{target}` is declared in {type_pkg}"));
+        }
+        // The concrete escape hatch, written out with this impl's own names — `@derive(T, via: f)`
+        // is documented as "the newtype pattern without boilerplate", and it is the fix the author
+        // actually needs, not a restatement of the rule.
+        let short_trait = short_name(trait_name);
+        let short_target = short_name(target);
+        d.help(format!(
+            "an `impl` must live in the same package as the trait or as the type. To give \
+             `{short_target}` this behavior from here, wrap it in a type you own — the newtype \
+             pattern, which `via:` writes for you:\n    \
+             @derive({short_trait}, via: inner)\n    \
+             class My{short_target} {{ pub inner: {short_target} }}"
+        ));
+    }
+
+    /// Where the trait named `name` was **declared**, when that is a `.noe` `trait` declaration with
+    /// a real span. `None` for a built-in trait (never in `user_traits`) and for a trait seeded from
+    /// the extension registry (recorded in `native_traits`, and carrying a placeholder span that
+    /// points at the entry source) — both belong to no package, which is exactly what the orphan
+    /// rule needs to know.
+    fn trait_decl_span(&self, name: &str) -> Option<Span> {
+        if self.symbols.native_traits.contains(name) {
+            return None;
+        }
+        self.symbols.user_traits.get(name).map(|d| d.name_span)
     }
 
     /// Type-check a standalone `impl Trait for T { … }`'s method **bodies**.
@@ -913,16 +1034,26 @@ impl Checker {
     /// implemented at most once, counting both a `@derive(T)` directive and an `impl T { }` block
     /// as implementations. A second implementation of an already-implemented trait — whether
     /// `@derive(T)` twice, two `impl T` blocks, or a `@derive(T)` alongside an `impl T` — is
-    /// reported as `E0027 ConflictingTraitImpl`, pointing at the later occurrence and naming where
-    /// the first one is. This keeps each `(type, trait)` pair single-implementation, so
-    /// [`Self::satisfies`] and runtime dispatch are unambiguous.
+    /// reported as `E0027 ConflictingTraitImpl`, **labelling both sites**: the primary span on the
+    /// later occurrence, a secondary label on the one it collides with. This keeps each
+    /// `(type, trait)` pair single-implementation, so [`Self::satisfies`] and runtime dispatch are
+    /// unambiguous.
+    ///
+    /// **Both sites, because the two can be in different files.** Coherence runs over the *linked*
+    /// program, so the competing implementations may be two sibling modules — or two dependency
+    /// packages — that never mention each other. Naming only the later one, and describing the
+    /// other as "above", sent the reader looking up a file that does not contain it; the second
+    /// label (rendered by `ariadne` against its own file, see `noeta_diagnostics::render_mapped`)
+    /// is the only thing that makes the conflict locatable. [`ImplForm`] supplies each side's
+    /// spelling, so the wording fits whichever pair actually collided rather than assuming the
+    /// same-file `@derive`-vs-`impl` case.
     ///
     /// The orphan half of coherence is enforced separately: an in-body `impl` block can only name
-    /// the type that owns it, and a standalone `impl Trait for T {}` is required (in
-    /// [`Self::check_standalone_impl`]) to target a type declared in the same module — so a trait
-    /// is still only ever implemented for a local type, and every trait is a built-in. Records and
-    /// enums carry no in-body `impl` blocks (pass an empty slice); `standalone` carries the
-    /// `(trait, span)` of every standalone impl targeting this type.
+    /// the type that owns it, and a standalone `impl Trait for T {}` must target a type the program
+    /// declares and live in the same package as that type or as the trait
+    /// ([`Self::check_standalone_impl`]). Records and enums carry no in-body `impl` blocks (pass an
+    /// empty slice); `standalone` carries the `(trait, span)` of every standalone impl targeting
+    /// this type.
     pub(crate) fn check_coherence(
         &mut self,
         derives: &[DeriveSpec],
@@ -930,38 +1061,48 @@ impl Checker {
         standalone: &[(String, Span)],
     ) {
         // Source order is derives, then in-body impls, then standalone impls: this scan reports the
-        // textually-later duplicate and names where the first one is. `From` is deliberately
+        // textually-later duplicate and labels the one it collides with. `From` is deliberately
         // covered by the same name-keyed rule: an impl block's methods flatten into the type's
         // method table by NAME (there is no overloading), so a type can carry exactly one `from` —
         // one declared conversion. A second `From` impl (same source or another) is exactly the
         // ambiguity the `?` conversion must never see — two declared paths into the target — and
         // collides here (E0027).
-        let mut seen: HashMap<String, Span> = HashMap::new();
-        let occurrences: Vec<(String, Span)> = derives
+        let mut seen: HashMap<String, (Span, ImplForm)> = HashMap::new();
+        let occurrences: Vec<(String, Span, ImplForm)> = derives
             .iter()
-            .map(|d| (d.name.to_string(), d.span))
+            .map(|d| (d.name.to_string(), d.span, ImplForm::Derive))
             .chain(
                 impls
                     .iter()
-                    .map(|b| (b.trait_name.to_string(), b.trait_span)),
+                    .map(|b| (b.trait_name.to_string(), b.trait_span, ImplForm::InBody)),
             )
-            .chain(standalone.iter().map(|(name, span)| (name.clone(), *span)))
+            .chain(
+                standalone
+                    .iter()
+                    .map(|(name, span)| (name.clone(), *span, ImplForm::Standalone)),
+            )
             .collect();
-        for (name, span) in occurrences {
+        for (name, span, form) in occurrences {
             match seen.get(&name) {
-                Some(_first) => {
+                Some((first_span, first_form)) => {
+                    let (first_span, first_form) = (*first_span, *first_form);
                     self.error(
                         DiagnosticCode::ConflictingTraitImpl,
                         span,
                         format!("trait `{name}` is implemented more than once for this type"),
                     )
+                    // The offending (later) site first, so `ariadne` groups it first and the
+                    // rendered header carries the same file/line the primary span — and every
+                    // non-rendered consumer of the diagnostic — reports.
+                    .label(span, format!("implemented again here, {form}"))
+                    .label(first_span, format!("first implemented here, {first_form}"))
                     .help(format!(
-                        "`{name}` is already implemented above; a type may implement each trait \
-                         only once (via one `@derive` or one `impl` block, not both)"
+                        "a type may implement each trait only once — remove one of the two \
+                         implementations of `{name}`, or merge them into a single one"
                     ));
                 }
                 None => {
-                    seen.insert(name, span);
+                    seen.insert(name, (span, form));
                 }
             }
         }
@@ -2215,6 +2356,13 @@ impl Checker {
     }
 }
 
+/// The **short** form of a link-qualified name (`b.thing.Thing` → `Thing`) — what the author wrote
+/// and what a code sketch in a diagnostic must use, since the qualified form is the linker's
+/// spelling and is not valid in a declaration.
+fn short_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
 /// Whether a recorded impl argument satisfies a demanded bound argument: exact type equality,
 /// with a `dyn`/inference-hole on either side deferring to the runtime (never a false negative).
 fn bound_arg_matches(have: &Type, want: &Type) -> bool {
@@ -2228,5 +2376,30 @@ fn bound_display(name: &str, args: &[Type]) -> String {
     } else {
         let args: Vec<String> = args.iter().map(Type::to_string).collect();
         format!("{name}<{}>", args.join(", "))
+    }
+}
+
+/// How one implementation of a trait was **written** — the three spellings [`Checker::check_coherence`]
+/// counts as implementations, so a collision report can name what actually collided instead of
+/// guessing at the `@derive`-vs-`impl` pair. Two standalone impls in two modules are the common
+/// cross-file conflict, and neither is a `@derive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImplForm {
+    /// A `@derive(Trait)` directive on the type's declaration.
+    Derive,
+    /// An `impl Trait { … }` block inside the type's own body.
+    InBody,
+    /// A standalone `impl Trait for Type { … }` declaration, which may live in another module
+    /// (or, before the package orphan rule, another package) entirely.
+    Standalone,
+}
+
+impl std::fmt::Display for ImplForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ImplForm::Derive => "by a `@derive`",
+            ImplForm::InBody => "by an `impl` block in the type's body",
+            ImplForm::Standalone => "by a standalone `impl … for …`",
+        })
     }
 }

@@ -217,19 +217,34 @@ pub struct Loaded {
     /// keyed by `SourceId`. SourceIds survive tier activation, so the map stays valid against the
     /// activated program.
     pub editions: noeta_edition::EditionMap,
+    /// Which **package** each source came from, keyed by `SourceId` (the loader's `Linked::packages`)
+    /// — the provenance the package orphan rule (E0070) reads. `SourceId`s survive tier activation,
+    /// so the map stays valid against the activated program, exactly as [`Loaded::editions`] does.
+    pub packages: noeta_span::PackageMap,
 }
 
 impl Loaded {
-    /// Type-check the loaded program under its per-source editions — the one blessed way, so no
-    /// caller can forget to thread the edition map (`check_all` alone would silently drop it).
+    /// The check configuration this loaded program carries: its per-source editions and package
+    /// provenance. One place, so no caller can thread half of it (a `check_all` alone would silently
+    /// drop both, and the orphan rule would then never fire on a real dependency graph).
+    fn check_options(&self) -> noeta_check::CheckOptions {
+        noeta_check::CheckOptions {
+            editions: self.editions.clone(),
+            packages: self.packages.clone(),
+            ..noeta_check::CheckOptions::default()
+        }
+    }
+
+    /// Type-check the loaded program under its per-source editions and package provenance — the one
+    /// blessed way, so no caller can forget to thread them.
     pub fn check(&self) -> noeta_check::Checked {
-        noeta_check::check_all_with_editions(&self.program, self.editions.clone())
+        noeta_check::check_all_with(&self.program, self.check_options())
     }
 
     /// As [`Loaded::check`], but the session flavor: keeps the [`noeta_check::SessionChecker`]
     /// alive so REPL/debug-console fragments extend the whole-program typing environment.
     pub fn check_session(&self) -> (noeta_check::Checked, noeta_check::SessionChecker) {
-        noeta_check::check_all_session_with(&self.program, self.editions.clone())
+        noeta_check::check_all_session_opts(&self.program, self.check_options())
     }
 }
 
@@ -244,6 +259,7 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
     let linked = load_linked(file, facts)?;
     let sources = linked.sources;
     let editions = linked.editions;
+    let packages = linked.packages;
     // Activation inlines each `@<tier> { … }` block; with no active tiers the program runs as-is and
     // every tier block is stripped at lowering (the default). Activation is only done when needed.
     let program = if facts.active.is_empty() {
@@ -264,6 +280,7 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
         program,
         sources,
         editions,
+        packages,
     })
 }
 

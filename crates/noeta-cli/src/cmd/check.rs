@@ -185,7 +185,8 @@ pub(crate) fn cmd_check(
         // Check one entry of a parsed directory: link it against the shared pool, then
         // activate the resolved dev-tiers before checking, as `run`/`build`/`dump` do (with no
         // active tiers the program is checked as-is). Checking rides `check_under` with the
-        // directory's edition map, so the per-source editions travel structurally (audit-3 F8).
+        // directory's `CheckOptions`, so the per-source editions and package provenance travel
+        // structurally (audit-3 F8).
         // Entry lex/parse errors' spans live in the entry, and the shared map renders them
         // against it — the same (file, span, code) dedup key as the per-entry load produced.
         let mut check_entry = |parsed: &noeta_loader::ParsedDir,
@@ -212,16 +213,23 @@ pub(crate) fn cmd_check(
                         sources = std::rc::Rc::new(parsed.source_map_with(&linked.expansions));
                         editions = Some(parsed.editions_with(&linked.expansions));
                     }
-                    let editions = editions.as_ref().unwrap_or_else(|| parsed.editions());
+                    // Package provenance needs no expansion twin: generated sources are
+                    // deliberately unattributed, so the directory's map covers every source the
+                    // orphan rule may judge (see `ParsedDir::packages`).
+                    let opts = noeta_check::CheckOptions {
+                        editions: editions.unwrap_or_else(|| parsed.editions().clone()),
+                        packages: parsed.packages().clone(),
+                        ..noeta_check::CheckOptions::default()
+                    };
                     let program = linked.program;
                     let program_diags = if active_refs.is_empty() {
-                        crate::context::check_under(&program, editions).diagnostics
+                        crate::context::check_under(&program, &opts).diagnostics
                     } else {
                         let activated =
                             noeta_check::activate_tiers_with(&program, &active_refs, &providers);
                         let mut ds = activated.diagnostics;
                         ds.extend(
-                            crate::context::check_under(&activated.program, editions).diagnostics,
+                            crate::context::check_under(&activated.program, &opts).diagnostics,
                         );
                         ds
                     };

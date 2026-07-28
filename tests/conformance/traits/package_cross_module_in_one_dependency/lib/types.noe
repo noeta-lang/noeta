@@ -1,0 +1,9 @@
+namespace lib.types;
+
+pub trait Store {
+    fn label(): string
+}
+
+pub class NullStore {
+    fn new(): NullStore { return NullStore {} }
+}

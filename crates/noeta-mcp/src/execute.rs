@@ -388,9 +388,13 @@ pub fn test(p: &Prepared, filter: Option<&str>, real: bool, limits: &RunLimits) 
     if !activated.diagnostics.is_empty() {
         return empty(map_diagnostics(&source_map, &activated.diagnostics));
     }
-    let checked = noeta_check::check_all_with_editions(
+    let checked = noeta_check::check_all_with(
         &activated.program,
-        noeta_db::workspace_editions(&p.db, p.ws),
+        noeta_check::CheckOptions {
+            editions: noeta_db::workspace_editions(&p.db, p.ws),
+            packages: noeta_db::workspace_packages(&p.db, p.ws),
+            ..noeta_check::CheckOptions::default()
+        },
     );
     if !checked.diagnostics.is_empty() {
         return empty(map_diagnostics(&source_map, &checked.diagnostics));

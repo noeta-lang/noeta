@@ -280,10 +280,109 @@ pub fn run_case_path(entry: &Path, display: &str, stage: Stage) -> CaseResult {
     compare(display, &expectations, &outcome, stage)
 }
 
+/// The **dependency packages** of a multi-file case: every *subdirectory* of the case directory is
+/// one package, keyed (and rooted) by its directory name, holding that directory's `.noe` files as
+/// its modules.
+///
+/// A conformance case is otherwise one package — entry plus siblings — which cannot express any rule
+/// whose boundary is the package, the orphan rule (E0070) first among them. A subdirectory is the
+/// smallest thing that can: the loader's `DepPackage` needs a key, a root, and modules, and a
+/// directory name supplies the first two. Root == key, so nothing is re-rooted and a package's
+/// modules are addressed by exactly the namespace they declare; every package is visible to every
+/// other, which models a graph where the entry depends on all of them and they depend on each other
+/// (the checker sees one merged pool either way).
+///
+/// **Empty for every existing case**, and callers must keep the deps-free path when it is: linking
+/// *with* a resolved dependency graph is deliberately stricter about foreign import roots than
+/// sibling-only linking, so routing a package-less case through it would change its meaning.
+fn dep_packages(dir: &Path) -> Vec<noeta_loader::DepPackage> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    dirs.into_iter()
+        .filter_map(|package_dir| {
+            let name = package_dir.file_name()?.to_string_lossy().into_owned();
+            let Ok(files) = std::fs::read_dir(&package_dir) else {
+                return None;
+            };
+            let mut paths: Vec<PathBuf> = files
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|ext| ext == "noe"))
+                .collect();
+            paths.sort();
+            let modules: Vec<noeta_loader::RawModule> = paths
+                .iter()
+                .filter_map(|p| {
+                    Some(noeta_loader::RawModule {
+                        name: p.display().to_string(),
+                        text: std::fs::read_to_string(p).ok()?,
+                    })
+                })
+                .collect();
+            (!modules.is_empty()).then(|| noeta_loader::DepPackage {
+                key: name.clone(),
+                root: name,
+                modules,
+                dep_renames: std::collections::BTreeMap::new(),
+                native: false,
+                edition: noeta_lexer::Edition::DEFAULT,
+            })
+        })
+        .collect()
+}
+
+/// The same package layout as [`dep_packages`], expressed as the salsa module graph's
+/// [`noeta_db::DepSources`] — for the differential, which drives multi-file cases through the query
+/// graph rather than the batch loader. `next_id` continues the `SourceId` numbering past the entry
+/// and its siblings, matching the loader's own assignment (entry = 0, siblings `1..=S`, dependency
+/// modules after), so a span resolves to the same file on both paths.
+pub(crate) fn dep_sources(entry: &Path, next_id: u32) -> Vec<noeta_db::DepSources> {
+    let Some(dir) = entry.parent() else {
+        return Vec::new();
+    };
+    let mut id = next_id;
+    dep_packages(dir)
+        .into_iter()
+        .map(|pkg| {
+            let modules = pkg
+                .modules
+                .iter()
+                .map(|m| {
+                    let source = Source::new(SourceId(id), m.name.as_str(), m.text.as_str());
+                    id += 1;
+                    source
+                })
+                .collect();
+            noeta_db::DepSources {
+                root: pkg.root,
+                key: pkg.key,
+                renames: Vec::new(),
+                modules,
+                edition: noeta_lexer::Edition::DEFAULT,
+            }
+        })
+        .collect()
+}
+
 /// Load + link `entry` and run the merged program to an [`Outcome`]. Lex/parse errors render
 /// against the source they came from; check/runtime diagnostics against the entry source.
 fn run_linked(entry: &Path, stage: Stage) -> Outcome {
-    let linked = match noeta_loader::load(entry, noeta_lexer::Edition::DEFAULT) {
+    // A case with package subdirectories links through the dependency-aware path so its sources
+    // carry real package provenance; one without keeps the deps-free path byte-for-byte.
+    let deps = entry.parent().map(dep_packages).unwrap_or_default();
+    let load = if deps.is_empty() {
+        noeta_loader::load(entry, noeta_lexer::Edition::DEFAULT)
+    } else {
+        noeta_loader::load_with_deps(entry, noeta_lexer::Edition::DEFAULT, &deps)
+    };
+    let linked = match load {
         Ok(Ok(linked)) => linked,
         Ok(Err(load_diagnostics)) => {
             let errors = load_diagnostics
@@ -320,7 +419,16 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     // Check/runtime diagnostics may land on a declaration merged in from a sibling module, so they
     // resolve through the source map (by each span's `SourceId`) rather than always against the
     // entry — that is what gives a cross-module error its real file/line/column.
-    let checked = noeta_check::check_all(&linked.program);
+    // Checked under the program's real per-source provenance, so a package-boundary rule (E0070)
+    // sees the same graph a `noeta run` of the same layout does.
+    let checked = noeta_check::check_all_with(
+        &linked.program,
+        noeta_check::CheckOptions {
+            editions: linked.editions.clone(),
+            packages: linked.packages.clone(),
+            ..noeta_check::CheckOptions::default()
+        },
+    );
     if !checked.diagnostics.is_empty() {
         return Outcome {
             stdout: String::new(),

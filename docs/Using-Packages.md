@@ -112,7 +112,18 @@ $ noeta run src/main.noe
 Hello from aether!
 ```
 
-## 6 · Keeping up
+## 6 · What a package may implement
+
+A dependency can only add behavior to its **own** types, or to its own traits. `impl Trait for Type`
+must live in the package that declares the trait or the type — the [orphan
+rule](Generics-and-Traits#the-orphan-rule), E0070. So no package you install can quietly change what
+another package's types do, and no combination of dependencies can produce a coherence conflict you
+have no way to resolve.
+
+The same rule applies to *your* code: to give a dependency's type behavior of your own, wrap it in a
+type you own and delegate — `@derive(Trait, via: field)` writes the newtype for you.
+
+## 7 · Keeping up
 
 - **`noeta update`** re-resolves everything deliberately: newer versions satisfying your
   requirements, moved branch tips, drifted pins. Nothing else ever moves an existing pin.

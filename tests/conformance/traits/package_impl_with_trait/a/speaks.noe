@@ -1,0 +1,15 @@
+// The trait's OWN package implements it for a foreign type. Legal: the impl lives with the trait,
+// which is one of the two homes the orphan rule allows. `a` is the only package that could ever
+// declare `Speaks`, so nothing is injected behind anyone's back — a consumer of `a` gets `a`'s
+// implementations of `a`'s trait.
+namespace a.speaks;
+
+use b.thing.{Thing};
+
+pub trait Speaks {
+    fn speak(): string
+}
+
+impl Speaks for Thing {
+    fn speak(): string { return "a says ${self.id}" }
+}

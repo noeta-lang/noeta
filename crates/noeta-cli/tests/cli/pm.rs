@@ -2150,3 +2150,157 @@ fn publish_docs_only_reuploads_docs_without_touching_the_index() {
             "`acme/greeter@9.9.9` is not published",
         ));
 }
+
+// --- the package orphan rule (E0070) over a real dependency graph -------------------------------
+
+/// Lay out `a` (a trait), `b` (a type), `glue` (depending on both), and an app depending on all
+/// three, with `glue`'s single module written by the caller — the one thing that varies between the
+/// orphan cases. Returns the app's entry path. The app **never names `glue`**: that is the whole
+/// point of the fixture — a transitive dependency injecting behavior into a type from a third
+/// package, in a program that mentions the injector nowhere.
+fn orphan_project(name: &str, glue_module: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    for sub in ["a", "b", "glue", "app"] {
+        std::fs::create_dir_all(base.join(sub)).unwrap();
+    }
+    std::fs::write(
+        base.join("a/noeta.toml"),
+        "[package]\nname = \"vendor/a\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("a/speaks.noe"),
+        "namespace a.speaks;\npub trait Speaks { fn speak(): string }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("b/noeta.toml"),
+        "[package]\nname = \"vendor/b\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("b/thing.noe"),
+        "namespace b.thing;\npub class Thing {\n  pub id: int\n  fn new(id: int): Thing { return Thing { id: id } }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("glue/noeta.toml"),
+        "[package]\nname = \"third/glue\"\nversion = \"0.1.0\"\n\
+         [dependencies]\na = { path = \"../a\" }\nb = { path = \"../b\" }\n",
+    )
+    .unwrap();
+    std::fs::write(base.join("glue/impls.noe"), glue_module).unwrap();
+    std::fs::write(
+        base.join("app/noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\na = { path = \"../a\" }\nb = { path = \"../b\" }\nglue = { path = \"../glue\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("app/main.noe"),
+        "use b.thing.{Thing};\necho Thing.new(7).id\n",
+    )
+    .unwrap();
+    base.join("app/main.noe")
+}
+
+#[test]
+fn a_cross_package_orphan_impl_is_rejected_naming_all_three_packages() {
+    // Before the rule, this program ran: `glue` — a package the app names nowhere — made `Thing`
+    // satisfy `Speaks`, and two such packages in one graph collided as an E0027 the end user could
+    // not fix. The diagnostic has to name all three packages and both declaration sites, or the
+    // author cannot tell whose impl this is or why it is refused.
+    let entry = orphan_project(
+        "pm_orphan_reject",
+        "namespace glue.impls;\nuse a.speaks.{Speaks};\nuse b.thing.{Thing};\n\
+         impl Speaks for Thing { fn speak(): string { return \"glue\" } }\n",
+    );
+    let out = lang().arg("run").arg(&entry).assert().failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("E0070"), "{stderr}");
+    for expected in [
+        "package `a`",
+        "package `b`",
+        "package `glue`",
+        // Each side's declaration is located, in its own file, by the multi-file renderer.
+        "speaks.noe",
+        "thing.noe",
+        "impls.noe",
+        // The escape hatch, written out with this impl's own (short, declarable) names.
+        "@derive(Speaks, via: inner)",
+        "class MyThing { pub inner: Thing }",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "the orphan diagnostic must contain {expected:?}:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn an_impl_in_the_traits_package_or_the_types_package_is_accepted() {
+    // The rule forbids a *third* package, not cross-package impls. Both legal homes still run.
+    let with_trait = orphan_project(
+        "pm_orphan_ok_trait_side",
+        // `glue` becomes irrelevant here; the impl moves into the trait's own package below.
+        "namespace glue.impls;\npub fn unused(): int { return 0 }\n",
+    );
+    let base = with_trait.parent().unwrap().parent().unwrap();
+    std::fs::write(
+        base.join("a/noeta.toml"),
+        "[package]\nname = \"vendor/a\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nb = { path = \"../b\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("a/speaks.noe"),
+        "namespace a.speaks;\nuse b.thing.{Thing};\npub trait Speaks { fn speak(): string }\n\
+         impl Speaks for Thing { fn speak(): string { return \"a says ${self.id}\" } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("app/main.noe"),
+        "use a.speaks.{Speaks};\nuse b.thing.{Thing};\n\
+         fn say(x: dyn Speaks): string { return x.speak() }\necho say(Thing.new(7))\n",
+    )
+    .unwrap();
+    lang()
+        .arg("run")
+        .arg(&with_trait)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a says 7"));
+
+    // The mirror image: the impl lives with the TYPE and the trait is foreign.
+    let with_type = orphan_project(
+        "pm_orphan_ok_type_side",
+        "namespace glue.impls;\npub fn unused(): int { return 0 }\n",
+    );
+    let base = with_type.parent().unwrap().parent().unwrap();
+    std::fs::write(
+        base.join("b/noeta.toml"),
+        "[package]\nname = \"vendor/b\"\nversion = \"0.1.0\"\n\
+         [dependencies]\na = { path = \"../a\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("b/thing.noe"),
+        "namespace b.thing;\nuse a.speaks.{Speaks};\npub class Thing {\n  pub id: int\n  \
+         fn new(id: int): Thing { return Thing { id: id } }\n}\n\
+         impl Speaks for Thing { fn speak(): string { return \"b says ${self.id}\" } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("app/main.noe"),
+        "use a.speaks.{Speaks};\nuse b.thing.{Thing};\n\
+         fn say(x: dyn Speaks): string { return x.speak() }\necho say(Thing.new(7))\n",
+    )
+    .unwrap();
+    lang()
+        .arg("run")
+        .arg(&with_type)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("b says 7"));
+}

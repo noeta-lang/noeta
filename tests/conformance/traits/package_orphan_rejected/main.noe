@@ -1,0 +1,16 @@
+// The **package orphan rule** (E0070): an `impl Trait for Type` must live in the same package as
+// the trait or as the type. Here a third package — `glue`, a transitive dependency this entry does
+// not name once — implements `a`'s trait for `b`'s type.
+//
+// That is exactly the injection the rule exists to stop. Without it this program ran: `Thing`
+// silently satisfied `Speaks`, `t.speak()` dispatched into code from a package the author never
+// wrote down, and a second such package anywhere in the graph collided as an E0027 the end user
+// could not fix — they own neither impl, so they can remove neither.
+//
+// A **package** case: subdirectories of the case directory are dependency packages, which is the
+// only form that can express a package boundary at all (a flat directory is one package).
+// expect: error E0070 at 8:6
+// expect: exit 1
+use b.thing.{Thing};
+
+echo Thing.new(7).id

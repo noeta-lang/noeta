@@ -193,7 +193,7 @@ add10 = Adder { base: 10 }
 echo add10(5)     // 15
 ```
 
-There is also a **standalone** `impl Trait for T { ... }`, which must target a struct, class, or enum **the program declares** — a target no module declares is E0013, a wrong or missing required method is E0015. "The program" is the whole linked program rather than the one file: a module may implement a trait for a sibling's or a dependency's type, so a glue module that imports both sides is a legitimate place to put an impl. A standalone impl of a **user** trait may carry method bodies (hoisted onto the target type); an impl of a **built-in** trait must stay an empty-body marker (a body is E0015 — those methods live in the type's own body).
+There is also a **standalone** `impl Trait for T { ... }`, which must target a struct, class, or enum **the program declares** — a target no module declares is E0013, a wrong or missing required method is E0015. "The program" is the whole linked program rather than the one file: a module may implement a trait for a sibling module's type, or for a type declared in the entry, so where in your package you put an impl is a matter of layout. Across a *package* boundary it is not free: the [orphan rule](#the-orphan-rule) requires the impl to sit with the trait or with the type (E0070). A standalone impl of a **user** trait may carry method bodies (hoisted onto the target type); an impl of a **built-in** trait must stay an empty-body marker (a body is E0015 — those methods live in the type's own body).
 
 **A standalone impl travels with its type.** Wherever the target type reaches — a sibling module, a consumer of your package, a consumer that never names the type and only ever holds it as a `dyn Trait` — its standalone impls go with it, and every surface that reads trait membership sees them: the `dyn Trait` coercion, trait-method dispatch, the precise `x is dyn Trait` test, a `<T: Trait>` bound, and `traits_of(x)`. Which spelling you choose is a matter of layout, never of reach — an in-body `impl Trait { … }` block and a standalone `impl Trait for T { … }` declare the same thing, and a type that must be written one way to be usable from another module is a bug, not a rule.
 
@@ -268,9 +268,51 @@ The derivable built-ins are `Equatable`, `Comparable`, `Display`, `Error`, `Clon
 
 ## Coherence
 
-Each type has **at most one** implementation of a given trait, across `@derive(T)`, an in-body `impl T { }`, and a standalone `impl T for Type { }`. A duplicate or competing impl is E0027 — including two *different modules* that each implement one trait for one type, which is a conflict like any other and is reported rather than silently resolved in someone's favor.
+Coherence has two halves: **uniqueness** — at most one implementation per (type, trait) pair — and the **orphan rule** — who is allowed to write one.
 
-Coherence reduces to that uniqueness check, with no orphan rule to go with it. Noeta links **one whole program** at a time: every module and every dependency is resolved into a single program before it is checked, so there is no separately-compiled unit that could hold an impl this one cannot see, and "at most one implementation" is a question the checker can always answer in full. That is what lets a standalone `impl` target an imported type at all — the thing an orphan rule exists to forbid is, here, just another impl the uniqueness check counts.
+### Uniqueness
+
+Each type has **at most one** implementation of a given trait, across `@derive(T)`, an in-body `impl T { }`, and a standalone `impl T for Type { }`. A duplicate or competing impl is E0027 — including two *different modules* that each implement one trait for one type, which is a conflict like any other and is reported rather than silently resolved in someone's favor. The diagnostic labels **both** sites, each rendered against its own file, since the two are routinely in different modules.
+
+Uniqueness is always decidable here, and that is a property of the language: Noeta links **one whole program** at a time, so every module and every dependency is resolved into a single program before it is checked, and there is no separately-compiled unit that could hold an implementation this one cannot see.
+
+### The orphan rule
+
+An `impl Trait for Type` must live in the **same package** as the trait **or** as the type. A package that declares neither is E0070.
+
+This is Rust's orphan rule with *crate* read as *package*, and — unlike Rust's — it is not there to make coherence decidable. It is there because the alternative is invisible action at a distance. Without it, a package deep in your dependency graph can implement one vendor's trait for another vendor's type, and the behavior appears in an application that imports both and names the implementing package nowhere:
+
+```noeta ignore
+// third.glue — depends on vendor.a and vendor.b, and is written by neither
+impl Speaks for Thing { fn speak(): string { return "glue says ${self.id}" } }
+```
+```noeta ignore
+// your application, which imports vendor.a and vendor.b and never mentions third.glue
+t = Thing.new(7)
+echo t is dyn Speaks   // true — from a package you did not write down
+echo t.speak()         // "glue says 7"
+```
+
+Two such packages anywhere in one graph then collide as an E0027 the end user **cannot fix**: they own neither implementation, so they can remove neither, and the only escape is to drop a dependency. The cost of the feature is global and invisible; its benefit — attaching behavior to a foreign type — is already served by the newtype, below.
+
+What the rule does **not** restrict:
+
+- **Cross-module impls inside one package.** The boundary is the package, not the file. A module may implement a trait for a type declared in a sibling module, or in the entry, exactly as before.
+- **`@derive(Trait)` and in-body `impl Trait { }`.** Both sit on the type's own declaration, so they are same-package by construction.
+- **Cross-*package* impls with one end at home.** Implementing your own trait for a foreign type is fine; so is implementing a foreign trait for your own type. Only the third-party case is refused.
+
+A **built-in** trait (`Display`, `Comparable`, …) and a trait provided by a native extension belong to no package, so they can never be the local end: `impl Display for SomeoneElsesType {}` has to live in that type's package.
+
+### The escape hatch: a newtype
+
+To give a foreign type behavior from your own package, wrap it in a type you own. `@derive(Trait, via: field)` is [the newtype pattern without the boilerplate](Derives#delegating-through-a-field-via) — it forwards the whole trait through the field:
+
+```noeta ignore
+@derive(Speaks, via: inner)
+class MyThing { pub inner: Thing }
+```
+
+The behavior is then yours, scoped to your type, and visible to exactly the code that asks for it. E0070's help prints this sketch with your own names filled in.
 
 ## Operator errors
 

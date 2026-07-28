@@ -27,7 +27,7 @@ use std::path::Path;
 
 use noeta_ast::{Program, Stmt, UseName};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
-use noeta_span::{Source, SourceId, SourceMap, Span};
+use noeta_span::{PackageOrigin, Source, SourceId, SourceMap, Span};
 
 pub use expand::ExpandedSource;
 
@@ -50,6 +50,17 @@ pub struct Linked {
     /// edition. The checker consults this per declaration (via a span's `SourceId`) so a merged
     /// program applies each package's own edition rules — the editions compiler arc's whole point.
     pub editions: noeta_lexer::EditionMap,
+    /// Which **package** each source was read from, keyed by `SourceId` — the provenance the merged
+    /// program otherwise destroys. The entry and its siblings are [`PackageOrigin::Root`]; each
+    /// dependency package's modules carry that package's global key. The checker consults this per
+    /// declaration (via a span's `SourceId`) to enforce the package orphan rule — an
+    /// `impl Trait for Type` must live in the same package as the trait or as the type.
+    ///
+    /// **Compile-time expansion sources are deliberately absent.** Generated code is attributed to
+    /// no package, so an impl a directive synthesized is never judged by the orphan rule: the
+    /// generating directive may sit on a *dependency's* declaration, which would make "the root
+    /// package" the wrong answer rather than merely a missing one.
+    pub packages: noeta_span::PackageMap,
     /// Every **non-Noeta file** a compile-time directive expansion read (an OpenAPI spec and the
     /// documents it `$ref`s, say), as the hooks reported them.
     ///
@@ -404,15 +415,18 @@ pub fn link(
 ) -> Result<Linked, Vec<LoadDiagnostic>> {
     // The entry is always SourceId 0; siblings follow. Each module keeps its own source so its
     // spans stay valid and its diagnostics render against it. The deps-free path: entry + siblings
-    // are one package, so every source takes the root edition.
+    // are one package, so every source takes the root edition and the root package.
     let entry = Source::new(SourceId(0), entry_name, entry_text);
     let mut sources: Vec<Source> = vec![entry.clone()];
     let mut editions = noeta_lexer::EditionMap::new();
+    let mut packages = noeta_span::PackageMap::new();
     editions.set(SourceId(0), root_edition);
+    packages.set(SourceId(0), PackageOrigin::Root);
     for (i, raw) in siblings.iter().enumerate() {
         let id = SourceId((i + 1) as u32);
         sources.push(Source::new(id, raw.name.as_str(), raw.text.as_str()));
         editions.set(id, root_edition);
+        packages.set(id, PackageOrigin::Root);
     }
     let (lexeds, text_tiers) = lex_program(&sources, &editions);
 
@@ -473,6 +487,7 @@ pub fn link(
         entry,
         sources: SourceMap::new(sources),
         editions,
+        packages,
         reads,
     })
 }
@@ -591,13 +606,16 @@ pub fn link_with_deps(
     // Assemble every module's `Source` up front — entry = 0, siblings `1..=S`, dependency modules
     // continuing the sequence — then lex them as one program (see [`lex_program`]: a text tier
     // declared in any file, a dependency package's included, captures verbatim bodies in every
-    // file) before any parsing. The `editions` side-table is built in lock-step: the entry and its
-    // siblings take the root package's edition, each dependency's modules that package's own.
+    // file) before any parsing. The `editions` and `packages` side-tables are built in lock-step:
+    // the entry and its siblings take the root package's edition and are the root package, each
+    // dependency's modules take that package's own edition and its global key.
     let entry = Source::new(SourceId(0), entry_name, entry_text);
     let mut next_id: u32 = 1;
     let mut sources: Vec<Source> = vec![entry.clone()];
     let mut editions = noeta_lexer::EditionMap::new();
+    let mut packages = noeta_span::PackageMap::new();
     editions.set(SourceId(0), root_edition);
+    packages.set(SourceId(0), PackageOrigin::Root);
     for raw in siblings {
         sources.push(Source::new(
             SourceId(next_id),
@@ -605,6 +623,7 @@ pub fn link_with_deps(
             raw.text.as_str(),
         ));
         editions.set(SourceId(next_id), root_edition);
+        packages.set(SourceId(next_id), PackageOrigin::Root);
         next_id += 1;
     }
     let sibling_end = sources.len();
@@ -616,6 +635,10 @@ pub fn link_with_deps(
                 raw.text.as_str(),
             ));
             editions.set(SourceId(next_id), dep.edition);
+            packages.set(
+                SourceId(next_id),
+                PackageOrigin::Dependency(dep.key.clone()),
+            );
             next_id += 1;
         }
     }
@@ -699,6 +722,7 @@ pub fn link_with_deps(
         entry,
         sources: SourceMap::new(sources),
         editions,
+        packages,
         reads,
     })
 }
@@ -763,6 +787,10 @@ type ModuleParse = Result<Program, Box<BrokenModule>>;
 pub struct ParsedDir {
     sources: Vec<Source>,
     editions: noeta_lexer::EditionMap,
+    /// Which package each source was read from, keyed by the shared `SourceId` numbering — the
+    /// directory-mode twin of `Linked::packages`. Directory modules are the root package;
+    /// dependency modules carry their package's global key.
+    packages: noeta_span::PackageMap,
     modules: Vec<ModuleParse>,
     dep_programs: Vec<Program>,
     /// Dependency-package modules that failed to lex/parse — a hard error for *every* entry in the
@@ -811,6 +839,7 @@ pub fn parse_dir(
 ) -> ParsedDir {
     let mut sources: Vec<Source> = Vec::with_capacity(modules.len());
     let mut editions = noeta_lexer::EditionMap::new();
+    let mut packages = noeta_span::PackageMap::new();
     let mut next_id: u32 = 0;
     for raw in &modules {
         sources.push(Source::new(
@@ -819,6 +848,7 @@ pub fn parse_dir(
             raw.text.as_str(),
         ));
         editions.set(SourceId(next_id), root_edition);
+        packages.set(SourceId(next_id), PackageOrigin::Root);
         next_id += 1;
     }
     for dep in deps {
@@ -829,6 +859,10 @@ pub fn parse_dir(
                 raw.text.as_str(),
             ));
             editions.set(SourceId(next_id), dep.edition);
+            packages.set(
+                SourceId(next_id),
+                PackageOrigin::Dependency(dep.key.clone()),
+            );
             next_id += 1;
         }
     }
@@ -849,6 +883,7 @@ pub fn parse_dir(
     ParsedDir {
         sources,
         editions,
+        packages,
         modules: parsed_modules,
         dep_programs,
         broken_deps,
@@ -875,6 +910,13 @@ impl ParsedDir {
     /// Which edition governs each source, keyed by the shared `SourceId` numbering.
     pub fn editions(&self) -> &noeta_lexer::EditionMap {
         &self.editions
+    }
+
+    /// Which package each source came from, keyed by the shared `SourceId` numbering. An entry's
+    /// expansions are deliberately absent (as in `Linked::packages`), so the orphan rule never
+    /// judges generated code.
+    pub fn packages(&self) -> &noeta_span::PackageMap {
+        &self.packages
     }
 
     /// The shared sources **plus** one entry's expansions ([`EntryLink::expansions`]), so a
@@ -3343,6 +3385,79 @@ mod tests {
         assert!(
             has_class(&linked, "Value"),
             "the transitive package's Value must link in via the dep-key rewrite"
+        );
+    }
+
+    #[test]
+    fn linking_records_which_package_each_source_came_from() {
+        // Package provenance is the thing linking otherwise destroys: the merged program is one
+        // flat statement list, and nothing in it says which package a declaration arrived from.
+        // The `packages` side-table is the only carrier — the entry and its siblings are the root
+        // package, each dependency's modules that package's global key — and the checker's orphan
+        // rule (E0070) reads it through each declaration's span.
+        let dep = DepPackage {
+            key: "geo".to_string(),
+            root: "shapes".to_string(),
+            modules: vec![module(
+                "circle.noe",
+                "namespace shapes.circle;\npub fn area(r: float): float { return r * r; }\n",
+            )],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+        };
+        let sibling = module(
+            "lib.noe",
+            "namespace App.Lib;\npub fn two(): int { return 2; }\n",
+        );
+        let linked = link_with_deps(
+            "main.noe",
+            "use geo.circle.area;\nuse App.Lib.two;\necho two();\n",
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+            std::slice::from_ref(&dep),
+        )
+        .unwrap();
+        assert_eq!(
+            linked.packages.source_package(SourceId(0)),
+            Some(&PackageOrigin::Root),
+            "the entry is the root package"
+        );
+        assert_eq!(
+            linked.packages.source_package(SourceId(1)),
+            Some(&PackageOrigin::Root),
+            "a sibling module is the SAME package as the entry — the orphan rule\'s boundary is \
+             the package, not the file"
+        );
+        assert_eq!(
+            linked.packages.source_package(SourceId(2)),
+            Some(&PackageOrigin::Dependency("geo".to_string())),
+            "a dependency module carries its package\'s global key (not its own root segment)"
+        );
+        // Never guessed: a source the loader did not read is unknown, not "the root package".
+        assert_eq!(linked.packages.source_package(SourceId(9)), None);
+    }
+
+    #[test]
+    fn a_deps_free_link_puts_every_source_in_the_root_package() {
+        let sibling = module(
+            "lib.noe",
+            "namespace App.Lib;\npub fn two(): int { return 2; }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "use App.Lib.two;\necho two();\n",
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .unwrap();
+        assert_eq!(
+            linked.packages.source_package(SourceId(0)),
+            Some(&PackageOrigin::Root)
+        );
+        assert_eq!(
+            linked.packages.source_package(SourceId(1)),
+            Some(&PackageOrigin::Root)
         );
     }
 

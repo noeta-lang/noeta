@@ -221,10 +221,10 @@ fn run_file_benches(
             .iterations_override
             .or_else(|| iterations_arg(bench))
             .map(|n| n.max(1))
-            .unwrap_or_else(|| calibrate_iterations(&setup, &run.editions, bench));
+            .unwrap_or_else(|| calibrate_iterations(&setup, &run.opts, bench));
         let mut outcome = match (
-            measure_iterations(&setup, &run.editions, bench, n, 3),
-            measure_iterations(&setup, &run.editions, bench, n.saturating_mul(2), 3),
+            measure_iterations(&setup, &run.opts, bench, n, 3),
+            measure_iterations(&setup, &run.opts, bench, n.saturating_mul(2), 3),
         ) {
             (Ok(t1), Ok(t2)) => BenchOutcome {
                 name: bench.name.clone(),
@@ -374,12 +374,12 @@ pub(crate) fn print_bench_outcome(
 /// measurement, where it is reported).
 pub(crate) fn calibrate_iterations(
     setup: &[Stmt],
-    editions: &noeta_lexer::EditionMap,
+    opts: &noeta_check::CheckOptions,
     bench: &TierFn,
 ) -> u64 {
     let mut n: u64 = 64;
     loop {
-        let Ok(t) = measure_iterations(setup, editions, bench, n, 1) else {
+        let Ok(t) = measure_iterations(setup, opts, bench, n, 1) else {
             return DEFAULT_BENCH_ITERATIONS;
         };
         let elapsed = t.as_nanos().max(1) as f64;
@@ -480,7 +480,7 @@ pub(crate) fn iterations_arg(bench: &TierFn) -> Option<u64> {
 /// nonzero exit / any diagnostic (a panic in the bench body) is a failure, surfaced as `Err`.
 pub(crate) fn measure_iterations(
     setup: &[Stmt],
-    editions: &noeta_lexer::EditionMap,
+    opts: &noeta_check::CheckOptions,
     bench: &TierFn,
     n: u64,
     runs: u32,
@@ -521,7 +521,7 @@ pub(crate) fn measure_iterations(
         span: bench.span,
     };
 
-    let checked = check_under(&program, editions);
+    let checked = check_under(&program, opts);
     if !checked.diagnostics.is_empty() {
         return Err(checked.diagnostics[0].message.clone());
     }
