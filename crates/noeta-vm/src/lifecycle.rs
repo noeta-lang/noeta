@@ -904,8 +904,8 @@ impl<'m> Vm<'m> {
     pub(crate) fn materialize_attributes(&self, type_name: &str) -> Value {
         let attributed_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
-            "Attributed",
-            vec!["target".to_string(), "value".to_string()],
+            noeta_ast::reflect::ATTRIBUTED,
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::ATTRIBUTED),
         ));
         let shape = noeta_ast::reflect::attribute_shape(type_name, &self.module.reflection);
         let fields = shape.fields;
@@ -942,8 +942,8 @@ impl<'m> Vm<'m> {
     pub(crate) fn materialize_roles(&self, role_enum: Option<&str>) -> Value {
         let binding_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
-            "RoleBinding",
-            vec!["target".to_string(), "role".to_string()],
+            noeta_ast::reflect::ROLE_BINDING,
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::ROLE_BINDING),
         ));
         let items: Vec<Value> = self
             .module
@@ -982,12 +982,7 @@ impl<'m> Vm<'m> {
         let info_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             noeta_ast::reflect::PARAM_INFO,
-            vec![
-                "name".to_string(),
-                "type".to_string(),
-                "optional".to_string(),
-                "attrs".to_string(),
-            ],
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::PARAM_INFO),
         ));
         let items: Vec<Value> = self
             .module
@@ -1083,7 +1078,7 @@ impl<'m> Vm<'m> {
         let entry_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             noeta_ast::reflect::FIELD_ENTRY,
-            vec!["name".to_string(), "value".to_string()],
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::FIELD_ENTRY),
         ));
         let items: Vec<Value> = value
             .object_fields_for_reflection()
@@ -1106,11 +1101,7 @@ impl<'m> Vm<'m> {
         let spec_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             noeta_ast::reflect::FIELD_SPEC,
-            vec![
-                "name".to_string(),
-                "type".to_string(),
-                "optional".to_string(),
-            ],
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::FIELD_SPEC),
         ));
         let items: Vec<Value> = self
             .module

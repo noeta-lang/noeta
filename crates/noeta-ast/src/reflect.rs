@@ -1962,6 +1962,60 @@ pub fn prelude_enums() -> Vec<PreludeEnum> {
     ]
 }
 
+/// The `Attributed<T>` prelude struct's name — `{ target: string, value: T }`, the element type of
+/// `attributes_of::<T>()`'s result.
+pub const ATTRIBUTED: &str = "Attributed";
+
+/// A **prelude struct**: one of the record types the language declares for you, and the *only*
+/// statement of its field list. Everything that builds or registers one reads it from here — the
+/// checker's records, both backends' `attributes_of` / `roles_of` / `params_of` / `fields_of` /
+/// `field_specs_of` materializations, and the type environments that make a source-written literal
+/// construct. Before the table those field lists were hand-copied at eight sites across two
+/// backends, and neither backend registered the types at all, so `FieldEntry { name: "a", value: 1
+/// }` type-checked and aborted with E0005 at run time — the struct half of the prelude-enum hole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreludeStruct {
+    /// The struct's name, as a program spells it.
+    pub name: &'static str,
+    /// Its fields, in **slot order** — the order a materialized instance's values are built in, and
+    /// the order a shape interns them under, so a materialized value and a constructed one are the
+    /// same value.
+    pub fields: Vec<String>,
+}
+
+/// Every prelude struct, in registration order. The counterpart of [`prelude_enums`].
+///
+/// `ParamInfo` and `FieldSpec` are registered like the rest even though a source literal cannot
+/// currently spell them (their `type` field collides with the `type` keyword in struct-literal
+/// position): the registration is what makes their materialization read one field list rather than
+/// two, and the day the literal becomes spellable it constructs.
+pub fn prelude_structs() -> Vec<PreludeStruct> {
+    let s = |name: &'static str, fields: &[&str]| PreludeStruct {
+        name,
+        fields: fields.iter().map(|f| (*f).to_string()).collect(),
+    };
+    vec![
+        s(ATTRIBUTED, &["target", "value"]),
+        s(ROLE_BINDING, &["target", "role"]),
+        s(PARAM_INFO, &["name", "type", "optional", "attrs"]),
+        s(FIELD_ENTRY, &["name", "value"]),
+        s(FIELD_SPEC, &["name", "type", "optional"]),
+        s(TIER_ROOT, &["name", "run"]),
+        s(TIER_TEXT, &["target", "text"]),
+    ]
+}
+
+/// The fields of the prelude struct `name`, in slot order — the lookup every materialization site
+/// uses instead of re-listing them. Panics for a name that is not a prelude struct: every call site
+/// passes one of the constants above, so a miss is a programming error, not a runtime condition.
+pub fn prelude_struct_fields(name: &str) -> Vec<String> {
+    prelude_structs()
+        .into_iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("`{name}` is not a prelude struct"))
+        .fields
+}
+
 /// The **declaration index** of `variant` in the prelude enum `enum_name`, or `None` when the pair
 /// names no prelude variant (a user enum, or `Option`/`Result`). Both backends stamp this onto the
 /// values they materialize — a reflected `type_of(…)` value and a source-written `Type.Int` then

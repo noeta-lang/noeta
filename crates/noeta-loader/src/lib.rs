@@ -2059,7 +2059,7 @@ fn build_module_map(
             }
         }
     }
-    add_native_attribute_aliases(&mut map, own_stmts, reg);
+    add_native_type_aliases(&mut map, own_stmts, reg);
     qualify::UnitMap {
         names: map,
         handles: if canonical_handles {
@@ -2130,21 +2130,37 @@ fn canonical_use_binding(
     }
 }
 
-/// Fold a module's native **attribute** imports into its rewrite map, so a `#[Skip]` /
-/// `attributes_of::<Skip>()` written after `use std.test.{Skip}` rewrites to its qualified identity
-/// `std.test.Skip` — the one FQN the checker's gate keys on, the reflection manifest carries, and the
-/// test/bench/mcp/doc runners read (D2b: one identity everywhere). Mirrors the checker's `use`
-/// classification (`classify_use`), but keeps **only** attribute-kind imports (`is_ext_attribute`):
-/// every other native import stays the checker's `extern_types` job, so this rewrite never touches a
-/// type or value name — its blast radius is attribute names alone. A leaf `use std.test.{Skip}` binds
-/// `Skip`; a group `use std.test` / concrete `use std.test.mod` binds the projected `test.Skip` form.
-fn add_native_attribute_aliases(
+/// Fold a module's **native type** imports into its rewrite map, so every spelling of a native type
+/// rewrites to the one qualified identity the rest of the toolchain keys on (`std.http.Framing`,
+/// `std.test.Skip`) — the FQN the checker seeds its symbol tables under, the reflection manifest
+/// carries, both backends build shapes from, and the test/bench/mcp/doc runners read. Mirrors the
+/// checker's `use` classification (`classify_use`).
+///
+/// Two spellings reach here. A **leaf** import (`use std.test.{Skip}`) binds the short local name;
+/// a **group** import (`use std.http`, or a concrete module `use std.test.mod`) binds the projected
+/// dotted form (`http.Framing`). Aliasing the group form is what makes `http.Framing.Sse` work at
+/// all: the collapse in [`qualify`] turns the dotted prefix into a single `Ident(std.http.Framing)`
+/// with `.Sse` still on it, which is exactly the shape a leaf-imported `Framing.Sse` reaches the
+/// backends as. Without the alias the chain stayed `((http).Framing).Sse`, the compiler saw a member
+/// access on the namespace handle, and the program died at *compile* time with an internal
+/// "type member used as a value" — while `use std.http.{Framing}` + `Framing.Sse` worked. That
+/// asymmetry is not a curiosity: two packages exporting the same short name (`std.http.Framing` and
+/// `para.ai.provider.Framing`) cannot both be leaf-imported, so the dotted form is the *only*
+/// spelling available to a program that needs both.
+///
+/// A **local declaration wins**: a name a file declares itself is not rewritten to a native type of
+/// the same name, matching the shadowing rule the rest of the prelude follows.
+fn add_native_type_aliases(
     map: &mut qualify::QMap,
     own_stmts: &[Stmt],
     reg: &noeta_ext_abi::registry::Registry,
 ) {
     use noeta_ext_abi::registry::UseKind;
+    let declared: HashSet<&str> = own_stmts.iter().filter_map(decl_name).collect();
     let mut alias = |local: String, qualified: String| {
+        if declared.contains(local.as_str()) {
+            return;
+        }
         map.insert(qualified.clone(), qualified.clone());
         map.insert(local, qualified);
     };
@@ -2155,19 +2171,25 @@ fn add_native_attribute_aliases(
         for n in names {
             let local = n.local();
             match reg.classify_use(path, &n.name) {
+                // A leaf import of a native attribute struct. (Other leaf-imported native types are
+                // the checker's `extern_types` job and already resolve; aliasing them here too would
+                // rewrite a *value* spelling the backends bind under the short name.)
                 UseKind::ExtStruct(qualified) if reg.is_ext_attribute(&qualified) => {
                     alias(local.to_string(), qualified);
                 }
-                UseKind::Namespace(prefix) => {
+                // A group import — every native **value type** under the namespace, by its dotted
+                // spelling. Enums, fielded types (classes/structs), and attribute structs only: a
+                // native **trait** is keyed by its *short* name throughout the checker (`impl
+                // fx.Pixels for T`, a `T: Pixels` bound, `dyn Pixels`), so rewriting its dotted
+                // spelling to the qualified identity makes the `impl` name a trait the checker has
+                // never heard of. A trait is a contract, not a value — nothing constructs one — so
+                // it needs no dotted alias in the first place.
+                UseKind::Namespace(prefix) | UseKind::Module(prefix) => {
                     for (rel, q) in reg.namespace_types(&prefix) {
-                        if reg.is_ext_attribute(&q) {
-                            alias(format!("{local}.{rel}"), q);
-                        }
-                    }
-                }
-                UseKind::Module(qualified) => {
-                    for (rel, q) in reg.namespace_types(&qualified) {
-                        if reg.is_ext_attribute(&q) {
+                        let is_value_type = reg.find_enum_qualified(&q).is_some()
+                            || reg.resolve_fielded(&q).is_some()
+                            || reg.is_ext_attribute(&q);
+                        if is_value_type {
                             alias(format!("{local}.{rel}"), q);
                         }
                     }

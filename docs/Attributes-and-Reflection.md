@@ -126,7 +126,26 @@ echo type_of([1]) == Type.List(Type.Int)      // true
 echo 5.compare(2) == Ordering.Greater         // true
 ```
 
-Each shadows like any prelude name: declaring your own `enum Ordering` replaces it for that program.
+The prelude **structs** are ordinary structs in the same way — `Attributed`, `RoleBinding`, `ParamInfo`, `FieldEntry`, `FieldSpec`, `TierRoot`, `TierText` are constructible by literal, and a constructed one equals the materialized one field for field:
+
+```noeta
+struct P { a: int; b: string }
+
+echo fields_of(P { a: 1, b: "x" })[0] == FieldEntry { name: "a", value: 1 }   // true
+```
+
+(`ParamInfo` and `FieldSpec` are the exception a literal cannot currently spell: their `type` field collides with the `type` keyword in struct-literal position. Reading `p.type` off one works.)
+
+Each shadows like any prelude name: declaring your own `enum Ordering` or `struct FieldEntry` replaces it for that program.
+
+A **native** enum — one an extension registers, like `std.http`'s `Framing` — behaves the same, and does so under either spelling. A leaf import binds the short name; a group import lets you dot into the namespace, which is the spelling you need when two packages export the same short name:
+
+```noeta
+use std.http
+use std.http.{Framing}
+
+echo http.Framing.Sse == Framing.Sse   // true — one type, two spellings
+```
 
 ### `params_of(name): List<ParamInfo>`
 
