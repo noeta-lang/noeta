@@ -81,6 +81,7 @@ use noeta_types::{BuiltinTrait, Type};
 mod args;
 mod attributes;
 mod collect;
+mod constructors;
 mod decls;
 pub mod directives;
 mod effects;
@@ -101,6 +102,7 @@ pub use tiers::{
     activate_tiers_with, dedent_doc, extend_reflection, resolve_docs, resolve_texts,
 };
 
+use constructors::compute_fresh_constructors;
 use effects::*;
 use env::*;
 use forwarding::*;
@@ -282,6 +284,10 @@ fn check_all_impl(
     let fwd = compute_forwarding(program, &checker.imports.extern_types);
     checker.symbols.forwarding = fwd.map;
     checker.symbols.forwarding_poisoned = fwd.poisoned;
+    // The fresh-constructor pre-pass (generic constructor reflection), for the same reason: a
+    // `Repo.new(...)` call site stamps its instantiation onto the result whether it is written
+    // before or after `Repo`'s declaration.
+    checker.symbols.fresh_constructors = compute_fresh_constructors(program);
     // Compute destruct-reachability + parameter relevance before checking bodies (local-binding
     // relevance is recorded inline during `check_program`, and needs the reachable set ready).
     checker.compute_relevance(program);
@@ -354,6 +360,10 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
     let fwd = compute_forwarding(program, &checker.imports.extern_types);
     checker.symbols.forwarding = fwd.map;
     checker.symbols.forwarding_poisoned = fwd.poisoned;
+    // The fresh-constructor pre-pass (generic constructor reflection), for the same reason: a
+    // `Repo.new(...)` call site stamps its instantiation onto the result whether it is written
+    // before or after `Repo`'s declaration.
+    checker.symbols.fresh_constructors = compute_fresh_constructors(program);
     checker.compute_relevance(program);
     // Tier declarations FIRST: they build the tier registry, and the directive placement check
     // resolves a declaration's unrecognized `@name` against the whole name-space (which includes
@@ -491,6 +501,10 @@ impl SessionChecker {
             .symbols
             .forwarding_poisoned
             .extend(fwd.poisoned);
+        self.checker
+            .symbols
+            .fresh_constructors
+            .extend(compute_fresh_constructors(entry));
         // Re-run the reachability fixpoint over the ACCUMULATED registries (this entry's
         // `destruct` class can make an earlier entry's type reachable), and record this entry's
         // parameter relevance.
@@ -1042,6 +1056,12 @@ struct Symbols {
     /// composite forward (`f<T>` demanding `List<T>`, then `List<List<T>>`, …). Reported as a
     /// clear E0058 at the declaration instead of an unbounded table.
     forwarding_poisoned: HashSet<String>,
+    /// The **fresh-constructor set** (generic constructor reflection): `(type, method)` pairs for
+    /// every associated function of a generic struct/class whose every `return` hands back a
+    /// freshly-built literal of that type ([`compute_fresh_constructors`]). A call of one records
+    /// its resolved instantiation as a construction site, so the caller stamps the object with the
+    /// type argument the constructor body could not know.
+    fresh_constructors: crate::constructors::FreshConstructors,
     /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
     /// through the type's own block, its fields, or its collection elements (the fixpoint
     /// [`compute_destruct_reachable`] computes). The input to per-binding destructor-relevance.
@@ -1113,6 +1133,21 @@ struct Coloring {
     /// call on a `T`-typed receiver resolves through a bound's trait at the bound's instantiation
     /// (`x.key(): int` under `T: Keyed<int>` — [`Checker::type_param_trait_method`]).
     type_params: HashMap<String, Vec<crate::env::BoundReq>>,
+    /// While checking a **generic type's instance method** body: the enclosing type's own type
+    /// parameters, in DECLARATION order, with any name the method's own `<…>` shadows replaced by
+    /// the empty string (which no identifier can equal). Empty everywhere else — at top level, in a
+    /// free function, and in an ASSOCIATED function, which has no receiver to carry the
+    /// instantiation. This is the channel that makes `type_name::<T>()` resolvable inside
+    /// `class Repo<T>`: the index found here is the argument position to read off `self`'s
+    /// reflected type tag. Saved and restored around each function.
+    self_type_params: Vec<String>,
+    /// The `(literal span, expected type)` of the **named object literal currently being checked in
+    /// a position that has an expectation** — the channel that lets a construction absorb type
+    /// arguments its field values do not pin (`r: Repo<Todo> = Repo { tbl: "todos" }`, where no
+    /// field mentions `T`). Read by `synth_object_named`, which fills only the parameters inference
+    /// left open, so an argument the fields DO determine is never overridden by the annotation.
+    /// `None` outside such a position.
+    expected_object: Option<(noeta_span::Span, Type)>,
     /// The declared return type of the function whose body is currently being checked — the
     /// expectation each `return <value>` is checked against. `Unknown` at top level and inside a
     /// function with no return annotation (so the check is a no-op there). Saved and restored
@@ -2408,6 +2443,33 @@ impl Checker {
                 self.coloring.current_forwarding.len() as u32,
             );
         }
+        // The enclosing generic type's parameters, for `type_name::<T>()` inside an INSTANCE method
+        // (generic constructor reflection, Gap B): the instantiation is not in the body — one
+        // compiled body serves every `Repo<…>` — but the receiver carries it as a reflected type
+        // tag, so a parameter's declaration index here is the argument position to read off `self`.
+        // Only an instance method has that receiver; an associated function keeps the E0058.
+        let saved_self_params = std::mem::take(&mut self.coloring.self_type_params);
+        if target == TargetKind::Method
+            && let Some(ct) = self.coloring.current_type.clone()
+            && self
+                .receiver_of(&ct, decl.name.as_str())
+                .allows_instance_call()
+            && let Some(params) = self.symbols.generic_types.get(&ct)
+        {
+            // A method's own `<U>` shadows a same-named type parameter, and it has no receiver
+            // channel of its own — blank the slot so no lookup can match it.
+            let own: HashSet<&str> = decl.type_params.iter().map(|p| p.name.as_str()).collect();
+            self.coloring.self_type_params = params
+                .iter()
+                .map(|p| {
+                    if own.contains(p.as_str()) {
+                        String::new()
+                    } else {
+                        p.clone()
+                    }
+                })
+                .collect();
+        }
         let saved_type_params = self.coloring.type_params.clone();
         self.coloring
             .type_params
@@ -2570,6 +2632,7 @@ impl Checker {
         self.coloring.current_yield = saved_yield;
         self.coloring.loop_depth = saved_loop_depth;
         self.coloring.type_params = saved_type_params;
+        self.coloring.self_type_params = saved_self_params;
         self.coloring.fn_depth -= 1;
         self.coloring.current_forwarding = saved_forwarding;
     }

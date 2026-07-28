@@ -891,8 +891,10 @@ impl Checker {
                         return sig.ret.clone();
                     }
                     // A static call: the type arguments are not known from a bare type name, so the
-                    // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`).
-                    return self.call_user_method(
+                    // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`)
+                    // — and, in a checked position, the expected type does (`r: Repo<Todo> =
+                    // Repo.new("todos")` binds `T = Todo` through the return-position seed).
+                    let ret = self.call_user_method(
                         name,
                         &sig,
                         args,
@@ -902,6 +904,11 @@ impl Checker {
                         Some(call_span),
                         env,
                     );
+                    // A **fresh constructor** of a generic type: the instantiation resolved here is
+                    // the one the constructor body could not see, so record the call as the
+                    // construction site and let the backends stamp the returned object with it.
+                    self.note_constructor_call(tn.as_str(), name, &ret, call_span);
+                    return ret;
                 }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.

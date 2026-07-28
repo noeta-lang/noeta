@@ -826,12 +826,41 @@ pub enum Op {
         err_shape: u32,
         span: Span,
     },
+    /// Stamp a **reflected type tag** onto the value already in `reg` (generic constructor
+    /// reflection): `repr` is an index into [`Module::type_reprs`]. Emitted directly after a call to
+    /// a generic type's *fresh constructor* (`Repo.new("todos")` at `Repo<Todo>`), because the
+    /// instantiation is known at the call site and not inside `fn new`, where the object literal is
+    /// written. The checker only records such a site when every `return` of the callee hands back a
+    /// freshly-built literal of the type, so no other reference to this object can exist — which is
+    /// what makes writing the tag in place (rather than rebuilding the value, impossible for a
+    /// reference-`class`) sound. Invisible to value semantics, exactly like the construction-time tag.
+    Retag {
+        reg: Reg,
+        repr: u32,
+    },
     /// `type_of(value)`: `dst = Type` — the runtime [`noeta_ast::reflect`] head-constructor descriptor
     /// of the value in `src` (`List(Dyn)`, `Named("Route")`, `Int`, …). Generics are erased at
     /// runtime, so element/argument types collapse to `Dyn` at this fidelity.
     TypeOf {
         dst: Reg,
         src: Reg,
+    },
+    /// `type_name::<T>()` where `T` is a **type parameter of the enclosing generic type**, inside
+    /// one of its instance methods: `dst` = the head name of type argument `index` of `src`'s
+    /// reflected type tag, as a `string`. One compiled body serves every instantiation, so the
+    /// instantiation rides on the receiver rather than being folded into a constant.
+    ///
+    /// A receiver whose tag carries no such argument **aborts** (`noeta_ast::reflect::
+    /// missing_type_arg_message`, shared with the reference backend) instead of answering a
+    /// placeholder name — the surface exists to hand a name to something that keys on it.
+    TypeArgName {
+        dst: Reg,
+        src: Reg,
+        index: u32,
+        /// `(enclosing type, parameter)` for the abort message. Boxed: cold, and an `Op` must stay
+        /// inside one cache line.
+        names: Box<(String, String)>,
+        span: Span,
     },
     /// `fields_of(value)`: `dst = List<FieldEntry>` — the struct/class instance in `src` read as
     /// `{ name, value }` pairs in declaration order (derive layer 3); the empty list for any other
@@ -1929,6 +1958,10 @@ fn op_repr(
         Op::Construct {
             dst, name, fields, ..
         } => format!("Construct   r{dst} <- construct(r{name}, r{fields})"),
+        Op::Retag { reg, repr } => format!("Retag       r{reg} <- tag #{repr}"),
+        Op::TypeArgName {
+            dst, src, index, ..
+        } => format!("TypeArgName r{dst} <- r{src}.typearg[{index}]"),
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::FieldsOf { dst, src } => format!("FieldsOf    r{dst} <- fields_of(r{src})"),
         Op::TraitsOf { dst, src } => format!("TraitsOf    r{dst} <- traits_of(r{src})"),

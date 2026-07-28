@@ -510,6 +510,24 @@ pub enum Rvalue {
         args: Vec<Atom>,
         span: Span,
     },
+    /// `type_name::<T>()` where `T` is a **type parameter of the enclosing generic type**, inside
+    /// one of its instance methods (generic constructor reflection, Gap B): the qualified name of
+    /// type argument `index` of `operand`'s reflected type tag, as a `string`.
+    ///
+    /// One compiled body serves every instantiation, so there is no constant to fold; the
+    /// instantiation travels on the receiver instead, in the very tag `type_of` already reads.
+    /// `operand` is always `self` as lowering emits it. A value whose tag does not carry that
+    /// argument — an instance built where the instantiation was genuinely unknown — **aborts** with
+    /// a message naming the type and the parameter, rather than answering `"dyn"`: a wrong name
+    /// would flow silently into whatever keyed on it.
+    TypeArgName {
+        operand: Atom,
+        index: u32,
+        /// The enclosing type and parameter names, for the abort message only.
+        type_name: String,
+        param: String,
+        span: Span,
+    },
     /// `type_of(value)` — the runtime `Type` descriptor of a value.
     TypeOf { operand: Atom, span: Span },
     /// `fields_of(value)` — a struct/class instance's fields as `List<FieldEntry>` (derive

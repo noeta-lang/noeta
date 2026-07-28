@@ -3850,6 +3850,26 @@ impl<'m> FnCompiler<'m> {
                 }
                 Ok(())
             }
+            // `type_name::<T>()` over the enclosing generic type's parameter: the name is read off
+            // the receiver's reflected type tag at run time — one compiled body serves every
+            // instantiation, so there is no constant to bake.
+            Rvalue::TypeArgName {
+                operand,
+                index,
+                type_name,
+                param,
+                span,
+            } => {
+                let src = self.atom_reg(operand)?;
+                self.code.push(Op::TypeArgName {
+                    dst,
+                    src,
+                    index: *index,
+                    names: Box::new((type_name.clone(), param.clone())),
+                    span: *span,
+                });
+                Ok(())
+            }
             Rvalue::TypeOf { operand, span } => {
                 // Evaluate the operand for its side effects in both fidelities. When the checker
                 // resolved a concrete static type for this site, bake the precise `Type` constant
@@ -4246,7 +4266,16 @@ impl<'m> FnCompiler<'m> {
                 self.module.types.get(type_name)
                 && let Some(&proto) = fns.get(name)
             {
-                return self.call_associated(proto, args, dst, span, supplied);
+                self.call_associated(proto, args, dst, span, supplied)?;
+                // A **fresh constructor** of a generic type (`Repo.new("todos")` typed `Repo<Todo>`):
+                // the instantiation is known here and not inside `fn new`, where the object literal
+                // is written, so the call site stamps the result. The checker records the site only
+                // when every `return` of the callee hands back a freshly-built literal of the type,
+                // which is what makes the in-place tag unobservable.
+                if let Some(k) = reflect {
+                    self.code.push(Op::Retag { reg: dst, repr: k });
+                }
+                return Ok(());
             }
         }
         // Otherwise the receiver is a value: a runtime-dispatched method call (a user instance

@@ -287,6 +287,10 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*reg);
             f.def = Some(*reg);
         }
+        // Writes the value's reflected type tag beside the payload — the register keeps holding the
+        // very same value, so this is a pure USE (no `def`): the object must still be live here, and
+        // it stays live for whoever consumes it afterwards.
+        Op::Retag { reg, .. } => f.uses.push(*reg),
         Op::ConcatInPlace { dst, lhs, rhs, .. } => {
             f.def = Some(*dst);
             f.uses.push(*lhs);
@@ -503,7 +507,7 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
-        Op::FromBytes { dst, src, .. } => {
+        Op::FromBytes { dst, src, .. } | Op::TypeArgName { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
@@ -810,6 +814,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::StoreGlobal { src, .. } => m(src),
         Op::TakeGlobal { dst, .. } => m(dst),
         Op::Drop { reg, .. } => m(reg),
+        Op::Retag { reg, .. } => m(reg),
         Op::ConcatInPlace { dst, lhs, rhs, .. } => {
             m(dst);
             m(lhs);
@@ -1028,7 +1033,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(src);
         }
-        Op::FromBytes { dst, src, .. } => {
+        Op::FromBytes { dst, src, .. } | Op::TypeArgName { dst, src, .. } => {
             m(dst);
             m(src);
         }
