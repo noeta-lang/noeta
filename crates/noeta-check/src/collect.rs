@@ -1420,7 +1420,7 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
             capacity: inner, ..
         } => collect_nested_fns_in_expr(inner, out),
         // A turbofish operand is a type — no expression, so no nested fn; a dynamic one is ordinary.
-        Expr::FieldSpecsOf { name, .. } => {
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
             if let Some(e) = name.dynamic() {
                 collect_nested_fns_in_expr(e, out);
             }

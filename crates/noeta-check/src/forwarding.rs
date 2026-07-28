@@ -506,7 +506,7 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         }
         // A turbofish operand names a *declared* type, never an enclosing type parameter's slot (a
         // `T` there is erased and reflects as nothing), so it forwards no recipe.
-        Expr::FieldSpecsOf { name, .. } => {
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
             if let Some(e) = name.dynamic() {
                 rec!(e);
             }

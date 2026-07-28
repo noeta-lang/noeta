@@ -1209,7 +1209,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32, vp: &Varia
         | Expr::FromBytes { blob: expr, .. } => hoist_in_expr(expr, pre, ctr, vp),
         Expr::Channel { capacity, .. } => hoist_in_expr(capacity, pre, ctr, vp),
         // A turbofish operand is a type — no expression to hoist; a dynamic one is ordinary.
-        Expr::FieldSpecsOf { name, .. } => {
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
             if let Some(e) = name.dynamic_mut() {
                 hoist_in_expr(e, pre, ctr, vp);
             }

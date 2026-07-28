@@ -186,6 +186,54 @@ impl ReflectionInfo {
             .collect()
     }
 
+    /// The **type-level variant schema** of the declared enum `type_name` — one [`VariantSpecData`]
+    /// per variant in declaration order — the data `variants_of::<T>()` / `variants_of(name)`
+    /// materialize. The enum twin of [`Self::field_specs`], and deliberately the same contract: an
+    /// unknown name, or a name that is a struct or class rather than an enum, yields the empty list,
+    /// the same "nothing to report" answer `params_of` gives an unknown target, so a framework can
+    /// probe a type name without a guard.
+    ///
+    /// The pair is what makes a walked type *knowable*. `field_specs_of` alone cannot tell an enum
+    /// from a field-less struct — both answer with the empty list — so a schema builder that recursed
+    /// into a `Type.Named(name, _)` emitted an empty object for an enum and was silently wrong.
+    /// Asking both means the empty/empty case is the one honest "I know nothing about this name",
+    /// and a non-empty variant list is the loud answer that was missing.
+    ///
+    /// Each variant's payload is reported as [`FieldSpecData`] — the very elements `field_specs`
+    /// returns for a struct — because a payload *is* ordinary declared-field data (a positional
+    /// payload carries a synthesized `_0`/`_1` name and its real type). Both backends read this one
+    /// accessor, so the materialized `List<VariantSpec>` agrees across the differential by
+    /// construction.
+    pub fn variant_specs(&self, type_name: &str) -> Vec<VariantSpecData<'_>> {
+        let Some(info) = self.type_named(type_name) else {
+            return Vec::new();
+        };
+        if info.kind != TypeKind::Enum {
+            return Vec::new();
+        }
+        info.variants
+            .iter()
+            .map(|variant| VariantSpecData {
+                name: &variant.name,
+                payload: variant
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| FieldSpecData {
+                        name,
+                        ty: variant.field_types.get(i).unwrap_or(&TypeRepr::Dyn),
+                        // A variant payload field declares no default — there is no syntax for one —
+                        // so it can never be omitted from a construction. Reported through the same
+                        // `FieldSpec` the struct side uses rather than a payload-only element type:
+                        // one vocabulary, and `optional` says the true thing about a payload.
+                        optional: false,
+                    })
+                    .collect(),
+                backing: variant.backing.as_ref(),
+            })
+            .collect()
+    }
+
     /// The reflection [`TypeRepr`] of a **type reference** — a type name used as a value
     /// (`#[Encode(codec: JsonCodec)]`, `#[Builds(target: List<int>)]`), given its head `name` and
     /// its generic `args`. Reports the same precise constructor a `type_of` over a value of that
@@ -443,11 +491,30 @@ pub struct TypeInfo {
     pub variants: Vec<VariantInfo>,
 }
 
-/// An enum variant's reflectable shape.
+/// An enum variant's reflectable shape: its name, its payload fields, and — for a backed enum — the
+/// literal value backing it.
+///
+/// A **positional** payload (`Leaf(User)`, `Pair(string, int)`) reaches here as an ordinary field
+/// with a synthesized `_0`/`_1` name and its declared type in `field_types`, because that is how the
+/// AST stores it. So this is the same (name, declared type) pairing [`TypeInfo::fields`] /
+/// [`TypeInfo::field_types`] carry for a struct, and [`ReflectionInfo::variant_specs`] projects it
+/// through the same [`FieldSpecData`] the struct-side `field_specs_of` reports — one payload
+/// vocabulary rather than an enum-shaped special case.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VariantInfo {
     pub name: String,
+    /// Payload field names in declaration order (`_0`, `_1`, … for a positional payload); empty for
+    /// a fieldless variant.
     pub fields: Vec<String>,
+    /// Each payload field's declared type as a reflection [`TypeRepr`], parallel to `fields`. An
+    /// unannotated payload field is [`TypeRepr::Dyn`]. Captured from the DECLARATION, so — like
+    /// [`TypeInfo::field_types`] — it is precise: `Many(List<int>)` is `List(Int)`, not `List(Dyn)`.
+    pub field_types: Vec<TypeRepr>,
+    /// The **backing value** of this variant in a backed enum (`enum Status: string { Pending =
+    /// "pending" }`), folded through the shared [`fold_const_expr`]; `None` for a plain enum's
+    /// variant, and for a backed variant whose value is not a literal. Reported by `variants_of` so
+    /// a schema derived from a backed enum can emit the wire values rather than the variant names.
+    pub backing: Option<AttrValue>,
 }
 
 /// Build the reflection info for a program. **Pure and deterministic**: the same AST + `native_roles`
@@ -606,14 +673,7 @@ pub fn build(
                     field_types: Vec::new(),
                     field_optional: Vec::new(),
                     field_defaults: Vec::new(),
-                    variants: decl
-                        .variants
-                        .iter()
-                        .map(|v| VariantInfo {
-                            name: v.name.clone(),
-                            fields: v.fields.iter().map(|f| f.name.clone()).collect(),
-                        })
-                        .collect(),
+                    variants: variant_infos(&decl.variants),
                 });
             }
             // A **standalone** `impl Trait for T { … }`'s methods, keyed by the same `Type.method`
@@ -864,6 +924,29 @@ fn field_types(fields: &[FieldDecl]) -> Vec<TypeRepr> {
         .collect()
 }
 
+/// Project one enum's variants into their reflectable shape — the data `variants_of` materializes.
+///
+/// A payload field's declared type goes through the very same `typeref_to_repr` [`field_types`] uses,
+/// so a variant payload and a struct field report a declared type identically; a positional payload
+/// needs no special case because the parser already stored its type in the type slot under a
+/// synthesized `_0`/`_1` name. A backed variant's value folds through [`fold_const_expr`], the one
+/// definition of "a literal" the whole manifest shares.
+fn variant_infos(variants: &[crate::VariantDecl]) -> Vec<VariantInfo> {
+    variants
+        .iter()
+        .map(|v| VariantInfo {
+            name: v.name.clone(),
+            fields: v.fields.iter().map(|f| f.name.clone()).collect(),
+            field_types: v
+                .fields
+                .iter()
+                .map(|f| f.ty.as_ref().map(typeref_to_repr).unwrap_or(TypeRepr::Dyn))
+                .collect(),
+            backing: v.backed_value.as_ref().and_then(fold_const_expr),
+        })
+        .collect()
+}
+
 /// Whether each field declared a default, parallel to the field list — the optionality a dynamic
 /// constructor reads. Any default expression counts (not only a literal one), matching the runtime
 /// default thunks both backends compile per field.
@@ -987,6 +1070,26 @@ pub struct FieldSpecData<'a> {
     pub name: &'a str,
     pub ty: &'a TypeRepr,
     pub optional: bool,
+}
+
+/// One variant of a type-level enum schema — the borrowed view [`ReflectionInfo::variant_specs`]
+/// returns, which both backends materialize into a prelude `VariantSpec { name, payload, backing }`
+/// value.
+///
+/// The variant's own `#[…]` attributes are deliberately **absent**, exactly as they are from
+/// [`FieldSpecData`]: a member's attributes are already keyed in the manifest under its qualified
+/// `Enum.Variant` target — the same `Type.field` convention the struct side uses — so
+/// `attributes_of::<T>()` is the one answer to "what is annotated on this member" for fields,
+/// methods, parameters and variants alike. Carrying them here would make the enum half of one
+/// surface answer a question the struct half does not.
+#[derive(Debug)]
+pub struct VariantSpecData<'a> {
+    pub name: &'a str,
+    /// The variant's payload as ordinary declared-field data, in declaration order; empty for a
+    /// fieldless variant.
+    pub payload: Vec<FieldSpecData<'a>>,
+    /// The literal value backing this variant in a backed enum, or `None` for a plain enum.
+    pub backing: Option<&'a AttrValue>,
 }
 
 /// A concrete-scalar field type as a friendly lowercase name (`int`/`float`/`bool`/`string`/`bytes`),
@@ -1809,6 +1912,15 @@ pub const FIELD_ENTRY: &str = "FieldEntry";
 /// may omit it). Registered like `ParamInfo`; both backends materialize the matching shape.
 pub const FIELD_SPEC: &str = "FieldSpec";
 
+/// The prelude `VariantSpec` struct — the element type of the **type-level** enum query
+/// `variants_of::<T>()` / `variants_of(name)`: `{ name: string, payload: List<FieldSpec>, backing:
+/// ?dyn }`, one per declared variant of an enum TYPE, in declaration order. The enum twin of
+/// [`FIELD_SPEC`], and it reuses `FieldSpec` for the payload rather than introducing a second
+/// member-shape vocabulary: a variant payload is ordinary declared-field data. `backing` is the
+/// variant's value in a backed enum (`some("pending")` / `some(3)`) and `none` for a plain enum.
+/// Registered like `FieldSpec`; both backends materialize the matching shape.
+pub const VARIANT_SPEC: &str = "VariantSpec";
+
 /// The prelude `Layout` enum's name — the storage-layout vocabulary `@packed` takes
 /// (`@packed(Layout.Column)`). Like [`SEMANTIC_ENUM`] it is directive vocabulary, not a runtime
 /// value: the parser resolves the argument syntactically, and the prelude registers the enum so
@@ -1988,7 +2100,8 @@ pub struct PreludeStruct {
 /// `ParamInfo` and `FieldSpec` are registered like the rest even though a source literal cannot
 /// currently spell them (their `type` field collides with the `type` keyword in struct-literal
 /// position): the registration is what makes their materialization read one field list rather than
-/// two, and the day the literal becomes spellable it constructs.
+/// two, and the day the literal becomes spellable it constructs. `VariantSpec` has no such collision
+/// and is spellable today.
 pub fn prelude_structs() -> Vec<PreludeStruct> {
     let s = |name: &'static str, fields: &[&str]| PreludeStruct {
         name,
@@ -2000,6 +2113,7 @@ pub fn prelude_structs() -> Vec<PreludeStruct> {
         s(PARAM_INFO, &["name", "type", "optional", "attrs"]),
         s(FIELD_ENTRY, &["name", "value"]),
         s(FIELD_SPEC, &["name", "type", "optional"]),
+        s(VARIANT_SPEC, &["name", "payload", "backing"]),
         s(TIER_ROOT, &["name", "run"]),
         s(TIER_TEXT, &["target", "text"]),
     ]

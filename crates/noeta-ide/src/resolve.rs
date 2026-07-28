@@ -827,7 +827,7 @@ impl Resolver {
                 self.walk_expr(target)
             }
             // A turbofish operand is a type, not an expression; only a dynamic one is walked.
-            Expr::FieldSpecsOf { name, .. } => {
+            Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
                 if let Some(e) = name.dynamic() {
                     self.walk_expr(e);
                 }

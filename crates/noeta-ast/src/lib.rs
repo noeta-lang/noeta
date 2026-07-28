@@ -1878,6 +1878,19 @@ pub enum Expr {
     /// `field_specs_of::<T>()` names the type statically; the two surfaces are the two arms of
     /// [`TypeOperand`], and both converge on one name-keyed runtime node.
     FieldSpecsOf { name: TypeOperand, span: Span },
+    /// The reflection query `variants_of::<T>()` / `variants_of(name)` — a declared enum TYPE's
+    /// variant schema, returned as a `List<VariantSpec>` (each `{ name: string, payload:
+    /// List<FieldSpec>, backing: ?dyn }`, declaration order). The **enum twin** of
+    /// [`Expr::FieldSpecsOf`], with the same two surfaces (the two arms of [`TypeOperand`]), the same
+    /// name-keyed convergence, and the same lenient contract: a name that is not a declared enum
+    /// yields the empty list.
+    ///
+    /// It exists because `field_specs_of` alone left an enum **indistinguishable from a field-less
+    /// struct** — both answered with the empty list — so anything walking a type to build a schema
+    /// recursed into an enum-typed field, found nothing, and emitted an empty object. Asking both
+    /// queries makes that case loud: variants present ⇒ an enum, and empty/empty ⇒ genuinely nothing
+    /// known about the name.
+    VariantsOf { name: TypeOperand, span: Span },
     /// The reflection constructor `construct::<T>(fields)` / `construct(name, fields)` — build a
     /// struct value from field values at runtime, reusing the SAME construction path as a `T { … }`
     /// literal (field defaults and full-initialization honored). `name` is a runtime `string` naming
@@ -2228,6 +2241,7 @@ impl Expr {
             | Expr::ReturnsOf { span, .. }
             | Expr::Invoke { span, .. }
             | Expr::FieldSpecsOf { span, .. }
+            | Expr::VariantsOf { span, .. }
             | Expr::Construct { span, .. }
             | Expr::TypeTest { span, .. }
             | Expr::FieldSet { span, .. }
@@ -2332,7 +2346,9 @@ impl Expr {
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
             Expr::Channel { capacity, .. } => capacity.mentions(name),
             // A turbofish operand is a type, never a value binding; only a dynamic one can mention.
-            Expr::FieldSpecsOf { name: n, .. } => n.dynamic().is_some_and(|e| e.mentions(name)),
+            Expr::FieldSpecsOf { name: n, .. } | Expr::VariantsOf { name: n, .. } => {
+                n.dynamic().is_some_and(|e| e.mentions(name))
+            }
             Expr::Construct {
                 name: n, fields, ..
             } => n.dynamic().is_some_and(|e| e.mentions(name)) || fields.mentions(name),
@@ -2448,7 +2464,9 @@ impl Expr {
             | Expr::ReturnsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
             Expr::Channel { capacity, .. } => capacity.has_await(),
-            Expr::FieldSpecsOf { name, .. } => name.dynamic().is_some_and(Expr::has_await),
+            Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
+                name.dynamic().is_some_and(Expr::has_await)
+            }
             Expr::Construct { name, fields, .. } => {
                 name.dynamic().is_some_and(Expr::has_await) || fields.has_await()
             }

@@ -918,7 +918,9 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
         }
         // A turbofish operand IS a type reference (and the only one the derive rewrite can reach
         // here); a dynamic one is an ordinary expression.
-        Expr::FieldSpecsOf { name, .. } => visit_type_operand_types(name, f),
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
+            visit_type_operand_types(name, f)
+        }
         Expr::Construct { name, fields, .. } => {
             visit_type_operand_types(name, f);
             visit_expr_types(fields, f);

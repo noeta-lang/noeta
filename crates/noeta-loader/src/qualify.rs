@@ -490,7 +490,7 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
             capacity: inner, ..
         } => bound_in_expr(inner, names),
         // A turbofish operand is a type, never a binding; a dynamic one is an ordinary expression.
-        Expr::FieldSpecsOf { name, .. } => {
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
             if let Some(e) = name.dynamic() {
                 bound_in_expr(e, names);
             }
@@ -1043,7 +1043,9 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         // empty schema. A *dynamic* operand is a runtime string and is walked as the ordinary
         // expression it is: a literal `field_specs_of("Todo")` means the string `Todo`, and rewriting
         // it because it happens to spell a local type name would be a different bug.
-        Expr::FieldSpecsOf { name, .. } => q_type_operand(name, visit),
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
+            q_type_operand(name, visit)
+        }
         Expr::Construct { name, fields, .. } => {
             q_type_operand(name, visit);
             q_expr(fields, visit);
