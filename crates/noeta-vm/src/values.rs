@@ -596,11 +596,19 @@ pub(crate) fn make_attr_enum(enum_name: &str, variant: &str, data: Vec<Value>) -
     if noeta_ast::reflect::prelude_variant_index(enum_name, variant).is_some() {
         return Value::enum_value(prelude_enum_shape(enum_name, variant), data);
     }
+    // `builtin_result_option` is the "this is `Result`/`Option`" flag — it drops the enum name from
+    // display (`Ok(5)`, not `Result.Ok(5)`), which is right for exactly those two and wrong for
+    // everything else. Keying it on the enum NAME is the tree-walker's rule
+    // (`EnumValue::is_builtin_result_or_option`); keying it on "does this variant carry a payload",
+    // as it used to, silently renamed every payload-carrying user enum in an attribute argument —
+    // `#[Cfg(mode: Mode.Fast(3))]` reflected as `Fast(3)` here and `Mode.Fast(3)` in the
+    // tree-walker, a differential mismatch no corpus case had reached.
+    let builtin_result_option = enum_name == "Result" || enum_name == "Option";
     let shape = noeta_object::intern_shape(Shape::enum_variant(
         enum_name,
         variant,
         Vec::new(),
-        !data.is_empty(),
+        builtin_result_option,
     ));
     Value::enum_value(shape, data)
 }
