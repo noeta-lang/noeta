@@ -367,10 +367,15 @@ const HTTP_TYPES: &[ExtType] = &[
         ..ExtType::DEFAULTS
     },
     // The incremental body reader (http-streaming arc) — the `Socket` shape on the OUTBOUND side:
-    // a host-resource handle whose `recv` rides the executor, so its methods live in the ctx table.
+    // a host-resource handle whose `recv` rides the executor, so its body methods live in the ctx
+    // table. Its **head** methods (`status`/`ok`/`header`/`error_for_status`) are plain reads off
+    // the handle and live in the ordinary table, so answering "did this request fail?" costs no
+    // executor round and no `recv()`.
     ExtType {
         name: noeta_ext_abi::stream::FRAME_STREAM_TYPE_NAME,
         namespace: "std.http",
+        methods: crate::http_stream::FRAME_STREAM_METHODS,
+        dispatch: crate::http_stream::frame_stream_method_dispatch,
         ctx_methods: crate::http_stream::FRAME_STREAM_CTX_METHODS,
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::http_stream::frame_stream_ctx_method_dispatch(method, ctx, recv, args)
@@ -397,6 +402,33 @@ const HTTP_TYPES: &[ExtType] = &[
 
 /// `FrameStream`'s method prose (`noeta doc --api` renders `docs/std-http.md` from this).
 const FRAME_STREAM_DOCS: &[(&str, &str)] = &[
+    (
+        "status",
+        "The response status the opening handshake received — readable immediately, **before** the first \
+         `recv()`. Check it: a rate-limited provider answers a streaming request with a `429` whose body is \
+         a JSON error document, and since that is not an event stream, `Framing.Sse` decodes it to zero \
+         frames. Without the status, that failure is indistinguishable from a model that had nothing to \
+         say.",
+    ),
+    (
+        "ok",
+        "Whether `status()` is a 2xx. `if !stream.ok() { … }` is the guard to write before draining a \
+         stream you did not open with `error_for_status()`.",
+    ),
+    (
+        "header",
+        "A response header from the opening handshake, matched case-insensitively; `none` when absent. \
+         This is where a streamed failure keeps its actionable part: `stream.header(\"retry-after\")` on a \
+         `429` tells a backoff loop how long to wait, and the provider's `x-ratelimit-*` headers report the \
+         remaining budget.",
+    ),
+    (
+        "error_for_status",
+        "Turn a non-2xx status into the `Err` arm, so `client.stream(req, Framing.Sse)?.error_for_status()?` \
+         short-circuits a rate limit the same way a transport failure does. Opt-in and explicit, exactly \
+         like `Response.error_for_status`: a status is an answer, not a broken network, so plain `?` on a \
+         `stream(...)` keeps its one meaning.",
+    ),
     (
         "recv",
         "The next frame of the body, or `none` once the body ends. Await it: `frame = stream.recv().await`. \
@@ -2236,10 +2268,15 @@ fn want_framing(
 /// Marshal a stream-open outcome as `Result<FrameStream, HttpError>` — the
 /// [`crate::net::fetch_outcome`] twin, shared by the free function and the `Client` method so both
 /// doors return the identical shape.
-fn stream_outcome(result: Result<u64, noeta_ext_abi::NetError>) -> NativeOut {
+///
+/// The head rides onto the handle here, which is what makes `stream.status()` answerable without a
+/// `recv()` — see [`noeta_ext_abi::stream::FrameStream`].
+fn stream_outcome(
+    result: Result<noeta_ext_abi::stream::StreamHead, noeta_ext_abi::NetError>,
+) -> NativeOut {
     match result {
-        Ok(stream) => NativeOut::Ok(Box::new(NativeOut::Extern(crate::ExternBox::new(
-            noeta_ext_abi::stream::FrameStream { stream },
+        Ok(head) => NativeOut::Ok(Box::new(NativeOut::Extern(crate::ExternBox::new(
+            noeta_ext_abi::stream::FrameStream::new(head),
         )))),
         Err(error) => NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error)))),
     }
@@ -4867,9 +4904,16 @@ const HTTP_CLIENT_DOCS: &[(&str, &str)] = &[
          `Framing.Ndjson` yields one JSON document per line, unparsed, in `data` (Ollama's native \
          shape). `Framing.Lines` yields one raw line per frame, blank lines included.\n\n\
          The `Err` arm means the request never produced a response — an HTTP error *status* opens a \
-         stream normally, because an error page streams like any other body. A body that is cut off \
-         mid-frame simply ends: with `Framing.Sse` the incomplete trailing block is discarded, since \
-         a frame only exists once its terminating blank line arrives.\n\n\
+         stream normally, because an error page streams like any other body. **Check the status \
+         before you drain it**: `stream.status()`/`ok()` answer from the response head, without a \
+         `recv()`. A rate-limited provider replies `429` with a bare JSON error document, and since \
+         that is not an event stream, `Framing.Sse` cuts it into zero frames — so an unchecked reader \
+         sees an empty stream and cannot tell a rate limit from a model with nothing to say. \
+         `stream.header(\"retry-after\")` carries the backoff, and \
+         `client.stream(req, framing)?.error_for_status()?` short-circuits the whole case in one \
+         line.\n\n\
+         A body that is cut off mid-frame simply ends: with `Framing.Sse` the incomplete trailing \
+         block is discarded, since a frame only exists once its terminating blank line arrives.\n\n\
          Call `close()` when abandoning a stream early; a drained one needs no close.",
     ),
     ("get_async", "Async `get` — yields a `Future<Response>`."),

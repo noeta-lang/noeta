@@ -103,10 +103,15 @@ fn run_with_executor(
         Err(unsupported) => {
             // By construction every checked program compiles (the differential holds the VM at
             // 100% coverage); surface the invariant breach rather than mislabel it a user error.
+            let located: Vec<_> = unsupported
+                .diagnostic()
+                .iter()
+                .map(|d| noeta_diagnostics::to_json(&sources, d))
+                .collect();
             return json!({
                 "compiled": false,
-                "diagnostics": [],
-                "error": format!("internal error: the VM cannot compile this program: {}", unsupported.reason),
+                "diagnostics": located,
+                "error": unsupported.to_string(),
             })
             .to_string();
         }

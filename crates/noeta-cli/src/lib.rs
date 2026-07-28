@@ -1451,10 +1451,7 @@ pub(crate) fn run_declared_tier(
             }
             ExitCode::from(result.exit_code.clamp(0, 255) as u8)
         }
-        Err(msg) => {
-            eprintln!("noeta: {msg}");
-            ExitCode::from(1)
-        }
+        Err(u) => noeta_runner::CompileFailure::from_unsupported(&linked.sources, &u).report(),
     }
 }
 

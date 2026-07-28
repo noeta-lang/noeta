@@ -266,8 +266,9 @@ pub trait Network {
     // `sandbox_respond`) so a streaming program terminates in-oracle, and the real host overrides
     // the descriptor builders with genuinely async reqwest/socket bodies. ---
 
-    /// Open `request`'s response body as an incremental stream cut with `framing`, returning a
-    /// stream id passed to [`Self::net_stream_recv`] / [`Self::net_stream_close`].
+    /// Open `request`'s response body as an incremental stream cut with `framing`, returning the
+    /// [`crate::stream::StreamHead`] — the stream id passed to [`Self::net_stream_recv`] /
+    /// [`Self::net_stream_close`], **and the response head that came back with it**.
     ///
     /// Synchronous, and deliberately so: opening a stream is "send the request and read the
     /// response **head**", which is exactly the point where a transport failure is still a
@@ -276,13 +277,17 @@ pub trait Network {
     /// `Result<FrameStream, HttpError>` whose `Err` means "the request never got off the ground",
     /// the same contract the one-shot verbs have.
     ///
+    /// Because the handshake is where the status exists, it is also the only place a host can be
+    /// *made* to report it — see [`crate::stream::StreamHead`] for why that is returned rather
+    /// than queried afterwards.
+    ///
     /// The default is an honest capability error, so a host with no streaming transport (WASI, the
     /// browser) stays compiling and a program reaching the surface is told why.
     fn net_stream_open(
         &mut self,
         request: crate::NetRequest,
         _framing: crate::stream::Framing,
-    ) -> Result<u64, crate::NetError> {
+    ) -> Result<crate::stream::StreamHead, crate::NetError> {
         Err(crate::NetError::new(
             crate::NetErrorKind::Other,
             request.url,

@@ -67,20 +67,62 @@ use noeta_span::Span;
 
 /// Why a program could not be lowered to bytecode yet — a node outside the current subset.
 /// The differential harness treats this as "skip", not "fail".
+///
+/// **The span is the difference between a bug report and a scavenger hunt.** The compiler covers
+/// the whole language, so reaching this at all is an internal invariant break: the checker accepted
+/// the program and the backend should have compiled it. Without a location that surfaced as a bare
+/// `internal error: the VM cannot compile this program: <reason>` — no file, no line, nothing to
+/// grep — which reads exactly like a broken toolchain rather than one construct in one function.
+/// Every site that knows where it is now says so, and [`Unsupported::diagnostic`] renders it
+/// through the ordinary `ariadne` path with the offending source under a caret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unsupported {
     pub reason: String,
+    /// Where the offending construct is, when the compiler knows. `None` only where the failure
+    /// belongs to no single node — keep it that way: a `None` here costs a reader the whole file.
+    pub span: Option<Span>,
 }
 
-impl std::fmt::Display for Unsupported {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "unsupported by the VM: {}", self.reason)
+impl Unsupported {
+    /// This failure as a renderable [`Diagnostic`], when a location is known.
+    ///
+    /// `None` means "there is nothing to point at" — the caller falls back to
+    /// [`Display`](std::fmt::Display), which is the pre-span behavior and the honest one when no
+    /// span exists.
+    pub fn diagnostic(&self) -> Option<Diagnostic> {
+        self.span.map(|span| {
+            Diagnostic::error(
+                DiagnosticCode::InternalCompilerError,
+                span,
+                format!("the VM cannot compile this program: {}", self.reason),
+            )
+            .with_help(
+                "this is a compiler bug, not a mistake in your program: the type checker accepted \
+                 it, so the bytecode backend should have compiled it. Please report it with the \
+                 construct above.",
+            )
+        })
     }
 }
 
-fn unsupported<T>(reason: impl Into<String>) -> Result<T, Unsupported> {
+impl std::fmt::Display for Unsupported {
+    /// The span-less rendering — the one sentence every front-end used to compose by hand out of
+    /// `.reason`. Owning it here means a front-end with no `SourceMap` writes `{u}` and cannot word
+    /// it differently from the next one.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "internal error: the VM cannot compile this program: {}",
+            self.reason
+        )
+    }
+}
+
+/// An `Unsupported` at a known location — what every site inside this crate should build.
+fn unsupported<T>(reason: impl Into<String>, span: Span) -> Result<T, Unsupported> {
     Err(Unsupported {
         reason: reason.into(),
+        span: Some(span),
     })
 }
 
@@ -451,6 +493,9 @@ fn compile_to_mc(
     )
     .map_err(|u| Unsupported {
         reason: format!("not yet lowered to the Core IR: {}", u.feature),
+        // The IR's own `Unsupported` already knows where it stopped; dropping that here is what
+        // left the run path with nothing to render.
+        span: Some(u.span),
     })?;
     let ir = noeta_ir_passes::insert_drops(&ir, relevance.as_ref());
     // Thread in-place-reuse tokens (Phase 5) onto self-update constructors. A pure function of the
@@ -674,6 +719,7 @@ impl SessionCompiler {
         }
         .map_err(|u| Unsupported {
             reason: format!("not yet lowered to the Core IR: {}", u.feature),
+            span: Some(u.span),
         })?;
         let relevance = sites.map(|s| passes_relevance(&s.destructor_relevance));
         let ir = noeta_ir_passes::insert_drops(&ir, relevance.as_ref());
@@ -2102,7 +2148,10 @@ impl<'m> FnCompiler<'m> {
             }
             if let Some(var) = self.lookup_local(&name) {
                 if !var.celled {
-                    return unsupported("a forward capture of a not-yet-celled local");
+                    return unsupported(
+                        format!("`{name}` is captured by a closure before its binding is celled"),
+                        func.span,
+                    );
                 }
                 upvalues.push((name, var.mutable));
                 captures.push(PendingCapture::From(CaptureFrom::Local(var.reg)));
@@ -2112,7 +2161,13 @@ impl<'m> FnCompiler<'m> {
             } else {
                 // A free name the analysis flagged but that is neither a live celled local nor an
                 // upvalue here (e.g. captured before its binding was lowered) — skip the program.
-                return unsupported("a capture that could not be sourced from the enclosing frame");
+                return unsupported(
+                    format!(
+                        "`{name}` is free in a closure but is neither a celled local nor an \
+                         upvalue of the enclosing frame"
+                    ),
+                    func.span,
+                );
             }
         }
         Ok((upvalues, captures))
@@ -3179,7 +3234,10 @@ impl<'m> FnCompiler<'m> {
                     self.code.push(Op::LoadNativeFn { dst, func });
                     Ok(dst)
                 }
-                None => unsupported("reference to a prelude value/builtin"),
+                None => unsupported(
+                    format!("`{name}` is a prelude name with no first-class value form"),
+                    span,
+                ),
             },
         }
     }
@@ -4068,7 +4126,13 @@ impl<'m> FnCompiler<'m> {
             // hole against one. Refuse rather than drop the mask: silently lowering it would call
             // the builtin with the args shifted into the wrong positions.
             if supplied.is_some() {
-                return unsupported("named arguments that skip a parameter of a prelude function");
+                return unsupported(
+                    format!(
+                        "`{name}` is a prelude function, and prelude functions have no defaulted \
+                         parameters for a named argument to skip"
+                    ),
+                    span,
+                );
             }
             // `Ok(x)`/`Ok()`, `Err(e)`, `some(x)`, `panic(msg)` — an arity-correct direct call
             // keeps its dedicated fast op (`MakeEnum` / `Op::Panic`, which tier-1 also compiles).
@@ -4077,13 +4141,13 @@ impl<'m> FnCompiler<'m> {
             // F3) — so the direct and indirect paths cannot diverge, and neither aborts compile.
             match name.as_str() {
                 "Ok" if args.len() <= 1 => {
-                    return self.make_result_option("Result", "Ok", args, dst);
+                    return self.make_result_option("Result", "Ok", args, dst, span);
                 }
                 "Err" if args.len() == 1 => {
-                    return self.make_result_option("Result", "Err", args, dst);
+                    return self.make_result_option("Result", "Err", args, dst, span);
                 }
                 "some" if args.len() == 1 => {
-                    return self.make_result_option("Option", "some", args, dst);
+                    return self.make_result_option("Option", "some", args, dst, span);
                 }
                 "panic" if args.len() == 1 => return self.make_panic(args, span),
                 _ => {}
@@ -4100,7 +4164,10 @@ impl<'m> FnCompiler<'m> {
                 });
                 return Ok(());
             }
-            return unsupported("prelude function not in the VM subset");
+            return unsupported(
+                format!("`{name}` is a prelude name the bytecode backend has no call form for"),
+                span,
+            );
         }
         // A statically-known top-level `fn` (immutable, zero-upvalue global) — call it directly
         // through its slot, skipping the `LoadGlobal` + per-call retain/release of the callee
@@ -4171,7 +4238,7 @@ impl<'m> FnCompiler<'m> {
                 if let Some(&proto) = fns.get(name) {
                     return self.call_associated(proto, args, dst, span, supplied);
                 }
-                return self.make_enum(type_name, name, args, reflect, dst);
+                return self.make_enum(type_name, name, args, reflect, dst, span);
             }
             // An associated function `Type.f(...)` resolves at compile time for both kinds — struct
             // and class share the dispatch table (the unified body).
@@ -4370,7 +4437,7 @@ impl<'m> FnCompiler<'m> {
                     });
                     return Ok(());
                 }
-                Member::Unsupported(reason) => return unsupported(reason),
+                Member::Unsupported(reason) => return unsupported(reason, span),
                 Member::FieldAccess => {}
             }
         }
@@ -4436,7 +4503,10 @@ impl<'m> FnCompiler<'m> {
             // apply; the reuse pass never marks them (it excludes nothing here, but `make_opaque`
             // simply ignores the token — the copying path is always correct).
             Some(TypeInfo::Opaque) => self.make_opaque(type_name, fields, spread, dst),
-            Some(TypeInfo::Enum { .. }) => unsupported("enum type used as a record literal"),
+            Some(TypeInfo::Enum { .. }) => unsupported(
+                format!("`{type_name}` is an enum, and an enum has no record-literal form"),
+                span,
+            ),
             None => {
                 // The tree-walker looks the type up first and errors before touching fields.
                 let idx = self.add_diag(unknown_type_diag(type_name, type_name_span));
@@ -4594,11 +4664,14 @@ impl<'m> FnCompiler<'m> {
         args: &[Atom],
         reflect: Option<u32>,
         dst: Reg,
+        span: Span,
     ) -> Result<(), Unsupported> {
         let slots = match self.module.types.get(type_name) {
             Some(TypeInfo::Enum { variants, .. }) => match variants.get(variant) {
                 Some(slots) => slots.clone(),
-                None => return unsupported("unknown enum variant"),
+                None => {
+                    return unsupported(format!("`{type_name}` has no variant `{variant}`"), span);
+                }
             },
             _ => unreachable!("make_enum is only reached for enum types"),
         };
@@ -4723,11 +4796,22 @@ impl<'m> FnCompiler<'m> {
         variant: &str,
         args: &[Atom],
         dst: Reg,
+        span: Span,
     ) -> Result<(), Unsupported> {
         let arg_regs = self.atom_regs(args)?;
         let allowed = if variant == "Ok" { 0..=1 } else { 1..=1 };
         if !allowed.contains(&arg_regs.len()) {
-            return unsupported("Result/Option constructor with an unexpected argument count");
+            return unsupported(
+                format!(
+                    "`{variant}` takes {}, not {}",
+                    match variant {
+                        "Ok" => "no argument or one",
+                        _ => "exactly one argument",
+                    },
+                    arg_regs.len()
+                ),
+                span,
+            );
         }
         let shape = self.module.builtin_enum_shape(enum_name, variant);
         self.code.push(Op::MakeEnum {
@@ -4744,7 +4828,10 @@ impl<'m> FnCompiler<'m> {
     fn make_panic(&mut self, args: &[Atom], span: Span) -> Result<(), Unsupported> {
         let arg_regs = self.atom_regs(args)?;
         if arg_regs.len() != 1 {
-            return unsupported("`panic` with an unexpected argument count");
+            return unsupported(
+                format!("`panic` takes exactly one argument, not {}", arg_regs.len()),
+                span,
+            );
         }
         self.code.push(Op::Panic {
             msg: arg_regs[0],
@@ -5223,6 +5310,10 @@ mod tests {
     use noeta_parser::parse;
     use noeta_span::{Source, SourceId};
 
+    use super::{Unsupported, unsupported};
+    use noeta_diagnostics::DiagnosticCode;
+    use noeta_span::Span;
+
     /// Compile `src` in **debug** mode (as `noeta dap` does), threading the checker's site maps into
     /// `compile_with_sites` with `debug = true` so the per-prototype debug info is emitted.
     fn compile_dbg(src: &str) -> Module {
@@ -5582,5 +5673,48 @@ mod tests {
         assert_eq!(color.variants.len(), 2);
         assert_eq!(color.variants[1].name, "Rgb");
         assert_eq!(color.variants[1].fields, vec!["r".to_string()]);
+    }
+
+    /// An internal compile failure must be *locatable*. The whole cost of the span-less version was
+    /// that `internal error: the VM cannot compile this program: <reason>` reads as a broken
+    /// toolchain, so this pins both halves: a located failure renders as a real diagnostic, and a
+    /// span-less one still says the one sentence every front-end used to compose by hand.
+    #[test]
+    fn an_unsupported_renders_as_a_located_diagnostic() {
+        let span = Span::new_in(SourceId::FIRST, 10, 20);
+        let located = Unsupported {
+            reason: "`Shape.Circle` is a data-carrying variant used without arguments".to_string(),
+            span: Some(span),
+        };
+        let diagnostic = located
+            .diagnostic()
+            .expect("a located failure has a diagnostic");
+        assert_eq!(diagnostic.code, DiagnosticCode::InternalCompilerError);
+        assert_eq!(diagnostic.span, span);
+        assert!(diagnostic.message.contains("`Shape.Circle`"));
+        assert!(
+            diagnostic.help.is_some(),
+            "reaching this is a compiler bug, and the render must say so"
+        );
+
+        let bare = Unsupported {
+            reason: "something".to_string(),
+            span: None,
+        };
+        assert!(bare.diagnostic().is_none());
+        assert_eq!(
+            bare.to_string(),
+            "internal error: the VM cannot compile this program: something"
+        );
+    }
+
+    /// Every `Unsupported` this crate raises through its own helper carries a span. The type allows
+    /// `None` (the IR seam and any future site with nothing to point at), but a *reason* with no
+    /// location is what cost two agents an afternoon, so the helper cannot produce one.
+    #[test]
+    fn the_unsupported_helper_always_carries_a_location() {
+        let span = Span::new_in(SourceId::FIRST, 3, 4);
+        let raised: Result<(), Unsupported> = unsupported("a reason", span);
+        assert_eq!(raised.unwrap_err().span, Some(span));
     }
 }

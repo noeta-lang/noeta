@@ -105,10 +105,12 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
             sources: loaded.sources,
         }),
         Err(u) => Err(RunOutput::failed(
-            format!(
-                "noeta: internal error: the VM cannot compile this program: {}\n",
-                u.reason
-            ),
+            match u.diagnostic() {
+                Some(diagnostic) => {
+                    noeta_diagnostics::render_mapped(&loaded.sources, std::iter::once(&diagnostic))
+                }
+                None => format!("noeta: {u}\n"),
+            },
             1,
         )),
     }

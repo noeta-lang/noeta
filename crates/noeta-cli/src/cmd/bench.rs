@@ -555,7 +555,7 @@ pub(crate) fn bench_execute(
         .map_err(|err| format!("cannot start the runtime: {err}"))?;
     // Compile to bytecode untimed (isolates I.4a — the real path is the VM), then time execution
     // alone, so the measurement excludes both lowering and bytecode generation.
-    let module = compile_real(program, checked)?;
+    let module = compile_real(program, checked).map_err(|u| u.to_string())?;
     let start = Instant::now();
     let result = VmBackend::new().run_module_with_host(&module, Box::new(host));
     Ok((result, start.elapsed()))

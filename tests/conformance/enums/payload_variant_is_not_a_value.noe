@@ -1,0 +1,22 @@
+// A **payload-carrying** variant named without its arguments is not a value.
+//
+// `Shape.Square` (payload-free) reads as a `Shape`, and that is right — it *is* the whole value.
+// `Shape.Circle` is not: it needs an `int` before a `Shape` exists. Naming it as a first-class
+// constructor (`Fn(int) -> Shape`, the way `some`/`Ok` are) is a real feature and a real slice;
+// until it exists this must be a **static** error, because the expression has no run-time value.
+//
+// It used to check clean and then die in the backend with `internal error: the VM cannot compile
+// this program` — the checks-clean-then-fails shape, reached through the enum-member spelling: a
+// value the type system believed in that neither runtime had heard of. A one-line program was
+// enough to hit it.
+//
+// Construction and matching are untouched — see `enums/match.noe`; only the bare, argument-less
+// mention in value position is rejected.
+// expect: error E0007 at 21:5
+// expect: exit 1
+enum Shape {
+    Circle(int);
+    Square;
+}
+x = Shape.Circle
+echo x

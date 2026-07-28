@@ -72,18 +72,52 @@ mod read {
     /// The shared open-stream table on [`crate::RealHost`].
     pub(crate) type RealStreams = Arc<Mutex<HashMap<u64, RealStream>>>;
 
+    /// The response head the pump reports back over the head channel — the status/headers/url half
+    /// of [`noeta_stdlib::stream::StreamHead`], before the host has an id to pair it with.
+    ///
+    /// Reported rather than discarded because it is the *only* moment the status exists on this
+    /// path: the body that follows is frames, and a vendor's non-2xx body is not an event stream at
+    /// all, so an SSE reader that never saw the head sees an empty stream and nothing else.
+    pub(crate) struct ResponseHead {
+        pub(crate) status: u16,
+        pub(crate) headers: Vec<(String, String)>,
+        pub(crate) url: String,
+    }
+
+    /// Read the head out of a live reqwest response: the status, every header (repeats included, in
+    /// wire order), and the **final** URL after any redirects.
+    fn response_head(response: &reqwest::Response) -> ResponseHead {
+        ResponseHead {
+            status: response.status().as_u16(),
+            headers: response
+                .headers()
+                .iter()
+                // A header whose value is not valid UTF-8 is dropped rather than lossily mangled:
+                // the seam's vocabulary is `String`, and a mangled value reads as real data.
+                .filter_map(|(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|v| (name.as_str().to_string(), v.to_string()))
+                })
+                .collect(),
+            url: response.url().to_string(),
+        }
+    }
+
     /// Open `request`'s body as a frame stream, blocking only until the response **head** is in.
     ///
-    /// Returns the receiving half on success. A transport failure surfaces here as a [`NetError`], the
-    /// same door the one-shot verbs use; once the head is in, a body failure just ends the stream —
-    /// there is no longer a `Result` to carry it, and a partially-consumed stream that ends early is
-    /// exactly what a truncated body looks like to a reader.
+    /// Returns the receiving half **and the head** on success. A transport failure surfaces here as a
+    /// [`NetError`], the same door the one-shot verbs use; once the head is in, a body failure just
+    /// ends the stream — there is no longer a `Result` to carry it, and a partially-consumed stream
+    /// that ends early is exactly what a truncated body looks like to a reader. A non-2xx **status**
+    /// is not a failure at either point: it opens successfully and the caller reads `status()`.
     pub(crate) fn open(
         client: reqwest::Client,
         request: NetRequest,
         framing: Framing,
-    ) -> Result<RealStream, NetError> {
-        let (head_tx, head_rx) = sync_channel::<Result<(), NetError>>(1);
+    ) -> Result<(RealStream, ResponseHead), NetError> {
+        let (head_tx, head_rx) = sync_channel::<Result<ResponseHead, NetError>>(1);
         let (frame_tx, frame_rx) = sync_channel::<Frame>(FRAME_BUFFER);
         let url = request.url.clone();
 
@@ -119,9 +153,12 @@ mod read {
         // The pump always reports the head exactly once; a disconnect here means the thread died
         // before it could, which is an internal failure rather than a transport one.
         match head_rx.recv() {
-            Ok(Ok(())) => Ok(RealStream {
-                frames: Arc::new(Mutex::new(frame_rx)),
-            }),
+            Ok(Ok(head)) => Ok((
+                RealStream {
+                    frames: Arc::new(Mutex::new(frame_rx)),
+                },
+                head,
+            )),
             Ok(Err(error)) => Err(error),
             Err(_) => Err(NetError::new(
                 NetErrorKind::Other,
@@ -137,13 +174,13 @@ mod read {
         client: reqwest::Client,
         request: NetRequest,
         framing: Framing,
-        head_tx: SyncSender<Result<(), NetError>>,
+        head_tx: SyncSender<Result<ResponseHead, NetError>>,
         frame_tx: SyncSender<Frame>,
     ) {
         let url = request.url.clone();
         let response = match send_head(&client, request).await {
             Ok(response) => {
-                if head_tx.send(Ok(())).is_err() {
+                if head_tx.send(Ok(response_head(&response))).is_err() {
                     return; // the opener gave up
                 }
                 response
