@@ -1381,26 +1381,33 @@ impl Interpreter {
             builtin_enum("Option", "none", vec![]),
             false,
         );
-        // The built-in `Ordering` enum is namable like any other, so `Ordering.Less` can be
-        // constructed directly (not only received from `.compare()`); its variants carry no data
-        // and build the same `EnumValue` `compare` returns.
-        global.declare(
-            "Ordering".to_string(),
-            Value::EnumType(Rc::new(EnumDef {
-                name: "Ordering".to_string(),
-                variants: ["Less", "Equal", "Greater"]
-                    .into_iter()
-                    .map(|name| VariantInfo {
-                        name: name.to_string(),
-                        field_names: Vec::new(),
-                    })
-                    .collect(),
-                derives_comparable: false,
-                derives_tojson: false,
-                methods: HashMap::new(),
-            })),
-            false,
-        );
+        // Every **prelude enum** is namable like any other, so `Ordering.Less`, `Type.Unit`,
+        // `Semantic.TrustBoundary`, `Layout.Row`, and `Cancelled.Cancelled` can be *constructed*
+        // and not only received or matched — a construction builds the same value `.compare()` /
+        // `type_of()` return. The declarations come from the one shared table
+        // (`noeta_ast::reflect::prelude_enums`) the checker and the compiler read too: a hand-kept
+        // list here is exactly how everything but `Ordering` came to type-check and then abort with
+        // E0005. Declared before the program's own statements, so a user declaration shadows it.
+        for decl in noeta_ast::reflect::prelude_enums() {
+            global.declare(
+                decl.name.to_string(),
+                Value::EnumType(Rc::new(EnumDef {
+                    name: decl.name.to_string(),
+                    variants: decl
+                        .variants
+                        .iter()
+                        .map(|v| VariantInfo {
+                            name: v.name.clone(),
+                            field_names: v.field_names(),
+                        })
+                        .collect(),
+                    derives_comparable: false,
+                    derives_tojson: false,
+                    methods: HashMap::new(),
+                })),
+                false,
+            );
+        }
         Interpreter {
             stdout: String::new(),
             stderr: String::new(),
@@ -5542,18 +5549,25 @@ fn numeric_scalar(value: &Value) -> Option<noeta_stdlib::NumScalar> {
     }
 }
 
-/// Construct a built-in `Result`/`Option`/`Ordering` value (`Ok`/`Err`/`some`/`none`, or
-/// `Ordering.Less`/`Equal`/`Greater`). These reuse the ordinary [`EnumValue`] representation, so
-/// they participate in `match` and equality like any enum; only `Result`/`Option`'s display and
-/// the `?`/`??` operators treat them specially.
+/// Construct a built-in enum value — a `Result`/`Option` case (`Ok`/`Err`/`some`/`none`), a
+/// prelude-enum case (`Ordering.Less`, `Type.List(…)`, `Semantic.Sink`, …), or an attribute
+/// argument's user-enum case. These reuse the ordinary [`EnumValue`] representation, so they
+/// participate in `match` and equality like any enum; only `Result`/`Option`'s display and the
+/// `?`/`??` operators treat them specially.
 fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
-    // The built-in enums' defined variant order (`none < some`, `Ok < Err`,
-    // `Less < Equal < Greater`) — must agree with the VM's shape indices.
-    let variant_index = match variant {
-        "none" | "Ok" | "Less" => 0,
-        "some" | "Err" | "Equal" => 1,
-        _ => 2,
-    };
+    // The variant's declaration index — derived `Comparable`'s primary key, and what a
+    // source-written `Ordering.Less` carries, so a materialized value orders identically to a
+    // constructed one. A prelude enum answers from the shared declaration table; `Option`/`Result`
+    // (constructed through `none`/`some`/`Ok`/`Err`, not by naming the enum, so absent from that
+    // table) keep their defined order here. Anything else is a user enum reached through an
+    // attribute argument, whose declaration this function cannot see.
+    let variant_index = noeta_ast::reflect::prelude_variant_index(enum_name, variant)
+        .map(|i| i as usize)
+        .unwrap_or(match variant {
+            "none" | "Ok" => 0,
+            "some" | "Err" => 1,
+            _ => usize::MAX,
+        });
     Value::Enum(Rc::new(EnumValue {
         enum_name: enum_name.to_string(),
         variant: variant.to_string(),

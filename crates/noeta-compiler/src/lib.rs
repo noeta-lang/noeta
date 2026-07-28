@@ -1036,28 +1036,35 @@ impl ModuleCompiler {
     /// Pass 1: register every top-level `type`/`class`/`enum`/`use` so bodies compiled later
     /// can resolve them, and reserve a placeholder prototype for each class `fn`.
     fn register_types(&mut self, program: &Program) {
-        // The built-in `Ordering` enum is namable like any other (so `Ordering.Less` can be
-        // constructed, not only received from `.compare()`); registered first so a user `enum
-        // Ordering` would shadow it. Its variants carry no data, matching `make_ordering`.
-        self.types.insert(
-            "Ordering".to_string(),
-            TypeInfo::Enum {
-                variants: ["Less", "Equal", "Greater"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        (
-                            v.to_string(),
-                            VariantSlots {
-                                index: i as u32,
-                                fields: Vec::new(),
-                            },
-                        )
-                    })
-                    .collect(),
-                fns: HashMap::new(),
-            },
-        );
+        // Every **prelude enum** is namable like any other, so `Ordering.Less`, `Type.Unit`,
+        // `Semantic.TrustBoundary`, `Layout.Row`, and `Cancelled.Cancelled` lower to `MakeEnum`
+        // rather than failing name resolution at run time. The declarations come from the one
+        // shared table (`noeta_ast::reflect::prelude_enums`) the checker and the tree-walker read
+        // too — the hand-kept list that used to sit here covered only `Ordering`, which is how
+        // everything else came to type-check and then abort with E0005. Registered first, so a user
+        // `enum Ordering` shadows the prelude one.
+        for decl in noeta_ast::reflect::prelude_enums() {
+            self.types.insert(
+                decl.name.to_string(),
+                TypeInfo::Enum {
+                    variants: decl
+                        .variants
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            (
+                                v.name.clone(),
+                                VariantSlots {
+                                    index: i as u32,
+                                    fields: v.field_names(),
+                                },
+                            )
+                        })
+                        .collect(),
+                    fns: HashMap::new(),
+                },
+            );
+        }
         for stmt in &program.stmts {
             match stmt {
                 noeta_ast::Stmt::Struct(decl) => {

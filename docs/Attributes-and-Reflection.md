@@ -116,6 +116,18 @@ echo match type_of(5) {
 
 `Type` variants include the scalars `Type.Int`, `Type.Float`, `Type.F32`, `Type.F64`, `Type.IntN(bits, signed)`, `Type.Bool`, `Type.String`, `Type.Bytes`, `Type.Unit`, `Type.Dyn`; the containers `Type.List(inner)`, `Type.Set(inner)`, `Type.Map(k, v)`, `Type.Option(inner)`, `Type.Result(ok, err)`; `Type.Fn(params, ret)` and `Type.Union(members)`; the trait object `Type.DynTrait(name)`; and the nominals `Type.Struct(name, args)`, `Type.Enum(name, args)`, `Type.Class(name, args)`, `Type.Named(name, args)`. Collection literals carry their resolved element type as a runtime tag that survives a `dyn` launder (a content-changing op like `.set` drops the tag to head-only).
 
+### The prelude enums are ordinary enums
+
+`Type` is one of five enums the language declares for you — `Ordering` (what `.compare()` returns), `Type`, `Semantic` (the built-in role vocabulary), `Layout` (the `@packed` storage vocabulary), and `Cancelled` (the `Err` payload of a cancelled `join`). Each is namable like any enum you declare yourself: you can annotate with it, `match` on it exhaustively, **and construct a case by name**. A constructed case is the very same value the runtime hands you, so `==` works and you are not forced into a `match` just to ask one question:
+
+```noeta
+echo type_of(5) == Type.Int                   // true
+echo type_of([1]) == Type.List(Type.Int)      // true
+echo 5.compare(2) == Ordering.Greater         // true
+```
+
+Each shadows like any prelude name: declaring your own `enum Ordering` replaces it for that program.
+
 ### `params_of(name): List<ParamInfo>`
 
 Reflects a **callable's parameters** by name — one `ParamInfo` per parameter, in declaration order: `{ name: string, type: Type, optional: bool, attrs: List<dyn> }`. The name is a top-level function's bare name or a method's qualified `Type.method` (the same target keying the attribute manifest). `type` is the parameter's *declared* type as the same `Type` ADT `type_of` returns, `optional` reports whether a call may omit the parameter (it declared a default), and `attrs` holds the parameter's own `#[...]` attribute instances:
@@ -268,6 +280,8 @@ for b in attributes_of::<Builds>() {
 ### `roles_of(): List<RoleBinding>` / `roles_of::<RoleEnum>(): List<RoleBinding>`
 
 The compile-time `(declaration, role)` index built from `@role(...)` tags — each binding has a `.target` and a `.role`. The optional turbofish scopes the query to a single `@semantic` enum (the mirror of `attributes_of::<T>()`): `roles_of::<Semantic>()` returns only the bindings whose role is a `Semantic` variant, while bare `roles_of()` returns the whole index. The enum is resolved at compile time (closed-world); naming a non-`@semantic` type is an error (E0031).
+
+`.role` is a real enum value, so it compares directly — `if b.role == Semantic.TrustBoundary { … }`.
 
 ### `invoke(recv, name, args): Result<dyn, dyn>` / `invoke(name, args): Result<dyn, dyn>`
 

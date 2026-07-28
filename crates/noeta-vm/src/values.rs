@@ -378,25 +378,37 @@ pub(crate) fn make_ordering(variant: &str) -> Value {
         "Equal" => &EQUAL,
         _ => &GREATER,
     };
-    let index = match variant {
-        "Less" => 0,
-        "Equal" => 1,
-        _ => 2,
-    };
-    let shape = cell.get_or_init(|| {
-        noeta_object::intern_shape(
-            Shape::enum_variant("Ordering", variant, Vec::new(), false).with_variant_index(index),
-        )
-    });
+    let shape = cell.get_or_init(|| prelude_enum_shape(noeta_ast::reflect::ORDERING_ENUM, variant));
     Value::enum_value(shape, Vec::new())
 }
 
-/// Build a role enum value (`Semantic.EntryPoint`, `WebRole.Controller`, …) with a fresh shape —
-/// the payload-free `roles_of()` counterpart to [`make_ordering`], for whichever `@semantic` enum a
-/// `@role` tag named. Matches the tree-walker's by structural equality.
+/// The interned shape of one **prelude enum** variant, built from the shared declaration table
+/// ([`noeta_ast::reflect::prelude_enums`]) — the same slot names and declaration index the compiler
+/// bakes into a source-written `Ordering.Less` / `Type.Int` / `Semantic.Sink`. Going through one
+/// table is what makes a *materialized* prelude value (from `.compare()`, `type_of`, `roles_of()`)
+/// and a *constructed* one intern the identical shape, so they match, compare, and display alike
+/// instead of one of them being unordered for want of a variant index.
+///
+/// A pair the table does not know — a user `@semantic` enum reached through `roles_of()`, say —
+/// falls back to the payload-free, index-less shape, exactly as before.
+pub(crate) fn prelude_enum_shape(enum_name: &str, variant: &str) -> &'static Shape {
+    let fields =
+        noeta_ast::reflect::prelude_variant_field_names(enum_name, variant).unwrap_or_default();
+    let shape = Shape::enum_variant(enum_name, variant, fields, false);
+    let shape = match noeta_ast::reflect::prelude_variant_index(enum_name, variant) {
+        Some(index) => shape.with_variant_index(index),
+        None => shape,
+    };
+    noeta_object::intern_shape(shape)
+}
+
+/// Build a role enum value (`Semantic.EntryPoint`, `WebRole.Controller`, …) — the payload-free
+/// `roles_of()` counterpart to [`make_ordering`], for whichever `@semantic` enum a `@role` tag
+/// named. The built-in `Semantic` goes through the shared prelude table (so it is interchangeable
+/// with a constructed `Semantic.EntryPoint`); a user enum keeps the index-less shape. Matches the
+/// tree-walker's by structural equality either way.
 pub(crate) fn make_role(enum_name: &str, variant: &str) -> Value {
-    let shape =
-        noeta_object::intern_shape(Shape::enum_variant(enum_name, variant, Vec::new(), false));
+    let shape = prelude_enum_shape(enum_name, variant);
     Value::enum_value(shape, Vec::new())
 }
 
@@ -507,13 +519,7 @@ pub(crate) fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
             vec![Value::list(members.iter().map(build_type_value).collect())]
         }
     };
-    let shape = noeta_object::intern_shape(Shape::enum_variant(
-        TYPE_ENUM,
-        repr.variant_name(),
-        Vec::new(),
-        false,
-    ));
-    Value::enum_value(shape, data)
+    Value::enum_value(prelude_enum_shape(TYPE_ENUM, repr.variant_name()), data)
 }
 
 /// Convert a manifest attribute-argument literal tree to a VM value (for materializing an attribute
@@ -581,10 +587,15 @@ pub(crate) fn reflection_type_name(value: Value) -> Option<String> {
     None
 }
 
-/// Build an enum value (`Color.Red`, `Ok(5)`, `Option.none`) for an attribute argument, with a fresh
-/// payload-free or payload-carrying shape. Matches the tree-walker's `builtin_enum` by structural
-/// shape equality.
+/// Build an enum value (`Color.Red`, `Ok(5)`, `Mode.Fast(3)`) for an attribute argument, with a
+/// fresh payload-free or payload-carrying shape. Matches the tree-walker's `builtin_enum` by
+/// structural shape equality.
 pub(crate) fn make_attr_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
+    // A **prelude** enum's case interns the shared shape (slot names + declaration index), so an
+    // attribute argument's `Semantic.Sink` is indistinguishable from a source-written one.
+    if noeta_ast::reflect::prelude_variant_index(enum_name, variant).is_some() {
+        return Value::enum_value(prelude_enum_shape(enum_name, variant), data);
+    }
     let shape = noeta_object::intern_shape(Shape::enum_variant(
         enum_name,
         variant,
