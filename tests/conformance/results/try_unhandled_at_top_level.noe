@@ -1,0 +1,45 @@
+// An `Err` propagated by `?` out of the **top level** aborts the program with the error's own
+// `message()` and a non-zero exit (E0069).
+//
+// Top-level code declares no return type, so there is nothing for the static position rule (E0012,
+// `try_result_return_type`) to judge — which is exactly why this path used to end the program *quietly
+// at exit 0*. The failure was completely invisible: no output, no diagnostic, success reported.
+//
+// Both halves of the propagation chain are pinned here, in order:
+//
+//   - `wrap` returns `Result<string, LoadError>` and propagates **normally** — the success unwraps
+//     through two frames, and the failure travels outward unconverted (the declared error type
+//     matches, so no `From` is involved).
+//   - Only when that `Err` runs out of frames does the abort fire. Output produced before it is kept
+//     and nothing after it runs, exactly as `panic` behaves.
+//
+// The message is the payload's `Error::message()`, not its structural display — an unhandled failure
+// should read as the sentence the author wrote for it.
+// expect: stdout "before"
+// expect: stdout "[contents of notes.txt]"
+// expect: error E0069 at 44:6
+// expect: exit 1
+struct LoadError {
+    path: string
+
+    impl Error {
+        fn message(): string { return "cannot load `${self.path}`" }
+    }
+}
+
+fn load(path: string): Result<string, LoadError> {
+    if path.ends_with(".txt") {
+        return Ok("contents of ${path}")
+    }
+    return Err(LoadError { path: path })
+}
+
+fn wrap(path: string): Result<string, LoadError> {
+    raw = load(path)?
+    return Ok("[${raw}]")
+}
+
+echo "before"
+echo wrap("notes.txt")?
+echo wrap("config.toml")?
+echo "unreached"
