@@ -4,11 +4,11 @@
 //! side effect* — invisible to program output, so the differential can't see it — so this test
 //! observes the spans directly: it runs a served program on a [`SandboxHost`] whose recorder feeds a
 //! shared sink ([`SandboxHost::set_span_sink`]) that outlives the host (the VM consumes it), then
-//! asserts on the emitted spans. Under the sandbox the accept leaf drives the fixed **seven**-request
-//! script (`GET /`, `GET /health`, `POST /echo`, `GET /users/42?active=true`, `DELETE /users/42`,
-//! `POST /form`, `GET /ws`), so the emitted spans are deterministic. The counts below are that
-//! script's length — `sandbox_request_script` is the one place it is defined, so a request added
-//! there lands here.
+//! asserts on the emitted spans. Under the sandbox the accept leaf drives a fixed request script,
+//! so the emitted spans are deterministic. Every count below is DERIVED from
+//! `sandbox_request_script` — the one place the script is defined — so a request added there
+//! updates these tests instead of rotting them, and the expected span names are derived from the
+//! script itself rather than transcribed.
 
 use std::sync::{Arc, Mutex};
 
@@ -97,6 +97,48 @@ fn attr<'a>(span: &'a SpanData, key: &str) -> Option<&'a AttrValue> {
         .map(|(_, v)| v)
 }
 
+/// How many requests the sandbox's inbound script drives — the single source every count in this
+/// file derives from, so adding a scripted request never leaves a stale integer behind.
+fn scripted() -> usize {
+    noeta_stdlib::net::sandbox_request_script().len()
+}
+
+/// The SERVER-span names the script must produce, derived from the script itself: OTel names a
+/// server span `"{method} {route}"`, where the route is the path with any query stripped (a raw
+/// query would explode span cardinality). Derived rather than transcribed so the expectation and
+/// the script cannot disagree about what was sent.
+fn expected_span_names() -> Vec<String> {
+    noeta_stdlib::net::sandbox_request_script()
+        .iter()
+        .map(|r| {
+            let path = r.url.split(['?', '#']).next().unwrap_or(&r.url);
+            format!("{} {path}", r.method)
+        })
+        .collect()
+}
+
+/// The one span with `name`, failing loudly if it is absent or ambiguous.
+///
+/// Every assertion that used to index the span list by position goes through this instead: an
+/// index silently starts checking a *different* request when the script grows, which is a test
+/// that keeps passing while measuring the wrong thing.
+fn span_named<'a>(spans: &'a [SpanData], name: &str) -> &'a SpanData {
+    let mut matching = spans.iter().filter(|s| s.name == name);
+    let found = matching
+        .next()
+        .unwrap_or_else(|| panic!("no span named `{name}` among {:?}", names_of(spans)));
+    assert!(
+        matching.next().is_none(),
+        "several spans named `{name}` — the assertion would be ambiguous"
+    );
+    found
+}
+
+/// The span names, for a failure message.
+fn names_of(spans: &[SpanData]) -> Vec<&str> {
+    spans.iter().map(|s| s.name.as_str()).collect()
+}
+
 /// Every accepted connection produces one SERVER span, named `"{method} {route}"` with the query
 /// stripped, in the sandbox script's order — the headline of T4.
 #[test]
@@ -111,15 +153,8 @@ fn serve_emits_one_server_span_per_request() {
     let names: Vec<&str> = spans.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
-        [
-            "GET /",
-            "GET /health",
-            "POST /echo",
-            "GET /users/42",
-            "DELETE /users/42",
-            "POST /form",
-            "GET /ws"
-        ]
+        expected_span_names(),
+        "one span per scripted request, in script order"
     );
     assert!(
         spans.iter().all(|s| s.kind == SpanKind::Server),
@@ -143,7 +178,9 @@ fn serve_span_carries_http_attributes() {
          fn fetch(req: Request): Response { return server.response(201, \"made\") }\n\
          server.serve(8080, fetch)\n",
     );
-    let echo = &spans[2]; // POST /echo
+    // Located by NAME, not by position: an index into the script is exactly the kind of
+    // assertion that silently starts checking a different request when the script grows.
+    let echo = span_named(&spans, "POST /echo");
     assert_eq!(
         attr(echo, "http.request.method"),
         Some(&AttrValue::Str("POST".into()))
@@ -179,8 +216,8 @@ fn handler_spans_nest_under_the_server_span() {
         .iter()
         .filter(|s| s.kind == SpanKind::Server)
         .collect();
-    assert_eq!(db.len(), 7, "one child span per scripted request");
-    assert_eq!(servers.len(), 7);
+    assert_eq!(db.len(), scripted(), "one child span per scripted request");
+    assert_eq!(servers.len(), scripted());
     for (child, server) in db.iter().zip(&servers) {
         let parent = child.parent.expect("child has a parent");
         assert_eq!(
@@ -218,8 +255,8 @@ fn interleaved_handlers_keep_their_own_context() {
         .iter()
         .filter(|s| s.kind == SpanKind::Server)
         .collect();
-    assert_eq!(work.len(), 7);
-    assert_eq!(servers.len(), 7);
+    assert_eq!(work.len(), scripted());
+    assert_eq!(servers.len(), scripted());
     // Every work span parents under exactly one distinct server span (a bijection), and shares its
     // trace — no cross-request leakage.
     let mut claimed: Vec<[u8; 8]> = Vec::new();
@@ -269,8 +306,8 @@ fn handler_spawned_task_inherits_the_server_span() {
         .iter()
         .filter(|s| s.kind == SpanKind::Server)
         .collect();
-    assert_eq!(bg.len(), 7);
-    assert_eq!(servers.len(), 7);
+    assert_eq!(bg.len(), scripted());
+    assert_eq!(servers.len(), scripted());
     for (child, server) in bg.iter().zip(&servers) {
         let parent = child.parent.expect("bg has a parent");
         assert_eq!(
@@ -401,15 +438,16 @@ fn serve_span_status_reflects_5xx_only() {
          }\n\
          server.serve(8080, fetch)\n",
     );
-    // span[1] is `GET /health` → 503 → Error; the rest are 200 → Unset.
-    assert_eq!(spans[1].name, "GET /health");
-    assert_eq!(spans[1].status, SpanStatus::Error("HTTP 503".into()));
+    // The `GET /health` span is the 503 → Error; every other span is 200 → Unset. Both halves key
+    // on the NAME rather than a script index, so this keeps checking the health request whatever
+    // else the script grows.
+    let health = span_named(&spans, "GET /health");
+    assert_eq!(health.status, SpanStatus::Error("HTTP 503".into()));
     assert!(
         spans
             .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != 1)
-            .all(|(_, s)| s.status == SpanStatus::Unset),
+            .filter(|s| s.name != "GET /health")
+            .all(|s| s.status == SpanStatus::Unset),
         "only the 5xx span is an error"
     );
 }

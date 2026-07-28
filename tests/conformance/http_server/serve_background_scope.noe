@@ -17,6 +17,8 @@
 // expect: stdout "[bg] ran a job"
 // expect: stdout "queued /ws"
 // expect: stdout "[bg] ran a job"
+// expect: stdout "queued /events"
+// expect: stdout "[bg] ran a job"
 // expect: exit 0
 use std.http.server
 use std.http.{Request, Response}

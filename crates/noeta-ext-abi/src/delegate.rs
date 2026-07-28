@@ -366,6 +366,9 @@ macro_rules! __delegate_host_capability {
             fn net_sse_close_now(&mut self, conn: u64) -> Result<(), $crate::StdError> {
                 self.$field.net_sse_close_now(conn)
             }
+            fn net_sse_start(&self, conn: u64) -> Box<dyn $crate::ExternIo> {
+                self.$field.net_sse_start(conn)
+            }
             fn net_sse_send(&self, conn: u64, wire: String) -> Box<dyn $crate::ExternIo> {
                 self.$field.net_sse_send(conn, wire)
             }

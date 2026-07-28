@@ -169,7 +169,85 @@ impl Extension for HttpExtension {
         // `noeta serve` (higher-order-abi H6) — contributed here, not a core CLI verb.
         &[crate::serve::SERVE_COMMAND]
     }
+    fn enums(&self) -> &'static [ExtEnum] {
+        HTTP_ENUMS
+    }
+    fn structs(&self) -> &'static [ExtStruct] {
+        HTTP_STRUCTS
+    }
 }
+
+/// The `http` unit's native enum: `Framing` (http-streaming arc) — how `client.stream` cuts a
+/// response body. A real language enum rather than a string, so a `match` over it is exhaustive
+/// (E0011) and a typo is a compile error instead of a runtime surprise.
+///
+/// Fieldless and unbacked: the variants are a choice, not a value with a wire representation, so
+/// there is nothing for `.value()` to return.
+const HTTP_ENUMS: &[ExtEnum] = &[ExtEnum {
+    name: noeta_ext_abi::stream::FRAMING_TYPE_NAME,
+    namespace: "std.http",
+    variants: &[
+        ExtVariant {
+            name: "Sse",
+            fields: &[],
+            value: VariantValue::None,
+        },
+        ExtVariant {
+            name: "Ndjson",
+            fields: &[],
+            value: VariantValue::None,
+        },
+        ExtVariant {
+            name: "Lines",
+            fields: &[],
+            value: VariantValue::None,
+        },
+    ],
+    ..ExtEnum::DEFAULTS
+}];
+
+/// The `http` unit's native value struct: `Frame` (http-streaming arc) — one frame cut out of a
+/// streaming body.
+///
+/// A **struct**, not a class and not an extern handle, and that is the load-bearing decision: a
+/// struct-kind type is `Send` when all its fields are (they are all `string`/`?int` here), so a
+/// frame crosses a channel or an isolate. A consuming pipeline — the motivating case is an LLM
+/// client re-emitting provider tokens to a browser — is channel-based, and a `class`/`dyn` is
+/// `!Send` and could not participate.
+///
+/// Every field is `pub` and none is `mut`: a frame is a decoded observation, so reading it is the
+/// whole point and mutating it in place is meaningless (build a new one).
+const HTTP_STRUCTS: &[ExtStruct] = &[ExtStruct {
+    name: noeta_ext_abi::stream::FRAME_TYPE_NAME,
+    namespace: "std.http",
+    fields: &[
+        ExtField {
+            name: "event",
+            ty: Str,
+            is_public: true,
+            is_mut: false,
+        },
+        ExtField {
+            name: "data",
+            ty: Str,
+            is_public: true,
+            is_mut: false,
+        },
+        ExtField {
+            name: "id",
+            ty: Str,
+            is_public: true,
+            is_mut: false,
+        },
+        ExtField {
+            name: "retry",
+            ty: SigType::Option(&SigType::Int),
+            is_public: true,
+            is_mut: false,
+        },
+    ],
+    ..ExtStruct::STRUCT_DEFAULTS
+}];
 
 /// The `id` unit's extern type: `Uuid` (X2 — pure, byte-ordered, key-capable).
 const ID_TYPES: &[ExtType] = &[ExtType {
@@ -288,6 +366,67 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: SOCKET_DOCS,
         ..ExtType::DEFAULTS
     },
+    // The incremental body reader (http-streaming arc) — the `Socket` shape on the OUTBOUND side:
+    // a host-resource handle whose `recv` rides the executor, so its methods live in the ctx table.
+    ExtType {
+        name: noeta_ext_abi::stream::FRAME_STREAM_TYPE_NAME,
+        namespace: "std.http",
+        ctx_methods: crate::http_stream::FRAME_STREAM_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::http_stream::frame_stream_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        key_capable: false, // identifies a host resource
+        docs: FRAME_STREAM_DOCS,
+        ..ExtType::DEFAULTS
+    },
+    // The event-stream sink (http-streaming arc) — `Socket`'s write-only inbound twin. Its `send`
+    // takes a `Frame` value struct, which must arrive marshalled rather than as an opaque handle.
+    ExtType {
+        name: noeta_ext_abi::stream::SSE_SINK_TYPE_NAME,
+        namespace: "std.http",
+        ctx_methods: crate::http_stream::SSE_SINK_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::http_stream::sse_sink_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        key_capable: false, // identifies a host resource
+        deep_marshal: true,
+        docs: SSE_SINK_DOCS,
+        ..ExtType::DEFAULTS
+    },
+];
+
+/// `FrameStream`'s method prose (`noeta doc --api` renders `docs/std-http.md` from this).
+const FRAME_STREAM_DOCS: &[(&str, &str)] = &[
+    (
+        "recv",
+        "The next frame of the body, or `none` once the body ends. Await it: `frame = stream.recv().await`. \
+         A stream yields `none` forever after the body ends, so a `while` loop over it terminates.",
+    ),
+    (
+        "close",
+        "Release the stream and its connection without reading the rest of the body — what a caller does \
+         after seeing a terminal frame (`[DONE]`) rather than draining to the end. Idempotent, and \
+         unnecessary once `recv` has returned `none`.",
+    ),
+];
+
+/// `SseSink`'s method prose.
+const SSE_SINK_DOCS: &[(&str, &str)] = &[
+    (
+        "send",
+        "Push one `Frame` to the client. A multi-line `data` is encoded as several `data:` lines, which is \
+         the only legal way to carry a newline through an event stream.",
+    ),
+    (
+        "comment",
+        "Write an SSE comment (`: text`) — the keepalive heartbeat. It puts bytes on the wire without \
+         dispatching an event, so an idle stream is not reaped by an intermediary.",
+    ),
+    (
+        "close",
+        "End the event stream and release the connection. The stream also closes when the handler returns, \
+         so this is for ending early.",
+    ),
 ];
 
 /// The always-on core extern types: `FileHandle` (X3 — mutable + effectful, `fs`), `Cell<T>` (H4),
@@ -1434,6 +1573,19 @@ const HTTP_ERROR_SIG: SigType = SigType::Named(crate::net::HTTP_ERROR_TYPE_NAME)
 /// `resp.error_for_status()?`.
 const RESPONSE_RESULT_SIG: SigType = SigType::Result(&RESPONSE_SIG, &HTTP_ERROR_SIG);
 
+/// The `Framing` choice a `stream` call cuts with (http-streaming arc).
+const FRAMING_SIG: SigType = SigType::Named(noeta_ext_abi::stream::FRAMING_TYPE_NAME);
+/// The open incremental reader.
+const FRAME_STREAM_SIG: SigType = SigType::Named(noeta_ext_abi::stream::FRAME_STREAM_TYPE_NAME);
+/// The event-stream sink a `server.sse` handler writes to.
+pub(crate) const SSE_SINK_SIG: SigType = SigType::Named(noeta_ext_abi::stream::SSE_SINK_TYPE_NAME);
+
+/// What `stream` returns: the same `Err` door the one-shot verbs use, so `?` on opening a stream
+/// means exactly "the request never got off the ground" — an HTTP error *status* is still a
+/// successfully opened stream whose body the caller reads (an error page streams like anything
+/// else), matching `Ok(Response)` for a 404.
+const FRAME_STREAM_RESULT_SIG: SigType = SigType::Result(&FRAME_STREAM_SIG, &HTTP_ERROR_SIG);
+
 /// A request-headers argument type — `Map<string, string>`, named once.
 const HEADERS: SigType = SigType::Map(&SigType::String, &SigType::String);
 /// The optional trailing `headers` parameter every verb accepts (http arc H5).
@@ -1543,6 +1695,22 @@ const HTTP_CLIENT_FNS: &[ExtFn] = &[
         name: "request_async",
         params: &[Str, Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
+    },
+    // `stream(req, framing)` (http-streaming arc) — read a response body INCREMENTALLY instead of
+    // buffering it whole.
+    //
+    // It takes a prepared `Request` rather than a url, because a streaming call is always a
+    // configured one in practice (a base URL, an auth header, a JSON body naming the model) and
+    // `prepare`/`send` is already the seam where std hands off to user code.
+    //
+    // Synchronous, returning `Result<FrameStream, HttpError>`: the call sends the request and reads
+    // the response HEAD, which is the last moment a failure is still a transport error the caller
+    // can handle. Everything after that is body, and a body failure surfaces as the stream ending.
+    ExtFn {
+        param_names: &["req", "framing"],
+        name: "stream",
+        params: &[REQUEST_SIG, FRAMING_SIG],
+        ret: Concrete(FRAME_STREAM_RESULT_SIG),
     },
 ];
 
@@ -2011,6 +2179,14 @@ fn http_dispatch(
             crate::http_client::HttpClient::new(base),
         )));
     }
+    // `stream(req, framing)` (http-streaming arc) — open the body incrementally. Unlike the verbs
+    // below it takes a prepared request, so there is nothing to build.
+    if func == "stream" {
+        want_arity(func, args, 2)?;
+        let request = want_request(func, args, 0)?.inner.clone();
+        let framing = want_framing(func, args, 1)?;
+        return Ok(stream_outcome(host.net_stream_open(request, framing)));
+    }
     // Build the request from the call, per verb shape. Bodyless verbs put headers at index 1;
     // body-carrying verbs and `request` put them at index 2. The method is uppercased so
     // `request("get", …)` and any custom verb (QUERY) normalize.
@@ -2052,6 +2228,33 @@ fn http_dispatch(
         // A transport failure is `Err(HttpError)`, never a `StdError` abort (http arc H6) — the
         // caller decides whether to `?` it, retry it, or inspect its `kind()`.
         Ok(crate::net::fetch_outcome(host.net_fetch(request)))
+    }
+}
+
+/// Read a `Framing` argument — a real native enum value, so the variant name IS the choice and
+/// there is no string to mistype (the checker has already proven exhaustiveness).
+fn want_framing(
+    func: &str,
+    args: &[NativeValue],
+    index: usize,
+) -> Result<noeta_ext_abi::stream::Framing, StdError> {
+    let Some(NativeValue::Variant { variant, .. }) = args.get(index) else {
+        return Err(type_error(func, noeta_ext_abi::stream::FRAMING_TYPE_NAME));
+    };
+    variant
+        .parse::<noeta_ext_abi::stream::Framing>()
+        .map_err(|()| type_error(func, noeta_ext_abi::stream::FRAMING_TYPE_NAME))
+}
+
+/// Marshal a stream-open outcome as `Result<FrameStream, HttpError>` — the
+/// [`crate::net::fetch_outcome`] twin, shared by the free function and the `Client` method so both
+/// doors return the identical shape.
+fn stream_outcome(result: Result<u64, noeta_ext_abi::NetError>) -> NativeOut {
+    match result {
+        Ok(stream) => NativeOut::Ok(Box::new(NativeOut::Extern(crate::ExternBox::new(
+            noeta_ext_abi::stream::FrameStream { stream },
+        )))),
+        Err(error) => NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error)))),
     }
 }
 
@@ -2134,6 +2337,20 @@ const CLIENT_METHODS: &[ExtFn] = &[
         name: "send",
         params: &[REQUEST_SIG],
         ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    // The streaming terminal (http-streaming arc) — `send`'s incremental twin, and the door a
+    // configured client needs: a streaming call in practice carries a base URL and an auth header,
+    // so without this the whole `Client` configuration chain would be unreachable from `stream`.
+    //
+    // The client's **retry policy is deliberately not applied**. Retrying means re-sending the
+    // request and discarding the first attempt's response — coherent for a buffered body, and not
+    // for a stream the caller may already have begun reading. The base URL, headers, and deadline
+    // all still apply.
+    ExtFn {
+        param_names: &["request", "framing"],
+        name: "stream",
+        params: &[REQUEST_SIG, FRAMING_SIG],
+        ret: Concrete(FRAME_STREAM_RESULT_SIG),
     },
     ExtFn {
         param_names: &["path", "headers"],
@@ -2227,6 +2444,19 @@ const CLIENT_DOCS: &[(&str, &str)] = &[
         "Perform an already-built `Request` through this client's configuration (base URL, \
          headers, deadline, retry). The terminal a composed middleware chain bottoms out in — \
          see the `para/api` package, which owns middleware, mocking, and pagination.",
+    ),
+    (
+        "stream",
+        "`send`'s incremental twin: perform the request through this client's configuration and read \
+         the response body as a `FrameStream` cut by `framing` — see `client.stream`.\n\n\
+         Applies the base URL, the client headers, and the deadline, but **not** the retry policy: \
+         retrying re-sends the request and discards the first attempt's response, which is coherent \
+         for a buffered body and not for a stream the caller may already be reading.\n\n\
+         This is a **separate terminal from `send`**, not a variant of it, and a middleware chain \
+         written over `send` does not cover it. That is deliberate — a layer that buffers, caches, \
+         replays, or retries a response cannot operate on a single-shot body, so the two terminals \
+         are kept distinct rather than letting a stream flow silently through layers that would \
+         mishandle it.",
     ),
     (
         "get",
@@ -2365,6 +2595,17 @@ fn client_method_dispatch(
                 request.inner.headers.clone(),
             );
             return Ok(crate::net::fetch_outcome(client.perform(outgoing, host)));
+        }
+        // The streaming terminal (http-streaming arc) — `send`'s twin, layering the same client
+        // configuration onto a prepared request, minus the retry policy (see the signature's note:
+        // re-sending discards a response the caller may already be reading).
+        "stream" => {
+            want_arity(method, args, 2)?;
+            let request = want_request(method, args, 0)?.inner.clone();
+            let framing = want_framing(method, args, 1)?;
+            let outgoing =
+                client.build(&request.method, &request.url, request.body, request.headers);
+            return Ok(stream_outcome(host.net_stream_open(outgoing, framing)));
         }
         _ => {}
     }
@@ -4627,6 +4868,23 @@ const HTTP_CLIENT_DOCS: &[(&str, &str)] = &[
         "Perform an HTTP request with an arbitrary `method` to `url` — the general form the verb \
          helpers build on.",
     ),
+    (
+        "stream",
+        "Read a response body **incrementally**, cut into frames: `stream(req, framing)` sends the \
+         prepared request and returns a `FrameStream` whose `recv()` yields the next `Frame` (or \
+         `none` at the end of the body). Use it for anything that arrives over time rather than all \
+         at once — an LLM token stream, a progress feed, a log tail.\n\n\
+         `framing` picks the cut. `Framing.Sse` parses `text/event-stream` (what OpenAI-compatible \
+         endpoints speak) to the WHATWG rules: multi-line `data:` fields join with newlines, `event:`/\
+         `id:`/`retry:` populate the frame, comments and blocks without data dispatch nothing. \
+         `Framing.Ndjson` yields one JSON document per line, unparsed, in `data` (Ollama's native \
+         shape). `Framing.Lines` yields one raw line per frame, blank lines included.\n\n\
+         The `Err` arm means the request never produced a response — an HTTP error *status* opens a \
+         stream normally, because an error page streams like any other body. A body that is cut off \
+         mid-frame simply ends: with `Framing.Sse` the incomplete trailing block is discarded, since \
+         a frame only exists once its terminating blank line arrives.\n\n\
+         Call `close()` when abandoning a stream early; a drained one needs no close.",
+    ),
     ("get_async", "Async `get` — yields a `Future<Response>`."),
     ("head_async", "Async `head`."),
     ("delete_async", "Async `delete`."),
@@ -4673,6 +4931,19 @@ const HTTP_SERVER_DOCS: &[(&str, &str)] = &[
     (
         "websocket",
         "Upgrade the current request to a WebSocket, driving the connection with `handler(socket)`.",
+    ),
+    (
+        "sse",
+        "Answer the current request with a **server-sent events** stream, driving it with \
+         `handler(sink)`. Return it from a `fetch` handler exactly like `server.websocket`: the \
+         response head goes out as `text/event-stream`, the connection is held open, and the handler \
+         pushes frames with `sink.send(frame)` until it returns (which closes the stream).\n\n\
+         The one-way twin of `websocket`, and the write side of `client.stream`. Use it when the \
+         client only needs to *listen* — a progress endpoint, a log tail, a build-status feed, an \
+         LLM token stream re-emitted to a browser. It needs no handshake and no client opt-in, so any \
+         request can be answered with one, and a browser consumes it with a plain `EventSource`.\n\n\
+         Send `sink.comment(\"keepalive\")` periodically on an otherwise idle stream: it puts bytes on \
+         the wire without dispatching an event, which stops an intermediary reaping the connection.",
     ),
     (
         "liveview_js",

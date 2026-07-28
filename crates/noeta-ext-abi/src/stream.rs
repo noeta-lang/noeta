@@ -681,17 +681,32 @@ pub fn frame_from_value(value: &crate::NativeValue) -> Option<Frame> {
     let retry = fields
         .iter()
         .find(|(k, _)| k == FRAME_FIELDS[3])
-        .and_then(|(_, v)| match v {
-            // An `?int` field arrives as the payload itself when present; `Unit` is the absent arm.
-            crate::NativeValue::Scalar(crate::Scalar::Int(ms)) => Some(*ms),
-            _ => None,
-        });
+        .and_then(|(_, v)| optional_int(v));
     Some(Frame {
         event: text(FRAME_FIELDS[0]),
         data: text(FRAME_FIELDS[1]),
         id: text(FRAME_FIELDS[2]),
         retry,
     })
+}
+
+/// Read an `?int` field out of the argument view.
+///
+/// Accepts both shapes an optional can arrive in, because which one a backend produces is its
+/// own marshalling detail and not something this seam should depend on: the bare payload (a
+/// flattened `Some`) and a real `Option` variant. Anything else — including the `None` variant and
+/// a unit — is absent.
+fn optional_int(value: &crate::NativeValue) -> Option<i64> {
+    match value {
+        crate::NativeValue::Scalar(crate::Scalar::Int(ms)) => Some(*ms),
+        crate::NativeValue::Variant {
+            variant, fields, ..
+        } if variant == "Some" => match fields.first() {
+            Some(crate::NativeValue::Scalar(crate::Scalar::Int(ms))) => Some(*ms),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The default incremental-read descriptor: it pulls the next frame synchronously through the Host
@@ -711,6 +726,25 @@ impl crate::ExternIo for StreamRecvIo {
         host: &mut dyn crate::Host,
     ) -> Result<crate::NativeOut, crate::StdError> {
         Ok(frame_recv_outcome(host.net_stream_recv_next(self.stream)?))
+    }
+}
+
+/// The default SSE **start** descriptor: writes the `text/event-stream` response head through the
+/// Host at spawn. The [`crate::net::WsUpgradeIo`] twin — one leaf that switches the connection out
+/// of one-reply-and-close.
+#[derive(Debug)]
+pub struct SseStartIo {
+    /// The connection switching to an event stream.
+    pub conn: u64,
+}
+
+impl crate::ExternIo for SseStartIo {
+    fn run_sync(
+        &mut self,
+        host: &mut dyn crate::Host,
+    ) -> Result<crate::NativeOut, crate::StdError> {
+        host.net_sse_start_now(self.conn)?;
+        Ok(crate::NativeOut::Unit)
     }
 }
 

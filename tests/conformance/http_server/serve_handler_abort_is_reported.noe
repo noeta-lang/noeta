@@ -13,8 +13,9 @@
 // expect: stdout "DELETE /users/42"
 // expect: stdout "POST /form"
 // expect: stdout "GET /ws"
-// expect: stderr "noeta serve: request handler failed: [E0016] index 99 out of bounds for list of length 3"
+// expect: stdout "GET /events"
 // expect: stdout "served"
+// expect: stderr "noeta serve: request handler failed: [E0016] index 99 out of bounds for list of length 3"
 // expect: exit 0
 use std.http.server
 use std.http.{Request, Response}

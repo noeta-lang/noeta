@@ -354,6 +354,12 @@ pub trait Network {
         Ok(())
     }
 
+    /// Build the SSE start descriptor. Default via [`Self::net_sse_start_now`]; `RealHost`
+    /// overrides it with an async write of the response head.
+    fn net_sse_start(&self, conn: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::stream::SseStartIo { conn })
+    }
+
     /// Build the SSE send descriptor. Default via [`Self::net_sse_send_now`]; `RealHost` overrides
     /// it with an async socket write.
     fn net_sse_send(&self, conn: u64, wire: String) -> Box<dyn crate::ExternIo> {

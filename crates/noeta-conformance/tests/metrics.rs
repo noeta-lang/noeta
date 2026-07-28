@@ -168,11 +168,18 @@ fn server_serve_auto_instruments_request_metrics() {
     let MetricPoints::Histogram(points) = &duration.points else {
         panic!("request duration is a histogram");
     };
-    // The scripted requests: GET /, GET /health, POST /echo, GET /users/42, DELETE /users/42,
-    // POST /form, and GET /ws (answered as a plain 200 here — the handler never upgrades it,
-    // server-hmr L0) — seven distinct (method, route, status) series, each observed once. This is
-    // the length of `noeta_stdlib::sandbox_request_script`, the one place the script is defined.
-    assert_eq!(points.len(), 7, "one series per distinct request");
+    // One distinct (method, route, status) series per scripted request, each observed once. Every
+    // scripted request has a distinct method+route, and this handler answers all of them with a
+    // plain 200 (it never upgrades `/ws`, never streams `/events`), so the series count IS the
+    // script length. Read from `sandbox_request_script` rather than hardcoded: the comment used to
+    // *claim* this was the script length while the code said `7`, which is exactly how the two
+    // drift apart.
+    let scripted = noeta_stdlib::net::sandbox_request_script().len();
+    assert_eq!(
+        points.len(),
+        scripted,
+        "one series per distinct scripted request"
+    );
     assert!(
         points.iter().all(|p| p.count == 1),
         "each request observed once"

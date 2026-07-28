@@ -14,6 +14,7 @@
 // expect: stdout "DELETE /users/42 -> no-ct"
 // expect: stdout "POST /form -> application/x-www-form-urlencoded"
 // expect: stdout "GET /ws -> no-ct"
+// expect: stdout "GET /events -> no-ct"
 // expect: exit 0
 use std.http.server
 use std.http.{Request, Response}

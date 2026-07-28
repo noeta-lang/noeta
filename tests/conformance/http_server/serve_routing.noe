@@ -9,6 +9,7 @@
 // expect: stdout "DELETE /users/42"
 // expect: stdout "POST /form title=buy+milk&note=caf%C3%A9"
 // expect: stdout "GET /ws"
+// expect: stdout "GET /events"
 // expect: stdout "served"
 // expect: exit 0
 use std.http.server
