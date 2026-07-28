@@ -159,6 +159,10 @@ and `mcp` alike.
   browser shows (root → modules → declarations → members); `doc_page` reads one node's signature and
   prose. All three work from a parse alone, so they read work-in-progress code.
 
+Every tool that takes a `file` analyzes **the whole program** — the entry, its sibling modules, and
+the packages its `noeta.toml` depends on, each under its own language edition. Dependency
+resolution is a read-only query: asking a question never rewrites `noeta.lock`.
+
 **Understand** — the compiler's semantic answers:
 - `check` — type-check code; the same JSON diagnostics `noeta check --format json` emits.
 - `type_at` / `symbols` — the inferred type at a symbol/position (plus a `layout` storage fact for `@packed`/flat-list types, same wording as editor hover); a file's declaration outline.
@@ -173,7 +177,11 @@ and `mcp` alike.
 - `reflect` — the [attributes & `@role` reflection manifest](Attributes-and-Reflection): which
   declarations are entry points, trust boundaries, persistence boundaries, sinks, or layers —
   each with its source location, joinable with every other tool. The `symbols` outline carries
-  the same roles per node, so the architecture shows on the map itself.
+  the same roles per node, so the architecture shows on the map itself. A role conferred by a
+  **dependency package's** `@role`-bearing attribute is indexed exactly like one declared in the
+  file at hand — tagging a package's tool attribute `@role(Semantic.TrustBoundary)` is what makes
+  "what can a language model reach in this program?" answerable off the architecture graph, and
+  the answer here is the same one `roles_of()` gives in-language.
 - `trace` — unfold the **static call path from a role**: `trace(from: "EntryPoint")` starts at
   every function bearing the role and walks the call graph — each node a function with its own
   roles, declaration and call sites; external module calls and dynamic callees are labeled

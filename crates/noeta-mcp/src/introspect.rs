@@ -469,4 +469,100 @@ enum Color { Red; Green }
         assert_eq!(reflect(&prep(), Some("Semantic.EntryPoint")).roles.len(), 1);
         assert_eq!(reflect(&prep(), Some("Sink")).roles.len(), 0);
     }
+
+    /// A two-package project on disk: `acme/toolkit` declares a `@role(Semantic.TrustBoundary)`
+    /// attribute struct, and `acme/app` depends on it by path and applies the attribute to a
+    /// function (alongside a same-file role, as the control). Returns the app's entry path.
+    fn dep_role_project(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join("noeta-mcp-tests").join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        let (app, toolkit) = (root.join("app"), root.join("toolkit"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&toolkit).unwrap();
+        std::fs::write(
+            toolkit.join("noeta.toml"),
+            "[package]\nname = \"acme/toolkit\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            toolkit.join("api.noe"),
+            "namespace toolkit.api;\n\
+             @attribute(Function)\n@role(Semantic.TrustBoundary)\npub struct Tool { name: string }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\ntoolkit = { path = \"../toolkit\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("main.noe"),
+            "use toolkit.api.Tool\n\
+             @attribute(Function)\n@role(Semantic.Sink)\nstruct Local { name: string }\n\
+             #[Tool(\"dep\")]\nfn from_dep(): void { return }\n\
+             #[Local(\"own\")]\nfn from_local(): void { return }\n\
+             echo \"ok\";\n",
+        )
+        .unwrap();
+        app.join("main.noe")
+    }
+
+    /// A role conferred by a **dependency package's** `@role`-bearing attribute reaches `reflect`.
+    ///
+    /// It used not to: the MCP built its workspace from the entry and its *siblings* only, so the
+    /// package declaring the `@role` was never linked. The attribute *application* sits in the
+    /// entry, so `attributes` listed it while `roles` came back empty — the half-delivered feature
+    /// where "what can a language model reach in this program?" is answerable in-language
+    /// (`roles_of()`) but not off the agent surface. The same-file `@role` is the control: it
+    /// always worked, and must keep working.
+    #[test]
+    fn reflect_sees_a_role_conferred_by_a_dependency_package() {
+        noeta_stdlib::registry::default_seeded();
+        let entry = dep_role_project("mcp_reflect_dep_role");
+        let p = prepare(&None, &Some(entry.display().to_string())).expect("prepare");
+
+        let out = reflect(&p, None);
+        let roles: Vec<(&str, &str)> = out
+            .roles
+            .iter()
+            .map(|r| (r.target.as_str(), r.role.as_str()))
+            .collect();
+        assert!(
+            roles.contains(&("from_dep", "Semantic.TrustBoundary")),
+            "the dependency-conferred role must be indexed: {roles:?}"
+        );
+        assert!(
+            roles.contains(&("from_local", "Semantic.Sink")),
+            "the same-file role still reports: {roles:?}"
+        );
+        // The attribute is listed under the package's **qualified** identity — proof the link
+        // resolved, rather than falling back to the entry's own unlinked AST.
+        assert!(
+            out.attributes
+                .iter()
+                .any(|a| a.target == "from_dep" && a.name == "toolkit.api.Tool"),
+            "attributes: {:?}",
+            out.attributes
+        );
+        // Filtering by the dependency-conferred role finds it too.
+        assert_eq!(reflect(&p, Some("TrustBoundary")).roles.len(), 1);
+    }
+
+    /// The same resolution makes `check` see the dependency: before it, a program importing a
+    /// package was analyzed as one whose import does not exist, so the agent surface reported
+    /// errors on code `noeta run` compiles cleanly.
+    #[test]
+    fn check_resolves_a_dependency_package() {
+        noeta_stdlib::registry::default_seeded();
+        let entry = dep_role_project("mcp_check_dep_package");
+        let resolved =
+            crate::resolve_workspace(&None, &Some(entry.display().to_string())).expect("resolve");
+        assert!(
+            !resolved.deps.is_empty(),
+            "the path dependency must resolve into the workspace"
+        );
+        let out = crate::run_check(&resolved);
+        assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
+    }
 }
