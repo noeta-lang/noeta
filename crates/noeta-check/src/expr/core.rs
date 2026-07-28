@@ -596,11 +596,19 @@ impl Checker {
         if !args.is_empty() || !self.coloring.type_params.contains_key(name.as_str()) {
             return false;
         }
-        // A parameter of the ENCLOSING generic type, named from a **self-less** member (an
-        // associated function, or a method whose body never touches `self`): the instantiation
-        // does exist at run time — it is on the receiver's reflected type tag — but this member has
-        // no receiver to read it from. Say that, instead of the blanket "generics are erased",
-        // which would send the author looking for a fix that is not the one.
+        // A parameter of the ENCLOSING generic type that this site cannot reach. The instantiation
+        // DOES exist at run time — it is on the receiver's reflected type tag — so the blanket
+        // "generics are erased" would send the author looking for a fix that is not the one. Two
+        // distinct reasons, each with its own fix, so each says which it is:
+        //
+        //   * this member has no receiver to read the tag from (an associated function, or a
+        //     method whose body never touches `self` — which is what makes it associated);
+        //   * the name is shadowed by the METHOD's own type parameter, which is a different `T`
+        //     entirely and has no per-call channel of its own.
+        //
+        // `self_type_params` is non-empty exactly inside an instance method of a generic type, and
+        // holds a blank in the slot of any parameter the method's own `<…>` shadows — so "in scope
+        // on the type, but not reachable here" splits cleanly on it.
         if let Some(owner) = self.coloring.current_type.clone()
             && self
                 .symbols
@@ -608,19 +616,33 @@ impl Checker {
                 .get(&owner)
                 .is_some_and(|ps| ps.iter().any(|p| p == name.as_str()))
         {
-            self.error(
-                DiagnosticCode::InvalidTypeArguments,
-                *span,
+            let shadowed = !self.coloring.self_type_params.is_empty();
+            let msg = if shadowed {
                 format!(
-                    "`{surface}` cannot reflect over `{name}` here: this member of \
-                     `{owner}` has no receiver, and `{name}` is carried by the instance"
-                ),
-            )
-            .help(format!(
-                "an instance of a generic type records its type arguments at construction, so \
-                 `{surface}::<{name}>()` resolves in a method that takes `self` — read a field of \
-                 `self` (or take the value as a parameter and reflect at the call site)"
-            ));
+                    "`{surface}` cannot reflect over `{name}` here: this method declares its own \
+                     `{name}`, which shadows `{owner}`'s and is erased"
+                )
+            } else {
+                format!(
+                    "`{surface}` cannot reflect over `{name}` here: this member of `{owner}` has \
+                     no receiver, and `{name}` is carried by the instance"
+                )
+            };
+            let help = if shadowed {
+                format!(
+                    "rename the method's parameter if you meant `{owner}`'s `{name}` (an \
+                     instance's own type arguments are recorded at construction and reachable \
+                     from `self`); a method's own type parameter has no such channel"
+                )
+            } else {
+                format!(
+                    "an instance of a generic type records its type arguments at construction, so \
+                     `{surface}::<{name}>()` resolves in a method that takes `self` — read a field \
+                     of `self` (or take the value as a parameter and reflect at the call site)"
+                )
+            };
+            self.error(DiagnosticCode::InvalidTypeArguments, *span, msg)
+                .help(help);
             return true;
         }
         self.error(
