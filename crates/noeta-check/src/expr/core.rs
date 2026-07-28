@@ -529,6 +529,51 @@ impl Checker {
         self.assignable(arg, param) || arg.defers_to_runtime() || param.defers_to_runtime()
     }
 
+    /// Whether `expr` is a **literal form that would absorb** `expected` — whether one of
+    /// [`Self::check_inner`]'s absorbing arms fires for this exact pair.
+    ///
+    /// Checking mode is only worth entering when the expectation actually reaches the literal. For
+    /// a *reassignment* (`Stmt::Binding`'s un-annotated arm) that distinction is what keeps the
+    /// tailored `E0007` — the one that names the binding and offers the union — as the single
+    /// report on a mismatch: an expectation the value cannot absorb would be enforced anonymously
+    /// by [`Self::subsume`] first, and then reported a second time by the reassignment's own check.
+    ///
+    /// Deliberately literal-only. A call, a `?`, and a `??` also have absorbing arms above, but
+    /// each ends in its own `subsume`, so routing a reassignment through them buys precision the
+    /// reassignment check already provides, at the cost of that double report. A literal arm
+    /// returns the expectation unchanged and reports only about its *elements*, which is strictly
+    /// more precise than one message about the whole value.
+    ///
+    /// Kept adjacent to the arms it mirrors: a new absorbing literal arm needs a line here.
+    pub(crate) fn absorbs_expectation(&self, expr: &Expr, expected: &Type) -> bool {
+        match expr {
+            Expr::List { .. } => matches!(expected, Type::List(_)),
+            Expr::Map { .. } => matches!(expected, Type::Map(..)),
+            Expr::Ident { name, .. } => name == "none" && matches!(expected, Type::Option(_)),
+            Expr::Closure { .. } => matches!(expected, Type::Fn { .. }),
+            // A target-typed `.{ … }` absorbs the expected type's *name*, and only a concrete
+            // named record type supplies one.
+            Expr::Object(lit) => {
+                lit.type_name.is_none()
+                    && matches!(expected, Type::Named(n, _) if self.symbols.records.contains_key(n))
+            }
+            Expr::Call { callee, args, .. } => match callee.as_ref() {
+                Expr::Ident { name, .. } if name == "some" => {
+                    args.len() == 1 && matches!(expected, Type::Option(_))
+                }
+                // `Ok()` is the unit-payload form, so zero or one argument.
+                Expr::Ident { name, .. } if name == "Ok" => {
+                    args.len() <= 1 && matches!(expected, Type::Result(..))
+                }
+                Expr::Ident { name, .. } if name == "Err" => {
+                    args.len() == 1 && matches!(expected, Type::Result(..))
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     pub(crate) fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {
         if !self.assignable(actual, expected) {
             self.error(

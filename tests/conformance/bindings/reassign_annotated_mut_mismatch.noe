@@ -1,0 +1,18 @@
+// The expectation flowing into a reassignment does NOT loosen the two rules around it. A `mut`
+// binding's type is fixed at its declaration, so a value the binding cannot hold is still `E0007`
+// — including a context-free polymorphic literal, which used to be reported as `E0023` (and, for
+// `Ok(_)`, as `E0007` AND `E0023` together). `Ok(3)` cannot absorb a `List<int>` expectation, so
+// it synthesizes and is rejected by the reassignment check with its own message, once.
+//
+// The second half is the un-refined accumulator: `mut acc = []` has no annotation, so `acc = []`
+// refines nothing and the binding's type stays an undeterminable hole — still `E0023`, exactly as
+// before. `E0023` is a binding-site diagnostic, and this write is still at one.
+// expect: error E0007 at 14:6
+// expect: error E0023 at 17:7
+// expect: exit 1
+mut xs: List<int> = [1];
+xs = Ok(3);
+
+mut acc = [];
+acc = [];
+echo acc;
