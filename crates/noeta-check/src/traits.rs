@@ -1763,7 +1763,10 @@ impl Checker {
                 let bound = &bound.name;
                 let satisfied = match BuiltinTrait::from_name(bound) {
                     Some(t) => self.satisfies(concrete, t),
-                    None => self.satisfies_user_trait(concrete, bound, &[]),
+                    None => {
+                        self.satisfies_user_trait(concrete, bound, &[])
+                            || self.native_type_advertises(concrete, bound)
+                    }
                 };
                 if !satisfied {
                     let help =
@@ -1865,6 +1868,30 @@ impl Checker {
     /// can — via a recorded in-body or standalone `impl` (`user_trait_impls`). A
     /// `dyn`/inference-hole defers to runtime (never a false negative); a built-in/primitive type
     /// never implements a user trait.
+    /// Whether a **native** type advertises `bound` in its own `ExtType.traits` declaration.
+    ///
+    /// The import-gated `user_trait_impls` table cannot answer this: `seed_ext_traits` seeds a
+    /// native trait only when the program `use`s it, which is right for *naming* one (`impl Widget`
+    /// needs the import like any other name) and wrong for a **bound on a native signature**. A
+    /// program calling `synced_signal(crdt.gcounter(), …)` never names `Mergeable` — the bound is
+    /// the extension's own business — so requiring an import to satisfy it would make every such
+    /// call site import traits it does not mention. The registry knows the advertisement outright,
+    /// so ask it there.
+    fn native_type_advertises(&self, ty: &Type, bound: &str) -> bool {
+        let Type::Named(name, _) = ty else {
+            return false;
+        };
+        let qualified = self
+            .imports
+            .extern_types
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.clone());
+        self.reg()
+            .find_type_qualified(&qualified)
+            .is_some_and(|t| t.traits.contains(&bound))
+    }
+
     fn satisfies_user_trait(&self, ty: &Type, bound: &str, want: &[Type]) -> bool {
         self.satisfies_user_trait_inner(ty, bound, want, &mut Vec::new())
     }
@@ -1949,7 +1976,10 @@ impl Checker {
             // type-checked when `Mergeable` stopped being built-in. Both kinds are checked here.
             let satisfied = match BuiltinTrait::from_name(bound) {
                 Some(t) => self.satisfies(&concrete, t),
-                None => self.satisfies_user_trait(&concrete, bound, &[]),
+                None => {
+                    self.satisfies_user_trait(&concrete, bound, &[])
+                        || self.native_type_advertises(&concrete, bound)
+                }
             };
             if satisfied {
                 continue;
