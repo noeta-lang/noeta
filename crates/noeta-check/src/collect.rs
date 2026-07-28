@@ -454,17 +454,16 @@ impl Checker {
                         .iter()
                         .map(|v| VariantInfo {
                             name: v.name.clone(),
-                            // A variant's **accurate** payload types (via `variant_field_type`, R2b),
-                            // exactly as a struct's field types live in `self.symbols.records`: one source of
-                            // truth for enum-construction type-argument inference **and** the `Send`
-                            // classifier **and** destructor-relevance. (Previously `field_type(&p.ty)`,
-                            // which is `Unknown` for a positional payload whose type parses into the
-                            // `Param`'s *name* — an `Unknown` that silently classified an enum wrapping
-                            // a `class` as `Send`, unlike the equivalent struct.)
+                            // A variant's payload types, read from the annotation exactly as a
+                            // struct's field types are (R2b): one source of truth for
+                            // enum-construction type-argument inference, the `Send` classifier, and
+                            // destructor-relevance. This needed a `variant_field_type` helper that
+                            // rebuilt a positional payload's type out of the `Param`'s *name*; the
+                            // parser puts it in `ty` now, so the plain field rule reaches both forms.
                             fields: v
                                 .fields
                                 .iter()
-                                .map(|v| variant_field_type(v, &self.imports.extern_types))
+                                .map(|v| field_type(&v.ty, &self.imports.extern_types))
                                 .collect(),
                         })
                         .collect();

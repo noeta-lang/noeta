@@ -532,6 +532,7 @@ impl SessionChecker {
                 ty: None,
                 default: None,
                 span,
+                positional: false,
             })
             .collect();
         let wrapper = Program {

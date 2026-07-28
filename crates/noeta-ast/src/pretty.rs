@@ -56,6 +56,38 @@ fn param_list(params: &[Param]) -> String {
         .join(" ")
 }
 
+/// An enum variant's payload list, for the AST rendering the fmt safety gate compares.
+///
+/// Unlike [`param_list`], this renders the **type** — because for a variant payload the type is
+/// what the declaration is about, and it is the only thing distinguishing `Leaf(User)` from
+/// `Leaf(Post)`. A positional payload prints its type alone; a named one prints `name: type`, so
+/// the two spellings stay distinguishable in the snapshot (a formatter that turned one into the
+/// other would be changing the source's meaning to a reader, even though nothing binds a payload
+/// by name).
+///
+/// The gate saw neither before: a named payload rendered as its bare name, so dropping its `: T`
+/// annotation would have compared equal, and a positional one rendered as *its type in the name
+/// slot* — right by accident, and only until the representation was fixed.
+fn variant_payload_list(fields: &[Param]) -> String {
+    fields
+        .iter()
+        .map(|p| {
+            let attrs: String = p
+                .attrs
+                .iter()
+                .map(|a| format!("#[{}{}] ", a.name, attr_args_str(&a.args)))
+                .collect();
+            let ty = p.ty.as_ref().map(type_ref_str).unwrap_or_default();
+            if p.positional {
+                format!("{attrs}{ty}")
+            } else {
+                format!("{attrs}{}: {ty}", p.name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl Pretty for CallArg {
     /// A labelled argument renders its label. The fmt safety gate compares this form before and
     /// after formatting, so an unrendered label would be a label the formatter could silently
@@ -392,7 +424,7 @@ impl Pretty for EnumDecl {
                 if v.fields.is_empty() {
                     v.name.clone()
                 } else {
-                    format!("{}({})", v.name, param_list(&v.fields))
+                    format!("{}({})", v.name, variant_payload_list(&v.fields))
                 }
             })
             .collect();

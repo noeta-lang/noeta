@@ -1390,6 +1390,22 @@ pub struct Param {
     pub ty: Option<TypeRef>,
     pub default: Option<Expr>,
     pub span: Span,
+    /// Whether the declaration wrote **no name** — an enum variant's *positional* payload,
+    /// `Leaf(User)` as opposed to `Leaf(u: User)`. `name` is then the synthesized slot name `_0`,
+    /// `_1`, … (the spelling both backends already use for a native enum's payload slots) and says
+    /// nothing the source said; `ty` holds the type, like every other parameter's.
+    ///
+    /// Always `false` for a function or method parameter, which must be named.
+    ///
+    /// The flag exists so that a positional payload's *type* lives in the type slot. It used to
+    /// live in `name`, with `ty: None` — parsed by the identifier rule and stored where a name
+    /// goes. Every consumer that wanted the type had to know the trick, and each one that did not
+    /// silently did something wrong: module qualification skipped it (so a cross-module
+    /// `Leaf(User)` was E0013 "unknown type" while `Leaf(u: User)` worked), the E0013 declaration
+    /// check reconstructed a `TypeRef` by hand, IDE completion collected no type span for it, and —
+    /// because an identifier is not a type — `Leaf(App.Models.User)`, `Leaf(List<User>)`, and
+    /// `Leaf(?User)` were all syntax errors. One representation, one rule.
+    pub positional: bool,
 }
 
 impl Param {

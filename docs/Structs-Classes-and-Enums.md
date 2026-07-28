@@ -174,6 +174,25 @@ enum Direction: string {                                 // string-backed
 }
 ```
 
+A payload field may be **named** (`NegativePrice(index: int)`) or **positional** (`NegativePrice(int)`) — the name is documentation, since construction and `match` both bind by position. Either way the payload is a *type*, so it may be anything a type annotation may: an imported or fully-qualified name, generic arguments, `?T`, a tuple, a function type.
+
+```noeta
+use std.id.Uuid
+
+enum Event {
+    Started(Uuid)                                        // an imported type
+    Tagged(List<string>)                                 // generic arguments
+    Scored(name: string, points: int)                    // named, several fields
+    Missing
+}
+echo match Event.Tagged(["a", "b"]) {
+    Event.Started(u)   => "start",
+    Event.Tagged(tags) => "${tags.len()} tags",
+    Event.Scored(n, p) => "${n}=${p}",
+    Event.Missing      => "-",
+}
+```
+
 Construct with `Enum.Variant` (or `Enum.Variant(payload)`), compare with `==`, and destructure in a `match`:
 
 ```noeta

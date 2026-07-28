@@ -1750,6 +1750,7 @@ where
                 ty,
                 default,
                 span: ctx.to_span(e.span()),
+                positional: false,
             },
         );
     param
@@ -1757,6 +1758,77 @@ where
         .allow_trailing()
         .collect::<Vec<_>>()
         .delimited_by(just(T::LParen), just(T::RParen))
+        .boxed()
+}
+
+/// An enum variant's payload list — `(u: User)`, `(User)`, `(int, string)`, or `()`.
+///
+/// Not [`params_parser`], because a variant payload may be written **positionally**: a bare type
+/// with no name. That used to go through the same identifier-then-optional-annotation rule a
+/// function parameter uses, so the *type* landed in the name slot with `ty: None` — which meant it
+/// had to be a single bare identifier. `Leaf(App.Models.User)` was a syntax error, and every
+/// consumer reading `ty` (module qualification, most consequentially) simply did not see a type
+/// there at all.
+///
+/// Here each field is either `name: Type` or a full [`type_parser`] type, so a positional payload
+/// admits everything a type annotation does — a qualified path, generic arguments, `?T`, a tuple —
+/// and lands in `ty` like a named one. A positional field's name is the synthesized slot name
+/// `_0`, `_1`, … assigned by position, flagged by [`Param::positional`]; both backends already
+/// spell a native enum's payload slots that way, and nothing binds a payload by name — construction
+/// and patterns are both positional.
+fn variant_fields_parser<'src, I, P>(
+    ctx: Ctx<'src>,
+    expr: P,
+) -> impl Parser<'src, I, Vec<Param>, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+    P: Parser<'src, I, Expr, Extra<'src>> + Clone + 'src,
+{
+    // `name: Type` is tried first: `type_parser` would otherwise consume the name as a one-segment
+    // type and leave the `:` stranded.
+    let named = ident_parser(ctx)
+        .then_ignore(just(T::Colon))
+        .then(type_parser(ctx))
+        .map(|((name, name_span), ty)| (Some((name, name_span)), ty));
+    let positional = type_parser(ctx).map(|ty| (None, ty));
+    let field = attribute_parser(ctx, expr)
+        .repeated()
+        .collect::<Vec<_>>()
+        .then(choice((named, positional)))
+        .map_with(move |(attrs, (named, ty)), e| {
+            // A positional field's name is left empty here and filled in below, where its position
+            // in the list is known; its `name_span` points at the type it was written as.
+            let (name, name_span) = match named {
+                Some((name, name_span)) => (name, name_span),
+                None => (String::new(), ty.span()),
+            };
+            Param {
+                attrs,
+                positional: name.is_empty(),
+                name,
+                name_span,
+                ty: Some(ty),
+                default: None,
+                span: ctx.to_span(e.span()),
+            }
+        });
+    field
+        .separated_by(just(T::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(T::LParen), just(T::RParen))
+        .map(|fields: Vec<Param>| {
+            fields
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut f)| {
+                    if f.positional {
+                        f.name = format!("_{i}");
+                    }
+                    f
+                })
+                .collect()
+        })
         .boxed()
 }
 
@@ -3451,7 +3523,7 @@ where
             .collect::<Vec<_>>()
             .then(id.clone())
             .then(choice((
-                params_parser(ctx, expr.clone(), false).map(|fields| (fields, None)),
+                variant_fields_parser(ctx, expr.clone()).map(|fields| (fields, None)),
                 just(T::Eq)
                     .ignore_then(expr.clone())
                     .map(|value| (Vec::new(), Some(value))),

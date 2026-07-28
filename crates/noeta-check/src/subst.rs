@@ -664,25 +664,6 @@ pub(crate) fn field_type(ty: &Option<TypeRef>, xt: &HashMap<String, String>) -> 
         .unwrap_or(Type::Unknown)
 }
 
-/// The type of one enum-variant payload field (R2b). A **positional** payload (`Leaf(T)`, `V(int)`)
-/// is parsed with its type as the `Param`'s *name* and no annotation, so its type is reconstructed
-/// from the name; a **named** field (`Leaf(x: T)`) uses its annotation. Reconstructing from the name
-/// routes through the same name→[`Type`] resolution `from_ref` uses, so `int` maps to [`Type::Int`]
-/// and a type parameter `T` to `Type::Named("T", [])` (the form [`bind_type_params`] unifies).
-pub(crate) fn variant_field_type(p: &Param, xt: &HashMap<String, String>) -> Type {
-    match &p.ty {
-        Some(tr) => from_ref_q(tr, xt),
-        None => from_ref_q(
-            &TypeRef::Named {
-                name: p.name.clone(),
-                args: Vec::new(),
-                span: p.name_span,
-            },
-            xt,
-        ),
-    }
-}
-
 /// The receiver (`self`) type inside a method of `name` — `Named(name, <its own type params>)` — so
 /// an explicit `self.field` resolves through [`Checker::synth_member`] to the field's declared type
 /// (a concrete field keeps it precisely, e.g. `List<u64>`; a generic field erases to `dyn` via the

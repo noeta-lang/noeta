@@ -229,10 +229,15 @@ pub(crate) fn fn_signature(decl: &FnDecl) -> String {
 
 /// One parameter (or variant field) rendered as `name: T`, or just `name` when it has no annotation.
 /// Shared with signature help.
+///
+/// A variant's **positional** payload (`Circle(float)`) renders as its type alone: the source gave
+/// it no name, and the `_0` the AST carries is a synthesized slot name that must never surface in a
+/// hover.
 pub(crate) fn param_detail(param: &Param) -> String {
-    match &param.ty {
-        Some(ty) => format!("{}: {}", param.name, render_type_ref(ty)),
-        None => param.name.clone(),
+    match (&param.ty, param.positional) {
+        (Some(ty), true) => render_type_ref(ty),
+        (Some(ty), false) => format!("{}: {}", param.name, render_type_ref(ty)),
+        (None, _) => param.name.clone(),
     }
 }
 

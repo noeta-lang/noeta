@@ -159,6 +159,7 @@ pub(super) fn desugar_state_machine(
             ty: None,
             default: None,
             span,
+            positional: false,
         }],
         ret: None,
         body: ClosureBody::Block(vec![dispatch]),

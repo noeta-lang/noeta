@@ -1,11 +1,12 @@
 // A **positional** variant payload (`Leaf(Widget)`) names a type, and that name is validated like
 // every other annotation — an unresolvable one is E0013.
 //
-// It is spelled unlike every other annotation, though: a positional payload is parsed with its type
-// as the field's *name* and no annotation at all, so the declaration walk's "check the annotation"
-// step saw nothing and this was the one type position in the language nobody validated. The named
-// form `Leaf(item: Widget)` was correctly rejected while this one checked clean.
-// expect: error E0013 at 11:10
+// It used to be *stored* unlike every other annotation: a positional payload parsed with its type
+// in the field's *name* and no annotation at all, so the declaration walk's "check the annotation"
+// step saw nothing, and this was the one type position in the language nobody validated — the named
+// form `Leaf(item: Widget)` was correctly rejected while this one checked clean. The type lives in
+// the type slot now, so the ordinary rule reaches it; this case pins that it still does.
+// expect: error E0013 at 12:10
 // expect: exit 1
 enum Tree {
     Leaf(Widget);

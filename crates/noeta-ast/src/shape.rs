@@ -103,13 +103,16 @@ fn payload_spelling(fields: &[Param]) -> String {
     }
     let parts: Vec<String> = fields
         .iter()
-        .map(|p| match &p.ty {
-            // A named payload field (`NegativePrice(index: int)`) spells name and type.
-            Some(ty) => format!("{}: {}", p.name, type_spelling(ty)),
-            // A POSITIONAL payload (`Leaf(T)`) is parsed with its type as the parameter's *name*
-            // and no annotation, so the name is the spelling — the same reconstruction the
-            // checker's `variant_field_type` performs.
-            None => short_type_name(&p.name).to_string(),
+        .map(|p| {
+            let ty = p.ty.as_ref().map(type_spelling).unwrap_or_default();
+            // A POSITIONAL payload (`Leaf(T)`) spells the type alone — its name is a synthesized
+            // slot name, nothing the source wrote. A named field (`NegativePrice(index: int)`)
+            // spells both.
+            if p.positional {
+                ty
+            } else {
+                format!("{}: {}", p.name, ty)
+            }
         })
         .collect();
     format!("({})", parts.join(", "))
@@ -169,6 +172,18 @@ mod tests {
             ty,
             default: None,
             span: span(),
+            positional: false,
+        }
+    }
+
+    /// A variant's **positional** payload, as the parser builds it: the type in `ty`, a synthesized
+    /// `_N` slot name, and the flag that says the source wrote no name.
+    fn positional_param(index: usize, ty: TypeRef) -> Param {
+        Param {
+            positional: true,
+            name: format!("_{index}"),
+            ty: Some(ty),
+            ..param("", None)
         }
     }
 
@@ -276,8 +291,12 @@ mod tests {
             variant_shape(&[
                 variant("Empty", Vec::new()),
                 variant("Named", vec![param("index", Some(named("int", vec![])))]),
-                // A POSITIONAL payload parses its type as the parameter's name, with no annotation.
-                variant("Positional", vec![param("string", None)]),
+                // A POSITIONAL payload carries its type like any other field; only the *name* is
+                // synthesized, and the spelling must not leak it.
+                variant(
+                    "Positional",
+                    vec![positional_param(0, named("string", vec![]))],
+                ),
                 variant(
                     "Two",
                     vec![

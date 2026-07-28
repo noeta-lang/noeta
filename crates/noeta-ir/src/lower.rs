@@ -1648,6 +1648,7 @@ impl Lowerer<'_> {
                         ty: None,
                         default: None,
                         span: *span,
+                        positional: false,
                     })
                     .collect();
                 let call = Expr::Call {
