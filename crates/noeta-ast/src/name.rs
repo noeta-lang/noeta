@@ -84,7 +84,7 @@
 //! let written = Name::written("User");
 //! let canonical = Name::canonical("std.id.Uuid");
 //! assert_eq!(written.as_str(), "User");
-//! assert_eq!(canonical.short(), "Uuid");
+//! assert_eq!(canonical.as_str(), "std.id.Uuid");
 //! ```
 //!
 //! A bare `String` cannot become one by assignment:
@@ -190,11 +190,6 @@ impl Name {
         self.0 = qualified.into();
     }
 
-    /// The human-facing short name: the segment after the final `.`. See [`crate::short_type_name`].
-    pub fn short(&self) -> &str {
-        crate::short_type_name(&self.0)
-    }
-
     /// Whether the name is empty — the "absent" spelling a few parser positions use in place of an
     /// `Option` (`RoleTag::enum_name` for an unqualified `@role(Variant)`).
     pub fn is_empty(&self) -> bool {
@@ -266,12 +261,6 @@ mod tests {
     fn provenance_constructors_agree_on_the_text() {
         assert_eq!(Name::written("User").as_str(), "User");
         assert_eq!(Name::canonical("App.User").as_str(), "App.User");
-    }
-
-    #[test]
-    fn short_strips_the_namespace() {
-        assert_eq!(Name::canonical("App.Models.User").short(), "User");
-        assert_eq!(Name::written("User").short(), "User");
     }
 
     #[test]
