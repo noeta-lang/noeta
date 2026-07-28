@@ -274,7 +274,7 @@ async fn tokens(body: string): void {
 
 A `FrameStream` is a **handle** on a single consumable body: copies alias it, and it belongs to the task that opened it. A **`Frame`, by contrast, is a value struct** — so by the rule in [Isolates and `Send`](#isolates-and-send) it is `Send`. That is deliberate rather than incidental: it lets one task own the body while others receive frames over a channel, which is the natural shape of a streaming pipeline.
 
-```noeta
+```noeta ignore
 concurrent {
     spawn read_into(stream, tx)     // one task owns the FrameStream
     spawn forward(rx)               // others receive Frames over a channel
