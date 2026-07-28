@@ -55,7 +55,7 @@
 //! `Option<String>`, `Vec<(String, Span)>`) are genuinely ambiguous — a `String` is a qualifiable
 //! declaration name or a local binding or literal text, and nothing but a human knows which — and
 //! **those are exactly the rows [`TABLE`] holds**, plus the handful of type-shaped fields that are
-//! deliberately not walked. 404 fields, ~75 judgements.
+//! deliberately not walked. Roughly 390 fields; fewer than a hundred judgements.
 //!
 //! ## How the check is run
 //!
@@ -332,9 +332,25 @@ const TABLE: &[Row] = &[
         Unqualified("resolved through the (now-qualified) enum"),
     ),
     Row(
+        "AttrValue::Map",
+        "0",
+        Sub(
+            "a map literal's VALUES are recursed into; its keys are string literals, since a runtime \
+             map is string-keyed",
+        ),
+    ),
+    Row(
         "AttrValue::Struct",
         "type_name",
         Name("a struct-valued attribute argument names a real type"),
+    ),
+    Row(
+        "AttrValue::Struct",
+        "fields",
+        Sub(
+            "a struct literal's field VALUES are recursed into; the field names belong to the \
+             (now-qualified) type",
+        ),
     ),
     Row(
         "AttrValue::TypeRef",
@@ -618,17 +634,25 @@ const NODES: &[&str] = &[
 /// The verdict a field's DECLARED TYPE settles on its own, or `None` when only a human can say.
 ///
 /// This is the half worth keeping and the half that scales: `Option<TypeRef>` must be qualified and
-/// `Vec<Stmt>` must be recursed into whatever the field is called, so 330 of the 404 fields need no
-/// judgement at all. The residue — a bare `String` — is genuinely ambiguous (a declaration name? a
-/// local? literal text?) and is what [`TABLE`] is for.
+/// `Vec<Stmt>` must be recursed into whatever the field is called, so three quarters of the fields
+/// need no judgement at all. The residue — anything mentioning `String` — is genuinely ambiguous (a
+/// declaration name? a local? a member name? literal text?) and is what [`TABLE`] is for; it is
+/// never derived, so a future `Vec<(String, Span)>` cannot slip through as "inert, it has a Span in
+/// it".
 fn derived_verdict(field_ty: &str) -> Option<Verdict> {
     let mentions = |t: &str| {
         field_ty
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .any(|w| w == t)
     };
-    // `TypeRef` first: `Vec<(String, TypeRef)>` is an associated-type binding, and the type half is
-    // what must be qualified.
+    // A field mentioning `String` is NEVER derived, whatever else its type holds: a string in this
+    // AST is a declaration name, a local binding, a member name, or literal text, and only a human
+    // knows which. Checked before everything else so that a future `Vec<(String, Span)>` cannot
+    // slip through as "inert, it has a Span in it".
+    if mentions("String") {
+        return None;
+    }
+    // `TypeRef` next: a type reference must be qualified wherever it sits.
     if mentions("TypeRef") {
         return Some(Type("a declared type reference"));
     }
