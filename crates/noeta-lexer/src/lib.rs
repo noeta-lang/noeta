@@ -189,6 +189,13 @@ pub enum TokenKind {
     /// argument is an instance and whose result carries values, not declared types).
     #[token("field_specs_of")]
     FieldSpecsOfKw,
+    /// The reflection keyword `variants_of` — a declared enum TYPE's variant schema as
+    /// `List<VariantSpec>` (`{ name: string, payload: List<FieldSpec>, backing: ?dyn }`). The enum
+    /// twin of [`TokenKind::FieldSpecsOfKw`], with the same two disjoint surfaces under one keyword:
+    /// the static turbofish `variants_of::<T>()` and the dynamic `variants_of(name)` a framework uses
+    /// when it holds the type only as the string off a `Type.Named(name, _)` it just reflected.
+    #[token("variants_of")]
+    VariantsOfKw,
     /// The reflection keyword `construct` — build a struct value from field values at runtime, reusing
     /// the same construction path as a `T { … }` literal (defaults + full-initialization honored).
     /// Two surfaces: the static turbofish `construct::<T>(fields)` (desugared to the type name) and
@@ -456,6 +463,7 @@ impl TokenKind {
             TokenKind::ReturnsOfKw => "ReturnsOfKw",
             TokenKind::InvokeKw => "InvokeKw",
             TokenKind::FieldSpecsOfKw => "FieldSpecsOfKw",
+            TokenKind::VariantsOfKw => "VariantsOfKw",
             TokenKind::ConstructKw => "ConstructKw",
             TokenKind::ColonColon => "ColonColon",
             TokenKind::StringLit => "StringLit",
@@ -570,6 +578,7 @@ impl TokenKind {
             TokenKind::ReturnsOfKw => "`returns_of`",
             TokenKind::InvokeKw => "`invoke`",
             TokenKind::FieldSpecsOfKw => "`field_specs_of`",
+            TokenKind::VariantsOfKw => "`variants_of`",
             TokenKind::ConstructKw => "`construct`",
             TokenKind::ColonColon => "`::`",
             TokenKind::StringLit => "a string literal",

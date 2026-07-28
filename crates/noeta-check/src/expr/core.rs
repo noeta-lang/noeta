@@ -393,7 +393,8 @@ impl Checker {
                 // `results.map(Ok)` see the precise monomorphic signature instead of the erased
                 // one. Subsumption still runs, so an incompatible instantiation reports.
                 if let Expr::Ident { name, span } = expr
-                    && let Some(fn_ty) = self.instantiate_fn_value(name, expected, *span, env)
+                    && let Some(fn_ty) =
+                        self.instantiate_fn_value(name.as_str(), expected, *span, env)
                 {
                     self.subsume(&fn_ty, expected, *span);
                     return fn_ty;
@@ -576,7 +577,7 @@ impl Checker {
         let TypeRef::Named { name, args, span } = ty else {
             return false;
         };
-        if !args.is_empty() || !self.coloring.type_params.contains_key(name) {
+        if !args.is_empty() || !self.coloring.type_params.contains_key(name.as_str()) {
             return false;
         }
         self.error(
@@ -710,7 +711,7 @@ impl Checker {
             // The one lookup site that needs an *owned* type (synthesis returns `Type` by value),
             // so it clones here rather than in `lookup` (audit-3 Finding 12).
             Expr::Ident { name, span }
-                if lookup(env, name).is_none()
+                if lookup(env, name.as_str()).is_none()
                     && self.symbols.forwarding.contains_key(name.as_str())
                     && self.symbols.functions.contains_key(name.as_str()) =>
             {
@@ -733,7 +734,7 @@ impl Checker {
                 ));
                 Type::Unknown
             }
-            Expr::Ident { name, span } => match lookup(env, name)
+            Expr::Ident { name, span } => match lookup(env, name.as_str())
                 .cloned()
                 // A bare user-function reference is a first-class value of its **full** signature
                 // type — parameters included, so passing it where a `Fn(A) -> B` is declared
@@ -742,16 +743,19 @@ impl Checker {
                 // position. (Was params-erased until higher-order-abi H2 made module signatures
                 // carry declared `Fn` params, which an erased handle could never satisfy.)
                 .or_else(|| {
-                    self.symbols.functions.get(name).map(|sig| Type::Fn {
-                        params: sig.params.clone(),
-                        ret: Box::new(sig.ret.clone()),
-                    })
+                    self.symbols
+                        .functions
+                        .get(name.as_str())
+                        .map(|sig| Type::Fn {
+                            params: sig.params.clone(),
+                            ret: Box::new(sig.ret.clone()),
+                        })
                 })
                 // A selectively-imported module function referenced as a value (`let f = sqrt`).
                 .or_else(|| {
                     self.imports
                         .imported_fns
-                        .contains_key(name)
+                        .contains_key(name.as_str())
                         .then(|| Type::Fn {
                             params: Vec::new(),
                             ret: Box::new(Type::Dyn),
@@ -778,13 +782,13 @@ impl Checker {
                         .help(format!(
                             "member access is explicit — the field is `self.{name}`"
                         ));
-                    } else if !self.config.session_mode && !self.is_known_name(name, env) {
+                    } else if !self.config.session_mode && !self.is_known_name(name.as_str(), env) {
                         // A bare reference to a name that resolves to nothing — a genuinely
                         // undefined value (F1), the same static `E0005` as an unknown callee. A
                         // session defers (a later entry may define it). In a SEALED named-fn
                         // body a miss that names a real top-level binding gets the capture hint.
                         let sealed_global_miss = self.coloring.in_sealed_body
-                            && self.symbols.global_binding_names.contains(name);
+                            && self.symbols.global_binding_names.contains(name.as_str());
                         let diag = self.error(
                             DiagnosticCode::UnknownName,
                             *span,
@@ -1119,7 +1123,7 @@ impl Checker {
                     }
                     return Type::Unknown;
                 };
-                self.synth_object_named(lit, &type_name, env)
+                self.synth_object_named(lit, type_name.as_str(), env)
             }
             Expr::Try { expr, span } => {
                 let inner = self.synth(expr, env);
@@ -1327,7 +1331,7 @@ impl Checker {
                 // both filtered by matching only a *bare* (`args.is_empty()`) erased-width name.
                 if let TypeRef::Named { name, args, span } = ty
                     && args.is_empty()
-                    && let Some(base) = erased_scalar_width_base(name)
+                    && let Some(base) = erased_scalar_width_base(name.as_str())
                 {
                     self.warn(
                         DiagnosticCode::ErasedWidthNarrow,
@@ -1523,6 +1527,24 @@ impl Checker {
                     Vec::new(),
                 )))
             }
+            Expr::VariantsOf { name, span } => {
+                // The type-level variant schema, surfaced as `List<VariantSpec>`. The enum twin of
+                // `field_specs_of`, checked through the SAME `check_type_operand` so the turbofish
+                // resolves a name (and reports an erased type parameter as E0058) identically, and
+                // the dynamic surface stays lenient — a name that is not an enum is a runtime empty
+                // list, not a static error.
+                self.check_type_operand(
+                    name,
+                    env,
+                    *span,
+                    "variants_of",
+                    "pass an enum type name, or use the turbofish `variants_of::<T>()`",
+                );
+                Type::List(Box::new(Type::Named(
+                    noeta_ast::reflect::VARIANT_SPEC.to_string(),
+                    Vec::new(),
+                )))
+            }
             Expr::Construct { name, fields, span } => {
                 // The dynamic struct constructor: build a value of the type `name` from `fields`, a
                 // runtime `List<dyn>` of field values in declaration order. Fallible by construction
@@ -1611,7 +1633,7 @@ impl Checker {
                 // qualified identity through the imports; falling back to the raw binding lets an
                 // unimported/typo'd receiver resolve to nothing and report cleanly below.
                 let binding = match recv.as_ref() {
-                    Expr::Ident { name, .. } => name.clone(),
+                    Expr::Ident { name, .. } => name.to_string(),
                     _ => String::new(),
                 };
                 // `recv.func::<T>(args)` where the receiver is NOT an imported native module is a
@@ -1625,8 +1647,9 @@ impl Checker {
                 // module, a local binding, nor a user type (a typo'd module) falls through to the
                 // native-call path below and reports there, unchanged.
                 if let Expr::Ident { name, .. } = recv.as_ref()
-                    && !self.imports.modules.contains_key(name)
-                    && (lookup(env, name).is_some() || self.symbols.types.contains(name))
+                    && !self.imports.modules.contains_key(name.as_str())
+                    && (lookup(env, name.as_str()).is_some()
+                        || self.symbols.types.contains(name.as_str()))
                 {
                     self.check_type_ref(ty);
                     let mut arg_types: Vec<Type> = args
@@ -1765,7 +1788,7 @@ impl Checker {
                     })
                     .collect();
                 let ret = self.synth_typed_call(
-                    name,
+                    name.as_str(),
                     *name_span,
                     type_args,
                     &mut arg_types,
@@ -1844,7 +1867,7 @@ impl Checker {
                 if let Some(recv) = recv {
                     let recv_is_type = matches!(
                         recv.as_ref(),
-                        Expr::Ident { name, .. } if self.symbols.types.contains(name)
+                        Expr::Ident { name, .. } if self.symbols.types.contains(name.as_str())
                     );
                     if !recv_is_type {
                         self.synth(recv, env);

@@ -28,8 +28,8 @@
 
 use crate::pretty::type_ref_str;
 use crate::{
-    BinaryOp, CallArg, DeriveSpec, Expr, FieldDecl, FieldInit, FnDecl, ObjectLit, Param, Stmt,
-    StrPart, TraitDecl, TypeOperand, TypeRef,
+    BinaryOp, CallArg, DeriveSpec, Expr, FieldDecl, FieldInit, FnDecl, Name, ObjectLit, Param,
+    Stmt, StrPart, TraitDecl, TypeOperand, TypeRef,
 };
 use noeta_span::Span;
 
@@ -86,16 +86,21 @@ pub fn plan_derive(
     fields: &[FieldDecl],
     existing: &[FnDecl],
 ) -> Option<Result<Vec<FnDecl>, DerivePlanError>> {
-    if let Some(tr) = ctx.user_trait(&spec.name) {
+    if let Some(tr) = ctx.user_trait(spec.name.as_str()) {
         return Some(plan_user_trait_derive(&tr, fields, existing, spec));
     }
     if spec.via.is_some() {
-        return Some(plan_builtin_via(&spec.name, type_name, fields, spec));
+        return Some(plan_builtin_via(
+            spec.name.as_str(),
+            type_name,
+            fields,
+            spec,
+        ));
     }
     if spec.name == ERROR_TRAIT {
         return Some(Ok(plan_error_derive(spec.span)));
     }
-    ctx.native_recipe(&spec.name)
+    ctx.native_recipe(spec.name.as_str())
         .map(|methods| Ok(plan_native_derive(&methods, spec.span)))
 }
 
@@ -162,7 +167,7 @@ pub fn plan_user_trait_derive(
                 existing,
                 &binding.target,
                 spec.span,
-                &tr.name,
+                tr.name.as_str(),
             )?);
             continue;
         }
@@ -172,7 +177,7 @@ pub fn plan_user_trait_derive(
         }
         // Required and unbound: deduce a field bridge — same-name first, else a unique
         // type-compatible candidate; ambiguity or absence is an error naming the options.
-        out.push(deduce_field_bridge(m, fields, spec.span, &tr.name)?);
+        out.push(deduce_field_bridge(m, fields, spec.span, tr.name.as_str())?);
     }
     Ok(out)
 }
@@ -195,7 +200,7 @@ fn plan_user_trait_via(
             "`via:` forwards the whole trait through the field; drop the `member: target` pairs",
         ));
     }
-    require_field(fields, via_field, &tr.name, spec.span)?;
+    require_field(fields, via_field, tr.name.as_str(), spec.span)?;
     Ok(tr
         .methods
         .iter()
@@ -211,7 +216,7 @@ fn plan_user_trait_via(
             let call = Expr::Call {
                 callee: Box::new(member(
                     member(ident("self", spec.span), via_field, spec.span),
-                    &m.name,
+                    m.name.as_str(),
                     spec.span,
                 )),
                 args: m
@@ -438,7 +443,7 @@ pub fn plan_builtin_via(
         }
         // fn add(other: T): T { return T { f: self.f + other.f } }
         let construct = Expr::Object(ObjectLit {
-            type_name: Some(type_name.to_string()),
+            type_name: Some(Name::canonical(type_name)),
             type_name_span: span,
             fields: vec![FieldInit {
                 name: via_field.clone(),
@@ -918,7 +923,9 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
         }
         // A turbofish operand IS a type reference (and the only one the derive rewrite can reach
         // here); a dynamic one is an ordinary expression.
-        Expr::FieldSpecsOf { name, .. } => visit_type_operand_types(name, f),
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
+            visit_type_operand_types(name, f)
+        }
         Expr::Construct { name, fields, .. } => {
             visit_type_operand_types(name, f);
             visit_expr_types(fields, f);
@@ -965,7 +972,7 @@ fn require_field<'f>(
 
 fn ident(name: &str, span: Span) -> Expr {
     Expr::Ident {
-        name: name.to_string(),
+        name: Name::canonical(name),
         span,
     }
 }
@@ -981,7 +988,7 @@ fn member(receiver: Expr, name: &str, span: Span) -> Expr {
 
 fn named(name: &str, span: Span) -> TypeRef {
     TypeRef::Named {
-        name: name.to_string(),
+        name: Name::canonical(name),
         args: Vec::new(),
         span,
     }
@@ -997,7 +1004,7 @@ fn ret_stmt(value: Expr, span: Span) -> Vec<Stmt> {
 /// A bare synthesized `FnDecl` skeleton — name only, everything else empty/default.
 fn empty_fn(name: &str, span: Span) -> FnDecl {
     FnDecl {
-        name: name.to_string(),
+        name: Name::canonical(name),
         name_span: span,
         is_public: false,
         type_params: Vec::new(),
@@ -1028,7 +1035,7 @@ fn synth_fn(template: &FnDecl, body: Vec<Stmt>, span: Span) -> FnDecl {
         ret: template.ret.clone(),
         is_async: template.is_async,
         body,
-        ..empty_fn(&template.name, span)
+        ..empty_fn(template.name.as_str(), span)
     }
 }
 

@@ -87,7 +87,7 @@ pub(crate) fn resolve_variant_patterns(
     match pattern {
         Pattern::Binding { span, .. } => match sites.get(span) {
             Some((type_name, variant)) => Pattern::Variant {
-                type_name: type_name.clone(),
+                type_name: type_name.clone().map(noeta_ast::Name::canonical),
                 variant: variant.clone(),
                 bindings: Vec::new(),
                 span: *span,
@@ -502,12 +502,12 @@ pub fn hoist_impl_methods_with_registry(
     let mut additions: StdHashMap<String, Vec<FnDecl>> = StdHashMap::new();
     for stmt in &program.stmts {
         if let AstStmt::Impl(decl) = stmt {
-            let entry = additions.entry(decl.target.clone()).or_default();
+            let entry = additions.entry(decl.target.to_string()).or_default();
             entry.extend(decl.methods.iter().cloned());
             // Default-method fallback (UT5): the impl'd trait's omitted defaults ride along,
             // after the impl's own methods so a provided override wins the name-skip below.
             entry.extend(omitted_defaults(
-                &decl.trait_name,
+                decl.trait_name.as_str(),
                 &decl.trait_args,
                 &decl.methods,
             ));
@@ -536,7 +536,7 @@ pub fn hoist_impl_methods_with_registry(
         derives.iter().any(|d| {
             d.via.is_some()
                 || d.name == "Error"
-                || registry.is_some_and(|r| r.find_ext_derive(&d.name).is_some())
+                || registry.is_some_and(|r| r.find_ext_derive(d.name.as_str()).is_some())
         })
     };
     let body_needs = body_needs
@@ -585,7 +585,7 @@ pub fn hoist_impl_methods_with_registry(
         let mut synthesized: Vec<FnDecl> = Vec::new();
         for block in impls {
             synthesized.extend(omitted_defaults(
-                &block.trait_name,
+                block.trait_name.as_str(),
                 &block.trait_args,
                 methods,
             ));
@@ -600,7 +600,7 @@ pub fn hoist_impl_methods_with_registry(
         };
         for spec in derives {
             if let Some(Ok(planned)) =
-                noeta_ast::derive::plan_derive(&ctx, spec, name, fields, methods)
+                noeta_ast::derive::plan_derive(&ctx, spec, name.as_str(), fields, methods)
             {
                 synthesized.extend(planned);
             }
@@ -723,7 +723,7 @@ struct Lowerer<'a> {
 /// pointing at the `?`.
 fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
     let ident = |name: &str| Expr::Ident {
-        name: name.to_string(),
+        name: noeta_ast::Name::canonical(name),
         span,
     };
     let call = |callee: Expr, args: Vec<Expr>| Expr::Call {
@@ -799,7 +799,7 @@ fn module_global_names(program: &AstProgram) -> HashSet<String> {
         .iter()
         .filter_map(|stmt| match stmt {
             AstStmt::Binding { name, .. } => Some(name.clone()),
-            AstStmt::Fn(decl) => Some(decl.name.clone()),
+            AstStmt::Fn(decl) => Some(decl.name.to_string()),
             _ => None,
         })
         .collect()
@@ -870,8 +870,8 @@ impl Lowerer<'_> {
             TypeRef::Named { name, args, span } => TypeRef::Named {
                 name: self
                     .type_aliases
-                    .get(name)
-                    .cloned()
+                    .get(name.as_str())
+                    .map(noeta_ast::Name::canonical)
                     .unwrap_or_else(|| name.clone()),
                 args: args.iter().map(|a| self.resolve_type_aliases(a)).collect(),
                 span: *span,
@@ -910,8 +910,8 @@ impl Lowerer<'_> {
             TypeRef::DynTrait { trait_name, span } => TypeRef::DynTrait {
                 trait_name: self
                     .type_aliases
-                    .get(trait_name)
-                    .cloned()
+                    .get(trait_name.as_str())
+                    .map(noeta_ast::Name::canonical)
                     .unwrap_or_else(|| trait_name.clone()),
                 span: *span,
             },
@@ -1190,11 +1190,11 @@ impl Lowerer<'_> {
                     decl.span,
                     true,
                     decl.is_async,
-                    Some(decl.name.clone()),
+                    Some(decl.name.to_string()),
                     Some(decl.captures.iter().map(|(n, _)| n.clone()).collect()),
                 )?;
                 out.push(Stmt::Decl(Decl::Fn {
-                    name: decl.name.clone(),
+                    name: decl.name.to_string(),
                     func: Rc::new(func),
                     span: decl.span,
                 }));
@@ -1213,7 +1213,7 @@ impl Lowerer<'_> {
                         Some(format!("{}.{}", decl.name, m.name)),
                         Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
                     )?;
-                    methods.push((m.name.clone(), Rc::new(func)));
+                    methods.push((m.name.to_string(), Rc::new(func)));
                 }
                 // The `destruct` block lowers to a parameterless block [`Func`] (fields resolve
                 // against the receiver, like a method), so the VM can compile it to a prototype.
@@ -1257,7 +1257,7 @@ impl Lowerer<'_> {
                         Some(format!("{}.{}", decl.name, m.name)),
                         Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
                     )?;
-                    methods.push((m.name.clone(), Rc::new(func)));
+                    methods.push((m.name.to_string(), Rc::new(func)));
                 }
                 out.push(Stmt::Decl(Decl::Enum(EnumDef {
                     decl: Rc::new(decl.clone()),
@@ -1282,7 +1282,7 @@ impl Lowerer<'_> {
                         Some(format!("{}.{}", decl.name, m.name)),
                         Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
                     )?;
-                    methods.push((m.name.clone(), Rc::new(func)));
+                    methods.push((m.name.to_string(), Rc::new(func)));
                 }
                 let field_defaults = self.lower_field_defaults(&decl.fields)?;
                 out.push(Stmt::Decl(Decl::Struct(StructDef {
@@ -1724,14 +1724,14 @@ impl Lowerer<'_> {
                     .collect();
                 let call = Expr::Call {
                     callee: Box::new(Expr::Ident {
-                        name: fname,
+                        name: noeta_ast::Name::canonical(fname),
                         span: callee_span,
                     }),
                     args: params
                         .iter()
                         .map(|p| {
                             noeta_ast::CallArg::positional(Expr::Ident {
-                                name: p.name.clone(),
+                                name: noeta_ast::Name::canonical(p.name.clone()),
                                 span: *span,
                             })
                         })
@@ -1761,7 +1761,7 @@ impl Lowerer<'_> {
                 ))
             }
             Expr::Ident { name, span } => Ok(Atom::Var {
-                name: name.clone(),
+                name: name.to_string(),
                 span: *span,
             }),
             Expr::Unary { op, operand, span } => {
@@ -2187,7 +2187,7 @@ impl Lowerer<'_> {
                 ..
             } => {
                 let callee = Atom::Var {
-                    name: name.clone(),
+                    name: name.to_string(),
                     span: *name_span,
                 };
                 let (mut arg_atoms, supplied) = self.lower_args(args, *span, out)?;
@@ -2385,7 +2385,7 @@ impl Lowerer<'_> {
                     ),
                     None => Expr::Call {
                         callee: Box::new(Expr::Ident {
-                            name: "panic".to_string(),
+                            name: noeta_ast::Name::canonical("panic"),
                             span: *tier_span,
                         }),
                         args: vec![noeta_ast::CallArg::positional(Expr::Str {
@@ -2674,7 +2674,7 @@ impl Lowerer<'_> {
                     return self.lower_expr(&desugared, out);
                 }
                 let module = match recv.as_ref() {
-                    Expr::Ident { name, .. } => name.clone(),
+                    Expr::Ident { name, .. } => name.to_string(),
                     _ => String::new(),
                 };
                 let args = args
@@ -2771,6 +2771,10 @@ impl Lowerer<'_> {
                 let name = self.lower_type_operand(name, out)?;
                 Ok(self.emit(out, Rvalue::FieldSpecsOf { name, span: *span }, *span))
             }
+            Expr::VariantsOf { name, span } => {
+                let name = self.lower_type_operand(name, out)?;
+                Ok(self.emit(out, Rvalue::VariantsOf { name, span: *span }, *span))
+            }
             Expr::Construct { name, fields, span } => {
                 let name = self.lower_type_operand(name, out)?;
                 let fields = self.lower_expr(fields, out)?;
@@ -2861,7 +2865,8 @@ impl Lowerer<'_> {
                 // program, so the empty name cannot reach a backend.
                 let type_name = lit
                     .type_name
-                    .clone()
+                    .as_ref()
+                    .map(noeta_ast::Name::to_string)
                     .or_else(|| self.sites.inferred_object_types.get(&lit.span).cloned())
                     .unwrap_or_default();
                 Ok(self.emit(

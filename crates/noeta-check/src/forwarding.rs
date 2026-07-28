@@ -166,14 +166,14 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
                     walk_stmt(stmt, &cx, mark);
                 }
                 if overflow {
-                    poisoned.insert(f.name.clone());
+                    poisoned.insert(f.name.to_string());
                 }
             }
             if marks.is_empty() {
                 continue;
             }
-            if map.get(&f.name) != Some(&marks) {
-                map.insert(f.name.clone(), marks);
+            if map.get(f.name.as_str()) != Some(&marks) {
+                map.insert(f.name.to_string(), marks);
                 changed = true;
             }
         }
@@ -225,7 +225,7 @@ fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         } => {
             if let Expr::Ident { name, .. } = value
                 && let (Some(slots), Some(callee_params), Some((raw_params, raw_ret))) = (
-                    cx.map.get(name),
+                    cx.map.get(name.as_str()),
                     cx.decl_params.get(name.as_str()),
                     cx.sigs.get(name.as_str()),
                 )
@@ -370,7 +370,7 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
             ..
         } => {
             if let (Some(slots), Some(callee_params)) =
-                (cx.map.get(name), cx.decl_params.get(name.as_str()))
+                (cx.map.get(name.as_str()), cx.decl_params.get(name.as_str()))
                 && type_args.len() == callee_params.len()
             {
                 let subst: HashMap<String, Type> = callee_params
@@ -506,7 +506,7 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         }
         // A turbofish operand names a *declared* type, never an enclosing type parameter's slot (a
         // `T` there is erased and reflects as nothing), so it forwards no recipe.
-        Expr::FieldSpecsOf { name, .. } => {
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
             if let Some(e) = name.dynamic() {
                 rec!(e);
             }

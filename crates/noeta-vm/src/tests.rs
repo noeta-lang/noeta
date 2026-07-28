@@ -2222,11 +2222,11 @@ fn attribute_manifest_records_decorations() {
         arg_values,
         vec![
             noeta_ast::AttrValue::TypeRef {
-                name: "login".to_string(),
+                name: noeta_ast::Name::written("login"),
                 args: Vec::new()
             },
             noeta_ast::AttrValue::TypeRef {
-                name: "post".to_string(),
+                name: noeta_ast::Name::written("post"),
                 args: Vec::new()
             },
         ]

@@ -610,10 +610,10 @@ impl Flattener<'_> {
                     && decl.type_params.is_empty()
                     && !body_has_yield(&decl.body) =>
             {
-                self.record(&decl.name, false, true);
+                self.record(decl.name.as_str(), false, true);
                 self.blocks[cur].stmts.push(AstStmt::Binding {
                     mut_decl: false,
-                    name: decl.name.clone(),
+                    name: decl.name.to_string(),
                     name_span: decl.name_span,
                     ty: None,
                     value: Expr::Closure {
@@ -1209,7 +1209,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32, vp: &Varia
         | Expr::FromBytes { blob: expr, .. } => hoist_in_expr(expr, pre, ctr, vp),
         Expr::Channel { capacity, .. } => hoist_in_expr(capacity, pre, ctr, vp),
         // A turbofish operand is a type — no expression to hoist; a dynamic one is ordinary.
-        Expr::FieldSpecsOf { name, .. } => {
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
             if let Some(e) = name.dynamic_mut() {
                 hoist_in_expr(e, pre, ctr, vp);
             }
@@ -1347,7 +1347,7 @@ fn state_arm(k: i64, body: Vec<AstStmt>, span: Span) -> AstStmt {
         cond: Expr::Binary {
             op: BinaryOp::Eq,
             lhs: Box::new(Expr::Ident {
-                name: STATE_VAR.to_string(),
+                name: noeta_ast::Name::canonical(STATE_VAR),
                 span,
             }),
             rhs: Box::new(Expr::Int { value: k, span }),
@@ -1375,7 +1375,7 @@ fn assign_state(k: i64, span: Span) -> AstStmt {
 /// `name` — an identifier reference (a hoisted generator cell).
 fn ident(name: &str, span: Span) -> Expr {
     Expr::Ident {
-        name: name.to_string(),
+        name: noeta_ast::Name::canonical(name),
         span,
     }
 }
@@ -1839,7 +1839,7 @@ fn is_some_test(opt: Expr, span: Span) -> Expr {
 fn call_some(value: Expr, span: Span) -> Expr {
     Expr::Call {
         callee: Box::new(Expr::Ident {
-            name: "some".to_string(),
+            name: noeta_ast::Name::canonical("some"),
             span,
         }),
         args: vec![noeta_ast::CallArg::positional(value)],
@@ -1851,7 +1851,7 @@ fn call_some(value: Expr, span: Span) -> Expr {
 /// always reassigned before it is read in a well-formed generator).
 fn none_expr(span: Span) -> Expr {
     Expr::Ident {
-        name: "none".to_string(),
+        name: noeta_ast::Name::canonical("none"),
         span,
     }
 }

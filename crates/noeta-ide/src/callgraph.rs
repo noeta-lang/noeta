@@ -119,29 +119,29 @@ pub fn build(program: &Program, expr_types: &HashMap<Span, TypeRepr>, texts: &[&
     for stmt in &program.stmts {
         match stmt {
             Stmt::Fn(decl) => functions.push(FnNode {
-                name: decl.name.clone(),
+                name: decl.name.to_string(),
                 name_span: decl.name_span,
                 decl_span: decl.span,
                 method: false,
             }),
             Stmt::Struct(decl) => {
                 for m in &decl.methods {
-                    functions.push(method_node(&decl.name, m));
+                    functions.push(method_node(decl.name.as_str(), m));
                 }
             }
             Stmt::Class(decl) => {
                 for m in &decl.methods {
-                    functions.push(method_node(&decl.name, m));
+                    functions.push(method_node(decl.name.as_str(), m));
                 }
             }
             Stmt::Enum(decl) => {
                 for m in &decl.methods {
-                    functions.push(method_node(&decl.name, m));
+                    functions.push(method_node(decl.name.as_str(), m));
                 }
             }
             Stmt::Impl(decl) => {
                 for m in &decl.methods {
-                    functions.push(method_node(&decl.target, m));
+                    functions.push(method_node(decl.target.as_str(), m));
                 }
             }
             // Tier fns (`@test fn adds…`) are graph nodes like any top-level fn (server-hmr W3):
@@ -151,7 +151,7 @@ pub fn build(program: &Program, expr_types: &HashMap<Span, TypeRepr>, texts: &[&
                 for item in items {
                     if let Stmt::Fn(decl) = item {
                         functions.push(FnNode {
-                            name: decl.name.clone(),
+                            name: decl.name.to_string(),
                             name_span: decl.name_span,
                             decl_span: decl.span,
                             method: false,

@@ -419,15 +419,18 @@ impl Type {
                 ret: Box::new(Type::from_ref(ret)),
             },
             TypeRef::Optional { inner, .. } => Type::Option(Box::new(Type::from_ref(inner))),
-            TypeRef::DynTrait { trait_name, .. } => Type::DynTrait(trait_name.clone()),
+            TypeRef::DynTrait { trait_name, .. } => Type::DynTrait(trait_name.to_string()),
             // `Self::Name` with no resolution context (a `dyn` receiver, or any site lacking the
             // impl's binding map) degrades to a gradual hole — the associated type never enters the
             // lattice (slice 1a). A concrete receiver's projection is baked at collect *before* this
             // conversion, so it never reaches here as a projection.
             TypeRef::AssocProjection { .. } => Type::Unknown,
             TypeRef::Named { name, args, .. } => {
-                let Some((builtin, spelling)) = BuiltinTy::from_name(name) else {
-                    return Type::Named(name.clone(), args.iter().map(Type::from_ref).collect());
+                let Some((builtin, spelling)) = BuiltinTy::from_name(name.as_str()) else {
+                    return Type::Named(
+                        name.to_string(),
+                        args.iter().map(Type::from_ref).collect(),
+                    );
                 };
                 // The bare lowercase collection spellings (`list`, `map`, `set`) leave their
                 // element types *unspecified* — an inference hole the checker fills by forward
@@ -553,7 +556,7 @@ mod tests {
 
     fn named(name: &str, args: Vec<TypeRef>) -> TypeRef {
         TypeRef::Named {
-            name: name.to_string(),
+            name: noeta_ast::Name::written(name),
             args,
             span: Span::new(0, 0),
         }

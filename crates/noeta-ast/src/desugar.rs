@@ -17,7 +17,7 @@
 //! thunk once for an eager DSL; wrap them in computeds for a reactive one), and a hole's lexical
 //! captures ride the ordinary closure machinery.
 
-use crate::{CallArg, ClosureBody, Expr, Program, Stmt};
+use crate::{CallArg, ClosureBody, Expr, Name, Program, Stmt};
 use noeta_span::Span;
 
 /// The resolved handler an expression tier's block desugars to. A **program**-declared tier's
@@ -60,7 +60,7 @@ pub fn expr_tier_handlers(program: &Program) -> std::collections::HashMap<String
             let Stmt::Fn(f) = stmt else { return None };
             let tier = f.tier.as_ref()?;
             tier.expr.as_ref()?;
-            Some((tier.name.clone(), f.name.clone()))
+            Some((tier.name.clone(), f.name.to_string()))
         })
         .collect()
 }
@@ -102,7 +102,7 @@ pub fn tier_expr_call(
     // module-function reference — both are function *values*, so the `Call` is identical.
     let callee = match handler {
         ExprTierHandler::Program(name) => Expr::Ident {
-            name: name.clone(),
+            name: Name::canonical(name),
             span: tier_span,
         },
         ExprTierHandler::Native { module, func } => Expr::NativeFnRef {

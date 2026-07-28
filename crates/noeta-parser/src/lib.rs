@@ -33,9 +33,9 @@ use chumsky::prelude::*;
 use noeta_ast::{
     AssocTypeDecl, AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, ClassDecl,
     ClosureBody, Decorators, DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern,
-    ImplBlock, MatchArm, MethodDirective, ObjectLit, PackedDirective, PackedLayout, Param, Pattern,
-    Program, RoleTag, Stmt, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod, TypeOperand,
-    TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
+    ImplBlock, MatchArm, MethodDirective, Name, ObjectLit, PackedDirective, PackedLayout, Param,
+    Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod,
+    TypeOperand, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::Edition;
@@ -421,8 +421,8 @@ fn expr_to_attr_value(expr: &Expr) -> Result<AttrValue, (String, Span)> {
                 Expr::Ident { name, .. } if matches!(name.as_str(), "Ok" | "Err" | "some") => {
                     let enum_name = if name == "some" { "Option" } else { "Result" };
                     Ok(AttrValue::Enum {
-                        enum_name: enum_name.to_string(),
-                        variant: name.clone(),
+                        enum_name: Name::written(enum_name),
+                        variant: name.to_string(),
                         args: conv,
                     })
                 }
@@ -452,7 +452,7 @@ fn expr_to_attr_value(expr: &Expr) -> Result<AttrValue, (String, Span)> {
         Expr::Ident { name, .. } => {
             if name == "none" {
                 Ok(AttrValue::Enum {
-                    enum_name: "Option".to_string(),
+                    enum_name: Name::canonical("Option"),
                     variant: "none".to_string(),
                     args: Vec::new(),
                 })
@@ -594,14 +594,14 @@ fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) 
 /// directive does not cascade).
 fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Option<TierDecl> {
     let mut name: Option<(String, Span)> = None;
-    let mut config: Option<(String, Span)> = None;
+    let mut config: Option<(Name, Span)> = None;
     let mut text: Option<(String, Span)> = None;
-    let mut expr: Option<(String, Span)> = None;
+    let mut expr: Option<(Name, Span)> = None;
     let mut bad = false;
     for arg in args {
         match (&arg.name, &arg.value) {
             (None, AttrValue::TypeRef { name: n, .. }) if name.is_none() => {
-                name = Some((n.clone(), arg.span));
+                name = Some((n.to_string(), arg.span));
             }
             (Some(k), AttrValue::TypeRef { name: ty, .. }) if k == "config" && config.is_none() => {
                 config = Some((ty.clone(), arg.span));
@@ -657,7 +657,7 @@ fn directive_heads(args: Vec<DirectiveArg>) -> Vec<(String, Span)> {
     args.into_iter()
         .map(|arg| {
             let name = match &arg.value {
-                AttrValue::TypeRef { name, .. } => name.clone(),
+                AttrValue::TypeRef { name, .. } => name.to_string(),
                 // A qualified or literal argument is not a plain name; the checker rejects it by
                 // name lookup (`E0030`). Rendering it keeps the diagnostic's text faithful to what
                 // was written rather than substituting a placeholder.
@@ -721,11 +721,11 @@ fn directive_derive_specs(args: Vec<DirectiveArg>, ctx: &Ctx) -> Vec<DeriveSpec>
                         ));
                         continue;
                     }
-                    spec.via = Some((target, target_span));
+                    spec.via = Some((target.to_string(), target_span));
                 } else {
                     spec.bindings.push(noeta_ast::MemberBinding {
                         member: key,
-                        target,
+                        target: target.to_string(),
                         span: key_span.merge(target_span),
                     });
                 }
@@ -749,7 +749,7 @@ fn directive_derive_specs(args: Vec<DirectiveArg>, ctx: &Ctx) -> Vec<DeriveSpec>
                     variant,
                     args,
                 } if args.is_empty() => specs.push(DeriveSpec {
-                    name: format!("{enum_name}.{variant}"),
+                    name: Name::written(format!("{enum_name}.{variant}")),
                     args: Vec::new(),
                     bindings: Vec::new(),
                     via: None,
@@ -786,14 +786,14 @@ fn directive_role_tag(arg: DirectiveArg) -> RoleTag {
             span: head.merge(v),
         },
         (AttrValue::TypeRef { name, .. }, spans) => RoleTag {
-            enum_name: String::new(),
-            variant: name.clone(),
+            enum_name: Name::default(),
+            variant: name.to_string(),
             span: spans.head(),
         },
         // Anything else (a literal, a qualified value whose spans did not survive) still produces a
         // tag so the checker reports it as an unknown role rather than the parser dropping it.
         (other, spans) => RoleTag {
-            enum_name: String::new(),
+            enum_name: Name::default(),
             variant: format!("{other:?}"),
             span: spans.head(),
         },
@@ -1499,7 +1499,7 @@ where
             .filter(|(name, _): &(String, Span)| name == "dyn")
             .ignore_then(dotted_name.clone())
             .map_with(move |trait_name, e| TypeRef::DynTrait {
-                trait_name,
+                trait_name: Name::written(trait_name),
                 span: ctx.to_span(e.span()),
             });
         let named = dotted_name
@@ -1514,7 +1514,7 @@ where
                     .or_not(),
             )
             .map_with(move |(name, args), e| TypeRef::Named {
-                name,
+                name: Name::written(name),
                 args: args.unwrap_or_default(),
                 span: ctx.to_span(e.span()),
             })
@@ -1656,7 +1656,7 @@ where
         )
         .then_ignore(just(T::RBracket))
         .map_with(move |((name, name_span), args), e| Attribute {
-            name,
+            name: Name::written(name),
             name_span,
             args: commit_attr_args(&ctx, args.unwrap_or_default()),
             span: ctx.to_span(e.span()),
@@ -1717,7 +1717,10 @@ where
         )
         .map(|((name, name_span), args)| {
             (
-                noeta_ast::AttrValue::TypeRef { name, args },
+                noeta_ast::AttrValue::TypeRef {
+                    name: Name::written(name),
+                    args,
+                },
                 ValueSpans::Name(name_span),
                 None,
             )
@@ -1943,7 +1946,7 @@ where
                     type_name.push_str(&seg);
                 }
                 Pattern::Variant {
-                    type_name: Some(type_name),
+                    type_name: Some(Name::written(type_name)),
                     variant,
                     bindings: binds.unwrap_or_default(),
                     span: ctx.to_span(e.span()),
@@ -2194,7 +2197,7 @@ where
             .then(just(T::Colon).ignore_then(sub.clone()).or_not())
             .map_with(move |((name, name_span), value), e| {
                 let value = value.unwrap_or_else(|| Expr::Ident {
-                    name: name.clone(),
+                    name: Name::written(name.clone()),
                     span: name_span,
                 });
                 ObjItem::Field(FieldInit {
@@ -2283,7 +2286,7 @@ where
                     }
                 }
                 Expr::Object(ObjectLit {
-                    type_name: Some(type_name),
+                    type_name: Some(Name::written(type_name)),
                     type_name_span,
                     fields,
                     spread,
@@ -2310,7 +2313,7 @@ where
                         }
                     }
                     Expr::Object(ObjectLit {
-                        type_name: Some(name),
+                        type_name: Some(Name::written(name)),
                         type_name_span: name_span,
                         fields,
                         spread,
@@ -2318,7 +2321,7 @@ where
                     })
                 }
                 None => Expr::Ident {
-                    name,
+                    name: Name::written(name),
                     span: name_span,
                 },
             },
@@ -2449,7 +2452,7 @@ where
                         None => match key {
                             Expr::Ident { name, span } => (
                                 Expr::Str {
-                                    value: name.clone(),
+                                    value: name.to_string(),
                                     span,
                                 },
                                 Expr::Ident { name, span },
@@ -2658,7 +2661,7 @@ where
                 let (func, func_span) = func;
                 Expr::TypedModuleCall {
                     recv: Box::new(Expr::Ident {
-                        name: module_name,
+                        name: Name::written(module_name),
                         span: module_span,
                     }),
                     func,
@@ -2696,7 +2699,7 @@ where
             )
             .map_with(
                 move |(((name, name_span), type_args), args), e| Expr::TypedCall {
-                    name,
+                    name: Name::written(name),
                     name_span,
                     type_args,
                     args,
@@ -2812,6 +2815,26 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `variants_of::<T>()` / `variants_of(name)` — the TYPE-level variant schema, the enum twin of
+        // `field_specs_of`. Identical surface shape by construction (same two arms, same reason the
+        // turbofish stays a `TypeRef` until lowering so the linker's namespace qualification can see
+        // it), so the two productions differ only in their keyword and node.
+        let variants_of = just(T::VariantsOfKw)
+            .ignore_then(choice((
+                just(T::ColonColon)
+                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                    .then_ignore(just(T::LParen))
+                    .then_ignore(just(T::RParen))
+                    .map(TypeOperand::Static),
+                sub.clone()
+                    .delimited_by(just(T::LParen), just(T::RParen))
+                    .map(|e| TypeOperand::Dynamic(Box::new(e))),
+            )))
+            .map_with(move |name, e| Expr::VariantsOf {
+                name,
+                span: ctx.to_span(e.span()),
+            });
+
         // `construct::<T>(fields)` / `construct(name, fields)` — the dynamic struct constructor. The
         // turbofish carries the type as a `TypeOperand::Static` (like `field_specs_of`, and for the
         // same qualification reason) plus a single `fields` operand; the string form takes the type
@@ -2864,10 +2887,10 @@ where
             channel,
             roles_of,
             // The tuple is at its arity cap, so each keyword-led reflection query shares a slot with
-            // a disjoint sibling: the two signature queries `params_of`/`returns_of` with the
-            // type-level `field_specs_of`, and the by-name `invoke` with the by-name `construct`. All
-            // five commit on their leading keyword.
-            params_of.or(returns_of).or(field_specs_of),
+            // a disjoint sibling: the two signature queries `params_of`/`returns_of` with the two
+            // type-level schema queries `field_specs_of`/`variants_of`, and the by-name `invoke` with
+            // the by-name `construct`. All six commit on their leading keyword.
+            params_of.or(returns_of).or(field_specs_of).or(variants_of),
             invoke.or(construct),
             // One choice-tuple slot for the two user turbofish forms (the tuple is at its arity
             // cap): the module form (`json.parse::<T>(s)`, needs a `.`) wins over the free-function
@@ -3477,7 +3500,7 @@ where
                     .map(Option::unwrap_or_default),
             )
             .map_with(move |((name, _name_span), args), e| TraitBound {
-                name,
+                name: Name::written(name),
                 args,
                 span: ctx.to_span(e.span()),
             });
@@ -3562,7 +3585,7 @@ where
                 ),
                       e| {
                     Stmt::Fn(FnDecl {
-                        name: name_pair.0,
+                        name: Name::written(name_pair.0),
                         name_span: name_pair.1,
                         is_public: pub_kw.is_some(),
                         type_params,
@@ -3714,7 +3737,7 @@ where
                         }
                     }
                     FnDecl {
-                        name: name_pair.0,
+                        name: Name::written(name_pair.0),
                         name_span: name_pair.1,
                         is_public: false,
                         type_params,
@@ -3797,7 +3820,7 @@ where
                 move |(((trait_name, trait_span), trait_args), members), e| {
                     let (methods, assoc_bindings) = split_impl_members(members);
                     ClassMember::Impl(ImplBlock {
-                        trait_name,
+                        trait_name: Name::written(trait_name),
                         trait_span,
                         trait_args,
                         methods,
@@ -3848,7 +3871,7 @@ where
                     }
                 }
                 Stmt::Enum(EnumDecl {
-                    name: name_pair.0,
+                    name: Name::written(name_pair.0),
                     name_span: name_pair.1,
                     is_public: false,
                     type_params,
@@ -3893,10 +3916,10 @@ where
                       e| {
                     let (methods, assoc_bindings) = split_impl_members(members);
                     Stmt::Impl(noeta_ast::ImplDecl {
-                        trait_name,
+                        trait_name: Name::written(trait_name),
                         trait_span,
                         trait_args,
-                        target,
+                        target: Name::written(target),
                         target_span,
                         methods,
                         assoc_bindings,
@@ -3925,7 +3948,7 @@ where
                     let has_default = body.is_some();
                     TraitMethod {
                         sig: FnDecl {
-                            name: name_pair.0,
+                            name: Name::written(name_pair.0),
                             name_span: name_pair.1,
                             is_public: false,
                             type_params,
@@ -3984,7 +4007,7 @@ where
             .map_with(move |((name_pair, type_params), members), e| {
                 let (methods, assoc_types) = split_trait_members(members);
                 Stmt::Trait(TraitDecl {
-                    name: name_pair.0,
+                    name: Name::written(name_pair.0),
                     name_span: name_pair.1,
                     is_public: false,
                     type_params,
@@ -4030,7 +4053,7 @@ where
                     }
                 }
                 Stmt::Struct(StructDecl {
-                    name,
+                    name: Name::written(name),
                     name_span,
                     is_public: false,
                     type_params,
@@ -4075,7 +4098,7 @@ where
                     }
                 }
                 Stmt::Class(ClassDecl {
-                    name,
+                    name: Name::written(name),
                     name_span,
                     is_public: false,
                     type_params,
@@ -4221,7 +4244,7 @@ where
                             };
                             Stmt::Binding {
                                 mut_decl: false,
-                                name,
+                                name: name.to_string(),
                                 name_span,
                                 ty: None,
                                 value,
@@ -4297,7 +4320,7 @@ where
                             };
                             Stmt::Binding {
                                 mut_decl: false,
-                                name,
+                                name: name.to_string(),
                                 name_span,
                                 ty: None,
                                 value,
@@ -4361,7 +4384,7 @@ where
                             };
                             Stmt::Binding {
                                 mut_decl: false,
-                                name,
+                                name: name.to_string(),
                                 name_span,
                                 ty: None,
                                 value,
@@ -4396,7 +4419,7 @@ where
                             };
                             Stmt::Binding {
                                 mut_decl: false,
-                                name,
+                                name: name.to_string(),
                                 name_span,
                                 ty,
                                 value,
@@ -4413,7 +4436,9 @@ where
                             let mut targets = Vec::with_capacity(items.len());
                             for item in items {
                                 match item {
-                                    Expr::Ident { name, span } => targets.push((name, span)),
+                                    Expr::Ident { name, span } => {
+                                        targets.push((name.into_string(), span))
+                                    }
                                     other => ctx.diags.borrow_mut().push(Diagnostic::error(
                                         DiagnosticCode::UnexpectedToken,
                                         other.span(),

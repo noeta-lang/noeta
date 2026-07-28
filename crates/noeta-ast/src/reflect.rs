@@ -186,6 +186,54 @@ impl ReflectionInfo {
             .collect()
     }
 
+    /// The **type-level variant schema** of the declared enum `type_name` — one [`VariantSpecData`]
+    /// per variant in declaration order — the data `variants_of::<T>()` / `variants_of(name)`
+    /// materialize. The enum twin of [`Self::field_specs`], and deliberately the same contract: an
+    /// unknown name, or a name that is a struct or class rather than an enum, yields the empty list,
+    /// the same "nothing to report" answer `params_of` gives an unknown target, so a framework can
+    /// probe a type name without a guard.
+    ///
+    /// The pair is what makes a walked type *knowable*. `field_specs_of` alone cannot tell an enum
+    /// from a field-less struct — both answer with the empty list — so a schema builder that recursed
+    /// into a `Type.Named(name, _)` emitted an empty object for an enum and was silently wrong.
+    /// Asking both means the empty/empty case is the one honest "I know nothing about this name",
+    /// and a non-empty variant list is the loud answer that was missing.
+    ///
+    /// Each variant's payload is reported as [`FieldSpecData`] — the very elements `field_specs`
+    /// returns for a struct — because a payload *is* ordinary declared-field data (a positional
+    /// payload carries a synthesized `_0`/`_1` name and its real type). Both backends read this one
+    /// accessor, so the materialized `List<VariantSpec>` agrees across the differential by
+    /// construction.
+    pub fn variant_specs(&self, type_name: &str) -> Vec<VariantSpecData<'_>> {
+        let Some(info) = self.type_named(type_name) else {
+            return Vec::new();
+        };
+        if info.kind != TypeKind::Enum {
+            return Vec::new();
+        }
+        info.variants
+            .iter()
+            .map(|variant| VariantSpecData {
+                name: &variant.name,
+                payload: variant
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| FieldSpecData {
+                        name,
+                        ty: variant.field_types.get(i).unwrap_or(&TypeRepr::Dyn),
+                        // A variant payload field declares no default — there is no syntax for one —
+                        // so it can never be omitted from a construction. Reported through the same
+                        // `FieldSpec` the struct side uses rather than a payload-only element type:
+                        // one vocabulary, and `optional` says the true thing about a payload.
+                        optional: false,
+                    })
+                    .collect(),
+                backing: variant.backing.as_ref(),
+            })
+            .collect()
+    }
+
     /// The reflection [`TypeRepr`] of a **type reference** — a type name used as a value
     /// (`#[Encode(codec: JsonCodec)]`, `#[Builds(target: List<int>)]`), given its head `name` and
     /// its generic `args`. Reports the same precise constructor a `type_of` over a value of that
@@ -443,11 +491,30 @@ pub struct TypeInfo {
     pub variants: Vec<VariantInfo>,
 }
 
-/// An enum variant's reflectable shape.
+/// An enum variant's reflectable shape: its name, its payload fields, and — for a backed enum — the
+/// literal value backing it.
+///
+/// A **positional** payload (`Leaf(User)`, `Pair(string, int)`) reaches here as an ordinary field
+/// with a synthesized `_0`/`_1` name and its declared type in `field_types`, because that is how the
+/// AST stores it. So this is the same (name, declared type) pairing [`TypeInfo::fields`] /
+/// [`TypeInfo::field_types`] carry for a struct, and [`ReflectionInfo::variant_specs`] projects it
+/// through the same [`FieldSpecData`] the struct-side `field_specs_of` reports — one payload
+/// vocabulary rather than an enum-shaped special case.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VariantInfo {
     pub name: String,
+    /// Payload field names in declaration order (`_0`, `_1`, … for a positional payload); empty for
+    /// a fieldless variant.
     pub fields: Vec<String>,
+    /// Each payload field's declared type as a reflection [`TypeRepr`], parallel to `fields`. An
+    /// unannotated payload field is [`TypeRepr::Dyn`]. Captured from the DECLARATION, so — like
+    /// [`TypeInfo::field_types`] — it is precise: `Many(List<int>)` is `List(Int)`, not `List(Dyn)`.
+    pub field_types: Vec<TypeRepr>,
+    /// The **backing value** of this variant in a backed enum (`enum Status: string { Pending =
+    /// "pending" }`), folded through the shared [`fold_const_expr`]; `None` for a plain enum's
+    /// variant, and for a backed variant whose value is not a literal. Reported by `variants_of` so
+    /// a schema derived from a backed enum can emit the wire values rather than the variant names.
+    pub backing: Option<AttrValue>,
 }
 
 /// Build the reflection info for a program. **Pure and deterministic**: the same AST + `native_roles`
@@ -485,19 +552,19 @@ pub fn build(
             Stmt::Struct(decl) => {
                 push_attrs(
                     &mut manifest,
-                    &decl.name,
+                    decl.name.as_str(),
                     decl.name_span,
                     &decl.decorators.attrs,
                 );
-                push_field_attrs(&mut manifest, &decl.name, &decl.fields);
+                push_field_attrs(&mut manifest, decl.name.as_str(), &decl.fields);
                 // A role tag rides on the attribute struct; record each (validated) `Enum.Variant`
                 // so every declaration the attribute annotates inherits it. A malformed `@role`
                 // never reaches a runnable program (the checker rejects it).
                 if let Some(roles) = decl.decorators.role.as_ref() {
                     for tag in roles {
                         role_of.push((
-                            decl.name.clone(),
-                            (tag.enum_name.clone(), tag.variant.clone()),
+                            decl.name.to_string(),
+                            (tag.enum_name.to_string(), tag.variant.clone()),
                         ));
                     }
                 }
@@ -512,7 +579,7 @@ pub fn build(
                     push_params(&mut manifest, &mut params, target, method);
                 }
                 types.push(TypeInfo {
-                    name: decl.name.clone(),
+                    name: decl.name.to_string(),
                     kind: TypeKind::Struct,
                     fields: decl.fields.iter().map(|f| f.name.clone()).collect(),
                     field_types: field_types(&decl.fields),
@@ -524,11 +591,11 @@ pub fn build(
             Stmt::Class(decl) => {
                 push_attrs(
                     &mut manifest,
-                    &decl.name,
+                    decl.name.as_str(),
                     decl.name_span,
                     &decl.decorators.attrs,
                 );
-                push_field_attrs(&mut manifest, &decl.name, &decl.fields);
+                push_field_attrs(&mut manifest, decl.name.as_str(), &decl.fields);
                 // A method's attributes are keyed by its qualified `Class.method` name, so a
                 // `#[...]` on a method surfaces distinctly from the same name on another class.
                 for method in &decl.methods {
@@ -537,7 +604,7 @@ pub fn build(
                     push_params(&mut manifest, &mut params, target, method);
                 }
                 types.push(TypeInfo {
-                    name: decl.name.clone(),
+                    name: decl.name.to_string(),
                     kind: TypeKind::Class,
                     fields: decl.fields.iter().map(|f| f.name.clone()).collect(),
                     field_types: field_types(&decl.fields),
@@ -552,8 +619,13 @@ pub fn build(
                 // `FnDecl` keeps its own `attrs` — only the four *type* declaration kinds moved
                 // their decorators into `Decorators`. A `fn` carries `#[...]` attributes and a
                 // `@tier(...)` declaration, neither of which is a type decorator.
-                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
-                push_params(&mut manifest, &mut params, decl.name.clone(), decl);
+                push_attrs(
+                    &mut manifest,
+                    decl.name.as_str(),
+                    decl.name_span,
+                    &decl.attrs,
+                );
+                push_params(&mut manifest, &mut params, decl.name.to_string(), decl);
             }
             // A trait carries `#[...]` data attributes keyed by its name (UT6), like a type —
             // surfaced via `attributes_of` (and inheriting a role transitively when annotated with a
@@ -564,7 +636,7 @@ pub fn build(
             Stmt::Trait(decl) => {
                 push_attrs(
                     &mut manifest,
-                    &decl.name,
+                    decl.name.as_str(),
                     decl.name_span,
                     &decl.decorators.attrs,
                 );
@@ -582,7 +654,7 @@ pub fn build(
             Stmt::Enum(decl) => {
                 push_attrs(
                     &mut manifest,
-                    &decl.name,
+                    decl.name.as_str(),
                     decl.name_span,
                     &decl.decorators.attrs,
                 );
@@ -600,20 +672,13 @@ pub fn build(
                     push_params(&mut manifest, &mut params, target, method);
                 }
                 types.push(TypeInfo {
-                    name: decl.name.clone(),
+                    name: decl.name.to_string(),
                     kind: TypeKind::Enum,
                     fields: Vec::new(),
                     field_types: Vec::new(),
                     field_optional: Vec::new(),
                     field_defaults: Vec::new(),
-                    variants: decl
-                        .variants
-                        .iter()
-                        .map(|v| VariantInfo {
-                            name: v.name.clone(),
-                            fields: v.fields.iter().map(|f| f.name.clone()).collect(),
-                        })
-                        .collect(),
+                    variants: variant_infos(&decl.variants),
                 });
             }
             // A **standalone** `impl Trait for T { … }`'s methods, keyed by the same `Type.method`
@@ -733,22 +798,41 @@ fn collect_trait_impls(program: &Program, native: &NativeTraitImpls) -> Vec<Trai
                 impls: &[ImplBlock],
                 derives: &[crate::DeriveSpec]| {
         for block in impls {
-            push(records, type_name, canon(&block.trait_name));
+            push(records, type_name, canon(block.trait_name.as_str()));
         }
         for spec in derives {
             // A native derive recipe implements no trait; every other derive a runnable program
             // carries names a real trait (built-in, user, or native — the checker gated the rest).
-            if !is_recipe(&spec.name) {
-                push(records, type_name, canon(&spec.name));
+            if !is_recipe(spec.name.as_str()) {
+                push(records, type_name, canon(spec.name.as_str()));
             }
         }
     };
     for stmt in &program.stmts {
         match stmt {
-            Stmt::Impl(decl) => push(&mut records, &decl.target, canon(&decl.trait_name)),
-            Stmt::Struct(d) => body(&mut records, &d.name, &d.impls, &d.decorators.derives),
-            Stmt::Class(d) => body(&mut records, &d.name, &d.impls, &d.decorators.derives),
-            Stmt::Enum(d) => body(&mut records, &d.name, &d.impls, &d.decorators.derives),
+            Stmt::Impl(decl) => push(
+                &mut records,
+                decl.target.as_str(),
+                canon(decl.trait_name.as_str()),
+            ),
+            Stmt::Struct(d) => body(
+                &mut records,
+                d.name.as_str(),
+                &d.impls,
+                &d.decorators.derives,
+            ),
+            Stmt::Class(d) => body(
+                &mut records,
+                d.name.as_str(),
+                &d.impls,
+                &d.decorators.derives,
+            ),
+            Stmt::Enum(d) => body(
+                &mut records,
+                d.name.as_str(),
+                &d.impls,
+                &d.decorators.derives,
+            ),
             _ => {}
         }
     }
@@ -861,6 +945,29 @@ fn field_types(fields: &[FieldDecl]) -> Vec<TypeRepr> {
     fields
         .iter()
         .map(|f| f.ty.as_ref().map(typeref_to_repr).unwrap_or(TypeRepr::Dyn))
+        .collect()
+}
+
+/// Project one enum's variants into their reflectable shape — the data `variants_of` materializes.
+///
+/// A payload field's declared type goes through the very same `typeref_to_repr` [`field_types`] uses,
+/// so a variant payload and a struct field report a declared type identically; a positional payload
+/// needs no special case because the parser already stored its type in the type slot under a
+/// synthesized `_0`/`_1` name. A backed variant's value folds through [`fold_const_expr`], the one
+/// definition of "a literal" the whole manifest shares.
+fn variant_infos(variants: &[crate::VariantDecl]) -> Vec<VariantInfo> {
+    variants
+        .iter()
+        .map(|v| VariantInfo {
+            name: v.name.clone(),
+            fields: v.fields.iter().map(|f| f.name.clone()).collect(),
+            field_types: v
+                .fields
+                .iter()
+                .map(|f| f.ty.as_ref().map(typeref_to_repr).unwrap_or(TypeRepr::Dyn))
+                .collect(),
+            backing: v.backed_value.as_ref().and_then(fold_const_expr),
+        })
         .collect()
 }
 
@@ -987,6 +1094,26 @@ pub struct FieldSpecData<'a> {
     pub name: &'a str,
     pub ty: &'a TypeRepr,
     pub optional: bool,
+}
+
+/// One variant of a type-level enum schema — the borrowed view [`ReflectionInfo::variant_specs`]
+/// returns, which both backends materialize into a prelude `VariantSpec { name, payload, backing }`
+/// value.
+///
+/// The variant's own `#[…]` attributes are deliberately **absent**, exactly as they are from
+/// [`FieldSpecData`]: a member's attributes are already keyed in the manifest under its qualified
+/// `Enum.Variant` target — the same `Type.field` convention the struct side uses — so
+/// `attributes_of::<T>()` is the one answer to "what is annotated on this member" for fields,
+/// methods, parameters and variants alike. Carrying them here would make the enum half of one
+/// surface answer a question the struct half does not.
+#[derive(Debug)]
+pub struct VariantSpecData<'a> {
+    pub name: &'a str,
+    /// The variant's payload as ordinary declared-field data, in declaration order; empty for a
+    /// fieldless variant.
+    pub payload: Vec<FieldSpecData<'a>>,
+    /// The literal value backing this variant in a backed enum, or `None` for a plain enum.
+    pub backing: Option<&'a AttrValue>,
 }
 
 /// A concrete-scalar field type as a friendly lowercase name (`int`/`float`/`bool`/`string`/`bytes`),
@@ -1116,6 +1243,111 @@ pub fn plan_construct_named(
         }
     }
     Ok(())
+}
+
+/// The plan for a **named** by-name invocation: how a `Map<string, dyn>` of arguments becomes the
+/// positional argument list a call prologue expects, plus the supplied mask that tells the callee
+/// which of its defaults to run. Produced by [`plan_invoke_named`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct NamedCall {
+    /// The supplied mask, indexed over the callee's **declared parameters** (a receiver, where there
+    /// is one, is not a parameter — the VM shifts the mask up by one at the call site, exactly as the
+    /// compiler does for a statically-named method call). `None` when the named arguments happen to
+    /// fill a dense prefix of the parameters, which the ordinary count-based prefix rule already
+    /// describes — the same "only carry a mask when it says something new" rule lowering applies, so
+    /// a reordering-only named call stays on every prefix-assuming fast path.
+    pub supplied: Option<u64>,
+    /// For each argument the callee will receive, in ascending parameter order, the index into the
+    /// caller's `provided` list it comes from.
+    pub order: Vec<usize>,
+}
+
+/// The number of declared parameters a **skipping** call can address by name. The supplied mask is
+/// one `u64`, and a method's mask is shifted up by one to make room for the receiver at bit 0, so the
+/// tighter of the two capacities is 63 — applied uniformly, because one bound that is always right
+/// beats two that differ by call kind and diverge between the backends (the tree-walker never
+/// shifts, so parameter 63 of a method used to work there and silently misplace its value in the VM).
+///
+/// Only *skipping* is limited: a call that fills a dense prefix of the parameters needs no mask and
+/// is unaffected at any arity, and so is a pure reordering.
+pub const MASKED_PARAM_LIMIT: usize = 63;
+
+/// Plan a **named** dynamic invocation: bind a set of `provided` argument names against a callable's
+/// declared `params`, in the same shape [`plan_construct_named`] binds field names against a type's
+/// field schema. `callee` names the callable for the error messages — the same target string
+/// `params_of` takes, so an error points at the thing you would reflect.
+///
+/// `declared_arity` is the parameter count the *callee itself* declares, cross-checked against
+/// `params` (which comes from the reflection artifact). The two disagree only when the artifact holds
+/// no signature for this callable at all — a global bound to a closure that was never declared as a
+/// top-level `fn`, say — and binding names against a signature that is not the callee's would place
+/// arguments on the wrong parameters. That case is refused in the checker's own words rather than
+/// guessed at.
+///
+/// Deliberately **no argument type-checking**, where [`plan_construct_named`] does check a scalar
+/// field against its declared type: `invoke`'s positional form has never type-checked its arguments
+/// (the callee's own typing is the backstop), so checking them here would make the very same call
+/// succeed positionally and fail by name. Errors, all ready-to-surface messages:
+///   * a provided name that is not a parameter of the callable;
+///   * a parameter that is neither provided nor defaulted;
+///   * a skipping call that names a parameter past [`MASKED_PARAM_LIMIT`].
+pub fn plan_invoke_named(
+    callee: &str,
+    params: &[ParamSig],
+    declared_arity: usize,
+    provided: &[String],
+) -> Result<NamedCall, String> {
+    if params.len() != declared_arity {
+        return Err(format!("`{callee}` does not take named arguments"));
+    }
+    let mut binding: Vec<Option<usize>> = vec![None; params.len()];
+    for (i, name) in provided.iter().enumerate() {
+        let Some(p) = params.iter().position(|s| &s.name == name) else {
+            return Err(format!("`{callee}` has no parameter `{name}`"));
+        };
+        binding[p] = Some(i);
+    }
+    for (p, spec) in params.iter().enumerate() {
+        if binding[p].is_none() && !spec.optional {
+            return Err(format!(
+                "missing required parameter `{}` of `{callee}`",
+                spec.name
+            ));
+        }
+    }
+    let order: Vec<usize> = binding.iter().flatten().copied().collect();
+    // A dense prefix is exactly what an ordinary short argument list means, so it needs no mask —
+    // and staying off the mask keeps `invoke("f", {"a": 1})` byte-identical to `invoke("f", [1])`.
+    if binding[..order.len()].iter().all(Option::is_some) {
+        return Ok(NamedCall {
+            supplied: None,
+            order,
+        });
+    }
+    // This call skips a parameter, so the mask is load-bearing and every parameter it supplies must
+    // fit in it. Checked over the *supplied* indices rather than merely where the first hole falls: a
+    // bit that does not fit is dropped from the mask, and the argument then lands on whichever
+    // parameter the shortened bit-count points at — a wrong value, with nothing said.
+    if let Some(p) = binding
+        .iter()
+        .rposition(Option::is_some)
+        .filter(|p| *p >= MASKED_PARAM_LIMIT)
+    {
+        return Err(format!(
+            "`{callee}` skips a parameter, so it cannot also name `{}` — only the first \
+             {MASKED_PARAM_LIMIT} parameters can be named by a skipping call",
+            params[p].name
+        ));
+    }
+    let mask = binding
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.is_some())
+        .fold(0u64, |m, (p, _)| m | (1 << p));
+    Ok(NamedCall {
+        supplied: Some(mask),
+        order,
+    })
 }
 
 /// A backend-agnostic descriptor of the prelude `Type` ADT — the shared vocabulary `type_of`
@@ -1634,7 +1866,7 @@ fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>, top: bool) -> 
         TypeRef::Optional { inner, .. } => TypeRepr::Option(Box::new(recur(inner))),
         // A trait object reflects as `DynTrait(name)` — the dynamic top refined by its trait bound, so
         // reflection can recover which trait a parameter is bound to (service injection by interface).
-        TypeRef::DynTrait { trait_name, .. } => TypeRepr::DynTrait(trait_name.clone()),
+        TypeRef::DynTrait { trait_name, .. } => TypeRepr::DynTrait(trait_name.to_string()),
         TypeRef::Tuple { .. } => TypeRepr::Dyn,
         // A `Self::Name` projection is not statically a concrete type here (resolution is per-impl at
         // the checker); reflect it as the dynamic top, like a tuple (slice 1a).
@@ -1642,7 +1874,7 @@ fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>, top: bool) -> 
         TypeRef::Fn { params, ret, .. } => {
             TypeRepr::Fn(params.iter().map(recur).collect(), Box::new(recur(ret)))
         }
-        TypeRef::Named { name, args, .. } => named_repr(name, args, nominal, top),
+        TypeRef::Named { name, args, .. } => named_repr(name.as_str(), args, nominal, top),
     }
 }
 
@@ -1808,6 +2040,15 @@ pub const FIELD_ENTRY: &str = "FieldEntry";
 /// and `optional` reports whether the field declared a default (so a dynamic constructor knows it
 /// may omit it). Registered like `ParamInfo`; both backends materialize the matching shape.
 pub const FIELD_SPEC: &str = "FieldSpec";
+
+/// The prelude `VariantSpec` struct — the element type of the **type-level** enum query
+/// `variants_of::<T>()` / `variants_of(name)`: `{ name: string, payload: List<FieldSpec>, backing:
+/// ?dyn }`, one per declared variant of an enum TYPE, in declaration order. The enum twin of
+/// [`FIELD_SPEC`], and it reuses `FieldSpec` for the payload rather than introducing a second
+/// member-shape vocabulary: a variant payload is ordinary declared-field data. `backing` is the
+/// variant's value in a backed enum (`some("pending")` / `some(3)`) and `none` for a plain enum.
+/// Registered like `FieldSpec`; both backends materialize the matching shape.
+pub const VARIANT_SPEC: &str = "VariantSpec";
 
 /// The prelude `Layout` enum's name — the storage-layout vocabulary `@packed` takes
 /// (`@packed(Layout.Column)`). Like [`SEMANTIC_ENUM`] it is directive vocabulary, not a runtime
@@ -1988,7 +2229,8 @@ pub struct PreludeStruct {
 /// `ParamInfo` and `FieldSpec` are registered like the rest even though a source literal cannot
 /// currently spell them (their `type` field collides with the `type` keyword in struct-literal
 /// position): the registration is what makes their materialization read one field list rather than
-/// two, and the day the literal becomes spellable it constructs.
+/// two, and the day the literal becomes spellable it constructs. `VariantSpec` has no such collision
+/// and is spellable today.
 pub fn prelude_structs() -> Vec<PreludeStruct> {
     let s = |name: &'static str, fields: &[&str]| PreludeStruct {
         name,
@@ -2000,6 +2242,7 @@ pub fn prelude_structs() -> Vec<PreludeStruct> {
         s(PARAM_INFO, &["name", "type", "optional", "attrs"]),
         s(FIELD_ENTRY, &["name", "value"]),
         s(FIELD_SPEC, &["name", "type", "optional"]),
+        s(VARIANT_SPEC, &["name", "payload", "backing"]),
         s(TIER_ROOT, &["name", "run"]),
         s(TIER_TEXT, &["target", "text"]),
     ]
@@ -2057,7 +2300,7 @@ fn push_attrs(
         manifest.push(AttributeRecord {
             target: target.to_string(),
             target_span,
-            name: attr.name.clone(),
+            name: attr.name.to_string(),
             args: attr.args.clone(),
         });
     }
@@ -2183,6 +2426,92 @@ mod tests {
 
     fn boxed(t: TypeRepr) -> Box<TypeRepr> {
         Box::new(t)
+    }
+
+    fn sig(name: &str, optional: bool) -> ParamSig {
+        ParamSig {
+            name: name.to_string(),
+            ty: TypeRepr::Int,
+            optional,
+        }
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    /// The named-invoke planner's three shapes. A **gap** — the whole point of the named form, and
+    /// the one thing a positional list cannot say — carries a mask; a pure **reordering** and a
+    /// dense **prefix** do not, because the ordinary count rule already describes them and staying
+    /// off the mask keeps every prefix-assuming fast path applying.
+    #[test]
+    fn plan_invoke_named_masks_only_a_skipping_call() {
+        let params = [sig("a", false), sig("b", true), sig("c", true)];
+        // `{a, c}` skips `b`: parameters 0 and 2, so bits 0 and 2.
+        let gap = plan_invoke_named("f", &params, 3, &names(&["a", "c"])).expect("plans");
+        assert_eq!(gap.supplied, Some(0b101));
+        assert_eq!(gap.order, vec![0, 1]);
+        // A reordering fills a prefix; `order` permutes the caller's list into parameter order.
+        let reordered = plan_invoke_named("f", &params, 3, &names(&["b", "a"])).expect("plans");
+        assert_eq!(reordered.supplied, None);
+        assert_eq!(reordered.order, vec![1, 0]);
+        // A prefix is an ordinary short argument list.
+        let prefix = plan_invoke_named("f", &params, 3, &names(&["a"])).expect("plans");
+        assert_eq!(prefix.supplied, None);
+        assert_eq!(prefix.order, vec![0]);
+    }
+
+    /// Every rejection is a message, never a panic — `invoke`'s contract is that resolution failures
+    /// are values. The wording mirrors `plan_construct_named`'s field-side equivalents.
+    #[test]
+    fn plan_invoke_named_rejects_in_constructs_vocabulary() {
+        let params = [sig("a", false), sig("b", true)];
+        assert_eq!(
+            plan_invoke_named("f", &params, 2, &names(&["a", "nope"])),
+            Err("`f` has no parameter `nope`".to_string())
+        );
+        assert_eq!(
+            plan_invoke_named("f", &params, 2, &names(&["b"])),
+            Err("missing required parameter `a` of `f`".to_string())
+        );
+        // A signature that is not the callee's (a global holding an undeclared closure) is refused
+        // rather than bound against, which would place arguments on the wrong parameters.
+        assert_eq!(
+            plan_invoke_named("f", &params, 3, &names(&["a"])),
+            Err("`f` does not take named arguments".to_string())
+        );
+    }
+
+    /// The mask is one `u64` (a method's shifted up by one for the receiver), so a **skipping** call
+    /// cannot name a parameter past the limit. Checked over the parameters the call *supplies*, not
+    /// over where its first hole falls: an out-of-range bit is simply dropped, and the argument then
+    /// lands on whichever parameter the shortened bit-count points at — a silently wrong value.
+    /// A dense prefix carries no mask, so it is unaffected at any arity.
+    #[test]
+    fn plan_invoke_named_bounds_a_skipping_call_by_what_it_supplies() {
+        let mut params = vec![sig("a", false)];
+        for i in 1..80 {
+            params.push(sig(&format!("p{i}"), true));
+        }
+        let far = format!("p{}", MASKED_PARAM_LIMIT);
+        assert_eq!(
+            plan_invoke_named("f", &params, params.len(), &names(&["a", &far])),
+            Err(format!(
+                "`f` skips a parameter, so it cannot also name `{far}` — only the first \
+                 {MASKED_PARAM_LIMIT} parameters can be named by a skipping call"
+            ))
+        );
+        // The last in-range parameter still plans, and its bit is the top one that fits.
+        let near = format!("p{}", MASKED_PARAM_LIMIT - 1);
+        let ok =
+            plan_invoke_named("f", &params, params.len(), &names(&["a", &near])).expect("in range");
+        assert_eq!(ok.supplied, Some(1u64 | (1u64 << (MASKED_PARAM_LIMIT - 1))));
+        // A dense prefix over the same wide signature needs no mask at all.
+        let prefix: Vec<String> = std::iter::once("a".to_string())
+            .chain((1..70).map(|i| format!("p{i}")))
+            .collect();
+        let dense = plan_invoke_named("f", &params, params.len(), &prefix).expect("prefix");
+        assert_eq!(dense.supplied, None);
     }
 
     fn record(type_name: &str, trait_name: &str) -> TraitImplRecord {
@@ -2334,7 +2663,7 @@ mod tests {
     /// A named `TypeRef` with the given generic arguments, spans elided.
     fn named(name: &str, args: Vec<TypeRef>) -> TypeRef {
         TypeRef::Named {
-            name: name.to_string(),
+            name: crate::Name::written(name),
             args,
             span: Span::new(0, 0),
         }

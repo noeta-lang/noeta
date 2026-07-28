@@ -488,7 +488,7 @@ pub(crate) fn call_stmt(name: &str, args: Vec<Expr>, span: Span) -> Stmt {
     Stmt::Expr {
         expr: Expr::Call {
             callee: Box::new(Expr::Ident {
-                name: name.to_string(),
+                name: noeta_ast::Name::canonical(name),
                 span,
             }),
             args: args
@@ -560,7 +560,7 @@ pub(crate) fn root_ref(name: &str, span: Span) -> Expr {
     match name.split_once('.') {
         Some((type_name, method)) => Expr::Member {
             receiver: Box::new(Expr::Ident {
-                name: type_name.to_string(),
+                name: noeta_ast::Name::canonical(type_name),
                 span,
             }),
             name: method.to_string(),
@@ -568,7 +568,7 @@ pub(crate) fn root_ref(name: &str, span: Span) -> Expr {
             span,
         },
         None => Expr::Ident {
-            name: name.to_string(),
+            name: noeta_ast::Name::canonical(name),
             span,
         },
     }

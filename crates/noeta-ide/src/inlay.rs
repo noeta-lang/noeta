@@ -328,7 +328,7 @@ impl Walker<'_> {
             Expr::FieldsOf { value, .. } | Expr::TraitsOf { value, .. } => self.expr(value),
             Expr::ParamsOf { target, .. } | Expr::ReturnsOf { target, .. } => self.expr(target),
             // A turbofish operand is a type, not an expression; only a dynamic one is walked.
-            Expr::FieldSpecsOf { name, .. } => {
+            Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
                 if let Some(e) = name.dynamic() {
                     self.expr(e);
                 }
@@ -399,7 +399,7 @@ impl Walker<'_> {
     /// parameter's own name shows nothing — the hint would repeat the code.
     fn param_name_hints(&mut self, callee: &Expr, args: &[noeta_ast::CallArg]) {
         let decl = match callee {
-            Expr::Ident { name, .. } => crate::top_level_fn(self.program, name),
+            Expr::Ident { name, .. } => crate::top_level_fn(self.program, name.as_str()),
             Expr::Member { receiver, name, .. } => self
                 .expr_types
                 .get(&receiver.span())

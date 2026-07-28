@@ -642,7 +642,7 @@ fn call_stmt(name: &str, args: Vec<Expr>, span: noeta_span::Span) -> Stmt {
     Stmt::Expr {
         expr: Expr::Call {
             callee: Box::new(Expr::Ident {
-                name: name.to_string(),
+                name: noeta_ast::Name::canonical(name),
                 span,
             }),
             // A synthesized call is positional by construction.

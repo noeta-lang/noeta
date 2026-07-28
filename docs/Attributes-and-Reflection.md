@@ -120,7 +120,7 @@ The payload-free cases are spelled **bare** here: the scrutinee is a `Type`, so 
 
 ### `type_name::<T>(): string`
 
-A type's **qualified runtime identity**, as a `string` — the same name `type_of` reports inside `Type.Struct(name, args)`, and the same key the name-keyed queries (`field_specs_of(name)`, `construct(name, …)`, `invoke(name, …)`) are stored under. It is how you *write* that key without hand-writing it:
+A type's **qualified runtime identity**, as a `string` — the same name `type_of` reports inside `Type.Struct(name, args)`, and the same key the name-keyed queries (`field_specs_of(name)`, `variants_of(name)`, `construct(name, …)`, `invoke(name, …)`) are stored under. It is how you *write* that key without hand-writing it:
 
 ```noeta
 namespace app.storage
@@ -139,7 +139,7 @@ An unresolvable type is `E0013`, exactly as in any other annotation. A generic *
 
 ### Reflection over a type parameter
 
-`field_specs_of::<T>()`, `construct::<T>(…)` and `type_name::<T>()` are keyed on a type **name**, and generics are erased: one compiled body serves every instantiation, so inside `fn f<T>()` the argument `T` is only ever the literal character `T`, which names nothing. That is `E0058`.
+`field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)` and `type_name::<T>()` are keyed on a type **name**, and generics are erased: one compiled body serves every instantiation, so inside `fn f<T>()` the argument `T` is only ever the literal character `T`, which names nothing. That is `E0058`.
 
 ```noeta error
 fn count_of<T>(): int {
@@ -163,7 +163,7 @@ echo type_of([1]) == Type.List(Type.Int)      // true
 echo 5.compare(2) == Ordering.Greater         // true
 ```
 
-The prelude **structs** are ordinary structs in the same way — `Attributed`, `RoleBinding`, `ParamInfo`, `FieldEntry`, `FieldSpec`, `TierRoot`, `TierText` are constructible by literal, and a constructed one equals the materialized one field for field:
+The prelude **structs** are ordinary structs in the same way — `Attributed`, `RoleBinding`, `ParamInfo`, `FieldEntry`, `FieldSpec`, `VariantSpec`, `TierRoot`, `TierText` are constructible by literal, and a constructed one equals the materialized one field for field:
 
 ```noeta
 struct P { a: int; b: string }
@@ -238,7 +238,7 @@ The `Type` comes out of the same decoder `ParamInfo.type` goes through, so a sig
 
 ### `field_specs_of::<T>(): List<FieldSpec>` / `field_specs_of(name): List<FieldSpec>`
 
-The **type-level** field schema of a declared struct or class — one `FieldSpec` per field in declaration order: `{ name: string, type: Type, optional: bool }`. It is the declaration-side twin of `fields_of`: that one reflects an *instance*'s field **values** (and so sees the runtime-erased type), this one reflects the **declaration**, so `type` is precise and `optional` reports whether the field declared a default. An unknown name, or an enum, yields the empty list.
+The **type-level** field schema of a declared struct or class — one `FieldSpec` per field in declaration order: `{ name: string, type: Type, optional: bool }`. It is the declaration-side twin of `fields_of`: that one reflects an *instance*'s field **values** (and so sees the runtime-erased type), this one reflects the **declaration**, so `type` is precise and `optional` reports whether the field declared a default. An unknown name, or an enum, yields the empty list — an enum's cases are `variants_of`'s answer, and the two are meant to be asked as a pair.
 
 Two surfaces, one node: the turbofish `field_specs_of::<T>()` when you know the type statically, and `field_specs_of(name)` when you hold it only as a runtime string (a `Type.Struct(name, _)` you just reflected). They converge on one name-keyed query, so both behave identically — including under a `namespace`, where the turbofish resolves `T` to the same **qualified** identity `type_of` reports (`field_specs_of::<Todo>()` inside `namespace app.storage` asks for `app.storage.Todo`). The string surface takes the name verbatim, so it wants that qualified name too.
 
@@ -255,6 +255,86 @@ for spec in field_specs_of::<ServerOpts>() {
 // port: Type.Int optional=false
 // host: Type.String optional=true
 // verbose: Type.Bool optional=true
+```
+
+### `variants_of::<T>(): List<VariantSpec>` / `variants_of(name): List<VariantSpec>`
+
+The **type-level** variant schema of a declared enum — one `VariantSpec` per variant in declaration order: `{ name: string, payload: List<FieldSpec>, backing: ?dyn }`. It is the enum half of the same declaration-side query `field_specs_of` is the struct half of: two surfaces (turbofish and runtime string), one name-keyed query, the same **qualified**-identity resolution under a `namespace`, and the same lenient answer for a name it does not recognize — a struct, a class, or an unknown name yields the empty list, so a framework can probe any name without a guard.
+
+Ask them **together**, because neither alone can describe an arbitrary type. `field_specs_of` answers an enum with the empty list, and a field-less struct with the empty list too, so through that query alone an enum is indistinguishable from an empty struct: a schema builder that walked a `Type.Named(name, _)` recursed into an enum-typed field, found nothing, and emitted an empty object — silently wrong rather than loudly missing. With the pair, fields present means a struct or class, variants present means an enum, and both empty is the one honest "nothing is known about this name":
+
+```noeta
+enum Sentiment { Positive; Negative }
+
+struct Review {
+    text: string
+    mood: Sentiment
+}
+
+for spec in field_specs_of::<Review>() {
+    echo "${spec.name}: ${spec.type}"
+}
+// text: Type.String
+// mood: Type.Named(Sentiment, [])   // a name — ask both queries about it
+
+echo field_specs_of("Sentiment").len()   // 0 — not a struct
+echo variants_of("Sentiment").len()      // 2 — an enum, and here are its cases
+```
+
+A variant's **payload** is reported as ordinary declared-field data, through the very same `FieldSpec` the struct side uses — a payload *is* a field list. A positional payload carries a synthesized `_0`/`_1` name with its real declared type in the type slot, so a positional and a named payload read alike and need no special case at the consumer. `optional` is always `false`: a variant payload field has no syntax for a default, so it can never be omitted.
+
+```noeta
+enum Shape {
+    Circle(r: float)
+    Rect(int, int)
+    Many(List<int>)
+}
+
+for v in variants_of::<Shape>() {
+    echo v.name
+    for p in v.payload {
+        echo "  ${p.name}: ${p.type}"
+    }
+}
+// Circle
+//   r: Type.Float
+// Rect
+//   _0: Type.Int
+//   _1: Type.Int
+// Many
+//   _0: Type.List(Type.Int)
+```
+
+`backing` is the variant's value in a **backed enum** (`enum Status: string`), as `some(value)` — the wire value a derived schema should emit rather than the variant name. A plain enum's variants report `none`, so the `?` is the difference between "backed by this" and "not backed at all":
+
+```noeta
+enum Status: string {
+    Pending = "pending"
+    Done = "done"
+}
+
+for v in variants_of::<Status>() {
+    echo "${v.name} = ${v.backing}"
+}
+// Pending = some(pending)
+// Done = some(done)
+```
+
+A variant's own `#[...]` attributes are deliberately **not** in the report — exactly as a field's are not in `FieldSpec`. A member's attributes are already keyed in the manifest under its qualified `Enum.Variant` target, the same `Type.field` convention the struct side uses, so `attributes_of::<T>()` is the one answer to "what is annotated on this member" for fields, methods, parameters and variants alike. Carrying them here would make the enum half of one surface answer a question the struct half does not, and give a consumer two places to look for one fact:
+
+```noeta
+@attribute
+struct Doc { text: string }
+
+enum Sentiment {
+    #[Doc("a good review")]
+    Positive
+    Negative
+}
+
+for a in attributes_of::<Doc>() {
+    echo "${a.target}: ${a.value.text}"   // Sentiment.Positive: a good review
+}
 ```
 
 ### `construct::<T>(fields): Result<dyn, string>` / `construct(name, fields): Result<dyn, string>`
@@ -372,7 +452,40 @@ echo match invoke("greet", ["ada"]) {
 
 The two-operand form searches the top-level function namespace and nothing else. A type name, a qualified `Type.method`, and a local variable holding a function are each simply not found — reaching a type's methods is what the three-operand form is for, and a function value you already hold you can just call.
 
-Every resolution failure is an `Err`, never an abort: an unknown name, a non-string name, non-list args, and an arity mismatch alike. A parameter with a default may be omitted from `args`, exactly as at a direct call site — the pair to `ParamInfo.optional`. A panic *inside* the invoked body is a normal abort; only the by-name resolution is caught.
+`args` accepts either shape, exactly as `construct`'s `fields` does, and in both the two- and three-operand forms:
+
+- a **`List<dyn>`** — positional, in declaration order. A list shorter than the parameter count leaves the remaining parameters to their defaults, so trailing optional parameters may simply be left off. It cannot express a *gap*, by design.
+- a **`Map<string, dyn>`** — named, sparse and in any order. This is the form a caller filling a signature from `params_of` produces: supply `a` and `c` and let the middle `b` run its default.
+
+```noeta
+fn place(item: string, qty: int = 1, note: string = "-"): string {
+    return "${item} x${qty} (${note})"
+}
+
+mut call: Map<string, dyn> = {}
+call["item"] = "widget"
+call["note"] = "rush"
+
+echo match invoke("place", call) {
+    Ok(v)  => v,                         // widget x1 (rush)
+    Err(e) => e,
+}
+```
+
+The omitted `qty` runs its compiled default expression, exactly as at a direct `place(item: "widget", note: "rush")` call site — the named form is the same calling convention reached by name, not a second one. Parameter names come from the same signature index `params_of` reads, so reflecting a signature and then calling it by name round-trips on one target string.
+
+Every rejection is an `Err`, never an abort — an unknown name, a non-string name, args that are neither a list nor a map, an arity mismatch, and, in the named form:
+
+| Situation | Message |
+|---|---|
+| `args` is neither a list nor a map | ``invoke args must be a list or a map, found <kind>`` |
+| a named argument the callable has no parameter for | ``` `place` has no parameter `nope` ``` |
+| a parameter that is neither supplied nor defaulted | ``` missing required parameter `item` of `place` ``` |
+| a callable the signature index does not describe (a global holding a closure that was never declared as a `fn`) | ``` `f` does not take named arguments ``` |
+
+Unlike `construct`, the named form does **not** type-check an argument against its declared parameter type. `invoke`'s positional form never has — the callee's own typing is the backstop — and checking one form but not the other would make the very same call succeed positionally and fail by name.
+
+A parameter with a default may be omitted from either shape, exactly as at a direct call site — the pair to `ParamInfo.optional`. A panic *inside* the invoked body is a normal abort; only the by-name resolution is caught.
 
 ## Where this is headed
 

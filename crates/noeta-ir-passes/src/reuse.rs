@@ -90,7 +90,7 @@ fn collect_own_destructors_into(block: &Block, out: &mut HashSet<String>) {
         match stmt {
             Stmt::Decl(Decl::Class(class)) => {
                 if class.destructor.is_some() {
-                    out.insert(class.decl.name.clone());
+                    out.insert(class.decl.name.to_string());
                 }
                 for (_, f) in &class.methods {
                     collect_own_destructors_into(&f.body, out);

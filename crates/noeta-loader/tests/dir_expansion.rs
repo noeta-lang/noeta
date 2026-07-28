@@ -118,7 +118,7 @@ fn methods_of(linked: &EntryLink, name: &str) -> Vec<String> {
         .iter()
         .find_map(|s| match s {
             noeta_ast::Stmt::Struct(d) if d.name == name => {
-                Some(d.methods.iter().map(|m| m.name.clone()).collect())
+                Some(d.methods.iter().map(|m| m.name.to_string()).collect())
             }
             _ => None,
         })

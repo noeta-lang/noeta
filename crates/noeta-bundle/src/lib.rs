@@ -130,7 +130,16 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// the same wire break as every bump above. `Op` (in `Module::code`) also gained a `ReturnsOf`
 /// variant, declared beside `ParamsOf` rather than at the end, which shifts every discriminant after
 /// it — a wire break on its own by the same non-self-describing-encoding rule.
-pub const FORMAT_VERSION: u8 = 10;
+/// Bumped to 11 by the enum-reflection arc: `reflect::VariantInfo` (in `Module::reflection`) gained
+/// two trailing fields parallel to and beside `fields` — `field_types: Vec<TypeRepr>` and `backing:
+/// Option<AttrValue>` — so the new type-level `variants_of` query can report a variant's payload
+/// types precisely and a backed enum's wire value. Same non-self-describing-encoding reasoning as
+/// every bump above: postcard writes them back to back after `fields` with no tag, so a version-10
+/// reader would read the type sequence's length prefix as the next `VariantInfo`'s name length and
+/// desynchronise the manifest. `Op` (in `Module::code`) also gained a `VariantsOf` variant, declared
+/// beside `FieldSpecsOf` rather than at the end, which shifts every discriminant after it — a wire
+/// break on its own by the same rule.
+pub const FORMAT_VERSION: u8 = 11;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

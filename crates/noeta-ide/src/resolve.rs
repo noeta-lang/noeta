@@ -42,22 +42,22 @@ impl Definitions {
             match stmt {
                 Stmt::Fn(decl) => {
                     defs.values
-                        .entry(decl.name.clone())
+                        .entry(decl.name.to_string())
                         .or_insert(decl.name_span);
                 }
                 Stmt::Struct(decl) => {
                     defs.types
-                        .entry(decl.name.clone())
+                        .entry(decl.name.to_string())
                         .or_insert(decl.name_span);
                 }
                 Stmt::Class(decl) => {
                     defs.types
-                        .entry(decl.name.clone())
+                        .entry(decl.name.to_string())
                         .or_insert(decl.name_span);
                 }
                 Stmt::Enum(decl) => {
                     defs.types
-                        .entry(decl.name.clone())
+                        .entry(decl.name.to_string())
                         .or_insert(decl.name_span);
                 }
                 // A user trait's name resolves like a type name (L1) — so goto-def / hover on a
@@ -65,7 +65,7 @@ impl Definitions {
                 // emitted as a `Type` semantic token.
                 Stmt::Trait(decl) => {
                     defs.types
-                        .entry(decl.name.clone())
+                        .entry(decl.name.to_string())
                         .or_insert(decl.name_span);
                 }
                 _ => {}
@@ -149,30 +149,30 @@ impl MemberTable {
             match stmt {
                 Stmt::Struct(decl) => {
                     table.add_fields(
-                        &decl.name,
+                        decl.name.as_str(),
                         decl.fields.iter().map(|f| (&f.name, f.name_span)),
                     );
-                    table.add_methods(&decl.name, &decl.methods);
+                    table.add_methods(decl.name.as_str(), &decl.methods);
                 }
                 Stmt::Class(decl) => {
                     table.add_fields(
-                        &decl.name,
+                        decl.name.as_str(),
                         decl.fields.iter().map(|f| (&f.name, f.name_span)),
                     );
-                    table.add_methods(&decl.name, &decl.methods);
+                    table.add_methods(decl.name.as_str(), &decl.methods);
                 }
                 Stmt::Enum(decl) => {
                     table.add_fields(
-                        &decl.name,
+                        decl.name.as_str(),
                         decl.variants.iter().map(|v| (&v.name, v.name_span)),
                     );
-                    table.add_methods(&decl.name, &decl.methods);
+                    table.add_methods(decl.name.as_str(), &decl.methods);
                 }
                 // A trait's method signatures register under the trait name (L1) — so member
                 // resolution on a `dyn Trait` receiver's `.method` resolves to the contract.
                 Stmt::Trait(decl) => {
                     let sigs: Vec<FnDecl> = decl.methods.iter().map(|m| m.sig.clone()).collect();
-                    table.add_methods(&decl.name, &sigs);
+                    table.add_methods(decl.name.as_str(), &sigs);
                 }
                 _ => {}
             }
@@ -191,7 +191,7 @@ impl MemberTable {
     fn add_methods(&mut self, ty: &str, methods: &[FnDecl]) {
         for method in methods {
             self.by_type_member
-                .entry((ty.to_string(), method.name.clone()))
+                .entry((ty.to_string(), method.name.to_string()))
                 .or_insert(method.name_span);
         }
     }
@@ -253,7 +253,7 @@ impl DefUse {
             if let Stmt::Fn(decl) = stmt {
                 resolver
                     .functions
-                    .entry(decl.name.clone())
+                    .entry(decl.name.to_string())
                     .or_insert(decl.name_span);
             }
         }
@@ -375,7 +375,7 @@ pub fn visible_at(program: &Program, offset: u32, source: SourceId) -> Vec<(Stri
         if let Stmt::Fn(decl) = stmt {
             resolver
                 .functions
-                .entry(decl.name.clone())
+                .entry(decl.name.to_string())
                 .or_insert(decl.name_span);
         }
     }
@@ -621,7 +621,7 @@ impl Resolver {
             }
             Stmt::Fn(decl) => {
                 // The fn name is visible to siblings and to itself (recursion).
-                self.bind(&decl.name, decl.name_span);
+                self.bind(decl.name.as_str(), decl.name_span);
                 self.walk_callable(
                     decl.span,
                     &decl.params,
@@ -721,7 +721,7 @@ impl Resolver {
     fn walk_expr(&mut self, expr: &Expr) {
         self.maybe_snapshot(expr.span());
         match expr {
-            Expr::Ident { name, span } => self.use_ident(name, *span),
+            Expr::Ident { name, span } => self.use_ident(name.as_str(), *span),
             Expr::Unary { operand, .. } => self.walk_expr(operand),
             Expr::Binary { lhs, rhs, .. } => {
                 self.walk_expr(lhs);
@@ -827,7 +827,7 @@ impl Resolver {
                 self.walk_expr(target)
             }
             // A turbofish operand is a type, not an expression; only a dynamic one is walked.
-            Expr::FieldSpecsOf { name, .. } => {
+            Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
                 if let Some(e) = name.dynamic() {
                     self.walk_expr(e);
                 }

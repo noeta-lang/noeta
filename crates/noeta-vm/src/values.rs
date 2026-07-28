@@ -555,15 +555,24 @@ pub(crate) fn attr_value_to_vm(
             enum_name,
             variant,
             args,
-        } => make_attr_enum(enum_name, variant, args.iter().map(recur).collect()),
+        } => make_attr_enum(
+            enum_name.as_str(),
+            variant,
+            args.iter().map(recur).collect(),
+        ),
         A::Struct { type_name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-            let shape =
-                noeta_object::intern_shape(Shape::object(ShapeKind::Struct, type_name, names));
+            let shape = noeta_object::intern_shape(Shape::object(
+                ShapeKind::Struct,
+                type_name.as_str(),
+                names,
+            ));
             let values: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::object(shape, values)
         }
-        A::TypeRef { name, args } => build_type_value(&reflection.type_ref_repr(name, args)),
+        A::TypeRef { name, args } => {
+            build_type_value(&reflection.type_ref_repr(name.as_str(), args))
+        }
     }
 }
 
@@ -635,6 +644,44 @@ pub(crate) fn free_fn_miss_message(name: &str) -> String {
     } else {
         format!("no top-level function `{name}`")
     }
+}
+
+/// Bind an `invoke`'s arguments to the prototype it resolved to — the VM twin of the tree-walker's
+/// `bind_invoke_args`, and the same two shapes: a **positional** `List<dyn>` keeps the arity
+/// pre-check, a **named** `Map<string, dyn>` binds through the shared `plan_invoke_named`. `total` is
+/// the callee's declared parameter count with a method's receiver already excluded, and `n_defaults`
+/// how many of them carry a default.
+///
+/// Parameter names come from the reflection artifact rather than the `Chunk` (which carries none),
+/// which is also what makes the two backends agree: both read the one table `params_of` reads,
+/// keyed by the same `target` string. Returns the positional argument list plus the mask (indexed
+/// over declared parameters — a method's call site shifts it up by one for the receiver), or a
+/// ready-to-surface message for the `Result.Err`.
+pub(crate) fn bind_invoke_args(
+    reflection: &noeta_ast::reflect::ReflectionInfo,
+    target: &str,
+    kind: &str,
+    total: usize,
+    n_defaults: usize,
+    positional: Vec<Value>,
+    named: Option<&[(String, Value)]>,
+) -> Result<(Vec<Value>, Option<u64>), String> {
+    let Some(named) = named else {
+        let required = total - n_defaults;
+        if positional.len() < required || positional.len() > total {
+            return Err(arity_message(kind, required, total, positional.len()));
+        }
+        return Ok((positional, None));
+    };
+    let names: Vec<String> = named.iter().map(|(n, _)| n.clone()).collect();
+    let plan = noeta_ast::reflect::plan_invoke_named(
+        target,
+        reflection.params_for(target),
+        total,
+        &names,
+    )?;
+    let args = plan.order.iter().map(|&i| named[i].1).collect();
+    Ok((args, plan.supplied))
 }
 
 /// The arity-mismatch message, worded identically to the tree-walker's (so the differential

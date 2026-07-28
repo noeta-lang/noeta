@@ -378,7 +378,7 @@ mod tests {
             span,
         };
         let spec = DeriveSpec {
-            name: String::new(),
+            name: noeta_ast::Name::default(),
             args: Vec::new(),
             bindings: Vec::new(),
             via: Some(("f".to_string(), span)),

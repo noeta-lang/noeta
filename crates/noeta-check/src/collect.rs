@@ -181,7 +181,7 @@ impl Checker {
         };
         self.symbols
             .method_receiver
-            .insert((type_name.to_string(), m.name.clone()), receiver);
+            .insert((type_name.to_string(), m.name.to_string()), receiver);
         let own_generics: Vec<(String, Vec<BoundReq>)> = m
             .type_params
             .iter()
@@ -220,7 +220,7 @@ impl Checker {
                 raw_ret,
             });
         self.symbols.methods.insert(
-            (type_name.to_string(), m.name.clone()),
+            (type_name.to_string(), m.name.to_string()),
             FnSig {
                 params,
                 param_names: m.params.iter().map(|p| p.name.clone()).collect(),
@@ -268,20 +268,20 @@ impl Checker {
                             )
                         })
                         .collect();
-                    self.symbols.records.insert(r.name.clone(), fields);
+                    self.symbols.records.insert(r.name.to_string(), fields);
                     // Where this type was declared — the span whose `SourceId` the package orphan
                     // rule resolves the type's package from.
                     self.symbols
                         .type_decl_spans
-                        .insert(r.name.clone(), r.name_span);
+                        .insert(r.name.to_string(), r.name_span);
                     if let Some(directive) = &r.decorators.packed {
-                        self.symbols.packed_structs.insert(r.name.clone());
+                        self.symbols.packed_structs.insert(r.name.to_string());
                         if directive.layout == noeta_ast::PackedLayout::Column {
-                            self.symbols.column_structs.insert(r.name.clone());
+                            self.symbols.column_structs.insert(r.name.to_string());
                         }
                     }
                     if r.decorators.validated.is_some() {
-                        self.symbols.validated_types.insert(r.name.clone());
+                        self.symbols.validated_types.insert(r.name.to_string());
                     }
                     // A struct's `mut` fields are assignable via `x.f = v` (value-semantic, so the
                     // write is a copy-on-write rebind). Register them exactly as for a class; the
@@ -293,35 +293,35 @@ impl Checker {
                         .map(|f| f.name.clone())
                         .collect();
                     if !muts.is_empty() {
-                        self.symbols.mut_fields.insert(r.name.clone(), muts);
+                        self.symbols.mut_fields.insert(r.name.to_string(), muts);
                     }
-                    self.symbols.types.insert(r.name.clone());
+                    self.symbols.types.insert(r.name.to_string());
                     self.symbols
                         .type_kinds
-                        .insert(r.name.clone(), noeta_types::TypeKind::Struct);
-                    self.record_optional_fields(&r.name, &r.fields);
+                        .insert(r.name.to_string(), noeta_types::TypeKind::Struct);
+                    self.record_optional_fields(r.name.as_str(), &r.fields);
                     // A struct satisfies a trait it `@derive`s or in-body `impl`s — the same
                     // chain a class/enum records. (The impls half was missing here: a struct's
                     // `impl Comparable` never registered, so bounds falsely rejected it.)
                     self.record_trait_impls(
-                        &r.name,
+                        r.name.as_str(),
                         r.decorators
                             .derives
                             .iter()
                             .map(|d| d.name.as_str())
                             .chain(r.impls.iter().map(|b| b.trait_name.as_str())),
                     );
-                    self.record_derived(&r.name, &r.decorators.derives);
-                    self.record_from_impls(&r.name, &r.impls);
-                    self.record_attribute(&r.name, r.decorators.attribute.as_deref());
+                    self.record_derived(r.name.as_str(), &r.decorators.derives);
+                    self.record_from_impls(r.name.as_str(), &r.impls);
+                    self.record_attribute(r.name.as_str(), r.decorators.attribute.as_deref());
                     self.symbols.generic_types.insert(
-                        r.name.clone(),
+                        r.name.to_string(),
                         r.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
                     // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
                     self.symbols
                         .type_params
-                        .insert(r.name.clone(), r.type_params.clone());
+                        .insert(r.name.to_string(), r.type_params.clone());
                     // Record each struct method's signature + instance classification, exactly as
                     // for a class (this closed a long-standing gap: struct associated calls —
                     // `B.new(1)` — previously typed as a hole because struct methods were never
@@ -343,18 +343,18 @@ impl Checker {
                     // flattened walk this replaces — inherent first, so a same-named impl method
                     // still wins.
                     for m in &r.methods {
-                        self.collect_method_sig(&r.name, m, &tps, &struct_generics);
+                        self.collect_method_sig(r.name.as_str(), m, &tps, &struct_generics);
                     }
                     for (m, provided) in impl_block_methods(&r.impls) {
                         self.collect_method_sig_classified(
-                            &r.name,
+                            r.name.as_str(),
                             m,
                             &tps,
                             &struct_generics,
                             provided,
                         );
                     }
-                    self.bake_impl_assoc(&r.name, &r.impls, &tps, &struct_generics);
+                    self.bake_impl_assoc(r.name.as_str(), &r.impls, &tps, &struct_generics);
                 }
                 Stmt::Class(c) => {
                     let fields = c
@@ -367,12 +367,12 @@ impl Checker {
                             )
                         })
                         .collect();
-                    self.symbols.records.insert(c.name.clone(), fields);
+                    self.symbols.records.insert(c.name.to_string(), fields);
                     self.symbols
                         .type_decl_spans
-                        .insert(c.name.clone(), c.name_span);
+                        .insert(c.name.to_string(), c.name_span);
                     if c.decorators.validated.is_some() {
-                        self.symbols.validated_types.insert(c.name.clone());
+                        self.symbols.validated_types.insert(c.name.to_string());
                     }
                     let muts: HashSet<String> = c
                         .fields
@@ -381,7 +381,7 @@ impl Checker {
                         .map(|f| f.name.clone())
                         .collect();
                     if !muts.is_empty() {
-                        self.symbols.mut_fields.insert(c.name.clone(), muts);
+                        self.symbols.mut_fields.insert(c.name.to_string(), muts);
                     }
                     // Class fields default **private**; only those declared `pub` are public
                     // (object-model slice 2d). Struct fields are always public, so structs never
@@ -393,28 +393,30 @@ impl Checker {
                         .map(|f| f.name.clone())
                         .collect();
                     if !private.is_empty() {
-                        self.symbols.private_fields.insert(c.name.clone(), private);
+                        self.symbols
+                            .private_fields
+                            .insert(c.name.to_string(), private);
                     }
-                    self.symbols.types.insert(c.name.clone());
+                    self.symbols.types.insert(c.name.to_string());
                     self.symbols
                         .type_kinds
-                        .insert(c.name.clone(), noeta_types::TypeKind::Class);
+                        .insert(c.name.to_string(), noeta_types::TypeKind::Class);
                     // A class with a `destruct { ... }` block seeds destruct-reachability (Phase 3.2b).
                     if c.destructor.is_some() {
-                        self.symbols.destructor_classes.insert(c.name.clone());
+                        self.symbols.destructor_classes.insert(c.name.to_string());
                     }
                     // A class satisfies a trait it `@derive`s or `impl`s; record both for bound
                     // enforcement (the `impl`/`derive` *names* are validated elsewhere).
                     self.record_trait_impls(
-                        &c.name,
+                        c.name.as_str(),
                         c.decorators
                             .derives
                             .iter()
                             .map(|d| d.name.as_str())
                             .chain(c.impls.iter().map(|b| b.trait_name.as_str())),
                     );
-                    self.record_derived(&c.name, &c.decorators.derives);
-                    self.record_from_impls(&c.name, &c.impls);
+                    self.record_derived(c.name.as_str(), &c.decorators.derives);
+                    self.record_from_impls(c.name.as_str(), &c.impls);
                     // Record each method's signature (class methods and impl-block methods alike),
                     // so `obj.method(...)` resolves to a concrete type and its arguments are
                     // checked. The class's generic parameters are erased to `dyn` (erased at
@@ -435,26 +437,26 @@ impl Checker {
                         })
                         .collect();
                     self.symbols.generic_types.insert(
-                        c.name.clone(),
+                        c.name.to_string(),
                         c.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
                     // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
                     self.symbols
                         .type_params
-                        .insert(c.name.clone(), c.type_params.clone());
+                        .insert(c.name.to_string(), c.type_params.clone());
                     for m in &c.methods {
-                        self.collect_method_sig(&c.name, m, &tps, &class_generics);
+                        self.collect_method_sig(c.name.as_str(), m, &tps, &class_generics);
                     }
                     for (m, provided) in impl_block_methods(&c.impls) {
                         self.collect_method_sig_classified(
-                            &c.name,
+                            c.name.as_str(),
                             m,
                             &tps,
                             &class_generics,
                             provided,
                         );
                     }
-                    self.bake_impl_assoc(&c.name, &c.impls, &tps, &class_generics);
+                    self.bake_impl_assoc(c.name.as_str(), &c.impls, &tps, &class_generics);
                 }
                 Stmt::Enum(e) => {
                     let variants = e
@@ -475,40 +477,40 @@ impl Checker {
                                 .collect(),
                         })
                         .collect();
-                    self.symbols.enums.insert(e.name.clone(), variants);
-                    self.symbols.types.insert(e.name.clone());
+                    self.symbols.enums.insert(e.name.to_string(), variants);
+                    self.symbols.types.insert(e.name.to_string());
                     self.symbols
                         .type_decl_spans
-                        .insert(e.name.clone(), e.name_span);
+                        .insert(e.name.to_string(), e.name_span);
                     self.symbols
                         .type_kinds
-                        .insert(e.name.clone(), noeta_types::TypeKind::Enum);
+                        .insert(e.name.to_string(), noeta_types::TypeKind::Enum);
                     // `@semantic` makes the enum role-eligible (its fieldless variants may be named
                     // by `@role(Enum.Variant)`); recorded for the post-collect role-validation pass.
                     if e.decorators.semantic.is_some() {
-                        self.symbols.semantic_enums.insert(e.name.clone());
+                        self.symbols.semantic_enums.insert(e.name.to_string());
                     }
                     // An enum satisfies a trait it `@derive`s or `impl`s (its in-body blocks are
                     // uniform with a class's — object-model slice 3); record both so an operator
                     // trait (`impl Add`, `impl Comparable`, …) is accepted on an enum operand.
                     self.record_trait_impls(
-                        &e.name,
+                        e.name.as_str(),
                         e.decorators
                             .derives
                             .iter()
                             .map(|d| d.name.as_str())
                             .chain(e.impls.iter().map(|b| b.trait_name.as_str())),
                     );
-                    self.record_derived(&e.name, &e.decorators.derives);
-                    self.record_from_impls(&e.name, &e.impls);
+                    self.record_derived(e.name.as_str(), &e.decorators.derives);
+                    self.record_from_impls(e.name.as_str(), &e.impls);
                     self.symbols.generic_types.insert(
-                        e.name.clone(),
+                        e.name.to_string(),
                         e.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
                     // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
                     self.symbols
                         .type_params
-                        .insert(e.name.clone(), e.type_params.clone());
+                        .insert(e.name.to_string(), e.type_params.clone());
                     // Record each enum method's signature (inherent + impl-block, the unified body —
                     // object-model slice 3) under `(Enum, method)`, exactly like a class's, so an
                     // instance call `status.label()` and an associated call `Status.parse(s)` resolve
@@ -526,18 +528,18 @@ impl Checker {
                         })
                         .collect();
                     for m in &e.methods {
-                        self.collect_method_sig(&e.name, m, &tps, &enum_generics);
+                        self.collect_method_sig(e.name.as_str(), m, &tps, &enum_generics);
                     }
                     for (m, provided) in impl_block_methods(&e.impls) {
                         self.collect_method_sig_classified(
-                            &e.name,
+                            e.name.as_str(),
                             m,
                             &tps,
                             &enum_generics,
                             provided,
                         );
                     }
-                    self.bake_impl_assoc(&e.name, &e.impls, &tps, &enum_generics);
+                    self.bake_impl_assoc(e.name.as_str(), &e.impls, &tps, &enum_generics);
                 }
                 Stmt::Fn(f) => {
                     // The registered signature is **erased** (generic parameters → `dyn`): the
@@ -582,7 +584,7 @@ impl Checker {
                         raw_ret,
                     });
                     self.symbols.functions.insert(
-                        f.name.clone(),
+                        f.name.to_string(),
                         FnSig {
                             params,
                             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
@@ -603,14 +605,14 @@ impl Checker {
                 // counts it. Validity (orphan rule, trait, body) is checked in pass 2.
                 Stmt::Impl(decl) => {
                     self.record_trait_impls(
-                        &decl.target,
+                        decl.target.as_str(),
                         std::iter::once(decl.trait_name.as_str()),
                     );
                     self.symbols
                         .standalone_impls
-                        .entry(decl.target.clone())
+                        .entry(decl.target.to_string())
                         .or_default()
-                        .push((decl.trait_name.clone(), decl.trait_span));
+                        .push((decl.trait_name.to_string(), decl.trait_span));
                 }
                 // A user-defined trait (L1) is registered up front so forward references (an `impl`
                 // or `<T: Trait>` bound textually above the `trait`) resolve. A duplicate declaration
@@ -618,7 +620,7 @@ impl Checker {
                 Stmt::Trait(t) => {
                     self.symbols
                         .user_traits
-                        .entry(t.name.clone())
+                        .entry(t.name.to_string())
                         .or_insert_with(|| t.clone());
                 }
                 _ => {}
@@ -638,7 +640,12 @@ impl Checker {
         for stmt in &program.stmts {
             let (type_name, impls, derives): (&str, &[noeta_ast::ImplBlock], &[DeriveSpec]) =
                 match stmt {
-                    Stmt::Impl(decl) if self.symbols.user_traits.contains_key(&decl.trait_name) => {
+                    Stmt::Impl(decl)
+                        if self
+                            .symbols
+                            .user_traits
+                            .contains_key(decl.trait_name.as_str()) =>
+                    {
                         let args: Vec<Type> = decl
                             .trait_args
                             .iter()
@@ -646,15 +653,15 @@ impl Checker {
                             .collect();
                         self.symbols
                             .user_trait_impls
-                            .entry(decl.target.clone())
+                            .entry(decl.target.to_string())
                             .or_default()
-                            .entry(decl.trait_name.clone())
+                            .entry(decl.trait_name.to_string())
                             .or_insert(args);
                         continue;
                     }
-                    Stmt::Struct(d) => (&d.name, &d.impls, &d.decorators.derives),
-                    Stmt::Class(d) => (&d.name, &d.impls, &d.decorators.derives),
-                    Stmt::Enum(d) => (&d.name, &d.impls, &d.decorators.derives),
+                    Stmt::Struct(d) => (d.name.as_str(), &d.impls, &d.decorators.derives),
+                    Stmt::Class(d) => (d.name.as_str(), &d.impls, &d.decorators.derives),
+                    Stmt::Enum(d) => (d.name.as_str(), &d.impls, &d.decorators.derives),
                     _ => continue,
                 };
             for (trait_name, trait_args) in impls
@@ -662,7 +669,7 @@ impl Checker {
                 .map(|b| (&b.trait_name, b.trait_args.as_slice()))
                 .chain(derives.iter().map(|d| (&d.name, d.args.as_slice())))
             {
-                if self.symbols.user_traits.contains_key(trait_name) {
+                if self.symbols.user_traits.contains_key(trait_name.as_str()) {
                     let args: Vec<Type> = trait_args
                         .iter()
                         .map(|t| from_ref_q(t, &self.imports.extern_types))
@@ -671,7 +678,7 @@ impl Checker {
                         .user_trait_impls
                         .entry(type_name.to_string())
                         .or_default()
-                        .entry(trait_name.clone())
+                        .entry(trait_name.to_string())
                         .or_insert(args);
                 }
             }
@@ -682,22 +689,36 @@ impl Checker {
         // projecting `Self::Name` in a method signature to the implementor's concrete type.
         for stmt in &program.stmts {
             match stmt {
-                Stmt::Impl(d) => {
-                    self.record_assoc_bindings(&d.target, &d.trait_name, &d.assoc_bindings)
-                }
+                Stmt::Impl(d) => self.record_assoc_bindings(
+                    d.target.as_str(),
+                    d.trait_name.as_str(),
+                    &d.assoc_bindings,
+                ),
                 Stmt::Struct(d) => {
                     for b in &d.impls {
-                        self.record_assoc_bindings(&d.name, &b.trait_name, &b.assoc_bindings);
+                        self.record_assoc_bindings(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.assoc_bindings,
+                        );
                     }
                 }
                 Stmt::Class(d) => {
                     for b in &d.impls {
-                        self.record_assoc_bindings(&d.name, &b.trait_name, &b.assoc_bindings);
+                        self.record_assoc_bindings(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.assoc_bindings,
+                        );
                     }
                 }
                 Stmt::Enum(d) => {
                     for b in &d.impls {
-                        self.record_assoc_bindings(&d.name, &b.trait_name, &b.assoc_bindings);
+                        self.record_assoc_bindings(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.assoc_bindings,
+                        );
                     }
                 }
                 _ => {}
@@ -717,9 +738,19 @@ impl Checker {
                 &[noeta_ast::FnDecl],
                 &[DeriveSpec],
             ) = match stmt {
-                Stmt::Struct(d) => (&d.name, &d.fields, &d.methods, &d.decorators.derives),
-                Stmt::Class(d) => (&d.name, &d.fields, &d.methods, &d.decorators.derives),
-                Stmt::Enum(d) => (&d.name, &[], &d.methods, &d.decorators.derives),
+                Stmt::Struct(d) => (
+                    d.name.as_str(),
+                    &d.fields,
+                    &d.methods,
+                    &d.decorators.derives,
+                ),
+                Stmt::Class(d) => (
+                    d.name.as_str(),
+                    &d.fields,
+                    &d.methods,
+                    &d.decorators.derives,
+                ),
+                Stmt::Enum(d) => (d.name.as_str(), &[], &d.methods, &d.decorators.derives),
                 _ => continue,
             };
             // The ONE cascade (`noeta_ast::derive::plan_derive`), which the backends' hoist also
@@ -762,7 +793,7 @@ impl Checker {
             let type_params = self
                 .symbols
                 .type_params
-                .get(&d.target)
+                .get(d.target.as_str())
                 .cloned()
                 .unwrap_or_default();
             let tps: HashSet<String> = type_params.iter().map(|p| p.name.clone()).collect();
@@ -783,14 +814,24 @@ impl Checker {
                 .iter()
                 .map(|(n, t)| (n.as_str(), t))
                 .collect();
-            let provided = trait_supplies_instance_interface(&d.trait_name);
+            let provided = trait_supplies_instance_interface(d.trait_name.as_str());
             for m in &d.methods {
                 if assoc.is_empty() {
-                    self.collect_method_sig_classified(&d.target, m, &tps, &generics, provided);
+                    self.collect_method_sig_classified(
+                        d.target.as_str(),
+                        m,
+                        &tps,
+                        &generics,
+                        provided,
+                    );
                 } else {
                     let resolved = subst_self_assoc_in_fn(m, &assoc);
                     self.collect_method_sig_classified(
-                        &d.target, &resolved, &tps, &generics, provided,
+                        d.target.as_str(),
+                        &resolved,
+                        &tps,
+                        &generics,
+                        provided,
                     );
                 }
             }
@@ -823,21 +864,41 @@ impl Checker {
             match stmt {
                 Stmt::Struct(d) => {
                     for b in &d.impls {
-                        register(&d.name, &b.trait_name, &b.trait_args, &b.methods);
+                        register(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.trait_args,
+                            &b.methods,
+                        );
                     }
                 }
                 Stmt::Class(d) => {
                     for b in &d.impls {
-                        register(&d.name, &b.trait_name, &b.trait_args, &b.methods);
+                        register(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.trait_args,
+                            &b.methods,
+                        );
                     }
                 }
                 Stmt::Enum(d) => {
                     for b in &d.impls {
-                        register(&d.name, &b.trait_name, &b.trait_args, &b.methods);
+                        register(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.trait_args,
+                            &b.methods,
+                        );
                     }
                 }
                 Stmt::Impl(d) => {
-                    register(&d.target, &d.trait_name, &d.trait_args, &d.methods);
+                    register(
+                        d.target.as_str(),
+                        d.trait_name.as_str(),
+                        &d.trait_args,
+                        &d.methods,
+                    );
                 }
                 _ => {}
             }
@@ -901,9 +962,9 @@ impl Checker {
                         decl.trait_span,
                     )]
                 }
-                Stmt::Struct(d) => bundle_derive_candidates(&d.name, &d.decorators.derives),
-                Stmt::Class(d) => bundle_derive_candidates(&d.name, &d.decorators.derives),
-                Stmt::Enum(d) => bundle_derive_candidates(&d.name, &d.decorators.derives),
+                Stmt::Struct(d) => bundle_derive_candidates(d.name.as_str(), &d.decorators.derives),
+                Stmt::Class(d) => bundle_derive_candidates(d.name.as_str(), &d.decorators.derives),
+                Stmt::Enum(d) => bundle_derive_candidates(d.name.as_str(), &d.decorators.derives),
                 _ => continue,
             };
             for (target, trait_name, span) in candidates {
@@ -1004,7 +1065,7 @@ impl Checker {
     /// fallback and derive bridging share (the body itself is materialized by the backends'
     /// hoist; the checker needs the signature so member calls resolve and type).
     fn register_synth_method(&mut self, type_name: &str, m: &noeta_ast::FnDecl) {
-        let key = (type_name.to_string(), m.name.clone());
+        let key = (type_name.to_string(), m.name.to_string());
         if self.symbols.methods.contains_key(&key) {
             return;
         }
@@ -1094,7 +1155,7 @@ impl Checker {
                 .iter()
                 .map(|(n, t)| (n.as_str(), t))
                 .collect();
-            let provided = trait_supplies_instance_interface(&b.trait_name);
+            let provided = trait_supplies_instance_interface(b.trait_name.as_str());
             for m in &b.methods {
                 let resolved = subst_self_assoc_in_fn(m, &map);
                 self.collect_method_sig_classified(
@@ -1122,7 +1183,7 @@ impl Checker {
             .or_default();
         for t in derives
             .iter()
-            .filter_map(|d| BuiltinTrait::from_name(&d.name))
+            .filter_map(|d| BuiltinTrait::from_name(d.name.as_str()))
         {
             entry.insert(t);
         }
@@ -1134,7 +1195,7 @@ impl Checker {
                     .via_derives
                     .entry(name.to_string())
                     .or_default()
-                    .push((d.name.clone(), via.clone()));
+                    .push((d.name.to_string(), via.clone()));
             }
         }
     }
@@ -1153,30 +1214,30 @@ impl Checker {
         let mut ast_provided: HashSet<(String, String)> = HashSet::new();
         let mut note = |ty: &str, methods: &[FnDecl]| {
             for m in methods {
-                ast_provided.insert((ty.to_string(), m.name.clone()));
+                ast_provided.insert((ty.to_string(), m.name.to_string()));
             }
         };
         for stmt in &program.stmts {
             match stmt {
                 Stmt::Struct(d) => {
-                    note(&d.name, &d.methods);
+                    note(d.name.as_str(), &d.methods);
                     for b in &d.impls {
-                        note(&d.name, &b.methods);
+                        note(d.name.as_str(), &b.methods);
                     }
                 }
                 Stmt::Class(d) => {
-                    note(&d.name, &d.methods);
+                    note(d.name.as_str(), &d.methods);
                     for b in &d.impls {
-                        note(&d.name, &b.methods);
+                        note(d.name.as_str(), &b.methods);
                     }
                 }
                 Stmt::Enum(d) => {
-                    note(&d.name, &d.methods);
+                    note(d.name.as_str(), &d.methods);
                     for b in &d.impls {
-                        note(&d.name, &b.methods);
+                        note(d.name.as_str(), &b.methods);
                     }
                 }
-                Stmt::Impl(d) => note(&d.target, &d.methods),
+                Stmt::Impl(d) => note(d.target.as_str(), &d.methods),
                 _ => {}
             }
         }
@@ -1299,7 +1360,7 @@ fn collect_nested_fn_names(stmt: &Stmt, top_level: bool, out: &mut HashSet<Strin
     };
     let fn_decl = |decl: &FnDecl, is_nested: bool, out: &mut HashSet<String>| {
         if is_nested {
-            out.insert(decl.name.clone());
+            out.insert(decl.name.to_string());
         }
         for s in &decl.body {
             collect_nested_fn_names(s, false, out);
@@ -1431,7 +1492,7 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
             capacity: inner, ..
         } => collect_nested_fns_in_expr(inner, out),
         // A turbofish operand is a type — no expression, so no nested fn; a dynamic one is ordinary.
-        Expr::FieldSpecsOf { name, .. } => {
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
             if let Some(e) = name.dynamic() {
                 collect_nested_fns_in_expr(e, out);
             }
@@ -1638,7 +1699,7 @@ fn trait_supplies_instance_interface(trait_name: &str) -> bool {
 /// enum walks agree on how to classify a block's methods.
 fn impl_block_methods(impls: &[ImplBlock]) -> impl Iterator<Item = (&FnDecl, bool)> {
     impls.iter().flat_map(|b| {
-        let provided = trait_supplies_instance_interface(&b.trait_name);
+        let provided = trait_supplies_instance_interface(b.trait_name.as_str());
         b.methods.iter().map(move |m| (m, provided))
     })
 }

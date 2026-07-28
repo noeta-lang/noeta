@@ -812,6 +812,14 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// `variants_of::<T>()` / `variants_of(name)`: `dst = List<VariantSpec>` — the declared variant
+    /// schema (`{ name, payload, backing }`, declaration order) of the enum named by the runtime
+    /// string in `src`; the empty list for an unknown type or one that is not an enum. The enum twin
+    /// of `FieldSpecsOf`, declared beside it so the two type-level schema queries read as one surface.
+    VariantsOf {
+        dst: Reg,
+        src: Reg,
+    },
     /// `construct::<T>(fields)` / `construct(name, fields)`: `dst = Result<dyn, string>` — build a
     /// struct/class value of the type named by the runtime string in `name` from the `List<dyn>` in
     /// `fields` (declaration order), reusing the same construction path as a `MakeStruct` literal
@@ -1923,6 +1931,9 @@ fn op_repr(
         },
         Op::ParamsOf { dst, src } => format!("ParamsOf    r{dst} <- params_of(r{src})"),
         Op::ReturnsOf { dst, src } => format!("ReturnsOf   r{dst} <- returns_of(r{src})"),
+        Op::VariantsOf { dst, src } => {
+            format!("VariantsOf r{dst} <- variants_of(r{src})")
+        }
         Op::FieldSpecsOf { dst, src } => {
             format!("FieldSpecsOf r{dst} <- field_specs_of(r{src})")
         }

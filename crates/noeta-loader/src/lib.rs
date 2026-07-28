@@ -1767,7 +1767,7 @@ fn link_core(
                 let mut cloned = stmt.clone();
                 qualify::qualify_stmt(&mut cloned, map);
                 if let Stmt::Impl(decl) = &cloned
-                    && merged_types.contains(&decl.target)
+                    && merged_types.contains(decl.target.as_str())
                     && seen_impls.insert(decl.span)
                 {
                     imported.push(cloned);
@@ -1899,15 +1899,15 @@ fn module_namespace(program: &Program) -> Option<Vec<String>> {
 /// identity. (A method is not top-level — it resolves through its type, so it is not here.)
 fn qualifiable_decl_name(stmt: &Stmt) -> Option<&str> {
     match stmt {
-        Stmt::Class(decl) => Some(&decl.name),
-        Stmt::Struct(decl) => Some(&decl.name),
-        Stmt::Enum(decl) => Some(&decl.name),
-        Stmt::Fn(decl) => Some(&decl.name),
+        Stmt::Class(decl) => Some(decl.name.as_str()),
+        Stmt::Struct(decl) => Some(decl.name.as_str()),
+        Stmt::Enum(decl) => Some(decl.name.as_str()),
+        Stmt::Fn(decl) => Some(decl.name.as_str()),
         // A user-defined trait is a qualifiable declaration (L1): a `dyn Trait` type, a `<T: Trait>`
         // bound, or an `impl Trait for T` referencing a module-local trait drags its declaration into
         // the merged program via the cross-module closure — without this a package-local trait
         // (e.g. aether's `Middleware`) is "unknown" once the package is linked as a dependency.
-        Stmt::Trait(decl) => Some(&decl.name),
+        Stmt::Trait(decl) => Some(decl.name.as_str()),
         _ => None,
     }
 }
@@ -2547,13 +2547,13 @@ fn decl_is_public(stmt: &Stmt) -> bool {
 /// statements that declare no importable name.
 fn decl_name(stmt: &Stmt) -> Option<&str> {
     match stmt {
-        Stmt::Class(decl) => Some(&decl.name),
-        Stmt::Struct(decl) => Some(&decl.name),
-        Stmt::Enum(decl) => Some(&decl.name),
-        Stmt::Fn(decl) => Some(&decl.name),
+        Stmt::Class(decl) => Some(decl.name.as_str()),
+        Stmt::Struct(decl) => Some(decl.name.as_str()),
+        Stmt::Enum(decl) => Some(decl.name.as_str()),
+        Stmt::Fn(decl) => Some(decl.name.as_str()),
         // A user-defined trait is an importable name (L1) — `use pkg.mod.{MyTrait}` brings it into
         // scope for `dyn MyTrait`, a `<T: MyTrait>` bound, or an `impl MyTrait for T`.
-        Stmt::Trait(decl) => Some(&decl.name),
+        Stmt::Trait(decl) => Some(decl.name.as_str()),
         _ => None,
     }
 }
@@ -2625,7 +2625,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .any(|s| matches!(s, Stmt::Class(c) if leaf(&c.name) == name))
+            .any(|s| matches!(s, Stmt::Class(c) if leaf(c.name.as_str()) == name))
     }
 
     fn has_fn(linked: &Linked, name: &str) -> bool {
@@ -2633,7 +2633,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .any(|s| matches!(s, Stmt::Fn(f) if leaf(&f.name) == name))
+            .any(|s| matches!(s, Stmt::Fn(f) if leaf(f.name.as_str()) == name))
     }
 
     fn has_struct(linked: &Linked, name: &str) -> bool {
@@ -2641,7 +2641,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .any(|s| matches!(s, Stmt::Struct(d) if leaf(&d.name) == name))
+            .any(|s| matches!(s, Stmt::Struct(d) if leaf(d.name.as_str()) == name))
     }
 
     #[test]
@@ -3272,7 +3272,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .filter(|s| matches!(s, Stmt::Class(c) if leaf(&c.name) == "User"))
+            .filter(|s| matches!(s, Stmt::Class(c) if leaf(c.name.as_str()) == "User"))
             .count();
         assert_eq!(users, 1, "`User` must be merged exactly once");
     }
@@ -3298,7 +3298,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .filter(|s| matches!(s, Stmt::Class(c) if leaf(&c.name) == "Config"))
+            .filter(|s| matches!(s, Stmt::Class(c) if leaf(c.name.as_str()) == "Config"))
             .count();
         assert_eq!(configs, 1, "`Config` must not be merged alongside itself");
     }
@@ -3758,7 +3758,7 @@ mod tests {
             let Expr::Object(lit) = value else {
                 panic!("object literal")
             };
-            lit.type_name.clone().expect("named literal")
+            lit.type_name.clone().expect("named literal").to_string()
         };
         assert_eq!(ctor("a"), "App.Models.User");
         assert_eq!(ctor("b"), "App.People.User");
@@ -4195,7 +4195,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .filter(|s| matches!(s, Stmt::Fn(f) if leaf(&f.name) == "tool"))
+            .filter(|s| matches!(s, Stmt::Fn(f) if leaf(f.name.as_str()) == "tool"))
             .count();
         assert_eq!(tools, 1, "the entry's own declaration is not duplicated");
     }
@@ -4215,7 +4215,7 @@ mod tests {
             .expect("a tier block")
             .iter()
             .find_map(|s| match s {
-                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.clone()).collect()),
+                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.to_string()).collect()),
                 _ => None,
             })
             .expect("a fn inside the block")
@@ -4228,7 +4228,7 @@ mod tests {
             .stmts
             .iter()
             .find_map(|s| match s {
-                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.clone()).collect()),
+                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.to_string()).collect()),
                 _ => None,
             })
             .expect("a top-level fn")
