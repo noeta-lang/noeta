@@ -900,16 +900,26 @@ impl Checker {
     /// implemented at most once, counting both a `@derive(T)` directive and an `impl T { }` block
     /// as implementations. A second implementation of an already-implemented trait — whether
     /// `@derive(T)` twice, two `impl T` blocks, or a `@derive(T)` alongside an `impl T` — is
-    /// reported as `E0027 ConflictingTraitImpl`, pointing at the later occurrence and naming where
-    /// the first one is. This keeps each `(type, trait)` pair single-implementation, so
-    /// [`Self::satisfies`] and runtime dispatch are unambiguous.
+    /// reported as `E0027 ConflictingTraitImpl`, **labelling both sites**: the primary span on the
+    /// later occurrence, a secondary label on the one it collides with. This keeps each
+    /// `(type, trait)` pair single-implementation, so [`Self::satisfies`] and runtime dispatch are
+    /// unambiguous.
+    ///
+    /// **Both sites, because the two can be in different files.** Coherence runs over the *linked*
+    /// program, so the competing implementations may be two sibling modules — or two dependency
+    /// packages — that never mention each other. Naming only the later one, and describing the
+    /// other as "above", sent the reader looking up a file that does not contain it; the second
+    /// label (rendered by `ariadne` against its own file, see `noeta_diagnostics::render_mapped`)
+    /// is the only thing that makes the conflict locatable. [`ImplForm`] supplies each side's
+    /// spelling, so the wording fits whichever pair actually collided rather than assuming the
+    /// same-file `@derive`-vs-`impl` case.
     ///
     /// The orphan half of coherence is enforced separately: an in-body `impl` block can only name
-    /// the type that owns it, and a standalone `impl Trait for T {}` is required (in
-    /// [`Self::check_standalone_impl`]) to target a type declared in the same module — so a trait
-    /// is still only ever implemented for a local type, and every trait is a built-in. Records and
-    /// enums carry no in-body `impl` blocks (pass an empty slice); `standalone` carries the
-    /// `(trait, span)` of every standalone impl targeting this type.
+    /// the type that owns it, and a standalone `impl Trait for T {}` must target a type the program
+    /// declares and live in the same package as that type or as the trait
+    /// ([`Self::check_standalone_impl`]). Records and enums carry no in-body `impl` blocks (pass an
+    /// empty slice); `standalone` carries the `(trait, span)` of every standalone impl targeting
+    /// this type.
     pub(crate) fn check_coherence(
         &mut self,
         derives: &[DeriveSpec],
@@ -917,34 +927,48 @@ impl Checker {
         standalone: &[(String, Span)],
     ) {
         // Source order is derives, then in-body impls, then standalone impls: this scan reports the
-        // textually-later duplicate and names where the first one is. `From` is deliberately
+        // textually-later duplicate and labels the one it collides with. `From` is deliberately
         // covered by the same name-keyed rule: an impl block's methods flatten into the type's
         // method table by NAME (there is no overloading), so a type can carry exactly one `from` —
         // one declared conversion. A second `From` impl (same source or another) is exactly the
         // ambiguity the `?` conversion must never see — two declared paths into the target — and
         // collides here (E0027).
-        let mut seen: HashMap<String, Span> = HashMap::new();
-        let occurrences: Vec<(String, Span)> = derives
+        let mut seen: HashMap<String, (Span, ImplForm)> = HashMap::new();
+        let occurrences: Vec<(String, Span, ImplForm)> = derives
             .iter()
-            .map(|d| (d.name.clone(), d.span))
-            .chain(impls.iter().map(|b| (b.trait_name.clone(), b.trait_span)))
-            .chain(standalone.iter().map(|(name, span)| (name.clone(), *span)))
+            .map(|d| (d.name.clone(), d.span, ImplForm::Derive))
+            .chain(
+                impls
+                    .iter()
+                    .map(|b| (b.trait_name.clone(), b.trait_span, ImplForm::InBody)),
+            )
+            .chain(
+                standalone
+                    .iter()
+                    .map(|(name, span)| (name.clone(), *span, ImplForm::Standalone)),
+            )
             .collect();
-        for (name, span) in occurrences {
+        for (name, span, form) in occurrences {
             match seen.get(&name) {
-                Some(_first) => {
+                Some((first_span, first_form)) => {
+                    let (first_span, first_form) = (*first_span, *first_form);
                     self.error(
                         DiagnosticCode::ConflictingTraitImpl,
                         span,
                         format!("trait `{name}` is implemented more than once for this type"),
                     )
+                    // The offending (later) site first, so `ariadne` groups it first and the
+                    // rendered header carries the same file/line the primary span — and every
+                    // non-rendered consumer of the diagnostic — reports.
+                    .label(span, format!("implemented again here, {form}"))
+                    .label(first_span, format!("first implemented here, {first_form}"))
                     .help(format!(
-                        "`{name}` is already implemented above; a type may implement each trait \
-                         only once (via one `@derive` or one `impl` block, not both)"
+                        "a type may implement each trait only once — remove one of the two \
+                         implementations of `{name}`, or merge them into a single one"
                     ));
                 }
                 None => {
-                    seen.insert(name, span);
+                    seen.insert(name, (span, form));
                 }
             }
         }
@@ -2205,5 +2229,30 @@ fn bound_display(name: &str, args: &[Type]) -> String {
     } else {
         let args: Vec<String> = args.iter().map(Type::to_string).collect();
         format!("{name}<{}>", args.join(", "))
+    }
+}
+
+/// How one implementation of a trait was **written** — the three spellings [`Checker::check_coherence`]
+/// counts as implementations, so a collision report can name what actually collided instead of
+/// guessing at the `@derive`-vs-`impl` pair. Two standalone impls in two modules are the common
+/// cross-file conflict, and neither is a `@derive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImplForm {
+    /// A `@derive(Trait)` directive on the type's declaration.
+    Derive,
+    /// An `impl Trait { … }` block inside the type's own body.
+    InBody,
+    /// A standalone `impl Trait for Type { … }` declaration, which may live in another module
+    /// (or, before the package orphan rule, another package) entirely.
+    Standalone,
+}
+
+impl std::fmt::Display for ImplForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ImplForm::Derive => "by a `@derive`",
+            ImplForm::InBody => "by an `impl` block in the type's body",
+            ImplForm::Standalone => "by a standalone `impl … for …`",
+        })
     }
 }

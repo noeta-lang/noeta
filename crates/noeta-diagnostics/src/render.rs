@@ -4,7 +4,7 @@
 //! (diagnostic rendering quality is a product feature with its own snapshots).
 
 use crate::{Diagnostic, Severity};
-use ariadne::{Config, Label as AriadneLabel, Report, ReportKind, Source as AriadneSource};
+use ariadne::{Config, Label as AriadneLabel, Report, ReportKind};
 use noeta_span::{Source, SourceMap};
 
 fn report_kind(severity: Severity) -> ReportKind<'static> {
@@ -36,40 +36,84 @@ fn char_range(text: &str, span: noeta_span::Span) -> std::ops::Range<usize> {
 /// renders against that module's file and text rather than the entry's. The one cross-module
 /// rendering loop, shared by the CLI (printed to stderr) and the debug adapter (forwarded as
 /// output events).
+///
+/// A diagnostic's **secondary labels** are resolved the same way, each against *its own* source: a
+/// two-site diagnostic whose sites live in different files (two modules implementing one trait for
+/// one type, E0027) renders as one multi-file `ariadne` report. Resolving them against the primary
+/// span's file — which is all a single-[`Source`] render can do — pointed a cross-file label at an
+/// arbitrary byte range of the wrong text.
 pub fn render_mapped<'a>(
     sources: &SourceMap,
     diagnostics: impl Iterator<Item = &'a Diagnostic>,
 ) -> String {
     let mut text = String::new();
     for diagnostic in diagnostics {
-        text.push_str(&render(sources.source(diagnostic.span.source), diagnostic));
+        text.push_str(&render_one(
+            |id| sources.source(id),
+            sources.source(diagnostic.span.source),
+            diagnostic,
+        ));
     }
     text
 }
 
 /// Render `diagnostic` against `source` into a plain-text, color-free string.
+///
+/// Single-source: every label resolves to `source` whatever `SourceId` it carries, because one
+/// [`Source`] is all there is. Callers holding the whole [`SourceMap`] should use
+/// [`render_mapped`], which resolves each label against its own file.
 pub fn render(source: &Source, diagnostic: &Diagnostic) -> String {
-    let name = source.name();
-    let text = source.text();
+    render_one(|_| source, source, diagnostic)
+}
+
+/// The one report builder both entry points share: `resolve` maps a label's [`SourceId`] to the
+/// file it should render against (the identity-ish single-source closure for [`render`], the
+/// [`SourceMap`] lookup for [`render_mapped`]), and `primary` is the source the header positions
+/// against.
+///
+/// Every referenced file is handed to `ariadne` as one multi-source cache, so a report may carry
+/// labels in more than one file. With all labels in the primary source — every diagnostic before
+/// cross-file labels existed — the cache holds exactly one entry and the output is unchanged.
+fn render_one<'a>(
+    resolve: impl Fn(noeta_span::SourceId) -> &'a Source,
+    primary: &'a Source,
+    diagnostic: &Diagnostic,
+) -> String {
+    let name = primary.name();
 
     let mut builder = Report::build(
         report_kind(diagnostic.severity),
-        (name, char_range(text, diagnostic.span)),
+        (
+            name.to_string(),
+            char_range(primary.text(), diagnostic.span),
+        ),
     )
     .with_config(Config::default().with_color(false))
     .with_code(diagnostic.code)
     .with_message(&diagnostic.message);
 
+    // Each referenced file, in first-mention order, deduplicated by name — the cache `ariadne`
+    // fetches every label's text from.
+    let mut cache: Vec<(String, String)> = vec![(name.to_string(), primary.text().to_string())];
+
     if diagnostic.labels.is_empty() {
         // Always show at least the primary span so the caret has somewhere to point.
         builder = builder.with_label(
-            AriadneLabel::new((name, char_range(text, diagnostic.span)))
-                .with_message(&diagnostic.message),
+            AriadneLabel::new((
+                name.to_string(),
+                char_range(primary.text(), diagnostic.span),
+            ))
+            .with_message(&diagnostic.message),
         );
     } else {
         for label in &diagnostic.labels {
+            let source = resolve(label.span.source);
+            let label_name = source.name().to_string();
+            if !cache.iter().any(|(n, _)| *n == label_name) {
+                cache.push((label_name.clone(), source.text().to_string()));
+            }
             builder = builder.with_label(
-                AriadneLabel::new((name, char_range(text, label.span)))
+                AriadneLabel::new((label_name, char_range(source.text(), label.span)))
                     .with_message(&label.message),
             );
         }
@@ -82,7 +126,7 @@ pub fn render(source: &Source, diagnostic: &Diagnostic) -> String {
     let mut buffer = Vec::new();
     builder
         .finish()
-        .write((name, AriadneSource::from(source.text())), &mut buffer)
+        .write(ariadne::sources(cache), &mut buffer)
         .expect("writing a diagnostic to an in-memory buffer cannot fail");
     String::from_utf8(buffer).expect("ariadne emits valid UTF-8")
 }
@@ -90,7 +134,37 @@ pub fn render(source: &Source, diagnostic: &Diagnostic) -> String {
 #[cfg(test)]
 mod tests {
     use crate::{Diagnostic, DiagnosticCode};
-    use noeta_span::{Source, SourceId, Span};
+    use noeta_span::{Source, SourceId, SourceMap, Span};
+
+    #[test]
+    fn a_label_in_another_file_renders_against_that_file() {
+        // A two-site diagnostic whose sites are in different modules (E0027: two modules
+        // implementing one trait for one type). Every label used to be resolved against the
+        // PRIMARY span's text, so the second label pointed at an arbitrary byte range of the
+        // wrong file — here, `first.noe`'s bytes 0..4 would have been highlighted instead of
+        // `second.noe`'s `impl`.
+        let first = Source::new(SourceId(0), "first.noe", "impl Store for X {}\n");
+        let second = Source::new(SourceId(1), "second.noe", "// pad\nimpl Store for X {}\n");
+        let sources = SourceMap::new(vec![first, second]);
+        let primary = Span::new_in(SourceId(1), 7, 11);
+        let diag = Diagnostic::error(
+            DiagnosticCode::ConflictingTraitImpl,
+            primary,
+            "trait `Store` is implemented more than once for this type",
+        )
+        .with_label(primary, "implemented again here")
+        .with_label(Span::new_in(SourceId(0), 0, 4), "first implemented here");
+        let rendered = super::render_mapped(&sources, std::iter::once(&diag));
+        assert!(
+            rendered.contains("second.noe:2:1") && rendered.contains("first.noe:1:1"),
+            "both files are located in the report:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("first implemented here")
+                && rendered.contains("implemented again here"),
+            "both label messages survive:\n{rendered}"
+        );
+    }
 
     #[test]
     fn renders_without_panicking_and_contains_the_code() {
