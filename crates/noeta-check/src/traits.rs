@@ -332,6 +332,14 @@ impl Checker {
         if impl_pkg == type_pkg {
             return;
         }
+        // A trait that resolves to nothing at all is already E0014 at this same impl; reporting an
+        // orphan on top would cascade *and* describe a trait that does not exist as "built into the
+        // language". Only a real trait — a built-in or a declared one — is judged.
+        if BuiltinTrait::from_name(&decl.trait_name).is_none()
+            && !self.symbols.user_traits.contains_key(&decl.trait_name)
+        {
+            return;
+        }
         let trait_span = self.trait_decl_span(&decl.trait_name);
         let trait_pkg = trait_span.and_then(|s| self.package_at(s)).cloned();
         // Same package as the trait: equally legal — that is the "or" in the rule.

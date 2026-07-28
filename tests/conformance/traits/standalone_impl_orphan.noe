@@ -1,5 +1,8 @@
-// The orphan rule: a standalone `impl` may only target a type declared in this module. `Widget`
-// is never declared, so implementing a trait for it is rejected (E0013).
-// expect: error E0013 at 5:16
+// A standalone `impl` may only target a struct, class, or enum the program **declares**. `Widget`
+// is never declared anywhere, so implementing a trait for it is an unknown type (E0013).
+//
+// Distinct from the *package* orphan rule (E0070, `package_orphan_rejected/`), which is about a
+// declared type belonging to someone else's package. Here there is no type at all.
+// expect: error E0013 at 8:16
 // expect: exit 1
 impl Clone for Widget {}
