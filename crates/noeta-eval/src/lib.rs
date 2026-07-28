@@ -2677,6 +2677,25 @@ impl Interpreter {
         match try_branch(&value) {
             Some(TryBranch::Success(inner)) => Ok(inner),
             Some(TryBranch::Empty) => {
+                // An `Err` propagating out of TOP-LEVEL code (`call_sites` empty — no enclosing
+                // activation) has nowhere to go: no caller to hand it to, and no declared return type
+                // the checker could have rejected the `?` against (E0012 covers every declared
+                // return). Unwinding here used to end the program *quietly at exit 0* — a
+                // `client.get(url)?` transport failure was completely invisible and CI went green on
+                // a broken program. Abort with the error's own message instead (E0069); the abort
+                // teardown reclaims what `on_error` would have dropped, exactly as `panic` does. The
+                // VM's `Op::TryUnwrap` mirrors this on its outermost bottom frame, so the
+                // differential holds. `none` is untouched: an absence reaching the top is not a
+                // failure.
+                if self.call_sites.is_empty()
+                    && let Some(payload) = result_err_payload(&value)
+                {
+                    let message = self.unhandled_error_message(payload, span)?;
+                    self.record_abort_trace(span);
+                    self.diagnostics
+                        .push(Diagnostic::unhandled_error(span, &message));
+                    return Err(Unwind::Abort);
+                }
                 for drop in on_error {
                     if drop.relevant {
                         if let Some(v) = self.scope.take_for_drop(&drop.name) {
@@ -6132,7 +6151,7 @@ fn attr_value_to_eval(
 /// ([`noeta_ast::reflect::ReflectionInfo::trait_impls`]) and `traits_of` use. `None` for every
 /// non-nominal value (scalars, collections, functions), which therefore implements no trait.
 /// Mirrors the VM's `vm_nominal_name`.
-fn value_nominal_name(value: &Value) -> Option<String> {
+pub(crate) fn value_nominal_name(value: &Value) -> Option<String> {
     match value {
         Value::Object(o) => Some(o.def.name().to_string()),
         Value::Enum(e) => Some(e.enum_name.clone()),

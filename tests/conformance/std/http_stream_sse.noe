@@ -24,9 +24,13 @@
 // expect: stdout "ended after 4 frames"
 // expect: exit 0
 use std.http.client
-use std.http.{Framing, Frame}
+use std.http.{Framing, Frame, HttpError}
 
-async fn run(): void {
+// `Result<void, HttpError>`, not `void`: the `?` on the open early-returns a transport failure, so the
+// signature has to be able to carry one (E0012 otherwise). The top-level `?` hands it to the runtime,
+// which aborts with the error's `message()` and a non-zero exit — an unopened stream can never read
+// as "ended after 0 frames".
+async fn run(): Result<void, HttpError> {
     api = client.new("https://svc.test")
     stream = client.stream(api.prepare("get", "/stream/sse"), Framing.Sse)?
     echo "opened"

@@ -357,6 +357,16 @@ pub enum DiagnosticCode {
     /// caret, which turns "the compiler is broken" into "this one expression is". No conformance
     /// case expects it, and none should: a program that produces it is a bug to fix here.
     InternalCompilerError,
+    /// A `?` propagated an `Err` all the way **out of the top level** — the failure had nowhere left
+    /// to go, so the program aborts with the error's `message()` and a non-zero exit.
+    ///
+    /// The runtime half of the `?` position rule ([`Self::InvalidTry`] is the static half). Inside a
+    /// function with a *declared* return type the checker rejects the `?` outright; top-level code and
+    /// a `dyn`/inferred return have no declared return to check, so the judgement lands here instead
+    /// of being discarded. Before this existed, `client.get(url)?` at the top level (or in a `void`
+    /// function called from it) printed nothing after the `?`, produced no diagnostic, and **exited
+    /// 0** — a broken program CI reported as green.
+    UnhandledError,
 }
 
 impl DiagnosticCode {
@@ -431,6 +441,7 @@ impl DiagnosticCode {
         DiagnosticCode::UnreachableMatchArm,
         DiagnosticCode::VariantShadowedByBinding,
         DiagnosticCode::InternalCompilerError,
+        DiagnosticCode::UnhandledError,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -505,6 +516,7 @@ impl DiagnosticCode {
             DiagnosticCode::UnreachableMatchArm => "E0066",
             DiagnosticCode::VariantShadowedByBinding => "E0067",
             DiagnosticCode::InternalCompilerError => "E0068",
+            DiagnosticCode::UnhandledError => "E0069",
         }
     }
 
@@ -609,6 +621,23 @@ impl Diagnostic {
     pub fn label(&mut self, span: Span, message: impl Into<String>) -> &mut Diagnostic {
         self.labels.push(Label::new(span, message));
         self
+    }
+
+    /// The [`DiagnosticCode::UnhandledError`] abort: a `?` propagated an `Err` out of the top level,
+    /// so the program stops here with the error's own `message()`. Composed in the catalog rather
+    /// than at either runtime because **both** backends raise it — the differential oracle compares
+    /// diagnostics verbatim, so a single builder is what keeps the two from wording it differently.
+    pub fn unhandled_error(span: Span, message: &str) -> Diagnostic {
+        Diagnostic::error(
+            DiagnosticCode::UnhandledError,
+            span,
+            format!("unhandled error: {message}"),
+        )
+        .with_help(
+            "this `?` has no `Result` to early-return into, so the failure ends the program — \
+             handle it here with `match` / `??`, or move the work into a function that returns \
+             `Result<T, E>` and decide at its call site",
+        )
     }
 }
 
