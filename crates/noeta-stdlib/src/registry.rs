@@ -4731,7 +4731,24 @@ const FS_DOCS: &[(&str, &str)] = &[
 const JSON_DOCS: &[(&str, &str)] = &[
     (
         "parse",
-        "Parse a JSON string into a dynamic value — a `dyn` map/list/scalar tree.",
+        "Parse a JSON string, **aborting** on a malformed document (E0007).\n\n\
+         Two doors share the name. `json.parse(text)` decodes into a dynamic value — a `dyn` \
+         map/list/scalar tree, addressed with `v[\"key\"]`. `json.parse::<T>(text)` decodes into \
+         the type you name at the call site, filling declared field defaults and reporting a shape \
+         mismatch by path. Reach for either when a malformed document means the program is wrong; \
+         use `try_parse` when it means the *input* is wrong.",
+    ),
+    (
+        "try_parse",
+        "Parse a JSON string **recoverably**: `Ok(value)`, or `Err(JsonError)` naming the exact \
+         failure — its `path()`, `kind()`, and, for a malformed document, `line()`/`column()`. \
+         Never aborts.\n\n\
+         Two doors share the name. `json.try_parse(text): Result<dyn, JsonError>` needs no target \
+         type — the door for a body read off a wire, where the shape is the remote party's. \
+         `json.try_parse::<T>(text): Result<T, JsonError>` additionally checks the document \
+         against `T` and hands back a real `T`.\n\n\
+         Either door composes with `?` and with `match … { Ok(v) => …, Err(e) => … }`; `JsonError` \
+         implements `Error` and `Display`, so `${e}` interpolates its composed message.",
     ),
     ("stringify", "Serialize a value to a JSON string."),
 ];
@@ -6058,12 +6075,32 @@ const QUAT_FNS: &[ExtFn] = &[
 // `TypeRecipe`), not this dynamic dispatch. `json.stringify(value)` serializes a **deeply**
 // marshalled argument (the module sets `deep_marshal`) through the shared `json::stringify`.
 
+/// `JsonError`'s signature spelling — the error arm of every recoverable `json` door.
+const JSON_ERROR_SIG: SigType = SigType::Named(crate::json::JSON_ERROR_TYPE_NAME);
+
+/// What the recoverable **dynamic** door returns: `Result<dyn, JsonError>`.
+///
+/// The non-turbofish twin of `try_parse::<T>`'s `Result<T, JsonError>`, and the only recoverable
+/// decode that needs no declared recipe — which is what makes it the right door for a body read off
+/// a wire, where the shape is the remote party's and a malformed document must be a value the
+/// program handles rather than an abort.
+const DYN_JSON_RESULT_SIG: SigType = SigType::Result(&Dyn, &JSON_ERROR_SIG);
+
 const JSON_FNS: &[ExtFn] = &[
     ExtFn {
         param_names: &["text"],
         name: "parse",
         params: &[Str],
         ret: Concrete(Dyn),
+    },
+    // The recoverable dynamic door. It shares the name `try_parse` with the call-site-typed
+    // `try_parse::<T>` below, exactly as `parse` shares its name with `parse::<T>`: the plain and
+    // turbofish call surfaces are separate tables, so a name in both is two doors, not a collision.
+    ExtFn {
+        param_names: &["text"],
+        name: "try_parse",
+        params: &[Str],
+        ret: Concrete(DYN_JSON_RESULT_SIG),
     },
     ExtFn {
         param_names: &["value"],
@@ -6076,9 +6113,11 @@ const JSON_FNS: &[ExtFn] = &[
 // The **call-site-typed** doors — the turbofish forms `json.parse::<T>` (aborting) and
 // `json.try_parse::<T>` (recoverable → `Result<T, JsonError>`). A separate table from `JSON_FNS`:
 // the dynamic `parse(text): dyn` and the typed `parse::<T>: T` legitimately share the name
-// `parse`, so they live in disjoint call surfaces. Each declares `RetTy::TypeArg` with the
-// wrapper the checker types the call by; `json_typed_dispatch` produces the matching `NativeOut`
-// tree threaded with the checker-resolved recipe.
+// `parse` — and, since the recoverable dynamic door landed, `try_parse` is the second such pair
+// (`try_parse(text): Result<dyn, JsonError>` here, `try_parse::<T>(): Result<T, JsonError>` there).
+// The two call surfaces are disjoint tables, so sharing a name is two doors, not a collision.
+// Each declares `RetTy::TypeArg` with the wrapper the checker types the call by;
+// `json_typed_dispatch` produces the matching `NativeOut` tree threaded with the resolved recipe.
 const JSON_TYPED_FNS: &[ExtFn] = &[
     ExtFn {
         param_names: &["text"],
@@ -6090,7 +6129,7 @@ const JSON_TYPED_FNS: &[ExtFn] = &[
         param_names: &["text"],
         name: "try_parse",
         params: &[Str],
-        ret: TypeArg(TypeArgWrap::Result(SigType::Named("JsonError"))),
+        ret: TypeArg(TypeArgWrap::Result(JSON_ERROR_SIG)),
     },
 ];
 
@@ -6103,6 +6142,20 @@ fn json_dispatch(
         "parse" => {
             want_arity(func, args, 1)?;
             crate::json::parse_dynamic(want_str(func, args, 0)?)
+        }
+        // The recoverable dynamic door: it never uses the `Err` channel (that would be an abort),
+        // returning the whole `Result` inside the `NativeOut` — the same contract `try_parse::<T>`
+        // honors below, so both backends materialize one tree and stay identical by construction.
+        "try_parse" => {
+            want_arity(func, args, 1)?;
+            Ok(
+                match crate::json::try_parse_dynamic(want_str(func, args, 0)?) {
+                    Ok(out) => NativeOut::Ok(Box::new(out)),
+                    Err(error) => {
+                        NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error))))
+                    }
+                },
+            )
         }
         "stringify" => {
             want_arity(func, args, 1)?;
