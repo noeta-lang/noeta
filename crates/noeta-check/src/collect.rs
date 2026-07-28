@@ -843,49 +843,6 @@ impl Checker {
                 }
             }
         }
-        // A method an `impl <UserTrait>` block PROVIDES is part of the trait's **instance** interface
-        // whatever its body happens to mention. The STANDALONE `impl Trait for T` spelling already
-        // says so — it registers with `classify_instance: false` (see
-        // [`Self::collect_method_sig_classified`], whose doc comment argues it) — but the in-body
-        // `impl Trait { … }` half flattens its methods into the type's own walk, which classifies from
-        // the body. So a trait method that simply does not need `self`
-        // (`fn greet(who: string): string { return "hi " ~ who }`) was filed as an ASSOCIATED function
-        // and every `x.greet(…)` on it was E0047 — while the *identical* code written as a standalone
-        // impl checked clean. Two spellings of one declaration disagreed about what it declares.
-        //
-        // Runs last, so every trait is registered whatever the source order (an `impl` above its
-        // `trait` must classify like one below it). Scope is deliberately exactly the standalone
-        // rule's: only methods the block itself provides AND the trait declares. An extra inherent
-        // method in the block is not part of the contract, and an *omitted* default keeps the
-        // documented UT5 behavior (a self-less default is an associated fn, `Type.shout()`).
-        for stmt in &program.stmts {
-            let (type_name, impls): (&str, &[ImplBlock]) = match stmt {
-                Stmt::Struct(d) => (&d.name, &d.impls),
-                Stmt::Class(d) => (&d.name, &d.impls),
-                Stmt::Enum(d) => (&d.name, &d.impls),
-                _ => continue,
-            };
-            let provided: Vec<String> = impls
-                .iter()
-                .filter_map(|b| {
-                    self.symbols
-                        .user_traits
-                        .get(&b.trait_name)
-                        .map(|decl| (decl, b))
-                })
-                .flat_map(|(decl, b)| {
-                    b.methods
-                        .iter()
-                        .filter(|m| decl.methods.iter().any(|tm| tm.sig.name == m.name))
-                        .map(|m| m.name.clone())
-                })
-                .collect();
-            for name in provided {
-                self.symbols
-                    .method_instance
-                    .insert((type_name.to_string(), name), true);
-            }
-        }
         // Method-bundle bindings (kernel-methods K1) resolve after the whole collect walk, so a
         // binding is visible to method typing regardless of where the `impl`/`@derive` sits relative
         // to the `use` that binds its module. The TWO spellings register identically: a standalone
