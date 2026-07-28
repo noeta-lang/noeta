@@ -212,6 +212,27 @@ pub trait NativeCtx {
     /// [`CtxError::Abort`] (recorded backend-side), which the dispatch may propagate or recover.
     fn call(&mut self, callee: Slot, args: &[Slot]) -> CtxResult<Slot>;
 
+    /// Call a **named method** on a value, re-entering the backend to run its body —
+    /// `Ok(None)` when the receiver declares no such method.
+    ///
+    /// [`NativeCtx::call`] takes a callable *value*; this takes a receiver and a name, which is
+    /// what a native needs to reach a method a **user type** declared. The motivating case is a
+    /// trait an extension declares and a user type implements: `para.crdt.Mergeable`'s `merge` is
+    /// written in Noeta, and the sync engine holding two such values has no closure to call — only
+    /// the values and the method name from the contract. Both backends already do exactly this
+    /// internally to run a user `to_string` from [`NativeCtx::render`]; this exposes it.
+    ///
+    /// `recv` and `args` are borrowed (the caller keeps its slots); the returned slot is a fresh
+    /// one the caller owns. An abort inside the method propagates as [`CtxError::Abort`].
+    fn call_method(
+        &mut self,
+        _recv: Slot,
+        _method: &str,
+        _args: &[Slot],
+    ) -> CtxResult<Option<Slot>> {
+        Ok(None)
+    }
+
     /// Call a callable slot with `list[index]` as its single argument — the fused
     /// `list_get` + `call` + `free` a bounded mapper's fill loop performs per item (H2). One
     /// re-entry instead of three and no element slot is minted, which is what keeps a
