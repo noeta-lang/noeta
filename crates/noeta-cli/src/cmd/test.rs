@@ -690,10 +690,12 @@ pub(crate) fn run_one_test(
                 stdout: result.stdout,
             }
         }
-        Err(err) => TestOutcome {
+        // A synthesized per-case program has no `SourceMap` here, so this stays the one-line
+        // rendering — which now at least names the construct precisely.
+        Err(u) => TestOutcome {
             name: display,
             passed: false,
-            message: Some(err),
+            message: Some(u.to_string()),
             stdout: String::new(),
         },
     }

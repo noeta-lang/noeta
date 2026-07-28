@@ -81,22 +81,23 @@ pub fn debug_source(request_json: &str) -> String {
     let program = &noeta_db::ast(&db, src).0.program;
     let (checked, checker) =
         noeta_check::check_all_session_with(program, noeta_edition::EditionMap::default());
-    let (module, session) = match noeta_compiler::compile_with_sites_session(
-        program,
-        checked.sites,
-        false,
-        true,
-    ) {
-        Ok(compiled) => compiled,
-        Err(unsupported) => {
-            return json!({
+    let (module, session) =
+        match noeta_compiler::compile_with_sites_session(program, checked.sites, false, true) {
+            Ok(compiled) => compiled,
+            Err(unsupported) => {
+                let located: Vec<_> = unsupported
+                    .diagnostic()
+                    .iter()
+                    .map(|d| noeta_diagnostics::to_json(&sources, d))
+                    .collect();
+                return json!({
                     "compiled": false,
-                    "diagnostics": [],
-                    "error": format!("internal error: the VM cannot compile this program: {}", unsupported.reason),
+                    "diagnostics": located,
+                    "error": unsupported.to_string(),
                 })
                 .to_string();
-        }
-    };
+            }
+        };
 
     let requested = HashMap::from([(crate::SOURCE_NAME.to_string(), request.breakpoints)]);
     let stops = resolve_breakpoints(&module, &sources, &requested);

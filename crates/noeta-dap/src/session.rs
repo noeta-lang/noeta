@@ -90,7 +90,15 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
             session,
             checker,
         }),
-        Err(reason) => Err(RunOutput::failed(format!("noeta: {reason}\n"), 1)),
+        // Rendered against real source when the compiler knew where it stopped — the debugger's
+        // console shows the offending construct instead of one unlocatable sentence.
+        Err(u) => Err(RunOutput::failed(
+            match u.diagnostic() {
+                Some(diagnostic) => render_mapped(&loaded.sources, std::iter::once(&diagnostic)),
+                None => format!("noeta: {u}\n"),
+            },
+            1,
+        )),
     }
 }
 
@@ -154,7 +162,7 @@ pub fn run_compiled(compiled: Compiled, debugger: Option<Box<dyn Debugger>>) -> 
 fn compile_checked(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
-) -> Result<(Module, noeta_compiler::SessionCompiler), String> {
+) -> Result<(Module, noeta_compiler::SessionCompiler), noeta_compiler::Unsupported> {
     noeta_compiler::compile_with_sites_session(
         program,
         checked.sites.clone(),
@@ -162,10 +170,4 @@ fn compile_checked(
         true,
         true,
     )
-    .map_err(|u| {
-        format!(
-            "internal error: the VM cannot compile this program: {}",
-            u.reason
-        )
-    })
 }

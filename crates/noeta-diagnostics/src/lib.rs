@@ -346,6 +346,17 @@ pub enum DiagnosticCode {
     /// is yet unreachable — a lone `String => …` on a `Type` scrutinee is already the whole bug.
     /// Its sibling [`Self::UnreachableMatchArm`] covers the arms such a pattern silently swallows.
     VariantShadowedByBinding,
+    /// The bytecode backend could not compile a program the type checker accepted — an **internal
+    /// invariant break**, not a mistake in the source.
+    ///
+    /// It is in the catalog for one reason: so it can be *rendered*. The compiler covers the whole
+    /// language and the differential oracle holds it there, so this should never reach a user; when
+    /// it did, it arrived as a bare `internal error: the VM cannot compile this program: <reason>`
+    /// with no file and no line, which is indistinguishable from a broken toolchain and cost two
+    /// agents real time. Going through the ordinary renderer puts the offending construct under a
+    /// caret, which turns "the compiler is broken" into "this one expression is". No conformance
+    /// case expects it, and none should: a program that produces it is a bug to fix here.
+    InternalCompilerError,
 }
 
 impl DiagnosticCode {
@@ -419,6 +430,7 @@ impl DiagnosticCode {
         DiagnosticCode::ImpossibleTypeTest,
         DiagnosticCode::UnreachableMatchArm,
         DiagnosticCode::VariantShadowedByBinding,
+        DiagnosticCode::InternalCompilerError,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -492,6 +504,7 @@ impl DiagnosticCode {
             DiagnosticCode::ImpossibleTypeTest => "E0065",
             DiagnosticCode::UnreachableMatchArm => "E0066",
             DiagnosticCode::VariantShadowedByBinding => "E0067",
+            DiagnosticCode::InternalCompilerError => "E0068",
         }
     }
 
