@@ -16,15 +16,20 @@ use App.Billing.{Invoice, Receipt};
 
 — resolve against those declared namespaces: each imported name's *real* declaration (a class, struct, enum, or function) is pulled from the providing module and **merged into a single `Program`** ahead of the entry's own statements. Both backends then run the merged program unchanged, so the differential oracle is preserved by construction — there is no module-aware runtime, only one linked program.
 
-## What gets merged: imports, their closure, and every annotated declaration
+## What gets merged: imports, their closure, every impl, and every annotated declaration
 
-Three things put a pooled module's declaration into the merged program:
+Four things put a pooled module's declaration into the merged program:
 
 1. an **import** naming it (the `use`-driven merge above);
-2. the **same-module closure** of anything already merged — the internal helper an exported `fn` calls, the module-local type it names in a parameter/return/field, a standalone `impl` whose target type is present. Visibility does not gate an intra-module reference, so a non-`pub` helper is pulled;
-3. a **`#[...]` data attribute** anywhere on it — on the declaration itself, or on a method, field, variant, or parameter.
+2. the **same-module closure** of anything already merged — the internal helper an exported `fn` calls, the module-local type it names in a parameter/return/field;
+3. a **standalone `impl`** whose target type is anywhere in the program (the entry's own declarations included), because an impl has no import name and must travel with its type or the type arrives without its traits;
+4. a **`#[...]` data attribute** anywhere on it — on the declaration itself, or on a method, field, variant, or parameter.
 
-The third is `carries_data_attribute`, and it exists because an attribute's whole purpose is to make a declaration findable by something that never names it: `attributes_of::<Tool>()` discovers it and `invoke` calls it by name. Merging only along `use` edges meant the manifest held just the annotated declarations the entry happened to import — the registration mechanism could not see its own registrations, and reflection could not report what dispatch could reach. An annotated root is merged with the same closure an imported one gets, so it also *runs*.
+Visibility does not gate an intra-module reference, so a non-`pub` helper is pulled.
+
+The third runs to a **fixpoint**, because "is the target type in the program?" is a question whose answer grows while it is being asked: an impl's own body closure merges the declarations it names, so `impl Codec for MyCodec { fn decoder(): dyn Decoder { return MyDecoder.new() } }` is what puts `MyDecoder` in the program, and `impl Decoder for MyDecoder` only becomes eligible after it. One pass could not see that in either source order, and the impl it dropped failed silently — the type linked and its inherent methods dispatched, so only the trait went missing, in a consumer of the package and never in the package's own tests. Each impl is deduped on its **span**, the identity of a declaration being where it is written; deduping on `(target, trait)` instead named the coherence *slot*, so two modules that each implemented one trait for one type silently collapsed into whichever the scan reached first rather than reaching the checker as the E0027 they are.
+
+The fourth is `carries_data_attribute`, and it exists because an attribute's whole purpose is to make a declaration findable by something that never names it: `attributes_of::<Tool>()` discovers it and `invoke` calls it by name. Merging only along `use` edges meant the manifest held just the annotated declarations the entry happened to import — the registration mechanism could not see its own registrations, and reflection could not report what dispatch could reach. An annotated root is merged with the same closure an imported one gets, so it also *runs*.
 
 It is scoped to the annotation, not the file: an unannotated declaration nothing references still stays out, so this is not whole-directory compilation. A `@derive`/`@role`/`@packed` **directive** is deliberately not a root — it drives codegen on a declaration already in the program rather than registering one for discovery. (A `@role` still reaches the manifest transitively: it rides on an `@attribute` struct, and it is the *applications* of that struct that are roots.)
 
