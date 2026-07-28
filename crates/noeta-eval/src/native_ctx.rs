@@ -142,6 +142,40 @@ impl NativeCtx for EvalCtx<'_> {
         }
     }
 
+    fn call_method(
+        &mut self,
+        recv: Slot,
+        method: &str,
+        args: &[Slot],
+    ) -> CtxResult<Option<Slot>> {
+        // Only a user object has methods to reach; anything else reports "no such method" so the
+        // caller can fall back rather than abort.
+        let Value::Object(object) = self.get(recv)?.clone() else {
+            return Ok(None);
+        };
+        let Some(closure) = object.def.methods.get(method).cloned() else {
+            return Ok(None);
+        };
+        let mut argv = Vec::with_capacity(args.len());
+        for &a in args {
+            argv.push(self.get(a)?.clone());
+        }
+        match self
+            .interp
+            .call_method_on(&object, &closure, argv, self.span)
+        {
+            Ok(value) => Ok(Some(self.insert(value))),
+            Err(_) => Err(CtxError::Abort),
+        }
+    }
+
+    fn bytes_of(&mut self, slot: Slot) -> CtxResult<Option<Vec<u8>>> {
+        Ok(match self.get(slot)? {
+            Value::Bytes(b) => Some(b.as_ref().clone()),
+            _ => None,
+        })
+    }
+
     fn view(&mut self, slot: Slot) -> CtxResult<NativeValue> {
         Ok(value_to_native_deep(self.get(slot)?))
     }

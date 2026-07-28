@@ -192,6 +192,16 @@ pub trait NativeCtx {
     /// `to_string` propagates as [`CtxError::Abort`] (recorded backend-side).
     fn render(&mut self, slot: Slot) -> CtxResult<String>;
 
+    /// A slot's **raw bytes**, or `None` when it is not a `bytes` value.
+    ///
+    /// [`NativeCtx::view`]'s deep projection renders bytes as a *summary string* (`"<12 bytes>"`)
+    /// so a display/JSON path can never panic on binary — right for that job, lossy for this one.
+    /// A native that genuinely needs the payload (a `Syncable` value's wire encoding, say) reads
+    /// it here instead of parsing the summary back.
+    fn bytes_of(&mut self, _slot: Slot) -> CtxResult<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     /// Marshal a slot's value into the neutral argument view (the deep projection — these are
     /// orchestration paths, never hot loops; elements that stay opaque ride as slots instead).
     /// Errs on a freed/invalid slot (dispatch misuse).
@@ -211,6 +221,27 @@ pub trait NativeCtx {
     /// consumed; the result arrives in a fresh slot. An abort in the callee returns
     /// [`CtxError::Abort`] (recorded backend-side), which the dispatch may propagate or recover.
     fn call(&mut self, callee: Slot, args: &[Slot]) -> CtxResult<Slot>;
+
+    /// Call a **named method** on a value, re-entering the backend to run its body —
+    /// `Ok(None)` when the receiver declares no such method.
+    ///
+    /// [`NativeCtx::call`] takes a callable *value*; this takes a receiver and a name, which is
+    /// what a native needs to reach a method a **user type** declared. The motivating case is a
+    /// trait an extension declares and a user type implements: `para.crdt.Mergeable`'s `merge` is
+    /// written in Noeta, and the sync engine holding two such values has no closure to call — only
+    /// the values and the method name from the contract. Both backends already do exactly this
+    /// internally to run a user `to_string` from [`NativeCtx::render`]; this exposes it.
+    ///
+    /// `recv` and `args` are borrowed (the caller keeps its slots); the returned slot is a fresh
+    /// one the caller owns. An abort inside the method propagates as [`CtxError::Abort`].
+    fn call_method(
+        &mut self,
+        _recv: Slot,
+        _method: &str,
+        _args: &[Slot],
+    ) -> CtxResult<Option<Slot>> {
+        Ok(None)
+    }
 
     /// Call a callable slot with `list[index]` as its single argument — the fused
     /// `list_get` + `call` + `free` a bounded mapper's fill loop performs per item (H2). One

@@ -106,18 +106,6 @@ impl Checker {
             .help("only built-in traits can be implemented (e.g. `Add`, `Equatable`, `Display`)");
             return;
         };
-        if t.intrinsic() {
-            self.error(
-                DiagnosticCode::InvalidImpl,
-                trait_span,
-                format!("`{trait_name}` cannot be implemented"),
-            )
-            .help(format!(
-                "`{trait_name}` is a built-in capability satisfied only by the runtime types that \
-                 provide it (e.g. the CRDT types for `Mergeable`), not by a user `impl`"
-            ));
-            return;
-        }
         // No built-in trait declares an `async` method — the runtime invokes these protocols
         // (`to_string`, `compare`, `add`, `call`, …) for a value, not for a future. An `async`
         // implementation would hand the protocol a `Future<T>` where it reads a `T`, the same
@@ -549,6 +537,18 @@ impl Checker {
             return self
                 .resolve_assoc(target, trait_name, name)
                 .unwrap_or(Type::Unknown);
+        }
+        // A bare `Self` in the contract means "the implementing type", so resolve it exactly as an
+        // associated projection is resolved. Without this the impl is forced to spell the literal
+        // word `Self` — and a signature written that way is *uncallable*, because the concrete
+        // argument at the call site has nothing to unify a nominal `Self` against. A native trait
+        // declaring `SigType::SelfTy` synthesizes into precisely this shape
+        // (`stdlib::sig_type_ref`), so one fix serves both trait kinds.
+        if let Some(noeta_ast::TypeRef::Named { name, args, .. }) = ty
+            && name == "Self"
+            && args.is_empty()
+        {
+            return Type::Named(target.to_string(), Vec::new());
         }
         field_type(ty, &self.imports.extern_types)
     }
@@ -1889,19 +1889,17 @@ impl Checker {
                 }
                 // Bounds on a collected signature are validated trait names (E0014 otherwise); a
                 // non-built-in, non-user name is unreachable here, so skip rather than falsely report.
-                let Some(t) = BuiltinTrait::from_name(&bound.name) else {
-                    continue;
-                };
                 let bound = &bound.name;
-                if !self.satisfies(concrete, t) {
-                    let help = if t.intrinsic() {
-                        format!(
-                            "`{bound}` is a built-in capability — only the runtime types that \
-                             provide it (the CRDT types for `Mergeable`) satisfy this bound"
-                        )
-                    } else {
-                        format!("`{concrete}` must `@derive` or `impl {bound}` to be used here")
-                    };
+                let satisfied = match BuiltinTrait::from_name(bound) {
+                    Some(t) => self.satisfies(concrete, t),
+                    None => {
+                        self.satisfies_user_trait(concrete, bound, &[])
+                            || self.native_type_advertises(concrete, bound)
+                    }
+                };
+                if !satisfied {
+                    let help =
+                        format!("`{concrete}` must `@derive` or `impl {bound}` to be used here");
                     self.error(
                         DiagnosticCode::TraitBoundNotSatisfied,
                         span,
@@ -2044,6 +2042,30 @@ impl Checker {
     /// can — via a recorded in-body or standalone `impl` (`user_trait_impls`). A
     /// `dyn`/inference-hole defers to runtime (never a false negative); a built-in/primitive type
     /// never implements a user trait.
+    /// Whether a **native** type advertises `bound` in its own `ExtType.traits` declaration.
+    ///
+    /// The import-gated `user_trait_impls` table cannot answer this: `seed_ext_traits` seeds a
+    /// native trait only when the program `use`s it, which is right for *naming* one (`impl Widget`
+    /// needs the import like any other name) and wrong for a **bound on a native signature**. A
+    /// program calling `synced_signal(crdt.gcounter(), …)` never names `Mergeable` — the bound is
+    /// the extension's own business — so requiring an import to satisfy it would make every such
+    /// call site import traits it does not mention. The registry knows the advertisement outright,
+    /// so ask it there.
+    fn native_type_advertises(&self, ty: &Type, bound: &str) -> bool {
+        let Type::Named(name, _) = ty else {
+            return false;
+        };
+        let qualified = self
+            .imports
+            .extern_types
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.clone());
+        self.reg()
+            .find_type_qualified(&qualified)
+            .is_some_and(|t| t.traits.contains(&bound))
+    }
+
     fn satisfies_user_trait(&self, ty: &Type, bound: &str, want: &[Type]) -> bool {
         self.satisfies_user_trait_inner(ty, bound, want, &mut Vec::new())
     }
@@ -2065,12 +2087,18 @@ impl Checker {
             // (dispatch is by name at runtime; there is nothing static to hold the args against).
             Type::DynTrait(t) => t == bound,
             Type::Named(n, args) => {
-                let Some(impl_args) = self
-                    .symbols
-                    .user_trait_impls
-                    .get(n)
-                    .and_then(|impls| impls.get(bound))
-                else {
+                // A **native** type's impls are recorded under its qualified identity
+                // (`user_trait_impls["para.crdt.GSet"]["Mergeable"]`), while a signature names it
+                // by the short spelling its `ExtType` declares (`GSet`). Resolve through the
+                // import map on a miss, so a native type advertising a native trait satisfies the
+                // bound the same way a user type does.
+                let impls = self.symbols.user_trait_impls.get(n).or_else(|| {
+                    self.imports
+                        .extern_types
+                        .get(n)
+                        .and_then(|qualified| self.symbols.user_trait_impls.get(qualified))
+                });
+                let Some(impl_args) = impls.and_then(|impls| impls.get(bound)) else {
                     return false;
                 };
                 // An instantiated bound demands an impl at that instantiation (argument-wise,
@@ -2116,20 +2144,21 @@ impl Checker {
         span: Span,
     ) {
         for (concrete, bound) in stdlib::module_var_bounds(self.reg(), module, func, args) {
-            let Some(t) = BuiltinTrait::from_name(bound) else {
-                continue;
+            // A bound on a native signature names EITHER a built-in trait or a trait the extension
+            // itself declares (`para.crdt.Mergeable`). Resolving only the built-in set and skipping
+            // the rest silently drops the bound — which is how `synced_signal(42, "t")` briefly
+            // type-checked when `Mergeable` stopped being built-in. Both kinds are checked here.
+            let satisfied = match BuiltinTrait::from_name(bound) {
+                Some(t) => self.satisfies(&concrete, t),
+                None => {
+                    self.satisfies_user_trait(&concrete, bound, &[])
+                        || self.native_type_advertises(&concrete, bound)
+                }
             };
-            if self.satisfies(&concrete, t) {
+            if satisfied {
                 continue;
             }
-            let help = if t.intrinsic() {
-                format!(
-                    "`{bound}` is a built-in capability — only the runtime types that provide it \
-                     (the CRDT types `GCounter`/`PnCounter`/`GSet`) satisfy this bound"
-                )
-            } else {
-                format!("`{concrete}` must `@derive` or `impl {bound}`")
-            };
+            let help = format!("`{concrete}` must `@derive` or `impl {bound}`");
             self.error(
                 DiagnosticCode::TraitBoundNotSatisfied,
                 span,

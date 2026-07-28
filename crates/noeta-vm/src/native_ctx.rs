@@ -245,6 +245,48 @@ impl NativeCtx for VmCtx<'_, '_> {
         }
     }
 
+    fn call_method(
+        &mut self,
+        recv: Slot,
+        method: &str,
+        args: &[Slot],
+    ) -> CtxResult<Option<Slot>> {
+        let receiver = self.get(recv)?;
+        // Only a user-declared shape has methods to reach; anything else reports "no such method"
+        // so the caller can fall back rather than abort.
+        if !(receiver.is_object() || receiver.is_enum()) {
+            return Ok(None);
+        }
+        let Some(shape) = receiver.shape() else {
+            return Ok(None);
+        };
+        if self.vm.method_proto(&shape.name, method).is_none() {
+            return Ok(None);
+        }
+        // `run_method_handle` consumes its owned arguments — the receiver first, then the rest —
+        // so each is retained out of the (borrowed) slot table, exactly as `render` does.
+        let mut owned = Vec::with_capacity(args.len() + 1);
+        retain(receiver);
+        owned.push(receiver);
+        for &a in args {
+            let v = self.get(a)?;
+            retain(v);
+            owned.push(v);
+        }
+        // Empty `ty` resolves the method through the receiver's own shape (the bound-method path).
+        match self
+            .vm
+            .run_method_handle("", method, false, owned, self.span)
+        {
+            Ok(result) => Ok(Some(self.insert(result))),
+            Err(Abort) => Err(CtxError::Abort),
+        }
+    }
+
+    fn bytes_of(&mut self, slot: Slot) -> CtxResult<Option<Vec<u8>>> {
+        Ok(self.get(slot)?.bytes_data())
+    }
+
     fn view(&mut self, slot: Slot) -> CtxResult<NativeValue> {
         Ok(self.get(slot)?.to_native_deep())
     }

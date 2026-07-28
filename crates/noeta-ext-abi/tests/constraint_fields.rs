@@ -285,8 +285,9 @@ const TABLE: &[Row] = &[
         "arena_getter",
         Data(Anchor("crates/noeta-vm/src/methods.rs", "arena_getter")),
     ),
-    // The built-in traits this type claims: what makes a `T: Mergeable` / `T: Error` bound
-    // accept it. A bound is a rule, and the claim is what satisfies it.
+    // The traits this type claims: what makes a `T: Comparable` / `T: Error` bound accept it, and
+    // (for a native `ExtTrait` name) what makes it satisfy a package-declared trait. A bound is a
+    // rule, and the claim is what satisfies it.
     Row(
         "ExtType",
         "traits",
@@ -295,7 +296,7 @@ const TABLE: &[Row] = &[
                 "crates/noeta-check/src/prelude.rs",
                 "fn seed_native_builtin_traits(",
             ),
-            Anchor("crates/noeta-check/src/tests.rs", "Mergeable"),
+            Anchor("crates/noeta-check/src/tests.rs", "Comparable"),
         ),
     ),
     Row(
