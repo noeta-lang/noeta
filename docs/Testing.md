@@ -79,6 +79,47 @@ running 2 tests on 2 threads
 Only the file's *main effects* are removed from the shared setup — the top-level `echo` above
 prints nothing under `noeta test` — while the declarations and bindings around them stay live.
 
+### What counts as a main effect
+
+The split is by **statement form**, not by what the statement does. A top-level statement is shared
+setup if it *binds* something, and a main effect otherwise:
+
+| Kept — shared setup | Dropped — main effect |
+|---|---|
+| `use` imports, `namespace` | `echo …` |
+| every declaration (`fn`, `class`, `struct`, `enum`, `trait`, `impl`, `@attribute`) | a bare statement-expression: `f(x)`, `obj.method(…)` |
+| a binding or destructure: `x = …`, `mut x = …`, `(a, b) = …` | `if` / `for` / `while` statements |
+| `concurrent { … }` | `return` / `break` / `continue` |
+
+Dropping them is what makes a file with a `main` runnable as a test suite at all: a CLI entry's
+top-level `os.exit(run())` and a server's `server.serve()` are both statement-expressions, and
+running either under `noeta test` would exit the runner or block it forever.
+
+> **The sharp edge.** A binding is kept, but a *statement* that mutates what it holds is not — so
+> the tests see that value in its **unmutated** state, with no diagnostic. This bites hardest on a
+> native resource with per-instance state, where the object is real and working but empty:
+>
+> ```noeta ignore
+> conn = db.connect("sqlite::memory:")   // kept — every test gets a live connection
+> conn.migrate("migrations")             // DROPPED — a bare statement-expression
+>
+> @test
+> fn counts_users() use (conn): void {
+>     // Fails with the database's own `no such table: users`, not a language error:
+>     // the connection is fine, the schema was never created.
+>     assert(conn.query("SELECT * FROM users", []).len() == 2)
+> }
+> ```
+>
+> The same applies to a fixture seeded by a top-level `for` loop — the whole loop is dropped, so
+> the binding it seeds is kept but empty.
+>
+> Do setup work that tests depend on **inside a binding** (`applied = conn.migrate("migrations")`),
+> or in a helper the tests call themselves. Note that a binding runs once **per test**, not once
+> per file, so it must be idempotent against any state that outlives the isolate (a file, a
+> file-backed database) — that is also why `sqlite::memory:` is the well-behaved choice here: each
+> test gets its own connection and therefore its own empty database to migrate.
+
 ## Metadata attributes
 
 Lead a test with any of these `std.test` attributes to change how it runs or is reported. They are
