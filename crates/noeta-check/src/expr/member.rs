@@ -374,6 +374,19 @@ impl Checker {
         ))
     }
 
+    /// How `type_name.name` may be reached ([`Receiver`]) — the one place the table is consulted,
+    /// so every call form (`T.m(…)`, `x.m(…)`, either of those with a turbofish, and both handle
+    /// spellings) asks the same question and gets the same answer. An unrecorded method is
+    /// `Either`: the checker knows nothing that forbids a spelling, and refusing one would be
+    /// inventing a rule out of missing data.
+    pub(crate) fn receiver_of(&self, type_name: &str, name: &str) -> Receiver {
+        self.symbols
+            .method_receiver
+            .get(&(type_name.to_string(), name.to_string()))
+            .copied()
+            .unwrap_or(Receiver::Either)
+    }
+
     pub(crate) fn method_call_return(&self, recv: &Type, name: &str) -> Type {
         // A native (fielded/extern) method whose return is a trait associated-type projection
         // `Self::Name` / `List<Self::Name>` (slice 1b): resolve it against `trait_assoc` at this
@@ -611,13 +624,9 @@ impl Checker {
             // The handle's shape follows the derived classification (EX.2): an INSTANCE method's
             // handle takes the receiver as its first argument (`Fn(T, ...params) -> ret`); an
             // ASSOCIATED function's handle is the function itself (`Fn(params) -> ret`) — e.g.
-            // `ctor = Stack.new`.
-            let instance = self
-                .symbols
-                .method_instance
-                .get(&(tn.clone(), name.to_string()))
-                .copied()
-                .unwrap_or(true);
+            // `ctor = Stack.new`. A trait's self-less method ([`Receiver::Either`]) takes the
+            // instance shape, which is what the unclassified entry already meant here.
+            let instance = self.receiver_of(tn, name).handle_takes_receiver();
             let mut params = Vec::with_capacity(sig.params.len() + 1);
             if instance {
                 params.push(Type::Named(tn.clone(), Vec::new()));
@@ -703,15 +712,9 @@ impl Checker {
         {
             let params = sig.params.clone();
             let ret = sig.ret.clone();
-            let instance = self
-                .symbols
-                .method_instance
-                .get(&(n.clone(), name.to_string()))
-                .copied()
-                .unwrap_or(true);
             // Binding an ASSOCIATED function through a value is the wrong-way shape (E0047) —
             // there is no receiver to capture; bind it off the type instead.
-            if !instance {
+            if !self.receiver_of(n, name).allows_instance_call() {
                 self.error(
                     DiagnosticCode::InvalidReceiver,
                     member_span,

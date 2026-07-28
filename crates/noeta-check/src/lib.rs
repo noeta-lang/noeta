@@ -885,11 +885,14 @@ struct Symbols {
     /// `impl`-block methods so a method call on a user object resolves to a real type, with the
     /// owning class's generic parameters erased to `dyn` (they accept any argument).
     methods: HashMap<(String, String), FnSig>,
-    /// Whether each `(type, method)` is an **instance** method (its body references `self`) or an
-    /// associated function (never touches `self`) — DERIVED at collection time (prelude-redesign
-    /// EX.2; well-defined because member access is explicit, EX.1). Drives the wrong-way-call check
-    /// (E0047) and the associated-vs-instance shape of a `Type.method` handle.
-    method_instance: HashMap<(String, String), bool>,
+    /// How each `(type, method)` may be reached — instance-only, associated-only, or either
+    /// ([`Receiver`]). DERIVED at collection time from the body *and* from whether a trait's
+    /// interface supplies the method (prelude-redesign EX.2; well-defined because member access is
+    /// explicit, EX.1). Drives the wrong-way-call check (E0047) and the shape of a `Type.method`
+    /// handle. Read it through [`Checker::receiver_of`], never directly: an unclassified method has
+    /// a *meaning* (`Either`), and re-deciding that meaning at each use site is exactly how the
+    /// associated-call, instance-call, and turbofish paths drifted apart.
+    method_receiver: HashMap<(String, String), Receiver>,
     /// Which built-in traits each user type satisfies: type name → set of trait names it `@derive`s
     /// or `impl`s. The basis (with the built-in-type table in [`Checker::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
@@ -2273,11 +2276,12 @@ impl Checker {
             if self.diags.len() != before {
                 continue;
             }
-            // A `@test`/`@bench` method is invoked with no receiver, so it must not read `self`.
+            // A `@test`/`@bench` method is invoked with no receiver, so it must not read `self` —
+            // i.e. it must be reachable without one, which is every classification but `Instance`.
             if target == TargetKind::Method
                 && matches!(dir.name.as_str(), "test" | "bench")
                 && let Some(ty) = self.coloring.current_type.clone()
-                && self.symbols.method_instance.get(&(ty, decl.name.clone())) == Some(&true)
+                && !self.receiver_of(&ty, &decl.name).allows_associated_call()
             {
                 self.error(
                     DiagnosticCode::InvalidDirectiveSite,

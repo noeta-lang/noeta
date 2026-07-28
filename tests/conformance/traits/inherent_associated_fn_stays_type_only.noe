@@ -1,0 +1,12 @@
+// The rule the trait relaxation must NOT relax: a self-less **inherent** function is associated
+// only. It belongs to no trait's instance interface, so calling it on a value would evaluate a
+// receiver and then silently discard it — E0047, the mirror of `diagnostics/wrong_way_call.noe`.
+// Pinned here beside the trait cases so widening those can never widen this one by accident.
+// expect: error E0047 at 12:6
+// expect: exit 1
+struct Stack {
+    id: int
+    fn make(): Stack { return Stack { id: 9 } }
+}
+
+echo Stack { id: 1 }.make().id

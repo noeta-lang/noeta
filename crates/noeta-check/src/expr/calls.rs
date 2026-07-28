@@ -856,14 +856,9 @@ impl Checker {
                 {
                     // An INSTANCE method (its body references `self`) cannot be called
                     // associated-style — there is no receiver to become `self` (E0047,
-                    // prelude-redesign EX.2). The classification is derived from the body.
-                    if self
-                        .symbols
-                        .method_instance
-                        .get(&(tn.clone(), name.to_string()))
-                        .copied()
-                        .unwrap_or(false)
-                    {
+                    // prelude-redesign EX.2). A self-less method of a trait's interface
+                    // ([`Receiver::Either`]) is reachable this way as well as on a value.
+                    if !self.receiver_of(tn, name).allows_associated_call() {
                         self.error(
                             DiagnosticCode::InvalidReceiver,
                             span,
@@ -915,14 +910,11 @@ impl Checker {
                         .cloned()
                 {
                     // An ASSOCIATED function (never touches `self`) is not callable on a value —
-                    // the receiver would be silently discarded (E0047, prelude-redesign EX.2).
-                    if !self
-                        .symbols
-                        .method_instance
-                        .get(&(n.clone(), name.to_string()))
-                        .copied()
-                        .unwrap_or(true)
-                    {
+                    // the receiver would be silently discarded (E0047, prelude-redesign EX.2). A
+                    // self-less method of a trait's interface ([`Receiver::Either`]) IS callable
+                    // here: the trait's contract puts it in the instance interface, and that is how
+                    // `dyn Trait` reaches it.
+                    if !self.receiver_of(n, name).allows_instance_call() {
                         self.error(
                             DiagnosticCode::InvalidReceiver,
                             span,
@@ -1422,14 +1414,12 @@ impl Checker {
             return Type::Unknown;
         };
         // The associated/instance discipline (E0047) holds for the turbofish form exactly as for
-        // plain calls.
-        let is_instance = self
-            .symbols
-            .method_instance
-            .get(&(type_name.clone(), name.to_string()))
-            .copied()
-            .unwrap_or(true);
-        if associated && is_instance {
+        // plain calls — which it did not, quite: this read the table with ONE default (`true`) for
+        // both directions, while the plain paths used opposite ones, so an unclassified method
+        // (every standalone-impl method) was accepted as `T.m(…)` and refused as `T.m::<X>(…)`.
+        // Asking [`Checker::receiver_of`] the same question all three sites ask settles it.
+        let receiver = self.receiver_of(&type_name, name);
+        if associated && !receiver.allows_associated_call() {
             self.error(
                 DiagnosticCode::InvalidReceiver,
                 name_span,
@@ -1441,7 +1431,7 @@ impl Checker {
             ));
             return sig.ret.clone();
         }
-        if !associated && !is_instance {
+        if !associated && !receiver.allows_instance_call() {
             self.error(
                 DiagnosticCode::InvalidReceiver,
                 name_span,
