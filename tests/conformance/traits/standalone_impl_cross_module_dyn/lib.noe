@@ -1,0 +1,52 @@
+namespace pkg.lib;
+
+pub trait Decoder {
+    fn step(s: string): string
+}
+
+pub trait Codec {
+    fn run(): void
+}
+
+// Neither `Hidden` nor `Late` is `pub`, and the entry imports neither. They reach the merged program
+// only through the body of the standalone `impl Codec for MyCodec` below — which is exactly what
+// made their own standalone impls invisible: the linker decided an impl's eligibility ("is its
+// target type in the program?") from a snapshot taken before it merged any impl bodies' references.
+class Hidden {
+    fn new(): Hidden { return Hidden {} }
+}
+
+impl Decoder for Hidden {
+    fn step(s: string): string { return s.upper() }
+}
+
+class Late {
+    fn new(): Late { return Late {} }
+}
+
+fn want(x: dyn Decoder): string { return x.step("hi") }
+
+fn bound<T: Decoder>(x: T): string { return x.step("bound") }
+
+pub class MyCodec {
+    fn new(): MyCodec { return MyCodec {} }
+}
+
+impl Codec for MyCodec {
+    fn run(): void {
+        h = Hidden.new()
+        echo want(h)
+        echo h.step("direct")
+        echo bound(h)
+        echo h is dyn Decoder
+        echo traits_of(h)
+        echo want(Late.new())
+    }
+}
+
+// Written BELOW the impl whose body is what pulls `Late` into the program, where `impl Decoder for
+// Hidden` is written above it. No single pass in either direction can see both, so this pins the
+// fixpoint rather than a luckier source order.
+impl Decoder for Late {
+    fn step(s: string): string { return "late-" ~ s }
+}

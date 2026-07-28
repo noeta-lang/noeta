@@ -245,12 +245,7 @@ impl NativeCtx for VmCtx<'_, '_> {
         }
     }
 
-    fn call_method(
-        &mut self,
-        recv: Slot,
-        method: &str,
-        args: &[Slot],
-    ) -> CtxResult<Option<Slot>> {
+    fn call_method(&mut self, recv: Slot, method: &str, args: &[Slot]) -> CtxResult<Option<Slot>> {
         let receiver = self.get(recv)?;
         // Only a user-declared shape has methods to reach; anything else reports "no such method"
         // so the caller can fall back rather than abort.
