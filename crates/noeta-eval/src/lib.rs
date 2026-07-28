@@ -3144,6 +3144,22 @@ impl Interpreter {
             builtin_args.extend(args);
             return self.call_builtin(builtin, builtin_args, span);
         }
+        // `bytes.slice(start, end?)` — the byte-buffer twin of `string.slice`/`List.slice`, and the
+        // only `bytes` method that takes arguments, so it is handled ahead of the zero-arg table.
+        // The bounds rule is the shared `noeta_stdlib::bytes_slice` body.
+        if let Value::Bytes(data) = &receiver
+            && name == "slice"
+        {
+            self.expect_std_arity_range(name, &args, 1, 2, span)?;
+            let start = self.expect_std_int(name, &args[0], span)?;
+            let end = self.expect_std_opt_int(name, &args, 1, data.len() as i64, span)?;
+            return match noeta_stdlib::bytes_slice(data, start, Some(end)) {
+                Ok(sliced) => Ok(Value::Bytes(Rc::new(sliced))),
+                Err(error) => {
+                    Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                }
+            };
+        }
         let arity_ok = args.is_empty();
         // `len()` is the length of a collection (P1.3 — `count` is iterator-only, a consuming
         // terminal; a collection `count` is an unknown method like any other).
@@ -4203,6 +4219,24 @@ impl Interpreter {
                     ));
                 }
                 Ok(Value::Str(s.chars().nth(i as usize).unwrap().to_string()))
+            }
+            // `b[i]` on a `bytes` reads one byte as an `int` (0..=255). The read itself is the
+            // shared `noeta_stdlib::bytes_index` body, so the bounds error is identical in both
+            // backends by construction.
+            Value::Bytes(data) => {
+                let Value::Int(i) = index else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("bytes index must be an int, found {}", index.type_name()),
+                    ));
+                };
+                match noeta_stdlib::bytes_index(data, i) {
+                    Ok(byte) => Ok(Value::Int(byte)),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
             }
             other => Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,

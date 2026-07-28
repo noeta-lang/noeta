@@ -546,6 +546,23 @@ impl<'m> Vm<'m> {
             arg_vals.extend_from_slice(args);
             return self.call_builtin(builtin, &arg_vals, span);
         }
+        // `bytes.slice(start, end?)` — the byte-buffer twin of `string.slice`/`List.slice`, and the
+        // only `bytes` method taking arguments, so it is handled ahead of the zero-arg table. The
+        // bounds rule is the shared `noeta_stdlib::bytes_slice`, so both backends agree; the buffer
+        // is borrowed in place rather than cloned whole.
+        if method == "slice" && v.is_bytes() {
+            self.stdlib_arity_range(method, args, 1, 2, span)?;
+            let start = self.stdlib_int(method, args[0], span)?;
+            let len = v.bytes_len().expect("checked `is_bytes` above");
+            let end = self.stdlib_opt_int(method, args, 1, len as i64, span)?;
+            let sliced = v
+                .with_bytes(|data| noeta_stdlib::bytes_slice(data, start, Some(end)))
+                .expect("checked `is_bytes` above");
+            return match sliced {
+                Ok(bytes) => Ok(Value::bytes(bytes)),
+                Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
+            };
+        }
         // Built-in zero-argument methods on lists/maps/strings. `len()` is the collection
         // length (P1.3 — `count` is iterator-only, a consuming terminal).
         let result = if !args.is_empty() {

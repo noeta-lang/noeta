@@ -533,6 +533,19 @@ const CORE_TYPES: &[ExtType] = &[
         docs: JSON_ERROR_DOCS,
         ..ExtType::DEFAULTS
     },
+    // `Base64Error` — the `JsonError` shape for a flat input: pure, content-equal data carrying the
+    // failure kind and the offset it was detected at. Declares `Error` + `Display` so `<E: Error>`
+    // bounds accept it, `?` converts through `From`, and `${e}` renders the composed message.
+    ExtType {
+        name: crate::base64::BASE64_ERROR_TYPE_NAME,
+        namespace: "std.base64",
+        methods: BASE64_ERROR_METHODS,
+        dispatch: base64_error_method_dispatch,
+        key_capable: false, // a decode failure is not a map key
+        traits: &["Error", "Display"],
+        docs: BASE64_ERROR_DOCS,
+        ..ExtType::DEFAULTS
+    },
     // `ExecResult` (stdlib-gaps) — pure, content-equal subprocess outcome (the `Response` model).
     ExtType {
         name: crate::os::EXEC_RESULT_TYPE_NAME,
@@ -1317,6 +1330,197 @@ fn want_tag<'a>(func: &str, args: &'a [NativeValue], index: usize) -> Result<&'a
     match args.get(index) {
         Some(NativeValue::Bytes(b)) => Ok(b),
         _ => Err(type_error(func, "bytes")),
+    }
+}
+
+// --- `base64`: RFC 4648 encode/decode over `bytes` -----------------------------------------------
+//
+// Four functions rather than two plus alphabet/padding flags: the name states the wire format, so a
+// call site documents which envelope it speaks and a mistake is visible in review instead of
+// surfacing as a token the remote party silently rejects. `encode`/`decode` are the standard
+// `+/`-alphabet, `=`-padded form (RFC 4648 §4, and what §10's vectors show); `encode_url`/
+// `decode_url` are the `-_` URL-safe form with no padding (§5, as RFC 7515 requires for JWTs).
+// Decoding is recoverable — base64 off a wire is untrusted input exactly like JSON — so both decode
+// doors return `Result<bytes, Base64Error>` and never abort. See `crate::base64` for the alphabet-
+// strict / padding-indifferent rule and the reasoning behind offering url-safe at all.
+
+/// `Base64Error`'s signature spelling — the error arm of both decode doors.
+const BASE64_ERROR_SIG: SigType = SigType::Named(crate::base64::BASE64_ERROR_TYPE_NAME);
+
+/// What both decode doors return: `Result<bytes, Base64Error>`.
+const BASE64_RESULT_SIG: SigType = SigType::Result(&SigType::Bytes, &BASE64_ERROR_SIG);
+
+const BASE64_FNS: &[ExtFn] = &[
+    // Encoding accepts `string|bytes` like the `crypto` digests: a string encodes as its UTF-8
+    // bytes, which is what a caller inlining text into a data URI or an auth header wants, and
+    // spares the `.to_bytes()` ceremony in the overwhelmingly common case.
+    ExtFn {
+        param_names: &["data"],
+        name: "encode",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &["data"],
+        name: "encode_url",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &["text"],
+        name: "decode",
+        params: &[Str],
+        ret: Concrete(BASE64_RESULT_SIG),
+    },
+    ExtFn {
+        param_names: &["text"],
+        name: "decode_url",
+        params: &[Str],
+        ret: Concrete(BASE64_RESULT_SIG),
+    },
+];
+
+fn base64_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    // Both decode doors are recoverable: the whole `Result` rides inside the `NativeOut` and the
+    // `Err` channel (a runtime abort) is never used — the same contract `json.try_parse` honors.
+    let decoded = |result: Result<Vec<u8>, crate::base64::Base64Error>| match result {
+        Ok(bytes) => NativeOut::Ok(Box::new(NativeOut::Bytes(bytes))),
+        Err(error) => NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error)))),
+    };
+    match func {
+        "encode" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Str(crate::base64::encode(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "encode_url" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Str(crate::base64::encode_url(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "decode" => {
+            want_arity(func, args, 1)?;
+            Ok(decoded(crate::base64::decode(want_str(func, args, 0)?)))
+        }
+        "decode_url" => {
+            want_arity(func, args, 1)?;
+            Ok(decoded(crate::base64::decode_url(want_str(func, args, 0)?)))
+        }
+        _ => Err(no_function_error("base64", func)),
+    }
+}
+
+const BASE64_DOCS: &[(&str, &str)] = &[
+    (
+        "encode",
+        "Encode bytes (or a string, as its UTF-8 bytes) with the **standard** RFC 4648 alphabet, \
+         `=`-padded — the canonical form, and what an LLM provider's inline image/file field and an \
+         MCP resource's `blob` expect.",
+    ),
+    (
+        "encode_url",
+        "Encode with the **URL-safe** alphabet (`-`/`_`) and no padding — RFC 4648 §5 as RFC 7515 \
+         requires it, so the result is safe in a URL path, a query parameter, or a filename. This \
+         is the JWT-segment spelling.",
+    ),
+    (
+        "decode",
+        "Decode **standard**-alphabet base64 into `bytes`: `Ok(bytes)`, or `Err(Base64Error)` \
+         naming the failure and its `offset()`. Never aborts — base64 from a remote party is \
+         untrusted input exactly like JSON.\n\n\
+         Padded or unpadded input both decode; the *alphabet* is strict, so `-`/`_` is rejected \
+         here (reach for `decode_url`). Non-canonical trailing bits are rejected too, so a \
+         successful decode always re-encodes to the same text.",
+    ),
+    (
+        "decode_url",
+        "Decode **URL-safe**-alphabet base64 into `bytes` — the `encode_url` inverse, and the door \
+         for a JWT segment. Same recoverable `Result<bytes, Base64Error>` contract as `decode`, and \
+         it rejects `+`/`/`: that strictness is why this is a real function rather than a character \
+         substitution you apply afterwards, which would accept a mixed-alphabet token.",
+    ),
+];
+
+/// The `Base64Error` instance methods: pure reads over the decode failure — the `JsonError`
+/// accessor model. `message` is `impl Error`'s required method and `to_string` is `impl Display`'s
+/// (both declared on the type's registration), and both return the same composed message the value
+/// also displays as.
+const BASE64_ERROR_METHODS: &[ExtFn] = &[
+    ExtFn {
+        param_names: &[],
+        name: "message",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "kind",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "offset",
+        params: &[],
+        ret: Concrete(SigType::Option(&Int)),
+    },
+];
+
+const BASE64_ERROR_DOCS: &[(&str, &str)] = &[
+    (
+        "message",
+        "The composed human message (`invalid url-safe base64 character '+' at offset 3`). The \
+         `Error` trait's required method.",
+    ),
+    (
+        "to_string",
+        "Same as `message()` — the `Display` rendering, so `${e}` interpolates the message.",
+    ),
+    (
+        "kind",
+        "What went wrong: `\"invalid_character\"` (a character outside this door's alphabet), \
+         `\"invalid_length\"` (a truncated group), `\"invalid_last_symbol\"` (non-canonical \
+         trailing bits), or `\"invalid_padding\"`.",
+    ),
+    (
+        "offset",
+        "The 0-based byte offset into the encoded text where the failure was detected, or `none` \
+         when the failure is not positional (malformed padding).",
+    ),
+];
+
+fn base64_error_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    use crate::base64::{BASE64_ERROR_TYPE_NAME, Base64Error};
+    let Some(error) = recv.as_any().downcast_ref::<Base64Error>() else {
+        return Err(type_error(method, BASE64_ERROR_TYPE_NAME));
+    };
+    want_arity(method, args, 0)?;
+    match method {
+        // `message` (Error) and `to_string` (Display) are the same composed message by design.
+        "message" | "to_string" => Ok(NativeOut::Str(error.message())),
+        "kind" => Ok(NativeOut::Str(error.kind.label().to_string())),
+        "offset" => Ok(match error.offset {
+            Some(at) => NativeOut::Some(Box::new(NativeOut::Scalar(Scalar::Int(i64::from(at))))),
+            None => NativeOut::None,
+        }),
+        _ => Err(crate::no_method_error(BASE64_ERROR_TYPE_NAME, method)),
     }
 }
 
@@ -6405,6 +6609,17 @@ const CORE_MODULES: &[ExtModule] = &[
         dispatch: fs_dispatch,
         deep_marshal: false,
         docs: FS_DOCS,
+        ..ExtModule::DEFAULTS
+    },
+    // `base64` (RFC 4648) — the binary-over-text envelope every LLM provider, MCP resource, JWT,
+    // and data URI speaks. Pure and dep-light (the `base64` crate is already linked for HTTP Basic
+    // auth), so it is always-on core with no ring of its own.
+    ExtModule {
+        name: "base64",
+        functions: BASE64_FNS,
+        dispatch: base64_dispatch,
+        deep_marshal: false,
+        docs: BASE64_DOCS,
         ..ExtModule::DEFAULTS
     },
     ExtModule {

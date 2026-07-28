@@ -1,0 +1,85 @@
+// The Ring 2 `base64` module (RFC 4648) — the binary-over-text envelope every LLM provider, MCP
+// resource, JWT, and data URI speaks. Four functions rather than alphabet/padding flags: the name
+// states the wire format. `encode`/`decode` are the standard `+/` alphabet, `=`-padded (§4, and
+// what §10's vectors show); `encode_url`/`decode_url` are the URL-safe `-_` alphabet with no
+// padding (§5, as RFC 7515 requires for JWTs). Identical under both backends.
+//
+// RFC 4648 §10's normative vectors, both directions.
+// expect: stdout ""
+// expect: stdout "Zg=="
+// expect: stdout "Zm8="
+// expect: stdout "Zm9v"
+// expect: stdout "Zm9vYg=="
+// expect: stdout "Zm9vYmE="
+// expect: stdout "Zm9vYmFy"
+// expect: stdout "decoded: ||f|fo|foo|foob|fooba|foobar"
+// The two alphabets differ exactly where the RFC says, and each rejects the other's.
+// expect: stdout "std: +/++"
+// expect: stdout "url: -_--"
+// expect: stdout "std decodes: fbffbe"
+// expect: stdout "url decodes: fbffbe"
+// Multi-byte UTF-8 travels as its bytes, not its characters.
+// expect: stdout "aMOpbGxv -> héllo"
+// expect: stdout "5 bytes from 5 chars over 6 utf-8 bytes"
+// A decode of untrusted input is recoverable, never an abort.
+// expect: stdout "handled invalid_character at 4: invalid standard base64 character '!' at offset 4"
+// expect: stdout "handled invalid_length at 5: invalid base64 length: a group is truncated at offset 5"
+// expect: stdout "handled: invalid url-safe base64 character '+' at offset 0"
+// expect: stdout "still running"
+// expect: exit 0
+use std.base64
+
+// --- RFC 4648 section 10, encoding ---------------------------------------------------------------
+vectors = ["", "f", "fo", "foo", "foob", "fooba", "foobar"]
+for v in vectors {
+    echo base64.encode(v)
+}
+
+// --- RFC 4648 section 10, decoding (the same vectors back) ---------------------------------------
+mut round = "decoded: "
+for v in vectors {
+    round = round ~ match base64.decode(base64.encode(v)) {
+        Ok(d) => "|" ~ (d.decode() ?? "<not utf-8>"),
+        Err(e) => "|err ${e}",
+    }
+}
+echo round
+
+// --- the two alphabets ---------------------------------------------------------------------------
+// 0xFB 0xFF 0xBE is the byte triple that exercises both substituted characters.
+high: List<u8> = [0xfb, 0xff, 0xbe]
+raw = high.to_bytes()
+echo "std: ${base64.encode(raw)}"
+echo "url: ${base64.encode_url(raw)}"
+echo match base64.decode("+/++") { Ok(d) => "std decodes: ${d.to_hex()}", Err(e) => "err ${e}" }
+echo match base64.decode_url("-_--") { Ok(d) => "url decodes: ${d.to_hex()}", Err(e) => "err ${e}" }
+
+// --- multi-byte UTF-8 ----------------------------------------------------------------------------
+text = "héllo"
+encoded = base64.encode(text)
+echo match base64.decode(encoded) {
+    Ok(d) => "${encoded} -> ${d.decode() ?? "<not utf-8>"}",
+    Err(e) => "err ${e}",
+}
+echo "${text.len()} bytes from ${text.len()} chars over ${text.to_bytes().len()} utf-8 bytes"
+
+// --- the failure path: invalid input is a value you handle ---------------------------------------
+echo match base64.decode("Zm9v!!") {
+    Ok(d) => "unexpected ok",
+    Err(e) => "handled ${e.kind()} at ${e.offset() ?? -1}: ${e.message()}",
+}
+
+// A truncated group: one leftover symbol can never be a whole byte.
+echo match base64.decode("Zm9vY") {
+    Ok(d) => "unexpected ok",
+    Err(e) => "handled ${e.kind()} at ${e.offset() ?? -1}: ${e.message()}",
+}
+
+// The url-safe door REJECTS the standard alphabet — the reason it is a real function and not a
+// character substitution applied after the fact, which would accept a mixed-alphabet token.
+echo match base64.decode_url("+/++") {
+    Ok(d) => "unexpected ok",
+    Err(e) => "handled: ${e}",
+}
+
+echo "still running"
