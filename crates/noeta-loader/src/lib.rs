@@ -1665,60 +1665,87 @@ fn link_core(
     // impl to travel with its target type (a `dyn Trait` coercion or a bound check needs to see it).
     // An **inline** impl rides on its type's `class`/`struct` declaration and is already merged with it;
     // this closes the **standalone** case. Merge each pooled standalone impl whose (qualified) target
-    // type was itself merged — so the impl only lands when the type it refers to is present — deduped
+    // type is in the program — so the impl only lands when the type it refers to is present — deduped
     // by (target, trait) so a module reachable two ways contributes each impl once.
-    let merged_types: HashSet<String> = imported
-        .iter()
-        .filter_map(decl_name)
-        .map(str::to_string)
-        .collect();
+    //
+    // **To a fixpoint, over the whole program's types.** "Is the target type present?" has an answer
+    // that *grows while this loop runs*, and getting either half of that wrong drops an impl in
+    // silence — the type still links and its inherent methods still dispatch, so the only symptom is
+    // that the trait went missing, in a *consumer* of the package and never in the package's own
+    // tests. Two ways it grew:
+    //
+    // - An impl's own dependency closure (below) merges the declarations its bodies name, so a type
+    //   can arrive *because of another impl*: `impl Codec for MyCodec { fn decoder(): dyn Decoder {
+    //     return MyDecoder.new() } }` is what brings `MyDecoder` in, and `impl Decoder for MyDecoder`
+    //   is only eligible afterwards. One pass over a pre-loop snapshot never saw it, and no
+    //   source order can rescue a single pass — the two impls may be written either way round, in
+    //   either file — so iterate until a round merges nothing new.
+    // - The **entry's own** declarations are the program's tail (`entry_stmts`), not `imported`, so a
+    //   sibling's `impl Decoder for Target` against a `Target` the entry declares saw an absent type
+    //   and was dropped.
     let mut seen_impls: HashSet<(String, String)> = HashSet::new();
-    for mv in &module_views {
-        let Some(map) = module_maps.get(&mv.namespace) else {
-            continue;
-        };
-        for stmt in mv.stmts {
-            if !matches!(stmt, Stmt::Impl(_)) {
+    loop {
+        // Owned, and recomputed per round: the scan below pushes into `imported`, so it cannot hold
+        // a borrow of it, and the round after must see whatever this one merged.
+        let merged_types: HashSet<String> = imported
+            .iter()
+            .chain(entry_stmts.iter())
+            .filter_map(decl_name)
+            .map(str::to_string)
+            .collect();
+        let before = imported.len();
+        for mv in &module_views {
+            let Some(map) = module_maps.get(&mv.namespace) else {
                 continue;
-            }
-            let mut cloned = stmt.clone();
-            qualify::qualify_stmt(&mut cloned, map);
-            if let Stmt::Impl(decl) = &cloned
-                && merged_types.contains(&decl.target)
-                && seen_impls.insert((decl.target.clone(), decl.trait_name.clone()))
-            {
-                imported.push(cloned);
-                // The impl's method bodies may reference same-module free declarations — an internal
-                // helper `fn`, a module-local type — that no `use` names and that the target type's
-                // own closure never reached (they are the impl's dependencies, not the type's). They
-                // must travel with the impl or the checker fails E0005 on a body it cannot see, and
-                // *only across the package boundary*: inside the module every declaration is present,
-                // so this hole is invisible until a consumer imports the type. Seed the same closure
-                // the `use`-driven merge runs, from the impl's own (pre-qualification, short-named)
-                // references.
-                let refs = qualify::referenced_names(stmt);
-                let mut work = Vec::new();
-                for name in refs {
-                    if merge_one_dep(
-                        &name,
+            };
+            for stmt in mv.stmts {
+                if !matches!(stmt, Stmt::Impl(_)) {
+                    continue;
+                }
+                let mut cloned = stmt.clone();
+                qualify::qualify_stmt(&mut cloned, map);
+                if let Stmt::Impl(decl) = &cloned
+                    && merged_types.contains(&decl.target)
+                    && seen_impls.insert((decl.target.clone(), decl.trait_name.clone()))
+                {
+                    imported.push(cloned);
+                    // The impl's method bodies may reference same-module free declarations — an
+                    // internal helper `fn`, a module-local type — that no `use` names and that the
+                    // target type's own closure never reached (they are the impl's dependencies, not
+                    // the type's). They must travel with the impl or the checker fails E0005 on a
+                    // body it cannot see, and *only across the package boundary*: inside the module
+                    // every declaration is present, so this hole is invisible until a consumer
+                    // imports the type. Seed the same closure the `use`-driven merge runs, from the
+                    // impl's own (pre-qualification, short-named) references.
+                    let refs = qualify::referenced_names(stmt);
+                    let mut work = Vec::new();
+                    for name in refs {
+                        if merge_one_dep(
+                            &name,
+                            mv,
+                            &mv.namespace,
+                            &module_maps,
+                            &mut merged_q,
+                            &mut imported,
+                        ) {
+                            work.push(name);
+                        }
+                    }
+                    expand_module_refs(
+                        work,
                         mv,
                         &mv.namespace,
                         &module_maps,
                         &mut merged_q,
                         &mut imported,
-                    ) {
-                        work.push(name);
-                    }
+                    );
                 }
-                expand_module_refs(
-                    work,
-                    mv,
-                    &mv.namespace,
-                    &module_maps,
-                    &mut merged_q,
-                    &mut imported,
-                );
             }
+        }
+        // Nothing merged ⇒ no type became present ⇒ no further impl can become eligible. `merged_q`
+        // and `seen_impls` bound the total number of merges, so this terminates.
+        if imported.len() == before {
+            break;
         }
     }
 
