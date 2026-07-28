@@ -51,7 +51,13 @@
 /// `FrameStream` registrations. Every one is additive and nothing written for ABI 5 stops compiling
 /// — and under the rule above that is beside the point. They changed the contract, so they get a
 /// number. Retroactive, because they landed while the narrower test was in force.
-pub const ABI_VERSION: u32 = 6;
+/// **7** — the Ring 1 `bytes` surface grew its element reads: [`ring1::bytes_index`] (the `b[i]`
+/// body) and [`ring1::bytes_slice`] (the `b.slice(start, end?)` body), the shared semantics both
+/// backends call in for a primitive `bytes` previously did not have at all — it could be produced
+/// and measured but never taken apart, which made every in-language decoder inexpressible. Purely
+/// additive: nothing written for ABI 6 stops compiling. Counted anyway, per the rule above, because
+/// it widens what the ABI crate promises an extension (and a backend) can rely on.
+pub const ABI_VERSION: u32 = 7;
 
 pub mod args;
 pub mod channel;

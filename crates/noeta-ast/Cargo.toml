@@ -10,5 +10,8 @@ rust-version.workspace = true
 noeta-span = { workspace = true }
 serde = { workspace = true }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

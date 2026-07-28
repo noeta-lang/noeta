@@ -48,7 +48,7 @@ impl Checker {
             name: recv_name,
             span: recv_span,
         } = receiver
-            && !lookup_mutable(env, recv_name)
+            && !lookup_mutable(env, recv_name.as_str())
         {
             self.error(
                 DiagnosticCode::ImmutableAssignment,
@@ -498,8 +498,8 @@ impl Checker {
     pub(crate) fn resolve_namespace_prefix(&self, expr: &Expr, env: &Env) -> Option<String> {
         use noeta_ext_abi::registry::NsChild;
         match expr {
-            Expr::Ident { name, .. } if lookup(env, name).is_none() => {
-                self.imports.namespaces.get(name).cloned()
+            Expr::Ident { name, .. } if lookup(env, name.as_str()).is_none() => {
+                self.imports.namespaces.get(name.as_str()).cloned()
             }
             Expr::Member { receiver, name, .. } => {
                 let prefix = self.resolve_namespace_prefix(receiver, env)?;
@@ -616,7 +616,7 @@ impl Checker {
         // feature and a real slice; until it exists the honest answer is a static error, because
         // the expression has no value at run time.
         if let Expr::Ident { name: tn, .. } = receiver
-            && let Some(key) = self.enum_type_key(tn)
+            && let Some(key) = self.enum_type_key(tn.as_str())
             && let Some(fields) = self.enum_variant_fields(&key, name)
         {
             if fields == 0 {
@@ -645,24 +645,27 @@ impl Checker {
         // `Fn(ReceiverType, ...method_params) -> ret`; the resolution is recorded so lowering emits an
         // `Rvalue::MethodHandle`. (Built-in-type receivers — `list.len` — land in a later slice.)
         if let Expr::Ident { name: tn, .. } = receiver
-            && lookup(env, tn).is_none()
-            && let Some(sig) = self.symbols.methods.get(&(tn.clone(), name.to_string()))
+            && lookup(env, tn.as_str()).is_none()
+            && let Some(sig) = self
+                .symbols
+                .methods
+                .get(&(tn.to_string(), name.to_string()))
         {
             // The handle's shape follows the derived classification (EX.2): an INSTANCE method's
             // handle takes the receiver as its first argument (`Fn(T, ...params) -> ret`); an
             // ASSOCIATED function's handle is the function itself (`Fn(params) -> ret`) — e.g.
             // `ctor = Stack.new`. A trait's self-less method ([`Receiver::Either`]) takes the
             // instance shape, which is what the unclassified entry already meant here.
-            let instance = self.receiver_of(tn, name).handle_takes_receiver();
+            let instance = self.receiver_of(tn.as_str(), name).handle_takes_receiver();
             let mut params = Vec::with_capacity(sig.params.len() + 1);
             if instance {
-                params.push(Type::Named(tn.clone(), Vec::new()));
+                params.push(Type::Named(tn.to_string(), Vec::new()));
             }
             params.extend(sig.params.iter().cloned());
             let ret = sig.ret.clone();
             self.sites
                 .handle_sites
-                .insert(member_span, (tn.clone(), name.to_string(), !instance));
+                .insert(member_span, (tn.to_string(), name.to_string(), !instance));
             return Type::Fn {
                 params,
                 ret: Box::new(ret),
@@ -673,15 +676,15 @@ impl Checker {
         // `Fn(ReceiverType, ...method_params) -> ret` (prelude-redesign MH.2). Built-in types have no
         // associated fns, so a built-in handle is always instance.
         if let Expr::Ident { name: tn, .. } = receiver
-            && lookup(env, tn).is_none()
-            && let Some(recv_ty) = builtin_receiver_type(tn)
+            && lookup(env, tn.as_str()).is_none()
+            && let Some(recv_ty) = builtin_receiver_type(tn.as_str())
             && let Some(ret) = stdlib::method_return(self.reg(), &recv_ty, name)
         {
             let mut params = vec![recv_ty.clone()];
             params.extend(stdlib::method_params(self.reg(), &recv_ty, name).unwrap_or_default());
             self.sites
                 .handle_sites
-                .insert(member_span, (tn.clone(), name.to_string(), false));
+                .insert(member_span, (tn.to_string(), name.to_string(), false));
             return Type::Fn {
                 params,
                 ret: Box::new(ret),

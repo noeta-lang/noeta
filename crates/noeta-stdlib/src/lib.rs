@@ -33,6 +33,7 @@
 // `noeta_stdlib::` path resolves unchanged.
 pub use noeta_ext_abi::*;
 
+pub mod base64;
 pub mod bulk;
 pub mod cell;
 pub mod cookie;

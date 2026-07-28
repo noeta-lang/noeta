@@ -1070,8 +1070,8 @@ impl ModuleCompiler {
                     self.module_binding_names.push(name.clone());
                 }
                 noeta_ast::Stmt::Fn(decl) => {
-                    self.module_globals.insert(decl.name.clone(), false);
-                    self.module_fns.insert(decl.name.clone());
+                    self.module_globals.insert(decl.name.to_string(), false);
+                    self.module_fns.insert(decl.name.to_string());
                 }
                 noeta_ast::Stmt::Use { path, names, .. } => {
                     // A plain module import (`use std.{math}`) binds the module name; a selective
@@ -1145,24 +1145,24 @@ impl ModuleCompiler {
                 noeta_ast::Stmt::Struct(decl) => {
                     let fields = decl.fields.iter().map(|f| f.name.clone()).collect();
                     // A value `struct` always compares structurally.
-                    self.structural_eq_types.insert(decl.name.clone());
+                    self.structural_eq_types.insert(decl.name.to_string());
                     // A `@packed` struct feeds the key-capability fixpoint (P-PKEY, below).
                     if let Some(named) = noeta_ast::packed_named_fields(decl) {
-                        self.packed_fields.insert(decl.name.clone(), named);
+                        self.packed_fields.insert(decl.name.to_string(), named);
                     }
                     // A hand-written `compare`/`to_json` (via an `impl` block) takes precedence over
                     // the derived version — same rule as a class.
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                         && !decl.methods.iter().any(|m| m.name == "compare")
                     {
-                        self.comparable_derives.push(decl.name.clone());
+                        self.comparable_derives.push(decl.name.to_string());
                     }
                     // `@derive(Serialize<Json>)` synthesizes the structural JSON serializer (`Json`
                     // is the only format today, so it maps to the existing `to_json` codegen).
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                         && !decl.methods.iter().any(|m| m.name == "to_json")
                     {
-                        self.tojson_derives.push(decl.name.clone());
+                        self.tojson_derives.push(decl.name.to_string());
                     }
                     // Reserve a prototype per method, shared by associated-fn and instance-method
                     // dispatch (a struct `fn` is callable both ways, exactly like a class method).
@@ -1170,15 +1170,15 @@ impl ModuleCompiler {
                     for method in &decl.methods {
                         let proto = self.protos.len() as u32;
                         self.protos.push(Chunk::placeholder());
-                        fns.insert(method.name.clone(), proto);
+                        fns.insert(method.name.to_string(), proto);
                         self.methods.push(MethodEntry {
-                            type_name: decl.name.clone(),
-                            method: method.name.clone(),
+                            type_name: decl.name.to_string(),
+                            method: method.name.to_string(),
                             proto,
                         });
                     }
                     self.types
-                        .insert(decl.name.clone(), TypeInfo::Struct { fields, fns });
+                        .insert(decl.name.to_string(), TypeInfo::Struct { fields, fns });
                 }
                 noeta_ast::Stmt::Class(decl) => {
                     let fields: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
@@ -1187,29 +1187,29 @@ impl ModuleCompiler {
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Equatable")
                         || decl.methods.iter().any(|m| m.name == "eq")
                     {
-                        self.structural_eq_types.insert(decl.name.clone());
+                        self.structural_eq_types.insert(decl.name.to_string());
                     }
                     // A hand-written `compare` (via `impl Comparable`) takes precedence over the
                     // derived structural ordering.
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                         && !decl.methods.iter().any(|m| m.name == "compare")
                     {
-                        self.comparable_derives.push(decl.name.clone());
+                        self.comparable_derives.push(decl.name.to_string());
                     }
                     // A hand-written `to_json` takes precedence over the derived serializer.
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                         && !decl.methods.iter().any(|m| m.name == "to_json")
                     {
-                        self.tojson_derives.push(decl.name.clone());
+                        self.tojson_derives.push(decl.name.to_string());
                     }
                     let mut fns = HashMap::new();
                     for method in &decl.methods {
                         let proto = self.protos.len() as u32;
                         self.protos.push(Chunk::placeholder());
-                        fns.insert(method.name.clone(), proto);
+                        fns.insert(method.name.to_string(), proto);
                         self.methods.push(MethodEntry {
-                            type_name: decl.name.clone(),
-                            method: method.name.clone(),
+                            type_name: decl.name.to_string(),
+                            method: method.name.to_string(),
                             proto,
                         });
                     }
@@ -1217,10 +1217,10 @@ impl ModuleCompiler {
                     if decl.destructor.is_some() {
                         let proto = self.protos.len() as u32;
                         self.protos.push(Chunk::placeholder());
-                        self.destructors.push((decl.name.clone(), proto));
+                        self.destructors.push((decl.name.to_string(), proto));
                     }
                     self.types
-                        .insert(decl.name.clone(), TypeInfo::Class { fields, fns });
+                        .insert(decl.name.to_string(), TypeInfo::Class { fields, fns });
                 }
                 noeta_ast::Stmt::Enum(decl) => {
                     let variants = decl
@@ -1244,12 +1244,12 @@ impl ModuleCompiler {
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                         && !decl.methods.iter().any(|m| m.name == "compare")
                     {
-                        self.comparable_derives.push(decl.name.clone());
+                        self.comparable_derives.push(decl.name.to_string());
                     }
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                         && !decl.methods.iter().any(|m| m.name == "to_json")
                     {
-                        self.tojson_derives.push(decl.name.clone());
+                        self.tojson_derives.push(decl.name.to_string());
                     }
                     // Reserve a prototype per method, shared by associated-fn and instance-method
                     // dispatch (the unified body, object-model slice 3).
@@ -1257,15 +1257,15 @@ impl ModuleCompiler {
                     for method in &decl.methods {
                         let proto = self.protos.len() as u32;
                         self.protos.push(Chunk::placeholder());
-                        fns.insert(method.name.clone(), proto);
+                        fns.insert(method.name.to_string(), proto);
                         self.methods.push(MethodEntry {
-                            type_name: decl.name.clone(),
-                            method: method.name.clone(),
+                            type_name: decl.name.to_string(),
+                            method: method.name.to_string(),
                             proto,
                         });
                     }
                     self.types
-                        .insert(decl.name.clone(), TypeInfo::Enum { variants, fns });
+                        .insert(decl.name.to_string(), TypeInfo::Enum { variants, fns });
                 }
                 noeta_ast::Stmt::Use { path, names, .. } => {
                     // A `use std.{json}` native module — or a selective member import
@@ -1399,7 +1399,7 @@ impl ModuleCompiler {
             if let Stmt::Decl(Decl::Struct(strukt)) = stmt {
                 let name = strukt.decl.name.clone();
                 for (method, func) in &strukt.methods {
-                    let TypeInfo::Struct { fns, .. } = &self.types[&name] else {
+                    let TypeInfo::Struct { fns, .. } = &self.types[name.as_str()] else {
                         unreachable!("a struct registered as non-struct");
                     };
                     let proto = fns[method];
@@ -1412,7 +1412,7 @@ impl ModuleCompiler {
                     )?;
                     self.protos[proto as usize] = chunk;
                 }
-                self.compile_field_defaults(&name, &strukt.field_defaults)?;
+                self.compile_field_defaults(name.as_str(), &strukt.field_defaults)?;
                 continue;
             }
             // An enum method (object-model slice 3) compiles like a struct/class method but with an
@@ -1421,7 +1421,7 @@ impl ModuleCompiler {
             if let Stmt::Decl(Decl::Enum(en)) = stmt {
                 let name = en.decl.name.clone();
                 for (method, func) in &en.methods {
-                    let TypeInfo::Enum { fns, .. } = &self.types[&name] else {
+                    let TypeInfo::Enum { fns, .. } = &self.types[name.as_str()] else {
                         unreachable!("an enum registered as non-enum");
                     };
                     let proto = fns[method];
@@ -1441,7 +1441,7 @@ impl ModuleCompiler {
             };
             let name = class.decl.name.clone();
             for (method, func) in &class.methods {
-                let TypeInfo::Class { fns, .. } = &self.types[&name] else {
+                let TypeInfo::Class { fns, .. } = &self.types[name.as_str()] else {
                     unreachable!("a class registered as non-class");
                 };
                 let proto = fns[method];
@@ -1471,7 +1471,7 @@ impl ModuleCompiler {
                 )?;
                 self.protos[proto as usize] = chunk;
             }
-            self.compile_field_defaults(&name, &class.field_defaults)?;
+            self.compile_field_defaults(name.as_str(), &class.field_defaults)?;
         }
         Ok(())
     }
@@ -3899,7 +3899,7 @@ impl<'m> FnCompiler<'m> {
                 // Optional turbofish scope (mirrors `AttributesOf`): resolve the role enum name at
                 // compile time (closed-world); the VM keeps only bindings of that enum. `None` = all.
                 let role_enum = ty.as_ref().and_then(|ty| match ty {
-                    TypeRef::Named { name, .. } => Some(self.module.intern_name(name)),
+                    TypeRef::Named { name, .. } => Some(self.module.intern_name(name.as_str())),
                     _ => None,
                 });
                 self.code.push(Op::RolesOf { dst, role_enum });
@@ -5017,9 +5017,10 @@ impl<'m> FnCompiler<'m> {
                 // Through `runtime_type_name`, like every construction site: a pattern compares
                 // against the name the VALUE carries, and for a native type reached under an alias
                 // or a qualified spelling that is not the name written here.
-                let type_name = type_name
-                    .as_ref()
-                    .map(|n| self.module.intern_name(&self.module.runtime_type_name(n)));
+                let type_name = type_name.as_ref().map(|n| {
+                    self.module
+                        .intern_name(&self.module.runtime_type_name(n.as_str()))
+                });
                 let variant = self.module.intern_name(variant);
                 self.code.push(Op::MatchVariant {
                     src: reg,
@@ -5252,7 +5253,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         // value's nominal type against the module reflection's membership table — mirroring the
         // tree-walker's `runtime_matches` on the same shared table, so the differential holds by
         // construction.
-        TypeRef::DynTrait { trait_name, .. } => NarrowTarget::DynTrait(trait_name.clone()),
+        TypeRef::DynTrait { trait_name, .. } => NarrowTarget::DynTrait(trait_name.to_string()),
         // A `Self::Name` projection has no static runtime head (resolution is per-impl at the
         // checker); narrowing to one stays the permissive dynamic top — deliberately, and now
         // UNLIKE the precise `dyn Trait` above: a projection names a concrete per-impl type, not a
@@ -5265,7 +5266,8 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         // element type.
         TypeRef::Fn { .. } => NarrowTarget::Fn,
         TypeRef::Named { name, args, .. } => {
-            let head = narrow_head(name).unwrap_or_else(|| NarrowTarget::Named(name.clone()));
+            let head =
+                narrow_head(name.as_str()).unwrap_or_else(|| NarrowTarget::Named(name.to_string()));
             // A parametrized target (`List<int>`, `Box<int>`) additionally checks its type arguments
             // against the value's reflected tag (R3); a bare name (`List`, `Box`, `Struct`) stays the
             // head-only target, preserving the widening `x is List` and the untagged fallback.

@@ -3198,6 +3198,22 @@ impl Interpreter {
             builtin_args.extend(args);
             return self.call_builtin(builtin, builtin_args, span);
         }
+        // `bytes.slice(start, end?)` — the byte-buffer twin of `string.slice`/`List.slice`, and the
+        // only `bytes` method that takes arguments, so it is handled ahead of the zero-arg table.
+        // The bounds rule is the shared `noeta_stdlib::bytes_slice` body.
+        if let Value::Bytes(data) = &receiver
+            && name == "slice"
+        {
+            self.expect_std_arity_range(name, &args, 1, 2, span)?;
+            let start = self.expect_std_int(name, &args[0], span)?;
+            let end = self.expect_std_opt_int(name, &args, 1, data.len() as i64, span)?;
+            return match noeta_stdlib::bytes_slice(data, start, Some(end)) {
+                Ok(sliced) => Ok(Value::Bytes(Rc::new(sliced))),
+                Err(error) => {
+                    Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                }
+            };
+        }
         let arity_ok = args.is_empty();
         // `len()` is the length of a collection (P1.3 — `count` is iterator-only, a consuming
         // terminal; a collection `count` is an unknown method like any other).
@@ -4257,6 +4273,24 @@ impl Interpreter {
                     ));
                 }
                 Ok(Value::Str(s.chars().nth(i as usize).unwrap().to_string()))
+            }
+            // `b[i]` on a `bytes` reads one byte as an `int` (0..=255). The read itself is the
+            // shared `noeta_stdlib::bytes_index` body, so the bounds error is identical in both
+            // backends by construction.
+            Value::Bytes(data) => {
+                let Value::Int(i) = index else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("bytes index must be an int, found {}", index.type_name()),
+                    ));
+                };
+                match noeta_stdlib::bytes_index(data, i) {
+                    Ok(byte) => Ok(Value::Int(byte)),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
             }
             other => Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
@@ -6187,15 +6221,21 @@ fn attr_value_to_eval(
             enum_name,
             variant,
             args,
-        } => builtin_enum(enum_name, variant, args.iter().map(recur).collect()),
+        } => builtin_enum(
+            enum_name.as_str(),
+            variant,
+            args.iter().map(recur).collect(),
+        ),
         A::Struct { type_name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-            let def = Rc::new(fresh_type_def(type_name, &names, true));
+            let def = Rc::new(fresh_type_def(type_name.as_str(), &names, true));
             // `def.fields` is `names` (same order), so the recursed values are already slot-ordered.
             let slots: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::Object(Rc::new(ObjectValue::new(def, slots)))
         }
-        A::TypeRef { name, args } => build_type_value(&reflection.type_ref_repr(name, args)),
+        A::TypeRef { name, args } => {
+            build_type_value(&reflection.type_ref_repr(name.as_str(), args))
+        }
     }
 }
 
@@ -6240,9 +6280,8 @@ fn runtime_matches(
         // collection, function) implements no declared trait and never matches; the trait name was
         // canonicalized at lowering (`resolve_type_aliases`), so this is one string comparison.
         // Mirrors the VM's `NarrowTarget::DynTrait`.
-        TypeRef::DynTrait { trait_name, .. } => {
-            value_nominal_name(value).is_some_and(|n| reflection.type_implements(&n, trait_name))
-        }
+        TypeRef::DynTrait { trait_name, .. } => value_nominal_name(value)
+            .is_some_and(|n| reflection.type_implements(&n, trait_name.as_str())),
         // A `Self::Name` projection has no static runtime head (resolution is per-impl at the
         // checker), so narrowing to one stays the permissive dynamic top — deliberately, and now
         // UNLIKE the precise `dyn Trait` above: a projection names a concrete per-impl type, not a
@@ -6266,7 +6305,7 @@ fn runtime_matches(
             // The built-in heads, exhaustive over `BuiltinTy` so this and the VM's `narrow_head` —
             // the two halves of the differential — cannot drift apart. `None` means the name has no
             // built-in head and falls through to the nominal match below.
-            let builtin_ok = noeta_ast::BuiltinTy::from_name_any(name).and_then(|b| {
+            let builtin_ok = noeta_ast::BuiltinTy::from_name_any(name.as_str()).and_then(|b| {
                 use noeta_ast::BuiltinTy;
                 Some(match b {
                     BuiltinTy::Int => matches!(value, Value::Int(_)),
@@ -7120,8 +7159,10 @@ fn match_pattern(
             // its own name (`Framing.Sse`) — resolve the binding to that name rather than making
             // the comparison lenient, which would let two enums sharing a variant name match.
             if let Some(type_name) = type_name {
-                let expected = native_names.get(type_name).unwrap_or(type_name);
-                if &enum_value.enum_name != expected {
+                let expected = native_names
+                    .get(type_name.as_str())
+                    .map_or(type_name.as_str(), String::as_str);
+                if enum_value.enum_name != expected {
                     return None;
                 }
             }

@@ -1922,6 +1922,37 @@ impl<'m> Vm<'m> {
                             pc += 1;
                             continue;
                         }
+                        // A `bytes` buffer reads one byte as an `int` (0..=255). Borrowed in place
+                        // through `with_bytes` — never `bytes_data`, which clones the whole buffer
+                        // and would make a decode loop quadratic — and the read itself is the shared
+                        // `noeta_stdlib::bytes_index`, so the bounds error matches the tree-walker.
+                        if v.is_bytes() {
+                            let Some(i) = idx.as_int() else {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "bytes index must be an int, found {}",
+                                        idx.type_name()
+                                    ),
+                                ));
+                            };
+                            let read = v
+                                .with_bytes(|data| noeta_stdlib::bytes_index(data, i))
+                                .expect("checked `is_bytes` above");
+                            match read {
+                                Ok(byte) => set_reg(regs, fbase, *dst, Value::int(byte)),
+                                Err(error) => {
+                                    return Err(self.error(
+                                        stdlib_error_code(error.kind),
+                                        *span,
+                                        error.message,
+                                    ));
+                                }
+                            }
+                            pc += 1;
+                            continue;
+                        }
                         return Err(self.error(
                             DiagnosticCode::TypeMismatch,
                             *span,

@@ -479,9 +479,9 @@ fn fn_docs(f: &FnDecl, docs: &std::collections::HashMap<String, String>) -> Decl
     }
     DeclDocs {
         kind: "fn",
-        name: f.name.clone(),
+        name: f.name.to_string(),
         signature: sig,
-        doc: docs.get(&f.name).cloned(),
+        doc: docs.get(f.name.as_str()).cloned(),
         public: f.is_public,
     }
 }
@@ -514,9 +514,9 @@ fn struct_docs(s: &StructDecl, docs: &std::collections::HashMap<String, String>)
     sig.push_str(&format!("struct {}{}", s.name, fields_block(&s.fields)));
     DeclDocs {
         kind: "struct",
-        name: s.name.clone(),
+        name: s.name.to_string(),
         signature: sig,
-        doc: docs.get(&s.name).cloned(),
+        doc: docs.get(s.name.as_str()).cloned(),
         public: s.is_public,
     }
 }
@@ -529,9 +529,9 @@ fn class_docs(c: &ClassDecl, docs: &std::collections::HashMap<String, String>) -
     sig.push_str(&format!("class {}{}", c.name, fields_block(&c.fields)));
     DeclDocs {
         kind: "class",
-        name: c.name.clone(),
+        name: c.name.to_string(),
         signature: sig,
-        doc: docs.get(&c.name).cloned(),
+        doc: docs.get(c.name.as_str()).cloned(),
         public: c.is_public,
     }
 }
@@ -560,9 +560,9 @@ fn enum_docs(e: &EnumDecl, docs: &std::collections::HashMap<String, String>) -> 
     sig.push('}');
     DeclDocs {
         kind: "enum",
-        name: e.name.clone(),
+        name: e.name.to_string(),
         signature: sig,
-        doc: docs.get(&e.name).cloned(),
+        doc: docs.get(e.name.as_str()).cloned(),
         public: e.is_public,
     }
 }
@@ -596,9 +596,9 @@ fn trait_docs(t: &TraitDecl, docs: &std::collections::HashMap<String, String>) -
     sig.push('}');
     DeclDocs {
         kind: "trait",
-        name: t.name.clone(),
+        name: t.name.to_string(),
         signature: sig,
-        doc: docs.get(&t.name).cloned(),
+        doc: docs.get(t.name.as_str()).cloned(),
         public: t.is_public,
     }
 }

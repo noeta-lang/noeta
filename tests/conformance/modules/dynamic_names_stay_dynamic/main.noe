@@ -1,0 +1,73 @@
+// The **runtime-string** reflection surfaces under a `namespace`: `invoke(name, args)`,
+// `invoke(recv, name, args)` and `json.decode_typed(name, text)` take a name that is DATA, and the
+// linker's qualification pass must leave every one of them alone.
+//
+// This is the other half of `reflection/field_specs_namespaced`. That case pins the *static* side —
+// a turbofish operand is a type reference, so `field_specs_of::<Todo>()` must resolve to the
+// qualified identity. This one pins the side that must NOT move: a string is a string, even when it
+// happens to spell a local declaration's short name, so `invoke("greet", …)` under
+// `namespace app.svc` asks for a top-level function literally called `greet` and honestly misses —
+// the declaration is now `app.svc.greet`. Sniffing the operand and rewriting it would make the two
+// spellings agree for the wrong reason, and would silently change what a router or a serializer
+// means by a name it read off a request.
+//
+// The boundary is a type in the AST since the `Name` newtype landed: a qualifiable position holds a
+// `noeta_ast::Name` and a dynamic one holds an `Expr`/`String`, with no conversion between them. If
+// anyone ever retypes one of the operands below, this case goes red rather than the behavior
+// drifting quietly.
+//
+// A directory case on purpose: the harness runs a single-file case straight from source text with no
+// loader, so namespace qualification never runs for one — a bare `.noe` here could observe nothing.
+// expect: stdout "method by bare name: 7"
+// expect: stdout "fn by bare name: miss"
+// expect: stdout "fn by qualified name: hi ada"
+// expect: stdout "decode by qualified string: ok Ada"
+// expect: stdout "decode by bare string: err"
+// expect: exit 0
+namespace app.svc
+
+use std.json
+
+class Shape {
+    w: int
+    fn new(w: int): Shape { return Shape { w: w } }
+    fn area(): int { return self.w }
+}
+
+@derive(Deserialize<Json>)
+struct User { name: string }
+
+fn greet(n: string): string { return "hi ${n}" }
+
+// A METHOD name resolves against the receiver's type, never the module map — it is `Unqualified` in
+// the walk-coverage table and a plain `String` in the AST. So the bare spelling keeps working under
+// a namespace exactly as it does without one.
+s = Shape.new(7)
+echo match invoke(s, "area", []) {
+    Ok(v) => "method by bare name: ${v}",
+    Err(e) => "method by bare name: err=${e}",
+}
+
+// A TOP-LEVEL function's declared name *does* qualify (it is a `Name`), and the two-argument
+// `invoke` looks up that one flat top-level namespace. The operand is still a runtime string, so the
+// short spelling is a genuine miss and the qualified spelling is the hit. Both directions are pinned
+// — a miss alone would also pass if the string had been rewritten to something else that missed.
+echo match invoke("greet", ["ada"]) {
+    Ok(v) => "fn by bare name: ${v}",
+    Err(_) => "fn by bare name: miss",
+}
+echo match invoke("app.svc.greet", ["ada"]) {
+    Ok(v) => "fn by qualified name: ${v}",
+    Err(_) => "fn by qualified name: miss",
+}
+
+// `json.decode_typed` keys the per-type decode registry by the type's runtime identity, which the
+// linker qualified. The argument is the router-supplied string it always was.
+fn decoded(r: Result<dyn, json.JsonError>): string {
+    return match r {
+        Ok(u) => "ok ${u.name}",
+        Err(_) => "err",
+    }
+}
+echo "decode by qualified string: ${decoded(json.decode_typed("app.svc.User", "{\"name\": \"Ada\"}"))}"
+echo "decode by bare string: ${decoded(json.decode_typed("User", "{\"name\": \"Ada\"}"))}"

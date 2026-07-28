@@ -625,7 +625,7 @@ pub(crate) fn bound_reqs(
     bounds
         .iter()
         .map(|b| crate::env::BoundReq {
-            name: b.name.clone(),
+            name: b.name.to_string(),
             args: b.args.iter().map(|t| from_ref_q(t, xt)).collect(),
         })
         .collect()

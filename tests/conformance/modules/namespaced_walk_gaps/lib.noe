@@ -1,0 +1,24 @@
+// The declarations the entry reaches through positions the qualification walk used to skip: a
+// generic trait instantiated at an imported type, a `@semantic` enum named by a `@role` tag, and a
+// type referenced only from inside a match-arm guard.
+namespace App.Lib;
+
+@semantic
+pub enum WebRole {
+    Controller;
+    Middleware
+}
+
+pub enum Grade {
+    Low;
+    High
+}
+
+pub trait Keyed<K> {
+    fn key(): K
+}
+
+pub class Limits {
+    n: int
+    fn ceiling(): int { return 10; }
+}

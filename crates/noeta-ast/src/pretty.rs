@@ -7,7 +7,7 @@
 
 use crate::{
     AttrArg, AttrValue, CallArg, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl,
-    ForPattern, ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl,
+    ForPattern, ImplDecl, Name, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl,
     TraitBound, TraitDecl, TypeOperand, TypeParam, TypeRef,
 };
 use noeta_span::Span;
@@ -466,7 +466,7 @@ fn decorators_str(d: &crate::Decorators) -> String {
         match directive {
             crate::BuiltinDirective::Derive => {
                 for spec in &d.derives {
-                    let mut s = spec.name.clone();
+                    let mut s = spec.name.to_string();
                     if !spec.args.is_empty() {
                         s.push_str(&format!(
                             "<{}>",
@@ -597,7 +597,7 @@ fn type_params_str(params: &[TypeParam]) -> String {
 /// Render one trait bound: the bare name, or `Name<args>` for an instantiated bound.
 fn trait_bound_str(b: &TraitBound) -> String {
     if b.args.is_empty() {
-        b.name.clone()
+        b.name.to_string()
     } else {
         let args: Vec<String> = b.args.iter().map(type_ref_str).collect();
         format!("{}<{}>", b.name, args.join(", "))
@@ -656,7 +656,7 @@ pub(crate) fn attr_value_str(value: &AttrValue) -> String {
         AttrValue::Struct { type_name, .. } => format!("{type_name} {{…}}"),
         // Rendered WITH its generic arguments: the fmt safety gate compares this output, so a
         // formatter dropping the `<Json>` from `@derive(Serialize<Json>)` must be detectable.
-        AttrValue::TypeRef { name, args } if args.is_empty() => name.clone(),
+        AttrValue::TypeRef { name, args } if args.is_empty() => name.to_string(),
         AttrValue::TypeRef { name, args } => format!(
             "{name}<{}>",
             args.iter().map(type_ref_str).collect::<Vec<_>>().join(", ")
@@ -765,7 +765,7 @@ impl Pretty for ObjectLit {
         // leading indent before delegating here), so we start the text directly.
         // A target-typed `.{ … }` dumps its head as `.{` — the name is not in the source, and the
         // dump is a faithful view of the AST, not of what the checker will later infer.
-        let head = self.type_name.as_deref().unwrap_or(".{");
+        let head = self.type_name.as_ref().map_or(".{", Name::as_str);
         out.push_str(&format!("(object {} {}", head, span(self.span)));
         for field in &self.fields {
             out.push('\n');

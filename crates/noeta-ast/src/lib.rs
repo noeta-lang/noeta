@@ -14,12 +14,14 @@ pub mod bodies;
 pub mod builtin_ty;
 pub mod derive;
 pub mod desugar;
+mod name;
 mod pretty;
 pub mod reflect;
 pub mod shape;
 mod syntax_kind;
 
 pub use builtin_ty::{BuiltinTy, Spelling, parse_int_width};
+pub use name::Name;
 pub use pretty::Pretty;
 pub use syntax_kind::SyntaxKind;
 
@@ -214,7 +216,7 @@ impl Stmt {
 /// blocks (the unified body grammar), but never a `destruct` (pure data — that is class-only).
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDecl {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
     /// default.
@@ -325,25 +327,25 @@ impl Stmt {
             Stmt::Struct(d) => Some(Decorated {
                 decorators: &d.decorators,
                 site: Sites::STRUCT,
-                name: &d.name,
+                name: d.name.as_str(),
                 name_span: d.name_span,
             }),
             Stmt::Class(d) => Some(Decorated {
                 decorators: &d.decorators,
                 site: Sites::CLASS,
-                name: &d.name,
+                name: d.name.as_str(),
                 name_span: d.name_span,
             }),
             Stmt::Enum(d) => Some(Decorated {
                 decorators: &d.decorators,
                 site: Sites::ENUM,
-                name: &d.name,
+                name: d.name.as_str(),
                 name_span: d.name_span,
             }),
             Stmt::Trait(d) => Some(Decorated {
                 decorators: &d.decorators,
                 site: Sites::TRAIT,
-                name: &d.name,
+                name: d.name.as_str(),
                 name_span: d.name_span,
             }),
             // A `fn`'s directives are tier annotations on `FnDecl::tier`/`::directives`, not a
@@ -773,7 +775,7 @@ pub struct PackedDirective {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoleTag {
     /// The `@semantic` enum the role belongs to (e.g. `Semantic`, `WebRole`); empty if unqualified.
-    pub enum_name: String,
+    pub enum_name: Name,
     /// The variant naming the role (e.g. `EntryPoint`, `Controller`).
     pub variant: String,
     /// The whole `Enum.Variant` span, for diagnostics.
@@ -787,7 +789,7 @@ pub struct RoleTag {
 /// separate `@derive(...)` directive (a type declaration's `derives` list).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// The arguments inside the parentheses. Empty for a bare `#[Marker]`. Each argument is a
     /// literal (positional `#[Route("/x")]` or named `#[Cache(ttl: 60)]`) — attribute arguments
@@ -889,13 +891,13 @@ pub enum AttrValue {
     /// An enum value: a qualified `Enum.Variant` / `Enum.Variant(args)`, or a built-in `Option`/
     /// `Result` constructor (`Ok(5)`, `none`). Fieldless or literal-payload.
     Enum {
-        enum_name: String,
+        enum_name: Name,
         variant: String,
         args: Vec<AttrValue>,
     },
     /// A struct literal `Point { x: 1 }` (the named type prefix disambiguates it from a map).
     Struct {
-        type_name: String,
+        type_name: Name,
         fields: Vec<(String, AttrValue)>,
     },
     /// A type name used as a value (`JsonConverter`) — a type reference, materialized as the
@@ -906,7 +908,7 @@ pub enum AttrValue {
     /// argument form: the `@`-directives previously had a separate identifiers-only grammar whose
     /// sole capability beyond `#[...]`'s was generic type arguments.
     TypeRef {
-        name: String,
+        name: Name,
         args: Vec<TypeRef>,
     },
 }
@@ -934,7 +936,7 @@ impl AttrValue {
 /// the impl from the type's fields (parameterized by the args, e.g. the serialization format).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeriveSpec {
-    pub name: String,
+    pub name: Name,
     /// Generic type arguments (`<Json>`); empty for a nullary derive.
     pub args: Vec<TypeRef>,
     /// Explicit required-member bindings (`@derive(Ordered, value: amount)`, derive layer 1): the
@@ -974,7 +976,9 @@ pub fn packed_named_fields(decl: &StructDecl) -> Option<Vec<Option<String>>> {
         decl.fields
             .iter()
             .map(|f| match &f.ty {
-                Some(TypeRef::Named { name, args, .. }) if args.is_empty() => Some(name.clone()),
+                Some(TypeRef::Named { name, args, .. }) if args.is_empty() => {
+                    Some(name.to_string())
+                }
                 _ => None,
             })
             .collect(),
@@ -1053,7 +1057,7 @@ pub struct TypeParam {
 /// generic trait accepts any instantiation. Built-in traits take no bound arguments.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitBound {
-    pub name: String,
+    pub name: Name,
     /// The demanded instantiation's type arguments; empty for a bare bound.
     pub args: Vec<TypeRef>,
     pub span: Span,
@@ -1065,7 +1069,7 @@ pub struct TraitBound {
 /// validate the trait name and its required method signatures.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplBlock {
-    pub trait_name: String,
+    pub trait_name: Name,
     pub trait_span: Span,
     /// The trait's generic type arguments (`impl Cache<string> { … }`) — required (matching the
     /// trait's parameter count) when the trait is generic, so its default methods substitute
@@ -1083,7 +1087,7 @@ pub struct ImplBlock {
 /// The named contract a type implements via `impl Name for Type { ... }` (or an in-body `impl Name`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitDecl {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// Whether the trait is `pub` (exported for `use`).
     pub is_public: bool,
@@ -1134,12 +1138,12 @@ pub struct AssocTypeDecl {
 /// the satisfaction for bound/gate checks, and folds it into the target's trait coherence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplDecl {
-    pub trait_name: String,
+    pub trait_name: Name,
     pub trait_span: Span,
     /// The trait's generic type arguments (`impl Cache<string> for T { … }`); see
     /// [`ImplBlock::trait_args`].
     pub trait_args: Vec<TypeRef>,
-    pub target: String,
+    pub target: Name,
     pub target_span: Span,
     /// Methods written in the impl body. Empty for a marker/capability trait (e.g. `Attribute`);
     /// a non-empty body is parsed but only validated for arity in pass 1 (runtime dispatch of
@@ -1155,7 +1159,7 @@ pub struct ImplDecl {
 /// is just a conventional associated function returning the enclosing type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
     /// default.
@@ -1212,7 +1216,7 @@ pub struct FieldDecl {
 /// (`enum OrderError { Empty; NegativePrice(index: int); }`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDecl {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
     /// default.
@@ -1294,7 +1298,7 @@ impl UseName {
 /// `fn` declaration just introduces a callable binding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
     /// default; meaningless for a method (only top-level declarations are importable).
@@ -1354,7 +1358,7 @@ pub struct TierDecl {
     pub name: String,
     pub name_span: Span,
     /// The knob attribute type (`config: Fuzz`), if the tier has knobs.
-    pub config: Option<(String, Span)>,
+    pub config: Option<(Name, Span)>,
     /// The body language ID (`text: "markdown"`) when the tier is a **text tier** (text-tiers
     /// arc): its `@<name> { … }` bodies are verbatim text the lexer captures un-parsed, tagged
     /// with this language for tooling (editor injection, extraction). `None` for a code tier.
@@ -1366,7 +1370,7 @@ pub struct TierDecl {
     /// `fn(statics: List<string>, holes: List<() -> U>): T`). The named type must match the
     /// handler's return type (E0051). Composes with `text:` (the lang id drives tooling) and is
     /// mutually exclusive with `config:`.
-    pub expr: Option<(String, Span)>,
+    pub expr: Option<(Name, Span)>,
     /// The whole `@tier(…)` directive span, for diagnostics.
     pub span: Span,
 }
@@ -1436,14 +1440,14 @@ impl Param {
 pub enum TypeRef {
     /// A named type with optional generic arguments.
     Named {
-        name: String,
+        name: Name,
         args: Vec<TypeRef>,
         span: Span,
     },
     /// A **trait object** `dyn Trait` (L1 user traits, UT4): a value of any type that `impl`s
     /// `trait_name`, dispatched dynamically on its runtime type. The typed counterpart of the bare
     /// `dyn` top type — method calls resolve against the trait's declared signatures.
-    DynTrait { trait_name: String, span: Span },
+    DynTrait { trait_name: Name, span: Span },
     /// `?T`, sugar for `Option<T>`. Kept as its own node (not desugared) so M1 can
     /// produce precise diagnostics on the nullability surface.
     Optional { inner: Box<TypeRef>, span: Span },
@@ -1492,8 +1496,8 @@ impl TypeRef {
     /// query answers with the honest empty result rather than a spurious match.
     pub fn head_name(&self) -> String {
         match self {
-            TypeRef::Named { name, .. } => name.clone(),
-            TypeRef::DynTrait { trait_name, .. } => trait_name.clone(),
+            TypeRef::Named { name, .. } => name.to_string(),
+            TypeRef::DynTrait { trait_name, .. } => trait_name.to_string(),
             _ => String::new(),
         }
     }
@@ -1590,7 +1594,7 @@ pub enum Expr {
     /// A boolean literal.
     Bool { value: bool, span: Span },
     /// A reference to a binding.
-    Ident { name: String, span: Span },
+    Ident { name: Name, span: Span },
     /// A prefix unary operation.
     Unary {
         op: UnaryOp,
@@ -1796,7 +1800,7 @@ pub enum Expr {
     /// E0007 against the substituted parameter. Erased at runtime like every generic call — this
     /// lowers exactly as the plain `f(args)` does.
     TypedCall {
-        name: String,
+        name: Name,
         name_span: Span,
         type_args: Vec<TypeRef>,
         args: Vec<CallArg>,
@@ -1966,7 +1970,7 @@ pub struct ObjectLit {
     /// [`Self::span`]) for lowering to read — the name is never written back here, because checking
     /// sees the AST by shared reference. `Option` rather than an empty-string sentinel so every
     /// reader is forced to say what it does with an un-named literal.
-    pub type_name: Option<String>,
+    pub type_name: Option<Name>,
     /// The span of the type name, or of the `.{` token itself for the target-typed form.
     pub type_name_span: Span,
     pub fields: Vec<FieldInit>,
@@ -2060,7 +2064,7 @@ pub enum Pattern {
     /// `Type.Variant`, `Variant(sub, ...)`, or `Type.Variant(sub, ...)`. `type_name`
     /// is `None` for unqualified constructors like `Ok(x)` / `some(x)`.
     Variant {
-        type_name: Option<String>,
+        type_name: Option<Name>,
         variant: String,
         bindings: Vec<Pattern>,
         span: Span,

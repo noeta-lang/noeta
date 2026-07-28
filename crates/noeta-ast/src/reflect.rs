@@ -552,19 +552,19 @@ pub fn build(
             Stmt::Struct(decl) => {
                 push_attrs(
                     &mut manifest,
-                    &decl.name,
+                    decl.name.as_str(),
                     decl.name_span,
                     &decl.decorators.attrs,
                 );
-                push_field_attrs(&mut manifest, &decl.name, &decl.fields);
+                push_field_attrs(&mut manifest, decl.name.as_str(), &decl.fields);
                 // A role tag rides on the attribute struct; record each (validated) `Enum.Variant`
                 // so every declaration the attribute annotates inherits it. A malformed `@role`
                 // never reaches a runnable program (the checker rejects it).
                 if let Some(roles) = decl.decorators.role.as_ref() {
                     for tag in roles {
                         role_of.push((
-                            decl.name.clone(),
-                            (tag.enum_name.clone(), tag.variant.clone()),
+                            decl.name.to_string(),
+                            (tag.enum_name.to_string(), tag.variant.clone()),
                         ));
                     }
                 }
@@ -579,7 +579,7 @@ pub fn build(
                     push_params(&mut manifest, &mut params, target, method);
                 }
                 types.push(TypeInfo {
-                    name: decl.name.clone(),
+                    name: decl.name.to_string(),
                     kind: TypeKind::Struct,
                     fields: decl.fields.iter().map(|f| f.name.clone()).collect(),
                     field_types: field_types(&decl.fields),
@@ -591,11 +591,11 @@ pub fn build(
             Stmt::Class(decl) => {
                 push_attrs(
                     &mut manifest,
-                    &decl.name,
+                    decl.name.as_str(),
                     decl.name_span,
                     &decl.decorators.attrs,
                 );
-                push_field_attrs(&mut manifest, &decl.name, &decl.fields);
+                push_field_attrs(&mut manifest, decl.name.as_str(), &decl.fields);
                 // A method's attributes are keyed by its qualified `Class.method` name, so a
                 // `#[...]` on a method surfaces distinctly from the same name on another class.
                 for method in &decl.methods {
@@ -604,7 +604,7 @@ pub fn build(
                     push_params(&mut manifest, &mut params, target, method);
                 }
                 types.push(TypeInfo {
-                    name: decl.name.clone(),
+                    name: decl.name.to_string(),
                     kind: TypeKind::Class,
                     fields: decl.fields.iter().map(|f| f.name.clone()).collect(),
                     field_types: field_types(&decl.fields),
@@ -619,8 +619,13 @@ pub fn build(
                 // `FnDecl` keeps its own `attrs` — only the four *type* declaration kinds moved
                 // their decorators into `Decorators`. A `fn` carries `#[...]` attributes and a
                 // `@tier(...)` declaration, neither of which is a type decorator.
-                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
-                push_params(&mut manifest, &mut params, decl.name.clone(), decl);
+                push_attrs(
+                    &mut manifest,
+                    decl.name.as_str(),
+                    decl.name_span,
+                    &decl.attrs,
+                );
+                push_params(&mut manifest, &mut params, decl.name.to_string(), decl);
             }
             // A trait carries `#[...]` data attributes keyed by its name (UT6), like a type —
             // surfaced via `attributes_of` (and inheriting a role transitively when annotated with a
@@ -631,7 +636,7 @@ pub fn build(
             Stmt::Trait(decl) => {
                 push_attrs(
                     &mut manifest,
-                    &decl.name,
+                    decl.name.as_str(),
                     decl.name_span,
                     &decl.decorators.attrs,
                 );
@@ -649,7 +654,7 @@ pub fn build(
             Stmt::Enum(decl) => {
                 push_attrs(
                     &mut manifest,
-                    &decl.name,
+                    decl.name.as_str(),
                     decl.name_span,
                     &decl.decorators.attrs,
                 );
@@ -667,7 +672,7 @@ pub fn build(
                     push_params(&mut manifest, &mut params, target, method);
                 }
                 types.push(TypeInfo {
-                    name: decl.name.clone(),
+                    name: decl.name.to_string(),
                     kind: TypeKind::Enum,
                     fields: Vec::new(),
                     field_types: Vec::new(),
@@ -793,22 +798,41 @@ fn collect_trait_impls(program: &Program, native: &NativeTraitImpls) -> Vec<Trai
                 impls: &[ImplBlock],
                 derives: &[crate::DeriveSpec]| {
         for block in impls {
-            push(records, type_name, canon(&block.trait_name));
+            push(records, type_name, canon(block.trait_name.as_str()));
         }
         for spec in derives {
             // A native derive recipe implements no trait; every other derive a runnable program
             // carries names a real trait (built-in, user, or native — the checker gated the rest).
-            if !is_recipe(&spec.name) {
-                push(records, type_name, canon(&spec.name));
+            if !is_recipe(spec.name.as_str()) {
+                push(records, type_name, canon(spec.name.as_str()));
             }
         }
     };
     for stmt in &program.stmts {
         match stmt {
-            Stmt::Impl(decl) => push(&mut records, &decl.target, canon(&decl.trait_name)),
-            Stmt::Struct(d) => body(&mut records, &d.name, &d.impls, &d.decorators.derives),
-            Stmt::Class(d) => body(&mut records, &d.name, &d.impls, &d.decorators.derives),
-            Stmt::Enum(d) => body(&mut records, &d.name, &d.impls, &d.decorators.derives),
+            Stmt::Impl(decl) => push(
+                &mut records,
+                decl.target.as_str(),
+                canon(decl.trait_name.as_str()),
+            ),
+            Stmt::Struct(d) => body(
+                &mut records,
+                d.name.as_str(),
+                &d.impls,
+                &d.decorators.derives,
+            ),
+            Stmt::Class(d) => body(
+                &mut records,
+                d.name.as_str(),
+                &d.impls,
+                &d.decorators.derives,
+            ),
+            Stmt::Enum(d) => body(
+                &mut records,
+                d.name.as_str(),
+                &d.impls,
+                &d.decorators.derives,
+            ),
             _ => {}
         }
     }
@@ -1737,7 +1761,7 @@ fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>, top: bool) -> 
         TypeRef::Optional { inner, .. } => TypeRepr::Option(Box::new(recur(inner))),
         // A trait object reflects as `DynTrait(name)` — the dynamic top refined by its trait bound, so
         // reflection can recover which trait a parameter is bound to (service injection by interface).
-        TypeRef::DynTrait { trait_name, .. } => TypeRepr::DynTrait(trait_name.clone()),
+        TypeRef::DynTrait { trait_name, .. } => TypeRepr::DynTrait(trait_name.to_string()),
         TypeRef::Tuple { .. } => TypeRepr::Dyn,
         // A `Self::Name` projection is not statically a concrete type here (resolution is per-impl at
         // the checker); reflect it as the dynamic top, like a tuple (slice 1a).
@@ -1745,7 +1769,7 @@ fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>, top: bool) -> 
         TypeRef::Fn { params, ret, .. } => {
             TypeRepr::Fn(params.iter().map(recur).collect(), Box::new(recur(ret)))
         }
-        TypeRef::Named { name, args, .. } => named_repr(name, args, nominal, top),
+        TypeRef::Named { name, args, .. } => named_repr(name.as_str(), args, nominal, top),
     }
 }
 
@@ -2171,7 +2195,7 @@ fn push_attrs(
         manifest.push(AttributeRecord {
             target: target.to_string(),
             target_span,
-            name: attr.name.clone(),
+            name: attr.name.to_string(),
             args: attr.args.clone(),
         });
     }
@@ -2448,7 +2472,7 @@ mod tests {
     /// A named `TypeRef` with the given generic arguments, spans elided.
     fn named(name: &str, args: Vec<TypeRef>) -> TypeRef {
         TypeRef::Named {
-            name: name.to_string(),
+            name: crate::Name::written(name),
             args,
             span: Span::new(0, 0),
         }

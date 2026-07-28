@@ -27,7 +27,7 @@ use std::path::Path;
 
 use noeta_ast::{Program, Stmt, UseName};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
-use noeta_span::{Source, SourceId, SourceMap};
+use noeta_span::{Source, SourceId, SourceMap, Span};
 
 pub use expand::ExpandedSource;
 
@@ -1665,60 +1665,107 @@ fn link_core(
     // impl to travel with its target type (a `dyn Trait` coercion or a bound check needs to see it).
     // An **inline** impl rides on its type's `class`/`struct` declaration and is already merged with it;
     // this closes the **standalone** case. Merge each pooled standalone impl whose (qualified) target
-    // type was itself merged — so the impl only lands when the type it refers to is present — deduped
-    // by (target, trait) so a module reachable two ways contributes each impl once.
-    let merged_types: HashSet<String> = imported
+    // type is in the program — so the impl only lands when the type it refers to is present — deduped
+    // by the impl's own **span**, so a declaration reached more than once contributes once.
+    //
+    // **To a fixpoint, over the whole program's types.** "Is the target type present?" has an answer
+    // that *grows while this loop runs*, and getting either half of that wrong drops an impl in
+    // silence — the type still links and its inherent methods still dispatch, so the only symptom is
+    // that the trait went missing, in a *consumer* of the package and never in the package's own
+    // tests. Two ways it grew:
+    //
+    // - An impl's own dependency closure (below) merges the declarations its bodies name, so a type
+    //   can arrive *because of another impl*: `impl Codec for MyCodec { fn decoder(): dyn Decoder {
+    //     return MyDecoder.new() } }` is what brings `MyDecoder` in, and `impl Decoder for MyDecoder`
+    //   is only eligible afterwards. One pass over a pre-loop snapshot never saw it, and no
+    //   source order can rescue a single pass — the two impls may be written either way round, in
+    //   either file — so iterate until a round merges nothing new.
+    // - The **entry's own** declarations are the program's tail (`entry_stmts`), not `imported`, so a
+    //   sibling's `impl Decoder for Target` against a `Target` the entry declares saw an absent type
+    //   and was dropped.
+    //
+    // The dedup set answers the *same* question from the other side — "is this impl already in the
+    // program?" — so it is seeded from the program rather than starting empty, and it is keyed on the
+    // **span**: the identity of a declaration is where it is written.
+    //
+    // Both halves of that were wrong, and each dropped an impl silently. Starting empty: an entry
+    // that declares a `namespace` is a `module_views` member like any other, so the scan below meets
+    // the entry's own `impl Marker for Box2` again — with the entry's types now in `merged_types`
+    // (above), an unseeded set made that a second copy and coherence correctly called it E0027
+    // "implemented more than once". (Named declarations are protected from exactly this by
+    // `merged_q`'s entry seeding; an impl introduces no name, so this is where it is seeded.)
+    // Keying on `(target, trait)`: that is the identity of an impl's *coherence slot*, not of an
+    // impl, so two different modules each writing `impl Decoder for Target` collapsed to whichever
+    // the scan reached first, and the program ran with one of the two bodies and no diagnostic at
+    // all. Those are a genuine conflict, and E0027 is what says so — the linker's job is to carry
+    // each declaration into the program exactly once, not to adjudicate which of two should win.
+    let mut seen_impls: HashSet<Span> = imported
         .iter()
-        .filter_map(decl_name)
-        .map(str::to_string)
+        .chain(entry_stmts.iter())
+        .filter_map(standalone_impl_span)
         .collect();
-    let mut seen_impls: HashSet<(String, String)> = HashSet::new();
-    for mv in &module_views {
-        let Some(map) = module_maps.get(&mv.namespace) else {
-            continue;
-        };
-        for stmt in mv.stmts {
-            if !matches!(stmt, Stmt::Impl(_)) {
+    loop {
+        // Owned, and recomputed per round: the scan below pushes into `imported`, so it cannot hold
+        // a borrow of it, and the round after must see whatever this one merged.
+        let merged_types: HashSet<String> = imported
+            .iter()
+            .chain(entry_stmts.iter())
+            .filter_map(decl_name)
+            .map(str::to_string)
+            .collect();
+        let before = imported.len();
+        for mv in &module_views {
+            let Some(map) = module_maps.get(&mv.namespace) else {
                 continue;
-            }
-            let mut cloned = stmt.clone();
-            qualify::qualify_stmt(&mut cloned, map);
-            if let Stmt::Impl(decl) = &cloned
-                && merged_types.contains(&decl.target)
-                && seen_impls.insert((decl.target.clone(), decl.trait_name.clone()))
-            {
-                imported.push(cloned);
-                // The impl's method bodies may reference same-module free declarations — an internal
-                // helper `fn`, a module-local type — that no `use` names and that the target type's
-                // own closure never reached (they are the impl's dependencies, not the type's). They
-                // must travel with the impl or the checker fails E0005 on a body it cannot see, and
-                // *only across the package boundary*: inside the module every declaration is present,
-                // so this hole is invisible until a consumer imports the type. Seed the same closure
-                // the `use`-driven merge runs, from the impl's own (pre-qualification, short-named)
-                // references.
-                let refs = qualify::referenced_names(stmt);
-                let mut work = Vec::new();
-                for name in refs {
-                    if merge_one_dep(
-                        &name,
+            };
+            for stmt in mv.stmts {
+                if !matches!(stmt, Stmt::Impl(_)) {
+                    continue;
+                }
+                let mut cloned = stmt.clone();
+                qualify::qualify_stmt(&mut cloned, map);
+                if let Stmt::Impl(decl) = &cloned
+                    && merged_types.contains(decl.target.as_str())
+                    && seen_impls.insert(decl.span)
+                {
+                    imported.push(cloned);
+                    // The impl's method bodies may reference same-module free declarations — an
+                    // internal helper `fn`, a module-local type — that no `use` names and that the
+                    // target type's own closure never reached (they are the impl's dependencies, not
+                    // the type's). They must travel with the impl or the checker fails E0005 on a
+                    // body it cannot see, and *only across the package boundary*: inside the module
+                    // every declaration is present, so this hole is invisible until a consumer
+                    // imports the type. Seed the same closure the `use`-driven merge runs, from the
+                    // impl's own (pre-qualification, short-named) references.
+                    let refs = qualify::referenced_names(stmt);
+                    let mut work = Vec::new();
+                    for name in refs {
+                        if merge_one_dep(
+                            &name,
+                            mv,
+                            &mv.namespace,
+                            &module_maps,
+                            &mut merged_q,
+                            &mut imported,
+                        ) {
+                            work.push(name);
+                        }
+                    }
+                    expand_module_refs(
+                        work,
                         mv,
                         &mv.namespace,
                         &module_maps,
                         &mut merged_q,
                         &mut imported,
-                    ) {
-                        work.push(name);
-                    }
+                    );
                 }
-                expand_module_refs(
-                    work,
-                    mv,
-                    &mv.namespace,
-                    &module_maps,
-                    &mut merged_q,
-                    &mut imported,
-                );
             }
+        }
+        // Nothing merged ⇒ no type became present ⇒ no further impl can become eligible. `merged_q`
+        // and `seen_impls` bound the total number of merges, so this terminates.
+        if imported.len() == before {
+            break;
         }
     }
 
@@ -1810,15 +1857,15 @@ fn module_namespace(program: &Program) -> Option<Vec<String>> {
 /// identity. (A method is not top-level — it resolves through its type, so it is not here.)
 fn qualifiable_decl_name(stmt: &Stmt) -> Option<&str> {
     match stmt {
-        Stmt::Class(decl) => Some(&decl.name),
-        Stmt::Struct(decl) => Some(&decl.name),
-        Stmt::Enum(decl) => Some(&decl.name),
-        Stmt::Fn(decl) => Some(&decl.name),
+        Stmt::Class(decl) => Some(decl.name.as_str()),
+        Stmt::Struct(decl) => Some(decl.name.as_str()),
+        Stmt::Enum(decl) => Some(decl.name.as_str()),
+        Stmt::Fn(decl) => Some(decl.name.as_str()),
         // A user-defined trait is a qualifiable declaration (L1): a `dyn Trait` type, a `<T: Trait>`
         // bound, or an `impl Trait for T` referencing a module-local trait drags its declaration into
         // the merged program via the cross-module closure — without this a package-local trait
         // (e.g. aether's `Middleware`) is "unknown" once the package is linked as a dependency.
-        Stmt::Trait(decl) => Some(&decl.name),
+        Stmt::Trait(decl) => Some(decl.name.as_str()),
         _ => None,
     }
 }
@@ -2458,13 +2505,29 @@ fn decl_is_public(stmt: &Stmt) -> bool {
 /// statements that declare no importable name.
 fn decl_name(stmt: &Stmt) -> Option<&str> {
     match stmt {
-        Stmt::Class(decl) => Some(&decl.name),
-        Stmt::Struct(decl) => Some(&decl.name),
-        Stmt::Enum(decl) => Some(&decl.name),
-        Stmt::Fn(decl) => Some(&decl.name),
+        Stmt::Class(decl) => Some(decl.name.as_str()),
+        Stmt::Struct(decl) => Some(decl.name.as_str()),
+        Stmt::Enum(decl) => Some(decl.name.as_str()),
+        Stmt::Fn(decl) => Some(decl.name.as_str()),
         // A user-defined trait is an importable name (L1) — `use pkg.mod.{MyTrait}` brings it into
         // scope for `dyn MyTrait`, a `<T: MyTrait>` bound, or an `impl MyTrait for T`.
-        Stmt::Trait(decl) => Some(&decl.name),
+        Stmt::Trait(decl) => Some(decl.name.as_str()),
+        _ => None,
+    }
+}
+
+/// The identity of a **standalone** `impl Trait for Target`: its span. `None` for every other
+/// statement.
+///
+/// An impl declares no name, so it is absent from every name-keyed table the linker dedups with
+/// (`merged_q`, `unit_origins`), and "where it is written" is what identifies it instead — stable
+/// under [`qualify::qualify_stmt`], which rewrites names and leaves spans alone, so a merged clone
+/// still answers to its source statement. Deliberately *not* `(target, trait)`: that names the
+/// coherence slot rather than the declaration, so two modules that both fill it would collapse into
+/// one silently instead of reaching the checker as the E0027 they are.
+fn standalone_impl_span(stmt: &Stmt) -> Option<Span> {
+    match stmt {
+        Stmt::Impl(decl) => Some(decl.span),
         _ => None,
     }
 }
@@ -2520,7 +2583,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .any(|s| matches!(s, Stmt::Class(c) if leaf(&c.name) == name))
+            .any(|s| matches!(s, Stmt::Class(c) if leaf(c.name.as_str()) == name))
     }
 
     fn has_fn(linked: &Linked, name: &str) -> bool {
@@ -2528,7 +2591,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .any(|s| matches!(s, Stmt::Fn(f) if leaf(&f.name) == name))
+            .any(|s| matches!(s, Stmt::Fn(f) if leaf(f.name.as_str()) == name))
     }
 
     fn has_struct(linked: &Linked, name: &str) -> bool {
@@ -2536,7 +2599,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .any(|s| matches!(s, Stmt::Struct(d) if leaf(&d.name) == name))
+            .any(|s| matches!(s, Stmt::Struct(d) if leaf(d.name.as_str()) == name))
     }
 
     #[test]
@@ -3167,7 +3230,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .filter(|s| matches!(s, Stmt::Class(c) if leaf(&c.name) == "User"))
+            .filter(|s| matches!(s, Stmt::Class(c) if leaf(c.name.as_str()) == "User"))
             .count();
         assert_eq!(users, 1, "`User` must be merged exactly once");
     }
@@ -3193,7 +3256,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .filter(|s| matches!(s, Stmt::Class(c) if leaf(&c.name) == "Config"))
+            .filter(|s| matches!(s, Stmt::Class(c) if leaf(c.name.as_str()) == "Config"))
             .count();
         assert_eq!(configs, 1, "`Config` must not be merged alongside itself");
     }
@@ -3580,7 +3643,7 @@ mod tests {
             let Expr::Object(lit) = value else {
                 panic!("object literal")
             };
-            lit.type_name.clone().expect("named literal")
+            lit.type_name.clone().expect("named literal").to_string()
         };
         assert_eq!(ctor("a"), "App.Models.User");
         assert_eq!(ctor("b"), "App.People.User");
@@ -4017,7 +4080,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .filter(|s| matches!(s, Stmt::Fn(f) if leaf(&f.name) == "tool"))
+            .filter(|s| matches!(s, Stmt::Fn(f) if leaf(f.name.as_str()) == "tool"))
             .count();
         assert_eq!(tools, 1, "the entry's own declaration is not duplicated");
     }
@@ -4037,7 +4100,7 @@ mod tests {
             .expect("a tier block")
             .iter()
             .find_map(|s| match s {
-                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.clone()).collect()),
+                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.to_string()).collect()),
                 _ => None,
             })
             .expect("a fn inside the block")
@@ -4050,7 +4113,7 @@ mod tests {
             .stmts
             .iter()
             .find_map(|s| match s {
-                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.clone()).collect()),
+                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.to_string()).collect()),
                 _ => None,
             })
             .expect("a top-level fn")

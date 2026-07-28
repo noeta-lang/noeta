@@ -122,7 +122,7 @@ pub fn complete(program: &Program, offset: u32, source: SourceId) -> Vec<Candida
             _ => continue,
         };
         candidates.push(Candidate {
-            label: name.clone(),
+            label: name.to_string(),
             kind,
             detail: None,
         });
@@ -393,7 +393,7 @@ fn derive_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candi
             && decl.methods.iter().all(|m| m.has_default)
         {
             candidates.push(Candidate {
-                label: decl.name.clone(),
+                label: decl.name.to_string(),
                 kind: CandidateKind::Trait,
                 detail: Some(
                     "user trait — fully defaulted, derive adopts the defaults".to_string(),
@@ -460,7 +460,7 @@ fn role_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candida
             && decl.decorators.semantic.is_some()
         {
             candidates.push(Candidate {
-                label: decl.name.clone(),
+                label: decl.name.to_string(),
                 kind: CandidateKind::Enum,
                 detail: Some("@semantic enum".to_string()),
             });
@@ -666,7 +666,7 @@ impl IdeDeriveContext {
                 .stmts
                 .iter()
                 .filter_map(|s| match s {
-                    Stmt::Trait(t) => Some((t.name.clone(), t.clone())),
+                    Stmt::Trait(t) => Some((t.name.to_string(), t.clone())),
                     _ => None,
                 })
                 .collect(),
@@ -752,7 +752,7 @@ pub fn bundle_members(
 fn push_methods(members: &mut Vec<Candidate>, methods: &[noeta_ast::FnDecl]) {
     for method in methods {
         members.push(Candidate {
-            label: method.name.clone(),
+            label: method.name.to_string(),
             kind: CandidateKind::Method,
             detail: Some(symbols::fn_signature(method)),
         });
@@ -793,7 +793,7 @@ pub fn type_names(program: &Program) -> Vec<Candidate> {
             _ => continue,
         };
         candidates.push(Candidate {
-            label: name.clone(),
+            label: name.to_string(),
             kind,
             detail: None,
         });

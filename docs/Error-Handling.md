@@ -63,7 +63,19 @@ echo match digit("x") {
 }
 ```
 
-`Error` is independent of `Display`: implementing it never changes how the value renders (an `Err(e)` echoes with the payload's ordinary display), and an error type may *also* implement `Display` when its message is the natural rendering. `<E: Error>` works as a generic bound, so helpers can be polymorphic over any error type. The standard library's first implementor is [`JsonError`](std-json), the payload of `json.try_parse::<T>` and `json.decode_typed`.
+`Error` is independent of `Display`: implementing it never changes how the value renders (an `Err(e)` echoes with the payload's ordinary display), and an error type may *also* implement `Display` when its message is the natural rendering. `<E: Error>` works as a generic bound, so helpers can be polymorphic over any error type. The standard library's first implementor is [`JsonError`](std-json), the payload of `json.try_parse` (the dynamic door), `json.try_parse::<T>`, and `json.decode_typed`.
+
+> [!TIP]
+> **Reading a document whose shape is not yours.** A body off a wire carries the *remote party's* shape, so a malformed one is bad input rather than a bug in your program — it must be a value you handle. `json.try_parse(text)` is that door: it needs no declared type, returns `Result<dyn, JsonError>`, and carries the same `path()`/`kind()`/`line()`/`column()` detail the typed doors do. `json.parse(text)` stays the aborting spelling, for when a malformed document really does mean the program is wrong (E0007).
+
+```noeta
+use std.json
+
+echo match json.try_parse("{ nope") {
+    Ok(doc) => "read ${doc["id"]}",
+    Err(e)  => "bad payload (${e.kind()}) at line ${e.line() ?? 0}: ${e.message()}",
+}
+```
 
 ### Deriving `Error`
 
@@ -209,7 +221,7 @@ echo load("{ nope")
 The rules keep the language explicit:
 
 - **`?` is the only implicit conversion position.** A `return Err(jsonErr)` or an assignment with a mismatched error type stays the plain type mismatch (E0007) it always was; write `Err(AppError.from(e))` there — `from` is an ordinary associated function, callable anywhere as `Target.from(x)`.
-- **Exactly one conversion path.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which the [orphan rule](Generics-and-Traits#coherence) would bar from carrying your impl). A type carries at most one `From` impl — a second, whatever its source, is a coherence conflict (E0027) — and conversions never chain.
+- **Exactly one conversion path.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which could not carry your impl anyway — an `impl` targets a struct, class, or enum the program [declares](Generics-and-Traits#implementing-a-trait), never a built-in or an extern). A type carries at most one `From` impl — a second, whatever its source, is a coherence conflict (E0027) — and conversions never chain.
 - **No conversion, no propagation.** A `?` whose `Err` type neither matches the declared error type nor has a `From` conversion is E0057. (A `dyn`/unannotated context defers to runtime, as everywhere in the gradual checker.)
 - `from` is an **associated** conversion: it builds a new target value from its argument, so a body referencing `self` is rejected (E0015), as is a parameter that disagrees with the declared source.
 

@@ -928,7 +928,7 @@ impl Printer<'_> {
             parts.push(Doc::text("async "));
         }
         parts.push(Doc::text("fn "));
-        parts.push(Doc::text(decl.name.clone()));
+        parts.push(Doc::text(decl.name.to_string()));
         parts.push(self.type_params(&decl.type_params)?);
         parts.push(self.params(&decl.params)?);
         // The sealed-fn capture clause (`use (a, b)`) — dropping it would silently strip the
@@ -1062,7 +1062,7 @@ impl Printer<'_> {
                         // An instantiated bound (`T: Keyed<int>`) renders its arguments through
                         // the ordinary type printer; a bare bound is just the name.
                         Ok(Doc::concat([
-                            Doc::text(b.name.clone()),
+                            Doc::text(b.name.to_string()),
                             self.trait_args_doc(&b.args)?,
                         ]))
                     })
@@ -1086,7 +1086,7 @@ impl Printer<'_> {
             parts.push(Doc::text("pub "));
         }
         parts.push(Doc::text("struct "));
-        parts.push(Doc::text(d.name.clone()));
+        parts.push(Doc::text(d.name.to_string()));
         parts.push(self.type_params(&d.type_params)?);
         parts.push(Doc::text(" "));
         parts.push(self.type_body(&d.fields, &d.methods, &d.impls, None, d.span)?);
@@ -1099,7 +1099,7 @@ impl Printer<'_> {
             parts.push(Doc::text("pub "));
         }
         parts.push(Doc::text("class "));
-        parts.push(Doc::text(d.name.clone()));
+        parts.push(Doc::text(d.name.to_string()));
         parts.push(self.type_params(&d.type_params)?);
         parts.push(Doc::text(" "));
         parts.push(self.type_body(
@@ -1285,7 +1285,7 @@ impl Printer<'_> {
             parts.push(Doc::text("pub "));
         }
         parts.push(Doc::text("trait "));
-        parts.push(Doc::text(d.name.clone()));
+        parts.push(Doc::text(d.name.to_string()));
         parts.push(self.type_params(&d.type_params)?);
         parts.push(Doc::text(" "));
         // The body lists associated types first (`type Name;` / `type Name = Default;`), then method
@@ -1327,7 +1327,7 @@ impl Printer<'_> {
             parts.push(Doc::text("async "));
         }
         parts.push(Doc::text("fn "));
-        parts.push(Doc::text(m.sig.name.clone()));
+        parts.push(Doc::text(m.sig.name.to_string()));
         // A trait method's own `<...>` is rejected by the checker (E0058 — trait method sets stay
         // monomorphic, poly-deferrals D3), but the formatter must still round-trip it faithfully:
         // dropping it here would make the formatted source re-parse to a different AST (the fmt
@@ -1351,7 +1351,7 @@ impl Printer<'_> {
             parts.push(Doc::text("pub "));
         }
         parts.push(Doc::text("enum "));
-        parts.push(Doc::text(d.name.clone()));
+        parts.push(Doc::text(d.name.to_string()));
         parts.push(self.type_params(&d.type_params)?);
         if let Some(backing) = &d.backing {
             parts.push(Doc::text(": "));
@@ -1524,7 +1524,7 @@ impl Printer<'_> {
 
     fn derive_spec(&self, d: &DeriveSpec) -> Result<Doc, FmtError> {
         let head = if d.args.is_empty() {
-            Doc::text(d.name.clone())
+            Doc::text(d.name.to_string())
         } else {
             let mut args = Vec::new();
             for a in &d.args {
@@ -1602,7 +1602,7 @@ impl Printer<'_> {
             // instantiation a `@derive(Serialize<Json>)` synthesizes. Rendered through the same
             // `type_ref` printer a type annotation uses, so a nested `Serialize<List<Json>>` and a
             // plain `List<Json>` format identically rather than through a second, drifting path.
-            AttrValue::TypeRef { name, args } if args.is_empty() => Doc::text(name.clone()),
+            AttrValue::TypeRef { name, args } if args.is_empty() => Doc::text(name.to_string()),
             AttrValue::TypeRef { name, args } => {
                 let ds: Result<Vec<_>, _> = args.iter().map(|a| self.type_ref(a)).collect();
                 Doc::concat([
@@ -1685,7 +1685,7 @@ impl Printer<'_> {
         Ok(match ty {
             TypeRef::Named { name, args, .. } => {
                 if args.is_empty() {
-                    Doc::text(name.clone())
+                    Doc::text(name.to_string())
                 } else {
                     let ds: Result<Vec<_>, _> = args.iter().map(|a| self.type_ref(a)).collect();
                     Doc::concat([
@@ -2003,7 +2003,7 @@ impl Printer<'_> {
                 if *signed { "i" } else { "u" }
             )),
             Expr::Bool { value, .. } => Doc::text(value.to_string()),
-            Expr::Ident { name, .. } => Doc::text(name.clone()),
+            Expr::Ident { name, .. } => Doc::text(name.to_string()),
             Expr::Unary { op, operand, .. } => {
                 // A prefix op binds looser than postfix (13); parenthesize a looser operand.
                 Doc::concat([Doc::text(op.symbol()), self.operand(operand, 13, true)?])

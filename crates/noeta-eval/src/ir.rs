@@ -636,10 +636,10 @@ impl Interpreter {
         // right after this declaration lands, below).
         let packed = noeta_ast::packed_named_fields(decl);
         if let Some(named) = packed.clone() {
-            self.packed_fields.insert(decl.name.clone(), named);
+            self.packed_fields.insert(decl.name.to_string(), named);
         }
         let def = TypeDef {
-            name: decl.name.clone(),
+            name: decl.name.to_string(),
             fields,
             methods,
             destructor: None,
@@ -657,7 +657,7 @@ impl Interpreter {
             field_defaults: strukt.field_defaults.clone(),
         };
         self.scope
-            .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
+            .declare(decl.name.to_string(), Value::Type(Rc::new(def)), false);
         // P-PKEY: settle the fixpoint with this declaration included and stamp every settled
         // type's (`Rc`-shared) def — a later declaration completing a forward-referenced nested
         // chain retro-marks the earlier defs, and every live instance sees it through the shared
@@ -697,7 +697,7 @@ impl Interpreter {
             .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
             .collect();
         let def = EnumDef {
-            name: decl.name.clone(),
+            name: decl.name.to_string(),
             variants,
             // A hand-written `compare`/`to_json` takes precedence over derivation — the same
             // rule `declare_ir_struct` applies.
@@ -708,7 +708,7 @@ impl Interpreter {
             methods,
         };
         self.scope
-            .declare(decl.name.clone(), Value::EnumType(Rc::new(def)), false);
+            .declare(decl.name.to_string(), Value::EnumType(Rc::new(def)), false);
     }
 
     /// Register a class whose methods are IR-bodied closures. Mirrors `declare_class`: fields,
@@ -729,7 +729,7 @@ impl Interpreter {
             .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
             .collect();
         let def = TypeDef {
-            name: decl.name.clone(),
+            name: decl.name.to_string(),
             fields,
             methods,
             // The lowered `destruct` block (a parameterless IR `Func`), run via `exec_ir_fn_body`
@@ -753,7 +753,7 @@ impl Interpreter {
             field_defaults: class.field_defaults.clone(),
         };
         self.scope
-            .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
+            .declare(decl.name.to_string(), Value::Type(Rc::new(def)), false);
     }
 
     /// Run a lowered function body as a call: allocate its temporary frame, run its
