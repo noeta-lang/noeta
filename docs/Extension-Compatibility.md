@@ -63,7 +63,10 @@ not `#[non_exhaustive]`: registration literals spell only what they use
 without breaking existing registrations. Second, the crate carries an **`ABI_VERSION`** constant;
 today every extension is compiled from source against the exact toolchain (see composition below),
 so an ABI change surfaces as an ordinary compile error and the constant is *recorded, not checked*—
-it exists as the handshake a future dynamic-loading path would refuse a mismatch with.
+it exists as the handshake a future dynamic-loading path would refuse a mismatch with. It moves on
+**any** change to the contract, additive ones included: pre-1.0 a bump costs a digit, while a missed
+bump leaves a number that under-describes what it names. So expect it to move often, and do not read
+a bump as a warning that your package will stop compiling — most bumps break nothing.
 
 A minimal entry crate, for orientation (see
 [Writing a Native Package](Writing-Native-Packages) for the full walkthrough):
