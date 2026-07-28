@@ -1760,11 +1760,12 @@ impl Checker {
                 }
                 // Bounds on a collected signature are validated trait names (E0014 otherwise); a
                 // non-built-in, non-user name is unreachable here, so skip rather than falsely report.
-                let Some(t) = BuiltinTrait::from_name(&bound.name) else {
-                    continue;
-                };
                 let bound = &bound.name;
-                if !self.satisfies(concrete, t) {
+                let satisfied = match BuiltinTrait::from_name(bound) {
+                    Some(t) => self.satisfies(concrete, t),
+                    None => self.satisfies_user_trait(concrete, bound, &[]),
+                };
+                if !satisfied {
                     let help =
                         format!("`{concrete}` must `@derive` or `impl {bound}` to be used here");
                     self.error(
@@ -1936,10 +1937,15 @@ impl Checker {
         span: Span,
     ) {
         for (concrete, bound) in stdlib::module_var_bounds(self.reg(), module, func, args) {
-            let Some(t) = BuiltinTrait::from_name(bound) else {
-                continue;
+            // A bound on a native signature names EITHER a built-in trait or a trait the extension
+            // itself declares (`para.crdt.Mergeable`). Resolving only the built-in set and skipping
+            // the rest silently drops the bound — which is how `synced_signal(42, "t")` briefly
+            // type-checked when `Mergeable` stopped being built-in. Both kinds are checked here.
+            let satisfied = match BuiltinTrait::from_name(bound) {
+                Some(t) => self.satisfies(&concrete, t),
+                None => self.satisfies_user_trait(&concrete, bound, &[]),
             };
-            if self.satisfies(&concrete, t) {
+            if satisfied {
                 continue;
             }
             let help = format!("`{concrete}` must `@derive` or `impl {bound}`");

@@ -283,10 +283,12 @@ pub enum SigType {
     Var(u8),
     /// A **trait-bounded** type variable (p2p P2) — like [`SigType::Var`] for binding and
     /// substitution, but the type bound to it must satisfy the named built-in trait or the call is
-    /// a static error (E0025). `synced_signal(initial: BoundedVar(0, "Mergeable"), …)` is the first
-    /// use: only a CRDT may be synced, enforced at compile time. The checker maps the trait name
-    /// through `BuiltinTrait::from_name` and reuses its ordinary bound-satisfaction check.
-    BoundedVar(u8, &'static str),
+    /// a static error (E0025). `synced_signal(initial: BoundedVar(0, &["Mergeable", "Syncable"]), …)`
+    /// is the motivating use: a synced value must both converge *and* know how to cross the wire,
+    /// and those are separate capabilities a type can hold independently. **Every** listed bound
+    /// must be satisfied, so the list is a conjunction (`T: Mergeable + Syncable`), matching what
+    /// the surface `<T: A + B>` means. A single-element slice is the ordinary one-bound case.
+    BoundedVar(u8, &'static [&'static str]),
     /// A **generic nominal instantiation** (higher-order-abi H4) — a generic extern type in a
     /// signature position: `cell.new(v: Var(0)) -> Generic("Cell", &[Var(0)])` types as
     /// `Cell<T>` with `T` bound from the argument. The plain [`SigType::Named`] stays the
@@ -381,7 +383,9 @@ impl SigType {
                 ret.render()
             ),
             SigType::Var(n) => type_var_name(*n),
-            SigType::BoundedVar(n, bound) => format!("{}: {}", type_var_name(*n), bound),
+            SigType::BoundedVar(n, bounds) => {
+                format!("{}: {}", type_var_name(*n), bounds.join(" + "))
+            }
             SigType::Generic(name, args) => format!(
                 "{}<{}>",
                 name,
@@ -4248,7 +4252,12 @@ mod render_tests {
         assert_eq!(SigType::Var(0).render(), "T");
         assert_eq!(SigType::Var(1).render(), "U");
         assert_eq!(SigType::Var(7).render(), "T2");
-        assert_eq!(SigType::BoundedVar(0, "Mergeable").render(), "T: Mergeable");
+        assert_eq!(SigType::BoundedVar(0, &["Mergeable"]).render(), "T: Mergeable");
+        // A conjunction renders the way the surface spells it.
+        assert_eq!(
+            SigType::BoundedVar(0, &["Mergeable", "Syncable"]).render(),
+            "T: Mergeable + Syncable"
+        );
         assert_eq!(
             SigType::Generic("Cell", &[SigType::Var(0)]).render(),
             "Cell<T>"

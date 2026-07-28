@@ -339,7 +339,7 @@ fn receiver_bindings(receiver_args: &[Type]) -> Vec<Option<Type>> {
 /// The **trait bounds** on a registry function's bounded type variables (p2p P2), each paired with
 /// the concrete type the call's arguments bound it to — for the checker to enforce (`E0025`). A
 /// bound whose variable the arguments left undetermined (a gradual hole) yields nothing: no
-/// information, so no error. `synced_signal(initial: BoundedVar(0, "Mergeable"), …)` called with a
+/// information, so no error. `synced_signal(initial: BoundedVar(0, &["Mergeable"]), …)` called with a
 /// `GCounter` argument yields `[(GCounter, "Mergeable")]`; called with `int`, `[(int, "Mergeable")]`
 /// — which the caller then rejects.
 pub(super) fn module_var_bounds(
@@ -373,7 +373,8 @@ pub(super) fn module_var_bounds(
 fn collect_bounded_vars(sig: &registry::SigType, out: &mut Vec<(u8, &'static str)>) {
     use registry::SigType;
     match sig {
-        SigType::BoundedVar(n, trait_name) => out.push((*n, trait_name)),
+        // Each bound is enforced separately, so a conjunction contributes one pair per name.
+        SigType::BoundedVar(n, bounds) => out.extend(bounds.iter().map(|t| (*n, *t))),
         SigType::List(t) | SigType::Option(t) | SigType::Future(t) | SigType::Optional(t) => {
             collect_bounded_vars(t, out)
         }
