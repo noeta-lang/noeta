@@ -469,6 +469,7 @@ fn compile_to_mc(
         deserialize_recipes: sites.deserialize_recipes,
         type_args: ir.type_args.clone(),
         structural_eq_types: HashSet::new(),
+        native_type_names: HashMap::new(),
         packed_fields: HashMap::new(),
         key_capable_types: HashSet::new(),
         types: HashMap::new(),
@@ -592,6 +593,7 @@ impl SessionCompiler {
             deserialize_recipes: Vec::new(),
             type_args: Vec::new(),
             structural_eq_types: HashSet::new(),
+            native_type_names: HashMap::new(),
             packed_fields: HashMap::new(),
             key_capable_types: HashSet::new(),
             types: HashMap::new(),
@@ -903,6 +905,17 @@ struct ModuleCompiler {
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
     /// `TypeDef::structural_eq` so both backends agree (object-model slice 2).
     structural_eq_types: HashSet<String>,
+    /// For a **native** type registered under a key that is not its own name — an aliased leaf
+    /// import (`use std.http.Framing as F`) or a group import's qualified identity
+    /// (`http.Framing`) — the canonical short name a value of it carries in its shape.
+    ///
+    /// The two are different questions and were previously answered by one string: the key is how
+    /// *source* names the type, the runtime name is the identity a **native-returned** value stamps
+    /// and that a `Framing.Sse` pattern compares against. Keying by the alias without this map
+    /// would build shapes named `F`, which no native value matches; keying by the canonical name
+    /// without it leaves the alias unresolvable, which is what made an aliased native type compile
+    /// and then fail at run time with `cannot find F in this scope`.
+    native_type_names: HashMap<String, String>,
     /// Every `@packed` struct's field-type names (P-PKEY, `noeta_ast::packed_named_fields`),
     /// accumulated across `register_types` passes (a session declares incrementally) — the input
     /// to the key-capability fixpoint below.
@@ -1225,8 +1238,14 @@ impl ModuleCompiler {
                             // what a `TheEnum.Variant` pattern compares against (S1 identity note).
                             UseKind::ExtEnum(qualified) => {
                                 if let Some(en) = self.registry.find_enum_qualified(&qualified) {
-                                    self.types
-                                        .insert(imported.name.clone(), ext_enum_type_info(en));
+                                    // Keyed by the import's LOCAL binding — its alias when one is
+                                    // written — because that is the name source uses to reach it.
+                                    // The canonical short name is recorded beside it, since that is
+                                    // what a value of the type carries.
+                                    let key = imported.local().to_string();
+                                    self.native_type_names
+                                        .insert(key.clone(), en.name.to_string());
+                                    self.types.insert(key, ext_enum_type_info(en));
                                 }
                             }
                             // A native **fielded type** — a class (`use geo.Handle`,
@@ -1238,16 +1257,18 @@ impl ModuleCompiler {
                             // selects the class-kind or struct-kind shape off `ExtFielded::kind`.
                             UseKind::ExtClass(qualified) | UseKind::ExtStruct(qualified) => {
                                 if let Some(cl) = self.registry.resolve_fielded(&qualified) {
+                                    let key = imported.local().to_string();
+                                    self.native_type_names
+                                        .insert(key.clone(), cl.name.to_string());
                                     // A native value **struct** always compares structurally — record
                                     // its imported (runtime shape) name so `MakeStruct` builds the
                                     // shape with `structural_eq = true`, exactly as a `.noe` struct
                                     // declaration does above. A native class stays identity (`==` is
                                     // reference), so it is NOT added.
                                     if cl.kind == noeta_ext_abi::FieldedKind::Struct {
-                                        self.structural_eq_types.insert(imported.name.clone());
+                                        self.structural_eq_types.insert(key.clone());
                                     }
-                                    self.types
-                                        .insert(imported.name.clone(), ext_fielded_type_info(cl));
+                                    self.types.insert(key, ext_fielded_type_info(cl));
                                 }
                             }
                             // A **group** import (`use std.http`, or a concrete native module):
@@ -1304,6 +1325,11 @@ impl ModuleCompiler {
     /// one misses the other — a quieter failure than the compile error the qualified spelling used
     /// to give, and a worse one.
     fn runtime_type_name(&self, key: &str) -> String {
+        // A native type registered under a key that is not its own name — an alias, or a group
+        // import's qualified identity. Recorded at registration, so one lookup answers both.
+        if let Some(name) = self.native_type_names.get(key) {
+            return name.clone();
+        }
         if !key.contains('.') {
             return key.to_string();
         }
@@ -4894,7 +4920,12 @@ impl<'m> FnCompiler<'m> {
                 ..
             } => {
                 fail_jumps.push(self.code.len());
-                let type_name = type_name.as_ref().map(|n| self.module.intern_name(n));
+                // Through `runtime_type_name`, like every construction site: a pattern compares
+                // against the name the VALUE carries, and for a native type reached under an alias
+                // or a qualified spelling that is not the name written here.
+                let type_name = type_name
+                    .as_ref()
+                    .map(|n| self.module.intern_name(&self.module.runtime_type_name(n)));
                 let variant = self.module.intern_name(variant);
                 self.code.push(Op::MatchVariant {
                     src: reg,

@@ -1,0 +1,36 @@
+// An **aliased** native type is the same type under the new name — in every position, in a file the
+// linker merges as well as in the entry.
+//
+// A `use` binds in one file, so an alias must be honored at run time exactly as the checker reads
+// it. It was not: a native type bound under the name it was IMPORTED with rather than the name it
+// was bound to, so `use std.http.Framing as F` left `F` unresolvable at run time — the program
+// checked clean and then died with `cannot find F in this scope`. Binding by the alias alone is not
+// enough either, because the shape a value carries is the type's OWN name (`Framing`), which is
+// what a native-returned value stamps: build the shape from the alias and nothing matches it.
+//
+// So the two are different questions with one answer each — the binding is the alias, the runtime
+// name is the type's — and this pins that construction, patterns, `is`, and equality all agree
+// across the two spellings and across the module boundary.
+// expect: stdout "Framing.Sse"
+// expect: stdout "lib: sse"
+// expect: stdout "lib is: true"
+// expect: stdout "eq across the boundary: true"
+// expect: stdout "entry match: sse"
+// expect: stdout "type: Type.Enum(std.http.Framing, [])"
+// expect: exit 0
+namespace probe.main
+
+use probe.lib
+use std.http.Framing as Alias
+
+from_lib = lib.sse();
+
+// The value a *merged* module built under its own alias.
+echo from_lib;
+echo "lib: ${lib.name(from_lib)}";
+echo "lib is: ${lib.is_framing(from_lib)}";
+
+// …is the same value the entry builds under a different alias for the same type.
+echo "eq across the boundary: ${from_lib == Alias.Sse}";
+echo "entry match: ${match from_lib { Alias.Sse => "sse", _ => "other" }}";
+echo "type: ${type_of(from_lib)}";

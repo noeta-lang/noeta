@@ -517,7 +517,12 @@ impl Interpreter {
         frame: &mut Frame,
     ) -> Eval<Flow> {
         for arm in arms {
-            if let Some(bindings) = crate::match_pattern(&arm.pattern, &value, &self.reflection) {
+            if let Some(bindings) = crate::match_pattern(
+                &arm.pattern,
+                &value,
+                &self.reflection,
+                &self.native_type_names,
+            ) {
                 let child = crate::Scope::child(&self.scope);
                 for (name, bound) in bindings {
                     child.declare(name, bound, false);
