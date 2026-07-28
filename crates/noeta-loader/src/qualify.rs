@@ -663,7 +663,7 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
             span: _,
         } => bound_in_expr(inner, names),
         // A turbofish operand is a type, never a binding; a dynamic one is an ordinary expression.
-        Expr::FieldSpecsOf { name, span: _ } => {
+        Expr::FieldSpecsOf { name, span: _ } | Expr::VariantsOf { name, span: _ } => {
             if let Some(e) = name.dynamic() {
                 bound_in_expr(e, names);
             }
@@ -1474,13 +1474,16 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         Expr::ParamsOf { target, span: _ } | Expr::ReturnsOf { target, span: _ } => {
             q_expr(target, visit)
         }
-        // The two name-keyed reflection surfaces. A *turbofish* operand is a real type reference, so
-        // it qualifies here like any other — that is what makes `field_specs_of::<Todo>()` under
-        // `namespace app.storage` query `app.storage.Todo` rather than silently answering with the
-        // empty schema. A *dynamic* operand is a runtime string and is walked as the ordinary
-        // expression it is: a literal `field_specs_of("Todo")` means the string `Todo`, and rewriting
-        // it because it happens to spell a local type name would be a different bug.
-        Expr::FieldSpecsOf { name, span: _ } => q_type_operand(name, visit),
+        // The three name-keyed reflection surfaces. A *turbofish* operand is a real type reference,
+        // so it qualifies here like any other — that is what makes `field_specs_of::<Todo>()` (and
+        // `variants_of::<Priority>()`) under `namespace app.storage` query the qualified identity
+        // rather than silently answering with the empty schema. A *dynamic* operand is a runtime
+        // string and is walked as the ordinary expression it is: a literal `field_specs_of("Todo")`
+        // means the string `Todo`, and rewriting it because it happens to spell a local type name
+        // would be a different bug.
+        Expr::FieldSpecsOf { name, span: _ } | Expr::VariantsOf { name, span: _ } => {
+            q_type_operand(name, visit)
+        }
         Expr::Construct {
             name,
             fields,

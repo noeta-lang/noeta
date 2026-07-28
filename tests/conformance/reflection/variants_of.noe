@@ -1,0 +1,118 @@
+// `variants_of::<T>()` / `variants_of(name)` — the TYPE-level variant schema, the enum twin of
+// `field_specs_of`. One `VariantSpec { name, payload: List<FieldSpec>, backing: ?dyn }` per declared
+// variant in declaration order.
+//
+// The gap it closes: through `field_specs_of` alone an enum is indistinguishable from a field-less
+// struct — both answer with the empty list — so anything walking a type to build a schema recursed
+// into an enum-typed field, found nothing, and emitted an empty object: silently wrong rather than
+// loudly missing. Asking both queries makes it loud (variants present ⇒ an enum), which is why the
+// `Sentiment` lines below pin `field_specs_of` at 0 alongside a non-empty `variants_of`.
+//
+// A payload is reported as ordinary declared-field data through the SAME `FieldSpec` the struct side
+// uses: a positional payload carries a synthesized `_0`/`_1` name with its real declared type in the
+// type slot, so `Rect(int, int)` needs no special case. `optional` is always false — a variant
+// payload field has no syntax for a default.
+//
+// A variant's own `#[...]` attributes are deliberately NOT reported here (see the `Doc` lines): a
+// member's attributes are keyed in the manifest under its qualified `Enum.Variant` target, the same
+// `Type.field` convention the struct side uses, so `attributes_of` is the one answer for both halves.
+// expect: stdout "field_specs_of(Sentiment) = 0"
+// expect: stdout "variants_of(Sentiment) = 2"
+// expect: stdout "sentiment: Positive payload=0 backing=none"
+// expect: stdout "sentiment: Negative payload=0 backing=none"
+// expect: stdout "shape: Circle"
+// expect: stdout "shape:   r: Type.Float optional=false"
+// expect: stdout "shape: Rect"
+// expect: stdout "shape:   _0: Type.Int optional=false"
+// expect: stdout "shape:   _1: Type.Int optional=false"
+// expect: stdout "shape: Many"
+// expect: stdout "shape:   _0: Type.List(Type.Int) optional=false"
+// expect: stdout "backed: Pending = some(pending)"
+// expect: stdout "backed: Done = some(done)"
+// expect: stdout "code: Low = some(1)"
+// expect: stdout "code: High = some(9)"
+// expect: stdout "by string: 2"
+// expect: stdout "non-enum struct: 0"
+// expect: stdout "non-enum class: 0"
+// expect: stdout "unknown name: 0"
+// expect: stdout "attrs stay in the manifest: Sentiment.Positive"
+// expect: exit 0
+enum Sentiment {
+    #[Doc("a good review")]
+    Positive
+    Negative
+}
+
+enum Shape {
+    Circle(r: float)
+    Rect(int, int)
+    Many(List<int>)
+}
+
+enum Status: string {
+    Pending = "pending"
+    Done = "done"
+}
+
+enum Severity: int {
+    Low = 1
+    High = 9
+}
+
+struct Review {
+    text: string
+    mood: Sentiment
+}
+
+class Session {
+    id: int
+    fn new(): Session { return Session { id: 0 } }
+}
+
+@attribute
+struct Doc {
+    text: string
+}
+
+// --- the gap: an enum reports no fields, but it does report variants ---------------------------
+echo "field_specs_of(Sentiment) = ${field_specs_of::<Sentiment>().len()}"
+echo "variants_of(Sentiment) = ${variants_of::<Sentiment>().len()}"
+for v in variants_of::<Sentiment>() {
+    echo "sentiment: ${v.name} payload=${v.payload.len()} backing=${v.backing}"
+}
+
+// --- a payload is ordinary declared-field data, positional or named ----------------------------
+for v in variants_of::<Shape>() {
+    echo "shape: ${v.name}"
+    for p in v.payload {
+        echo "shape:   ${p.name}: ${p.type} optional=${p.optional}"
+    }
+}
+
+// --- a backed enum reports its backing value ---------------------------------------------------
+for v in variants_of::<Status>() {
+    echo "backed: ${v.name} = ${v.backing}"
+}
+for v in variants_of::<Severity>() {
+    echo "code: ${v.name} = ${v.backing}"
+}
+
+// --- the runtime-string surface: the same query, off a name you only hold as a string ----------
+// This is the shape a schema walker is in — it reflected a field and got `Type.Named(name, _)`.
+mut walked = "?"
+for spec in field_specs_of::<Review>() {
+    if spec.name == "mood" {
+        walked = "Sentiment"
+    }
+}
+echo "by string: ${variants_of(walked).len()}"
+
+// --- failure paths: a name that is not an enum is the empty list, never an error ---------------
+echo "non-enum struct: ${variants_of::<Review>().len()}"
+echo "non-enum class: ${variants_of::<Session>().len()}"
+echo "unknown name: ${variants_of("NoSuchType").len()}"
+
+// --- a variant's attributes stay where every other member's do: the manifest -------------------
+for a in attributes_of::<Doc>() {
+    echo "attrs stay in the manifest: ${a.target}"
+}

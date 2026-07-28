@@ -2263,6 +2263,18 @@ impl Printer<'_> {
                     Doc::concat([Doc::text("field_specs_of("), self.expr(e)?, Doc::text(")")])
                 }
             },
+            // `variants_of` prints through the identical two-arm reconstruction — one surface, so
+            // one shape.
+            Expr::VariantsOf { name, .. } => match name {
+                TypeOperand::Static(ty) => Doc::concat([
+                    Doc::text("variants_of::<"),
+                    self.type_ref(ty)?,
+                    Doc::text(">()"),
+                ]),
+                TypeOperand::Dynamic(e) => {
+                    Doc::concat([Doc::text("variants_of("), self.expr(e)?, Doc::text(")")])
+                }
+            },
             // `construct::<T>(fields)` reconstructs its turbofish likewise; the dynamic form prints
             // both operands as `construct(name, fields)`.
             Expr::Construct { name, fields, .. } => match name {

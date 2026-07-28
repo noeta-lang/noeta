@@ -12,6 +12,7 @@
 //   error's help points at, and it must keep working.
 // expect: stdout "empty struct: 0"
 // expect: stdout "enum: 0"
+// expect: stdout "enum variants: 2"
 // expect: stdout "container head: 0"
 // expect: stdout "dynamic in a generic: 2"
 // expect: stdout "concrete: 2"
@@ -33,6 +34,9 @@ fn by_name<T>(name: string): int { return field_specs_of(name).len() }
 
 echo "empty struct: ${field_specs_of::<Empty>().len()}"
 echo "enum: ${field_specs_of::<Color>().len()}"
+// The enum twin answers where `field_specs_of` honestly cannot: an empty field schema and a
+// non-empty variant schema is what tells a schema walker this name is an enum, not an empty struct.
+echo "enum variants: ${variants_of::<Color>().len()}"
 echo "container head: ${container_of::<Todo>()}"
 echo "dynamic in a generic: ${by_name::<Todo>("Todo")}"
 echo "concrete: ${field_specs_of::<Todo>().len()}"

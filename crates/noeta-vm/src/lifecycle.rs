@@ -1122,6 +1122,62 @@ impl<'m> Vm<'m> {
         Value::list(items)
     }
 
+    /// Materialize a declared enum's variant schema into a `List<VariantSpec>` (`{ name, payload,
+    /// backing }`, declaration order) — the type-level reflection `variants_of`. An unknown type, or
+    /// one that is not an enum, yields the empty list (the same contract `materialize_field_specs`
+    /// answers a non-fielded type with). Each payload entry is a `FieldSpec` built by the SAME
+    /// construction `materialize_field_specs` uses, so a variant payload and a struct field are the
+    /// same value shape; `backing` goes through the shared `attr_value_to_vm`, so a backed value
+    /// materializes exactly as the same literal does in an attribute argument. The tree-walker's
+    /// `materialize_variant_specs` builds each element the same way, so the values agree across the
+    /// differential by construction.
+    pub(crate) fn materialize_variant_specs(&self, type_name: &str) -> Value {
+        let spec_shape = noeta_object::intern_shape(Shape::object(
+            ShapeKind::Struct,
+            noeta_ast::reflect::FIELD_SPEC,
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::FIELD_SPEC),
+        ));
+        let variant_shape = noeta_object::intern_shape(Shape::object(
+            ShapeKind::Struct,
+            noeta_ast::reflect::VARIANT_SPEC,
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::VARIANT_SPEC),
+        ));
+        let items: Vec<Value> = self
+            .module
+            .reflection
+            .variant_specs(type_name)
+            .into_iter()
+            .map(|variant| {
+                let payload: Vec<Value> = variant
+                    .payload
+                    .into_iter()
+                    .map(|spec| {
+                        Value::object(
+                            spec_shape,
+                            vec![
+                                Value::string(spec.name),
+                                build_type_value(spec.ty),
+                                Value::bool(spec.optional),
+                            ],
+                        )
+                    })
+                    .collect();
+                let backing = match variant.backing {
+                    Some(value) => crate::values::make_some(crate::values::attr_value_to_vm(
+                        value,
+                        &self.module.reflection,
+                    )),
+                    None => crate::values::make_none(),
+                };
+                Value::object(
+                    variant_shape,
+                    vec![Value::string(variant.name), Value::list(payload), backing],
+                )
+            })
+            .collect();
+        Value::list(items)
+    }
+
     /// `construct(name, fields)` — build a struct/class value of the type named by `name_val` from the
     /// field values `fields_val` (declaration order), reusing the SAME slot/defaults construction path
     /// `Op::MakeStruct` uses so defaults and full-initialization are honored identically. Returns a

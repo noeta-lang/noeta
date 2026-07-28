@@ -8,14 +8,17 @@
 // `field_specs_of::<Todo>()` written at the call site answered 2. A silent wrong answer, so:
 // E0058, the code for a turbofish instantiation that cannot apply.
 //
-// `construct::<T>(…)` is the same query under the same erasure, and is pinned alongside so the two
-// surfaces cannot drift apart.
-// expect: error E0058 at 16:49
-// expect: error E0058 at 18:83
+// `construct::<T>(…)` and `variants_of::<T>()` are the same query under the same erasure, and are
+// pinned alongside so the surfaces cannot drift apart.
+// expect: error E0058 at 17:49
+// expect: error E0058 at 19:83
+// expect: error E0058 at 21:46
 // expect: exit 1
 fn count_of<T>(): int { return field_specs_of::<T>().len() }
 
 fn build_a<T>(fields: Map<string, dyn>): Result<dyn, string> { return construct::<T>(fields) }
+
+fn cases_of<T>(): int { return variants_of::<T>().len() }
 
 struct Todo {
     id: int

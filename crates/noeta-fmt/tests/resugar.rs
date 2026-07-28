@@ -126,7 +126,7 @@ fn resugared_output_is_idempotent() {
 #[test]
 fn reflection_turbofish_round_trips() {
     preserved(
-        "struct T {\n    a: int\n}\n\nspecs = field_specs_of::<T>()\nv = construct::<T>([1])\n",
+        "struct T {\n    a: int\n}\n\nspecs = field_specs_of::<T>()\nv = construct::<T>([1])\nc = variants_of::<T>()\n",
     );
 }
 
@@ -144,6 +144,6 @@ fn authored_reflection_string_is_not_sugared() {
     // while the string is taken verbatim. The two surfaces were previously one `Expr::Str` operand,
     // so the printer could not tell them apart and rewrote this into the turbofish form.
     preserved(
-        "struct T {\n    a: int\n}\n\nspecs = field_specs_of(\"T\")\nv = construct(\"T\", [1])\n",
+        "struct T {\n    a: int\n}\n\nspecs = field_specs_of(\"T\")\nv = construct(\"T\", [1])\nc = variants_of(\"T\")\n",
     );
 }

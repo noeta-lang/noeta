@@ -1846,6 +1846,37 @@ fn a_label_that_cannot_bind_is_rejected_not_ignored() {
     );
 }
 
+/// A **skipping** named call carries a supplied mask — one `u64`, shifted up by one for a method's
+/// receiver — so it can only name parameters within `MASKED_PARAM_LIMIT`.
+///
+/// Regression: the bound was checked over the position of the first *hole*, so `f(1, z: 5)` over 66
+/// parameters (hole at 1, `z` at 65) checked clean, lowering dropped `z`'s out-of-range bit from the
+/// mask, and the argument landed on whichever parameter the shortened bit-count pointed at — where
+/// that parameter's own default then overwrote it. An explicitly written argument vanished with
+/// nothing said, which is the exact failure named arguments exist to remove.
+///
+/// Only skipping is bounded: a dense prefix carries no mask, and neither does a pure reordering.
+#[test]
+fn a_skipping_named_call_is_bounded_by_the_parameter_it_names() {
+    let wide = |call: &str| {
+        let mut params = vec!["a: int".to_string()];
+        params.extend((1..65).map(|i| format!("p{i}: int = {i}")));
+        params.push("z: int = 999".to_string());
+        format!(
+            "fn f({}): int {{ return a }}\necho {call};\n",
+            params.join(", ")
+        )
+    };
+    // Skips `p1..`, then names parameter 65 — refused rather than silently dropped.
+    assert_eq!(codes(&wide("f(1, z: 5)")), ["E0061"]);
+    // The same wide signature is fine when the call does not skip: a dense prefix, and a pure
+    // reordering of one.
+    assert!(codes(&wide("f(1, 7)")).is_empty());
+    assert!(codes(&wide("f(p1: 7, a: 1)")).is_empty());
+    // A skip within the limit is exactly what the named form is for.
+    assert!(codes(&wide("f(1, p2: 7)")).is_empty());
+}
+
 #[test]
 fn a_named_native_signature_binds_labels() {
     // `math.pow` declares `param_names: &["base", "exp"]`, so it accepts labels and REORDERS by

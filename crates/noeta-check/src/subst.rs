@@ -40,6 +40,8 @@ pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "ParamInfo",
     // The field-schema element `field_specs_of()` returns (`{ name: string, type: Type, optional }`).
     "FieldSpec",
+    // The variant-schema element `variants_of()` returns (`{ name, payload: List<FieldSpec>, backing }`).
+    "VariantSpec",
     // The roots-list element a declared tier's runner receives (tier-providers T2).
     "TierRoot",
     // The lazy-iterator type (Track I): a writable annotation now that `iter()`/adapters and

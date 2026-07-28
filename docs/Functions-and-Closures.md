@@ -150,7 +150,7 @@ Where a label **cannot** bind it is refused (E0061) rather than ignored:
 All of this used to be accepted with the label silently discarded, which meant `math.pow(exp: 3.0, base: 2.0)` computed 3² and a label naming nothing at all — `"abc".replace(zzz: "a", "b")` — ran without complaint. A label is now honoured or refused, never ignored.
 
 > [!NOTE]
-> Only the first 64 parameters can be *skipped* by name; a call that skips one beyond that is rejected. Reordering and labelling are unaffected.
+> A call that *skips* a defaulted parameter can only name parameters among the first 63; one that names a later parameter as well is rejected. Reordering and labelling are unaffected, at any arity, as is a call that simply supplies a prefix.
 
 ## Multiple return via tuples
 

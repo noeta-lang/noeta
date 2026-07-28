@@ -1013,6 +1013,10 @@ fn expr_variants() -> Vec<Expr> {
             name: TypeOperand::Static(tref(&n("FieldSpecsOf"), "name")),
             span: SP,
         },
+        Expr::VariantsOf {
+            name: TypeOperand::Static(tref(&n("VariantsOf"), "name")),
+            span: SP,
+        },
         Expr::Construct {
             name: TypeOperand::Dynamic(bx("TypeOperand::Dynamic", "0")),
             fields: bx(&n("Construct"), "fields"),

@@ -328,7 +328,7 @@ impl Walker<'_> {
             Expr::FieldsOf { value, .. } | Expr::TraitsOf { value, .. } => self.expr(value),
             Expr::ParamsOf { target, .. } | Expr::ReturnsOf { target, .. } => self.expr(target),
             // A turbofish operand is a type, not an expression; only a dynamic one is walked.
-            Expr::FieldSpecsOf { name, .. } => {
+            Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
                 if let Some(e) = name.dynamic() {
                     self.expr(e);
                 }

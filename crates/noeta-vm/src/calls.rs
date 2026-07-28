@@ -129,6 +129,21 @@ impl<'m> Vm<'m> {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, Abort> {
+        self.call_value_masked(callee, args, span, None)
+    }
+
+    /// [`Self::call_value`] carrying a **supplied mask** — which declared parameters the arguments
+    /// fill, for a call that skips a defaulted one in the middle. `None` is the ordinary prefix rule
+    /// and is what every caller but the named `invoke` passes; the mask is indexed over the callee's
+    /// declared parameters, matching the tree-walker (a first-class closure reserves no receiver
+    /// register, so nothing is shifted here).
+    pub(crate) fn call_value_masked(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+        span: Span,
+        supplied: Option<u64>,
+    ) -> Result<Value, Abort> {
         match callee.as_closure() {
             Some(proto) => {
                 let chunk = &self.module.protos[proto as usize];
@@ -150,16 +165,17 @@ impl<'m> Vm<'m> {
                 let n_args = args.len();
                 let (mut frames, mut regs) = self.pooled_run_stacks(num_registers);
                 for (i, v) in args.into_iter().enumerate() {
-                    regs[i] = v;
+                    regs[noeta_bytecode::param_of_arg(i, supplied)] = v;
                 }
                 // A first-class closure may capture upvalues; carry its cells into the re-entrant
                 // frame (one owned reference each) and hand them to each default thunk, which shares
                 // the closure's upvalue layout so a capture-referencing default reads the right cell.
                 let count = callee.closure_upvalue_count();
                 let cells: Vec<Value> = (0..count).map(|i| callee.closure_upvalue(i)).collect();
-                // Fill any omitted trailing parameters from their default thunks.
+                // Fill every parameter the call left out from its default thunk — the trailing
+                // ones under the ordinary prefix rule, plus any the mask says was skipped.
                 for (reg, dproto) in &defaults {
-                    if !noeta_bytecode::is_param_filled(*reg as usize, n_args, None) {
+                    if !noeta_bytecode::is_param_filled(*reg as usize, n_args, supplied) {
                         let value = self.run_thunk(*dproto, &cells)?;
                         regs[*reg as usize] = value;
                     }

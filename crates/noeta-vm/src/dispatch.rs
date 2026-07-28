@@ -2881,6 +2881,14 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
+                    Op::VariantsOf { dst, src } => {
+                        // The runtime name string names a declared type; materialize its variant
+                        // schema (empty unless it is an enum).
+                        let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                        let result = self.materialize_variant_specs(&name);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
                     Op::Construct {
                         dst,
                         name,
@@ -2948,26 +2956,52 @@ impl<'m> Vm<'m> {
                         // the duration of the dispatch, then released after the call frame is built (its
                         // elements retained into it). `arg_items` below borrows from this temporary.
                         let mut args_to_release: Option<Value> = None;
+                        // A **named** `Map<string, dyn>` args operand (the same shape `Op::Construct`
+                        // takes) is projected to its `(name, value)` pairs here and bound to
+                        // parameters once the callee is known. The values share the map's references
+                        // exactly as `construct_dynamic`'s do, so there is no temporary to release;
+                        // a non-string key is dropped, as it is there.
+                        let named: Option<Vec<(String, Value)>> = args_val.is_map().then(|| {
+                            let keys = args_val.map_keys().expect("checked is_map");
+                            let vals = args_val.map_values().expect("checked is_map");
+                            keys.iter()
+                                .zip(vals)
+                                .filter_map(|(k, v)| match k {
+                                    noeta_stdlib::MapKey::Str(s) => {
+                                        Some((s.as_str().to_owned(), v))
+                                    }
+                                    _ => None,
+                                })
+                                .collect()
+                        });
                         // Resolve the dispatch by name: either a prototype to call (`Ok`) or a reason it
                         // failed (`Err(msg)` → `Result.Err`). Every resolution failure — non-string name,
-                        // non-list args, non-invokable receiver, unknown name, arity mismatch — is a
-                        // runtime `Err`, never an abort (only a panic *inside* the called body aborts).
-                        let outcome: Result<(InvokeTarget, Vec<Value>), String> = 'resolve: {
+                        // args that are neither a list nor a map, a non-invokable receiver, an unknown
+                        // name, an arity mismatch, an unknown or missing parameter in the named form —
+                        // is a runtime `Err`, never an abort (only a panic *inside* the called body
+                        // aborts).
+                        let outcome: Result<(InvokeTarget, Vec<Value>, Option<u64>), String> = 'resolve: {
                             let Some(method) = name_val.as_string() else {
                                 break 'resolve Err(format!(
                                     "invoke name must be a string, found {}",
                                     name_val.type_name()
                                 ));
                             };
-                            if !args_val.is_list() {
+                            if named.is_none() && !args_val.is_list() {
                                 break 'resolve Err(format!(
-                                    "invoke args must be a list, found {}",
+                                    "invoke args must be a list or a map, found {}",
                                     args_val.type_name()
                                 ));
                             }
-                            let args_list = args_val.realize_list();
-                            args_to_release = Some(args_list);
-                            let arg_items = args_list.list_items().expect("checked is_list");
+                            // A packed positional list is materialized to a temporary boxed list for
+                            // the duration of the dispatch; the named form reads the map directly.
+                            let arg_items: Vec<Value> = if named.is_some() {
+                                Vec::new()
+                            } else {
+                                let args_list = args_val.realize_list();
+                                args_to_release = Some(args_list);
+                                args_list.list_items().expect("checked is_list")
+                            };
                             // No receiver: the free-function form. The name resolves against the
                             // module's global slot table and nothing else — the same binding
                             // `Op::CallGlobal` reads for a statically-known top-level `fn`, which is
@@ -2988,16 +3022,20 @@ impl<'m> Vm<'m> {
                                 let chunk =
                                     &module.protos[callee.as_closure().expect("filtered") as usize];
                                 let total = chunk.num_params as usize;
-                                let required = total - chunk.defaults.len();
-                                if arg_items.len() < required || arg_items.len() > total {
-                                    break 'resolve Err(arity_message(
-                                        "function",
-                                        required,
-                                        total,
-                                        arg_items.len(),
-                                    ));
-                                }
-                                break 'resolve Ok((InvokeTarget::Free(callee), arg_items));
+                                break 'resolve match bind_invoke_args(
+                                    &module.reflection,
+                                    &method,
+                                    "function",
+                                    total,
+                                    chunk.defaults.len(),
+                                    arg_items,
+                                    named.as_deref(),
+                                ) {
+                                    Ok((args, supplied)) => {
+                                        Ok((InvokeTarget::Free(callee), args, supplied))
+                                    }
+                                    Err(message) => Err(message),
+                                };
                             };
                             // A type handle dispatches an associated function (no receiver); an object
                             // dispatches an instance method (receiver in register 0). A reflection `Type`
@@ -3027,16 +3065,19 @@ impl<'m> Vm<'m> {
                             // defaults widen the accepted range, exactly as `Op::CallMethod`.
                             let callee_chunk = &module.protos[proto as usize];
                             let total = callee_chunk.num_params as usize - 1;
-                            let required = total - callee_chunk.defaults.len();
-                            if arg_items.len() < required || arg_items.len() > total {
-                                break 'resolve Err(arity_message(
-                                    kind,
-                                    required,
-                                    total,
-                                    arg_items.len(),
-                                ));
-                            }
-                            Ok((InvokeTarget::Proto { proto, is_assoc }, arg_items))
+                            let (args, supplied) = match bind_invoke_args(
+                                &module.reflection,
+                                &format!("{type_name}.{method}"),
+                                kind,
+                                total,
+                                callee_chunk.defaults.len(),
+                                arg_items,
+                                named.as_deref(),
+                            ) {
+                                Ok(bound) => bound,
+                                Err(message) => break 'resolve Err(message),
+                            };
+                            Ok((InvokeTarget::Proto { proto, is_assoc }, args, supplied))
                         };
                         match outcome {
                             Err(message) => {
@@ -3051,8 +3092,9 @@ impl<'m> Vm<'m> {
                             // re-entry `map`/`filter` use — which carries the closure's upvalues and
                             // fills its defaults. Arity was pre-checked above, so `call_value`'s own
                             // (aborting) arity guard is unreachable and a soft `Err` is preserved.
-                            Ok((InvokeTarget::Free(callee), arg_items)) => {
-                                // `call_value` consumes owned arguments; the list still owns these.
+                            Ok((InvokeTarget::Free(callee), arg_items, supplied)) => {
+                                // `call_value_masked` consumes owned arguments; the list (or, in the
+                                // named form, the map) still owns these.
                                 let owned: Vec<Value> = arg_items
                                     .iter()
                                     .map(|&a| {
@@ -3063,12 +3105,13 @@ impl<'m> Vm<'m> {
                                 if let Some(list) = args_to_release.take() {
                                     list.release();
                                 }
-                                let result = self.call_value(callee, owned, *span)?;
+                                let result =
+                                    self.call_value_masked(callee, owned, *span, supplied)?;
                                 let ok = self.persist.shapes[*ok_shape as usize];
                                 set_reg(regs, fbase, *dst, Value::enum_value(ok, vec![result]));
                                 pc += 1;
                             }
-                            Ok((InvokeTarget::Proto { proto, is_assoc }, arg_items)) => {
+                            Ok((InvokeTarget::Proto { proto, is_assoc }, arg_items, supplied)) => {
                                 // An associated call leaves register 0 as unit (no receiver); an instance
                                 // call places the retained receiver there. The result is wrapped in
                                 // `Result.Ok` as it lands in the caller, so the invocation yields a
@@ -3088,8 +3131,10 @@ impl<'m> Vm<'m> {
                                     *dst,
                                     RetTransform::WrapOk(ok),
                                     pc + 1,
-                                    // Reflective invocation builds its argument list positionally.
-                                    None,
+                                    // The prototype reserves register 0 for `self`, so every
+                                    // declared parameter's bit moves up by one — the same shift the
+                                    // compiler applies to a statically-named method call.
+                                    supplied.map(|m| (m << 1) | 1),
                                 )?;
                                 // Release the temporary boxed args list before transferring (its
                                 // elements were already retained into the call frame above); `take`

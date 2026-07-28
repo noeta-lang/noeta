@@ -2815,6 +2815,26 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `variants_of::<T>()` / `variants_of(name)` — the TYPE-level variant schema, the enum twin of
+        // `field_specs_of`. Identical surface shape by construction (same two arms, same reason the
+        // turbofish stays a `TypeRef` until lowering so the linker's namespace qualification can see
+        // it), so the two productions differ only in their keyword and node.
+        let variants_of = just(T::VariantsOfKw)
+            .ignore_then(choice((
+                just(T::ColonColon)
+                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                    .then_ignore(just(T::LParen))
+                    .then_ignore(just(T::RParen))
+                    .map(TypeOperand::Static),
+                sub.clone()
+                    .delimited_by(just(T::LParen), just(T::RParen))
+                    .map(|e| TypeOperand::Dynamic(Box::new(e))),
+            )))
+            .map_with(move |name, e| Expr::VariantsOf {
+                name,
+                span: ctx.to_span(e.span()),
+            });
+
         // `construct::<T>(fields)` / `construct(name, fields)` — the dynamic struct constructor. The
         // turbofish carries the type as a `TypeOperand::Static` (like `field_specs_of`, and for the
         // same qualification reason) plus a single `fields` operand; the string form takes the type
@@ -2867,10 +2887,10 @@ where
             channel,
             roles_of,
             // The tuple is at its arity cap, so each keyword-led reflection query shares a slot with
-            // a disjoint sibling: the two signature queries `params_of`/`returns_of` with the
-            // type-level `field_specs_of`, and the by-name `invoke` with the by-name `construct`. All
-            // five commit on their leading keyword.
-            params_of.or(returns_of).or(field_specs_of),
+            // a disjoint sibling: the two signature queries `params_of`/`returns_of` with the two
+            // type-level schema queries `field_specs_of`/`variants_of`, and the by-name `invoke` with
+            // the by-name `construct`. All six commit on their leading keyword.
+            params_of.or(returns_of).or(field_specs_of).or(variants_of),
             invoke.or(construct),
             // One choice-tuple slot for the two user turbofish forms (the tuple is at its arity
             // cap): the module form (`json.parse::<T>(s)`, needs a `.`) wins over the free-function

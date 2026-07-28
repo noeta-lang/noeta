@@ -1138,6 +1138,11 @@ impl Pretty for Expr {
                 name.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::VariantsOf { name, span: s } => {
+                out.push_str(&format!("(variants_of {}\n", span(*s)));
+                name.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::Construct {
                 name,
                 fields,
