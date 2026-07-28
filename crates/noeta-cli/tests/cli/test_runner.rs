@@ -492,3 +492,34 @@ fn test_on_a_directory_keeps_the_filter_messages() {
         .success()
         .stdout(predicate::str::contains("no tests matching --name"));
 }
+
+/// An `async fn` test is **driven**, not merely called.
+///
+/// The runner invokes a test root by synthesizing a call to it. A call to an `async fn` evaluates to
+/// a `Future`, so without an `.await` the future was constructed, dropped, and the body never ran —
+/// which made every assertion in an async test pass, silently and totally. The failing case is the
+/// load-bearing half: it can only fail if its body executed.
+#[test]
+fn test_runs_async_tests_rather_than_dropping_their_futures() {
+    let file = temp_program(
+        "test_async",
+        "async fn later(): int { return 7; }\n\
+         @test {\n\
+             async fn an_async_body_executes(): void { assert(later().await == 3, \"seven is not three\"); }\n\
+             async fn await_yields_the_value(): void { assert(later().await == 7); }\n\
+             fn a_sync_test_is_unchanged(): void { assert(1 == 1); }\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("FAIL  an_async_body_executes")
+                .and(predicate::str::contains("seven is not three"))
+                .and(predicate::str::contains("ok    await_yields_the_value"))
+                .and(predicate::str::contains("2 passed, 1 failed, 3 total")),
+        );
+}
