@@ -1,0 +1,14 @@
+// An orphan standalone `impl` that carries a **method body** is the same E0013 as the empty-body
+// orphan next door (`standalone_impl_orphan.noe`) — and it used to be a compiler **crash** instead.
+//
+// The checker skipped the bodies of an impl whose target it did not know, to keep cascading noise
+// off the one real error. But it had already enumerated them, so the body-coverage gate — the
+// self-check that every body-owning site was actually entered, which exists because "never looked at
+// a body" is the failure mode that hides forever — found them unvisited and panicked the debug
+// compiler outright. A release build did not panic; it silently left the body unchecked. Misspelling
+// a type name in an `impl` is all it took. The bodies are checked now, with `self` at the gradual
+// top so an unknown target still cannot cascade.
+// expect: error E0013 at 14:18
+// expect: exit 1
+trait Decoder { fn step(s: string): string }
+impl Decoder for Widget { fn step(s: string): string { return s.upper() } }

@@ -27,7 +27,7 @@ use std::path::Path;
 
 use noeta_ast::{Program, Stmt, UseName};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
-use noeta_span::{Source, SourceId, SourceMap};
+use noeta_span::{Source, SourceId, SourceMap, Span};
 
 pub use expand::ExpandedSource;
 
@@ -1666,7 +1666,7 @@ fn link_core(
     // An **inline** impl rides on its type's `class`/`struct` declaration and is already merged with it;
     // this closes the **standalone** case. Merge each pooled standalone impl whose (qualified) target
     // type is in the program — so the impl only lands when the type it refers to is present — deduped
-    // by (target, trait) so a module reachable two ways contributes each impl once.
+    // by the impl's own **span**, so a declaration reached more than once contributes once.
     //
     // **To a fixpoint, over the whole program's types.** "Is the target type present?" has an answer
     // that *grows while this loop runs*, and getting either half of that wrong drops an impl in
@@ -1685,16 +1685,24 @@ fn link_core(
     //   and was dropped.
     //
     // The dedup set answers the *same* question from the other side — "is this impl already in the
-    // program?" — so it is seeded from the program rather than starting empty. An entry that declares
-    // a `namespace` is a `module_views` member like any other, so the scan below meets the entry's
-    // own `impl Marker for Box2` again; with the entry's types now in `merged_types` (above) an empty
-    // set made that a second copy, and coherence correctly called it E0027 "implemented more than
-    // once". Named declarations are protected from exactly this by `merged_q`'s entry seeding, but an
-    // impl introduces no name, so (target, trait) is its identity and this is where it is seeded.
-    let mut seen_impls: HashSet<(String, String)> = imported
+    // program?" — so it is seeded from the program rather than starting empty, and it is keyed on the
+    // **span**: the identity of a declaration is where it is written.
+    //
+    // Both halves of that were wrong, and each dropped an impl silently. Starting empty: an entry
+    // that declares a `namespace` is a `module_views` member like any other, so the scan below meets
+    // the entry's own `impl Marker for Box2` again — with the entry's types now in `merged_types`
+    // (above), an unseeded set made that a second copy and coherence correctly called it E0027
+    // "implemented more than once". (Named declarations are protected from exactly this by
+    // `merged_q`'s entry seeding; an impl introduces no name, so this is where it is seeded.)
+    // Keying on `(target, trait)`: that is the identity of an impl's *coherence slot*, not of an
+    // impl, so two different modules each writing `impl Decoder for Target` collapsed to whichever
+    // the scan reached first, and the program ran with one of the two bodies and no diagnostic at
+    // all. Those are a genuine conflict, and E0027 is what says so — the linker's job is to carry
+    // each declaration into the program exactly once, not to adjudicate which of two should win.
+    let mut seen_impls: HashSet<Span> = imported
         .iter()
         .chain(entry_stmts.iter())
-        .filter_map(standalone_impl_key)
+        .filter_map(standalone_impl_span)
         .collect();
     loop {
         // Owned, and recomputed per round: the scan below pushes into `imported`, so it cannot hold
@@ -1718,7 +1726,7 @@ fn link_core(
                 qualify::qualify_stmt(&mut cloned, map);
                 if let Stmt::Impl(decl) = &cloned
                     && merged_types.contains(&decl.target)
-                    && seen_impls.insert((decl.target.clone(), decl.trait_name.clone()))
+                    && seen_impls.insert(decl.span)
                 {
                     imported.push(cloned);
                     // The impl's method bodies may reference same-module free declarations — an
@@ -2508,16 +2516,18 @@ fn decl_name(stmt: &Stmt) -> Option<&str> {
     }
 }
 
-/// The identity of a **standalone** `impl Trait for Target` — `(target, trait)`, as spelled in the
-/// statement, so it is the *qualified* pair once the statement has been through
-/// [`qualify::qualify_stmt`]. `None` for every other statement.
+/// The identity of a **standalone** `impl Trait for Target`: its span. `None` for every other
+/// statement.
 ///
 /// An impl declares no name, so it is absent from every name-keyed table the linker dedups with
-/// (`merged_q`, `unit_origins`); this pair is what "the same impl" means instead. Coherence allows a
-/// type one impl per trait, which is precisely why the pair identifies it.
-fn standalone_impl_key(stmt: &Stmt) -> Option<(String, String)> {
+/// (`merged_q`, `unit_origins`), and "where it is written" is what identifies it instead — stable
+/// under [`qualify::qualify_stmt`], which rewrites names and leaves spans alone, so a merged clone
+/// still answers to its source statement. Deliberately *not* `(target, trait)`: that names the
+/// coherence slot rather than the declaration, so two modules that both fill it would collapse into
+/// one silently instead of reaching the checker as the E0027 they are.
+fn standalone_impl_span(stmt: &Stmt) -> Option<Span> {
     match stmt {
-        Stmt::Impl(decl) => Some((decl.target.clone(), decl.trait_name.clone())),
+        Stmt::Impl(decl) => Some(decl.span),
         _ => None,
     }
 }

@@ -1,0 +1,7 @@
+namespace pkg.first;
+
+use pkg.types.{Decoder, Target};
+
+impl Decoder for Target {
+    fn step(s: string): string { return "first" }
+}

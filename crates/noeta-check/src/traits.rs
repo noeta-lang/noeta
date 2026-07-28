@@ -218,11 +218,16 @@ impl Checker {
 
     /// Validate a standalone `impl Trait for T {}` declaration. Two checks beyond the shared
     /// trait-side validation ([`Self::check_trait_impl`], also run): the **orphan rule** — `T` must
-    /// be a struct/class/enum declared in this module, not a built-in or a `use`-imported name
-    /// (E0013) — and the **built-in body restriction** — a *user* trait's standalone impl may
-    /// carry method bodies (hoisted onto the target), but a built-in trait's must stay an
-    /// empty-body marker (E0015). Coherence is enforced together with the target's
-    /// `@derive`s/in-body impls in [`Self::check_coherence`].
+    /// be a struct, class, or enum **the program declares**, not a built-in or an unresolved name
+    /// (E0013) — and the **built-in body restriction** — a *user* trait's standalone impl may carry
+    /// method bodies (hoisted onto the target), but a built-in trait's must stay an empty-body
+    /// marker (E0015).
+    ///
+    /// "The program declares" is the whole linked program, not the one file: the checker runs
+    /// downstream of the linker, so an imported type is a declared type like any other and a module
+    /// may implement a trait for a sibling's or a dependency's type. Nothing is lost by that — one
+    /// program is linked at a time, so coherence is whole-program **uniqueness**, enforced together
+    /// with the target's `@derive`s/in-body impls in [`Self::check_coherence`] (E0027).
     pub(crate) fn check_standalone_impl(&mut self, decl: &ImplDecl, env: &mut Env) {
         // A dotted trait path is a method-bundle binding (kernel-methods K1) with its own
         // validation — bundle resolution, packed-target + constraint checks, conflict rules. But a
@@ -299,14 +304,21 @@ impl Checker {
         if decl.methods.is_empty() {
             return;
         }
-        // Only for a type this module declares. A target that is not a known record/enum already
-        // produced E0013 above; checking bodies against a type we know nothing about would pile
-        // cascading noise on top of that one real error.
-        if !self.symbols.records.contains_key(&decl.target)
-            && !self.symbols.enums.contains_key(&decl.target)
-        {
-            return;
-        }
+        // An **orphan** target — not a record/enum this program declares — already produced E0013
+        // above. Its bodies are checked all the same. This used to `return` early, to keep cascading
+        // noise off the one real error, and that made the body-coverage gate
+        // ([`Checker::verify_body_coverage`]) fire: the checker enumerated these bodies and then
+        // never entered them. A debug build panicked outright ("the checker never visited these
+        // bodies") on `impl T for Undeclared { fn m() { … } }` — a program a user writes by
+        // misspelling a type name — and a release build silently left the body unchecked. The gate
+        // exists precisely because "never looked at a body" is the failure that hides indefinitely,
+        // so the answer is to look, not to exempt.
+        //
+        // What kept the noise down is kept: `self` binds to the gradual top rather than to a type we
+        // know nothing about, so member access through it defers instead of erroring, and
+        // `current_type` stays unset rather than naming a type that has no fields to be private.
+        let known = self.symbols.records.contains_key(&decl.target)
+            || self.symbols.enums.contains_key(&decl.target);
         let type_params = self
             .symbols
             .type_params
@@ -314,8 +326,17 @@ impl Checker {
             .cloned()
             .unwrap_or_default();
         let saved_params = self.enter_type_params(&type_params);
-        let bindings = vec![("self".to_string(), self_type(&decl.target, &type_params))];
-        let saved_type = self.coloring.current_type.replace(decl.target.clone());
+        let self_ty = if known {
+            self_type(&decl.target, &type_params)
+        } else {
+            Type::Unknown
+        };
+        let bindings = vec![("self".to_string(), self_ty)];
+        let saved_type = if known {
+            self.coloring.current_type.replace(decl.target.clone())
+        } else {
+            self.coloring.current_type.take()
+        };
         for method in &decl.methods {
             self.check_fn(method, env, &bindings, TargetKind::Method);
         }
