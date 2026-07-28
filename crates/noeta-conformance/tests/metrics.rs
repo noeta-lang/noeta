@@ -168,10 +168,10 @@ fn server_serve_auto_instruments_request_metrics() {
     let MetricPoints::Histogram(points) = &duration.points else {
         panic!("request duration is a histogram");
     };
-    // The scripted requests: GET /, GET /health, POST /echo, GET /users/42, DELETE /users/42, and
-    // GET /ws (answered as a plain 200 here — the handler never upgrades it, server-hmr L0) — six
-    // distinct (method, route, status) series, each observed once.
-    assert_eq!(points.len(), 6, "one series per distinct request");
+    // The scripted requests: GET /, GET /health, POST /echo, GET /users/42, DELETE /users/42,
+    // GET /ws (answered as a plain 200 here — the handler never upgrades it, server-hmr L0), and
+    // POST /form — seven distinct (method, route, status) series, each observed once.
+    assert_eq!(points.len(), 7, "one series per distinct request");
     assert!(
         points.iter().all(|p| p.count == 1),
         "each request observed once"
