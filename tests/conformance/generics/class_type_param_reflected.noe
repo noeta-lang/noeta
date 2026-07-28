@@ -1,0 +1,49 @@
+// `type_name::<T>()` resolves inside a generic type's **instance method**, over the type's own
+// parameter. One compiled body serves every instantiation, so there is no constant to fold — the
+// name is read at run time off the receiver's reflected type tag, which its construction site
+// recorded. This is what lets a repository know its model type without being handed a stringly
+// typed name at construction (`Repository.new(type_name::<Todo>(), …)`).
+//
+// A `struct` is pinned alongside the `class`: the tag rides beside the payload for both kinds, and
+// a struct's copy carries it.
+// expect: stdout "todos:Todo"
+// expect: stdout "users:User"
+// expect: stdout "h/Todo"
+// expect: stdout "h/Todo"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+struct Holder<T> {
+    pub label: string
+
+    fn new(label: string): Holder<T> {
+        return Holder { label: label };
+    }
+
+    fn model(): string {
+        return self.label ~ "/" ~ type_name::<T>();
+    }
+}
+rt: Repo<Todo> = Repo.new("todos");
+ru: Repo<User> = Repo.new("users");
+echo rt.model();
+echo ru.model();
+h: Holder<Todo> = Holder.new("h");
+copy = h;
+echo h.model();
+echo copy.model();

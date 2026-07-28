@@ -303,6 +303,68 @@ impl Checker {
         }
     }
 
+    /// Record a **generic constructor call** as a construction site (generic constructor
+    /// reflection): `Repo.new("todos")` resolved to `Repo<Todo>` tags the object the call returns,
+    /// recovering the instantiation the constructor body cannot see (inside `fn new` the literal's
+    /// type is `Repo<T>`, with `T` still a parameter).
+    ///
+    /// Three conditions, all of them load-bearing:
+    ///
+    /// * `Type.method` is a **provable fresh constructor** ([`crate::constructors`]) — every
+    ///   `return` hands back a new literal — so the returned object is this call's alone and the
+    ///   backends may write its tag in place. A factory returning a shared instance is excluded:
+    ///   two differently-instantiated call sites would otherwise overwrite each other's answer.
+    /// * the resolved result is that very type, generically instantiated;
+    /// * every argument is **fully concrete** — no `dyn`, no inference hole, no enclosing type
+    ///   parameter. A partially-open instantiation is left untagged rather than recorded as
+    ///   `Repo<dyn>`: erasure is what the value already reports, and inventing a `dyn` argument
+    ///   would claim a fact the call site does not have.
+    pub(crate) fn note_constructor_call(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        ret: &Type,
+        span: Span,
+    ) {
+        if !self
+            .symbols
+            .fresh_constructors
+            .contains(&(type_name.to_string(), method.to_string()))
+        {
+            return;
+        }
+        let Type::Named(n, args) = ret else { return };
+        if n != type_name || args.is_empty() || !args.iter().all(|a| self.fully_concrete(a)) {
+            return;
+        }
+        self.note_construction(ret, span);
+    }
+
+    /// Whether `ty` names a fully-determined type: no `dyn`/`dyn Trait` top, no inference hole, and
+    /// no mention of a type parameter in scope. The gate on recording a constructor call's
+    /// instantiation — a tag is a claim about the value, so a partially-open type makes no claim.
+    pub(crate) fn fully_concrete(&self, ty: &Type) -> bool {
+        if matches!(ty, Type::Dyn | Type::Unknown | Type::DynTrait(_)) {
+            return false;
+        }
+        if self.mentions_in_scope_param(ty) {
+            return false;
+        }
+        match ty {
+            Type::Named(_, args) | Type::Tuple(args) | Type::Union(args) => {
+                args.iter().all(|a| self.fully_concrete(a))
+            }
+            Type::List(e) | Type::Set(e) | Type::Option(e) => self.fully_concrete(e),
+            Type::Map(k, v) | Type::Result(k, v) => {
+                self.fully_concrete(k) && self.fully_concrete(v)
+            }
+            Type::Fn { params, ret } => {
+                params.iter().all(|p| self.fully_concrete(p)) && self.fully_concrete(ret)
+            }
+            _ => true,
+        }
+    }
+
     /// Record a `map(...)` call site at `span` if its result element type `elem` is a packed struct
     /// (P-PACK 2.6 category B) — the span the VM's `map` builtin keys on to build a flat result.
     pub(crate) fn note_map_packed(&mut self, elem: &Type, span: Span) {

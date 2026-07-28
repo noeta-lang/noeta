@@ -25,7 +25,23 @@ impl Checker {
     /// index — check-position expressions (an absorbed closure, an annotation-driven literal)
     /// previously never recorded, so hover and inlay hints missed them.
     pub(crate) fn check(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
+        // A NAMED object literal in a position that HAS an expectation publishes it, so the
+        // construction can adopt type arguments its field values leave unconstrained (`r:
+        // Repo<Todo> = Repo { tbl: "todos" }` — no field mentions `T`, so inference alone yields
+        // `Repo` with no arguments, and the instance would record nothing to reflect). Keyed by the
+        // literal's own span so a nested literal cannot pick up an outer expectation.
+        let saved_expected_object = match expr {
+            Expr::Object(lit) if lit.type_name.is_some() => Some(
+                self.coloring
+                    .expected_object
+                    .replace((lit.span, expected.clone())),
+            ),
+            _ => None,
+        };
         let ty = self.check_inner(expr, expected, env);
+        if let Some(saved) = saved_expected_object {
+            self.coloring.expected_object = saved;
+        }
         if self.config.record_expr_types
             && let Some(repr) = type_to_repr_top(&ty, &self.symbols.type_kinds)
         {
@@ -579,6 +595,55 @@ impl Checker {
         };
         if !args.is_empty() || !self.coloring.type_params.contains_key(name.as_str()) {
             return false;
+        }
+        // A parameter of the ENCLOSING generic type that this site cannot reach. The instantiation
+        // DOES exist at run time — it is on the receiver's reflected type tag — so the blanket
+        // "generics are erased" would send the author looking for a fix that is not the one. Two
+        // distinct reasons, each with its own fix, so each says which it is:
+        //
+        //   * this member has no receiver to read the tag from (an associated function, or a
+        //     method whose body never touches `self` — which is what makes it associated);
+        //   * the name is shadowed by the METHOD's own type parameter, which is a different `T`
+        //     entirely and has no per-call channel of its own.
+        //
+        // `self_type_params` is non-empty exactly inside an instance method of a generic type, and
+        // holds a blank in the slot of any parameter the method's own `<…>` shadows — so "in scope
+        // on the type, but not reachable here" splits cleanly on it.
+        if let Some(owner) = self.coloring.current_type.clone()
+            && self
+                .symbols
+                .generic_types
+                .get(&owner)
+                .is_some_and(|ps| ps.iter().any(|p| p == name.as_str()))
+        {
+            let shadowed = !self.coloring.self_type_params.is_empty();
+            let msg = if shadowed {
+                format!(
+                    "`{surface}` cannot reflect over `{name}` here: this method declares its own \
+                     `{name}`, which shadows `{owner}`'s and is erased"
+                )
+            } else {
+                format!(
+                    "`{surface}` cannot reflect over `{name}` here: this member of `{owner}` has \
+                     no receiver, and `{name}` is carried by the instance"
+                )
+            };
+            let help = if shadowed {
+                format!(
+                    "rename the method's parameter if you meant `{owner}`'s `{name}` (an \
+                     instance's own type arguments are recorded at construction and reachable \
+                     from `self`); a method's own type parameter has no such channel"
+                )
+            } else {
+                format!(
+                    "an instance of a generic type records its type arguments at construction, so \
+                     `{surface}::<{name}>()` resolves in a method that takes `self` — read a field \
+                     of `self` (or take the value as a parameter and reflect at the call site)"
+                )
+            };
+            self.error(DiagnosticCode::InvalidTypeArguments, *span, msg)
+                .help(help);
+            return true;
         }
         self.error(
             DiagnosticCode::InvalidTypeArguments,
@@ -1350,7 +1415,27 @@ impl Checker {
             // at run time, so a `type_name::<T>()` inside `fn f<T>()` could only ever yield the
             // literal `"T"`, which names nothing. Unlike `attributes_of`, there is no forwarding
             // escape: this lowers to a compile-time constant, with no runtime node to feed a slot.
-            Expr::TypeName { ty, .. } => {
+            Expr::TypeName { ty, span } => {
+                // Inside a generic type's INSTANCE method, a bare parameter of the enclosing type
+                // is not erased after all: the receiver carries the instantiation as a reflected
+                // type tag stamped at its construction site, so `type_name::<T>()` reads argument
+                // `i` off `self` at run time (generic constructor reflection, Gap B). Recorded as a
+                // site rather than folded to a constant — one compiled body serves every
+                // instantiation, so there is no constant to fold to.
+                if let TypeRef::Named { name, args, .. } = ty
+                    && args.is_empty()
+                    && let Some(i) = self
+                        .coloring
+                        .self_type_params
+                        .iter()
+                        .position(|p| p == name.as_str())
+                {
+                    let owner = self.coloring.current_type.clone().unwrap_or_default();
+                    self.sites
+                        .self_type_arg_sites
+                        .insert(*span, (owner, i as u32));
+                    return Type::String;
+                }
                 if !self.reject_erased_type_param(ty, "type_name") {
                     self.check_type_ref(ty);
                 }
@@ -2015,6 +2100,26 @@ impl Checker {
                             f.name
                         ),
                     );
+                }
+            }
+        }
+        // Fill any parameter the field values left unconstrained from the CHECKED position's
+        // expectation. Purely additive — an argument the fields DID pin stays as inferred, so the
+        // established "fields determine the instantiation" rule is untouched; this only decides
+        // what an otherwise-unconstrained parameter is, where the alternative is nothing at all.
+        // Only a fully concrete expectation contributes: a `dyn`/open argument makes no claim.
+        if !params.is_empty()
+            && let Some((expected_span, Type::Named(n, expected_args))) =
+                self.coloring.expected_object.clone()
+            && expected_span == lit.span
+            && n == type_name
+        {
+            for (i, p) in params.iter().enumerate() {
+                if !subst.contains_key(p)
+                    && let Some(t) = expected_args.get(i)
+                    && self.fully_concrete(t)
+                {
+                    subst.insert(p.clone(), t.clone());
                 }
             }
         }
