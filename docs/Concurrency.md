@@ -216,6 +216,51 @@ concurrent {
 | **Explicit close** | `tx.close()` still works and is idempotent; it composes with auto-close (whichever happens first closes the channel). |
 | **Deadlock** | A channel that can make no progress — every party blocked on channel ops with no live counterparty, no timer, and no pending IO — is a deterministic deadlock: the sandbox catches it as `E0010`, and the real (parallel) scheduler raises the same `E0010` rather than spinning. |
 
+## Streaming I/O
+
+Some sources produce values *over time* rather than all at once. The two in the standard library share the channel shape above — an awaited `recv` yielding `none` when the source is finished — so one `while` loop drains any of them:
+
+| Source | Read | Ends when |
+|---|---|---|
+| `Receiver<T>` (a channel) | `rx.recv().await` → `?T` | the channel is closed and drained |
+| `FrameStream` (an HTTP response body) | `stream.recv().await` → `?Frame` | the body ends |
+| `Socket` (a websocket session) | `sock.recv().await` → `?string` | the peer closes |
+
+```noeta
+use std.http.client
+use std.http.{Framing, Frame}
+
+async fn tokens(body: string): void {
+    api = client.new("https://api.example.com")
+    stream = client.stream(api.prepare("post", "/v1/chat", body), Framing.Sse)?
+    mut going = true
+    while going {
+        next = stream.recv().await
+        if next == none {
+            going = false
+        } else {
+            f: Frame = next ?? Frame { event: "", data: "", id: "", retry: none }
+            echo f.data
+        }
+    }
+}
+```
+
+A `FrameStream` is a **handle** on a single consumable body: copies alias it, and it belongs to the task that opened it. A **`Frame`, by contrast, is a value struct** — so by the rule in [Isolates and `Send`](#isolates-and-send) it is `Send`. That is deliberate rather than incidental: it lets one task own the body while others receive frames over a channel, which is the natural shape of a streaming pipeline.
+
+```noeta
+concurrent {
+    spawn read_into(stream, tx)     // one task owns the FrameStream
+    spawn forward(rx)               // others receive Frames over a channel
+}
+```
+
+Backpressure runs end to end: the real host's reader holds a bounded number of decoded frames and then stops reading the socket, so a slow consumer slows the *server* down instead of growing memory.
+
+Serving a stream is the mirror image. `server.sse(handler)` runs `handler(sink)` as a session and `sink.send(frame)` pushes to the client, exactly as `server.websocket` does for a socket — both are ordinary in-flight handlers to the serve loop, so a long-lived session interleaves with other requests rather than blocking them.
+
 ## Determinism
 
 In the sandbox executor (used for the differential oracle) time is a logical clock, so interleavings are reproducible and both backends agree. On the CLI, `noeta run` uses a real (tokio) executor and real OS-thread isolates. See [Concurrency Internals](Concurrency-Internals) for the "simulate deterministically, deploy real" design.
+
+A streaming body is deterministic under the sandbox too: the responder decodes a scripted body that is a pure function of the request, so a reading loop terminates in-oracle and both backends observe the identical frames.
