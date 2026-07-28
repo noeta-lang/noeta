@@ -163,6 +163,9 @@ Every tool that takes a `file` analyzes **the whole program** — the entry, its
 the packages its `noeta.toml` depends on, each under its own language edition. Dependency
 resolution is a read-only query: asking a question never rewrites `noeta.lock`.
 
+A failing tool fails **one request, not the session**: an internal error comes back as a JSON-RPC
+error naming the tool, and the server keeps serving. Retry it or ask something else — no reconnect.
+
 **Understand** — the compiler's semantic answers:
 - `check` — type-check code; the same JSON diagnostics `noeta check --format json` emits.
 - `type_at` / `symbols` — the inferred type at a symbol/position (plus a `layout` storage fact for `@packed`/flat-list types, same wording as editor hover); a file's declaration outline.

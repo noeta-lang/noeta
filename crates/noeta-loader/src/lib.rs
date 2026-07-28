@@ -2035,38 +2035,82 @@ fn build_module_map(
             }
         }
     }
+    // A unit's own declarations shadow an import of the same name, whichever scope the import sits
+    // in — so the set is the unit's, shared by the unit map and every tier-block overlay below.
+    let declared: HashSet<&str> = own_stmts.iter().filter_map(decl_name).collect();
+    add_module_import_aliases(&mut map, own_stmts, modules);
+    add_native_type_aliases(&mut map, own_stmts, &declared, reg);
+    let handles = if canonical_handles {
+        native_use_handles(own_stmts, modules, reg)
+    } else {
+        qualify::QMap::new()
+    };
+    // A tier block's own `use`s (`@test { use std.test.{Skip} … }`) bind inside the block only, so
+    // they get a **per-block overlay** instead of joining the tables above — see
+    // [`qualify::UnitMap::tier_scopes`]. Without this the block's references were qualified against
+    // the unit's table alone: `#[Skip("…")]` stayed the bare `Skip` the runner (which matches the
+    // qualified `std.test.Skip`) never recognizes, so activation lifted a test whose skip had
+    // silently evaporated.
+    let mut tier_scopes = std::collections::HashMap::new();
     for stmt in own_stmts {
-        if let Stmt::Use { path, names, .. } = stmt {
-            for n in names {
-                if module_declares(modules, path, &n.name) {
-                    let qualified = format!("{}.{}", path.join("."), n.name);
-                    map.insert(qualified.clone(), qualified.clone());
-                    map.insert(n.local().to_string(), qualified);
-                } else if let Some(module) = module_with_namespace(modules, path, &n.name) {
-                    // A whole-module import (`use geometry.vec`): every `pub` declaration aliases
-                    // under the local binding — `vec.Vec2` → `geometry.vec.Vec2` — so qualified
-                    // references (struct-literal heads, annotations, patterns, member chains)
-                    // rewrite to the FQN the merged program declares.
-                    let ns = module.namespace.join(".");
-                    for decl in module.stmts.iter().filter(|s| decl_is_public(s)) {
-                        if let Some(dname) = qualifiable_decl_name(decl) {
-                            let qualified = format!("{ns}.{dname}");
-                            map.insert(qualified.clone(), qualified.clone());
-                            map.insert(format!("{}.{dname}", n.local()), qualified);
-                        }
+        let Stmt::TierBlock { items, span, .. } = stmt else {
+            continue;
+        };
+        if !items.iter().any(|s| matches!(s, Stmt::Use { .. })) {
+            continue;
+        }
+        let mut names = map.clone();
+        add_module_import_aliases(&mut names, items, modules);
+        add_native_type_aliases(&mut names, items, &declared, reg);
+        let mut block_handles = handles.clone();
+        if canonical_handles {
+            block_handles.extend(native_use_handles(items, modules, reg));
+        }
+        tier_scopes.insert(
+            *span,
+            qualify::UnitMap {
+                names,
+                handles: block_handles,
+                tier_scopes: std::collections::HashMap::new(),
+            },
+        );
+    }
+    qualify::UnitMap {
+        names: map,
+        handles,
+        tier_scopes,
+    }
+}
+
+/// Fold the **loaded-module** imports among `use_stmts` into a rewrite map: an import that resolves
+/// to a real module qualifies to that module's identity, keyed by the import's local (alias-aware)
+/// name. Split out of [`build_module_map`] so a tier block's own `use`s can be folded into a
+/// block-scoped overlay through the exact same rule.
+fn add_module_import_aliases(map: &mut qualify::QMap, use_stmts: &[Stmt], modules: &[ModuleView]) {
+    for stmt in use_stmts {
+        let Stmt::Use { path, names, .. } = stmt else {
+            continue;
+        };
+        for n in names {
+            if module_declares(modules, path, &n.name) {
+                let qualified = format!("{}.{}", path.join("."), n.name);
+                map.insert(qualified.clone(), qualified.clone());
+                map.insert(n.local().to_string(), qualified);
+            } else if let Some(module) = module_with_namespace(modules, path, &n.name) {
+                // A whole-module import (`use geometry.vec`): every `pub` declaration aliases
+                // under the local binding — `vec.Vec2` → `geometry.vec.Vec2` — so qualified
+                // references (struct-literal heads, annotations, patterns, member chains)
+                // rewrite to the FQN the merged program declares.
+                let ns = module.namespace.join(".");
+                for decl in module.stmts.iter().filter(|s| decl_is_public(s)) {
+                    if let Some(dname) = qualifiable_decl_name(decl) {
+                        let qualified = format!("{ns}.{dname}");
+                        map.insert(qualified.clone(), qualified.clone());
+                        map.insert(format!("{}.{dname}", n.local()), qualified);
                     }
                 }
             }
         }
-    }
-    add_native_type_aliases(&mut map, own_stmts, reg);
-    qualify::UnitMap {
-        names: map,
-        handles: if canonical_handles {
-            native_use_handles(own_stmts, modules, reg)
-        } else {
-            qualify::QMap::new()
-        },
     }
 }
 
@@ -2149,14 +2193,16 @@ fn canonical_use_binding(
 /// spelling available to a program that needs both.
 ///
 /// A **local declaration wins**: a name a file declares itself is not rewritten to a native type of
-/// the same name, matching the shadowing rule the rest of the prelude follows.
+/// the same name, matching the shadowing rule the rest of the prelude follows. `declared` is the
+/// unit's own declaration names, passed in rather than derived from `use_stmts` so a tier-block
+/// overlay (whose `use_stmts` are one block's imports) still honors the whole file's shadowing.
 fn add_native_type_aliases(
     map: &mut qualify::QMap,
-    own_stmts: &[Stmt],
+    use_stmts: &[Stmt],
+    declared: &HashSet<&str>,
     reg: &noeta_ext_abi::registry::Registry,
 ) {
     use noeta_ext_abi::registry::UseKind;
-    let declared: HashSet<&str> = own_stmts.iter().filter_map(decl_name).collect();
     let mut alias = |local: String, qualified: String| {
         if declared.contains(local.as_str()) {
             return;
@@ -2164,7 +2210,7 @@ fn add_native_type_aliases(
         map.insert(qualified.clone(), qualified.clone());
         map.insert(local, qualified);
     };
-    for stmt in own_stmts {
+    for stmt in use_stmts {
         let Stmt::Use { path, names, .. } = stmt else {
             continue;
         };
@@ -3974,5 +4020,96 @@ mod tests {
             .filter(|s| matches!(s, Stmt::Fn(f) if leaf(&f.name) == "tool"))
             .count();
         assert_eq!(tools, 1, "the entry's own declaration is not duplicated");
+    }
+
+    // --- a tier block's own `use`s (block-scoped qualification) --------------------------------
+
+    /// The attribute names on the first `Stmt::Fn` inside the program's first `@<tier>` block.
+    fn block_fn_attrs(linked: &Linked) -> Vec<String> {
+        linked
+            .program
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::TierBlock { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("a tier block")
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.clone()).collect()),
+                _ => None,
+            })
+            .expect("a fn inside the block")
+    }
+
+    /// The attribute names on the first *top-level* `Stmt::Fn`.
+    fn top_fn_attrs(linked: &Linked) -> Vec<String> {
+        linked
+            .program
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.clone()).collect()),
+                _ => None,
+            })
+            .expect("a top-level fn")
+    }
+
+    #[test]
+    fn a_tier_blocks_own_use_qualifies_references_inside_the_block() {
+        // The `use` sits *inside* the `@test` block, so it only reaches the top-level statement
+        // stream once the tier activates — after the linker has run. The qualifier must still see
+        // it, or `#[Skip(…)]` stays the bare `Skip` that neither the checker's attribute table nor
+        // the test runner (which matches the qualified `std.test.Skip`) recognizes, and the skip
+        // silently evaporates.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use std.test.{Skip}\n  #[Skip(\"later\")]\n  fn f(text: string): string { return text; }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[],
+        )
+        .expect("links");
+        assert_eq!(
+            block_fn_attrs(&linked),
+            vec![noeta_ast::reflect::TEST_ATTR_SKIP.to_string()]
+        );
+    }
+
+    #[test]
+    fn a_tier_blocks_use_does_not_qualify_references_outside_it() {
+        // The overlay is scoped to the block: the same name on a top-level fn is untouched, so it
+        // still resolves to nothing and still earns its "cannot be used as an attribute" error.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use std.test.{Skip}\n  fn inside(): void { }\n}\n#[Skip(\"outside\")]\nfn outside(): void { }\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[],
+        )
+        .expect("links");
+        assert_eq!(top_fn_attrs(&linked), vec!["Skip".to_string()]);
+    }
+
+    #[test]
+    fn a_tier_blocks_use_is_not_hoisted_out_of_the_block() {
+        // The overlay is a *rewrite table*, not an import: the `use` statement itself stays inside
+        // the block, so a build with the tier inactive drops it with the block and no import is
+        // left dangling in the merged program.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use std.test.{Skip}\n  #[Skip(\"later\")]\n  fn f(text: string): string { return text; }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[],
+        )
+        .expect("links");
+        assert!(
+            !linked
+                .program
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Use { .. })),
+            "no top-level `use` may appear: {:?}",
+            linked.program.stmts
+        );
     }
 }

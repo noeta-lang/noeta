@@ -262,7 +262,7 @@ fn spawn_run(
     resume: mpsc::Receiver<Resume>,
     out: Sender<Value>,
 ) -> JoinHandle<()> {
-    thread::spawn(move || {
+    let worker = move || {
         let _ = out.send(event(
             "thread",
             json!({ "reason": "started", "threadId": MAIN_THREAD_ID }),
@@ -307,7 +307,15 @@ fn spawn_run(
         ));
         let _ = out.send(exited_event(run.exit_code));
         let _ = out.send(terminated_event());
-    })
+    };
+    // The worker runs the whole compile front end (`compile_file` above), so it needs a real stack,
+    // not `std::thread`'s 2 MiB default: parsing an ordinary real-world module overflows that in a
+    // debug build, and a stack overflow aborts the *adapter process*, taking the debug session with
+    // it. Same defect the MCP/LSP tokio runtimes had, in a hand-rolled thread instead of a runtime.
+    thread::Builder::new()
+        .stack_size(noeta_parser::SERVER_STACK_SIZE)
+        .spawn(worker)
+        .expect("spawn the DAP run worker")
 }
 
 /// Abandon the current run: set the terminate flag (for a *running* worker) and send a terminate

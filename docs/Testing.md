@@ -83,7 +83,9 @@ prints nothing under `noeta test` — while the declarations and bindings around
 
 Lead a test with any of these `std.test` attributes to change how it runs or is reported. They are
 not prelude — bring them in with `use std.test.{Skip, Name, Group, Data}` (or qualify one inline,
-`#[std.test.Skip]`):
+`#[std.test.Skip]`). The `use` may sit at the top of the file or at the top of the `@test` block
+itself; both spellings resolve the same. A block-scoped one binds *inside that block only*, and is
+dropped with the block on an ordinary `noeta run`/`noeta build`:
 
 | Attribute | Effect |
 |---|---|
@@ -93,9 +95,9 @@ not prelude — bring them in with `use std.test.{Skip, Name, Group, Data}` (or 
 | `#[Data([…])]` | Parameterized — runs once per row, reported as `name[row]`. |
 
 ```noeta
-use std.test.{Skip, Name, Group, Data}
-
 @test {
+    use std.test.{Skip, Name, Group, Data}
+
     #[Skip("flaky until fixed")]
     fn not_ready(): void { assert(false) }
 

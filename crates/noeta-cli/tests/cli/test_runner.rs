@@ -248,6 +248,42 @@ fn test_skip_reason_is_shown() {
 }
 
 #[test]
+fn test_skip_imported_inside_the_tier_block_takes_effect() {
+    // A tier block may open with its own `use`s. That import is what the `#[Skip]` below it depends
+    // on, and it used to reach the linker's qualifier too late (a block's `use` only becomes
+    // top-level when the tier activates, *after* qualification): the attribute stayed the bare
+    // `Skip` the runner never matches, so the skip silently evaporated and `f` ran as a test and
+    // failed on its missing argument. Block-scoped and top-level `use` must agree.
+    let file = temp_program(
+        "test_skip_block_scoped_use",
+        "@test {\n    use std.test.{Skip}\n    #[Skip(\"needs an argument\")]\n    fn f(text: string): string { return text }\n}\n",
+    );
+    lang().arg("test").arg(&file).assert().success().stdout(
+        predicate::str::contains("skip  f (needs an argument)")
+            .and(predicate::str::contains("1 skipped"))
+            .and(predicate::str::contains("FAIL").not()),
+    );
+}
+
+#[test]
+fn test_a_tier_blocks_use_does_not_escape_the_block() {
+    // The counterpart: the block-scoped import stays block-scoped. On a normal run (the block is
+    // stripped) a `Skip` *outside* the `@test` block resolves to nothing, so it is still the
+    // ordinary E0029 — the fix qualifies references inside the block, it does not fold the block's
+    // imports into the file's scope.
+    let file = temp_program(
+        "test_block_use_scope",
+        "@test {\n    use std.test.{Skip}\n    fn inside(): void { assert(true) }\n}\n#[Skip(\"out of scope\")]\nfn outside(): void { }\necho \"main\"\n",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0029"));
+}
+
+#[test]
 fn test_group_filter_runs_only_that_group() {
     let file = temp_program("test_group", ATTR_TESTS);
     lang()

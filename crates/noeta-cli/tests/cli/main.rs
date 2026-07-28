@@ -20,6 +20,7 @@ mod grammar;
 mod ide;
 mod init;
 mod isolates;
+mod mcp;
 mod namespace;
 mod pm;
 mod pm_native;

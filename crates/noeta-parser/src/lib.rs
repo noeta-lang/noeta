@@ -1070,16 +1070,55 @@ pub fn parse_fragment(id: SourceId, name: &str, text: &str) -> Fragment {
 /// hundreds of delimiters deep, while an adversarial or generated one no longer crashes the process.
 const MAX_NESTING_DEPTH: usize = 256;
 
-/// Nesting depth up to which parsing runs inline on the caller's stack — chosen to stay well within
-/// the smallest stack a parse runs on (a ~2 MiB test thread). Beyond it, parsing moves to a worker
-/// thread with a large stack ([`DEEP_PARSE_STACK`]) so even input near [`MAX_NESTING_DEPTH`] cannot
-/// overflow whatever stack the caller happens to have. The overwhelming majority of programs nest
-/// far less than this and never leave the caller's thread.
+/// Nesting depth up to which parsing *may* run inline on the caller's stack. Beyond it, parsing
+/// moves to a worker thread with a large stack ([`DEEP_PARSE_STACK`]) so even input near
+/// [`MAX_NESTING_DEPTH`] cannot overflow whatever stack the caller happens to have. The
+/// overwhelming majority of programs nest far less than this.
+///
+/// A depth under this limit is **necessary but not sufficient** for an inline parse: the caller's
+/// stack must also have [`INLINE_PARSE_HEADROOM`] free. This limit alone used to be the whole test,
+/// against a documented assumption that the smallest stack a parse ever runs on is "a ~2 MiB test
+/// thread" — and that assumption was false in both directions. A tokio runtime gives its workers
+/// exactly 2 MiB (so the servers parse on the smallest stack in the system), and in a debug build
+/// **four** nested `if` statements in one function are enough to overflow 2 MiB — a quarter of what
+/// this limit permits inline. Ordinary real-world modules therefore aborted the MCP/LSP process.
 const INLINE_NESTING_DEPTH: usize = 16;
 
-/// Stack size for the deep-nesting worker thread — comfortably above what [`MAX_NESTING_DEPTH`]
-/// levels need (~tens of MiB), so the depth limit, not the stack, is the binding constraint.
+/// Stack a parse must find free before it runs **inline** on the caller's thread. A caller with less
+/// is served on the deep-stack worker instead, at the cost of one thread spawn per *file*.
+///
+/// Measured on the debug build (the worst case — release frames are far smaller): nesting depth 4
+/// overflows a 2 MiB thread, while depths 4, 8 and 16 all fit in 4 MiB, since `chumsky`'s
+/// `recursive` combinators move onto heap stack segments (`stacker`) once the thread stack runs
+/// low. 4 MiB is therefore the measured requirement across the whole inline range up to
+/// [`INLINE_NESTING_DEPTH`], and this is that with half again for margin. It stays under a `main`
+/// thread's 8 MiB default, so the CLI keeps parsing inline exactly as before.
+///
+/// `stacker::remaining_stack()` answers "how much is left"; when it cannot tell (`None`), the
+/// conservative answer is to offload.
+const INLINE_PARSE_HEADROOM: usize = 6 * 1024 * 1024;
+
+/// Stack size for the deep-nesting worker thread.
+///
+/// Measured on the debug build: it holds statement nesting to depth ~180 and overflows by ~200 —
+/// short of [`MAX_NESTING_DEPTH`], so the depth limit is **not** the binding constraint there and a
+/// legal-but-very-deep file can still abort the process. Raising this does not close the gap
+/// (depth 255 overflows a 1 GiB stack too): past ~190 the binding constraint is `chumsky`'s
+/// hard-coded 64 KiB `stacker` red zone, which a debug build's frames can overrun between two grow
+/// checks. Closing it properly means lowering [`MAX_NESTING_DEPTH`] to a depth that is provably
+/// safe, which is a language-visible change to where E0032 fires; tracked in `plans/backlog.md`.
 const DEEP_PARSE_STACK: usize = 64 * 1024 * 1024;
+
+/// Stack size a long-lived server should give the threads it runs the compiler front end on — the
+/// LSP/DAP/MCP runtimes, whose platform default (tokio's 2 MiB) is *below* what a parse of an
+/// ordinary real-world module needs in a debug build.
+///
+/// It lives here because the parser owns the deepest recursion in the pipeline and owns
+/// [`INLINE_PARSE_HEADROOM`], the number it has to clear: a server thread sized above the headroom
+/// keeps the inline fast path, one sized below it silently pushes every parse onto the deep-stack
+/// worker. Sized like a `main` thread's default with room to spare, so the analysis stages
+/// downstream of the parse (which recurse too, with far smaller frames) are covered as well.
+pub const SERVER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Parse a token stream into a [`Program`]. Rejects pathologically deep delimiter nesting up front
 /// (E0032) and, for merely deep input, runs the recursive-descent grammar on a large-stack worker
@@ -1123,10 +1162,16 @@ pub fn parse_in(
             )],
         };
     }
-    if max_depth > INLINE_NESTING_DEPTH {
-        // Deep but legal: parse on a worker thread whose stack is large enough that the depth limit
-        // above — not the caller's stack — is what bounds recursion. A scoped thread lets the
-        // closure borrow `source`/`tokens` directly; the owned [`Parsed`] crosses the join.
+    // Two independent reasons to leave the caller's thread: the input is deeper than an inline
+    // parse is sized for, or the caller's stack is too small to hold an inline parse at all. The
+    // second is what a *server* hits — its runtime threads are 2 MiB whatever the input looks like
+    // — and asking the stack directly is what makes the guarantee independent of who is calling.
+    let short_on_stack = stacker::remaining_stack().is_none_or(|left| left < INLINE_PARSE_HEADROOM);
+    if max_depth > INLINE_NESTING_DEPTH || short_on_stack {
+        // Deep but legal, or a caller too near its own limit: parse on a worker thread whose stack
+        // is large enough that the depth limit above — not the caller's stack — is what bounds
+        // recursion. A scoped thread lets the closure borrow `source`/`tokens` directly; the owned
+        // [`Parsed`] crosses the join.
         std::thread::scope(|scope| {
             std::thread::Builder::new()
                 .stack_size(DEEP_PARSE_STACK)
@@ -6081,6 +6126,48 @@ mod tests {
             parsed.diagnostics
         );
         assert_eq!(parsed.program.stmts.len(), 1);
+    }
+
+    #[test]
+    fn an_ordinary_program_parses_on_a_two_mebibyte_thread() {
+        // 2 MiB is the stack a tokio runtime gives its workers — what the LSP/MCP/DAP servers used
+        // to parse on — and it is also the "~2 MiB test thread" `INLINE_NESTING_DEPTH` was
+        // documented as being sized to stay within. That documentation was wrong by a wide margin:
+        // in a debug build, monomorphized `chumsky` frames are big enough that **four** nested `if`
+        // statements in one function overflow 2 MiB, while the inline threshold happily allows
+        // sixteen levels of nesting. So an entirely unremarkable file aborted the process. Now
+        // `parse_in` asks the stack how much is left and offloads when it is short, which is what
+        // makes this pass.
+        //
+        // Depth is deliberately at the measured cliff, not far beyond it: the assertion is that
+        // *ordinary* code parses, not that pathological code does.
+        const TWO_MEBIBYTES: usize = 2 * 1024 * 1024;
+        let mut src = String::new();
+        for i in 0..4 {
+            src.push_str(&format!("fn f{i}(a: int): int {{\n"));
+            for _ in 0..4 {
+                src.push_str("  if a > 0 {\n");
+            }
+            src.push_str("    return a + 1\n");
+            for _ in 0..4 {
+                src.push_str("  }\n");
+            }
+            src.push_str("  return 0\n}\n");
+        }
+        let parsed = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(TWO_MEBIBYTES)
+                .spawn_scoped(scope, || parse_str(&src))
+                .expect("spawn the 2 MiB probe thread")
+                .join()
+                .expect("a 2 MiB thread must be able to parse an ordinary program")
+        });
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "the probe program should parse cleanly: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.program.stmts.len(), 4);
     }
 
     #[test]

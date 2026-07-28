@@ -168,13 +168,20 @@ pub fn module_graph(p: &Prepared) -> ModuleGraphOutput {
     }
     // The workspace's own member inputs (entry + siblings, in `sources` order) — reading their
     // memoized per-file parses instead of minting duplicate inputs per call (ide-workspaces).
+    //
+    // `Prepared::sources` is the *whole* canonical ordering — members first, then every dependency
+    // package's modules — while `members` is only the leading member run. Zipping pairs each member
+    // with its own source and stops at the shorter of the two, so a program that has dependencies
+    // cannot index past the members: iterating `sources` and indexing `members` panicked with
+    // `index out of bounds` on any project with a `noeta.toml` dependency, which is to say on every
+    // real package.
     let members = p.ws.members(&p.db);
-    let modules = p
-        .sources
+    let modules = members
         .iter()
+        .zip(p.sources.iter())
         .enumerate()
-        .map(|(source_idx, src)| {
-            let parsed = noeta_db::ast(&p.db, members[source_idx]);
+        .map(|(source_idx, (member, src))| {
+            let parsed = noeta_db::ast(&p.db, *member);
             let mut namespace = String::new();
             let mut imports = Vec::new();
             for stmt in &parsed.0.program.stmts {

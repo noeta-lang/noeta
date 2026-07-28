@@ -32,6 +32,21 @@ When a tier *is* active, its block's items are **inlined** into the top-level pr
 
 Each tool activates its own tier: `noeta test` activates `test`, `noeta bench` activates `bench`, `noeta doc` activates `doc`. The `debug` tier has no dedicated command — you activate it explicitly.
 
+### A block's own imports
+
+A **top-level** tier block may open with its own `use`s, so a dependency only the tier needs is written where the tier is rather than at the top of the file:
+
+```noeta
+@test {
+    use std.test.{Skip}
+
+    #[Skip("needs an argument")]
+    fn f(text: string): string { return text }
+}
+```
+
+Such an import binds **inside the block only** — the same name used outside it resolves to nothing, exactly as if the `use` were not there — and it is dropped with the block when the tier is inactive, so it never reaches a production build. Everything the block's own code can name through it works the same as a top-level `use`, including the attribute names that `#[…]` resolves. (A block in *statement* position — nested in a function body, loop, or branch — is code, not a file scope: a `use` inside one binds nothing and its references are the ordinary "cannot find … in this scope" error.)
+
 ### `@debug` — conditional inline code
 
 `@debug { … }` is code in *statement* position: instrumentation you want compiled in only sometimes.
