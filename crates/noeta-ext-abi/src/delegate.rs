@@ -342,7 +342,7 @@ macro_rules! __delegate_host_capability {
                 &mut self,
                 request: $crate::NetRequest,
                 framing: $crate::stream::Framing,
-            ) -> Result<u64, $crate::NetError> {
+            ) -> Result<$crate::stream::StreamHead, $crate::NetError> {
                 self.$field.net_stream_open(request, framing)
             }
             fn net_stream_recv_next(

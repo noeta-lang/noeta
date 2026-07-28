@@ -596,23 +596,33 @@ impl Network for SandboxHost {
 
     // --- Streaming bodies (http-streaming arc) ---
 
-    /// Open a scripted stream: decode the whole deterministic body for `request` up front and hand
-    /// back a cursor over its frames.
+    /// Open a scripted stream: answer the head from the deterministic responder, decode the whole
+    /// deterministic body for `request` up front, and hand back a cursor over its frames.
     ///
     /// Decoding at open (rather than incrementally per `recv`) is what makes a streaming program
     /// resolve at spawn like every other sandbox leaf — deterministic, ready on the first poll, and
     /// therefore in-oracle. The frames are a pure function of the request, so both backends compute
     /// the identical sequence.
+    ///
+    /// The head is a pure function of the request too ([`crate::net::sandbox_stream_head`], whose
+    /// status grammar is the buffered responder's), so a differential program can script a streamed
+    /// `429` and both backends observe the same status.
     fn net_stream_open(
         &mut self,
         request: crate::NetRequest,
         framing: noeta_ext_abi::stream::Framing,
-    ) -> Result<u64, noeta_ext_abi::NetError> {
+    ) -> Result<noeta_ext_abi::stream::StreamHead, noeta_ext_abi::NetError> {
         let frames = crate::net::sandbox_stream_frames(&request, framing);
+        let (status, headers) = crate::net::sandbox_stream_head(&request);
         let id = self.next_stream;
         self.next_stream += 1;
         self.streams.insert(id, frames.into());
-        Ok(id)
+        Ok(noeta_ext_abi::stream::StreamHead {
+            stream: id,
+            status,
+            headers,
+            url: request.url,
+        })
     }
 
     /// Pop the next scripted frame; `None` once the body is exhausted — the deterministic "the
@@ -1472,7 +1482,8 @@ mod tests {
         };
         let stream = host
             .net_stream_open(request.clone(), Framing::Ndjson)
-            .unwrap();
+            .unwrap()
+            .stream;
 
         let mut seen = Vec::new();
         while let Some(frame) = host.net_stream_recv_next(stream).unwrap() {
@@ -1485,8 +1496,12 @@ mod tests {
         // Two streams are independent cursors, and closing one does not disturb the other.
         let a = host
             .net_stream_open(request.clone(), Framing::Ndjson)
-            .unwrap();
-        let b = host.net_stream_open(request, Framing::Ndjson).unwrap();
+            .unwrap()
+            .stream;
+        let b = host
+            .net_stream_open(request, Framing::Ndjson)
+            .unwrap()
+            .stream;
         assert_ne!(a, b);
         host.net_stream_recv_next(a)
             .unwrap()
@@ -1562,7 +1577,7 @@ mod tests {
                 body: vec![],
                 timeout_ms: None,
             };
-            let stream = host.net_stream_open(request, framing).unwrap();
+            let stream = host.net_stream_open(request, framing).unwrap().stream;
             let mut frames = Vec::new();
             while let Some(frame) = host.net_stream_recv_next(stream).unwrap() {
                 frames.push(frame);

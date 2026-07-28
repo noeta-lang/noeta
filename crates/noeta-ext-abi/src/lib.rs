@@ -35,7 +35,18 @@
 /// the new `Network` capability methods are default-provided and the new `ExtType`/`ExtEnum`
 /// registrations are additive, so nothing written for ABI 3 stops compiling. A source break is what
 /// this constant records — not every addition.
-pub const ABI_VERSION: u32 = 4;
+///
+/// **5** — [`host::Network::net_stream_open`] returns [`stream::StreamHead`] (the stream id plus the
+/// response status/headers/url) instead of a bare `u64`, so a streamed non-2xx is observable at all.
+/// Applying the ABI-4 test — "does anything written for the previous version stop compiling?" — this
+/// one does: a host that *overrides* `net_stream_open`, and an `ExternIo` that calls it through
+/// `&mut dyn Host`, both fail to compile until they take the new type. It is deliberately not the
+/// additive shape (a separate `net_stream_status(id)` accessor with a default), because a default
+/// there would let a streaming host silently report `200` for a real `429` — the same invisible
+/// failure the change exists to remove. The language-facing addition riding along
+/// (`FrameStream.status`/`ok`/`header`/`error_for_status`) is additive on its own and would not have
+/// warranted a bump.
+pub const ABI_VERSION: u32 = 5;
 
 pub mod args;
 pub mod channel;

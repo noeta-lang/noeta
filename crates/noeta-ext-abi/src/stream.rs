@@ -529,16 +529,99 @@ pub const FRAME_STREAM_TYPE_NAME: &str = "FrameStream";
 /// `FrameStream`'s qualified runtime identity.
 pub const FRAME_STREAM_TYPE_IDENTITY: &str = "std.http.FrameStream";
 
-/// An open response body being read incrementally — a plain host-resource id, exactly like
-/// [`crate::net::Request`]'s `conn` and the serve loop's `Socket`.
+/// What opening a stream produced: the host-side id **and the response head that came back with
+/// it** — the [`crate::NetResponse`] minus its body, which is the one thing a streamed response
+/// cannot hand over whole.
+///
+/// The head is returned rather than queried later because it is produced exactly once, at the
+/// opening handshake, and is immutable afterwards. A separate `net_stream_status(id)` accessor was
+/// the alternative and is worse in the specific way this type exists to prevent: it can be
+/// *forgotten*. A host that implements streaming but not the accessor would answer every request
+/// with a plausible default, and a silently-wrong `200` for a real `429` is the same class of
+/// invisible failure as discarding the status altogether. Returning it here makes a status
+/// structurally unavoidable — a host cannot open a stream without saying what the server answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamHead {
+    /// The host-side stream id, passed to [`crate::host::Network::net_stream_recv`] /
+    /// [`crate::host::Network::net_stream_close`].
+    pub stream: u64,
+    /// The response status. A non-2xx is **not** an error here, exactly as it is not one for
+    /// [`crate::NetResponse`]: the request reached the server and was answered.
+    pub status: u16,
+    /// The response headers, in the order the server sent them.
+    pub headers: Vec<(String, String)>,
+    /// The URL the response came from — the *final* one after any redirects, like
+    /// [`crate::NetResponse::url`].
+    pub url: String,
+}
+
+impl StreamHead {
+    /// A `200 OK` head for `stream` against `url`, carrying no headers — the shape a host with no
+    /// head information to report would produce.
+    pub fn ok(stream: u64, url: impl Into<String>) -> StreamHead {
+        StreamHead {
+            stream,
+            status: 200,
+            headers: Vec::new(),
+            url: url.into(),
+        }
+    }
+}
+
+/// An open response body being read incrementally — a host-resource id, exactly like
+/// [`crate::net::Request`]'s `conn` and the serve loop's `Socket`, plus the response head the
+/// opening handshake received.
+///
+/// **Why the head rides along.** A streamed response has the same two halves as a buffered one, a
+/// head and a body, but only the body arrives incrementally. Discarding the head made a streamed
+/// `429` indistinguishable from a model with nothing to say: the vendor answers a rate limit with a
+/// bare JSON document, which the SSE decoder correctly cuts into **zero** frames (it is not an
+/// event stream), so the caller saw an empty stream and no way to learn why. Carrying `status` and
+/// `headers` on the handle means the answer is readable *before* the first `recv()` — an API where
+/// you must consume a frame to discover the request failed would be a quieter version of the same
+/// bug — and it survives `close()`, because a head is a fact about the response, not a live
+/// resource.
 ///
 /// **Reference semantics**: a copy aliases the same underlying body, because a body is a single
-/// consumable resource and two independent cursors over one connection do not exist. Not
+/// consumable resource and two independent cursors over one connection do not exist. The head is
+/// copied with it, which changes nothing — two handles to one stream saw one handshake. Not
 /// key-capable (it identifies a host resource, not a value).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameStream {
     /// The host-side stream id.
     pub stream: u64,
+    /// The response status the opening handshake received.
+    pub status: u16,
+    /// The response headers, in the order the server sent them.
+    pub headers: Vec<(String, String)>,
+    /// The URL the response came from.
+    pub url: String,
+}
+
+impl FrameStream {
+    /// The reader for an opened [`StreamHead`].
+    pub fn new(head: StreamHead) -> FrameStream {
+        FrameStream {
+            stream: head.stream,
+            status: head.status,
+            headers: head.headers,
+            url: head.url,
+        }
+    }
+
+    /// Whether the response status is a 2xx — the [`crate::NetResponse::ok`] twin.
+    pub fn is_ok(&self) -> bool {
+        (200..=299).contains(&self.status)
+    }
+
+    /// The first value of header `name`, matched case-insensitively — the
+    /// [`crate::NetResponse::header_value`] twin.
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 impl ExternValue for FrameStream {
@@ -1159,6 +1242,34 @@ mod tests {
             decode_all(Framing::Sse, &format!("{wire}\ndata: real\n\n")),
             vec![Frame::data("real")]
         );
+    }
+
+    #[test]
+    fn a_frame_stream_answers_its_head_without_reading_a_frame() {
+        // The whole point of carrying the head on the handle: every question below is answerable
+        // with zero frames consumed, which is the only state a streamed 429 ever reaches.
+        let stream = FrameStream::new(StreamHead {
+            stream: 7,
+            status: 429,
+            headers: vec![
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("Retry-After".to_string(), "30".to_string()),
+            ],
+            url: "https://api.test/v1/chat".to_string(),
+        });
+        assert_eq!(stream.status, 429);
+        assert!(!stream.is_ok());
+        // Case-insensitive, like `NetResponse::header_value` — a server may send any casing.
+        assert_eq!(stream.header_value("retry-after"), Some("30"));
+        assert_eq!(stream.header_value("x-absent"), None);
+        assert!(StreamHead::ok(1, "https://api.test").status == 200);
+        assert!(FrameStream::new(StreamHead::ok(1, "https://api.test")).is_ok());
+        // A 2xx boundary either side, since `ok` is a range test and not `== 200`.
+        for (status, ok) in [(199, false), (200, true), (299, true), (300, false)] {
+            let mut probe = stream.clone();
+            probe.status = status;
+            assert_eq!(probe.is_ok(), ok, "status {status}");
+        }
     }
 
     #[test]
