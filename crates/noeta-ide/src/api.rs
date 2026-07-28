@@ -84,6 +84,20 @@ fn modules_in(exts: &[Ext], keep: &dyn Fn(Ext) -> bool) -> Vec<ApiModule> {
                     signature: f.render(),
                     doc: doc_of(m, f.name),
                 })
+                // Call-site-typed functions are part of the module's surface, for the same reason
+                // `typed_methods` are part of a type's (below): without them `json.parse::<T>` /
+                // `json.try_parse::<T>` are invisible to the docs browser, `noeta doc --api`, and the
+                // MCP docs tools — which is most of what makes the turbofish discoverable at all.
+                // They are listed under their **turbofish spelling** (`parse::<T>`), which is both
+                // how the surface is written and what keeps the entry distinct from a plain function
+                // of the same name: the two tables deliberately allow a shared name (`json.parse` is
+                // a dynamic `parse(text): dyn` AND a typed `parse::<T>: T`), so listing both under
+                // the bare name would collide two different doors onto one page.
+                .chain(m.typed_functions.iter().map(|f| ApiFn {
+                    name: turbofish_name(f.name),
+                    signature: f.render(),
+                    doc: doc_of(m, f.name),
+                }))
                 .collect();
             functions.sort_by(|a, b| a.name.cmp(&b.name));
             out.push(ApiModule {
@@ -136,24 +150,32 @@ fn types_in(exts: &[Ext], keep: &dyn Fn(Ext) -> bool) -> Vec<ApiType> {
             continue;
         }
         for t in ext.types() {
+            let doc_of_method = |name: &str| {
+                t.docs
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, d)| d.to_string())
+                    .unwrap_or_default()
+            };
             let mut methods: Vec<ApiFn> = t
                 .methods
                 .iter()
                 .chain(t.ctx_methods.iter())
-                // Call-site-typed methods (http arc H8) are part of the type's surface — without
-                // them `resp.json::<T>()` would be invisible to completion, hover, and the docs
-                // browser, which is most of what makes the turbofish discoverable at all.
-                .chain(t.typed_methods.iter())
                 .map(|f| ApiFn {
                     name: f.name.to_string(),
                     signature: f.render(),
-                    doc: t
-                        .docs
-                        .iter()
-                        .find(|(n, _)| *n == f.name)
-                        .map(|(_, d)| d.to_string())
-                        .unwrap_or_default(),
+                    doc: doc_of_method(f.name),
                 })
+                // Call-site-typed methods (http arc H8) are part of the type's surface — without
+                // them `resp.json::<T>()` would be invisible to completion, hover, and the docs
+                // browser, which is most of what makes the turbofish discoverable at all. Listed
+                // under their turbofish spelling, like a module's typed functions above (a name may
+                // appear in BOTH `methods` and `typed_methods`, so the bare name is not unique).
+                .chain(t.typed_methods.iter().map(|f| ApiFn {
+                    name: turbofish_name(f.name),
+                    signature: f.render(),
+                    doc: doc_of_method(f.name),
+                }))
                 .collect();
             methods.sort_by(|a, b| a.name.cmp(&b.name));
             out.push(ApiType {
@@ -250,14 +272,22 @@ fn namespace_violations_in(
     out
 }
 
-/// The prose for `name` in module `m`, or empty. Keyed by name so one table serves both plain and
-/// higher-order functions.
+/// The prose for `name` in module `m`, or empty. Keyed by the **declared** name so one table serves
+/// the plain, higher-order, and call-site-typed tables alike (a name shared by two of them documents
+/// both doors, which is why the `json.parse`/`try_parse` prose describes each).
 fn doc_of(m: &noeta_stdlib::ExtModule, name: &str) -> String {
     m.docs
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, d)| d.to_string())
         .unwrap_or_default()
+}
+
+/// How a call-site-typed function/method is *listed*: `parse` → `parse::<T>`. The surface spelling
+/// is the turbofish one, and it keeps a typed entry distinct from a same-named plain one — the two
+/// registration tables deliberately allow a shared name, so the bare name is not a unique key.
+fn turbofish_name(name: &str) -> String {
+    format!("{name}::<T>")
 }
 
 #[cfg(test)]
@@ -281,6 +311,38 @@ mod tests {
         let hyp = math.functions.iter().find(|f| f.name == "hypot").unwrap();
         assert!(hyp.doc.contains("Euclidean"));
         assert_eq!(hyp.signature, "fn hypot(x: float, y: float): float");
+    }
+
+    #[test]
+    fn call_site_typed_functions_are_listed_under_their_turbofish_spelling() {
+        // The `typed_functions` table used to be skipped here while `typed_methods` was chained in,
+        // so `json.parse::<T>` / `json.try_parse::<T>` existed in the language and in no reference.
+        let json = module("std.json").expect("std.json is a registered module");
+        let names: Vec<&str> = json.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"parse"), "the dynamic door: {names:?}");
+        assert!(names.contains(&"parse::<T>"), "the typed door: {names:?}");
+        assert!(
+            names.contains(&"try_parse"),
+            "recoverable dynamic: {names:?}"
+        );
+        assert!(
+            names.contains(&"try_parse::<T>"),
+            "recoverable typed: {names:?}"
+        );
+        // Both doors of one name carry the shared prose and their own signature.
+        let dynamic = function("std.json", "try_parse").expect("plain try_parse");
+        let typed = function("std.json", "try_parse::<T>").expect("typed try_parse");
+        assert_eq!(
+            dynamic.signature,
+            "fn try_parse(text: string): Result<dyn, JsonError>"
+        );
+        assert!(
+            typed
+                .signature
+                .starts_with("fn try_parse(text: string): Result<T, JsonError>")
+        );
+        assert!(dynamic.doc.contains("Result<dyn, JsonError>"));
+        assert_eq!(dynamic.doc, typed.doc, "one table, keyed by declared name");
     }
 
     #[test]
@@ -309,6 +371,7 @@ mod tests {
                     .functions
                     .iter()
                     .chain(m.ctx_functions.iter())
+                    .chain(m.typed_functions.iter())
                     .map(|f| f.name)
                     .collect();
                 for (key, _) in m.docs {

@@ -300,6 +300,50 @@ fn split(recv: &str, sep: &str, limit: Option<i64>) -> Vec<String> {
     }
 }
 
+/// The bytes twin of [`slice_bounds_error`] — same shape, "bytes" noun, buffer length.
+fn bytes_slice_bounds_error(start: i64, end: i64, len: usize) -> StdError {
+    StdError {
+        kind: ErrorKind::Bounds,
+        message: format!("slice [{start}..{end}] is out of bounds for bytes of length {len}"),
+    }
+}
+
+/// One byte of a buffer as an `int` — the shared body of the `bytes` index `b[i]`.
+///
+/// `bytes` was the one sequence in the language with a `len()` and no way to *read* an element, so
+/// a byte buffer could be produced and measured but never taken apart: any decoder (base64, a
+/// binary frame, a checksum) was inexpressible in-language. This is that missing primitive, and it
+/// deliberately matches the string/list index rules — non-negative, half-open against `len`, and an
+/// out-of-range index is [`ErrorKind::Bounds`], which both backends map to `IndexOutOfBounds`
+/// (E0016). A byte is unsigned, so the result is always `0..=255`.
+pub fn bytes_index(data: &[u8], index: i64) -> Result<i64, StdError> {
+    if index < 0 || index as usize >= data.len() {
+        return Err(StdError {
+            kind: ErrorKind::Bounds,
+            message: format!(
+                "index {index} out of bounds for bytes of length {}",
+                data.len()
+            ),
+        });
+    }
+    Ok(i64::from(data[index as usize]))
+}
+
+/// A sub-buffer of a byte buffer — the shared body of `bytes.slice(start, end?)`.
+///
+/// The `string.slice`/`List.slice` rules verbatim, one buffer down: half-open `[start, end)`, `end`
+/// defaulting to the length, and any out-of-range pair an [`ErrorKind::Bounds`] error naming the
+/// span. Added alongside the index so `bytes` gains the *whole* sequence-reading surface its
+/// siblings have rather than a single accessor bolted on — a decoder wants both.
+pub fn bytes_slice(data: &[u8], start: i64, end: Option<i64>) -> Result<Vec<u8>, StdError> {
+    let len = data.len();
+    let end = end.unwrap_or(len as i64);
+    if start < 0 || end < start || end as usize > len {
+        return Err(bytes_slice_bounds_error(start, end, len));
+    }
+    Ok(data[start as usize..end as usize].to_vec())
+}
+
 /// Lowercase hex rendering of a byte buffer — the `bytes.to_hex()` method (crypto arc C1),
 /// defined once so both backends print digests identically.
 pub fn bytes_to_hex(data: &[u8]) -> String {
@@ -985,6 +1029,51 @@ mod tests {
         );
         // Invalid UTF-8 decodes to `None`, not a lossy replacement.
         assert_eq!(bytes_decode_utf8(&[0xff, 0xfe]), None);
+    }
+
+    #[test]
+    fn bytes_index_reads_one_byte_unsigned() {
+        // A byte is unsigned: the high bytes that a signed read would turn negative must not.
+        let data = [0x00, 0x7f, 0x80, 0xff];
+        assert_eq!(bytes_index(&data, 0).unwrap(), 0);
+        assert_eq!(bytes_index(&data, 1).unwrap(), 127);
+        assert_eq!(bytes_index(&data, 2).unwrap(), 128);
+        assert_eq!(bytes_index(&data, 3).unwrap(), 255);
+        // Out of range both ways is a bounds error, like a string/list index.
+        assert_eq!(bytes_index(&data, 4).unwrap_err().kind, ErrorKind::Bounds);
+        assert_eq!(bytes_index(&data, -1).unwrap_err().kind, ErrorKind::Bounds);
+        assert_eq!(bytes_index(&[], 0).unwrap_err().kind, ErrorKind::Bounds);
+        assert_eq!(
+            bytes_index(&data, 9).unwrap_err().message,
+            "index 9 out of bounds for bytes of length 4"
+        );
+    }
+
+    #[test]
+    fn bytes_slice_matches_the_string_and_list_rules() {
+        let data = [1u8, 2, 3, 4];
+        assert_eq!(bytes_slice(&data, 1, Some(3)).unwrap(), vec![2, 3]);
+        // `end` defaults to the length; an empty slice is legal at either edge.
+        assert_eq!(bytes_slice(&data, 1, None).unwrap(), vec![2, 3, 4]);
+        assert_eq!(bytes_slice(&data, 4, None).unwrap(), Vec::<u8>::new());
+        assert_eq!(bytes_slice(&data, 2, Some(2)).unwrap(), Vec::<u8>::new());
+        // Out of range, inverted, and negative all report bounds.
+        assert_eq!(
+            bytes_slice(&data, 0, Some(5)).unwrap_err().kind,
+            ErrorKind::Bounds
+        );
+        assert_eq!(
+            bytes_slice(&data, 3, Some(1)).unwrap_err().kind,
+            ErrorKind::Bounds
+        );
+        assert_eq!(
+            bytes_slice(&data, -1, None).unwrap_err().kind,
+            ErrorKind::Bounds
+        );
+        assert_eq!(
+            bytes_slice(&data, 0, Some(5)).unwrap_err().message,
+            "slice [0..5] is out of bounds for bytes of length 4"
+        );
     }
 
     #[test]

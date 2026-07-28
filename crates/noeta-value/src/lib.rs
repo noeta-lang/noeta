@@ -280,6 +280,21 @@ impl Value {
         })
     }
 
+    /// Read `f` over this `bytes` value's buffer **in place**, or `None` if it is not a `bytes`.
+    ///
+    /// The borrowing twin of [`Value::bytes_data`], which clones the whole buffer: an element read
+    /// (`b[i]`) through `bytes_data` would be O(n) per step, making a decode loop quadratic. Any
+    /// per-element or sub-range `bytes` access should come through here.
+    pub fn with_bytes<R>(self, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::Bytes(b) => Some(f(b)),
+            _ => None,
+        })
+    }
+
     /// The length of this `bytes` value's buffer, or `None` if it is not a `bytes`.
     pub fn bytes_len(self) -> Option<usize> {
         if !self.is_pointer() {

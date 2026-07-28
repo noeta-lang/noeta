@@ -135,15 +135,26 @@ echo s.contains(2)    // true
 
 ## `bytes`
 
-An opaque binary buffer — what `string.to_bytes()`, a packed list's `.to_bytes()`, and a `crypto` digest return. It compares by content, and `type_of(b)` is `Type.Bytes`.
+A binary buffer — what `string.to_bytes()`, a packed list's `.to_bytes()`, and a `crypto` digest return. It compares by content, and `type_of(b)` is `Type.Bytes`.
+
+```noeta
+b = "hé".to_bytes()
+echo b[0]                   // 104  (one byte, as an int in 0..=255)
+echo b[1]                   // 195  (a high byte reads UNSIGNED, never negative)
+echo b.len()                // 3    (UTF-8 bytes, not characters)
+echo b.slice(1).to_hex()    // c3a9 (half-open; end defaults to the length)
+```
 
 | Method | Signature | Example → result |
 |---|---|---|
 | `len` | `len() -> int` | `"hé".to_bytes().len()` → `3` (UTF-8 bytes, not chars) |
 | `to_hex` | `to_hex() -> string` | `"hé".to_bytes().to_hex()` → `68c3a9` (lowercase — the usual way to display a digest) |
 | `decode` | `decode() -> ?string` | `"hé".to_bytes().decode()` → `some(hé)`; `none` when the bytes are not valid UTF-8 (the inverse of `string.to_bytes()`) |
+| `slice` | `slice(start: int, end?: int) -> bytes` | `"hé".to_bytes().slice(1)` → the last two bytes (half-open; end defaults to the length; out of bounds is E0016) |
 
-For round-tripping packed numeric data through `bytes` (`xs.to_bytes()` / `from_bytes::<T>(...)`), see [Fixed-Width Ints & Packed Types](Fixed-Width-Integers#bytes--serialize-a-packed-list).
+Index `b[i]` returns the i-th byte as an `int` in `0..=255` — bytes are **unsigned**, so `0xff` reads as `255` and never as `-1` — and an out-of-range index is E0016, exactly as for a string or a list. `bytes` is a value like every other collection: there is no `b[i] = x`, so build a buffer with `List<u8>.to_bytes()` (or `string.to_bytes()`) rather than mutating one.
+
+For round-tripping packed numeric data through `bytes` (`xs.to_bytes()` / `from_bytes::<T>(...)`), see [Fixed-Width Ints & Packed Types](Fixed-Width-Integers#bytes--serialize-a-packed-list). For the base64 envelope over `bytes`, see [`std.base64`](std-base64).
 
 ## Option and Result
 

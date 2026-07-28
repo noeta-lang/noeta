@@ -569,6 +569,9 @@ fn bytes_method(name: &str) -> Option<Type> {
         "len" => Type::Int,            // the buffer length in bytes
         "to_hex" => Type::String,      // lowercase hex rendering (crypto arc C1)
         "decode" => opt(Type::String), // UTF-8 decode — `none` on invalid UTF-8
+        // The sequence-reading pair `bytes` was missing next to `string`/`List<T>`: `b.slice(a, b?)`
+        // here and the index `b[i]` in `index_return`. A slice of a byte buffer is a byte buffer.
+        "slice" => Type::Bytes,
         _ => return None,
     })
 }
@@ -743,6 +746,8 @@ pub(super) fn method_params(
         Type::Set(elem) => set_params(name, elem),
         Type::Map(key, val) => map_params(name, key, val),
         Type::Bytes if name == "len" || name == "to_hex" || name == "decode" => Some(vec![]),
+        // `slice(start, end?)` — the trailing `end` is optional (see `builtin_method_required`).
+        Type::Bytes if name == "slice" => Some(vec![Type::Int, Type::Int]),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
         }
@@ -848,6 +853,8 @@ fn builtin_method_required(receiver: &Type, name: &str) -> Option<usize> {
         // `list.slice(start, end?)` — end optional; `list.join(sep?)` — separator optional.
         (Type::List(_), "slice") => 1,
         (Type::List(_), "join") => 0,
+        // `bytes.slice(start, end?)` — the same shape as its string/list siblings.
+        (Type::Bytes, "slice") => 1,
         _ => return None,
     };
     Some(required)
@@ -1012,6 +1019,10 @@ pub(super) fn index_return(receiver: &Type) -> Option<Type> {
         Type::List(elem) => (**elem).clone(),
         Type::Map(_, val) => (**val).clone(),
         Type::String => Type::String,
+        // `b[i]` reads one byte as an `int` (0..=255). `bytes` was the one sequence with a `len()`
+        // and no element read at all, so a byte buffer could be produced but never taken apart —
+        // which made every decoder (base64, a binary frame, a checksum) inexpressible in-language.
+        Type::Bytes => Type::Int,
         Type::Dyn => Type::Dyn,
         _ => return None,
     })

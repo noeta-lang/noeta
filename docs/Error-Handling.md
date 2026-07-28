@@ -63,7 +63,19 @@ echo match digit("x") {
 }
 ```
 
-`Error` is independent of `Display`: implementing it never changes how the value renders (an `Err(e)` echoes with the payload's ordinary display), and an error type may *also* implement `Display` when its message is the natural rendering. `<E: Error>` works as a generic bound, so helpers can be polymorphic over any error type. The standard library's first implementor is [`JsonError`](std-json), the payload of `json.try_parse::<T>` and `json.decode_typed`.
+`Error` is independent of `Display`: implementing it never changes how the value renders (an `Err(e)` echoes with the payload's ordinary display), and an error type may *also* implement `Display` when its message is the natural rendering. `<E: Error>` works as a generic bound, so helpers can be polymorphic over any error type. The standard library's first implementor is [`JsonError`](std-json), the payload of `json.try_parse` (the dynamic door), `json.try_parse::<T>`, and `json.decode_typed`.
+
+> [!TIP]
+> **Reading a document whose shape is not yours.** A body off a wire carries the *remote party's* shape, so a malformed one is bad input rather than a bug in your program — it must be a value you handle. `json.try_parse(text)` is that door: it needs no declared type, returns `Result<dyn, JsonError>`, and carries the same `path()`/`kind()`/`line()`/`column()` detail the typed doors do. `json.parse(text)` stays the aborting spelling, for when a malformed document really does mean the program is wrong (E0007).
+
+```noeta
+use std.json
+
+echo match json.try_parse("{ nope") {
+    Ok(doc) => "read ${doc["id"]}",
+    Err(e)  => "bad payload (${e.kind()}) at line ${e.line() ?? 0}: ${e.message()}",
+}
+```
 
 ### Deriving `Error`
 

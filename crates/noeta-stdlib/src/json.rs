@@ -21,7 +21,7 @@
 //! deterministic, and matching the language's sorted-key maps.
 
 use crate::registry::{FieldDefault, FieldRecipe, NativeOut, Scalar, TypeRecipe};
-use crate::{ErrorKind, ExternValue, StdError, invalid_json_error};
+use crate::{ErrorKind, ExternValue, StdError};
 use serde_json::Value as JsonValue;
 use std::any::Any;
 use std::cmp::Ordering;
@@ -283,14 +283,27 @@ pub fn parse_typed(text: &str, recipe: &TypeRecipe) -> Result<NativeOut, StdErro
     try_parse_typed(text, recipe).map_err(JsonError::into_std_error)
 }
 
-/// Parse `text` as JSON and decode it into a **dynamic** value tree (`json.parse(text)`, no
-/// turbofish): a JSON object becomes a string-keyed [`NativeOut::Map`], an array a
+/// Parse `text` as JSON into a **dynamic** value tree, recoverably (`json.try_parse(text)`, no
+/// turbofish) — the door for a document whose shape is the remote party's: a malformed body is a
+/// [`JsonError`] the program handles, not an abort.
+///
+/// This is the dynamic twin of [`try_parse_typed`], and the only recoverable door that needs no
+/// declared recipe: a JSON object becomes a string-keyed [`NativeOut::Map`], an array a
 /// [`NativeOut::List`], `null` the unit value, and scalars their matching [`NativeOut::Scalar`]/
-/// [`NativeOut::Str`]. The backend materializes it into the same map/list/scalar values both
-/// backends build, so the differential holds by construction.
+/// [`NativeOut::Str`]. Only [`JsonErrorKind::Syntax`] can occur — there is no target type to
+/// mismatch against — so the error always carries the source line/column from `serde_json`, exactly
+/// as a typed decode's syntax failure does.
+pub fn try_parse_dynamic(text: &str) -> Result<NativeOut, JsonError> {
+    let value: JsonValue = serde_json::from_str(text).map_err(|e| JsonError::syntax(&e))?;
+    Ok(to_native(&convert(value)))
+}
+
+/// Parse `text` as JSON and decode it into a **dynamic** value tree (`json.parse(text)`, no
+/// turbofish) — the **aborting** door over the same walk as [`try_parse_dynamic`], the dynamic twin
+/// of [`parse_typed`]. A malformed document is an [`ErrorKind::ArgType`] error the backend raises at
+/// the call site (`invalid JSON: …`, via [`JsonError::into_std_error`]).
 pub fn parse_dynamic(text: &str) -> Result<NativeOut, StdError> {
-    let json = parse(text).map_err(|detail| invalid_json_error(&detail))?;
-    Ok(to_native(&json))
+    try_parse_dynamic(text).map_err(JsonError::into_std_error)
 }
 
 /// Convert a parsed [`Json`] tree into the neutral dynamic [`NativeOut`] tree (`json.parse`'s result).
@@ -956,6 +969,57 @@ mod tests {
         assert!(err.eq_value(&twin));
         let other = try_parse_typed("{}", &TypeRecipe::Int).unwrap_err();
         assert!(!err.eq_value(&other));
+    }
+
+    // --- the recoverable DYNAMIC door (`json.try_parse`) ----------------------------------------
+
+    #[test]
+    fn try_parse_dynamic_builds_the_same_tree_as_the_aborting_door() {
+        // The recoverable and aborting dynamic doors are one walk: same tree, no recipe involved.
+        let text = "{\"a\": [1, 2.5, null], \"b\": \"x\", \"c\": true}";
+        assert_eq!(
+            try_parse_dynamic(text).unwrap(),
+            parse_dynamic(text).unwrap()
+        );
+        assert_eq!(
+            try_parse_dynamic(text).unwrap(),
+            NativeOut::Map(vec![
+                (
+                    "a".into(),
+                    NativeOut::List(vec![
+                        NativeOut::Scalar(Scalar::Int(1)),
+                        NativeOut::Scalar(Scalar::Float(2.5)),
+                        NativeOut::Unit,
+                    ])
+                ),
+                ("b".into(), NativeOut::Str("x".into())),
+                ("c".into(), NativeOut::Scalar(Scalar::Bool(true))),
+            ])
+        );
+    }
+
+    #[test]
+    fn try_parse_dynamic_reports_a_syntax_failure_with_line_and_column() {
+        // The whole point of the door: a malformed document is a value, and it carries the same
+        // path/line/column detail the typed door's syntax failure does.
+        let err = try_parse_dynamic("{\n  bad").unwrap_err();
+        assert_eq!(err.kind, JsonErrorKind::Syntax);
+        assert_eq!(err.path, "");
+        assert!(err.detail.starts_with("invalid JSON: "), "{}", err.detail);
+        assert_eq!(err.line, Some(2));
+        assert!(err.column.is_some());
+        // Byte-identical to the typed door's syntax error on the same input — one `JsonError::syntax`.
+        let typed = try_parse_typed("{\n  bad", &TypeRecipe::Int).unwrap_err();
+        assert_eq!(err, typed);
+    }
+
+    #[test]
+    fn the_dynamic_abort_door_message_is_unchanged() {
+        // `json.parse` now composes its abort through `JsonError::into_std_error`; the message must
+        // stay the `invalid JSON: …` / `ErrorKind::ArgType` pair the string-error era produced.
+        let err = parse_dynamic("{not json}").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::ArgType);
+        assert!(err.message.starts_with("invalid JSON: "), "{}", err.message);
     }
 
     #[test]

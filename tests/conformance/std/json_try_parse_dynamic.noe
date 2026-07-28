@@ -1,0 +1,49 @@
+// `json.try_parse(text)` is the **recoverable dynamic** door: `Result<dyn, JsonError>`. It needs no
+// declared type, so it is the door for a document whose shape is the remote party's — a body read
+// off a wire — where a malformed payload must be a value the program handles, not an abort. The
+// aborting `json.parse` and the call-site-typed `json.try_parse::<T>` keep their own meanings: the
+// plain and turbofish call surfaces are separate tables, so `try_parse` naming both is two doors.
+// Identical under both backends.
+// expect: stdout "Niro"
+// expect: stdout "3"
+// expect: stdout "{\"age\":3,\"name\":\"Niro\"}"
+// expect: stdout "[1,2,3]"
+// expect: stdout "null"
+// expect: stdout "handled syntax at line 2 column 3, path \"\""
+// expect: stdout "handled: invalid JSON: key must be a string at line 1 column 2"
+// expect: stdout "still running"
+// expect: stdout "typed door still typed: 7"
+// expect: exit 0
+use std.json
+
+// The happy path hands back the same `dyn` tree `json.parse` builds, so `?` reads it directly.
+doc = json.try_parse("{\"name\": \"Niro\", \"age\": 3}")?
+echo doc["name"]
+echo doc["age"]
+echo json.stringify(doc)
+
+// Arrays and `null` decode through the same walk.
+echo json.stringify(json.try_parse("[1, 2, 3]")?)
+echo json.stringify(json.try_parse("null")?)
+
+// The failure path: a malformed document is an `Err` carrying the same detail a typed decode
+// reports — the kind, the source line/column, and the (document-root, hence empty) path.
+echo match json.try_parse("{\n  bad") {
+    Ok(v) => "unexpected ok",
+    Err(e) => "handled ${e.kind()} at line ${e.line() ?? 0} column ${e.column() ?? 0}, path \"${e.path()}\"",
+}
+
+// `JsonError` implements `Display`, so the composed message interpolates.
+echo match json.try_parse("{not json}") {
+    Ok(v) => "unexpected ok",
+    Err(e) => "handled: ${e}",
+}
+
+// And the program keeps running — the whole point of the door.
+echo "still running"
+
+// The turbofish door is untouched: same name, different call surface, a real `T` inside the `Ok`.
+echo match json.try_parse::<int>("7") {
+    Ok(n) => "typed door still typed: ${n}",
+    Err(e) => "unexpected: ${e}",
+}
