@@ -2233,3 +2233,9 @@ mod tests {
         );
     }
 }
+
+/// The AST field-coverage gate: every field of every node this file walks, classified and checked
+/// against the real walk. See its module docs.
+#[cfg(test)]
+#[path = "ast_walk_coverage.rs"]
+mod ast_walk_coverage;
