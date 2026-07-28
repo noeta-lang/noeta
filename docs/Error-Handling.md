@@ -209,7 +209,7 @@ echo load("{ nope")
 The rules keep the language explicit:
 
 - **`?` is the only implicit conversion position.** A `return Err(jsonErr)` or an assignment with a mismatched error type stays the plain type mismatch (E0007) it always was; write `Err(AppError.from(e))` there — `from` is an ordinary associated function, callable anywhere as `Target.from(x)`.
-- **Exactly one conversion path.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which the [orphan rule](Generics-and-Traits#coherence) would bar from carrying your impl). A type carries at most one `From` impl — a second, whatever its source, is a coherence conflict (E0027) — and conversions never chain.
+- **Exactly one conversion path.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which could not carry your impl anyway — an `impl` targets a struct, class, or enum the program [declares](Generics-and-Traits#implementing-a-trait), never a built-in or an extern). A type carries at most one `From` impl — a second, whatever its source, is a coherence conflict (E0027) — and conversions never chain.
 - **No conversion, no propagation.** A `?` whose `Err` type neither matches the declared error type nor has a `From` conversion is E0057. (A `dyn`/unannotated context defers to runtime, as everywhere in the gradual checker.)
 - `from` is an **associated** conversion: it builds a new target value from its argument, so a body referencing `self` is rejected (E0015), as is a parameter that disagrees with the declared source.
 

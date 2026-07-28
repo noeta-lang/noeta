@@ -193,7 +193,9 @@ add10 = Adder { base: 10 }
 echo add10(5)     // 15
 ```
 
-There is also a **standalone** `impl Trait for T { ... }`, which must target a type declared in the same module — an orphan target is E0013, a wrong or missing required method is E0015. A standalone impl of a **user** trait may carry method bodies (hoisted onto the target type); an impl of a **built-in** trait must stay an empty-body marker (a body is E0015 — those methods live in the type's own body).
+There is also a **standalone** `impl Trait for T { ... }`, which must target a struct, class, or enum **the program declares** — a target no module declares is E0013, a wrong or missing required method is E0015. "The program" is the whole linked program rather than the one file: a module may implement a trait for a sibling's or a dependency's type, so a glue module that imports both sides is a legitimate place to put an impl. A standalone impl of a **user** trait may carry method bodies (hoisted onto the target type); an impl of a **built-in** trait must stay an empty-body marker (a body is E0015 — those methods live in the type's own body).
+
+**A standalone impl travels with its type.** Wherever the target type reaches — a sibling module, a consumer of your package, a consumer that never names the type and only ever holds it as a `dyn Trait` — its standalone impls go with it, and every surface that reads trait membership sees them: the `dyn Trait` coercion, trait-method dispatch, the precise `x is dyn Trait` test, a `<T: Trait>` bound, and `traits_of(x)`. Which spelling you choose is a matter of layout, never of reach — an in-body `impl Trait { … }` block and a standalone `impl Trait for T { … }` declare the same thing, and a type that must be written one way to be usable from another module is a bug, not a rule.
 
 **Default methods fall back.** A user trait's method *with* a body is a **default**: an implementor may omit it, and the omitted method falls back to the trait's default body — hoisted onto the implementing type, so it dispatches like any method (a default that mentions `self` is an instance method and may call the trait's required methods; a self-less default needs no receiver and may be called either way — see the receiver rule below). A method the impl provides always overrides its default — and an override is held to the trait's signature exactly like a required method is. A **generic** trait implements at an instantiation — `impl Keyed<int> { … }`, `impl Keyed<string> for Tag { … }`, `@derive(Keyed<string>)` — and its defaults substitute the type parameters through their signatures and bodies before hoisting; a bare `impl Keyed`/`@derive(Keyed)` on a generic trait is an arity error naming the parameters.
 
@@ -266,7 +268,9 @@ The derivable built-ins are `Equatable`, `Comparable`, `Display`, `Error`, `Clon
 
 ## Coherence
 
-Each type has **at most one** implementation of a given trait, across `@derive(T)`, an in-body `impl T { }`, and a standalone `impl T for Type { }`. A duplicate or competing impl is E0027. Because all traits are built-in and `impl` blocks may only target a type declared in the same module, the orphan problem is structurally impossible — coherence checking reduces to uniqueness.
+Each type has **at most one** implementation of a given trait, across `@derive(T)`, an in-body `impl T { }`, and a standalone `impl T for Type { }`. A duplicate or competing impl is E0027 — including two *different modules* that each implement one trait for one type, which is a conflict like any other and is reported rather than silently resolved in someone's favor.
+
+Coherence reduces to that uniqueness check, with no orphan rule to go with it. Noeta links **one whole program** at a time: every module and every dependency is resolved into a single program before it is checked, so there is no separately-compiled unit that could hold an impl this one cannot see, and "at most one implementation" is a question the checker can always answer in full. That is what lets a standalone `impl` target an imported type at all — the thing an orphan rule exists to forbid is, here, just another impl the uniqueness check counts.
 
 ## Operator errors
 

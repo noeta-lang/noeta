@@ -1026,7 +1026,9 @@ impl Checker {
         let d = self.error(
             DiagnosticCode::InvalidTry,
             span,
-            format!("`?` on a `Result` early-returns its `Err`, but this function returns `{declared}`"),
+            format!(
+                "`?` on a `Result` early-returns its `Err`, but this function returns `{declared}`"
+            ),
         );
         // Name the concrete declaration that admits this very `Err`; an unresolved error payload
         // (`dyn`, a hole) can only be described generically.
