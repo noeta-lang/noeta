@@ -452,7 +452,40 @@ echo match invoke("greet", ["ada"]) {
 
 The two-operand form searches the top-level function namespace and nothing else. A type name, a qualified `Type.method`, and a local variable holding a function are each simply not found — reaching a type's methods is what the three-operand form is for, and a function value you already hold you can just call.
 
-Every resolution failure is an `Err`, never an abort: an unknown name, a non-string name, non-list args, and an arity mismatch alike. A parameter with a default may be omitted from `args`, exactly as at a direct call site — the pair to `ParamInfo.optional`. A panic *inside* the invoked body is a normal abort; only the by-name resolution is caught.
+`args` accepts either shape, exactly as `construct`'s `fields` does, and in both the two- and three-operand forms:
+
+- a **`List<dyn>`** — positional, in declaration order. A list shorter than the parameter count leaves the remaining parameters to their defaults, so trailing optional parameters may simply be left off. It cannot express a *gap*, by design.
+- a **`Map<string, dyn>`** — named, sparse and in any order. This is the form a caller filling a signature from `params_of` produces: supply `a` and `c` and let the middle `b` run its default.
+
+```noeta
+fn place(item: string, qty: int = 1, note: string = "-"): string {
+    return "${item} x${qty} (${note})"
+}
+
+mut call: Map<string, dyn> = {}
+call["item"] = "widget"
+call["note"] = "rush"
+
+echo match invoke("place", call) {
+    Ok(v)  => v,                         // widget x1 (rush)
+    Err(e) => e,
+}
+```
+
+The omitted `qty` runs its compiled default expression, exactly as at a direct `place(item: "widget", note: "rush")` call site — the named form is the same calling convention reached by name, not a second one. Parameter names come from the same signature index `params_of` reads, so reflecting a signature and then calling it by name round-trips on one target string.
+
+Every rejection is an `Err`, never an abort — an unknown name, a non-string name, args that are neither a list nor a map, an arity mismatch, and, in the named form:
+
+| Situation | Message |
+|---|---|
+| `args` is neither a list nor a map | ``invoke args must be a list or a map, found <kind>`` |
+| a named argument the callable has no parameter for | ``` `place` has no parameter `nope` ``` |
+| a parameter that is neither supplied nor defaulted | ``` missing required parameter `item` of `place` ``` |
+| a callable the signature index does not describe (a global holding a closure that was never declared as a `fn`) | ``` `f` does not take named arguments ``` |
+
+Unlike `construct`, the named form does **not** type-check an argument against its declared parameter type. `invoke`'s positional form never has — the callee's own typing is the backstop — and checking one form but not the other would make the very same call succeed positionally and fail by name.
+
+A parameter with a default may be omitted from either shape, exactly as at a direct call site — the pair to `ParamInfo.optional`. A panic *inside* the invoked body is a normal abort; only the by-name resolution is caught.
 
 ## Where this is headed
 

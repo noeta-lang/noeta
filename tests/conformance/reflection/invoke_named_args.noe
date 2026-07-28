@@ -1,0 +1,115 @@
+// `invoke`'s **named** argument form: `args` may be a `Map<string, dyn>` as well as a positional
+// `List<dyn>` — the same two shapes `construct(name, fields)` takes, with the same resolution rules
+// and the same error vocabulary.
+//
+// The gap it closes: a positional list cannot express an omitted *middle* parameter, so a call that
+// skips a defaulted parameter and supplies a later one was inexpressible — `invoke("f", {…})` was
+// `Err(invoke args must be a list, found map)`. A language model filling a tool call does exactly
+// that routinely, so the consuming package refused the shape by name rather than guessing at a
+// default reflection does not expose either.
+//
+// An omitted defaulted parameter runs its compiled default expression, exactly as at a direct call
+// site — the named form is the same calling convention reached by name, not a second one. Parameter
+// names come from the same signature index `params_of` reads (the VM's `Chunk` carries none), so
+// both backends bind through one table and one shared planner.
+//
+// The positional form is unchanged, and the three-operand method form had the same gap and gets the
+// same fix: the args check ran before the receiver split, so both forms rejected a map.
+// expect: stdout "positional full: ok 123"
+// expect: stdout "positional short: ok 123"
+// expect: stdout "named all: ok 123"
+// expect: stdout "named gap: ok 129"
+// expect: stdout "named reorder: ok 153"
+// expect: stdout "named only required: ok 123"
+// expect: stdout "named unknown: err `f` has no parameter `nope`"
+// expect: stdout "named missing required: err missing required parameter `a` of `f`"
+// expect: stdout "args not a collection: err invoke args must be a list or a map, found int"
+// expect: stdout "method positional: ok r:2x3!"
+// expect: stdout "method named gap: ok r:2x3?"
+// expect: stdout "method named reorder: ok [-2x3!"
+// expect: stdout "method unknown param: err `Rect.label` has no parameter `nope`"
+// expect: stdout "assoc named gap: 1x7"
+// expect: stdout "assoc missing required: err missing required parameter `w` of `Rect.sized`"
+// expect: stdout "reflected: a=1 b=7 c=14 d=9"
+// expect: stdout "written:   a=1 b=7 c=14 d=9"
+// expect: exit 0
+struct Rect {
+    w: int
+    h: int
+
+    fn new(w: int = 1, h: int = 1): Rect {
+        return Rect { w: w, h: h }
+    }
+
+    // A required parameter, to pin the missing-parameter path on the associated form too.
+    fn sized(w: int, h: int = 1): Rect {
+        return Rect { w: w, h: h }
+    }
+
+    fn label(prefix: string = "r", sep: string = ":", suffix: string = "!"): string {
+        return "${prefix}${sep}${self.w}x${self.h}${suffix}"
+    }
+}
+
+fn f(a: int, b: int = 2, c: int = 3): int {
+    return a * 100 + b * 10 + c
+}
+
+fn show(r: Result<dyn, dyn>): string {
+    return match r {
+        Ok(v) => "ok ${v}",
+        Err(e) => "err ${e}",
+    }
+}
+
+// --- the positional form is untouched --------------------------------------------------------
+echo "positional full: ${show(invoke("f", [1, 2, 3]))}"
+echo "positional short: ${show(invoke("f", [1]))}"
+
+// --- the named form ----------------------------------------------------------------------------
+echo "named all: ${show(invoke("f", {"a": 1, "b": 2, "c": 3}))}"
+// The point of the whole exercise: `b` is skipped and `c` supplied, which no list can say. `b` runs
+// its own default (2), so the result is 1*100 + 2*10 + 9.
+echo "named gap: ${show(invoke("f", {"a": 1, "c": 9}))}"
+// A pure reordering fills a dense prefix, so it needs no mask at all and must stay identical to the
+// equivalent positional call.
+echo "named reorder: ${show(invoke("f", {"b": 5, "a": 1}))}"
+echo "named only required: ${show(invoke("f", {"a": 1}))}"
+
+// --- named failure paths, all values, never aborts ---------------------------------------------
+echo "named unknown: ${show(invoke("f", {"a": 1, "nope": 2}))}"
+echo "named missing required: ${show(invoke("f", {"c": 9}))}"
+echo "args not a collection: ${show(invoke("f", 7))}"
+
+// --- the three-operand method form has the same two shapes --------------------------------------
+r = Rect.new(2, 3)
+echo "method positional: ${show(invoke(r, "label", []))}"
+echo "method named gap: ${show(invoke(r, "label", {"suffix": "?"}))}"
+echo "method named reorder: ${show(invoke(r, "label", {"sep": "-", "prefix": "["}))}"
+echo "method unknown param: ${show(invoke(r, "label", {"nope": 1}))}"
+
+// --- and so does the associated-function form ----------------------------------------------------
+built = match invoke(Rect, "new", {"h": 7}) {
+    Ok(v) => v.as<Rect>() ?? Rect { w: 0, h: 0 },
+    Err(_) => Rect { w: 0, h: 0 },
+}
+echo "assoc named gap: ${built.w}x${built.h}"
+echo "assoc missing required: ${show(invoke(Rect, "sized", {"h": 4}))}"
+
+// --- the named form IS the ordinary calling convention, reached by name -------------------------
+// A skipped parameter runs its compiled default *expression* — not a literal, not a zero value —
+// so a reflected named call and the statically written one it mirrors must agree exactly. That
+// equivalence is the whole claim: `invoke` reaches the existing convention rather than reimplementing
+// it, so a default that computes cannot come out different depending on how the call was spelled.
+fn seed(): int { return 7 }
+
+fn g(a: int, b: int = seed(), c: int = seed() * 2, d: int = 5): string {
+    return "a=${a} b=${b} c=${c} d=${d}"
+}
+
+reflected = match invoke("g", {"a": 1, "d": 9}) {
+    Ok(v) => "${v}",
+    Err(e) => "err ${e}",
+}
+echo "reflected: ${reflected}"
+echo "written:   ${g(1, d: 9)}"

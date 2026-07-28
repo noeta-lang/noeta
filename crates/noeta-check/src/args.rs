@@ -323,22 +323,40 @@ impl Checker {
         // A named argument that skips a defaulted parameter (`f(1, c: 9)`) leaves a *hole*, carried
         // to the callee as a **supplied mask** on the call: the callee still evaluates the default,
         // over its own upvalues, and the mask tells its prologue which ones to run rather than
-        // inferring "the trailing remainder" from a count. The mask is one `u64`, so a hole beyond
-        // parameter 64 has nowhere to live — refuse it here instead of lowering a call the
-        // prologues would fill wrongly.
-        if let Some(hole) = binding.iter().position(Option::is_none)
-            && hole >= 64
-            && binding[hole..].iter().any(Option::is_some)
+        // inferring "the trailing remainder" from a count.
+        //
+        // The mask is one `u64`, and a method's is shifted up by one to make room for the receiver
+        // at bit 0, so a *skipping* call can only reach the first `MASKED_PARAM_LIMIT` parameters —
+        // one bound for both call kinds, since two that differ by kind is exactly how the tree-walker
+        // (which never shifts) and the VM came to disagree about parameter 63 of a method.
+        //
+        // The bound is checked over the parameters the call **supplies**, not merely over where its
+        // first hole falls. Lowering drops an out-of-range bit from the mask, and the argument then
+        // lands on whichever parameter the shortened bit-count points at — so `f(1, z: 5)` over 66
+        // parameters put nothing in `z` and nothing in the parameter it hit either (its default
+        // overwrote the misplaced value), silently losing an explicitly written argument. The
+        // first-hole test could not see that: the hole was parameter 1.
+        //
+        // Only skipping is limited. A call that fills a dense prefix carries no mask at all and is
+        // unaffected at any arity, and so is a pure reordering.
+        let last_supplied = binding.iter().rposition(Option::is_some);
+        let skips = binding
+            .iter()
+            .take(last_supplied.map_or(0, |p| p + 1))
+            .any(Option::is_none);
+        if skips
+            && let Some(p) = last_supplied.filter(|p| *p >= noeta_ast::reflect::MASKED_PARAM_LIMIT)
         {
             self.error(
                 DiagnosticCode::InvalidArgument,
                 span,
                 format!(
-                    "`{callee}` skips parameter `{}`, which is past the 64-parameter limit for named arguments",
-                    param_names[hole]
+                    "`{callee}` skips a parameter, so it cannot also name `{}` — only the first {} parameters can be named by a skipping call",
+                    param_names[p],
+                    noeta_ast::reflect::MASKED_PARAM_LIMIT
                 ),
             )
-            .help("pass it explicitly, or move it within the first 64 parameters");
+            .help("pass the skipped parameter explicitly, or move this one earlier in the list");
             return None;
         }
         // Every parameter without a default must be supplied — by position or by name. Reported

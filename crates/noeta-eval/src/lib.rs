@@ -3265,6 +3265,53 @@ impl Interpreter {
         }
     }
 
+    /// Bind an `invoke`'s arguments to the callee it resolved to.
+    ///
+    /// A **positional** `List<dyn>` keeps the arity pre-check the primitive has always done. A
+    /// **named** `Map<string, dyn>` is bound against the callable's reflected signature through the
+    /// shared `plan_invoke_named` — the planner twin of the one `construct` uses for its named field
+    /// map — so the two primitives accept, reject and *word* the same cases instead of growing two
+    /// dialects. Both backends bind through that one planner and read parameter names off the SAME
+    /// reflection artifact, so a named invocation agrees across the differential by construction
+    /// (the closure's own `params` would have been the tree-walker's alone; the VM's `Chunk` carries
+    /// no names at all).
+    ///
+    /// `target` is the reflection key for the callable — a bare fn name, or a qualified
+    /// `Type.method`, exactly the string `params_of` takes — so an error names the thing you would
+    /// reflect to fix it. Returns the positional argument list the call prologue expects plus the
+    /// supplied mask that tells it which defaults to run, or a ready-to-surface message for the
+    /// `Result.Err`. Never aborts: every rejection is a value.
+    fn bind_invoke_args(
+        &self,
+        target: &str,
+        kind: &str,
+        closure: &Closure,
+        positional: Vec<Value>,
+        named: Option<Vec<(String, Value)>>,
+    ) -> Result<(Vec<Value>, Option<u64>), String> {
+        let Some(named) = named else {
+            let required = required_count(&closure.defaults);
+            if positional.len() < required || positional.len() > closure.params.len() {
+                return Err(arity_message(
+                    kind,
+                    required,
+                    closure.params.len(),
+                    positional.len(),
+                ));
+            }
+            return Ok((positional, None));
+        };
+        let names: Vec<String> = named.iter().map(|(n, _)| n.clone()).collect();
+        let plan = noeta_ast::reflect::plan_invoke_named(
+            target,
+            self.reflection.params_for(target),
+            closure.params.len(),
+            &names,
+        )?;
+        let args = plan.order.iter().map(|&i| named[i].1.clone()).collect();
+        Ok((args, plan.supplied))
+    }
+
     /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch (P2.6). Reuses
     /// the same name-keyed method tables as `call_method` (or, receiver-less, the global scope), but
     /// **pre-checks** name resolution and arity so a miss is a runtime `Result.Err` rather than a
@@ -3284,13 +3331,34 @@ impl Interpreter {
                 name_val.type_name()
             )));
         };
-        let Value::List(items) = &args_val else {
-            return Ok(invoke_err(format!(
-                "invoke args must be a list, found {}",
-                args_val.type_name()
-            )));
+        // `args` is a positional `List<dyn>` or a **named** `Map<string, dyn>` — the same two
+        // shapes `construct(name, fields)` takes, worded the same way when it is neither. A map is
+        // kept as its `(name, value)` pairs here and bound to parameters below, once the callee (and
+        // so its declared signature) is known. A non-string key is dropped exactly as `construct`
+        // drops one; the parameter it would have named then simply reads as unsupplied.
+        let (args, named): (Vec<Value>, Option<Vec<(String, Value)>>) = match &args_val {
+            Value::List(items) => ((*items.to_rc_vec()).clone(), None),
+            Value::Map(entries, _) => (
+                Vec::new(),
+                Some(
+                    entries
+                        .iter()
+                        .filter_map(|(k, v)| match k {
+                            noeta_stdlib::MapKey::Str(s) => {
+                                Some((s.as_str().to_owned(), v.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+            ),
+            _ => {
+                return Ok(invoke_err(format!(
+                    "invoke args must be a list or a map, found {}",
+                    args_val.type_name()
+                )));
+            }
         };
-        let args: Vec<Value> = (*items.to_rc_vec()).clone();
         // No receiver: the free-function form. `method` names a **top-level function** — the same
         // string `params_of` takes for a free fn — so resolution is a lookup in the global scope
         // and nowhere else. Deliberately NOT `self.scope`: the VM reads a global slot, so consulting
@@ -3301,16 +3369,12 @@ impl Interpreter {
             let Some(Value::Function(closure)) = self.globals.lookup(method) else {
                 return Ok(invoke_err(free_fn_miss_message(method)));
             };
-            let required = required_count(&closure.defaults);
-            if args.len() < required || args.len() > closure.params.len() {
-                return Ok(invoke_err(arity_message(
-                    "function",
-                    required,
-                    closure.params.len(),
-                    args.len(),
-                )));
-            }
-            let result = self.call_closure(&closure, args, span)?;
+            let (args, supplied) =
+                match self.bind_invoke_args(method, "function", &closure, args, named) {
+                    Ok(bound) => bound,
+                    Err(message) => return Ok(invoke_err(message)),
+                };
+            let result = self.call_closure_masked(&closure, args, span, supplied)?;
             return Ok(builtin_enum("Result", "Ok", vec![result]));
         };
         // A reflection `Type` value (e.g. a stored attribute type-ref) dispatches like the type
@@ -3336,16 +3400,18 @@ impl Interpreter {
                     )));
                 };
                 let closure = Rc::clone(closure);
-                let required = required_count(&closure.defaults);
-                if args.len() < required || args.len() > closure.params.len() {
-                    return Ok(invoke_err(arity_message(
-                        "associated function",
-                        required,
-                        closure.params.len(),
-                        args.len(),
-                    )));
-                }
-                let result = self.call_closure(&closure, args, span)?;
+                let target = format!("{}.{method}", def.name());
+                let (args, supplied) = match self.bind_invoke_args(
+                    &target,
+                    "associated function",
+                    &closure,
+                    args,
+                    named,
+                ) {
+                    Ok(bound) => bound,
+                    Err(message) => return Ok(invoke_err(message)),
+                };
+                let result = self.call_closure_masked(&closure, args, span, supplied)?;
                 Ok(builtin_enum("Result", "Ok", vec![result]))
             }
             // A value → an instance method (the instance's fields are in scope).
@@ -3356,18 +3422,16 @@ impl Interpreter {
                         object.def.name()
                     )));
                 };
+                let target = format!("{}.{method}", object.def.name());
                 let object = Rc::clone(object);
                 let method_closure = Rc::clone(method_closure);
-                let required = required_count(&method_closure.defaults);
-                if args.len() < required || args.len() > method_closure.params.len() {
-                    return Ok(invoke_err(arity_message(
-                        "method",
-                        required,
-                        method_closure.params.len(),
-                        args.len(),
-                    )));
-                }
-                let result = self.call_method_on(&object, &method_closure, args, span)?;
+                let (args, supplied) =
+                    match self.bind_invoke_args(&target, "method", &method_closure, args, named) {
+                        Ok(bound) => bound,
+                        Err(message) => return Ok(invoke_err(message)),
+                    };
+                let result =
+                    self.call_method_on_masked(&object, &method_closure, args, span, supplied)?;
                 Ok(builtin_enum("Result", "Ok", vec![result]))
             }
             _ => Ok(invoke_err(format!(

@@ -1245,6 +1245,111 @@ pub fn plan_construct_named(
     Ok(())
 }
 
+/// The plan for a **named** by-name invocation: how a `Map<string, dyn>` of arguments becomes the
+/// positional argument list a call prologue expects, plus the supplied mask that tells the callee
+/// which of its defaults to run. Produced by [`plan_invoke_named`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct NamedCall {
+    /// The supplied mask, indexed over the callee's **declared parameters** (a receiver, where there
+    /// is one, is not a parameter — the VM shifts the mask up by one at the call site, exactly as the
+    /// compiler does for a statically-named method call). `None` when the named arguments happen to
+    /// fill a dense prefix of the parameters, which the ordinary count-based prefix rule already
+    /// describes — the same "only carry a mask when it says something new" rule lowering applies, so
+    /// a reordering-only named call stays on every prefix-assuming fast path.
+    pub supplied: Option<u64>,
+    /// For each argument the callee will receive, in ascending parameter order, the index into the
+    /// caller's `provided` list it comes from.
+    pub order: Vec<usize>,
+}
+
+/// The number of declared parameters a **skipping** call can address by name. The supplied mask is
+/// one `u64`, and a method's mask is shifted up by one to make room for the receiver at bit 0, so the
+/// tighter of the two capacities is 63 — applied uniformly, because one bound that is always right
+/// beats two that differ by call kind and diverge between the backends (the tree-walker never
+/// shifts, so parameter 63 of a method used to work there and silently misplace its value in the VM).
+///
+/// Only *skipping* is limited: a call that fills a dense prefix of the parameters needs no mask and
+/// is unaffected at any arity, and so is a pure reordering.
+pub const MASKED_PARAM_LIMIT: usize = 63;
+
+/// Plan a **named** dynamic invocation: bind a set of `provided` argument names against a callable's
+/// declared `params`, in the same shape [`plan_construct_named`] binds field names against a type's
+/// field schema. `callee` names the callable for the error messages — the same target string
+/// `params_of` takes, so an error points at the thing you would reflect.
+///
+/// `declared_arity` is the parameter count the *callee itself* declares, cross-checked against
+/// `params` (which comes from the reflection artifact). The two disagree only when the artifact holds
+/// no signature for this callable at all — a global bound to a closure that was never declared as a
+/// top-level `fn`, say — and binding names against a signature that is not the callee's would place
+/// arguments on the wrong parameters. That case is refused in the checker's own words rather than
+/// guessed at.
+///
+/// Deliberately **no argument type-checking**, where [`plan_construct_named`] does check a scalar
+/// field against its declared type: `invoke`'s positional form has never type-checked its arguments
+/// (the callee's own typing is the backstop), so checking them here would make the very same call
+/// succeed positionally and fail by name. Errors, all ready-to-surface messages:
+///   * a provided name that is not a parameter of the callable;
+///   * a parameter that is neither provided nor defaulted;
+///   * a skipping call that names a parameter past [`MASKED_PARAM_LIMIT`].
+pub fn plan_invoke_named(
+    callee: &str,
+    params: &[ParamSig],
+    declared_arity: usize,
+    provided: &[String],
+) -> Result<NamedCall, String> {
+    if params.len() != declared_arity {
+        return Err(format!("`{callee}` does not take named arguments"));
+    }
+    let mut binding: Vec<Option<usize>> = vec![None; params.len()];
+    for (i, name) in provided.iter().enumerate() {
+        let Some(p) = params.iter().position(|s| &s.name == name) else {
+            return Err(format!("`{callee}` has no parameter `{name}`"));
+        };
+        binding[p] = Some(i);
+    }
+    for (p, spec) in params.iter().enumerate() {
+        if binding[p].is_none() && !spec.optional {
+            return Err(format!(
+                "missing required parameter `{}` of `{callee}`",
+                spec.name
+            ));
+        }
+    }
+    let order: Vec<usize> = binding.iter().flatten().copied().collect();
+    // A dense prefix is exactly what an ordinary short argument list means, so it needs no mask —
+    // and staying off the mask keeps `invoke("f", {"a": 1})` byte-identical to `invoke("f", [1])`.
+    if binding[..order.len()].iter().all(Option::is_some) {
+        return Ok(NamedCall {
+            supplied: None,
+            order,
+        });
+    }
+    // This call skips a parameter, so the mask is load-bearing and every parameter it supplies must
+    // fit in it. Checked over the *supplied* indices rather than merely where the first hole falls: a
+    // bit that does not fit is dropped from the mask, and the argument then lands on whichever
+    // parameter the shortened bit-count points at — a wrong value, with nothing said.
+    if let Some(p) = binding
+        .iter()
+        .rposition(Option::is_some)
+        .filter(|p| *p >= MASKED_PARAM_LIMIT)
+    {
+        return Err(format!(
+            "`{callee}` skips a parameter, so it cannot also name `{}` — only the first \
+             {MASKED_PARAM_LIMIT} parameters can be named by a skipping call",
+            params[p].name
+        ));
+    }
+    let mask = binding
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.is_some())
+        .fold(0u64, |m, (p, _)| m | (1 << p));
+    Ok(NamedCall {
+        supplied: Some(mask),
+        order,
+    })
+}
+
 /// A backend-agnostic descriptor of the prelude `Type` ADT — the shared vocabulary `type_of`
 /// classifies a value into, mirroring the checker's type lattice. Both backends classify their
 /// native value into a `TypeRepr` and then build the prelude `Type` enum from it identically (the
@@ -2321,6 +2426,92 @@ mod tests {
 
     fn boxed(t: TypeRepr) -> Box<TypeRepr> {
         Box::new(t)
+    }
+
+    fn sig(name: &str, optional: bool) -> ParamSig {
+        ParamSig {
+            name: name.to_string(),
+            ty: TypeRepr::Int,
+            optional,
+        }
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    /// The named-invoke planner's three shapes. A **gap** — the whole point of the named form, and
+    /// the one thing a positional list cannot say — carries a mask; a pure **reordering** and a
+    /// dense **prefix** do not, because the ordinary count rule already describes them and staying
+    /// off the mask keeps every prefix-assuming fast path applying.
+    #[test]
+    fn plan_invoke_named_masks_only_a_skipping_call() {
+        let params = [sig("a", false), sig("b", true), sig("c", true)];
+        // `{a, c}` skips `b`: parameters 0 and 2, so bits 0 and 2.
+        let gap = plan_invoke_named("f", &params, 3, &names(&["a", "c"])).expect("plans");
+        assert_eq!(gap.supplied, Some(0b101));
+        assert_eq!(gap.order, vec![0, 1]);
+        // A reordering fills a prefix; `order` permutes the caller's list into parameter order.
+        let reordered = plan_invoke_named("f", &params, 3, &names(&["b", "a"])).expect("plans");
+        assert_eq!(reordered.supplied, None);
+        assert_eq!(reordered.order, vec![1, 0]);
+        // A prefix is an ordinary short argument list.
+        let prefix = plan_invoke_named("f", &params, 3, &names(&["a"])).expect("plans");
+        assert_eq!(prefix.supplied, None);
+        assert_eq!(prefix.order, vec![0]);
+    }
+
+    /// Every rejection is a message, never a panic — `invoke`'s contract is that resolution failures
+    /// are values. The wording mirrors `plan_construct_named`'s field-side equivalents.
+    #[test]
+    fn plan_invoke_named_rejects_in_constructs_vocabulary() {
+        let params = [sig("a", false), sig("b", true)];
+        assert_eq!(
+            plan_invoke_named("f", &params, 2, &names(&["a", "nope"])),
+            Err("`f` has no parameter `nope`".to_string())
+        );
+        assert_eq!(
+            plan_invoke_named("f", &params, 2, &names(&["b"])),
+            Err("missing required parameter `a` of `f`".to_string())
+        );
+        // A signature that is not the callee's (a global holding an undeclared closure) is refused
+        // rather than bound against, which would place arguments on the wrong parameters.
+        assert_eq!(
+            plan_invoke_named("f", &params, 3, &names(&["a"])),
+            Err("`f` does not take named arguments".to_string())
+        );
+    }
+
+    /// The mask is one `u64` (a method's shifted up by one for the receiver), so a **skipping** call
+    /// cannot name a parameter past the limit. Checked over the parameters the call *supplies*, not
+    /// over where its first hole falls: an out-of-range bit is simply dropped, and the argument then
+    /// lands on whichever parameter the shortened bit-count points at — a silently wrong value.
+    /// A dense prefix carries no mask, so it is unaffected at any arity.
+    #[test]
+    fn plan_invoke_named_bounds_a_skipping_call_by_what_it_supplies() {
+        let mut params = vec![sig("a", false)];
+        for i in 1..80 {
+            params.push(sig(&format!("p{i}"), true));
+        }
+        let far = format!("p{}", MASKED_PARAM_LIMIT);
+        assert_eq!(
+            plan_invoke_named("f", &params, params.len(), &names(&["a", &far])),
+            Err(format!(
+                "`f` skips a parameter, so it cannot also name `{far}` — only the first \
+                 {MASKED_PARAM_LIMIT} parameters can be named by a skipping call"
+            ))
+        );
+        // The last in-range parameter still plans, and its bit is the top one that fits.
+        let near = format!("p{}", MASKED_PARAM_LIMIT - 1);
+        let ok =
+            plan_invoke_named("f", &params, params.len(), &names(&["a", &near])).expect("in range");
+        assert_eq!(ok.supplied, Some(1u64 | (1u64 << (MASKED_PARAM_LIMIT - 1))));
+        // A dense prefix over the same wide signature needs no mask at all.
+        let prefix: Vec<String> = std::iter::once("a".to_string())
+            .chain((1..70).map(|i| format!("p{i}")))
+            .collect();
+        let dense = plan_invoke_named("f", &params, params.len(), &prefix).expect("prefix");
+        assert_eq!(dense.supplied, None);
     }
 
     fn record(type_name: &str, trait_name: &str) -> TraitImplRecord {
