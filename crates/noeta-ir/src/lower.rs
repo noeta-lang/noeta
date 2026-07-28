@@ -2771,6 +2771,10 @@ impl Lowerer<'_> {
                 let name = self.lower_type_operand(name, out)?;
                 Ok(self.emit(out, Rvalue::FieldSpecsOf { name, span: *span }, *span))
             }
+            Expr::VariantsOf { name, span } => {
+                let name = self.lower_type_operand(name, out)?;
+                Ok(self.emit(out, Rvalue::VariantsOf { name, span: *span }, *span))
+            }
             Expr::Construct { name, fields, span } => {
                 let name = self.lower_type_operand(name, out)?;
                 let fields = self.lower_expr(fields, out)?;

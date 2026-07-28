@@ -541,6 +541,24 @@ impl Checker {
             noeta_ast::reflect::FIELD_SPEC,
             &[Type::String, type_adt(), Type::Bool],
         );
+        // `VariantSpec { name: string, payload: List<FieldSpec>, backing: ?dyn }` — the element type
+        // of the TYPE-level `variants_of::<T>()` / `variants_of(name)` query, the enum twin of
+        // `FieldSpec`. `payload` reuses `FieldSpec` because a variant payload IS ordinary declared
+        // field data (a positional payload carries a synthesized `_0`/`_1` name and its real declared
+        // type), so the two halves of the type-level surface share one member vocabulary. `backing` is
+        // the variant's value in a backed enum — `?dyn` rather than `?string`/`?int` because a backing
+        // may be either, and `none` for a plain enum.
+        self.register_prelude_struct(
+            noeta_ast::reflect::VARIANT_SPEC,
+            &[
+                Type::String,
+                Type::List(Box::new(Type::Named(
+                    noeta_ast::reflect::FIELD_SPEC.to_string(),
+                    Vec::new(),
+                ))),
+                Type::Option(Box::new(Type::Dyn)),
+            ],
+        );
     }
 
     /// Register one **prelude struct**: its field *names* come from the shared declaration table

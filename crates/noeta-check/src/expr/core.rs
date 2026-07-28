@@ -1523,6 +1523,24 @@ impl Checker {
                     Vec::new(),
                 )))
             }
+            Expr::VariantsOf { name, span } => {
+                // The type-level variant schema, surfaced as `List<VariantSpec>`. The enum twin of
+                // `field_specs_of`, checked through the SAME `check_type_operand` so the turbofish
+                // resolves a name (and reports an erased type parameter as E0058) identically, and
+                // the dynamic surface stays lenient — a name that is not an enum is a runtime empty
+                // list, not a static error.
+                self.check_type_operand(
+                    name,
+                    env,
+                    *span,
+                    "variants_of",
+                    "pass an enum type name, or use the turbofish `variants_of::<T>()`",
+                );
+                Type::List(Box::new(Type::Named(
+                    noeta_ast::reflect::VARIANT_SPEC.to_string(),
+                    Vec::new(),
+                )))
+            }
             Expr::Construct { name, fields, span } => {
                 // The dynamic struct constructor: build a value of the type `name` from `fields`, a
                 // runtime `List<dyn>` of field values in declaration order. Fallible by construction

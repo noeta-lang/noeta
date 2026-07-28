@@ -561,6 +561,12 @@ pub enum Rvalue {
     /// non-fielded type). The turbofish form reaches here identically — the parser lowered `T` to its
     /// name string — so there is only ever a runtime name operand.
     FieldSpecsOf { name: Atom, span: Span },
+    /// `variants_of::<T>()` / `variants_of(name)` — the declared variant schema of the enum named by
+    /// the runtime `name` string, materialized as `List<VariantSpec>` (empty for an unknown type, or
+    /// for one that is not an enum). The enum twin of [`Rvalue::FieldSpecsOf`], reached the same way:
+    /// the parser lowered a turbofish `T` to its name string, so there is only ever a runtime name
+    /// operand.
+    VariantsOf { name: Atom, span: Span },
     /// `construct::<T>(fields)` / `construct(name, fields)` — build a struct value of the type named by
     /// the runtime `name` string from `fields` (a runtime `List<dyn>` of field values in declaration
     /// order), reusing the same construction path as a `T { … }` literal. Materializes a

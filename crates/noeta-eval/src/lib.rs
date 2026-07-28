@@ -2105,6 +2105,60 @@ impl Interpreter {
         Value::list(items)
     }
 
+    /// Materialize a declared enum's variant schema into a `List<VariantSpec>` (`{ name, payload,
+    /// backing }`, declaration order) — the type-level reflection `variants_of`. An unknown type, or
+    /// one that is not an enum, yields the empty list, the same contract `materialize_field_specs`
+    /// answers a non-fielded type with. Each payload entry is a `FieldSpec` built exactly as
+    /// `materialize_field_specs` builds one, and `backing` goes through the shared
+    /// `attr_value_to_eval`; the VM builds the matching shapes the same way, so the values agree
+    /// across the differential by construction.
+    fn materialize_variant_specs(&self, type_name: &str) -> Value {
+        let spec_def = Rc::new(fresh_type_def(
+            noeta_ast::reflect::FIELD_SPEC,
+            &noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::FIELD_SPEC),
+            true,
+        ));
+        let variant_def = Rc::new(fresh_type_def(
+            noeta_ast::reflect::VARIANT_SPEC,
+            &noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::VARIANT_SPEC),
+            true,
+        ));
+        let items: Vec<Value> = self
+            .reflection
+            .variant_specs(type_name)
+            .into_iter()
+            .map(|variant| {
+                let payload: Vec<Value> = variant
+                    .payload
+                    .into_iter()
+                    .map(|spec| {
+                        let slots = vec![
+                            Value::Str(spec.name.to_string()),
+                            build_type_value(spec.ty),
+                            Value::Bool(spec.optional),
+                        ];
+                        Value::Object(Rc::new(ObjectValue::new(spec_def.clone(), slots)))
+                    })
+                    .collect();
+                let backing = match variant.backing {
+                    Some(value) => builtin_enum(
+                        "Option",
+                        "some",
+                        vec![attr_value_to_eval(value, &self.reflection)],
+                    ),
+                    None => builtin_enum("Option", "none", Vec::new()),
+                };
+                let slots = vec![
+                    Value::Str(variant.name.to_string()),
+                    Value::list(payload),
+                    backing,
+                ];
+                Value::Object(Rc::new(ObjectValue::new(variant_def.clone(), slots)))
+            })
+            .collect();
+        Value::list(items)
+    }
+
     /// `construct(name, fields)` — build a struct/class value of the type named by `name_val` from the
     /// field values `fields_val` (declaration order), reusing the SAME construction path as a
     /// `T { … }` literal so defaults and full-initialization are honored identically. Returns a

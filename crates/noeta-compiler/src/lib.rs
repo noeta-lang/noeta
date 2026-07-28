@@ -3927,6 +3927,13 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::FieldSpecsOf { dst, src });
                 Ok(())
             }
+            Rvalue::VariantsOf { name, .. } => {
+                // The enum twin, emitted identically: the name is a runtime string and the VM reads
+                // the variant schema off the same `Module::reflection`.
+                let src = self.atom_reg(name)?;
+                self.code.push(Op::VariantsOf { dst, src });
+                Ok(())
+            }
             Rvalue::Construct {
                 name, fields, span, ..
             } => {

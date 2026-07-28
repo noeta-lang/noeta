@@ -1833,6 +1833,14 @@ impl Interpreter {
                 };
                 Ok(self.materialize_field_specs(&name))
             }
+            noeta_ir::Rvalue::VariantsOf { name, .. } => {
+                // The runtime name string names a declared type; materialize its variant schema.
+                let name = match self.eval_ir_atom(name, frame)? {
+                    Value::Str(s) => s,
+                    _ => String::new(),
+                };
+                Ok(self.materialize_variant_specs(&name))
+            }
             noeta_ir::Rvalue::Construct {
                 name, fields, span, ..
             } => {

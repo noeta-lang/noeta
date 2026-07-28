@@ -2850,6 +2850,14 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
+                    Op::VariantsOf { dst, src } => {
+                        // The runtime name string names a declared type; materialize its variant
+                        // schema (empty unless it is an enum).
+                        let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                        let result = self.materialize_variant_specs(&name);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
                     Op::Construct {
                         dst,
                         name,

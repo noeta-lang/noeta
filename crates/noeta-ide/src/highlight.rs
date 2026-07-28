@@ -113,6 +113,7 @@ fn is_keyword(kind: TokenKind) -> bool {
             | ParamsOfKw
             | ReturnsOfKw
             | FieldSpecsOfKw
+            | VariantsOfKw
             | ConstructKw
             | InvokeKw
     )
