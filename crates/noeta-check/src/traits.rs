@@ -929,18 +929,29 @@ impl Checker {
         }
     }
 
-    /// The `?` **error-position rule** (error-ergonomics): a `?` on a `Result` whose `Err` payload
-    /// type differs from the enclosing function's declared error type either **converts** through
-    /// the target's declared `impl From<Source>` (the site is recorded for lowering — the one
-    /// implicit conversion position in the language) or is `E0057`. Runs only when both sides are
-    /// resolved: a `dyn`/hole on either side, an undeclared return, or a type parameter in scope
-    /// defers to runtime exactly as before, and an assignable error (a union member, for instance)
-    /// propagates unconverted as it always did. Exactly-one-path is by construction: sources are
-    /// matched by type equality, and coherence admits at most one `From` impl per target type, so
-    /// no `?` site ever sees two candidate conversions.
+    /// The `?` **failure-position rule** — the `Result` twin of [`Self::check_try_option`], plus the
+    /// error-conversion rule layered on top of it.
+    ///
+    /// *Position* first: `?` on a `Result` early-returns the `Err`, so the enclosing function has to
+    /// be able to return one. A declared return that is neither a `Result` nor deferring is
+    /// **E0012**, exactly as the `Option` half is — the same rule, the same span, the same code.
+    /// Without it, `fn work(): void { client.get(url)? }` checked clean, discarded the transport
+    /// failure, and exited 0: the failure was unobservable and CI went green on a broken program. A
+    /// declared return that defers (`dyn`, an inference hole, top-level code, an unannotated closure)
+    /// still defers — an `Err` that reaches the top aborts there (E0069) rather than vanishing.
+    ///
+    /// *Conversion* second (error-ergonomics): a `?` whose `Err` payload type differs from the
+    /// declared error type either **converts** through the target's declared `impl From<Source>` (the
+    /// site is recorded for lowering — the one implicit conversion position in the language) or is
+    /// `E0057`. That judgement runs only when both sides are resolved: a `dyn`/hole on either side or
+    /// a type parameter in scope defers to runtime, and an assignable error (a union member, for
+    /// instance) propagates unconverted. Exactly-one-path is by construction: sources are matched by
+    /// type equality, and coherence admits at most one `From` impl per target type, so no `?` site
+    /// ever sees two candidate conversions.
     pub(crate) fn check_try_error(&mut self, err: &Type, span: Span) {
         let Type::Result(_, declared) = self.coloring.current_ret.clone() else {
-            return; // no declared `Result` context — `?` behaves exactly as before
+            self.reject_try_position(err, span);
+            return;
         };
         let declared = *declared;
         if err.defers_to_runtime() || declared.defers_to_runtime() {
@@ -979,6 +990,37 @@ impl Checker {
             ));
         } else {
             d.help("align the function's declared error type with the propagated error");
+        }
+    }
+
+    /// The position half of [`Self::check_try_error`]: the enclosing function's declared return is
+    /// not a `Result`, so the `Err` this `?` early-returns has nowhere to go. A return that defers
+    /// (`dyn`, an inference hole, top-level code, an unannotated closure) still defers to runtime;
+    /// anything else is E0012, naming the declaration that would make the propagation legal.
+    fn reject_try_position(&mut self, err: &Type, span: Span) {
+        let declared = self.coloring.current_ret.clone();
+        if declared.defers_to_runtime() {
+            return;
+        }
+        let d = self.error(
+            DiagnosticCode::InvalidTry,
+            span,
+            format!("`?` on a `Result` early-returns its `Err`, but this function returns `{declared}`"),
+        );
+        // Name the concrete declaration that admits this very `Err`; an unresolved error payload
+        // (`dyn`, a hole) can only be described generically.
+        if err.defers_to_runtime() {
+            d.help(
+                "declare the return as `Result<T, E>` to propagate the failure (converting through \
+                 `impl From<Source>` on `E` if the error types differ), or handle it here with \
+                 `match` / `??`",
+            );
+        } else {
+            d.help(format!(
+                "declare the return as `Result<T, {err}>` to propagate the failure (or \
+                 `Result<T, E>` with an `impl From<{err}>` on `E` to convert it), or handle it here \
+                 with `match` / `??`"
+            ));
         }
     }
 

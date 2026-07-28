@@ -20,6 +20,7 @@
 use std.http.client
 use std.http.Framing
 use std.http.Frame
+use std.http.HttpError
 
 fn blank(): Frame {
     return Frame { event: "", data: "", id: "", retry: none }
@@ -33,7 +34,10 @@ fn word(f: ?Frame): string {
     return "some"
 }
 
-async fn run(): void {
+// `Result<void, HttpError>`, not `void`: the `?`s below early-return a failed *open*, so the
+// signature has to be able to carry one (E0012 otherwise). A failed open must never look like an
+// empty body — which is the very confusion this case exists to rule out.
+async fn run(): Result<void, HttpError> {
     api = client.new("https://svc.test")
 
     // An empty body: open succeeds, the first read ends the stream.
@@ -68,5 +72,6 @@ async fn run(): void {
     a = cut.recv().await
     b = cut.recv().await
     echo "past the end: ${word(a)}, ${word(b)}"
+    return Ok()
 }
-run().await
+run().await?

@@ -10,8 +10,11 @@
 // expect: stdout "{"k":"v"}"
 // expect: exit 0
 use std.http.client
+use std.http.HttpError
 
-// Headers on a bodyless verb (arg index 1), echoed sorted by the /headers route.
+// Headers on a bodyless verb (arg index 1), echoed sorted by the /headers route. A top-level `?`
+// needs no declared return — and an `Err` reaching the top aborts with its `message()` and a
+// non-zero exit, so a broken request cannot pass for a clean run.
 echo client.get("https://svc.test/headers", {"x-b": "2", "x-a": "1"})?.body()
 
 // QUERY — body-carrying; /echo shows the uppercased method.
@@ -23,8 +26,11 @@ echo client.post("https://svc.test/headers", "b", {"authorization": "Bearer t"})
 // request with a custom verb + headers (headers ignored by the /echo route).
 echo client.request("PATCH", "https://svc.test/echo", {"x": "y"})?.body()
 
-// Optional headers work on the async twins too.
-async fn run(): void {
+// Optional headers work on the async twins too. `run` declares `Result<void, HttpError>` because it
+// uses `?`: inside a *named* function the operator's early return has to fit the signature (E0012
+// otherwise).
+async fn run(): Result<void, HttpError> {
     echo client.get_async("https://svc.test/headers", {"k": "v"}).await?.body()
+    return Ok()
 }
-run().await
+run().await?

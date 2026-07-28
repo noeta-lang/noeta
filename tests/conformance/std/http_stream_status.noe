@@ -28,8 +28,13 @@
 // expect: exit 0
 use std.http.client
 use std.http.Framing
+use std.http.HttpError
 
-async fn run(): void {
+// `Result<void, HttpError>`, not `void`: the `?`s on the opens early-return a transport failure, so the
+// signature has to be able to carry one (E0012 otherwise). It is the same distinction the case is
+// about — `?` means "never got off the ground", a status is an ordinary answer — now visible in the
+// signature instead of discarded.
+async fn run(): Result<void, HttpError> {
     api = client.new("https://svc.test")
 
     // A streamed rate limit. Opening SUCCEEDS — a status is an answer, not a transport failure — so
@@ -69,5 +74,6 @@ async fn run(): void {
         Err(_) => "error_for_status on a 2xx unexpectedly failed",
     }
     good.close()
+    return Ok()
 }
-run().await
+run().await?

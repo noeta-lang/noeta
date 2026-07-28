@@ -928,12 +928,64 @@ impl Vm<'_> {
         release(rendered);
         Ok(message)
     }
+
+    /// How an **unhandled** `Err` payload describes itself for the E0069 abort: a `string` payload as
+    /// itself, an `Error`-implementing payload through its `message()`, anything else through its
+    /// ordinary display — so the abort always names what went wrong, whatever was put in the `Err`.
+    /// `payload` is borrowed from the enclosing `Result` (freed by its owner).
+    ///
+    /// The `Error` test is the shared trait-membership table (the same one `is dyn Error` consults,
+    /// carrying declared `impl`s, `@derive`s, and native ABI declarations), so it agrees with "would a
+    /// `message()` call resolve" by construction and the tree-walker's twin decides identically.
+    pub(crate) fn unhandled_error_message(
+        &mut self,
+        payload: Value,
+        span: Span,
+    ) -> Result<String, Abort> {
+        if let Some(s) = payload.as_string() {
+            return Ok(s);
+        }
+        let implements_error = crate::lifecycle::vm_nominal_name(&payload)
+            .is_some_and(|name| self.module.reflection.type_implements(&name, "Error"));
+        if !implements_error {
+            return Ok(payload.display());
+        }
+        // An extern error (`std.http.HttpError`) declares `Error` through the ABI, so its `message`
+        // lives in the registry's dispatch, not a bytecode prototype. That path only *borrows* its
+        // receiver, so no retain here.
+        if payload.is_extern() {
+            let rendered = self.call_extern_method(payload, "message", &[], span)?;
+            let message = rendered.as_string().unwrap_or_default();
+            release(rendered);
+            return Ok(message);
+        }
+        let type_name = payload.shape().map(|s| s.name.clone()).unwrap_or_default();
+        // A native *fielded* type (`ExtClass`) advertising `Error` keeps its `message` in the class
+        // dispatch rather than the proto table — routed here for the same reason the extern arm
+        // exists, so the trait table stays the single gate and this helper can never fall through to
+        // the wrong dispatch. No std type is in that shape today; the arm is what keeps a future one
+        // from diverging from the tree-walker, whose generic `call_method` routes it automatically.
+        // Borrows its receiver, like the extern path.
+        if self.reg().resolve_fielded(&type_name).is_some() {
+            let rendered = self.call_native_class_method(payload, "message", &[], span)?;
+            let message = rendered.as_string().unwrap_or_default();
+            release(rendered);
+            return Ok(message);
+        }
+        // Retain before the consuming re-entry — `run_method_handle` releases the receiver, but the
+        // payload is still owned by the enclosing `Result`.
+        retain(payload);
+        let rendered = self.run_method_handle(&type_name, "message", false, vec![payload], span)?;
+        let message = rendered.as_string().unwrap_or_default();
+        release(rendered);
+        Ok(message)
+    }
 }
 
-/// The `Err` payload of a `Result::Err` value (validation arc): `Some(payload)` when `value` is
-/// `Result::Err(e)`, else `None`. The payload is **borrowed** (not retained) from `value`, matching
-/// [`crate::lifecycle::try_classify`]'s shared-payload convention.
-fn result_err_payload(value: Value) -> Option<Value> {
+/// The `Err` payload of a `Result::Err` value (validation arc, and the E0069 unhandled-error abort):
+/// `Some(payload)` when `value` is `Result::Err(e)`, else `None`. The payload is **borrowed** (not
+/// retained) from `value`, matching [`crate::lifecycle::try_classify`]'s shared-payload convention.
+pub(crate) fn result_err_payload(value: Value) -> Option<Value> {
     if !value.is_enum() {
         return None;
     }

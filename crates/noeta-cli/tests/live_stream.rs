@@ -212,12 +212,17 @@ fn client_stream_reads_a_real_body_arriving_in_pieces() {
             r#"use std.http.client
 use std.http.Framing
 use std.http.Frame
+use std.http.HttpError
 
 fn blank(): Frame {{
     return Frame {{ event: "", data: "", id: "", retry: none }}
 }}
 
-async fn run(): void {{
+// `Result<void, HttpError>`, not `void`: the `?` below early-returns a failed open, so the signature
+// has to be able to carry one (E0012). It also makes this fixture fail LOUDLY — a failed connection to
+// the stub server aborts with the transport message and a non-zero exit instead of producing an empty
+// stdout that only the `assert_eq!` below would notice.
+async fn run(): Result<void, HttpError> {{
     api = client.new("http://127.0.0.1:{port}")
     stream = client.stream(api.prepare("get", "/events"), Framing.Sse)?
     // The head, straight off the real handshake and before any frame is consumed.
@@ -233,8 +238,9 @@ async fn run(): void {{
         }}
     }}
     echo "done"
+    return Ok()
 }}
-run().await
+run().await?
 "#
         ),
     )
@@ -295,8 +301,12 @@ fn client_stream_reads_the_head_of_a_real_rate_limited_response() {
         format!(
             r#"use std.http.client
 use std.http.Framing
+use std.http.HttpError
 
-async fn run(): void {{
+// `Result<void, HttpError>`, not `void`: the `?` below early-returns a failed open, so the signature
+// has to be able to carry one (E0012) — and a fixture that could not connect at all now aborts with
+// the transport message instead of quietly printing nothing.
+async fn run(): Result<void, HttpError> {{
     api = client.new("http://127.0.0.1:{port}")
     // Opening SUCCEEDS: a status is an answer, not a transport failure, so `?` does not fire.
     stream = client.stream(api.prepare("post", "/v1/chat", "hi"), Framing.Sse)?
@@ -316,8 +326,9 @@ async fn run(): void {{
         Ok(_) => "error_for_status: unexpectedly ok",
         Err(e) => "error_for_status ${{e.kind()}}",
     }}
+    return Ok()
 }}
-run().await
+run().await?
 "#
         ),
     )

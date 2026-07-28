@@ -1,0 +1,37 @@
+// A `?` inside an **async** body is not top-level code, however the runtime happens to drive it.
+//
+// This guards the frame-identity condition the E0069 abort rests on. An `async fn` lowers to a state
+// machine the scheduler polls through a step closure, so its `?` runs on a *re-entrant* stack rather
+// than the program's bottom frame — and the two backends decide that from different evidence (the VM
+// from `run_depth`/frame depth, the tree-walker from its call-site stack). If either got it wrong, the
+// `Err` below would abort the program instead of arriving at the awaiter, and the differential would
+// disagree. It early-returns from `chain` exactly as it does in a synchronous function, and the
+// awaiter decides.
+// expect: stdout "ok: 2"
+// expect: stdout "handled: Failure.Nope"
+// expect: exit 0
+enum Failure { Nope }
+
+async fn work(fail: bool): Result<int, Failure> {
+    if fail {
+        return Err(Failure.Nope)
+    }
+    return Ok(1)
+}
+
+async fn chain(fail: bool): Result<int, Failure> {
+    n = work(fail).await?
+    return Ok(n + 1)
+}
+
+fine = chain(false).await
+echo match fine {
+    Ok(n)  => "ok: ${n}",
+    Err(e) => "unexpected: ${e}",
+}
+
+broken = chain(true).await
+echo match broken {
+    Ok(n)  => "unexpected ok: ${n}",
+    Err(e) => "handled: ${e}",
+}

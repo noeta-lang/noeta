@@ -21,8 +21,13 @@
 // expect: exit 0
 use std.http.client
 use std.http.Framing
+use std.http.HttpError
 
-async fn run(): void {
+// `Result<void, HttpError>`, not `void`: each `?` below early-returns a failed *open*, so the
+// signature has to be able to carry one (E0012 otherwise). The top-level `?` propagates it out of the
+// program, where an unhandled `Err` aborts with its `message()` and a non-zero exit — so a run that
+// never opened a stream can never be mistaken for one that opened three and abandoned them.
+async fn run(): Result<void, HttpError> {
     api = client.new("https://svc.test")
 
     // Never read at all.
@@ -37,5 +42,6 @@ async fn run(): void {
     _end = drained.recv().await
 
     echo "opened three, read one frame from one of them"
+    return Ok()
 }
-run().await
+run().await?

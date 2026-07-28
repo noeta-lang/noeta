@@ -1,0 +1,34 @@
+// `?` on a `Result` early-returns the `Err`, so the enclosing function has to be able to return one —
+// the failure-position twin of `try_option_return_type`, the same rule at the same span with the same
+// code (E0012).
+//
+// Before this rule existed, the `void` case below was the language's quietest hole: `noeta check`
+// reported 0 errors, the `?` discarded the `Err` on its way out, and the program **exited 0**. A
+// `client.get(url)?` in a `void` function could not observe its own transport failure, so CI went
+// green on a broken program. A declared return that *defers* (`dyn`, top-level code, an unannotated
+// closure) still defers — see `try_result_deferred_return` — and an `Err` that reaches the top aborts
+// there (E0069, `try_unhandled_at_top_level`) rather than vanishing.
+// expect: error E0012 at 23:12
+// expect: error E0012 at 30:12
+// expect: exit 1
+enum LoadError { Missing }
+
+fn load(): Result<string, LoadError> {
+    return Err(LoadError.Missing)
+}
+
+// A `void` return has no `Err` slot at all. The help names the fix — declare
+// `Result<T, LoadError>`, or handle it here with `match` / `??`.
+fn apply(): void {
+    text = load()?
+    echo text
+}
+
+// A typed return is the very same rule: a `string` cannot carry an `Err` either, and the caller's
+// binding was promised a `string`.
+fn name_of(): string {
+    return load()?
+}
+
+apply()
+echo name_of()

@@ -254,9 +254,12 @@ Some sources produce values *over time* rather than all at once. The two in the 
 
 ```noeta
 use std.http.client
-use std.http.{Framing, Frame}
+use std.http.{Framing, Frame, HttpError}
 
-async fn tokens(body: string): void {
+// `Result<void, HttpError>` rather than `void`, because the body uses `?`: the operator early-returns
+// the failure, so the signature has to be able to carry one — see [`?` — propagate a
+// failure](Error-Handling#--propagate-a-failure).
+async fn tokens(body: string): Result<void, HttpError> {
     api = client.new("https://api.example.com")
     opened = client.stream(api.prepare("post", "/v1/chat", body), Framing.Sse)?
     // Check the head before draining the body — see below.
@@ -271,6 +274,7 @@ async fn tokens(body: string): void {
             echo f.data
         }
     }
+    return Ok()
 }
 ```
 
