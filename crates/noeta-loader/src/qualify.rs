@@ -22,6 +22,23 @@
 //! std.http.url`, `decode` from `use std.http.url.{decode}`). Those are file-scoped names that the
 //! merged program's one flat global scope cannot keep apart, so the linker rewrites each to the
 //! import's **canonical identity** — see [`UnitMap::handles`].
+//!
+//! # No `..` in this file's AST patterns
+//!
+//! Every `Expr`/`Stmt`/`Pattern`/`TypeRef` destructuring below binds **every** field by name —
+//! deliberately-unused ones as `field: _`. This costs a line per node and buys the one property
+//! Rust's exhaustiveness check does not give for free.
+//!
+//! Rust forces a match to mention every *variant*; it does not force an arm to mention every
+//! *field*. So `Expr::TypedCall { type_args, args, .. }` compiled happily while the variant's
+//! `name` — the callee — went unvisited, and `gen::<T>(x)` under a `namespace` was `E0005` while
+//! `gen(x)` resolved. The same shape had already shipped twice before that. With `..` banned,
+//! adding a field to any of those types is a **compile error here**, at the commit that adds it,
+//! and whoever adds it has to say what qualification should do with it.
+//!
+//! The complementary half — that a bound field is actually *visited*, not merely named — is
+//! `ast_walk_coverage.rs`, which classifies every field of every one of those nodes and runs the
+//! real walk over a probe carrying a sentinel in each position.
 
 use std::collections::{HashMap, HashSet};
 
@@ -130,6 +147,8 @@ fn q_type_operand(op: &mut TypeOperand, visit: &mut NameVisitor) {
 
 /// Rewrite every named type inside a [`TypeRef`], recursively — so `List<User>`, `?User`,
 /// `A | B`, `(A, B)`, and `(A) -> B` all qualify their nominal leaves.
+///
+/// Every field is bound by name — see the module-level note on `..`.
 fn q_typeref(ty: &mut TypeRef, visit: &mut NameVisitor) {
     match ty {
         TypeRef::Named { name, args, span } => {
@@ -139,16 +158,25 @@ fn q_typeref(ty: &mut TypeRef, visit: &mut NameVisitor) {
             }
         }
         // A trait object qualifies its trait name like any nominal leaf.
-        TypeRef::DynTrait { trait_name, .. } => {
+        TypeRef::DynTrait {
+            trait_name,
+            span: _,
+        } => {
             visit(trait_name, NameKind::Type, None);
         }
         // `Self::Name` has no nominal leaf to qualify — the associated-type name resolves per-impl
         // at the checker, not through the import map (slice 1a).
-        TypeRef::AssocProjection { .. } => {}
-        TypeRef::Optional { inner, .. } => q_typeref(inner, visit),
-        TypeRef::Union { members, .. } => members.iter_mut().for_each(|m| q_typeref(m, visit)),
-        TypeRef::Tuple { elements, .. } => elements.iter_mut().for_each(|e| q_typeref(e, visit)),
-        TypeRef::Fn { params, ret, .. } => {
+        TypeRef::AssocProjection { name: _, span: _ } => {}
+        TypeRef::Optional { inner, span: _ } => q_typeref(inner, visit),
+        TypeRef::Union { members, span: _ } => members.iter_mut().for_each(|m| q_typeref(m, visit)),
+        TypeRef::Tuple { elements, span: _ } => {
+            elements.iter_mut().for_each(|e| q_typeref(e, visit))
+        }
+        TypeRef::Fn {
+            params,
+            ret,
+            span: _,
+        } => {
             params.iter_mut().for_each(|p| q_typeref(p, visit));
             q_typeref(ret, visit);
         }
@@ -299,11 +327,23 @@ fn bound_in_stmt(stmt: &Stmt, names: &mut HashSet<String>) {
         }
     };
     match stmt {
-        Stmt::Binding { name, value, .. } => {
+        Stmt::Binding {
+            mut_decl: _,
+            name,
+            name_span: _,
+            ty: _,
+            value,
+            span: _,
+        } => {
             names.insert(name.clone());
             bound_in_expr(value, names);
         }
-        Stmt::Destructure { targets, value, .. } => {
+        Stmt::Destructure {
+            mut_decl: _,
+            targets,
+            value,
+            span: _,
+        } => {
             names.extend(targets.iter().map(|(n, _)| n.clone()));
             bound_in_expr(value, names);
         }
@@ -311,33 +351,45 @@ fn bound_in_stmt(stmt: &Stmt, names: &mut HashSet<String>) {
             pattern,
             iterable,
             body,
-            ..
+            span: _,
         } => {
             match pattern {
-                noeta_ast::ForPattern::Single { name, .. } => {
+                noeta_ast::ForPattern::Single { name, name_span: _ } => {
                     names.insert(name.clone());
                 }
-                noeta_ast::ForPattern::Tuple { names: ns, .. } => {
+                noeta_ast::ForPattern::Tuple { names: ns, span: _ } => {
                     names.extend(ns.iter().map(|(n, _)| n.clone()));
                 }
             }
             bound_in_expr(iterable, names);
             each(body, names);
         }
-        Stmt::Echo { value, .. } | Stmt::Yield { value, .. } | Stmt::Expr { expr: value, .. } => {
-            bound_in_expr(value, names)
-        }
-        Stmt::Return { value, .. } => {
+        Stmt::Echo { value, span: _ }
+        | Stmt::Yield { value, span: _ }
+        | Stmt::Expr {
+            expr: value,
+            span: _,
+        } => bound_in_expr(value, names),
+        Stmt::Return { value, span: _ } => {
             if let Some(v) = value {
                 bound_in_expr(v, names);
             }
         }
-        Stmt::Concurrent { body, .. } | Stmt::TierBlock { items: body, .. } => each(body, names),
+        Stmt::Concurrent { body, span: _ } => each(body, names),
+        Stmt::TierBlock {
+            tier: _,
+            tier_span: _,
+            args: _,
+            items,
+            doc_text: _,
+            attached: _,
+            span: _,
+        } => each(items, names),
         Stmt::If {
             cond,
             then_body,
             else_body,
-            ..
+            span: _,
         } => {
             bound_in_expr(cond, names);
             each(then_body, names);
@@ -345,7 +397,11 @@ fn bound_in_stmt(stmt: &Stmt, names: &mut HashSet<String>) {
                 each(b, names);
             }
         }
-        Stmt::While { cond, body, .. } => {
+        Stmt::While {
+            cond,
+            body,
+            span: _,
+        } => {
             bound_in_expr(cond, names);
             each(body, names);
         }
@@ -355,35 +411,19 @@ fn bound_in_stmt(stmt: &Stmt, names: &mut HashSet<String>) {
             bound_in_fn(decl, names);
         }
         Stmt::Class(decl) => {
-            for m in &decl.methods {
-                bound_in_fn(m, names);
-            }
-            for b in &decl.impls {
-                for m in &b.methods {
-                    bound_in_fn(m, names);
-                }
-            }
+            bound_in_members(&decl.fields, &decl.methods, &decl.impls, names);
             if let Some(body) = &decl.destructor {
                 each(body, names);
             }
         }
         Stmt::Struct(decl) => {
-            for m in &decl.methods {
-                bound_in_fn(m, names);
-            }
-            for b in &decl.impls {
-                for m in &b.methods {
-                    bound_in_fn(m, names);
-                }
-            }
+            bound_in_members(&decl.fields, &decl.methods, &decl.impls, names);
         }
         Stmt::Enum(decl) => {
-            for m in &decl.methods {
-                bound_in_fn(m, names);
-            }
-            for b in &decl.impls {
-                for m in &b.methods {
-                    bound_in_fn(m, names);
+            bound_in_members(&[], &decl.methods, &decl.impls, names);
+            for v in &decl.variants {
+                if let Some(e) = &v.backed_value {
+                    bound_in_expr(e, names);
                 }
             }
         }
@@ -392,16 +432,59 @@ fn bound_in_stmt(stmt: &Stmt, names: &mut HashSet<String>) {
                 bound_in_fn(m, names);
             }
         }
-        Stmt::Trait(_)
-        | Stmt::Namespace { .. }
-        | Stmt::Use { .. }
-        | Stmt::Break { .. }
-        | Stmt::Continue { .. } => {}
+        // A trait's **default** method bodies are ordinary code, with ordinary parameters and
+        // locals. Skipping them let a default body's parameter named like a native-`use` handle
+        // (`fn f(url: string)` under `use std.http.url`) fail to suppress the α-rename, so
+        // `url.decode(…)` in that body was rewritten to the module's canonical name.
+        Stmt::Trait(decl) => {
+            for m in &decl.methods {
+                bound_in_fn(&m.sig, names);
+            }
+        }
+        Stmt::Namespace { path: _, span: _ }
+        | Stmt::Use {
+            path: _,
+            names: _,
+            span: _,
+        }
+        | Stmt::Break { span: _ }
+        | Stmt::Continue { span: _ } => {}
+    }
+}
+
+/// The binders inside a type declaration's body: its methods, its `impl` blocks' methods, and any
+/// **field-default** expression (`x: int = fn() => …` binds inside the thunk).
+fn bound_in_members(
+    fields: &[FieldDecl],
+    methods: &[FnDecl],
+    impls: &[ImplBlock],
+    names: &mut HashSet<String>,
+) {
+    for f in fields {
+        if let Some(d) = &f.default {
+            bound_in_expr(d, names);
+        }
+    }
+    for m in methods {
+        bound_in_fn(m, names);
+    }
+    for b in impls {
+        for m in &b.methods {
+            bound_in_fn(m, names);
+        }
     }
 }
 
 fn bound_in_fn(decl: &FnDecl, names: &mut HashSet<String>) {
     names.extend(decl.params.iter().map(|p| p.name.clone()));
+    // An explicit capture clause (`fn f(…) use (a, b)`) makes those names live bindings in the
+    // body, exactly as parameters are.
+    names.extend(decl.captures.iter().map(|(n, _)| n.clone()));
+    for p in &decl.params {
+        if let Some(d) = &p.default {
+            bound_in_expr(d, names);
+        }
+    }
     for s in &decl.body {
         bound_in_stmt(s, names);
     }
@@ -409,18 +492,23 @@ fn bound_in_fn(decl: &FnDecl, names: &mut HashSet<String>) {
 
 fn bound_in_pattern(p: &Pattern, names: &mut HashSet<String>) {
     match p {
-        Pattern::Binding { name, .. } => {
+        Pattern::Binding { name, span: _ } => {
             names.insert(name.clone());
         }
-        Pattern::Variant { bindings, .. } => {
-            bindings.iter().for_each(|b| bound_in_pattern(b, names))
+        Pattern::Variant {
+            type_name: _,
+            variant: _,
+            bindings,
+            span: _,
+        } => bindings.iter().for_each(|b| bound_in_pattern(b, names)),
+        Pattern::Tuple { elements, span: _ } => {
+            elements.iter().for_each(|e| bound_in_pattern(e, names))
         }
-        Pattern::Tuple { elements, .. } => elements.iter().for_each(|e| bound_in_pattern(e, names)),
-        Pattern::Wildcard { .. }
-        | Pattern::Int { .. }
-        | Pattern::Str { .. }
-        | Pattern::Bool { .. }
-        | Pattern::IsType { .. } => {}
+        Pattern::Wildcard { span: _ }
+        | Pattern::Int { value: _, span: _ }
+        | Pattern::Str { value: _, span: _ }
+        | Pattern::Bool { value: _, span: _ }
+        | Pattern::IsType { ty: _, span: _ } => {}
     }
 }
 
@@ -432,9 +520,14 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
             params,
             ret: _,
             body,
-            ..
+            span: _,
         } => {
             names.extend(params.iter().map(|p| p.name.clone()));
+            for p in params {
+                if let Some(d) = &p.default {
+                    bound_in_expr(d, names);
+                }
+            }
             match body {
                 ClosureBody::Expr(e) => bound_in_expr(e, names),
                 ClosureBody::Block(stmts) => {
@@ -445,11 +538,16 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
             }
         }
         Expr::Match {
-            scrutinee, arms, ..
+            scrutinee,
+            arms,
+            span: _,
         } => {
             bound_in_expr(scrutinee, names);
             for arm in arms {
                 bound_in_pattern(&arm.pattern, names);
+                if let Some(guard) = &arm.guard {
+                    bound_in_expr(guard, names);
+                }
                 match &arm.body {
                     ClosureBody::Expr(e) => bound_in_expr(e, names),
                     ClosureBody::Block(stmts) => {
@@ -468,76 +566,168 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
                 bound_in_expr(s, names);
             }
         }
-        Expr::Unary { operand: inner, .. }
+        Expr::Unary {
+            op: _,
+            operand: inner,
+            span: _,
+        }
         | Expr::Member {
-            receiver: inner, ..
+            receiver: inner,
+            name: _,
+            name_span: _,
+            span: _,
         }
         | Expr::TupleIndex {
-            receiver: inner, ..
+            receiver: inner,
+            index: _,
+            span: _,
         }
-        | Expr::Try { expr: inner, .. }
-        | Expr::Await { expr: inner, .. }
-        | Expr::Spawn { future: inner, .. }
-        | Expr::TypeOf { value: inner, .. }
-        | Expr::FieldsOf { value: inner, .. }
-        | Expr::TraitsOf { value: inner, .. }
-        | Expr::ParamsOf { target: inner, .. }
-        | Expr::ReturnsOf { target: inner, .. }
-        | Expr::As { expr: inner, .. }
-        | Expr::TypeTest { expr: inner, .. }
-        | Expr::FromBytes { blob: inner, .. }
+        | Expr::Try {
+            expr: inner,
+            span: _,
+        }
+        | Expr::Await {
+            expr: inner,
+            span: _,
+        }
+        | Expr::Spawn {
+            future: inner,
+            isolate: _,
+            span: _,
+        }
+        | Expr::TypeOf {
+            value: inner,
+            span: _,
+        }
+        | Expr::FieldsOf {
+            value: inner,
+            span: _,
+        }
+        | Expr::TraitsOf {
+            value: inner,
+            span: _,
+        }
+        | Expr::ParamsOf {
+            target: inner,
+            span: _,
+        }
+        | Expr::ReturnsOf {
+            target: inner,
+            span: _,
+        }
+        | Expr::As {
+            expr: inner,
+            ty: _,
+            span: _,
+        }
+        | Expr::TypeTest {
+            expr: inner,
+            ty: _,
+            span: _,
+        }
+        | Expr::FromBytes {
+            ty: _,
+            blob: inner,
+            span: _,
+        }
         | Expr::Channel {
-            capacity: inner, ..
+            elem: _,
+            capacity: inner,
+            span: _,
         } => bound_in_expr(inner, names),
         // A turbofish operand is a type, never a binding; a dynamic one is an ordinary expression.
-        Expr::FieldSpecsOf { name, .. } => {
+        Expr::FieldSpecsOf { name, span: _ } => {
             if let Some(e) = name.dynamic() {
                 bound_in_expr(e, names);
             }
         }
-        Expr::Construct { name, fields, .. } => {
+        Expr::Construct {
+            name,
+            fields,
+            span: _,
+        } => {
             if let Some(e) = name.dynamic() {
                 bound_in_expr(e, names);
             }
             bound_in_expr(fields, names);
         }
-        Expr::Binary { lhs: a, rhs: b, .. }
+        Expr::Binary {
+            op: _,
+            lhs: a,
+            rhs: b,
+            span: _,
+        }
         | Expr::Pipeline {
-            left: a, right: b, ..
+            left: a,
+            right: b,
+            span: _,
         }
         | Expr::Range {
-            start: a, end: b, ..
+            start: a,
+            end: b,
+            inclusive: _,
+            span: _,
         }
         | Expr::Index {
             receiver: a,
             index: b,
-            ..
+            span: _,
         }
         | Expr::Coalesce {
             value: a,
             fallback: b,
-            ..
+            span: _,
         }
         | Expr::FieldSet {
             receiver: a,
+            field: _,
+            field_span: _,
             value: b,
-            ..
+            span: _,
         } => {
             bound_in_expr(a, names);
             bound_in_expr(b, names);
         }
-        Expr::Call { callee, args, .. } => {
+        Expr::Call {
+            callee,
+            args,
+            span: _,
+        } => {
             bound_in_expr(callee, names);
             CallArg::values(args).for_each(|a| bound_in_expr(a, names));
         }
         // A turbofish call binds nothing itself — walk the argument expressions.
-        Expr::TypedCall { args, .. } => CallArg::values(args).for_each(|a| bound_in_expr(a, names)),
-        Expr::TypedModuleCall { recv, args, .. } | Expr::TypedMethodCall { recv, args, .. } => {
+        Expr::TypedCall {
+            name: _,
+            name_span: _,
+            type_args: _,
+            args,
+            span: _,
+        } => CallArg::values(args).for_each(|a| bound_in_expr(a, names)),
+        Expr::TypedModuleCall {
+            recv,
+            func: _,
+            func_span: _,
+            ty: _,
+            args,
+            span: _,
+        }
+        | Expr::TypedMethodCall {
+            recv,
+            name: _,
+            name_span: _,
+            type_args: _,
+            args,
+            span: _,
+        } => {
             bound_in_expr(recv, names);
             CallArg::values(args).for_each(|a| bound_in_expr(a, names));
         }
         Expr::Invoke {
-            recv, name, args, ..
+            recv,
+            name,
+            args,
+            span: _,
         } => {
             if let Some(recv) = recv {
                 bound_in_expr(recv, names);
@@ -545,35 +735,50 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
             bound_in_expr(name, names);
             bound_in_expr(args, names);
         }
-        Expr::List { items, .. } | Expr::Tuple { items, .. } => {
+        Expr::List { items, span: _ } | Expr::Tuple { items, span: _ } => {
             items.iter().for_each(|i| bound_in_expr(i, names))
         }
-        Expr::Map { entries, .. } => {
+        Expr::Map { entries, span: _ } => {
             for (k, v) in entries {
                 bound_in_expr(k, names);
                 bound_in_expr(v, names);
             }
         }
-        Expr::Interp { parts, .. } => {
+        Expr::Interp { parts, span: _ } => {
             for part in parts {
                 if let StrPart::Hole(e) = part {
                     bound_in_expr(e, names);
                 }
             }
         }
-        Expr::TierExpr { holes, .. } => holes.iter().for_each(|h| bound_in_expr(h, names)),
-        Expr::Ident { .. }
-        | Expr::NativeFnRef { .. }
-        | Expr::AttributesOf { .. }
-        | Expr::TypeName { .. }
-        | Expr::RolesOf { .. }
-        | Expr::Str { .. }
-        | Expr::Int { .. }
-        | Expr::Float { .. }
-        | Expr::F32 { .. }
-        | Expr::F64 { .. }
-        | Expr::IntN { .. }
-        | Expr::Bool { .. } => {}
+        Expr::TierExpr {
+            tier: _,
+            tier_span: _,
+            statics: _,
+            holes,
+            span: _,
+        } => holes.iter().for_each(|h| bound_in_expr(h, names)),
+        Expr::Ident { name: _, span: _ }
+        | Expr::NativeFnRef {
+            module: _,
+            func: _,
+            span: _,
+        }
+        | Expr::AttributesOf { ty: _, span: _ }
+        | Expr::TypeName { ty: _, span: _ }
+        | Expr::RolesOf { ty: _, span: _ }
+        | Expr::Str { value: _, span: _ }
+        | Expr::Int { value: _, span: _ }
+        | Expr::Float { value: _, span: _ }
+        | Expr::F32 { value: _, span: _ }
+        | Expr::F64 { value: _, span: _ }
+        | Expr::IntN {
+            magnitude: _,
+            signed: _,
+            bits: _,
+            span: _,
+        }
+        | Expr::Bool { value: _, span: _ } => {}
     }
 }
 
@@ -581,25 +786,42 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
 /// [`qualify_stmt`] (rewrite) and [`referenced_names`] (collect) drive it.
 fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
     match stmt {
-        Stmt::Echo { value, .. } | Stmt::Yield { value, .. } | Stmt::Expr { expr: value, .. } => {
-            q_expr(value, visit)
-        }
-        Stmt::Binding { ty, value, .. } => {
+        Stmt::Echo { value, span: _ }
+        | Stmt::Yield { value, span: _ }
+        | Stmt::Expr {
+            expr: value,
+            span: _,
+        } => q_expr(value, visit),
+        Stmt::Binding {
+            mut_decl: _,
+            // A binding's own name is a **value** binding in the flat merged scope, never a
+            // qualifiable declaration — `x = …` inside `namespace app` stays `x`.
+            name: _,
+            name_span: _,
+            ty,
+            value,
+            span: _,
+        } => {
             q_opt_typeref(ty, visit);
             q_expr(value, visit);
         }
-        Stmt::Destructure { value, .. } => q_expr(value, visit),
-        Stmt::Return { value, .. } => {
+        Stmt::Destructure {
+            mut_decl: _,
+            targets: _,
+            value,
+            span: _,
+        } => q_expr(value, visit),
+        Stmt::Return { value, span: _ } => {
             if let Some(inner) = value {
                 q_expr(inner, visit);
             }
         }
-        Stmt::Concurrent { body, .. } => q_body(body, visit),
+        Stmt::Concurrent { body, span: _ } => q_body(body, visit),
         Stmt::If {
             cond,
             then_body,
             else_body,
-            ..
+            span: _,
         } => {
             q_expr(cond, visit);
             q_body(then_body, visit);
@@ -607,16 +829,46 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
                 q_body(b, visit);
             }
         }
-        Stmt::For { iterable, body, .. } => {
+        Stmt::For {
             // A `for` binder introduces value names, never type references.
+            pattern: _,
+            iterable,
+            body,
+            span: _,
+        } => {
             q_expr(iterable, visit);
             q_body(body, visit);
         }
-        Stmt::While { cond, body, .. } => {
+        Stmt::While {
+            cond,
+            body,
+            span: _,
+        } => {
             q_expr(cond, visit);
             q_body(body, visit);
         }
-        Stmt::TierBlock { items, .. } => q_body(items, visit),
+        Stmt::TierBlock {
+            // The tier name lives in a **global**, package-spanning name-space (`@test`,
+            // `@bench`, a provider's `@fuzz`): a consumer writes the short name a `@tier` runner
+            // declared, so qualifying it here would make every declared tier unreachable.
+            tier: _,
+            tier_span: _,
+            args,
+            items,
+            // A text tier's body is verbatim foreign text, not Noeta.
+            doc_text: _,
+            attached: _,
+            span: _,
+        } => {
+            // The block's directive args are stamped verbatim onto each lifted fn as the tier's
+            // config attribute (`synthesized_config_attr`), where they construct a real struct —
+            // so a `@fuzz(mode: Mode.Fast)` arg naming a local/imported type has to qualify like
+            // any other attribute argument.
+            for a in args {
+                q_attr_value(&mut a.value, visit);
+            }
+            q_body(items, visit);
+        }
         Stmt::Fn(decl) => {
             // A **top-level** function's own name qualifies (like a type's); a method's does not —
             // methods resolve through their type, so `q_fn` (shared with methods) never touches the
@@ -640,12 +892,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         Stmt::Class(decl) => {
             visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
-            for a in &mut decl.decorators.attrs {
-                q_attr(a, visit);
-            }
-            for spec in &mut decl.decorators.derives {
-                q_derive(spec, visit);
-            }
+            q_decorators(&mut decl.decorators, visit);
             for f in &mut decl.fields {
                 q_field(f, visit);
             }
@@ -662,12 +909,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         Stmt::Struct(decl) => {
             visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
-            for a in &mut decl.decorators.attrs {
-                q_attr(a, visit);
-            }
-            for spec in &mut decl.decorators.derives {
-                q_derive(spec, visit);
-            }
+            q_decorators(&mut decl.decorators, visit);
             for f in &mut decl.fields {
                 q_field(f, visit);
             }
@@ -681,12 +923,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         Stmt::Enum(decl) => {
             visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
-            for a in &mut decl.decorators.attrs {
-                q_attr(a, visit);
-            }
-            for spec in &mut decl.decorators.derives {
-                q_derive(spec, visit);
-            }
+            q_decorators(&mut decl.decorators, visit);
             q_opt_typeref(&mut decl.backing, visit);
             for variant in &mut decl.variants {
                 q_variant(variant, visit);
@@ -707,10 +944,65 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             for m in &mut decl.methods {
                 q_fn(&mut m.sig, visit);
             }
+            // `type Item = Concrete;` — a required associated type's **default** is a concrete type
+            // reference and qualifies like any other. It did not, so a trait declaring
+            // `type Item = Todo;` alongside `Todo` in the same namespaced module resolved its own
+            // default against the *unqualified* `Todo`.
+            for at in &mut decl.assoc_types {
+                q_opt_typeref(&mut at.default, visit);
+            }
+            // A trait carries the same `Decorators` a type does, and (per `TraitDecl::decorators`)
+            // its `attrs`/`role` are *meaningful* — `attributes_of`/`roles_of` reflect them keyed by
+            // the trait name. They were the one declaration kind whose decorators this walk skipped,
+            // so `#[Route("/x")] trait Api` under a namespace kept a short attribute name the
+            // checker then rejected as E0029.
+            q_decorators(&mut decl.decorators, visit);
         }
-        // No type references: control-flow leaves, namespace/use (paths handled by the linker).
-        Stmt::Namespace { .. } | Stmt::Use { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        // No type references: control-flow leaves, namespace/use (paths handled by the linker —
+        // `Stmt::Use`'s path/names are resolved against the loaded modules, and rewriting them here
+        // would resolve the import against itself).
+        Stmt::Namespace { path: _, span: _ }
+        | Stmt::Use {
+            path: _,
+            names: _,
+            span: _,
+        }
+        | Stmt::Break { span: _ }
+        | Stmt::Continue { span: _ } => {}
     }
+}
+
+/// Walk a declaration's `@`-decorators and `#[...]` attributes — **one** walk shared by every
+/// declaration kind.
+///
+/// It is shared on purpose. [`Decorators`](noeta_ast::Decorators) exists because "every declaration
+/// kind has a slot for every directive" was previously a rule repeated four times and forgotten
+/// twice; qualification had the identical shape — struct/class/enum each open-coded `attrs` and
+/// `derives`, a trait qualified neither, and *nothing* qualified `role`. One function means adding a
+/// decorator kind is one decision here rather than four.
+fn q_decorators(d: &mut noeta_ast::Decorators, visit: &mut NameVisitor) {
+    for a in &mut d.attrs {
+        q_attr(a, visit);
+    }
+    for spec in &mut d.derives {
+        q_derive(spec, visit);
+    }
+    // `@role(Enum.Variant)` names a `@semantic` enum, which the checker looks up in
+    // `symbols.semantic_enums` — a table keyed by the **qualified** name after linking. Unvisited,
+    // an imported or namespaced role enum could never be found: `@role(App.Roles.Kind.Entry)` is not
+    // the surface (the grammar takes `Enum.Variant`), so there was no spelling that worked at all.
+    for tag in d.role.iter_mut().flatten() {
+        visit(&mut tag.enum_name, NameKind::Type, Some(tag.span));
+    }
+    // Deliberately untouched:
+    // * `attribute` — the placement kinds (`Method`, `Function`, …) are a closed built-in set, not
+    //   declarations in any module.
+    // * `semantic` / `validated` / `packed` — marker directives carrying only spans and a layout.
+    // * `foreign` — an extension-declared directive. Its arguments reach the hook as **source
+    //   spelling** (`AttrValue::as_directive_arg`, whose whole contract is "the path the author
+    //   wrote"), and nothing in the compiler resolves one as a type. Rewriting them would hand a
+    //   hook a name that appears nowhere in the source. If a hook ever needs a *resolved* type
+    //   there, that is a new declared argument kind, not a silent rewrite of every hook's strings.
 }
 
 /// Walk a block of statements.
@@ -724,12 +1016,27 @@ fn q_fn(decl: &mut FnDecl, visit: &mut NameVisitor) {
     for a in &mut decl.attrs {
         q_attr(a, visit);
     }
+    // A method's `@<tier>` directives (`@bench(iterations: 1000)` before a method) carry the same
+    // literal argument grammar a `#[...]` attribute and a top-level `@tier { … }` block do, and a
+    // nominal value in one means what it means in the others. Unlike a `Decorators::foreign`
+    // argument these never reach an extension hook — nothing outside the tier machinery reads them.
+    for dir in &mut decl.directives {
+        for a in &mut dir.args {
+            q_attr_value(&mut a.value, visit);
+        }
+    }
     q_type_params(&mut decl.type_params, visit);
     for p in &mut decl.params {
         q_param(p, visit);
     }
     q_opt_typeref(&mut decl.ret, visit);
     q_body(&mut decl.body, visit);
+    // `decl.name` is deliberately NOT visited here: `q_fn` is shared with methods, whose names
+    // resolve through their type. A top-level function's name is visited on the `Stmt::Fn` arm.
+    // `decl.tier`'s `config`/`expr` types are visited there too (only a top-level fn declares a
+    // tier); its `name` is the tier's global, consumer-written identity and never qualifies.
+    // `captures` are value bindings at the declaration site, `is_public`/`is_async`/`is_dev_tier`
+    // flags.
 }
 
 /// Qualify each type parameter's trait bounds: a bound NAME is a trait reference (a cross-module
@@ -788,6 +1095,7 @@ fn q_impl_block(b: &mut ImplBlock, visit: &mut NameVisitor) {
     // the module map (local/imported user traits); a built-in trait (`Add`, `Clone`) is absent from
     // it and left as-is.
     visit(&mut b.trait_name, NameKind::Type, None);
+    q_impl_types(&mut b.trait_args, &mut b.assoc_bindings, visit);
     for m in &mut b.methods {
         q_fn(m, visit);
     }
@@ -798,8 +1106,33 @@ fn q_impl_decl(decl: &mut ImplDecl, visit: &mut NameVisitor) {
     // qualifies iff it is a user trait (built-ins are absent from the module map).
     visit(&mut decl.trait_name, NameKind::Type, None);
     visit(&mut decl.target, NameKind::Type, None);
+    q_impl_types(&mut decl.trait_args, &mut decl.assoc_bindings, visit);
     for m in &mut decl.methods {
         q_fn(m, visit);
+    }
+}
+
+/// The two type-bearing halves an `impl` writes besides its trait and target: the trait's
+/// instantiation arguments (`impl Cache<Session> { … }`) and its associated-type bindings
+/// (`type Item = Todo;`).
+///
+/// Neither was walked, in either of the two `impl` forms — four positions, one omission. Both are
+/// ordinary type references the checker turns into lattice types (`collect`'s `from_ref_q` /
+/// `record_assoc_bindings`, `traits`'s `check_type_ref`), so a namespaced or imported type named in
+/// either resolved against its short name and failed as an unknown type — while the identical name
+/// written one line up, as the trait or the target, resolved fine.
+fn q_impl_types(
+    trait_args: &mut [TypeRef],
+    assoc_bindings: &mut [(String, TypeRef)],
+    visit: &mut NameVisitor,
+) {
+    for a in trait_args {
+        q_typeref(a, visit);
+    }
+    // The binding's own name is the *trait's* associated-type name — resolved per-impl against the
+    // trait declaration, never through the module map.
+    for (_assoc_name, ty) in assoc_bindings {
+        q_typeref(ty, visit);
     }
 }
 
@@ -846,7 +1179,10 @@ fn q_attr_value(av: &mut AttrValue, visit: &mut NameVisitor) {
             .iter_mut()
             .for_each(|(_, val)| q_attr_value(val, visit)),
         AttrValue::Enum {
-            enum_name, args, ..
+            enum_name,
+            // The variant is resolved through the (now-qualified) enum, never on its own.
+            variant: _,
+            args,
         } => {
             visit(enum_name, NameKind::Type, None);
             args.iter_mut().for_each(|a| q_attr_value(a, visit));
@@ -893,27 +1229,40 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
                 q_expr(s, visit);
             }
         }
-        Expr::As { expr, ty, .. } => {
+        Expr::As { expr, ty, span: _ } => {
             q_expr(expr, visit);
             q_typeref(ty, visit);
         }
-        Expr::TypeTest { expr, ty, .. } => {
+        Expr::TypeTest { expr, ty, span: _ } => {
             q_expr(expr, visit);
             q_typeref(ty, visit);
         }
         // `attributes_of::<T>()` and `type_name::<T>()` both hold a real type reference, and both
         // qualify here. For `type_name` that rewrite IS the feature: the string it yields is the
         // *qualified* identity precisely because the type survives to lowering as a type.
-        Expr::AttributesOf { ty, .. } | Expr::TypeName { ty, .. } => q_typeref(ty, visit),
-        Expr::FromBytes { ty, blob, .. } => {
+        Expr::AttributesOf { ty, span: _ } | Expr::TypeName { ty, span: _ } => q_typeref(ty, visit),
+        Expr::FromBytes { ty, blob, span: _ } => {
             q_typeref(ty, visit);
             q_expr(blob, visit);
         }
-        Expr::Channel { elem, capacity, .. } => {
+        Expr::Channel {
+            elem,
+            capacity,
+            span: _,
+        } => {
             q_typeref(elem, visit);
             q_expr(capacity, visit);
         }
-        Expr::TypedModuleCall { recv, ty, args, .. } => {
+        Expr::TypedModuleCall {
+            recv,
+            // A native module function's name is resolved against the module the receiver
+            // identifies, never through the module map.
+            func: _,
+            func_span: _,
+            ty,
+            args,
+            span: _,
+        } => {
             q_expr(recv, visit);
             q_typeref(ty, visit);
             args.iter_mut().for_each(|a| q_expr(&mut a.value, visit));
@@ -930,7 +1279,7 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             name_span,
             type_args,
             args,
-            ..
+            span: _,
         } => {
             visit(name, NameKind::Value, Some(*name_span));
             type_args.iter_mut().for_each(|t| q_typeref(t, visit));
@@ -941,25 +1290,43 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         // associated call, `Box2.pick::<T>(x)` — is a real sub-expression already walked above.
         Expr::TypedMethodCall {
             recv,
+            name: _,
+            name_span: _,
             type_args,
             args,
-            ..
+            span: _,
         } => {
             q_expr(recv, visit);
             type_args.iter_mut().for_each(|t| q_typeref(t, visit));
             args.iter_mut().for_each(|a| q_expr(&mut a.value, visit));
         }
-        Expr::Unary { operand, .. } => q_expr(operand, visit),
-        Expr::Binary { lhs, rhs, .. } => {
+        Expr::Unary {
+            op: _,
+            operand,
+            span: _,
+        } => q_expr(operand, visit),
+        Expr::Binary {
+            op: _,
+            lhs,
+            rhs,
+            span: _,
+        } => {
             q_expr(lhs, visit);
             q_expr(rhs, visit);
         }
-        Expr::Call { callee, args, .. } => {
+        Expr::Call {
+            callee,
+            args,
+            span: _,
+        } => {
             q_expr(callee, visit);
             args.iter_mut().for_each(|a| q_expr(&mut a.value, visit));
         }
         Expr::Closure {
-            params, ret, body, ..
+            params,
+            ret,
+            body,
+            span: _,
         } => {
             for p in params {
                 q_param(p, visit);
@@ -970,19 +1337,32 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
                 ClosureBody::Block(stmts) => q_body(stmts, visit),
             }
         }
-        Expr::Pipeline { left, right, .. } => {
+        Expr::Pipeline {
+            left,
+            right,
+            span: _,
+        } => {
             q_expr(left, visit);
             q_expr(right, visit);
         }
-        Expr::List { items, .. } | Expr::Tuple { items, .. } => {
+        Expr::List { items, span: _ } | Expr::Tuple { items, span: _ } => {
             items.iter_mut().for_each(|i| q_expr(i, visit))
         }
-        Expr::TupleIndex { receiver, .. } => q_expr(receiver, visit),
-        Expr::Range { start, end, .. } => {
+        Expr::TupleIndex {
+            receiver,
+            index: _,
+            span: _,
+        } => q_expr(receiver, visit),
+        Expr::Range {
+            start,
+            end,
+            inclusive: _,
+            span: _,
+        } => {
             q_expr(start, visit);
             q_expr(end, visit);
         }
-        Expr::Map { entries, .. } => {
+        Expr::Map { entries, span: _ } => {
             for (k, v) in entries {
                 q_expr(k, visit);
                 q_expr(v, visit);
@@ -992,20 +1372,35 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         // `geometry.vec.add` — a dotted module path whose collapse hands the backends the same flat
         // `Ident(FQN)` an imported short name rewrites to. Try that first; a plain field/method
         // chain matches no QMap key and recurses as before.
-        Expr::Member { .. } => {
+        Expr::Member {
+            receiver: _,
+            name: _,
+            name_span: _,
+            span: _,
+        } => {
+            // Both the chain's segment names and its receiver are reached: the collapse visits the
+            // whole dotted prefix as one candidate name, and the fallback recurses into the
+            // receiver (whose own `Expr::Ident`/`Expr::Member` arm visits it).
             if !collapse_qualified_chain(e, visit)
-                && let Expr::Member { receiver, .. } = e
+                && let Expr::Member {
+                    receiver,
+                    name: _,
+                    name_span: _,
+                    span: _,
+                } = e
             {
                 q_expr(receiver, visit);
             }
         }
         Expr::Index {
-            receiver, index, ..
+            receiver,
+            index,
+            span: _,
         } => {
             q_expr(receiver, visit);
             q_expr(index, visit);
         }
-        Expr::Interp { parts, .. } => {
+        Expr::Interp { parts, span: _ } => {
             for part in parts {
                 if let StrPart::Hole(e) = part {
                     q_expr(e, visit);
@@ -1013,43 +1408,65 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             }
         }
         Expr::Match {
-            scrutinee, arms, ..
+            scrutinee,
+            arms,
+            span: _,
         } => {
             q_expr(scrutinee, visit);
             for arm in arms {
                 q_pattern(&mut arm.pattern, visit);
+                if let Some(guard) = &mut arm.guard {
+                    q_expr(guard, visit);
+                }
                 match &mut arm.body {
                     ClosureBody::Expr(e) => q_expr(e, visit),
                     ClosureBody::Block(stmts) => q_body(stmts, visit),
                 }
             }
         }
-        Expr::Try { expr, .. } | Expr::Await { expr, .. } | Expr::Spawn { future: expr, .. } => {
-            q_expr(expr, visit)
-        }
+        Expr::Try { expr, span: _ }
+        | Expr::Await { expr, span: _ }
+        | Expr::Spawn {
+            future: expr,
+            isolate: _,
+            span: _,
+        } => q_expr(expr, visit),
         Expr::Coalesce {
-            value, fallback, ..
+            value,
+            fallback,
+            span: _,
         } => {
             q_expr(value, visit);
             q_expr(fallback, visit);
         }
-        Expr::TypeOf { value, .. } => q_expr(value, visit),
-        Expr::FieldsOf { value, .. } | Expr::TraitsOf { value, .. } => q_expr(value, visit),
+        Expr::TypeOf { value, span: _ } => q_expr(value, visit),
+        Expr::FieldsOf { value, span: _ } | Expr::TraitsOf { value, span: _ } => {
+            q_expr(value, visit)
+        }
         // The target is a runtime string, not a type, so nothing to qualify beyond the operand expr.
-        Expr::ParamsOf { target, .. } | Expr::ReturnsOf { target, .. } => q_expr(target, visit),
+        Expr::ParamsOf { target, span: _ } | Expr::ReturnsOf { target, span: _ } => {
+            q_expr(target, visit)
+        }
         // The two name-keyed reflection surfaces. A *turbofish* operand is a real type reference, so
         // it qualifies here like any other — that is what makes `field_specs_of::<Todo>()` under
         // `namespace app.storage` query `app.storage.Todo` rather than silently answering with the
         // empty schema. A *dynamic* operand is a runtime string and is walked as the ordinary
         // expression it is: a literal `field_specs_of("Todo")` means the string `Todo`, and rewriting
         // it because it happens to spell a local type name would be a different bug.
-        Expr::FieldSpecsOf { name, .. } => q_type_operand(name, visit),
-        Expr::Construct { name, fields, .. } => {
+        Expr::FieldSpecsOf { name, span: _ } => q_type_operand(name, visit),
+        Expr::Construct {
+            name,
+            fields,
+            span: _,
+        } => {
             q_type_operand(name, visit);
             q_expr(fields, visit);
         }
         Expr::Invoke {
-            recv, name, args, ..
+            recv,
+            name,
+            args,
+            span: _,
         } => {
             if let Some(recv) = recv {
                 q_expr(recv, visit);
@@ -1058,7 +1475,12 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_expr(args, visit);
         }
         Expr::FieldSet {
-            receiver, value, ..
+            receiver,
+            // A member name on the receiver's type, not a declaration.
+            field: _,
+            field_span: _,
+            value,
+            span: _,
         } => {
             q_expr(receiver, visit);
             q_expr(value, visit);
@@ -1066,25 +1488,41 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         // An expression-tier block's holes are ordinary expressions — type references inside
         // them (`${User.new()}`) qualify like anywhere else. The tier name is not a type; the
         // handler is resolved by the activation desugar against the already-qualified registry.
-        Expr::TierExpr { holes, .. } => {
+        Expr::TierExpr {
+            tier: _,
+            tier_span: _,
+            // Verbatim foreign-language text, not Noeta.
+            statics: _,
+            holes,
+            span: _,
+        } => {
             for h in holes {
                 q_expr(h, visit);
             }
         }
         // A resolved native-fn reference is synthesized *after* qualification (module/func are
         // already canonical), so it is a leaf here.
-        Expr::NativeFnRef { .. } => {}
+        Expr::NativeFnRef {
+            module: _,
+            func: _,
+            span: _,
+        } => {}
         // Leaves with no nested expression or type reference.
-        Expr::Str { .. }
-        | Expr::Int { .. }
-        | Expr::Float { .. }
-        | Expr::F32 { .. }
-        | Expr::F64 { .. }
-        | Expr::IntN { .. }
-        | Expr::Bool { .. } => {}
+        Expr::Str { value: _, span: _ }
+        | Expr::Int { value: _, span: _ }
+        | Expr::Float { value: _, span: _ }
+        | Expr::F32 { value: _, span: _ }
+        | Expr::F64 { value: _, span: _ }
+        | Expr::IntN {
+            magnitude: _,
+            signed: _,
+            bits: _,
+            span: _,
+        }
+        | Expr::Bool { value: _, span: _ } => {}
         // The optional `roles_of::<E>()` enum, like `attributes_of`'s type, may be a namespace-
         // qualified user enum, so qualify it (a bare `roles_of()` has nothing to qualify).
-        Expr::RolesOf { ty, .. } => {
+        Expr::RolesOf { ty, span: _ } => {
             if let Some(ty) = ty {
                 q_typeref(ty, visit);
             }
@@ -1103,7 +1541,7 @@ fn chain_segments(e: &Expr) -> Option<Vec<(String, noeta_span::Span)>> {
             receiver,
             name,
             name_span,
-            ..
+            span: _,
         } => {
             let mut segments = chain_segments(receiver)?;
             segments.push((name.clone(), *name_span));
@@ -1165,22 +1603,27 @@ fn q_pattern(p: &mut Pattern, visit: &mut NameVisitor) {
     match p {
         Pattern::Variant {
             type_name,
+            // The variant name resolves through the (now-qualified) enum, or — for an unqualified
+            // constructor like `Ok(x)` / `some(x)` — against the prelude. Never a module name.
+            variant: _,
             bindings,
             span,
-            ..
         } => {
             if let Some(n) = type_name {
                 visit(n, NameKind::Type, Some(*span));
             }
             bindings.iter_mut().for_each(|b| q_pattern(b, visit));
         }
-        Pattern::IsType { ty, .. } => q_typeref(ty, visit),
-        Pattern::Tuple { elements, .. } => elements.iter_mut().for_each(|e| q_pattern(e, visit)),
-        Pattern::Wildcard { .. }
-        | Pattern::Binding { .. }
-        | Pattern::Int { .. }
-        | Pattern::Str { .. }
-        | Pattern::Bool { .. } => {}
+        Pattern::IsType { ty, span: _ } => q_typeref(ty, visit),
+        Pattern::Tuple { elements, span: _ } => {
+            elements.iter_mut().for_each(|e| q_pattern(e, visit))
+        }
+        // A pattern binding introduces a value name; the literals carry no name at all.
+        Pattern::Wildcard { span: _ }
+        | Pattern::Binding { name: _, span: _ }
+        | Pattern::Int { value: _, span: _ }
+        | Pattern::Str { value: _, span: _ }
+        | Pattern::Bool { value: _, span: _ } => {}
     }
 }
 
@@ -1593,4 +2036,239 @@ mod tests {
         }
         assert_eq!(before, stmts, "a local binding must suppress the rewrite");
     }
+    // ---------------------------------------------------------------------------------------
+    // The field-enumeration sweep (ast-walk gate). Each test below pins one position the walk
+    // reached no name at, found by binding every field of every node instead of `..`-ing past it.
+    // ---------------------------------------------------------------------------------------
+
+    /// A match arm's **guard** is an ordinary expression and qualifies like one.
+    ///
+    /// Regression: `q_expr`'s `Expr::Match` arm walked the scrutinee, each arm's pattern and each
+    /// arm's body — and skipped `MatchArm::guard` entirely, because the arm destructured the node
+    /// with `..` and `guard` was simply never named. A guard is the one arm position that can
+    /// mention a *different* type from the one being matched (`Circle(r) if r > geo.Limits.MAX`),
+    /// so the omission cost exactly the references a guard exists to make.
+    #[test]
+    fn a_match_arm_guard_qualifies() {
+        let m = map(&[("Limits", "geo.Limits"), ("Shape", "geo.Shape")]);
+        let mut stmts = parse_one(
+            "r = match s {\n\
+             \x20 Shape.Circle => match_when(Limits.MAX),\n\
+             \x20 _ => 0,\n\
+             };\n",
+        );
+        // Re-parse with a guard (the arm above pins the no-guard path stays working).
+        let mut guarded =
+            parse_one("r = match s { Shape.Circle if Limits.MAX > 1 => 1, _ => 0 };\n");
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        for s in &mut guarded {
+            qualify_stmt(s, &m);
+        }
+        let Stmt::Binding { value, .. } = &guarded[0] else {
+            panic!("binding")
+        };
+        let Expr::Match { arms, .. } = value else {
+            panic!("match")
+        };
+        let Some(Expr::Binary { lhs, .. }) = arms[0].guard.as_ref() else {
+            panic!("a guarded arm")
+        };
+        let Expr::Member { receiver, .. } = &**lhs else {
+            panic!("Limits.MAX")
+        };
+        assert!(
+            matches!(&**receiver, Expr::Ident { name, .. } if name == "geo.Limits"),
+            "the guard's type reference must qualify: {receiver:?}"
+        );
+    }
+
+    /// An `impl`'s **trait arguments** and **associated-type bindings** qualify — in both the
+    /// in-body `impl Trait { … }` form and the standalone `impl Trait for T { … }` form.
+    ///
+    /// Regression: four positions, one omission. `q_impl_block`/`q_impl_decl` visited the trait name
+    /// (and, standalone, the target) and then walked straight to the methods, so `impl Cache<Session>`
+    /// and `type Item = Todo;` kept short names the checker then resolved as unknown types — while
+    /// the very same name spelled as the trait or the target on the same line resolved fine.
+    #[test]
+    fn impl_trait_args_and_assoc_bindings_qualify() {
+        let m = map(&[
+            ("Cache", "app.Cache"),
+            ("Session", "app.Session"),
+            ("Todo", "app.Todo"),
+            ("Store", "app.Store"),
+            ("Box", "app.Box"),
+        ]);
+        let mut stmts = parse_one(
+            "class Box {\n\
+             \x20 impl Cache<Session> {\n\
+             \x20   type Item = Todo;\n\
+             \x20 }\n\
+             }\n\
+             impl Store<Session> for Box {\n\
+             \x20 type Item = Todo;\n\
+             }\n",
+        );
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        let Stmt::Class(decl) = &stmts[0] else {
+            panic!("class")
+        };
+        let block = &decl.impls[0];
+        assert_eq!(block.trait_name, "app.Cache");
+        assert!(
+            matches!(&block.trait_args[0], TypeRef::Named { name, .. } if name == "app.Session"),
+            "an in-body impl's trait argument must qualify: {:?}",
+            block.trait_args
+        );
+        assert!(
+            matches!(&block.assoc_bindings[0].1, TypeRef::Named { name, .. } if name == "app.Todo"),
+            "an in-body impl's associated-type binding must qualify: {:?}",
+            block.assoc_bindings
+        );
+        let Stmt::Impl(decl) = &stmts[1] else {
+            panic!("impl")
+        };
+        assert_eq!(decl.target, "app.Box");
+        assert!(
+            matches!(&decl.trait_args[0], TypeRef::Named { name, .. } if name == "app.Session"),
+            "a standalone impl's trait argument must qualify: {:?}",
+            decl.trait_args
+        );
+        assert!(
+            matches!(&decl.assoc_bindings[0].1, TypeRef::Named { name, .. } if name == "app.Todo"),
+            "a standalone impl's associated-type binding must qualify: {:?}",
+            decl.assoc_bindings
+        );
+    }
+
+    /// A trait declaration's **associated-type defaults** and its **decorators** qualify.
+    ///
+    /// Regression: the `Stmt::Trait` arm visited the trait's own name, its type parameters and its
+    /// method signatures — and nothing else. `type Item = Todo;` (a concrete default) stayed short,
+    /// and a trait was the one declaration kind whose `Decorators` this walk never touched at all,
+    /// even though `TraitDecl::decorators` documents `attrs` and `role` as *meaningful* on a trait
+    /// (`attributes_of`/`roles_of` reflect them keyed by the trait name).
+    #[test]
+    fn trait_assoc_defaults_and_decorators_qualify() {
+        let m = map(&[("Todo", "app.Todo"), ("Route", "app.Route")]);
+        let mut stmts = parse_one(
+            "#[Route(\"/x\")]\n\
+             trait Feed {\n\
+             \x20 type Item = Todo;\n\
+             }\n",
+        );
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        let Stmt::Trait(decl) = &stmts[0] else {
+            panic!("trait")
+        };
+        assert!(
+            matches!(&decl.assoc_types[0].default, Some(TypeRef::Named { name, .. }) if name == "app.Todo"),
+            "an associated type's default must qualify: {:?}",
+            decl.assoc_types
+        );
+        assert_eq!(
+            decl.decorators.attrs[0].name, "app.Route",
+            "a trait's data attributes must qualify like every other declaration's"
+        );
+    }
+
+    /// A `@role(Enum.Variant)` tag's **enum** qualifies.
+    ///
+    /// Regression: nothing anywhere visited `Decorators::role`. The checker looks the name up in
+    /// `symbols.semantic_enums`, which after linking is keyed by the *qualified* name, and the
+    /// grammar takes a bare `Enum.Variant` — so there was no spelling at all that let an attribute
+    /// in a namespaced module confer a role from an imported `@semantic` enum.
+    #[test]
+    fn a_role_tags_enum_qualifies() {
+        let m = map(&[("Semantic", "app.roles.Semantic"), ("Entry", "app.Entry")]);
+        let mut stmts = parse_one(
+            "@attribute\n\
+             @role(Semantic.EntryPoint)\n\
+             struct Entry { }\n",
+        );
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        let Stmt::Struct(decl) = &stmts[0] else {
+            panic!("struct")
+        };
+        let tags = decl.decorators.role.as_ref().expect("a @role tag");
+        assert_eq!(tags[0].enum_name, "app.roles.Semantic");
+        assert_eq!(tags[0].variant, "EntryPoint", "the variant is left alone");
+    }
+
+    /// A tier block's and a method directive's **arguments** qualify like any other attribute
+    /// argument.
+    ///
+    /// Regression: a `@<tier>(…)` block's args are stamped verbatim onto each fn it contains as the
+    /// tier's config attribute (`synthesized_config_attr`), where they *construct a real struct* —
+    /// so a nominal value among them is an ordinary type reference. Neither the block form
+    /// (`Stmt::TierBlock::args`) nor the method form (`FnDecl::directives`) was walked.
+    #[test]
+    fn tier_directive_arguments_qualify() {
+        let m = map(&[("Mode", "app.Mode"), ("Box", "app.Box")]);
+        let mut stmts = parse_one(
+            "@bench(mode: Mode.Fast) {\n\
+             \x20 fn b() { }\n\
+             }\n\
+             class Box {\n\
+             \x20 @bench(mode: Mode.Fast)\n\
+             \x20 fn m() { }\n\
+             }\n",
+        );
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        let Stmt::TierBlock { args, .. } = &stmts[0] else {
+            panic!("tier block")
+        };
+        assert!(
+            matches!(&args[0].value, AttrValue::Enum { enum_name, .. } if enum_name == "app.Mode"),
+            "a tier block's directive args must qualify: {args:?}"
+        );
+        let Stmt::Class(decl) = &stmts[1] else {
+            panic!("class")
+        };
+        let dir_args = &decl.methods[0].directives[0].args;
+        assert!(
+            matches!(&dir_args[0].value, AttrValue::Enum { enum_name, .. } if enum_name == "app.Mode"),
+            "a method directive's args must qualify: {dir_args:?}"
+        );
+    }
+
+    /// A **trait default method's** parameter suppresses the native-`use` handle rewrite, exactly
+    /// as a free function's does.
+    ///
+    /// Regression: `bound_in_stmt` returned nothing at all for `Stmt::Trait`, so a default body's
+    /// parameters were invisible to the shadowing rule and `url.slice(0)` inside one was α-renamed
+    /// to the imported module's canonical name — turning a string method call into a call on
+    /// `std.http.url`.
+    #[test]
+    fn a_trait_default_bodys_parameter_shadows_a_handle() {
+        let m = handles(&[("url", "std.http.url")]);
+        let mut stmts = parse_one(
+            "trait Trim {\n\
+             \x20 fn trim(url: string): string { return url.slice(0); }\n\
+             }\n",
+        );
+        let before = stmts.clone();
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        assert_eq!(
+            before, stmts,
+            "a trait default body's parameter must suppress the rewrite"
+        );
+    }
 }
+
+/// The AST field-coverage gate: every field of every node this file walks, classified and checked
+/// against the real walk. See its module docs.
+#[cfg(test)]
+#[path = "ast_walk_coverage.rs"]
+mod ast_walk_coverage;
