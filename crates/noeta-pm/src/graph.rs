@@ -341,7 +341,7 @@ fn resolve_graph_impl(
         scope_trust,
         root_edition,
         registry_ids,
-    );
+    )?;
 
     // The root package's OWN native crate. A dependency's native crate becomes a `NativeCrate`
     // during the walk, but the root package is never walked as its own dependency — so a package
@@ -1770,16 +1770,33 @@ fn assemble(
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
     root_edition: crate::edition::Edition,
     registry_identities: std::collections::BTreeSet<String>,
-) -> ResolvedGraph {
+) -> Result<ResolvedGraph, PmError> {
     // Global segment per identity. Direct dependencies keep the consumer's key (so the entry's
     // `use <key>.…` needs no rewrite); transitive-only packages get a unique synthesized segment.
     let mut global: BTreeMap<String, String> = BTreeMap::new();
     let mut used: HashSet<String> = HashSet::new();
     for (key, identities) in root_edges {
         // A direct dependency keeps the consumer's key; every member of a root **scope** dependency
-        // shares that one key, so they all land under the scope root in the flat pool. First root key
-        // wins if an identity is aliased under several keys.
+        // shares that one key, so they all land under the scope root in the flat pool.
+        //
+        // One package under TWO root keys is refused rather than resolved. A package has one
+        // identity and its modules are re-rooted to one segment, so a second key cannot name the
+        // same modules — it can only be dropped, and dropping it made the manifest lie: whichever
+        // key lost simply did not exist, and `use <that key>.…` failed far away with "no module",
+        // helpfully suggesting the OTHER dependency entry. (The reverse — several packages under
+        // one key — is the supported scope form and is what the `[…]` array is for.)
         for identity in identities {
+            if let Some(first) = global.get(identity)
+                && first != key
+            {
+                return Err(PmError::Conflict(format!(
+                    "`{identity}` is bound under two import roots, `{first}` and `{key}` — a \
+                     package has one identity and its modules re-root to one segment, so only one \
+                     of them could ever resolve and the other would silently not exist. Keep \
+                     the key you write `use …` with and drop the other. (The reverse — several \
+                     packages sharing ONE root — is the array form, `root = [ {{ … }}, {{ … }} ]`.)"
+                )));
+            }
             global
                 .entry(identity.clone())
                 .or_insert_with(|| key.clone());
@@ -1877,7 +1894,7 @@ fn assemble(
     packages.sort_by(|a, b| a.key.cmp(&b.key));
     trusted_command_identities.sort();
     trusted_command_identities.dedup();
-    ResolvedGraph {
+    Ok(ResolvedGraph {
         packages,
         locked,
         native_crates,
@@ -1886,7 +1903,7 @@ fn assemble(
         root_edition,
         log_trust: None,
         registry_identities,
-    }
+    })
 }
 
 /// Enforce a manifest's `package.toolchain` requirement against the **running binary's** version.
@@ -2011,6 +2028,55 @@ mod tests {
         .unwrap();
         std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
         app
+    }
+
+    #[test]
+    fn one_package_under_two_import_roots_is_refused() {
+        // Silently picking one was worse than refusing: the manifest declared two roots, only one
+        // existed, and `use <the other>.…` failed far away with "no module" — suggesting the OTHER
+        // dependency entry, which is a different package as far as the author knows.
+        let app = path_dep_fixture("two_roots");
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nlib = { path = \"../lib\" }\nalso = { path = \"../lib\" }\n",
+        )
+        .unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("two roots for one package");
+        let msg = err.message().to_string();
+        assert!(msg.contains("acme/lib"), "names the package: {msg}");
+        assert!(msg.contains("`also`"), "names both keys: {msg}");
+        assert!(msg.contains("`lib`"), "names both keys: {msg}");
+        assert!(
+            msg.contains("array form"),
+            "points at the supported shape: {msg}"
+        );
+    }
+
+    #[test]
+    fn several_packages_under_one_root_still_resolve() {
+        // The reverse is the *supported* form — the `para` scope binds `para/aether` and `para/api`
+        // under one root — so the guard above must not touch it.
+        let app = path_dep_fixture("one_root_many");
+        let base = app.parent().unwrap().to_path_buf();
+        let other = base.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("noeta.toml"),
+            "[package]\nname = \"acme/other\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(other.join("other.noe"), "pub fn two(): int { return 2; }\n").unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nacme = [ { path = \"../lib\" }, { path = \"../other\" } ]\n",
+        )
+        .unwrap();
+        let graph = resolve_graph(&app.join("main.noe")).expect("a scope array resolves");
+        assert_eq!(graph.packages.len(), 2, "both members are present");
+        assert!(
+            graph.packages.iter().all(|p| p.key == "acme"),
+            "and they share the one root they were listed under"
+        );
     }
 
     #[test]
