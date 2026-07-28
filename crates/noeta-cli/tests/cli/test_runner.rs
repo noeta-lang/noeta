@@ -559,3 +559,84 @@ fn test_runs_async_tests_rather_than_dropping_their_futures() {
                 .and(predicate::str::contains("2 passed, 1 failed, 3 total")),
         );
 }
+
+/// The shared setup drops **statement-expressions**, not just `echo` — so a top-level statement
+/// that mutates a top-level binding does not run, and the tests see that binding in its
+/// *unmutated* state.
+///
+/// This is the documented "main effects do not run" rule (`is_tier_setup`), and it is the right
+/// rule: a CLI entry's top-level `os.exit(run())` and a server's `server.serve()` are both
+/// statement-expressions that must never run under `noeta test`. But the rule is sharp, because
+/// the *binding* survives while the mutation applied to it does not, and nothing says so — the
+/// only signal is whatever the half-initialized value does at runtime. A top-level
+/// `conn = db.connect(…)` followed by a bare `conn.migrate(…)` hands every test a live, working,
+/// **empty** database, which reports `no such table: users` rather than a language diagnostic.
+///
+/// `std.cell` is the smallest native resource with per-instance state, so it shows the shape with
+/// no database in the picture. The plain-binding case is the control: `Stmt::Binding` is kept, so
+/// reassignment *is* visible, which is what makes the native case surprising.
+#[test]
+fn test_setup_drops_statement_expressions_that_mutate_a_captured_binding() {
+    let file = temp_program(
+        "test_setup_drops_stmt_expr",
+        "use std.cell\n\
+         box = cell.new(0);\n\
+         box.set(41);\n\
+         mut plain = 0;\n\
+         plain = 41;\n\
+         @test {\n\
+             fn native_sees_top_level_mutation() use (box): void {\n\
+                 assert(box.get() == 41, \"cell holds ${box.get()}, expected 41\");\n\
+             }\n\
+             fn plain_binding_sees_top_level_mutation() use (plain): void {\n\
+                 assert(plain == 41, \"plain holds ${plain}, expected 41\");\n\
+             }\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            // The dropped `box.set(41)` leaves the cell at its constructed value, and the failure
+            // is a bare assertion — no diagnostic names the dropped statement.
+            predicate::str::contains("FAIL  native_sees_top_level_mutation")
+                .and(predicate::str::contains("cell holds 0, expected 41"))
+                // The control: a kept `Stmt::Binding` reassignment IS visible.
+                .and(predicate::str::contains(
+                    "ok    plain_binding_sees_top_level_mutation",
+                ))
+                .and(predicate::str::contains("1 passed, 1 failed, 2 total")),
+        );
+}
+
+/// The same drop applies to whole `for` / `if` / `while` statements, so a binding *seeded by a
+/// loop* is kept but empty. Pinned separately because the loop forms are not mentioned in the
+/// docs' "main effects" wording at all, and seeding a fixture with a loop is the obvious thing to
+/// reach for.
+#[test]
+fn test_setup_drops_top_level_loops_and_conditionals() {
+    let file = temp_program(
+        "test_setup_drops_loops",
+        "use std.cell\n\
+         log = cell.new([]);\n\
+         for name in [\"ada\", \"grace\"] { log.set(log.get() ~ [name]); }\n\
+         if true { log.set(log.get() ~ [\"guarded\"]); }\n\
+         @test\n\
+         fn seeded_by_a_loop() use (log): void {\n\
+             assert(log.get().len() == 3, \"log has ${log.get().len()} entries, expected 3\");\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("FAIL  seeded_by_a_loop")
+                .and(predicate::str::contains("log has 0 entries, expected 3")),
+        );
+}
