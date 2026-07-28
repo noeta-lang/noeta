@@ -97,12 +97,12 @@ pub(crate) fn sig_to_typeref(
     use noeta_span::Span;
     let sp = Span::new(0, 0);
     let named = |name: &str| TypeRef::Named {
-        name: name.to_string(),
+        name: noeta_ast::Name::canonical(name),
         args: Vec::new(),
         span: sp,
     };
     let named_args = |name: &str, args: Vec<TypeRef>| TypeRef::Named {
-        name: name.to_string(),
+        name: noeta_ast::Name::canonical(name),
         args,
         span: sp,
     };
@@ -185,7 +185,7 @@ pub(crate) fn ret_to_typeref(
     match ret {
         registry::RetTy::Concrete(s) => sig_to_typeref(reg, s),
         _ => noeta_ast::TypeRef::Named {
-            name: "dyn".to_string(),
+            name: noeta_ast::Name::canonical("dyn"),
             args: Vec::new(),
             span: Span::new(0, 0),
         },

@@ -55,9 +55,9 @@ fn render(ty: &TypeRef, name_of: fn(&str) -> &str) -> String {
     let rec = |t: &TypeRef| render(t, name_of);
     let list = |ts: &[TypeRef]| ts.iter().map(rec).collect::<Vec<_>>().join(", ");
     match ty {
-        TypeRef::Named { name, args, .. } if args.is_empty() => name_of(name).to_string(),
-        TypeRef::Named { name, args, .. } => format!("{}<{}>", name_of(name), list(args)),
-        TypeRef::DynTrait { trait_name, .. } => format!("dyn {}", name_of(trait_name)),
+        TypeRef::Named { name, args, .. } if args.is_empty() => name_of(name.as_str()).to_string(),
+        TypeRef::Named { name, args, .. } => format!("{}<{}>", name_of(name.as_str()), list(args)),
+        TypeRef::DynTrait { trait_name, .. } => format!("dyn {}", name_of(trait_name.as_str())),
         TypeRef::Optional { inner, .. } => format!("?{}", rec(inner)),
         TypeRef::Union { members, .. } => members.iter().map(rec).collect::<Vec<_>>().join(" | "),
         TypeRef::Tuple { elements, .. } => format!("({})", list(elements)),
@@ -145,7 +145,7 @@ mod tests {
 
     fn named(name: &str, args: Vec<TypeRef>) -> TypeRef {
         TypeRef::Named {
-            name: name.to_string(),
+            name: crate::Name::written(name),
             args,
             span: span(),
         }
@@ -265,7 +265,7 @@ mod tests {
         );
         assert_eq!(
             type_spelling(&TypeRef::DynTrait {
-                trait_name: "pkg.Shape".to_string(),
+                trait_name: crate::Name::written("pkg.Shape"),
                 span: span(),
             }),
             "dyn Shape"

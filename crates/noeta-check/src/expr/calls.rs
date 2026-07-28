@@ -66,12 +66,12 @@ impl Checker {
             return true;
         }
         matches!(expr, Expr::Ident { name, .. }
-            if lookup(env, name).is_none()
+            if lookup(env, name.as_str()).is_none()
                 && (matches!(name.as_str(), "Ok" | "Err" | "some")
                     || self
                         .symbols
                         .functions
-                        .get(name)
+                        .get(name.as_str())
                         .is_some_and(|sig| sig.generic.is_some())))
     }
 
@@ -289,11 +289,11 @@ impl Checker {
         let Expr::Ident { name, span } = callee.as_ref() else {
             return None;
         };
-        if lookup(env, name).is_some() {
+        if lookup(env, name.as_str()).is_some() {
             return None;
         }
-        let generic = self.symbols.functions.get(name)?.generic.clone()?;
-        Some((name.clone(), *span, generic))
+        let generic = self.symbols.functions.get(name.as_str())?.generic.clone()?;
+        Some((name.to_string(), *span, generic))
     }
 
     /// The seeded-call worker behind the check-mode seeding arms: defer the deferrable arguments,
@@ -608,7 +608,7 @@ impl Checker {
                 // than silently deferred or misrouted to the free function's signature. A
                 // `dyn`/`Unknown` local (an untyped closure value) stays deferred, its arguments
                 // unchecked as before.
-                if let Some(Type::Fn { params, ret }) = lookup(env, name) {
+                if let Some(Type::Fn { params, ret }) = lookup(env, name.as_str()) {
                     let params = params.clone();
                     let ret = (**ret).clone();
                     self.finalize_closure_args(&params, args, arg_exprs, env);
@@ -621,21 +621,21 @@ impl Checker {
                     // record which of its parameters carry defaults, so `required` is `0`.
                     let erased_import = params.is_empty() && matches!(ret, Type::Dyn);
                     if !erased_import {
-                        self.check_args(&params, 0, args, arg_exprs, span, name);
+                        self.check_args(&params, 0, args, arg_exprs, span, name.as_str());
                     }
                     return ret;
                 }
                 // A local binding of a user OBJECT type invoked as a value (`obj(args)`) — the
                 // `Callable` protocol: typed as `obj.call(args)` when the type provides a `call`
                 // method; a known user type without one is statically not callable (E0007).
-                if let Some(recv @ Type::Named(..)) = lookup(env, name) {
+                if let Some(recv @ Type::Named(..)) = lookup(env, name.as_str()) {
                     let recv = recv.clone();
                     if let Some(ret) = self.synth_callable_object(&recv, args, arg_exprs, span, env)
                     {
                         return ret;
                     }
                 }
-                if let Some(sig) = self.symbols.functions.get(name) {
+                if let Some(sig) = self.symbols.functions.get(name.as_str()) {
                     let required = sig.required;
                     // Named arguments bind to the parameters they name, so normalize the written
                     // list into parameter order ONCE, here — everything downstream (generic
@@ -645,26 +645,33 @@ impl Checker {
                     let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
                         let (names, types) = (sig.param_names.clone(), sig.params.clone());
                         match self.order_arguments(
-                            arg_exprs, &names, &types, required, name, args, span, call_span,
+                            arg_exprs,
+                            &names,
+                            &types,
+                            required,
+                            name.as_str(),
+                            args,
+                            span,
+                            call_span,
                         ) {
                             Some((a, p)) => {
                                 permuted = a;
                                 supplied_params = Some(p);
                                 &permuted[..]
                             }
-                            None => return self.symbols.functions[name].ret.clone(),
+                            None => return self.symbols.functions[name.as_str()].ret.clone(),
                         }
                     } else {
                         supplied_params = None;
                         arg_exprs
                     };
-                    let sig = &self.symbols.functions[name];
+                    let sig = &self.symbols.functions[name.as_str()];
                     // A generic function is instantiated per call: bind its type parameters from the
                     // argument types, check arguments against the substituted parameters, enforce
                     // the bounds (E0025), and return the substituted result type.
                     if let Some(generic) = sig.generic.clone() {
                         return self.check_generic_call(
-                            name,
+                            name.as_str(),
                             &generic,
                             required,
                             args,
@@ -687,14 +694,14 @@ impl Checker {
                         None => (sig.params.clone(), required),
                     };
                     self.finalize_closure_args(&params, args, arg_exprs, env);
-                    self.check_args(&params, required, args, arg_exprs, span, name);
+                    self.check_args(&params, required, args, arg_exprs, span, name.as_str());
                     return ret;
                 }
                 // A selectively-imported module function (`use std.math.sqrt`) called bare — typed
                 // exactly like the qualified `math.sqrt(args)` (same params/return tables). A local
                 // binding of the same name shadows it (checked first, in the arms above via `env`).
-                if let Some((module, func)) = self.imports.imported_fns.get(name).cloned()
-                    && lookup(env, name).is_none()
+                if let Some((module, func)) = self.imports.imported_fns.get(name.as_str()).cloned()
+                    && lookup(env, name.as_str()).is_none()
                 {
                     if let Some(params) = stdlib::module_params(self.reg(), &module, &func, args) {
                         let required = stdlib::module_required(self.reg(), &module, &func)
@@ -716,7 +723,7 @@ impl Checker {
                 // the free form left the prelude, P1.2.) Closure arguments synthesize standalone
                 // first, so a payload-typed result (`some(fn…)`) sees the real closure type.
                 self.finalize_closure_args(&[], args, arg_exprs, env);
-                if let Some(t) = stdlib::prelude_return(name, args) {
+                if let Some(t) = stdlib::prelude_return(name.as_str(), args) {
                     return t;
                 }
                 // Not a user fn, import, or prelude free function. A local (a closure value) or a
@@ -725,11 +732,11 @@ impl Checker {
                 // is a genuinely undefined callee — a static `E0005` (F1), so a typo is caught at
                 // check time instead of failing at runtime. A session defers (a later entry may
                 // define it).
-                if !self.config.session_mode && !self.is_known_name(name, env) {
+                if !self.config.session_mode && !self.is_known_name(name.as_str(), env) {
                     // In a SEALED named-fn body, a callee that names a real top-level binding
                     // (e.g. a closure bound at top level) gets the capture hint.
                     let sealed_global_miss = self.coloring.in_sealed_body
-                        && self.symbols.global_binding_names.contains(name);
+                        && self.symbols.global_binding_names.contains(name.as_str());
                     let diag = self.error(
                         DiagnosticCode::UnknownName,
                         span,
@@ -756,15 +763,15 @@ impl Checker {
                 // as "not assignable to `string`" while `?` accepted the same conversion.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
                     && (name == "try_from" || name == "from")
-                    && lookup(env, tn).is_none()
-                    && self.symbols.enums.contains_key(tn)
+                    && lookup(env, tn.as_str()).is_none()
+                    && self.symbols.enums.contains_key(tn.as_str())
                     && !self
                         .symbols
                         .methods
-                        .contains_key(&(tn.clone(), name.to_string()))
+                        .contains_key(&(tn.to_string(), name.to_string()))
                 {
                     self.check_args(&[Type::String], 1, args, arg_exprs, span, name);
-                    let ty = Type::Named(tn.clone(), Vec::new());
+                    let ty = Type::Named(tn.to_string(), Vec::new());
                     return if name == "from" {
                         ty
                     } else {
@@ -774,7 +781,7 @@ impl Checker {
                 // `Type.Variant(args)` — an algebraic enum constructor applied to its data. Infer the
                 // enum's type arguments from the payload (R2b), so `Tree.Leaf(5)` is `Tree<int>`.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
-                    && let Some(key) = self.enum_type_key(tn)
+                    && let Some(key) = self.enum_type_key(tn.as_str())
                     && self.is_enum_variant(&key, name)
                 {
                     // Payload types bind the enum's generics, so a closure payload must be real.
@@ -787,7 +794,7 @@ impl Checker {
                 // key the same stdlib return-type tables, and the chain form records its span so
                 // lowering materializes the leaf module value (`std.http.client`).
                 let module_id = match receiver.as_ref() {
-                    Expr::Ident { name: m, .. } => self.imports.modules.get(m).cloned(),
+                    Expr::Ident { name: m, .. } => self.imports.modules.get(m.as_str()).cloned(),
                     _ => None,
                 }
                 .or_else(|| self.resolve_namespace_module(receiver, env));
@@ -859,19 +866,19 @@ impl Checker {
                 // bounds at construction. Guard on the receiver naming a type that is not shadowed
                 // by a local variable.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
-                    && lookup(env, tn).is_none()
-                    && self.symbols.types.contains(tn)
+                    && lookup(env, tn.as_str()).is_none()
+                    && self.symbols.types.contains(tn.as_str())
                     && let Some(sig) = self
                         .symbols
                         .methods
-                        .get(&(tn.clone(), name.to_string()))
+                        .get(&(tn.to_string(), name.to_string()))
                         .cloned()
                 {
                     // An INSTANCE method (its body references `self`) cannot be called
                     // associated-style — there is no receiver to become `self` (E0047,
                     // prelude-redesign EX.2). A self-less method of a trait's interface
                     // ([`Receiver::Either`]) is reachable this way as well as on a value.
-                    if !self.receiver_of(tn, name).allows_associated_call() {
+                    if !self.receiver_of(tn.as_str(), name).allows_associated_call() {
                         self.error(
                             DiagnosticCode::InvalidReceiver,
                             span,
@@ -1361,9 +1368,10 @@ impl Checker {
         // instantiation); anything else synthesizes and must be a user type with methods.
         let (type_name, recv_args, associated) = match recv {
             Expr::Ident { name: tn, .. }
-                if lookup(env, tn).is_none() && self.symbols.types.contains(tn) =>
+                if lookup(env, tn.as_str()).is_none()
+                    && self.symbols.types.contains(tn.as_str()) =>
             {
-                (tn.clone(), Vec::new(), true)
+                (tn.to_string(), Vec::new(), true)
             }
             _ => match self.synth(recv, env) {
                 Type::Named(n, targs) => (n, targs, false),
@@ -1710,7 +1718,7 @@ pub(crate) fn closed_to_new_methods(ty: &Type) -> bool {
 /// invented name.
 fn callee_label(callee: &Expr) -> String {
     match callee {
-        Expr::Ident { name, .. } => name.clone(),
+        Expr::Ident { name, .. } => name.to_string(),
         Expr::Index { receiver, .. } => format!("{}[…]", callee_label(receiver)),
         Expr::Call { callee, .. } => format!("{}(…)", callee_label(callee)),
         Expr::Member { receiver, name, .. } => format!("{}.{name}", callee_label(receiver)),

@@ -107,7 +107,7 @@ fn walk_stmt(stmt: &Stmt, out: &mut Vec<BodySite>) {
             out.push(BodySite {
                 kind: BodyKind::Function,
                 owner: String::new(),
-                name: decl.name.clone(),
+                name: decl.name.to_string(),
                 span: decl.name_span,
             });
             // A nested `fn` is a body inside a body, and is checked in its own right.
@@ -163,8 +163,8 @@ fn walk_class(c: &ClassDecl, out: &mut Vec<BodySite>) {
     for m in &c.methods {
         out.push(BodySite {
             kind: BodyKind::Method,
-            owner: c.name.clone(),
-            name: m.name.clone(),
+            owner: c.name.to_string(),
+            name: m.name.to_string(),
             span: m.name_span,
         });
         walk_body(&m.body, out);
@@ -173,8 +173,8 @@ fn walk_class(c: &ClassDecl, out: &mut Vec<BodySite>) {
         for m in &block.methods {
             out.push(BodySite {
                 kind: BodyKind::Method,
-                owner: c.name.clone(),
-                name: m.name.clone(),
+                owner: c.name.to_string(),
+                name: m.name.to_string(),
                 span: m.name_span,
             });
             walk_body(&m.body, out);
@@ -183,7 +183,7 @@ fn walk_class(c: &ClassDecl, out: &mut Vec<BodySite>) {
     if let Some(destructor) = &c.destructor {
         out.push(BodySite {
             kind: BodyKind::Destructor,
-            owner: c.name.clone(),
+            owner: c.name.to_string(),
             name: "destruct".to_string(),
             span: c.name_span,
         });
@@ -195,8 +195,8 @@ fn walk_struct(s: &StructDecl, out: &mut Vec<BodySite>) {
     for m in &s.methods {
         out.push(BodySite {
             kind: BodyKind::Method,
-            owner: s.name.clone(),
-            name: m.name.clone(),
+            owner: s.name.to_string(),
+            name: m.name.to_string(),
             span: m.name_span,
         });
         walk_body(&m.body, out);
@@ -205,8 +205,8 @@ fn walk_struct(s: &StructDecl, out: &mut Vec<BodySite>) {
         for m in &block.methods {
             out.push(BodySite {
                 kind: BodyKind::Method,
-                owner: s.name.clone(),
-                name: m.name.clone(),
+                owner: s.name.to_string(),
+                name: m.name.to_string(),
                 span: m.name_span,
             });
             walk_body(&m.body, out);
@@ -218,8 +218,8 @@ fn walk_enum(e: &EnumDecl, out: &mut Vec<BodySite>) {
     for m in &e.methods {
         out.push(BodySite {
             kind: BodyKind::Method,
-            owner: e.name.clone(),
-            name: m.name.clone(),
+            owner: e.name.to_string(),
+            name: m.name.to_string(),
             span: m.name_span,
         });
         walk_body(&m.body, out);
@@ -228,8 +228,8 @@ fn walk_enum(e: &EnumDecl, out: &mut Vec<BodySite>) {
         for m in &block.methods {
             out.push(BodySite {
                 kind: BodyKind::Method,
-                owner: e.name.clone(),
-                name: m.name.clone(),
+                owner: e.name.to_string(),
+                name: m.name.to_string(),
                 span: m.name_span,
             });
             walk_body(&m.body, out);
@@ -241,8 +241,8 @@ fn walk_standalone_impl(decl: &ImplDecl, out: &mut Vec<BodySite>) {
     for m in &decl.methods {
         out.push(BodySite {
             kind: BodyKind::StandaloneImplMethod,
-            owner: decl.target.clone(),
-            name: m.name.clone(),
+            owner: decl.target.to_string(),
+            name: m.name.to_string(),
             span: m.name_span,
         });
         walk_body(&m.body, out);
@@ -257,8 +257,8 @@ fn walk_trait(decl: &TraitDecl, out: &mut Vec<BodySite>) {
         }
         out.push(BodySite {
             kind: BodyKind::TraitDefault,
-            owner: decl.name.clone(),
-            name: m.sig.name.clone(),
+            owner: decl.name.to_string(),
+            name: m.sig.name.to_string(),
             span: m.sig.name_span,
         });
         walk_body(&m.sig.body, out);

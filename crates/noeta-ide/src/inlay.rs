@@ -399,7 +399,7 @@ impl Walker<'_> {
     /// parameter's own name shows nothing — the hint would repeat the code.
     fn param_name_hints(&mut self, callee: &Expr, args: &[noeta_ast::CallArg]) {
         let decl = match callee {
-            Expr::Ident { name, .. } => crate::top_level_fn(self.program, name),
+            Expr::Ident { name, .. } => crate::top_level_fn(self.program, name.as_str()),
             Expr::Member { receiver, name, .. } => self
                 .expr_types
                 .get(&receiver.span())

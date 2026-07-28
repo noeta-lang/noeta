@@ -116,7 +116,7 @@ fn call_head(program: &noeta_ast::Program, fn_name: &str) -> Option<String> {
     let Stmt::Fn(decl) = program
         .stmts
         .iter()
-        .find(|s| matches!(s, Stmt::Fn(d) if d.name == fn_name || d.name.ends_with(&format!(".{fn_name}"))))?
+        .find(|s| matches!(s, Stmt::Fn(d) if d.name == fn_name || d.name.as_str().ends_with(&format!(".{fn_name}"))))?
     else {
         return None;
     };
@@ -128,7 +128,7 @@ fn call_head(program: &noeta_ast::Program, fn_name: &str) -> Option<String> {
         return None;
     };
     match callee.as_ref() {
-        Expr::Ident { name, .. } => Some(name.clone()),
+        Expr::Ident { name, .. } => Some(name.to_string()),
         Expr::Member { receiver, name, .. } => match receiver.as_ref() {
             Expr::Ident { name: recv, .. } => Some(format!("{recv}.{name}")),
             _ => None,

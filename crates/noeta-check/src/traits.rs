@@ -17,7 +17,7 @@ impl Checker {
         let target = self.coloring.current_type.clone().unwrap_or_default();
         self.check_trait_impl(
             &target,
-            &block.trait_name,
+            block.trait_name.as_str(),
             &block.trait_args,
             block.trait_span,
             &block.methods,
@@ -229,7 +229,11 @@ impl Checker {
         // cross-package **user trait** is *also* dotted once qualified (`para.aether.Store`), so a
         // known user trait is never a bundle — check that first, or a dependency's standalone
         // `impl Trait for T` would be misread as a bundle impl.
-        if decl.trait_name.contains('.') && !self.symbols.user_traits.contains_key(&decl.trait_name)
+        if decl.trait_name.as_str().contains('.')
+            && !self
+                .symbols
+                .user_traits
+                .contains_key(decl.trait_name.as_str())
         {
             self.check_bundle_impl(decl);
             // Override bodies are now permitted (ExtBundle→ExtTrait fold-in, slice 4): a kernel binding
@@ -238,8 +242,8 @@ impl Checker {
             self.check_standalone_impl_bodies(decl, env);
             return;
         }
-        if !self.symbols.records.contains_key(&decl.target)
-            && !self.symbols.enums.contains_key(&decl.target)
+        if !self.symbols.records.contains_key(decl.target.as_str())
+            && !self.symbols.enums.contains_key(decl.target.as_str())
         {
             self.error(
                 DiagnosticCode::UnknownType,
@@ -258,7 +262,12 @@ impl Checker {
         // A standalone `impl` with a method body is supported for **user traits** (L1, UT2 — its
         // methods are hoisted onto the target type by the loader). A built-in trait's standalone
         // impl is still marker-only: its operator/protocol methods live in the type's own body.
-        if !decl.methods.is_empty() && !self.symbols.user_traits.contains_key(&decl.trait_name) {
+        if !decl.methods.is_empty()
+            && !self
+                .symbols
+                .user_traits
+                .contains_key(decl.trait_name.as_str())
+        {
             self.error(
                 DiagnosticCode::InvalidImpl,
                 decl.span,
@@ -270,8 +279,8 @@ impl Checker {
             );
         }
         self.check_trait_impl(
-            &decl.target,
-            &decl.trait_name,
+            decl.target.as_str(),
+            decl.trait_name.as_str(),
             &decl.trait_args,
             decl.trait_span,
             &decl.methods,
@@ -302,20 +311,23 @@ impl Checker {
         // Only for a type this module declares. A target that is not a known record/enum already
         // produced E0013 above; checking bodies against a type we know nothing about would pile
         // cascading noise on top of that one real error.
-        if !self.symbols.records.contains_key(&decl.target)
-            && !self.symbols.enums.contains_key(&decl.target)
+        if !self.symbols.records.contains_key(decl.target.as_str())
+            && !self.symbols.enums.contains_key(decl.target.as_str())
         {
             return;
         }
         let type_params = self
             .symbols
             .type_params
-            .get(&decl.target)
+            .get(decl.target.as_str())
             .cloned()
             .unwrap_or_default();
         let saved_params = self.enter_type_params(&type_params);
-        let bindings = vec![("self".to_string(), self_type(&decl.target, &type_params))];
-        let saved_type = self.coloring.current_type.replace(decl.target.clone());
+        let bindings = vec![(
+            "self".to_string(),
+            self_type(decl.target.as_str(), &type_params),
+        )];
+        let saved_type = self.coloring.current_type.replace(decl.target.to_string());
         for method in &decl.methods {
             self.check_fn(method, env, &bindings, TargetKind::Method);
         }
@@ -347,7 +359,7 @@ impl Checker {
         let derived: Vec<(String, noeta_ext_abi::AssocDerivation)> = self
             .symbols
             .native_derived_assoc
-            .get(&decl.name)
+            .get(decl.name.as_str())
             .cloned()
             .unwrap_or_default();
         if !derived.is_empty()
@@ -361,7 +373,7 @@ impl Checker {
                 .collect();
             self.symbols
                 .trait_assoc
-                .insert((target.to_string(), decl.name.clone()), map);
+                .insert((target.to_string(), decl.name.to_string()), map);
         }
         // Associated-type coherence (slice 1a): every associated type WITHOUT a default must be bound
         // by this impl. A defaulted associated type — or a native-derived one (auto-supplied above) —
@@ -452,8 +464,8 @@ impl Checker {
             for (i, (tp, ip)) in tm.sig.params.iter().zip(&m.params).enumerate() {
                 // Resolve a `Self::Name` on either side against this impl's binding (slice 1a) so the
                 // contract compares concrete types (`int` vs `int`), not two opaque projections.
-                let want = self.assoc_resolved_type(&tp.ty, target, &decl.name);
-                let got = self.assoc_resolved_type(&ip.ty, target, &decl.name);
+                let want = self.assoc_resolved_type(&tp.ty, target, decl.name.as_str());
+                let got = self.assoc_resolved_type(&ip.ty, target, decl.name.as_str());
                 if !Self::sig_types_compatible(&want, &got) {
                     self.error(
                         DiagnosticCode::InvalidImpl,
@@ -467,8 +479,8 @@ impl Checker {
                     );
                 }
             }
-            let want_ret = self.assoc_resolved_type(&tm.sig.ret, target, &decl.name);
-            let got_ret = self.assoc_resolved_type(&m.ret, target, &decl.name);
+            let want_ret = self.assoc_resolved_type(&tm.sig.ret, target, decl.name.as_str());
+            let got_ret = self.assoc_resolved_type(&m.ret, target, decl.name.as_str());
             if !Self::sig_types_compatible(&want_ret, &got_ret) {
                 self.error(
                     DiagnosticCode::InvalidImpl,
@@ -490,10 +502,10 @@ impl Checker {
         if let Some(constraint) = self
             .symbols
             .native_trait_self_constraints
-            .get(&decl.name)
+            .get(decl.name.as_str())
             .copied()
         {
-            self.check_packed_self_constraint(target, trait_span, &decl.name, &constraint);
+            self.check_packed_self_constraint(target, trait_span, decl.name.as_str(), &constraint);
         }
     }
 
@@ -560,7 +572,7 @@ impl Checker {
     pub(crate) fn check_trait_decl(&mut self, decl: &noeta_ast::TraitDecl, env: &mut Env) {
         // A user trait may not shadow a built-in trait name — an `impl`/bound naming it would be
         // ambiguous against the closed built-in set.
-        if BuiltinTrait::from_name(&decl.name).is_some() {
+        if BuiltinTrait::from_name(decl.name.as_str()).is_some() {
             self.error(
                 DiagnosticCode::InvalidTraitDeclaration,
                 decl.name_span,
@@ -569,9 +581,9 @@ impl Checker {
                     decl.name
                 ),
             );
-        } else if self.symbols.types.contains(&decl.name)
-            || self.symbols.records.contains_key(&decl.name)
-            || self.symbols.enums.contains_key(&decl.name)
+        } else if self.symbols.types.contains(decl.name.as_str())
+            || self.symbols.records.contains_key(decl.name.as_str())
+            || self.symbols.enums.contains_key(decl.name.as_str())
         {
             // A trait and a type sharing a name would make `dyn {name}` / `{name}` ambiguous.
             self.error(
@@ -585,7 +597,7 @@ impl Checker {
         } else if self
             .symbols
             .user_traits
-            .get(&decl.name)
+            .get(decl.name.as_str())
             .is_some_and(|first| first.span != decl.span)
         {
             // A second `trait` of the same name; pass 1 kept the first.
@@ -667,7 +679,7 @@ impl Checker {
             return;
         }
         let saved_params = self.enter_type_params(&decl.type_params);
-        let bindings = vec![("self".to_string(), Type::DynTrait(decl.name.clone()))];
+        let bindings = vec![("self".to_string(), Type::DynTrait(decl.name.to_string()))];
         for m in defaults {
             self.check_fn(&m.sig, env, &bindings, TargetKind::Method);
         }
@@ -682,7 +694,11 @@ impl Checker {
     /// runtime, moved to compile time), and method-name conflicts with the target's own methods
     /// or an earlier binding's.
     pub(crate) fn check_bundle_impl(&mut self, decl: &ImplDecl) {
-        let (module_ref, bundle_name) = decl.trait_name.rsplit_once('.').expect("dotted path");
+        let (module_ref, bundle_name) = decl
+            .trait_name
+            .as_str()
+            .rsplit_once('.')
+            .expect("dotted path");
         if !self.imports.modules.contains_key(module_ref) {
             self.error(
                 DiagnosticCode::UnknownTrait,
@@ -695,7 +711,7 @@ impl Checker {
             .help("bind the module first — e.g. `use std.{vec}` brings `vec` into scope");
             return;
         }
-        let Some((_, bundle)) = self.resolve_bundle_ref(&decl.trait_name) else {
+        let Some((_, bundle)) = self.resolve_bundle_ref(decl.trait_name.as_str()) else {
             self.error(
                 DiagnosticCode::UnknownTrait,
                 decl.trait_span,
@@ -707,10 +723,10 @@ impl Checker {
         // carry an override body (checked by `check_standalone_impl_bodies` at the caller). The methods
         // are still native defaults — an empty `impl vec.Kernels for T {}` adopts every one.
         self.check_bundle_binding(
-            &decl.target,
+            decl.target.as_str(),
             decl.target_span,
             decl.trait_span,
-            &decl.trait_name,
+            decl.trait_name.as_str(),
             bundle,
         );
     }
@@ -905,8 +921,12 @@ impl Checker {
         let mut seen: HashMap<String, Span> = HashMap::new();
         let occurrences: Vec<(String, Span)> = derives
             .iter()
-            .map(|d| (d.name.clone(), d.span))
-            .chain(impls.iter().map(|b| (b.trait_name.clone(), b.trait_span)))
+            .map(|d| (d.name.to_string(), d.span))
+            .chain(
+                impls
+                    .iter()
+                    .map(|b| (b.trait_name.to_string(), b.trait_span)),
+            )
             .chain(standalone.iter().map(|(name, span)| (name.clone(), *span)))
             .collect();
         for (name, span) in occurrences {
@@ -1005,7 +1025,9 @@ impl Checker {
         let d = self.error(
             DiagnosticCode::InvalidTry,
             span,
-            format!("`?` on a `Result` early-returns its `Err`, but this function returns `{declared}`"),
+            format!(
+                "`?` on a `Result` early-returns its `Err`, but this function returns `{declared}`"
+            ),
         );
         // Name the concrete declaration that admits this very `Err`; an unresolved error payload
         // (`dyn`, a hole) can only be described generically.
@@ -1073,11 +1095,11 @@ impl Checker {
         type_methods: &[FnDecl],
     ) {
         for spec in derives {
-            let Some(t) = BuiltinTrait::from_name(&spec.name) else {
+            let Some(t) = BuiltinTrait::from_name(spec.name.as_str()) else {
                 // A USER trait derives through the shared planner (UT5 + bridging + `via:`
                 // delegation): defaults adopted wholesale, required members bridged onto the
                 // type's own fields/methods, or the whole trait forwarded through a field.
-                if let Some(decl) = self.symbols.user_traits.get(&spec.name).cloned() {
+                if let Some(decl) = self.symbols.user_traits.get(spec.name.as_str()).cloned() {
                     self.check_user_trait_derive(type_name, spec, &decl, fields, type_methods);
                     continue;
                 }
@@ -1089,8 +1111,8 @@ impl Checker {
                 // an empty `impl` would (`check_bundle_binding`); the binding itself was recorded in
                 // `collect` beside the `impl` form. A bundle takes no member bindings, no `via:`, and
                 // no type arguments — those belong to trait derives.
-                if spec.name.contains('.')
-                    && let Some((_, bundle)) = self.resolve_bundle_ref(&spec.name)
+                if spec.name.as_str().contains('.')
+                    && let Some((_, bundle)) = self.resolve_bundle_ref(spec.name.as_str())
                 {
                     if let Some(b) = spec.bindings.first() {
                         self.error(
@@ -1118,14 +1140,18 @@ impl Checker {
                         // Same target as the impl form: the decorated type, at the derive argument's
                         // span (which is both where the shape error points and the binding site).
                         self.check_bundle_binding(
-                            type_name, spec.span, spec.span, &spec.name, bundle,
+                            type_name,
+                            spec.span,
+                            spec.span,
+                            spec.name.as_str(),
+                            bundle,
                         );
                     }
                     continue;
                 }
                 // A NATIVE derive recipe (layer 4, `ExtDerive`): synthesizes handler forwards —
                 // no bindings/via surface, plus the recipe's own optional shape validation.
-                if let Some(ext) = self.reg().find_ext_derive(&spec.name) {
+                if let Some(ext) = self.reg().find_ext_derive(spec.name.as_str()) {
                     if let Some(b) = spec.bindings.first() {
                         self.error(
                             DiagnosticCode::UnderivableTrait,
@@ -1168,7 +1194,7 @@ impl Checker {
             // E0050 field constraint) does not apply — the synthesized method carries the behavior.
             if let Some((via_name, via_span)) = &spec.via {
                 if let Err(e) =
-                    noeta_ast::derive::plan_builtin_via(&spec.name, type_name, fields, spec)
+                    noeta_ast::derive::plan_builtin_via(spec.name.as_str(), type_name, fields, spec)
                 {
                     let d = self.error(DiagnosticCode::UnderivableTrait, spec.span, e.message);
                     if let Some(h) = e.help {
@@ -1379,14 +1405,16 @@ impl Checker {
                 .cloned()
                 .unwrap_or_default();
             let satisfied = match &f.ty {
-                Some(noeta_ast::TypeRef::Named { name, .. }) if params.contains(name) => {
+                Some(noeta_ast::TypeRef::Named { name, .. })
+                    if params.iter().any(|p| p == name.as_str()) =>
+                {
                     true // parameter-typed — deferred to the instantiation site
                 }
                 Some(noeta_ast::TypeRef::Named { name, .. }) => self
                     .symbols
                     .user_trait_impls
-                    .get(name)
-                    .is_some_and(|traits| traits.contains_key(&decl.name)),
+                    .get(name.as_str())
+                    .is_some_and(|traits| traits.contains_key(decl.name.as_str())),
                 Some(noeta_ast::TypeRef::DynTrait { trait_name, .. }) => trait_name == &decl.name,
                 _ => false,
             };

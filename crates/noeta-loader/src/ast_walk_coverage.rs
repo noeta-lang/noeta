@@ -78,6 +78,7 @@
 //! *derived* from the classification instead of checked against it — is what this gate exists to
 //! make safe: it pins the current behavior field by field, so that refactor has an oracle.
 
+use noeta_ast::Name as AstName;
 use noeta_ast::{
     AssocTypeDecl, AttrArg, AttrValue, Attribute, CallArg, ClassDecl, ClosureBody, Decorators,
     DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, ForeignDirective,
@@ -683,7 +684,7 @@ fn sentinel(node: &str, field: &str) -> String {
 
 fn ident(node: &str, field: &str) -> Expr {
     Expr::Ident {
-        name: sentinel(node, field),
+        name: AstName::written(sentinel(node, field)),
         span: SP,
     }
 }
@@ -694,7 +695,7 @@ fn bx(node: &str, field: &str) -> Box<Expr> {
 
 fn tref(node: &str, field: &str) -> TypeRef {
     TypeRef::Named {
-        name: sentinel(node, field),
+        name: AstName::written(sentinel(node, field)),
         args: Vec::new(),
         span: SP,
     }
@@ -714,7 +715,7 @@ fn arg(node: &str, field: &str) -> CallArg {
 
 fn attr(node: &str, field: &str) -> Attribute {
     Attribute {
-        name: sentinel(node, field),
+        name: AstName::written(sentinel(node, field)),
         name_span: SP,
         args: Vec::new(),
         span: SP,
@@ -726,7 +727,7 @@ fn attr(node: &str, field: &str) -> Attribute {
 /// report a false negative for `TraitMethod::sig` and friends).
 fn fn_with(node: &str, field: &str) -> FnDecl {
     FnDecl {
-        name: "zqfn".into(),
+        name: AstName::written("zqfn"),
         name_span: SP,
         is_public: false,
         type_params: Vec::new(),
@@ -759,7 +760,7 @@ fn type_param_with(node: &str, field: &str) -> TypeParam {
     TypeParam {
         name: "Zqtp".into(),
         bounds: vec![TraitBound {
-            name: sentinel(node, field),
+            name: AstName::written(sentinel(node, field)),
             args: Vec::new(),
             span: SP,
         }],
@@ -769,7 +770,7 @@ fn type_param_with(node: &str, field: &str) -> TypeParam {
 
 fn impl_block_with(node: &str, field: &str) -> ImplBlock {
     ImplBlock {
-        trait_name: sentinel(node, field),
+        trait_name: AstName::written(sentinel(node, field)),
         trait_span: SP,
         trait_args: Vec::new(),
         methods: Vec::new(),
@@ -916,7 +917,7 @@ fn expr_variants() -> Vec<Expr> {
             span: SP,
         },
         Expr::Object(ObjectLit {
-            type_name: Some(f("Object", "0")),
+            type_name: Some(AstName::written(f("Object", "0"))),
             type_name_span: SP,
             fields: Vec::new(),
             spread: None,
@@ -984,7 +985,7 @@ fn expr_variants() -> Vec<Expr> {
             span: SP,
         },
         Expr::TypedCall {
-            name: f("TypedCall", "name"),
+            name: AstName::written(f("TypedCall", "name")),
             name_span: SP,
             type_args: vec![tref(&n("TypedCall"), "type_args")],
             args: vec![arg(&n("TypedCall"), "args")],
@@ -1088,7 +1089,7 @@ fn expr_variants() -> Vec<Expr> {
         },
         // `ObjectLit`'s and `FieldInit`'s own fields.
         Expr::Object(ObjectLit {
-            type_name: Some(sentinel("ObjectLit", "type_name")),
+            type_name: Some(AstName::written(sentinel("ObjectLit", "type_name"))),
             type_name_span: SP,
             fields: vec![
                 FieldInit {
@@ -1135,7 +1136,7 @@ fn expr_variants() -> Vec<Expr> {
         Expr::As {
             expr: Box::new(Expr::Int { value: 0, span: SP }),
             ty: TypeRef::Named {
-                name: "Zqhost".into(),
+                name: AstName::written("Zqhost"),
                 args: typeref_variants(),
                 span: SP,
             },
@@ -1162,7 +1163,7 @@ fn pattern_variants() -> Vec<Pattern> {
             span: SP,
         },
         Pattern::Variant {
-            type_name: Some(sentinel(&n("Variant"), "type_name")),
+            type_name: Some(AstName::written(sentinel(&n("Variant"), "type_name"))),
             variant: sentinel(&n("Variant"), "variant"),
             bindings: vec![Pattern::IsType {
                 ty: tref(&n("Variant"), "bindings"),
@@ -1188,12 +1189,12 @@ fn typeref_variants() -> Vec<TypeRef> {
     let n = |v: &str| format!("TypeRef::{v}");
     vec![
         TypeRef::Named {
-            name: sentinel(&n("Named"), "name"),
+            name: AstName::written(sentinel(&n("Named"), "name")),
             args: vec![tref(&n("Named"), "args")],
             span: SP,
         },
         TypeRef::DynTrait {
-            trait_name: sentinel(&n("DynTrait"), "trait_name"),
+            trait_name: AstName::written(sentinel(&n("DynTrait"), "trait_name")),
             span: SP,
         },
         TypeRef::Optional {
@@ -1229,7 +1230,7 @@ fn attr_value_variants() -> Vec<AttrArg> {
         span: SP,
     };
     let tr = |node: &str, field: &str| AttrValue::TypeRef {
-        name: sentinel(node, field),
+        name: AstName::written(sentinel(node, field)),
         args: Vec::new(),
     };
     vec![
@@ -1241,16 +1242,16 @@ fn attr_value_variants() -> Vec<AttrArg> {
         one(AttrValue::Set(vec![tr(&n("Set"), "0")])),
         one(AttrValue::Map(vec![("k".into(), tr(&n("Map"), "0"))])),
         one(AttrValue::Enum {
-            enum_name: sentinel(&n("Enum"), "enum_name"),
+            enum_name: AstName::written(sentinel(&n("Enum"), "enum_name")),
             variant: sentinel(&n("Enum"), "variant"),
             args: vec![tr(&n("Enum"), "args")],
         }),
         one(AttrValue::Struct {
-            type_name: sentinel(&n("Struct"), "type_name"),
+            type_name: AstName::written(sentinel(&n("Struct"), "type_name")),
             fields: vec![("f".into(), tr(&n("Struct"), "fields"))],
         }),
         one(AttrValue::TypeRef {
-            name: sentinel(&n("TypeRef"), "name"),
+            name: AstName::written(sentinel(&n("TypeRef"), "name")),
             args: vec![tref(&n("TypeRef"), "args")],
         }),
         // `AttrArg`'s own fields.
@@ -1286,11 +1287,11 @@ fn stmt_variants() -> Vec<Stmt> {
             span: SP,
         },
         Stmt::Fn(FnDecl {
-            name: f("Fn", "0"),
+            name: AstName::written(f("Fn", "0")),
             ..fn_with("zq", "unused")
         }),
         Stmt::Enum(EnumDecl {
-            name: f("Enum", "0"),
+            name: AstName::written(f("Enum", "0")),
             name_span: SP,
             is_public: false,
             type_params: Vec::new(),
@@ -1302,7 +1303,7 @@ fn stmt_variants() -> Vec<Stmt> {
             span: SP,
         }),
         Stmt::Struct(StructDecl {
-            name: f("Struct", "0"),
+            name: AstName::written(f("Struct", "0")),
             name_span: SP,
             is_public: false,
             type_params: Vec::new(),
@@ -1313,7 +1314,7 @@ fn stmt_variants() -> Vec<Stmt> {
             span: SP,
         }),
         Stmt::Class(ClassDecl {
-            name: f("Class", "0"),
+            name: AstName::written(f("Class", "0")),
             name_span: SP,
             is_public: false,
             type_params: Vec::new(),
@@ -1325,17 +1326,17 @@ fn stmt_variants() -> Vec<Stmt> {
             span: SP,
         }),
         Stmt::Impl(ImplDecl {
-            trait_name: f("Impl", "0"),
+            trait_name: AstName::written(f("Impl", "0")),
             trait_span: SP,
             trait_args: Vec::new(),
-            target: "Zqtarget".into(),
+            target: AstName::written("Zqtarget"),
             target_span: SP,
             methods: Vec::new(),
             assoc_bindings: Vec::new(),
             span: SP,
         }),
         Stmt::Trait(TraitDecl {
-            name: f("Trait", "0"),
+            name: AstName::written(f("Trait", "0")),
             name_span: SP,
             is_public: false,
             type_params: Vec::new(),
@@ -1401,7 +1402,7 @@ fn stmt_variants() -> Vec<Stmt> {
             args: vec![AttrArg {
                 name: None,
                 value: AttrValue::TypeRef {
-                    name: f("TierBlock", "args"),
+                    name: AstName::written(f("TierBlock", "args")),
                     args: Vec::new(),
                 },
                 span: SP,
@@ -1421,7 +1422,7 @@ fn decl_probes() -> Vec<Stmt> {
         // FnDecl (and, through it, TierDecl, Param, TypeParam, TraitBound, Attribute, AttrArg,
         // AttrValue, MethodDirective).
         Stmt::Fn(FnDecl {
-            name: s("FnDecl", "name"),
+            name: AstName::written(s("FnDecl", "name")),
             name_span: SP,
             is_public: false,
             type_params: vec![
@@ -1430,12 +1431,12 @@ fn decl_probes() -> Vec<Stmt> {
                     name: s("TypeParam", "name"),
                     bounds: vec![
                         TraitBound {
-                            name: s("TraitBound", "name"),
+                            name: AstName::written(s("TraitBound", "name")),
                             args: vec![tref("TraitBound", "args")],
                             span: SP,
                         },
                         TraitBound {
-                            name: s("TypeParam", "bounds"),
+                            name: AstName::written(s("TypeParam", "bounds")),
                             args: Vec::new(),
                             span: SP,
                         },
@@ -1459,14 +1460,14 @@ fn decl_probes() -> Vec<Stmt> {
             attrs: vec![
                 attr("FnDecl", "attrs"),
                 Attribute {
-                    name: s("Attribute", "name"),
+                    name: AstName::written(s("Attribute", "name")),
                     name_span: SP,
                     args: {
                         let mut args = attr_value_variants();
                         args.push(AttrArg {
                             name: None,
                             value: AttrValue::TypeRef {
-                                name: s("Attribute", "args"),
+                                name: AstName::written(s("Attribute", "args")),
                                 args: Vec::new(),
                             },
                             span: SP,
@@ -1483,7 +1484,7 @@ fn decl_probes() -> Vec<Stmt> {
                     args: vec![AttrArg {
                         name: None,
                         value: AttrValue::TypeRef {
-                            name: s("MethodDirective", "args"),
+                            name: AstName::written(s("MethodDirective", "args")),
                             args: Vec::new(),
                         },
                         span: SP,
@@ -1497,7 +1498,7 @@ fn decl_probes() -> Vec<Stmt> {
                     args: vec![AttrArg {
                         name: None,
                         value: AttrValue::TypeRef {
-                            name: s("FnDecl", "directives"),
+                            name: AstName::written(s("FnDecl", "directives")),
                             args: Vec::new(),
                         },
                         span: SP,
@@ -1511,9 +1512,9 @@ fn decl_probes() -> Vec<Stmt> {
             tier: Some(TierDecl {
                 name: s("TierDecl", "name"),
                 name_span: SP,
-                config: Some((s("TierDecl", "config"), SP)),
+                config: Some((AstName::written(s("TierDecl", "config")), SP)),
                 text: Some((s("TierDecl", "text"), SP)),
-                expr: Some((s("TierDecl", "expr"), SP)),
+                expr: Some((AstName::written(s("TierDecl", "expr")), SP)),
                 span: SP,
             }),
             captures: vec![(s("FnDecl", "captures"), SP)],
@@ -1525,7 +1526,7 @@ fn decl_probes() -> Vec<Stmt> {
             tier: Some(TierDecl {
                 name: "zqt".into(),
                 name_span: SP,
-                config: Some((s("FnDecl", "tier"), SP)),
+                config: Some((AstName::written(s("FnDecl", "tier")), SP)),
                 text: None,
                 expr: None,
                 span: SP,
@@ -1534,7 +1535,7 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // StructDecl (and FieldDecl, Decorators, DeriveSpec, RoleTag, ImplBlock).
         Stmt::Struct(StructDecl {
-            name: s("StructDecl", "name"),
+            name: AstName::written(s("StructDecl", "name")),
             name_span: SP,
             is_public: false,
             type_params: vec![type_param_with("StructDecl", "type_params")],
@@ -1555,7 +1556,7 @@ fn decl_probes() -> Vec<Stmt> {
             impls: vec![
                 impl_block_with("StructDecl", "impls"),
                 ImplBlock {
-                    trait_name: s("ImplBlock", "trait_name"),
+                    trait_name: AstName::written(s("ImplBlock", "trait_name")),
                     trait_span: SP,
                     trait_args: vec![tref("ImplBlock", "trait_args")],
                     methods: vec![fn_with("ImplBlock", "methods")],
@@ -1566,14 +1567,14 @@ fn decl_probes() -> Vec<Stmt> {
             decorators: Decorators {
                 derives: vec![
                     DeriveSpec {
-                        name: s("Decorators", "derives"),
+                        name: AstName::written(s("Decorators", "derives")),
                         args: Vec::new(),
                         bindings: Vec::new(),
                         via: None,
                         span: SP,
                     },
                     DeriveSpec {
-                        name: s("DeriveSpec", "name"),
+                        name: AstName::written(s("DeriveSpec", "name")),
                         args: vec![tref("DeriveSpec", "args")],
                         bindings: vec![MemberBinding {
                             member: "m".into(),
@@ -1588,12 +1589,12 @@ fn decl_probes() -> Vec<Stmt> {
                 attribute: Some(vec![(s("Decorators", "attribute"), SP)]),
                 role: Some(vec![
                     RoleTag {
-                        enum_name: s("Decorators", "role"),
+                        enum_name: AstName::written(s("Decorators", "role")),
                         variant: "V".into(),
                         span: SP,
                     },
                     RoleTag {
-                        enum_name: s("RoleTag", "enum_name"),
+                        enum_name: AstName::written(s("RoleTag", "enum_name")),
                         variant: s("RoleTag", "variant"),
                         span: SP,
                     },
@@ -1607,7 +1608,7 @@ fn decl_probes() -> Vec<Stmt> {
                     args: vec![AttrArg {
                         name: None,
                         value: AttrValue::TypeRef {
-                            name: s("Decorators", "foreign"),
+                            name: AstName::written(s("Decorators", "foreign")),
                             args: Vec::new(),
                         },
                         span: SP,
@@ -1619,7 +1620,7 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // ClassDecl.
         Stmt::Class(ClassDecl {
-            name: s("ClassDecl", "name"),
+            name: AstName::written(s("ClassDecl", "name")),
             name_span: SP,
             is_public: false,
             type_params: vec![type_param_with("ClassDecl", "type_params")],
@@ -1632,7 +1633,7 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // A second struct, to carry `StructDecl::decorators` on its own.
         Stmt::Struct(StructDecl {
-            name: "Zqs2".into(),
+            name: AstName::written("Zqs2"),
             name_span: SP,
             is_public: false,
             type_params: Vec::new(),
@@ -1644,7 +1645,7 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // EnumDecl (and VariantDecl).
         Stmt::Enum(EnumDecl {
-            name: s("EnumDecl", "name"),
+            name: AstName::written(s("EnumDecl", "name")),
             name_span: SP,
             is_public: false,
             type_params: vec![type_param_with("EnumDecl", "type_params")],
@@ -1674,7 +1675,7 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // TraitDecl (and TraitMethod, AssocTypeDecl).
         Stmt::Trait(TraitDecl {
-            name: s("TraitDecl", "name"),
+            name: AstName::written(s("TraitDecl", "name")),
             name_span: SP,
             is_public: false,
             type_params: vec![type_param_with("TraitDecl", "type_params")],
@@ -1707,10 +1708,10 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // ImplDecl.
         Stmt::Impl(ImplDecl {
-            trait_name: s("ImplDecl", "trait_name"),
+            trait_name: AstName::written(s("ImplDecl", "trait_name")),
             trait_span: SP,
             trait_args: vec![tref("ImplDecl", "trait_args")],
-            target: s("ImplDecl", "target"),
+            target: AstName::written(s("ImplDecl", "target")),
             target_span: SP,
             methods: vec![fn_with("ImplDecl", "methods")],
             assoc_bindings: vec![("Item".into(), tref("ImplDecl", "assoc_bindings"))],

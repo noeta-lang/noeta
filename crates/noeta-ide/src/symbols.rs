@@ -77,7 +77,7 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
         match stmt {
             Stmt::Fn(decl) => symbols.push(fn_symbol(decl, SymbolKind::Function)),
             Stmt::Struct(decl) => symbols.push(SymbolNode {
-                name: decl.name.clone(),
+                name: decl.name.to_string(),
                 detail: None,
                 kind: SymbolKind::Struct,
                 full_span: decl.span,
@@ -86,7 +86,7 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
                 children: type_members(&decl.fields, &decl.methods),
             }),
             Stmt::Class(decl) => symbols.push(SymbolNode {
-                name: decl.name.clone(),
+                name: decl.name.to_string(),
                 detail: None,
                 kind: SymbolKind::Class,
                 full_span: decl.span,
@@ -97,7 +97,7 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
             Stmt::Enum(decl) => symbols.push(enum_symbol(decl)),
             Stmt::Impl(decl) => symbols.push(impl_symbol(decl)),
             Stmt::Trait(decl) => symbols.push(SymbolNode {
-                name: decl.name.clone(),
+                name: decl.name.to_string(),
                 detail: None,
                 kind: SymbolKind::Trait,
                 full_span: decl.span,
@@ -119,7 +119,7 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
 /// A function or method symbol, with its signature as detail.
 fn fn_symbol(decl: &FnDecl, kind: SymbolKind) -> SymbolNode {
     SymbolNode {
-        name: decl.name.clone(),
+        name: decl.name.to_string(),
         detail: Some(fn_signature(decl)),
         kind,
         full_span: decl.span,
@@ -169,7 +169,7 @@ fn enum_symbol(decl: &EnumDecl) -> SymbolNode {
         children.push(fn_symbol(method, SymbolKind::Method));
     }
     SymbolNode {
-        name: decl.name.clone(),
+        name: decl.name.to_string(),
         detail: None,
         kind: SymbolKind::Enum,
         full_span: decl.span,

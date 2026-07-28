@@ -142,12 +142,7 @@ impl NativeCtx for EvalCtx<'_> {
         }
     }
 
-    fn call_method(
-        &mut self,
-        recv: Slot,
-        method: &str,
-        args: &[Slot],
-    ) -> CtxResult<Option<Slot>> {
+    fn call_method(&mut self, recv: Slot, method: &str, args: &[Slot]) -> CtxResult<Option<Slot>> {
         // Only a user object has methods to reach; anything else reports "no such method" so the
         // caller can fall back rather than abort.
         let Value::Object(object) = self.get(recv)?.clone() else {

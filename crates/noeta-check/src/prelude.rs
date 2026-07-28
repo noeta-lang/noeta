@@ -684,7 +684,7 @@ fn synth_trait_decl(
                 })
                 .collect();
             let sig = FnDecl {
-                name: m.sig.name.to_string(),
+                name: noeta_ast::Name::canonical(m.sig.name),
                 name_span: sp,
                 is_public: true,
                 type_params: Vec::new(),
@@ -721,7 +721,7 @@ fn synth_trait_decl(
         })
         .collect();
     TraitDecl {
-        name: local.to_string(),
+        name: noeta_ast::Name::canonical(local),
         name_span: sp,
         is_public: true,
         type_params: Vec::new(),

@@ -2964,10 +2964,10 @@ fn module_members(program: &noeta_ast::Program, prefix: &str) -> Vec<String> {
     };
     for stmt in &program.stmts {
         match stmt {
-            noeta_ast::Stmt::Fn(decl) => push_leaf(&decl.name),
-            noeta_ast::Stmt::Struct(decl) => push_leaf(&decl.name),
-            noeta_ast::Stmt::Class(decl) => push_leaf(&decl.name),
-            noeta_ast::Stmt::Enum(decl) => push_leaf(&decl.name),
+            noeta_ast::Stmt::Fn(decl) => push_leaf(decl.name.as_str()),
+            noeta_ast::Stmt::Struct(decl) => push_leaf(decl.name.as_str()),
+            noeta_ast::Stmt::Class(decl) => push_leaf(decl.name.as_str()),
+            noeta_ast::Stmt::Enum(decl) => push_leaf(decl.name.as_str()),
             _ => {}
         }
     }
@@ -3013,7 +3013,12 @@ impl ResolvedCallable<'_> {
 /// (`geo.area`, `App.Hot.simulate`) renders under its leaf (`area`, `simulate`), the name the
 /// caller wrote — an identifier never contains a `.`, so the qualifier is unambiguously the prefix.
 fn render_fn_signature(decl: &noeta_ast::FnDecl) -> String {
-    let name = decl.name.rsplit('.').next().unwrap_or(&decl.name);
+    let name = decl
+        .name
+        .as_str()
+        .rsplit('.')
+        .next()
+        .unwrap_or(decl.name.as_str());
     let params: Vec<String> = decl.params.iter().map(symbols::param_detail).collect();
     let head = format!("fn {}({})", name, params.join(", "));
     match &decl.ret {

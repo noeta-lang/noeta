@@ -39,11 +39,29 @@
 //! The complementary half — that a bound field is actually *visited*, not merely named — is
 //! `ast_walk_coverage.rs`, which classifies every field of every one of those nodes and runs the
 //! real walk over a probe carrying a sentinel in each position.
+//!
+//! # The visitor takes a `Name`, not a `String`
+//!
+//! Both of those are **detection**: they notice the mistake once it is written. The third fix is
+//! [`noeta_ast::Name`], and it is why [`NameVisitor`] below takes `&mut Name`. Every position this
+//! walk is responsible for is declared `Name` in the AST; everything the walk must leave alone —
+//! a local binding, a member name, a tier name, a string literal's text, a dynamic reflection
+//! operand — is a plain `String`, and the two do not convert into each other in either direction.
+//!
+//! That closes the hole from the writing end rather than the reviewing end. A type reference can no
+//! longer be stored where literal text goes (bug 1's exact move), a raw string can no longer be
+//! dropped into a callee slot, and — because `ast_walk_coverage`'s `derived_verdict` now reads the
+//! declared type — a newly added `Name` field the walk fails to visit fails the gate with **no
+//! table row written at all**.
+//!
+//! Rewriting is likewise narrowed to one operation: [`noeta_ast::Name::qualify_to`] is a `Name`'s
+//! only mutator, so `grep -rn 'qualify_to'` enumerates every place in the compiler where a name's
+//! meaning changes. Today that is the three sites in [`qualify_stmt_scoped`] and nowhere else.
 
 use std::collections::{HashMap, HashSet};
 
 use noeta_ast::{
-    AttrValue, Attribute, CallArg, ClosureBody, Expr, FieldDecl, FnDecl, ImplBlock, ImplDecl,
+    AttrValue, Attribute, CallArg, ClosureBody, Expr, FieldDecl, FnDecl, ImplBlock, ImplDecl, Name,
     Param, Pattern, Stmt, StrPart, TypeOperand, TypeParam, TypeRef, VariantDecl,
 };
 
@@ -116,7 +134,7 @@ impl UnitMap {
 /// The [`Span`](noeta_span::Span) is supplied at the positions that can carry a **dotted**
 /// reference (type annotations, literal/pattern heads, member chains) so a map miss can be
 /// reported at its source location — the unresolved-FQN diagnostic; `None` elsewhere.
-type NameVisitor<'a> = dyn FnMut(&mut String, NameKind, Option<noeta_span::Span>) -> bool + 'a;
+type NameVisitor<'a> = dyn FnMut(&mut Name, NameKind, Option<noeta_span::Span>) -> bool + 'a;
 
 /// Where a visited name sits, so the rewriter can apply position-appropriate shadowing rules.
 /// Type positions (annotations, literal heads, pattern heads, decl names) share no namespace with
@@ -225,7 +243,15 @@ pub fn qualify_stmt_scoped(
     // "cannot be used as an attribute" error, while the one *inside* resolves to `std.test.Skip`.
     // The scoped table carries no `tier_scopes` of its own, so this substitution happens once.
     let block = match &*stmt {
-        Stmt::TierBlock { span, .. } => Some(*span),
+        Stmt::TierBlock {
+            tier: _,
+            tier_span: _,
+            args: _,
+            items: _,
+            doc_text: _,
+            attached: _,
+            span,
+        } => Some(*span),
         _ => None,
     };
     let map = block
@@ -245,6 +271,7 @@ pub fn qualify_stmt_scoped(
     bound.extend(outer_bound.iter().cloned());
     walk_stmt(stmt, &mut |name, kind, span| {
         let shadowed = name
+            .as_str()
             .split('.')
             .next()
             .is_some_and(|root| bound.contains(root));
@@ -252,7 +279,7 @@ pub fn qualify_stmt_scoped(
             return false;
         }
         if let Some(qualified) = map.names.get(name.as_str()) {
-            *name = qualified.clone();
+            name.qualify_to(qualified.clone());
             return true;
         }
         // A **type** reference reached *through* a handle — `http.Response` after `use std.http`,
@@ -261,10 +288,10 @@ pub fn qualify_stmt_scoped(
         // that no longer exists (`http.Response` where the import now binds `std.http`), and the
         // checker's `extern_types` key, derived from the same import, would never match it.
         if kind == NameKind::Type
-            && let Some((root, rest)) = name.split_once('.')
+            && let Some((root, rest)) = name.as_str().split_once('.')
             && let Some(canonical) = map.handles.get(root)
         {
-            *name = format!("{canonical}.{rest}");
+            name.qualify_to(format!("{canonical}.{rest}"));
             return true;
         }
         // A native `use` handle is a **value** binding, so it is reached as a bare identifier: the
@@ -276,13 +303,13 @@ pub fn qualify_stmt_scoped(
             && !shadowed
             && let Some(canonical) = map.handles.get(name.as_str())
         {
-            *name = canonical.clone();
+            name.qualify_to(canonical.clone());
             return true;
         }
-        if name.contains('.')
+        if name.as_str().contains('.')
             && let Some(span) = span
         {
-            dotted_misses.push((name.clone(), span));
+            dotted_misses.push((name.to_string(), span));
         }
         false
     });
@@ -299,7 +326,7 @@ pub fn referenced_names(stmt: &Stmt) -> HashSet<String> {
     // The walk needs `&mut` (it is shared with the rewriter); clone so the source is untouched.
     let mut scratch = stmt.clone();
     walk_stmt(&mut scratch, &mut |name, _kind, _span| {
-        names.insert(name.clone());
+        names.insert(name.to_string());
         // Never a "match": the collector has no QMap, so the member-chain collapse stays inert
         // and the walk keeps its shape (the collected dotted candidates are a harmless superset).
         false
@@ -407,7 +434,7 @@ fn bound_in_stmt(stmt: &Stmt, names: &mut HashSet<String>) {
         }
         Stmt::Fn(decl) => {
             // A function name is a value binding too (`fn vec(…)` shadows a `vec` module alias).
-            names.insert(decl.name.clone());
+            names.insert(decl.name.to_string());
             bound_in_fn(decl, names);
         }
         Stmt::Class(decl) => {
@@ -1536,7 +1563,7 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
 /// module-qualified reference.
 fn chain_segments(e: &Expr) -> Option<Vec<(String, noeta_span::Span)>> {
     match e {
-        Expr::Ident { name, span } => Some(vec![(name.clone(), *span)]),
+        Expr::Ident { name, span } => Some(vec![(name.to_string(), *span)]),
         Expr::Member {
             receiver,
             name,
@@ -1563,11 +1590,13 @@ fn collapse_qualified_chain(e: &mut Expr, visit: &mut NameVisitor) -> bool {
         return false;
     };
     for k in (2..=segments.len()).rev() {
-        let mut dotted = segments[..k]
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(".");
+        let mut dotted = Name::written(
+            segments[..k]
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+        );
         let prefix_span = noeta_span::Span {
             start: segments[0].1.start,
             end: segments[k - 1].1.end,
@@ -1700,7 +1729,10 @@ mod tests {
         let Expr::Object(lit) = value else {
             panic!("object")
         };
-        assert_eq!(lit.type_name.as_deref(), Some("App.Store.Order"));
+        assert_eq!(
+            lit.type_name.as_ref().map(Name::as_str),
+            Some("App.Store.Order")
+        );
     }
 
     /// Annotations, generic args, `is`/`as`, a static call, and an enum path all qualify; an

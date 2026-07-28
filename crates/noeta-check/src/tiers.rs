@@ -24,7 +24,7 @@
 //! module and the checker's in-place arm) share [`unknown_tier_diagnostic`], so they never drift.
 
 use noeta_ast::reflect::TIER_ATTR_DOC;
-use noeta_ast::{AttrArg, Attribute, Program, Stmt};
+use noeta_ast::{AttrArg, Attribute, Name, Program, Stmt};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
@@ -147,11 +147,11 @@ impl TierRegistry {
                     .or_default()
                     .push(DeclaredTier {
                         name: t.name.clone(),
-                        config: t.config.as_ref().map(|(n, _)| n.clone()),
+                        config: t.config.as_ref().map(|(n, _)| n.to_string()),
                         text: t.text.as_ref().map(|(lang, _)| lang.clone()),
-                        expr: t.expr.as_ref().map(|(ty, _)| ty.clone()),
-                        runner: f.name.clone(),
-                        root: runner_root(&f.name),
+                        expr: t.expr.as_ref().map(|(ty, _)| ty.to_string()),
+                        runner: f.name.to_string(),
+                        root: runner_root(f.name.as_str()),
                         span: t.span,
                     });
             }
@@ -392,7 +392,7 @@ fn knobless_args_diagnostic_for(tier: &str, args: &[AttrArg]) -> Option<Diagnost
 /// check the identical construction.
 pub fn synthesized_config_attr(attr_name: &str, args: &[AttrArg], tier_span: Span) -> Attribute {
     Attribute {
-        name: attr_name.to_string(),
+        name: Name::canonical(attr_name),
         name_span: tier_span,
         args: args.to_vec(),
         span: tier_span,
@@ -737,7 +737,7 @@ pub fn resolve_texts_with_registry(
                 _ => return None,
             };
             Some(DocTarget::Decl {
-                name: name.clone(),
+                name: name.to_string(),
                 name_span,
             })
         });
@@ -781,7 +781,7 @@ pub fn resolve_texts_with_registry(
                     text: text.clone(),
                     span: dir.span,
                     target: DocTarget::Decl {
-                        name: method.name.clone(),
+                        name: method.name.to_string(),
                         name_span: method.name_span,
                     },
                 });
@@ -992,7 +992,7 @@ fn stamp_doc(
         return;
     }
     attrs.push(Attribute {
-        name: TIER_ATTR_DOC.to_string(),
+        name: Name::canonical(TIER_ATTR_DOC),
         name_span,
         args: vec![AttrArg {
             name: Some("text".to_string()),
@@ -1126,7 +1126,7 @@ fn resolve_block(
                     };
                     if let Some(sink) = sink {
                         sink.push(TierFn {
-                            name: decl.name.clone(),
+                            name: decl.name.to_string(),
                             span: decl.name_span,
                             attrs: decl.attrs.clone(),
                             is_async: decl.is_async,
@@ -1286,7 +1286,7 @@ impl Checker {
             // duplicate within one provider — two `@tier(x)` declarations whose runners share a
             // package root — is a real collision (E0051): provider selection could not tell them
             // apart.
-            let root = decl_runner_root(&f.name);
+            let root = decl_runner_root(f.name.as_str());
             if let Some(first) = seen.get(&(decl.name.clone(), root.clone())) {
                 let first = *first;
                 self.error(
@@ -1305,7 +1305,7 @@ impl Checker {
                 seen.insert((decl.name.clone(), root), decl.name_span);
             }
             if let Some((config, config_span)) = &decl.config
-                && !self.symbols.attributes.contains(config)
+                && !self.symbols.attributes.contains(config.as_str())
             {
                 self.error(
                     DiagnosticCode::InvalidTierDeclaration,
@@ -1615,7 +1615,7 @@ impl Checker {
                 continue;
             }
             // The enum must be `@semantic` (the built-in `Semantic` always is).
-            if !self.symbols.semantic_enums.contains(&tag.enum_name) {
+            if !self.symbols.semantic_enums.contains(tag.enum_name.as_str()) {
                 self.error(
                     DiagnosticCode::InvalidRole,
                     tag.span,
@@ -1629,7 +1629,7 @@ impl Checker {
             match self
                 .symbols
                 .enums
-                .get(&tag.enum_name)
+                .get(tag.enum_name.as_str())
                 .and_then(|vs| vs.iter().find(|v| v.name == tag.variant))
             {
                 None => {
