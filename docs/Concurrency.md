@@ -92,6 +92,32 @@ What stays E0040: `.await` inside a **closure** (function coloring — a closure
 | `if` / `while` condition, `for` iterable (heads) | ❌ E0040 |
 | Inside a closure | ❌ E0040 |
 
+### `async` methods and traits
+
+A method may be `async`, including a trait method — required or defaulted. The rule is the one above with nothing added: calling it produces a `Future<T>`, and that is true of *every* way the receiver is reached — a concrete type, a `<F: Fetcher>` bound, a `dyn Fetcher` trait object, or a `dyn` narrowed with `x is dyn Fetcher`.
+
+```noeta
+use std.task.{sleep}
+
+trait Fetcher {
+    async fn fetch(url: string): string
+}
+
+struct Http {
+    impl Fetcher {
+        async fn fetch(url: string): string {
+            sleep(1).await
+            return "body:" ~ url
+        }
+    }
+}
+
+async fn via_dyn(f: dyn Fetcher): string { return f.fetch("one").await }
+echo via_dyn(Http {}).await   // body:one
+```
+
+What makes that uniform typing honest is that an implementation must match its trait's `async`-ness: a plain `fn` satisfying an `async` trait method — or an `async fn` satisfying a synchronous one — is E0015. Forgetting the `.await` is then an ordinary E0007 (`expected string, found Future<string>`) wherever the call is reached from.
+
 ## Structured concurrency
 
 A `concurrent { … }` scope runs tasks concurrently and joins them at the closing brace. Inside it:

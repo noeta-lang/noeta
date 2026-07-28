@@ -1,0 +1,20 @@
+// The negative half of the trait-object typing: a call to an `async` trait method through `dyn` is
+// a `Future<string>`, so returning it unawaited from a `fn …: string` is E0007 — the diagnostic the
+// unsound version of this program never produced (it checked clean and printed `<future>`).
+// expect: error E0007 at 17:12
+// expect: exit 1
+trait Fetcher {
+    async fn fetch(url: string): string
+}
+
+struct Http {
+    impl Fetcher {
+        async fn fetch(url: string): string { return "body" }
+    }
+}
+
+fn via_dyn(f: dyn Fetcher): string {
+    return f.fetch("y")
+}
+
+echo via_dyn(Http {})

@@ -260,12 +260,17 @@ impl Checker {
             .map(|p| param_type(p, &self.imports.extern_types))
             .collect();
         let required = required_params(&m.sig.params);
-        let ret = m
-            .sig
-            .ret
-            .as_ref()
-            .map(|t| from_ref_q(t, &self.imports.extern_types))
-            .unwrap_or(Type::Unknown);
+        // `async` is part of the return type on every path that reads a signature (`async fn m(): T`
+        // is called for a `Future<T>`), so this one wraps too — a native trait's synthesized decl is
+        // never `async` today, but the rule belongs with the read, not with today's registry.
+        let ret = async_return(
+            m.sig
+                .ret
+                .as_ref()
+                .map(|t| from_ref_q(t, &self.imports.extern_types))
+                .unwrap_or(Type::Unknown),
+            m.sig.is_async,
+        );
         self.sites
             .trait_call_sites
             .insert(call_span, (qualified, name.to_string()));
@@ -322,6 +327,53 @@ impl Checker {
         None
     }
 
+    /// Resolve a method call on a **trait object** (`dyn Trait`, UT4) against the trait's declared
+    /// contract — the `dyn` twin of [`Self::type_param_trait_method`], and deliberately its mirror
+    /// image so the two receivers can never disagree about the same method. Returns `(parameter
+    /// types, required count, return type)`; `None` when `tr` names no known trait or the trait
+    /// declares no `name`.
+    ///
+    /// Two things the raw signature read this replaced got wrong, both of which the bound path had
+    /// always got right:
+    ///
+    /// * **`async` is part of the return type.** A call to an `async fn m(): T` produces
+    ///   `Future<T>` ([`async_return`]) — the runtime returns a future through `dyn` dispatch
+    ///   exactly as it does through a bound, so typing the call `T` was a soundness hole: the
+    ///   program declared `string` and held a `<future>`.
+    /// * **A generic trait's parameters must be substituted.** `dyn Trait` carries no type
+    ///   arguments (the surface has no `dyn Trait<...>` form), so — exactly as for a bare bound on a
+    ///   generic trait — its parameters instantiate permissively to `dyn`. Leaving them raw leaked
+    ///   the trait's own parameter name into the call's type (`s.get(k)` typed as `V`), which then
+    ///   mismatched every real type it met.
+    pub(crate) fn dyn_trait_method(
+        &self,
+        tr: &str,
+        name: &str,
+    ) -> Option<(Vec<Type>, usize, Type)> {
+        let decl = self.symbols.user_traits.get(tr)?;
+        let m = decl.methods.iter().find(|m| m.sig.name == name)?;
+        let subst: HashMap<String, Type> = decl
+            .type_params
+            .iter()
+            .map(|tp| (tp.name.clone(), Type::Dyn))
+            .collect();
+        let params: Vec<Type> = m
+            .sig
+            .params
+            .iter()
+            .map(|p| apply_subst(&param_type(p, &self.imports.extern_types), &subst))
+            .collect();
+        let ret = async_return(
+            field_type(&m.sig.ret, &self.imports.extern_types),
+            m.sig.is_async,
+        );
+        Some((
+            params,
+            required_params(&m.sig.params),
+            apply_subst(&ret, &subst),
+        ))
+    }
+
     pub(crate) fn method_call_return(&self, recv: &Type, name: &str) -> Type {
         // A native (fielded/extern) method whose return is a trait associated-type projection
         // `Self::Name` / `List<Self::Name>` (slice 1b): resolve it against `trait_assoc` at this
@@ -342,10 +394,9 @@ impl Checker {
         // A method call on a trait object (L1 user traits, UT4) resolves against the trait's declared
         // signatures — dispatched dynamically at runtime, but statically typed by the contract.
         if let Type::DynTrait(tr) = recv
-            && let Some(decl) = self.symbols.user_traits.get(tr)
-            && let Some(m) = decl.methods.iter().find(|m| m.sig.name == name)
+            && let Some((_, _, ret)) = self.dyn_trait_method(tr, name)
         {
-            return field_type(&m.sig.ret, &self.imports.extern_types);
+            return ret;
         }
         if recv.defers_to_runtime() {
             return recv.clone();

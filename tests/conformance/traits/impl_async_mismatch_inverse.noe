@@ -1,0 +1,14 @@
+// The other direction of the same contract: a synchronous trait method cannot be implemented by an
+// `async fn`. The trait declares `string`, so every receiver form types the call `string` — while
+// the implementation hands back a `Future<string>`. E0015.
+// expect: error E0015 at 10:18
+// expect: exit 1
+trait Greeter { fn greet(who: string): string }
+
+struct En {
+    impl Greeter {
+        async fn greet(who: string): string { return "hi " ~ who }
+    }
+}
+
+echo En {}.greet("Ada")

@@ -1563,8 +1563,8 @@ impl Checker {
     }
 
     /// Arity- and type-check a method call's arguments against the resolved parameter signature
-    /// (a built-in method or a user method); a deferred receiver or an unknown method is not
-    /// checked.
+    /// (a built-in method, a user method, or a trait object's declared contract); a deferred
+    /// receiver or an unknown method is not checked.
     pub(crate) fn check_method_args(
         &mut self,
         recv: &Type,
@@ -1581,6 +1581,14 @@ impl Checker {
         {
             let params = sig.params.clone();
             let required = sig.required;
+            self.check_args(&params, required, args, arg_exprs, span, name);
+        } else if let Type::DynTrait(tr) = recv
+            && let Some((params, required, _)) = self.dyn_trait_method(tr, name)
+        {
+            // A `dyn Trait` call is typed by the trait's contract on the way out (`method_call_return`)
+            // — so its arguments are checked against the same contract on the way in, exactly as the
+            // bound receiver's are. Without this a trait object was the one receiver whose arguments
+            // nothing checked: `g.greet(42)` against `fn greet(who: string)` passed `noeta check`.
             self.check_args(&params, required, args, arg_exprs, span, name);
         }
     }

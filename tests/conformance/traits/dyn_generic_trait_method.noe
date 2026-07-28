@@ -1,0 +1,26 @@
+// `dyn Trait` on a GENERIC trait: the surface has no `dyn Trait<...>` form, so — exactly as for a
+// bare `<S: Store>` bound — the trait's parameters instantiate permissively to `dyn` and those
+// positions defer. The `dyn` path used to leave them raw, leaking the trait's own parameter name
+// into the call's type (`s.get(k)` was `V`), so the trait object and the bare bound disagreed about
+// the same method. Naming the instantiation on the bound (`<S: Store<int>>`) still types it `int`.
+// expect: stdout "7"
+// expect: stdout "7"
+// expect: stdout "7"
+// expect: exit 0
+trait Store<V> {
+    fn get(k: string): V
+}
+
+struct Mem {
+    impl Store<int> {
+        fn get(k: string): int { return 7 }
+    }
+}
+
+fn via_bound<S: Store>(s: S): dyn { return s.get("k") }
+fn via_dyn(s: dyn Store): dyn { return s.get("k") }
+fn typed<S: Store<int>>(s: S): int { return s.get("k") }
+
+echo via_bound(Mem {})
+echo via_dyn(Mem {})
+echo typed(Mem {})

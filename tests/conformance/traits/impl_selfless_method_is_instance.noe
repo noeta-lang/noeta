@@ -1,0 +1,29 @@
+// A method an `impl <Trait>` block PROVIDES is part of the trait's instance interface whatever its
+// body mentions — the standalone spelling already said so, but the in-body spelling classified from
+// the body, so a trait method that simply does not need `self` was filed as an associated function
+// and `e.greet(...)` on it was E0047. Two spellings of one declaration disagreed about what it
+// declares; both dispatch on the instance at runtime. (An *omitted* default keeps the UT5 rule: a
+// self-less default is an associated fn — `En.shout()` below.)
+// expect: stdout "hi Ada"
+// expect: stdout "hi Bob"
+// expect: stdout "HELLO"
+// expect: exit 0
+trait Greeter {
+    fn greet(who: string): string
+    fn shout(): string { return "HELLO" }
+}
+
+struct InBody {
+    impl Greeter {
+        fn greet(who: string): string { return "hi " ~ who }
+    }
+}
+
+struct En { id: int }
+impl Greeter for En {
+    fn greet(who: string): string { return "hi " ~ who }
+}
+
+echo InBody {}.greet("Ada")
+echo En { id: 1 }.greet("Bob")
+echo En.shout()
