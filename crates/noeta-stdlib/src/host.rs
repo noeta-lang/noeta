@@ -1506,6 +1506,47 @@ mod tests {
         host.net_stream_close(9999).unwrap();
     }
 
+    /// http-streaming arc — the inbound SSE seam: starting a stream marks the connection, every
+    /// write lands in the transcript verbatim, and closing releases it.
+    ///
+    /// The transcript is asserted against the wire bytes the ENCODER produces (rather than a
+    /// hand-written string) so this stays a test of the seam; the encoding itself is pinned
+    /// separately, against the decoder, in `noeta_ext_abi::stream`'s round-trip test.
+    #[test]
+    fn inbound_event_streams_record_what_the_handler_wrote() {
+        use noeta_ext_abi::stream::{Frame, sse_comment_wire};
+
+        let mut host = SandboxHost::new();
+        assert!(
+            host.sse_transcript().is_empty(),
+            "nothing is recorded before a listener exists"
+        );
+        host.net_listen("127.0.0.1:0").unwrap();
+        host.net_sse_start_now(3).unwrap();
+
+        let named = Frame::named("start", "go");
+        host.net_sse_send_now(3, &named.to_sse_wire()).unwrap();
+        host.net_sse_send_now(3, &sse_comment_wire("keepalive"))
+            .unwrap();
+
+        assert_eq!(
+            host.sse_transcript(),
+            [
+                (3, "event: start\ndata: go\n\n".to_string()),
+                (3, ": keepalive\n".to_string()),
+            ]
+        );
+        // Closing is idempotent, and closing something never started is fine.
+        host.net_sse_close_now(3).unwrap();
+        host.net_sse_close_now(3).unwrap();
+        host.net_sse_close_now(404).unwrap();
+        assert_eq!(
+            host.sse_transcript().len(),
+            2,
+            "closing writes nothing to the transcript"
+        );
+    }
+
     /// The scripted stream body is a pure function of the request, so two hosts decode byte-identical
     /// frames — the property the differential rests on.
     #[test]

@@ -423,10 +423,9 @@ impl FrameDecoder {
             }
             // `retry:` is milliseconds, and only if the value is all ASCII digits; anything else
             // is ignored rather than defaulted, so a malformed hint cannot become a real one.
-            "retry" => {
-                if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
-                    self.retry = value.parse::<i64>().ok();
-                }
+            // (`parse` alone would accept `+5` and `-5`, which the spec's digit rule excludes.)
+            "retry" if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) => {
+                self.retry = value.parse::<i64>().ok();
             }
             // Any other field name is ignored, per the spec's forgiving-reader rule.
             _ => {}
@@ -660,13 +659,24 @@ pub fn frame_out(frame: Frame) -> crate::NativeOut {
 /// Read a [`Frame`] back out of the argument view — the inverse of [`frame_out`], for
 /// `SseSink.send(frame)`.
 ///
+/// **Both projections are accepted**, and that is not defensive padding. A value crosses the seam
+/// through one of two views: the *shallow* one, which carries a registered native struct as
+/// [`crate::NativeValue::Instance`], and the *deep* (JSON-shaped) one, which flattens any object to
+/// [`crate::NativeValue::Map`] of its fields in declared order. Which one a given call site uses is
+/// a property of the caller (`ctx.view` and a `deep_marshal` module both take the deep view), not of
+/// this type — so reading only one of them makes the seam silently sensitive to a decision made
+/// elsewhere. Both backends produce the identical shape either way, so the differential is
+/// unaffected.
+///
 /// A missing or mistyped field degrades to the type's default rather than failing: the checker has
 /// already proven the argument is a `Frame`, so a surprise here is an ABI-shape bug and not user
-/// input, and a sink that silently sends `data: ` is far easier to diagnose than one that aborts a
+/// input, and a sink that sends an empty `data:` is far easier to diagnose than one that aborts a
 /// live stream.
 pub fn frame_from_value(value: &crate::NativeValue) -> Option<Frame> {
-    let crate::NativeValue::Instance { fields, .. } = value else {
-        return None;
+    let fields = match value {
+        crate::NativeValue::Instance { fields, .. } => fields,
+        crate::NativeValue::Map(fields) => fields,
+        _ => return None,
     };
     let text = |name: &str| -> String {
         fields
@@ -692,10 +702,9 @@ pub fn frame_from_value(value: &crate::NativeValue) -> Option<Frame> {
 
 /// Read an `?int` field out of the argument view.
 ///
-/// Accepts both shapes an optional can arrive in, because which one a backend produces is its
-/// own marshalling detail and not something this seam should depend on: the bare payload (a
-/// flattened `Some`) and a real `Option` variant. Anything else — including the `None` variant and
-/// a unit — is absent.
+/// Accepts both shapes an optional arrives in — the bare payload (the deep view marshals an
+/// `Option` *through* its payload, so `some(1500)` is just `1500` and `none` is a unit) and a real
+/// `Option` variant (the shallow view). Anything else, unit included, is absent.
 fn optional_int(value: &crate::NativeValue) -> Option<i64> {
     match value {
         crate::NativeValue::Scalar(crate::Scalar::Int(ms)) => Some(*ms),

@@ -225,29 +225,49 @@ mod tests {
     use noeta_ext_abi::registry::Scalar;
     use noeta_ext_abi::stream::Frame;
 
+    fn frame_fields(retry: NativeValue) -> Vec<(String, NativeValue)> {
+        vec![
+            ("event".to_string(), NativeValue::Str("token".to_string())),
+            ("data".to_string(), NativeValue::Str("hi".to_string())),
+            ("id".to_string(), NativeValue::Str("3".to_string())),
+            ("retry".to_string(), retry),
+        ]
+    }
+
+    /// The shallow projection: a registered native struct as a real `Instance`.
     fn instance(retry: NativeValue) -> NativeValue {
         NativeValue::Instance {
             class: FRAME_TYPE_NAME.to_string(),
-            fields: vec![
-                ("event".to_string(), NativeValue::Str("token".to_string())),
-                ("data".to_string(), NativeValue::Str("hi".to_string())),
-                ("id".to_string(), NativeValue::Str("3".to_string())),
-                ("retry".to_string(), retry),
-            ],
+            fields: frame_fields(retry),
         }
     }
 
+    /// The deep (JSON-shaped) projection — what `ctx.view` actually hands `SseSink.send`: an object
+    /// flattened to its fields in declared order, with an `Option` marshalled THROUGH its payload.
+    fn deep(retry: NativeValue) -> NativeValue {
+        NativeValue::Map(frame_fields(retry))
+    }
+
     #[test]
-    fn a_frame_reads_back_out_of_the_argument_view() {
-        let frame = frame_from_value(&instance(NativeValue::Unit)).expect("a Frame");
+    fn a_frame_reads_back_out_of_either_argument_projection() {
+        let expected = Frame {
+            event: "token".to_string(),
+            data: "hi".to_string(),
+            id: "3".to_string(),
+            retry: None,
+        };
+        // The DEEP projection is what `ctx.view` — and therefore `SseSink.send` — actually
+        // produces: an object flattened to its fields. Reading only the shallow `Instance` shape
+        // is a silent no-op at every real call site, which is how this was first written.
         assert_eq!(
-            frame,
-            Frame {
-                event: "token".to_string(),
-                data: "hi".to_string(),
-                id: "3".to_string(),
-                retry: None,
-            }
+            frame_from_value(&deep(NativeValue::Unit)).expect("a Frame"),
+            expected,
+            "deep projection"
+        );
+        assert_eq!(
+            frame_from_value(&instance(NativeValue::Unit)).expect("a Frame"),
+            expected,
+            "shallow projection"
         );
     }
 

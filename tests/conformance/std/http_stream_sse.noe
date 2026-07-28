@@ -1,0 +1,49 @@
+// `client.stream(req, Framing.Sse)` (http-streaming arc) — read a response body INCREMENTALLY,
+// cut into server-sent-event frames, instead of buffering it whole.
+//
+// The sandbox answers `/stream/sse` with a scripted body exercising the corners a real provider
+// leans on, and the frames below pin every one of them:
+//   - a named event (`event: token`),
+//   - a multi-line `data:` field, which joins with a newline (NOT two frames),
+//   - a `: keepalive` comment, which dispatches nothing at all,
+//   - `id:` — which PERSISTS to later frames, per the spec's last-event-id rule,
+//   - `retry:` in milliseconds, which does NOT persist,
+//   - a terminal `data: [DONE]`, the OpenAI-compatible end marker.
+//
+// `recv()` yields `none` once the body ends, which is what lets the read loop terminate — under
+// the sandbox and, for a finite body, on the real host too.
+// expect: stdout "opened"
+// expect: stdout "[token] He (id= retry=-1)"
+// The multi-line frame's payload contains a real newline, so `echo` emits it as two lines — which
+// is exactly the evidence that the two `data:` fields joined into ONE frame rather than becoming
+// two frames.
+// expect: stdout "[] multi"
+// expect: stdout "line (id= retry=-1)"
+// expect: stdout "[] tagged (id=7 retry=1500)"
+// expect: stdout "[] [DONE] (id=7 retry=-1)"
+// expect: stdout "ended after 4 frames"
+// expect: exit 0
+use std.http.client
+use std.http.{Framing, Frame}
+
+async fn run(): void {
+    api = client.new("https://svc.test")
+    stream = client.stream(api.prepare("get", "/stream/sse"), Framing.Sse)?
+    echo "opened"
+
+    mut count = 0
+    mut going = true
+    while going {
+        next = stream.recv().await
+        if next == none {
+            going = false
+        } else {
+            f: Frame = next ?? Frame { event: "", data: "", id: "", retry: none }
+            count = count + 1
+            // `retry` is `?int`; -1 stands in for absent so one line covers both.
+            echo "[${f.event}] ${f.data} (id=${f.id} retry=${f.retry ?? -1})"
+        }
+    }
+    echo "ended after ${count} frames"
+}
+run().await

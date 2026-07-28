@@ -2231,18 +2231,29 @@ fn http_dispatch(
     }
 }
 
-/// Read a `Framing` argument — a real native enum value, so the variant name IS the choice and
-/// there is no string to mistype (the checker has already proven exhaustiveness).
+/// Read a `Framing` argument.
+///
+/// `Framing` is a real native enum, so a caller writes `Framing.Sse` and the **checker** rejects a
+/// typo or a missing `match` arm — that guarantee is static and holds regardless of how the value
+/// is projected across the seam.
+///
+/// At runtime it arrives in one of two shapes, and both are read. The *shallow* projection carries
+/// a real [`NativeValue::Variant`]; the *deep* (JSON-shaped) projection — which `http.client` takes,
+/// because its optional `headers` argument is a `Map` — flattens any non-`Option` enum to its
+/// variant **name**. Accepting only the variant form silently fails for every `deep_marshal`
+/// module, which is exactly how this was first written and exactly what it cost. Both backends
+/// flatten identically, so the differential is unaffected either way.
 fn want_framing(
     func: &str,
     args: &[NativeValue],
     index: usize,
 ) -> Result<noeta_ext_abi::stream::Framing, StdError> {
-    let Some(NativeValue::Variant { variant, .. }) = args.get(index) else {
-        return Err(type_error(func, noeta_ext_abi::stream::FRAMING_TYPE_NAME));
+    let name = match args.get(index) {
+        Some(NativeValue::Variant { variant, .. }) => variant.as_str(),
+        Some(NativeValue::Str(name)) => name.as_str(),
+        _ => return Err(type_error(func, noeta_ext_abi::stream::FRAMING_TYPE_NAME)),
     };
-    variant
-        .parse::<noeta_ext_abi::stream::Framing>()
+    name.parse::<noeta_ext_abi::stream::Framing>()
         .map_err(|()| type_error(func, noeta_ext_abi::stream::FRAMING_TYPE_NAME))
 }
 

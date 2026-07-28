@@ -1,0 +1,41 @@
+// An ABANDONED `FrameStream` (http-streaming arc): opened, partially read, and then simply
+// dropped — no `close()`, no drain. The program's own output is trivial on purpose; the real
+// assertion is delivered by the **leak oracle**, which runs this same file and proves residency
+// returns to 0 on both backends (`--check-leaks`, and the `KNOWN_LEAKS`-must-be-empty gate).
+//
+// What is being proven, and what is not:
+//
+//   - The language value and its extern box are reclaimed when the last reference dies. That is the
+//     part the leak oracle sees, and the part that could regress silently.
+//
+//   - The host-side stream entry is released at host teardown. There is deliberately **no**
+//     host-coupled finalizer in this runtime (see `docs/Native-Extensions.md`): values die in
+//     release paths that carry no host, so an extern box cannot reach the `Network` capability from
+//     its `Drop`. That is exactly why `close()` exists on the surface, and why a long-running
+//     server should call it rather than leaning on teardown — a stream abandoned inside a serve
+//     loop holds its connection until the process ends.
+//
+// Three streams are abandoned in three different states — never read, partially read, and fully
+// drained — because each releases a different amount of host-side state.
+// expect: stdout "opened three, read one frame from one of them"
+// expect: exit 0
+use std.http.client
+use std.http.Framing
+
+async fn run(): void {
+    api = client.new("https://svc.test")
+
+    // Never read at all.
+    _untouched = client.stream(api.prepare("get", "/stream/sse"), Framing.Sse)?
+
+    // Partially read, then abandoned mid-body — the case that actually holds a live reader.
+    partial = client.stream(api.prepare("get", "/stream/sse"), Framing.Sse)?
+    _first = partial.recv().await
+
+    // Fully drained but never closed: nothing left to read, entry still registered.
+    drained = client.stream(api.prepare("get", "/stream/empty"), Framing.Sse)?
+    _end = drained.recv().await
+
+    echo "opened three, read one frame from one of them"
+}
+run().await
