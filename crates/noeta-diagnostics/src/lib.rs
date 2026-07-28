@@ -634,9 +634,9 @@ impl Diagnostic {
             format!("unhandled error: {message}"),
         )
         .with_help(
-            "this `?` has no `Result` to early-return into, so the failure ends the program — \
-             handle it here with `match` / `??`, or move the work into a function that returns \
-             `Result<T, E>` and decide at its call site",
+            "this `?` has no `Result` to early-return into, so the failure stops here instead of \
+             being discarded — handle it with `match` / `??`, or move the work into a function that \
+             returns `Result<T, E>` and decide at its call site",
         )
     }
 }
