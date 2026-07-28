@@ -2,7 +2,7 @@
 // position is the ordinary catch-all-that-names-its-value form and stays clean, exactly as a
 // trailing `_` does. Nothing follows it, so nothing is dead.
 //
-// The variant-shadowing rule (E0067) is likewise narrow — it fires only when the name is a
+// Bare-identifier resolution is likewise narrow — a name becomes a case test only when it is a
 // payload-free variant of the SCRUTINEE's own enum. `rest` is not a `Signal` variant, and `label`'s
 // scrutinee is an `int` with no variants at all, so both bindings are just bindings.
 // expect: stdout "zero"

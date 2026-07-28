@@ -1,8 +1,8 @@
 // A payload-carrying variant pattern is CALL-SHAPED (`List(inner)`, `some(x)`, `Ok(v)`), so it can
-// never be confused with a binding — it needs no qualification and is never reported by E0067, and
-// because it emits a real test it never makes a later arm unreachable (E0066). Only the
-// payload-free spelling collides with the binding form; this case pins that the unqualified,
-// payload-carrying form stays legal and keeps every arm below it live.
+// never be confused with a binding, needs no qualification, and — because it emits a real test —
+// never makes a later arm unreachable (E0066). Only the payload-free spelling ever collided with
+// the binding form, and that is resolved against the scrutinee's own enum now
+// (`match_bare_variant_pattern.noe`); this case pins that the call-shaped form is unaffected.
 // expect: stdout "list of string"
 // expect: stdout "int"
 // expect: stdout "some 3"

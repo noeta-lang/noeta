@@ -118,9 +118,9 @@ fn label(s: Status): string {
 |---|---|
 | Literal | `0`, `"a"`, `true` |
 | Wildcard | `_` |
-| Binding | `n` (binds the whole value — matches everything, so it goes last) |
+| Binding | `n` — a name that is *not* a case of the scrutinee's enum; binds the whole value, matches everything, so it goes last |
 | Tuple | `(0, 0)`, `(x, y)`, `(1, label, _)`, nested `(n, (s, flag))` |
-| Enum | `Status.Paid` (payload-free: **qualify it**), payload-binding `OrderError.NegativePrice(i)` |
+| Enum | `Paid` or `Status.Paid` (payload-free), payload-binding `OrderError.NegativePrice(i)` |
 | Option | `some(n)`, `none` |
 | Result | `Ok(v)`, `Err(e)` |
 | Type | `is int`, `is string`, `is Point` (on unions / `dyn`) |
@@ -148,27 +148,50 @@ echo match parse_age("42") {
 }                              // age 42
 ```
 
-### A payload-free variant must be written qualified
+### A bare identifier is a variant when the scrutinee's enum has one
 
-A bare identifier pattern always **binds**: it names the whole scrutinee and matches every value. A payload-carrying variant is call-shaped (`Type.List(inner)`, `some(x)`, `Ok(v)`) and so can never be confused with one — but a **payload-free** variant spelled bare looks exactly like a binding, and is read as one. Write it qualified:
+A bare identifier in a pattern is read against the **scrutinee's own type**. If that type is an enum with a **payload-free variant of that name**, the pattern *is* that variant: it binds nothing, it matches only that case, and it counts toward exhaustiveness. Otherwise it is a **binding** — it names the whole value and matches everything.
 
 ```noeta
 enum Kind { Text; Number }
 
 fn describe(k: Kind): string {
     return match k {
-        Kind.Text   => "text",        // qualified — matches only this case
-        Kind.Number => "number",
+        Text   => "text",             // the `Kind.Text` case — matches only it
+        Number => "number",           // …and naming every case closes the match, no `_` needed
     }
 }
 echo describe(Kind.Number)            // number
 ```
 
-Writing `Text => "text"` instead is **E0067**: that arm binds `Text` to the whole value, answers `"text"` for *every* case, and leaves every arm below it dead. The checker reports it on the arm and names the spelling you meant (`Kind.Text`) — including on a lone first arm, where nothing is unreachable yet but the bug is already there.
+The qualified spelling `Kind.Text` still works and means exactly the same thing; reach for it when the short name would be ambiguous *to a reader*. A payload-carrying variant is call-shaped (`Type.List(inner)`, `some(x)`, `Ok(v)`) and was never ambiguous either way.
+
+Resolution is **scrutinee-directed**, which is the whole of the rule:
+
+- a name that is a payload-free variant of some *other* enum is not this scrutinee's case — it stays a binding;
+- when the scrutinee's type is `dyn`, gradual, or otherwise not a known enum, there is nothing to resolve against and every bare name is a binding;
+- a nested pattern resolves against the **field's** type, not the outer scrutinee's — in `Ok(none)` the inner `none` is read against the `Ok` payload's type;
+- a guard changes nothing;
+- `for` loops, `let`-destructuring and other binder positions are not match arms and are unaffected.
+
+`none` follows the same rule against the built-in `Option`, so it is the none *case* rather than a catch-all — which is why `match o { none => …, some(v) => … }` now means what it reads as. (It used to bind, silently swallowing the `some` arm below it.)
+
+The cost of the rule: a catch-all can no longer be *named* after a case of the scrutinee's enum. Writing
+
+```noeta error
+fn describe(k: Kind): string {
+    return match k {
+        Number => "number",
+        Text => "any text at all",    // this is the `Kind.Text` case, not a catch-all named `Text`
+    }
+}
+```
+
+gives you two case arms, not a case and a catch-all — and if you meant to bind, rename it (`rest`, `other`, `k2`). Naming a catch-all after a variant was always a coin flip for the reader; now it simply is not one.
 
 ### Arm order — an arm after a catch-all is dead (E0066)
 
-An unguarded `_` or bare-identifier arm matches every value, so any arm written after it can never run. That is **E0066**, an error: the arm is dead code no author intends, and (unlike an always-false type test) nothing in the source shows it. Put the catch-all last.
+An unguarded `_`, or an unguarded bare identifier that is genuinely a binding, matches every value — so any arm written after it can never run. That is **E0066**, an error: the arm is dead code no author intends, and (unlike an always-false type test) nothing in the source shows it. Put the catch-all last.
 
 ```noeta error
 fn rank(n: int): string {
@@ -180,7 +203,7 @@ fn rank(n: int): string {
 echo rank(1)
 ```
 
-A **guarded** arm (`pattern if cond`) is not a catch-all — the checker cannot prove a guard ever true — so arms after it stay reachable. One prelude pattern is worth knowing about here: `none` is a bare binding like any other, so a `none` arm must come *after* the `some(…)` arm it pairs with, never before it.
+A **guarded** arm (`pattern if cond`) is not a catch-all — the checker cannot prove a guard ever true — so arms after it stay reachable. Neither is a bare identifier that [resolved to a variant](#a-bare-identifier-is-a-variant-when-the-scrutinees-enum-has-one): it emits a real test, so the arms below it stay live. Only a `_`, or a bare name that is genuinely a binding, closes a `match`.
 
 ### Guards
 

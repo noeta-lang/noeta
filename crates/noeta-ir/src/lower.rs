@@ -71,6 +71,60 @@ enum BodyKind<'a> {
     Block(&'a [AstStmt]),
 }
 
+/// The checker's bare-payload-free-variant resolutions: a `match`-arm binding pattern's span → the
+/// `(qualifier, variant)` it names. See [`LoweringSites::variant_pattern_sites`].
+pub type VariantPatternSites = HashMap<Span, (Option<String>, String)>;
+
+/// Rewrite the bare-identifier patterns the checker resolved to payload-free variants into ordinary
+/// [`noeta_ast::Pattern::Variant`] tests, recursing so a nested one (`Ok(none)`, a tuple element, a
+/// variant payload) resolves against the type it was actually matched on. Everything else is
+/// returned verbatim: a binding the checker did not record stays a binding.
+pub(crate) fn resolve_variant_patterns(
+    pattern: &noeta_ast::Pattern,
+    sites: &VariantPatternSites,
+) -> noeta_ast::Pattern {
+    use noeta_ast::Pattern;
+    match pattern {
+        Pattern::Binding { span, .. } => match sites.get(span) {
+            Some((type_name, variant)) => Pattern::Variant {
+                type_name: type_name.clone(),
+                variant: variant.clone(),
+                bindings: Vec::new(),
+                span: *span,
+            },
+            None => pattern.clone(),
+        },
+        Pattern::Variant {
+            type_name,
+            variant,
+            bindings,
+            span,
+        } => Pattern::Variant {
+            type_name: type_name.clone(),
+            variant: variant.clone(),
+            bindings: bindings
+                .iter()
+                .map(|b| resolve_variant_patterns(b, sites))
+                .collect(),
+            span: *span,
+        },
+        Pattern::Tuple { elements, span } => Pattern::Tuple {
+            elements: elements
+                .iter()
+                .map(|e| resolve_variant_patterns(e, sites))
+                .collect(),
+            span: *span,
+        },
+        // Leaves — no sub-pattern can carry a resolution. Spelled out rather than wildcarded so a
+        // new pattern form has to decide here.
+        Pattern::Wildcard { .. }
+        | Pattern::Int { .. }
+        | Pattern::Str { .. }
+        | Pattern::Bool { .. }
+        | Pattern::IsType { .. } => pattern.clone(),
+    }
+}
+
 /// The checker's **lowering-site maps**, bundled so the lowering takes one reference rather than six
 /// span-keyed side channels. Every field is a pure function of the program, so the representation
 /// choices they drive stay invisible to `RunResult`; the REPL / IR-corpus path passes an all-empty
@@ -113,6 +167,12 @@ pub struct LoweringSites<'a> {
     /// The nominal type each target-typed `.{ … }` literal resolved to (see
     /// `noeta_check::Sites::inferred_object_types`) → the name baked into [`Rvalue::Object`].
     pub inferred_object_types: &'a HashMap<Span, String>,
+    /// Bare payload-free variant patterns (see `noeta_check::Sites::variant_pattern_sites`): each
+    /// `match`-arm [`noeta_ast::Pattern::Binding`] span the checker resolved to a variant of the
+    /// scrutinee's own enum → `(qualifier, variant)`. Rewritten here into a
+    /// [`noeta_ast::Pattern::Variant`] with no bindings, so both backends keep seeing an ordinary
+    /// qualified variant pattern and neither has to know the bare spelling exists.
+    pub variant_pattern_sites: &'a VariantPatternSites,
     /// Unbound method-handle sites (`Type.method` in value position) → the resolved
     /// `(ty, method, associated)`, emitted as an [`Rvalue::MethodHandle`] instead of a field load.
     pub handle_sites: &'a HashMap<Span, (String, String, bool)>,
@@ -177,6 +237,7 @@ impl LoweringSites<'static> {
         static HANDLES: OnceLock<HashMap<Span, (String, String, bool)>> = OnceLock::new();
         static PAIRS: OnceLock<HashMap<Span, (String, String)>> = OnceLock::new();
         static NAMES: OnceLock<HashMap<Span, String>> = OnceLock::new();
+        static VARIANT_PATTERNS: OnceLock<VariantPatternSites> = OnceLock::new();
         static TYPE_ARGS: OnceLock<Vec<noeta_ext_abi::TypeArgInfo>> = OnceLock::new();
         static HIDDEN: OnceLock<HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>> = OnceLock::new();
         static SLOTS: OnceLock<HashMap<Span, u32>> = OnceLock::new();
@@ -195,6 +256,7 @@ impl LoweringSites<'static> {
             width_sites: WIDTHS.get_or_init(HashMap::new),
             construction_sites: REPRS.get_or_init(HashMap::new),
             inferred_object_types: NAMES.get_or_init(HashMap::new),
+            variant_pattern_sites: VARIANT_PATTERNS.get_or_init(HashMap::new),
             handle_sites: HANDLES.get_or_init(HashMap::new),
             bound_handle_sites: SPANS.get_or_init(HashSet::new),
             field_call_sites: SPANS.get_or_init(HashSet::new),
@@ -236,6 +298,7 @@ macro_rules! lowering_sites {
             width_sites: &$s.width_sites,
             construction_sites: &$s.construction_sites,
             inferred_object_types: &$s.inferred_object_types,
+            variant_pattern_sites: &$s.variant_pattern_sites,
             handle_sites: &$s.handle_sites,
             bound_handle_sites: &$s.bound_handle_sites,
             field_call_sites: &$s.field_call_sites,
@@ -1439,6 +1502,7 @@ impl Lowerer<'_> {
             SuspendMode::Gen,
             &storable,
             params,
+            self.sites.variant_pattern_sites,
         );
         // The sealed step closure must keep writing the machine's PERSISTENT locals — the
         // desugar's hoisted prelude cells (`$state`, awaited-future cells, and any USER local
@@ -1499,6 +1563,7 @@ impl Lowerer<'_> {
             SuspendMode::Async,
             &storable,
             params,
+            self.sites.variant_pattern_sites,
         );
         // The sealed step closure must keep writing the machine's PERSISTENT locals — the
         // desugar's hoisted prelude cells (`$state`, awaited-future cells, and any USER local
@@ -2368,7 +2433,13 @@ impl Lowerer<'_> {
                         }
                     };
                     ir_arms.push(crate::Arm {
-                        pattern: arm.pattern.clone(),
+                        // A bare identifier the checker resolved to a payload-free variant becomes
+                        // the variant test it reads as — the ONE place that rewrite happens, so
+                        // both backends consume ordinary IR and neither knows the form exists.
+                        pattern: resolve_variant_patterns(
+                            &arm.pattern,
+                            self.sites.variant_pattern_sites,
+                        ),
                         guard,
                         body,
                         span: arm.span,

@@ -3537,13 +3537,13 @@ fn an_open_expectation_leaves_match_arms_synthesizing() {
     assert_eq!(codes(src), ["E0007"], "{:?}", codes(src));
 }
 
-// ----- E0066 / E0067: arm reachability and the variant a bare binding shadows -----
+// ----- Bare variant patterns + E0066 arm reachability -----
 //
-// A bare identifier pattern BINDS — it matches every value. A payload-carrying variant is
-// call-shaped and therefore unambiguous, but a payload-free one spelled bare looks exactly like a
-// binding, so `String => …` on a `Type` scrutinee answers the first arm for every case and kills
-// every arm below it in silence. E0067 names the qualified spelling; E0066 reports the arms it
-// swallowed. Both are errors: the dead arms are dead code no author intends.
+// A bare identifier pattern resolves to a **payload-free variant of the scrutinee's own enum** when
+// one of that name exists, and is a binding otherwise. So `String => …` on a `Type` scrutinee is the
+// `Type.String` case (refutable, binding nothing, counting toward exhaustiveness), while `rest => …`
+// on the same scrutinee — or `String` on an `int` — is the ordinary catch-all binding. E0066 still
+// reports the arms a genuine catch-all swallows.
 
 /// The rendered help lines, so a test can assert the suggestion actually names the fix.
 fn helps(text: &str) -> Vec<String> {
@@ -3561,32 +3561,70 @@ fn helps(text: &str) -> Vec<String> {
 const TYPE_ENUM: &str = "enum Type { String; Int; Bool; List(inner: string) }\n";
 
 #[test]
-fn a_bare_payload_free_variant_pattern_shadows_the_variant() {
+fn a_bare_payload_free_variant_pattern_resolves_to_the_variant() {
+    // The flip: the unambiguous-once-typed spelling is the short one. A lone `String` arm is now a
+    // case test, so the `match` is NOT exhaustive — E0011 names exactly the cases still missing,
+    // which is proof the arm covered `String` and nothing else.
     let src =
         format!("{TYPE_ENUM}fn f(t: Type): string {{ return match t {{ String => \"s\" }}; }}\n");
-    assert_eq!(codes(&src), ["E0067"]);
+    assert_eq!(codes(&src), ["E0011"], "{:?}", codes(&src));
     assert!(
-        helps(&src)[0].contains("Type.String"),
-        "the help must name the qualified spelling: {:?}",
+        !helps(&src).iter().any(|h| h.contains("Type.String")),
+        "nothing is left to qualify: {:?}",
         helps(&src)
     );
 }
 
 #[test]
-fn the_shadowed_variant_diagnostic_is_an_error_not_a_warning() {
-    let src =
-        format!("{TYPE_ENUM}fn f(t: Type): string {{ return match t {{ String => \"s\" }}; }}\n");
-    assert!(warn_codes(&src).is_empty(), "{:?}", warn_codes(&src));
+fn every_payload_free_variant_spelled_bare_is_exhaustive() {
+    // No `_` needed: each bare name covers its own case, so naming them all closes the match.
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ String => \"s\", Int => \"i\", Bool => \"b\", List(i) => i }};\n}}\n"
+    );
+    assert!(codes(&src).is_empty(), "{:?}", codes(&src));
 }
 
 #[test]
-fn every_arm_below_a_shadowed_variant_is_unreachable() {
-    // The whole-class case: one E0067 on the arm that swallowed everything, then one E0066 per
-    // arm it killed — each naming the one thing to fix.
+fn a_resolved_variant_pattern_binds_nothing() {
+    // It is the variant, not a name for the value — so the arm body cannot refer to it. (E0005 is
+    // the unknown-name code; the point is that *some* error fires rather than the whole value
+    // silently flowing through under the variant's name.)
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ String => \"${{String}}\", _ => \"o\" }};\n}}\n"
+    );
+    assert_eq!(codes(&src), ["E0005"], "{:?}", codes(&src));
+}
+
+#[test]
+fn arms_below_a_resolved_variant_stay_reachable() {
+    // What used to be E0067 + two E0066s is now simply a correct `match`.
     let src = format!(
         "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ String => \"s\", Int => \"i\", _ => \"o\" }};\n}}\n"
     );
-    assert_eq!(codes(&src), ["E0067", "E0066", "E0066"]);
+    assert!(codes(&src).is_empty(), "{:?}", codes(&src));
+}
+
+#[test]
+fn resolution_is_scrutinee_directed() {
+    // A payload-free variant of a DIFFERENT enum is not this scrutinee's case, so it stays a
+    // binding — and being irrefutable, it kills the arm after it (E0066).
+    let other = "enum Other { String; Int }\n";
+    let src = format!(
+        "{TYPE_ENUM}{other}fn f(o: Other): string {{\n  return match o {{ Bool => \"b\", _ => \"o\" }};\n}}\n"
+    );
+    assert_eq!(codes(&src), ["E0066"], "{:?}", codes(&src));
+    // …and a gradual scrutinee resolves nothing at all: `String` binds the whole `dyn` value.
+    let dynamic = format!(
+        "{TYPE_ENUM}fn f(d: dyn): string {{ return match d {{ String => \"s\", _ => \"o\" }}; }}\n"
+    );
+    assert_eq!(codes(&dynamic), ["E0066"], "{:?}", codes(&dynamic));
+}
+
+#[test]
+fn a_nested_bare_variant_resolves_against_the_field_type() {
+    // The inner pattern's scrutinee is the payload's type, not the outer one.
+    let src = "fn f(r: Result<?int, string>): string {\n  return match r {\n    Ok(none) => \"empty\",\n    Ok(some(v)) => \"${v}\",\n    Err(e) => e,\n  };\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
 
 #[test]
@@ -3657,20 +3695,29 @@ fn a_guarded_catch_all_leaves_the_arms_below_it_reachable() {
 }
 
 #[test]
-fn a_bare_none_arm_before_its_some_arm_is_reported() {
-    // `none` is a bare binding like any other, so it swallows the `some` arm it was meant to pair
-    // with — the same defect, in the one prelude pattern where it is easiest to write by accident.
-    let src = "fn f(o: ?int): string { return match o { none => \"n\", some(v) => \"${v}\" }; }\n";
-    assert_eq!(codes(src), ["E0066"]);
+fn a_bare_none_arm_resolves_on_an_option_scrutinee() {
+    // `none` is the correct bare spelling of the Option case, so it is a case test in EITHER order
+    // — the ordering bug the old always-binds rule forced on every author.
+    let none_first =
+        "fn f(o: ?int): string { return match o { none => \"n\", some(v) => \"${v}\" }; }\n";
+    assert!(codes(none_first).is_empty(), "{:?}", codes(none_first));
+    let some_first =
+        "fn f(o: ?int): string { return match o { some(v) => \"${v}\", none => \"n\" }; }\n";
+    assert!(codes(some_first).is_empty(), "{:?}", codes(some_first));
+    // A `none` arm alone covers only the none case — the some case is still missing.
+    let lone = "fn f(o: ?int): string { return match o { none => \"n\" }; }\n";
+    assert_eq!(codes(lone), ["E0011"], "{:?}", codes(lone));
+}
+
+#[test]
+fn a_bare_none_on_a_non_option_scrutinee_is_still_a_binding() {
+    // Resolution is scrutinee-directed, so on a `dyn` there is no Option case to resolve to and
+    // `none` is an ordinary irrefutable binding — it swallows the arm below it.
+    let src = "fn f(d: dyn): string { return match d { none => \"n\", some(v) => \"${v}\" }; }\n";
+    assert_eq!(codes(src), ["E0066"], "{:?}", codes(src));
     assert!(
-        helps(src)[0].contains("`some(…)` arm first"),
-        "the help must give the ordering fix: {:?}",
+        helps(src)[0].contains("plain binding"),
+        "the help must say why it did not resolve: {:?}",
         helps(src)
-    );
-    // The conventional order is clean, and `none` is never proposed as a "qualified" spelling —
-    // the bare form IS its correct spelling.
-    assert!(
-        codes("fn f(o: ?int): string { return match o { some(v) => \"${v}\", none => \"n\" }; }\n")
-            .is_empty()
     );
 }

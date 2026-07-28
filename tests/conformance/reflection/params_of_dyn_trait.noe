@@ -25,12 +25,12 @@ svc_kind = match ps[0].type {
 }
 echo "svc -> ${svc_kind}"
 
-// A bare `dyn` parameter stays `Type.Dyn` (no bound to recover).
-// `Type.Dyn` must be written qualified: a payload-free variant spelled bare is a *binding* that
-// matches every value (E0067), which would have made the `_` arm below unreachable.
+// A bare `dyn` parameter stays the reflection `Type`'s payload-free `Dyn` case (no bound to
+// recover). It is spelled BARE here: the scrutinee is a `Type`, so `Dyn` resolves to that case and
+// leaves the `_` arm below it live — the motivating shape for scrutinee-directed resolution.
 raw_kind = match ps[1].type {
     DynTrait(n) => "trait-${n}",
-    Type.Dyn => "plain-dyn",
+    Dyn => "plain-dyn",
     _ => "other",
 }
 echo "raw -> ${raw_kind}"
