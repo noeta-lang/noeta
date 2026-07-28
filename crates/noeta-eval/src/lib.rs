@@ -1304,6 +1304,12 @@ struct Interpreter {
     /// by the *same* `noeta_ast::reflect::build` the VM uses — so `attributes_of` materializes
     /// identical values in both backends. Populated at the start of `run`.
     reflection: noeta_ast::reflect::ReflectionInfo,
+    /// For a **native** type bound under a name that is not its own — `use std.http.Framing as F` —
+    /// the canonical short name a value of it carries. A pattern is written with the binding (`F.Sse`)
+    /// while the value it must match is stamped with the type's own name (`Framing`), so the two are
+    /// reconciled here rather than by making the comparison lenient. The VM keeps the same map for
+    /// the same reason (`Module::native_type_names`), so both backends answer identically.
+    native_type_names: std::collections::HashMap<String, String>,
     /// The concrete static type the checker resolved for each `type_of(value)` site (keyed by the
     /// `Expr::TypeOf` span), harvested via `noeta_check::resolve_type_of_sites` from the *same*
     /// program the VM harvests — so both backends bake identical full-fidelity `Type` constants
@@ -1441,6 +1447,7 @@ impl Interpreter {
             ext_arena_free: Vec::new(),
             ext_state: Vec::new(),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
+            native_type_names: std::collections::HashMap::new(),
             type_of_sites: std::collections::HashMap::new(),
             deserialize_recipes: std::collections::HashMap::new(),
             packed_type_layouts: std::collections::HashMap::new(),
@@ -1911,17 +1918,30 @@ impl Interpreter {
                     }))
                 }
             };
-            // A **value**-namespace import — a module handle or a member function — binds under the
-            // import's LOCAL name (its alias when one is written), matching the checker's
-            // `imports.modules` / `imports.imported_fns` keys and the canonical name the linker
-            // α-renamed a merged unit's references to. Binding the imported short name instead lost
-            // every alias at run time (`use std.http.url as u` left `u` unbound) and made two
-            // packages' same-leaf modules fight over one global. A type-namespace import keeps the
-            // imported short name: that name is also the runtime shape's, which native values stamp.
-            let local = match &value {
-                Value::NativeModule(_) | Value::ModuleFn(..) => imported.local().to_string(),
-                _ => imported.name.clone(),
-            };
+            // Every import binds under its LOCAL name — its alias when one is written — matching
+            // the checker's `imports.modules` / `imports.imported_fns` keys and the canonical name
+            // the linker α-renamed a merged unit's references to. Binding the imported short name
+            // instead lost every alias at run time (`use std.http.url as u` left `u` unbound) and
+            // made two packages' same-leaf modules fight over one global.
+            //
+            // A **type** import binds the same way, and the runtime shape name is unaffected: the
+            // value built above carries the registry's own `name`, so `use std.http.Framing as F`
+            // resolves `F.Sse` while the variant it builds is still stamped `Framing` — which is
+            // what a native-returned value carries and what a pattern compares against. Keying the
+            // scope by the imported name instead left an aliased native type unresolvable at run
+            // time in any file the linker merges (it checked clean, then raised `cannot find F`).
+            let local = imported.local().to_string();
+            match &value {
+                Value::EnumType(def) if def.name != local => {
+                    self.native_type_names
+                        .insert(local.clone(), def.name.clone());
+                }
+                Value::Type(def) if def.name != local => {
+                    self.native_type_names
+                        .insert(local.clone(), def.name.clone());
+                }
+                _ => {}
+            }
             self.scope.declare(local, value, false);
             // A **group** import (`use std.http`, or a concrete native module) additionally binds
             // every native type reachable under it, keyed by its **qualified identity** — the name
@@ -6991,6 +7011,7 @@ fn match_pattern(
     pattern: &Pattern,
     value: &Value,
     reflection: &noeta_ast::reflect::ReflectionInfo,
+    native_names: &std::collections::HashMap<String, String>,
 ) -> Option<Vec<(String, Value)>> {
     match pattern {
         Pattern::Wildcard { .. } => Some(Vec::new()),
@@ -7022,17 +7043,21 @@ fn match_pattern(
             let Value::Enum(enum_value) = value else {
                 return None;
             };
-            if let Some(type_name) = type_name
-                && &enum_value.enum_name != type_name
-            {
-                return None;
+            // A native type bound under an alias is written `F.Sse` here while the value carries
+            // its own name (`Framing.Sse`) — resolve the binding to that name rather than making
+            // the comparison lenient, which would let two enums sharing a variant name match.
+            if let Some(type_name) = type_name {
+                let expected = native_names.get(type_name).unwrap_or(type_name);
+                if &enum_value.enum_name != expected {
+                    return None;
+                }
             }
             if &enum_value.variant != variant || bindings.len() != enum_value.data.len() {
                 return None;
             }
             let mut all = Vec::new();
             for (sub, data) in bindings.iter().zip(&enum_value.data) {
-                all.extend(match_pattern(sub, data, reflection)?);
+                all.extend(match_pattern(sub, data, reflection, native_names)?);
             }
             Some(all)
         }
@@ -7050,7 +7075,7 @@ fn match_pattern(
             }
             let mut all = Vec::new();
             for (sub, item) in elements.iter().zip(items.iter()) {
-                all.extend(match_pattern(sub, item, reflection)?);
+                all.extend(match_pattern(sub, item, reflection, native_names)?);
             }
             Some(all)
         }

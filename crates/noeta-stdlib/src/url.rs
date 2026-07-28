@@ -11,36 +11,36 @@
 //! decodes in the host, so a *served* request never needs this — it is what a program reaches for
 //! when it parses a URL itself (a test harness driving a router with `"/pets?status=for%20sale"`,
 //! a client assembling a query, a redirect target being taken apart).
+//!
+//! **One codec, not two.** The implementation is [`noeta_ext_abi::net`]'s, which is also what the
+//! request path already decodes through (`Request.query`, `server.parse_form`) — so what a program
+//! decodes by hand and what the host decoded for it can never disagree. This module is the *name*:
+//! a URL codec is not a server's concern (a client needs it just as much), so it addresses under
+//! `http.url` rather than hanging off `http.server`.
 
 /// Percent-encode one component, leaving the RFC 3986 unreserved set alone.
 ///
 /// The unreserved set is `A-Z a-z 0-9 - _ . ~`; everything else becomes `%XX` per UTF-8 byte,
-/// uppercase-hex (RFC 3986 §2.1 prefers uppercase, and a decoder accepts either).
+/// uppercase-hex (RFC 3986 §2.1 prefers uppercase, and a decoder accepts either). A space is
+/// `%20`, not `+`: both decode to a space in a query, and `%20` is the form that is *also* correct
+/// inside a path segment.
 ///
 /// This encodes a **component** — one name or one value — so `&`, `=`, `?`, `#` and `/` are all
 /// escaped. Encoding a whole query string or a whole path with it would escape the separators that
 /// give it structure; encode the pieces, then join them.
 pub fn encode(value: &str) -> String {
-    const UNRESERVED: &[u8] = b"-_.~";
-    let mut out = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        if byte.is_ascii_alphanumeric() || UNRESERVED.contains(byte) {
-            out.push(*byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
+    noeta_ext_abi::net::percent_encode(value)
 }
 
 /// Percent-decode one component: every `%XX` back to its byte.
 ///
 /// The exact inverse of [`encode`], and **only** that: a `+` stays a `+`. The rule that a plus
 /// means a space belongs to `application/x-www-form-urlencoded` — a *query string*'s encoding — not
-/// to URLs, where a plus in a path segment is a literal plus. Applying it here would corrupt every
-/// path that contains one, so a query parser does that substitution itself, before decoding (`%2B`
-/// then still arrives as a literal `+`, which is the point). This matches `decodeURIComponent` and
-/// Python's `unquote`; both keep the form rule in a separate function for the same reason.
+/// to URLs, where a plus in a path segment is a literal plus. A query parser does that substitution
+/// itself, before decoding (`%2B` then still arrives as a literal `+`, which is the point); that is
+/// exactly what `server.parse_form` and `Request.query` do, through the same codec. This matches
+/// `decodeURIComponent` and Python's `unquote`, both of which keep the form rule in a separate
+/// function for the same reason.
 ///
 /// Decoding is total — it always answers a string. Two inputs a stricter decoder would reject are
 /// passed through verbatim instead, because both occur in the wild and neither is worth failing a
@@ -50,35 +50,7 @@ pub fn encode(value: &str) -> String {
 /// * bytes that do not form valid UTF-8 are replaced (`U+FFFD`) rather than dropped, so the result
 ///   is still a string and the damage is visible.
 pub fn decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => match hex_pair(bytes[i + 1], bytes[i + 2]) {
-                Some(byte) => {
-                    out.push(byte);
-                    i += 3;
-                }
-                // Not a hex pair — a literal `%`, kept as written.
-                None => {
-                    out.push(b'%');
-                    i += 1;
-                }
-            },
-            byte => {
-                out.push(byte);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// The byte two hex digits name, or `None` if either is not a hex digit.
-fn hex_pair(hi: u8, lo: u8) -> Option<u8> {
-    let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
-    Some(digit(hi)? * 16 + digit(lo)?)
+    noeta_ext_abi::net::percent_decode(value)
 }
 
 #[cfg(test)]
@@ -126,7 +98,7 @@ mod tests {
     fn a_plus_stays_a_plus_because_that_rule_belongs_to_form_encoding() {
         // In a path segment a `+` is a literal plus. A query parser substitutes it for a space
         // BEFORE decoding, which is why this function must not: doing both would turn every `%2B`
-        // into a space too.
+        // into a space too. `server.parse_form` is the flavor that does.
         assert_eq!(decode("a+b"), "a+b");
         assert_eq!(decode(&encode("a+b")), "a+b");
         assert_eq!(decode("a%2Bb"), "a+b");

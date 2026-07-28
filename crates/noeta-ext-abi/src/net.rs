@@ -374,7 +374,13 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// Percent-decode `application/x-www-form-urlencoded` text: `+` is a space and `%XX` is one byte.
+/// Percent-decode one URL component (RFC 3986): every `%XX` back to its byte, and nothing else.
+///
+/// The exact inverse of [`percent_encode`], and deliberately *only* that: a `+` stays a `+`. That a
+/// plus means a space is the `application/x-www-form-urlencoded` rule — a property of a query
+/// string or a form body, not of a URL — and applying it here would corrupt every path segment
+/// containing one. [`form_decode`] is the flavor that applies it, and it is what the form and query
+/// parsers below use; this is what a *path* segment and the exposed `std.http.url.decode` use.
 ///
 /// Decoding is done over **bytes** and converted to UTF-8 once at the end, because a non-ASCII
 /// character arrives as several `%XX` in a row — decoding each escape on its own would split a
@@ -386,10 +392,6 @@ pub fn percent_decode(raw: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
             b'%' if i + 2 < bytes.len() => {
                 match (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
                     (Some(hi), Some(lo)) => {
@@ -428,6 +430,23 @@ pub fn percent_encode(raw: &str) -> String {
     out
 }
 
+/// Percent-decode one `application/x-www-form-urlencoded` half: a `+` is a space, and everything
+/// else is [`percent_decode`]'s job.
+///
+/// The substitution happens **before** decoding, which is what keeps an escaped plus (`%2B`) a
+/// literal `+`: it is still an escape when the substitution runs, and becomes a `+` only after.
+/// Doing it the other way round would turn every `%2B` into a space too.
+pub fn form_decode(raw: &str) -> String {
+    // Substituting on BYTES rather than `chars`: every byte but the ASCII plus is passed through
+    // untouched, so a multi-byte sequence survives verbatim and is decoded by the walk below.
+    let swapped: Vec<u8> = raw
+        .as_bytes()
+        .iter()
+        .map(|&byte| if byte == b'+' { b' ' } else { byte })
+        .collect();
+    percent_decode(&String::from_utf8_lossy(&swapped))
+}
+
 /// Parse an `application/x-www-form-urlencoded` payload (`k=v&k2=v2`) into decoded pairs, in wire
 /// order. **Both** halves are percent-decoded — a key can be encoded too — and a pair with no `=`
 /// yields an empty value. Empty segments (a trailing `&`, or `&&`) are skipped rather than
@@ -438,7 +457,7 @@ pub fn form_pairs(body: &str) -> Vec<(String, String)> {
         .filter(|pair| !pair.is_empty())
         .map(|pair| {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            (percent_decode(key), percent_decode(value))
+            (form_decode(key), form_decode(value))
         })
         .collect()
 }
@@ -638,8 +657,7 @@ mod form_tests {
     use super::*;
 
     #[test]
-    fn percent_decode_handles_plus_escapes_and_multibyte() {
-        assert_eq!(percent_decode("buy+milk"), "buy milk");
+    fn percent_decode_handles_escapes_and_multibyte() {
         assert_eq!(percent_decode("a%20b"), "a b");
         // A non-ASCII character arrives as SEVERAL `%XX`; decoding per-escape would split it.
         assert_eq!(percent_decode("caf%C3%A9"), "café");
@@ -648,6 +666,21 @@ mod form_tests {
         assert_eq!(percent_decode("100%"), "100%");
         assert_eq!(percent_decode("%zz"), "%zz");
         assert_eq!(percent_decode("%4"), "%4");
+        // A plus is a plus. The form rule is `form_decode`'s, because a `+` in a PATH segment is a
+        // literal plus and this is the decoder a path (and `std.http.url.decode`) goes through.
+        assert_eq!(percent_decode("a+b"), "a+b");
+        assert_eq!(percent_decode("a%2Bb"), "a+b");
+    }
+
+    #[test]
+    fn form_decode_is_percent_decode_plus_the_one_form_rule() {
+        assert_eq!(form_decode("buy+milk"), "buy milk");
+        assert_eq!(form_decode("a%20b"), "a b");
+        // The substitution runs BEFORE decoding, so an escaped plus survives as a literal one —
+        // doing it after would turn every `%2B` into a space.
+        assert_eq!(form_decode("a%2Bb"), "a+b");
+        // Multi-byte input is untouched by the substitution.
+        assert_eq!(form_decode("caf%C3%A9+au+lait"), "café au lait");
     }
 
     #[test]

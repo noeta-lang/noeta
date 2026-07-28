@@ -2001,18 +2001,6 @@ const HTTP_SERVER_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Map(&Str, &Str)),
     },
-    ExtFn {
-        param_names: &["text"],
-        name: "url_decode",
-        params: &[Str],
-        ret: Concrete(Str),
-    },
-    ExtFn {
-        param_names: &["text"],
-        name: "url_encode",
-        params: &[Str],
-        ret: Concrete(Str),
-    },
 ];
 
 /// Read the optional `headers: Map<string, string>` argument at `index`, or an empty list if the
@@ -2155,18 +2143,6 @@ fn http_dispatch(
                 .map(|(name, value)| (name, NativeOut::Str(value)))
                 .collect(),
         ));
-    }
-    if func == "url_decode" {
-        want_arity(func, args, 1)?;
-        return Ok(NativeOut::Str(crate::net::percent_decode(want_str(
-            func, args, 0,
-        )?)));
-    }
-    if func == "url_encode" {
-        want_arity(func, args, 1)?;
-        return Ok(NativeOut::Str(crate::net::percent_encode(want_str(
-            func, args, 0,
-        )?)));
     }
     // The configured-client constructor (http arc H7) — pure, no request performed.
     if func == "new" {
