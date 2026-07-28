@@ -25,7 +25,17 @@
 /// omitted input field means. A `typed_dispatch` that walks a struct recipe destructures the tuple
 /// and no longer compiles; there is no silent behavior change, and `..DEFAULTS` cannot cover it
 /// (the change is inside a matched enum variant, not an added registration field).
-pub const ABI_VERSION: u32 = 3;
+///
+/// **4** — [`registry::DirectiveCtx`] gained the required `fields` field (the decorated
+/// declaration's shape, so an `expand` hook can generate from a struct's members and not only from
+/// its name). A hook itself takes `&DirectiveCtx` and is unaffected, but code that *constructs* one
+/// — in practice a package's own tests — no longer compiles without it.
+///
+/// The streaming-body surface that landed alongside it is deliberately **not** part of this bump:
+/// the new `Network` capability methods are default-provided and the new `ExtType`/`ExtEnum`
+/// registrations are additive, so nothing written for ABI 3 stops compiling. A source break is what
+/// this constant records — not every addition.
+pub const ABI_VERSION: u32 = 4;
 
 pub mod args;
 pub mod channel;
