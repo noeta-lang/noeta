@@ -6,9 +6,10 @@
 // The sandbox script's request 6 is `POST /form` with body `title=buy+milk&note=caf%C3%A9`, and
 // request 4 is `GET /users/42?active=true`. Both backends run the identical accept→handle loop.
 // expect: stdout "free title=buy milk fields=2"
-// expect: stdout "decode=a b c"
+// expect: stdout "decode=a b+c"
 // expect: stdout "encode=buy%20milk%20%26%20caf%C3%A9"
 // expect: stdout "roundtrip=café 🦀"
+// expect: stdout "form-plus=a b c"
 // expect: stdout "built POST /users title=buy milk ct=application/x-www-form-urlencoded"
 // expect: stdout "GET / form-fields=0"
 // expect: stdout "GET /health form-fields=0"
@@ -21,6 +22,7 @@
 // expect: stdout "served"
 // expect: exit 0
 use std.http.server
+use std.http.url
 use std.http.{Request, Response}
 
 // The codec as free functions, for a caller holding a body string rather than a `Request` — a
@@ -28,10 +30,18 @@ use std.http.{Request, Response}
 // consumer hand-rolls percent-decoding.
 free = server.parse_form("title=buy+milk&note=caf%C3%A9")
 echo "free title=${free["title"]} fields=${free.len()}"
-echo "decode=${server.url_decode("a%20b+c")}"
-echo "encode=${server.url_encode("buy milk & café")}"
-// `url_encode` is the inverse of `url_decode` over anything it produces, multi-byte included.
-echo "roundtrip=${server.url_decode(server.url_encode("café 🦀"))}"
+// The codec itself is `std.http.url` — a URL codec is not a server's concern, and a client needs it
+// just as much. It is the SAME implementation this form parser decodes through, so what a program
+// decodes by hand and what the host decoded for it cannot disagree.
+//
+// `url.decode` is RFC 3986 and nothing more: a `+` stays a `+`, because in a path segment it is a
+// literal plus. That a plus means a space is the form-encoding rule, and it lives where forms are
+// parsed — `parse_form` above turns `buy+milk` into `buy milk` while `url.decode` leaves it alone.
+echo "decode=${url.decode("a%20b+c")}"
+echo "encode=${url.encode("buy milk & café")}"
+// `encode` is the inverse of `decode` over anything it produces, multi-byte included.
+echo "roundtrip=${url.decode(url.encode("café 🦀"))}"
+echo "form-plus=${server.parse_form("k=a%20b+c")["k"]}"
 
 // A `Request` can be built without a server, so a handler taking one — or a framework routing on
 // one — is exercisable from a test or a script instead of only through the serve loop.
