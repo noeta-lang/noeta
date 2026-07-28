@@ -102,6 +102,22 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
         params: &[SigType::Fn(&[SOCKET_SIG], &SigType::Dyn)],
         ret: RetTy::Concrete(SigType::Named(crate::net::RESPONSE_TYPE_NAME)),
     },
+    // `sse(handler) -> Response` (http-streaming arc) — the websocket upgrade's exact twin for
+    // server-sent events: returned from a `fetch` handler, it answers the request with a
+    // `text/event-stream` response held open, and runs `handler(sink)` as its session (the serve
+    // loop reaps it like any handler; the stream closes when the handler returns).
+    //
+    // Declared `Response` for the same reason `websocket` is: a routing handler keeps ONE
+    // `(Request) -> Response` signature whether it serves a body, a socket, or an event stream.
+    //
+    // Unlike `websocket` this needs no handshake and no request-side opt-in — SSE is an ordinary
+    // HTTP response whose body never ends, so *any* request can be answered with one.
+    ExtFn {
+        param_names: &["handler"],
+        name: "sse",
+        params: &[SigType::Fn(&[crate::registry::SSE_SINK_SIG], &SigType::Dyn)],
+        ret: RetTy::Concrete(SigType::Named(crate::net::RESPONSE_TYPE_NAME)),
+    },
     // `liveview_js() -> string` (server-hmr L2) — the bundled browser client for the view/diff
     // push protocol ([`crate::liveview::LIVEVIEW_JS`]); a handler serves it as
     // `application/javascript`. Pure, so it is sandbox-deterministic like any string.
@@ -233,9 +249,21 @@ struct InFlight {
     /// The request's `Sec-WebSocket-Key`, captured at accept (server-hmr L0) — consumed if the
     /// handler upgrades. `None` for an ordinary request; an upgrade without a key is a 400.
     ws_key: Option<String>,
-    /// Whether this entry is a running **websocket session** (the upgrade handler) rather than an
-    /// HTTP handler: its completion closes the stream instead of replying.
-    ws: bool,
+    /// Which **session** this entry is running, if any — the second life an entry takes on after a
+    /// handler hands back an upgrade marker. `None` is an ordinary HTTP handler, whose completion
+    /// replies; a session's completion closes its stream instead, by the kind's own path.
+    session: Option<Session>,
+}
+
+/// The kind of persistent stream an upgraded connection is running (server-hmr L0,
+/// http-streaming arc). Both are "the handler returned a marker, so this connection is no longer
+/// one-reply-and-close", and they differ only in how a frame is written and how the stream ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Session {
+    /// A bidirectional websocket (`server.websocket`).
+    Ws,
+    /// A one-way server-sent-events stream (`server.sse`).
+    Sse,
 }
 
 /// Per-request metrics auto-instrumentation state (M3). Captured at accept, consumed at completion.
@@ -567,7 +595,7 @@ pub fn http_ctx_dispatch(
                                             context,
                                             metrics,
                                             ws_key,
-                                            ws: false,
+                                            session: None,
                                         }),
                                         Err(CtxError::Abort) => {
                                             report_abort(ctx, "request handler");
@@ -607,27 +635,76 @@ pub fn http_ctx_dispatch(
                     let polled = ctx.poll(fut);
                     in_flight[k].context = ctx.task_context().swap(prior);
                     let done = match polled {
-                        Ok(Some(value)) if in_flight[k].ws => {
-                            // A finished websocket session (server-hmr L0): the handler returned
-                            // (its value is discarded — a session "responds" by sending frames);
-                            // close the stream. Nothing to reply.
+                        Ok(Some(value)) if in_flight[k].session.is_some() => {
+                            // A finished session (server-hmr L0, http-streaming arc): the handler
+                            // returned (its value is discarded — a session "responds" by sending
+                            // frames); close the stream by its kind. Nothing to reply.
                             ctx.free(value);
-                            ws_close(ctx, conn)?;
+                            close_session(ctx, in_flight[k].session, conn)?;
                             true
                         }
                         Ok(Some(value)) => {
                             let mut upgrade: Option<crate::serve::WsUpgrade> = None;
+                            let mut sse: Option<crate::http_stream::SseUpgrade> = None;
                             let mut response = None;
                             // A non-extern or non-`Response` result falls to the 500.
                             let _ = ctx.with_extern(value, &mut |e| {
                                 if let Some(u) = e.as_any().downcast_ref::<WsUpgrade>() {
                                     upgrade = Some(u.clone());
+                                } else if let Some(u) =
+                                    e.as_any().downcast_ref::<crate::http_stream::SseUpgrade>()
+                                {
+                                    sse = Some(u.clone());
                                 } else {
                                     response = e.as_any().downcast_ref::<NetResponse>().cloned();
                                 }
                             });
                             ctx.free(value);
-                            if let Some(upgrade) = upgrade {
+                            if let Some(sse) = sse {
+                                // The event-stream hijack (http-streaming arc): write the
+                                // `text/event-stream` head, then run `handler(sink)` as this
+                                // entry's SECOND life — a session reaped exactly like a websocket's.
+                                //
+                                // No key to consume and no 400 arm: unlike a websocket upgrade,
+                                // *any* request can be answered with an event stream.
+                                end_server_span(ctx, span, 200);
+                                end_server_metrics(
+                                    ctx,
+                                    &instruments,
+                                    in_flight[k].metrics.take(),
+                                    200,
+                                );
+                                let io = ctx.host().net_sse_start(conn);
+                                let started = ctx.spawn_io(io);
+                                let unit = ctx.drive(started)?;
+                                ctx.free(unit);
+                                let sink =
+                                    ctx.intern(NativeOut::Extern(noeta_ext_abi::ExternBox::new(
+                                        noeta_ext_abi::stream::SseSink { conn },
+                                    )))?;
+                                let session = ctx.retained_get(sse.handler)?;
+                                let handler_ctx = std::mem::take(&mut in_flight[k].context);
+                                let prior = ctx.task_context().swap(handler_ctx);
+                                let called = ctx.call(session, &[sink]);
+                                in_flight[k].context = ctx.task_context().swap(prior);
+                                ctx.free(sink);
+                                ctx.free(session);
+                                ctx.release_retained(sse.handler);
+                                match called {
+                                    Ok(session_fut) => {
+                                        in_flight[k].fut = session_fut;
+                                        in_flight[k].span = None;
+                                        in_flight[k].session = Some(Session::Sse);
+                                        false
+                                    }
+                                    Err(CtxError::Abort) => {
+                                        report_abort(ctx, "event-stream session");
+                                        crate::http_stream::sse_close(ctx, conn)?;
+                                        true
+                                    }
+                                    Err(e) => return Err(e),
+                                }
+                            } else if let Some(upgrade) = upgrade {
                                 match in_flight[k].ws_key.take() {
                                     // The hijack (server-hmr L0): 101-handshake the connection,
                                     // then run `handler(socket)` as this entry's SECOND life — a
@@ -659,7 +736,7 @@ pub fn http_ctx_dispatch(
                                             Ok(session_fut) => {
                                                 in_flight[k].fut = session_fut;
                                                 in_flight[k].span = None;
-                                                in_flight[k].ws = true;
+                                                in_flight[k].session = Some(Session::Ws);
                                                 false
                                             }
                                             Err(CtxError::Abort) => {
@@ -711,15 +788,15 @@ pub fn http_ctx_dispatch(
                             }
                         }
                         Ok(None) => false,
-                        Err(CtxError::Abort) if in_flight[k].ws => {
-                            // A websocket session aborting closes its stream; the server survives
-                            // (the same worker-survives contract as a handler's 500). Report first:
-                            // a session dies with no reply to carry a status, so an unreported
-                            // abort is invisible — the client just sees the socket close and
-                            // reconnect.
-                            report_abort(ctx, "websocket session");
+                        Err(CtxError::Abort) if in_flight[k].session.is_some() => {
+                            // A session aborting closes its stream; the server survives (the same
+                            // worker-survives contract as a handler's 500). Report first: a session
+                            // dies with no reply to carry a status, so an unreported abort is
+                            // invisible — the client just sees the stream close and reconnect.
+                            let session = in_flight[k].session;
+                            report_abort(ctx, session_label(session));
                             ctx.free(fut);
-                            ws_close(ctx, conn)?;
+                            close_session(ctx, session, conn)?;
                             true
                         }
                         Err(CtxError::Abort) => {
@@ -773,6 +850,16 @@ pub fn http_ctx_dispatch(
                 noeta_ext_abi::ExternBox::new(WsUpgrade { handler }),
             )))
         }
+        // `server.sse(handler)` (http-streaming arc): retain the session handler and hand back the
+        // upgrade marker; the serve loop's reap performs the switch to `text/event-stream`. The
+        // `websocket` arm's exact twin.
+        "sse" => {
+            ctx_arity(func, args, 1)?;
+            let handler = ctx.retain(args[0])?;
+            Ok(CtxOut::Out(NativeOut::Extern(
+                noeta_ext_abi::ExternBox::new(crate::http_stream::SseUpgrade { handler }),
+            )))
+        }
         // `server.liveview_js()` (server-hmr L2): the bundled client shim source.
         "liveview_js" => {
             ctx_arity(func, args, 0)?;
@@ -781,6 +868,25 @@ pub fn http_ctx_dispatch(
             )))
         }
         _ => Err(no_function_error("http", func).into()),
+    }
+}
+
+/// Close whatever persistent stream an in-flight entry was running. `None` (an ordinary HTTP
+/// handler) closes nothing — its connection is released by the reply.
+fn close_session(ctx: &mut dyn NativeCtx, session: Option<Session>, conn: u64) -> CtxResult<()> {
+    match session {
+        Some(Session::Ws) => ws_close(ctx, conn),
+        Some(Session::Sse) => crate::http_stream::sse_close(ctx, conn),
+        None => Ok(()),
+    }
+}
+
+/// How a session names itself in a swallowed-abort diagnostic.
+fn session_label(session: Option<Session>) -> &'static str {
+    match session {
+        Some(Session::Ws) => "websocket session",
+        Some(Session::Sse) => "event-stream session",
+        None => "request handler",
     }
 }
 
@@ -821,7 +927,7 @@ fn hot_broadcast(
     if generation != *hot_gen {
         *hot_gen = generation;
         progressed = true;
-        for f in in_flight.iter().filter(|f| f.ws) {
+        for f in in_flight.iter().filter(|f| f.session == Some(Session::Ws)) {
             let _ = ws_send_text(ctx, f.conn, "{\"type\":\"reload\"}");
             let _ = ws_close(ctx, f.conn);
         }
@@ -832,7 +938,7 @@ fn hot_broadcast(
             "{{\"type\":\"error\",\"message\":{}}}",
             crate::json::json_string(&message)
         );
-        for f in in_flight.iter().filter(|f| f.ws) {
+        for f in in_flight.iter().filter(|f| f.session == Some(Session::Ws)) {
             let _ = ws_send_text(ctx, f.conn, &frame);
         }
     }

@@ -1,0 +1,57 @@
+// One `Framing` enum, three cuts (http-streaming arc) — the design decision this case exists to
+// pin. An OpenAI-compatible endpoint speaks SSE, Ollama's native `/api/chat` speaks
+// newline-delimited JSON, and a log tail is raw lines; all three are "read the body incrementally
+// and cut it into frames", so the cut is an argument rather than three parallel readers.
+//
+// The two line framings differ in exactly one way, asserted below: `Ndjson` SKIPS a blank line (a
+// blank line is not a JSON document), `Lines` KEEPS it (a blank line is content in a log tail).
+//
+// NDJSON deliberately does not parse the line — `data` is the document verbatim, so the caller
+// chooses its own decoding and a malformed line is the caller's error to report rather than one
+// the reader swallows.
+// expect: stdout "ndjson: [{"n":1}] [{"n":2}] [{"n":3}] "
+// expect: stdout "lines: [alpha] [] [beta] "
+// expect: stdout "an ndjson frame carries no event and no id: true"
+// expect: exit 0
+use std.http.client
+use std.http.Framing
+use std.http.Frame
+
+fn blank(): Frame {
+    return Frame { event: "", data: "", id: "", retry: none }
+}
+
+// Read a whole body, rendering each frame's payload as `[payload] ` — so an empty frame is
+// visible as `[]` rather than vanishing into a separator.
+async fn drain(path: string, framing: Framing): string {
+    api = client.new("https://svc.test")
+    stream = client.stream(api.prepare("get", path), framing)?
+    mut out = ""
+    mut going = true
+    while going {
+        next = stream.recv().await
+        if next == none {
+            going = false
+        } else {
+            f: Frame = next ?? blank()
+            out = "${out}[${f.data}] "
+        }
+    }
+    return out
+}
+
+async fn run(): void {
+    echo "ndjson: ${drain("/stream/ndjson", Framing.Ndjson).await}"
+
+    // The blank line survives as an empty frame here, and is dropped by `Ndjson` above.
+    echo "lines: ${drain("/stream/lines", Framing.Lines).await}"
+
+    // A line-oriented framing populates only `data`.
+    api = client.new("https://svc.test")
+    stream = client.stream(api.prepare("get", "/stream/ndjson"), Framing.Ndjson)?
+    f: Frame = stream.recv().await ?? blank()
+    echo "an ndjson frame carries no event and no id: ${f.event == "" && f.id == ""}"
+    // Abandoning the rest of the body deliberately: `close` releases it without draining.
+    stream.close()
+}
+run().await

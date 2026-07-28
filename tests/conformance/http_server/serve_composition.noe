@@ -19,6 +19,8 @@
 // expect: stdout "-> 404"
 // expect: stdout "log: GET /ws"
 // expect: stdout "-> 404"
+// expect: stdout "log: GET /events"
+// expect: stdout "-> 404"
 // expect: stdout "served"
 // expect: exit 0
 use std.http.server

@@ -40,6 +40,7 @@ pub fn shutdown_notify() -> std::sync::Arc<Notify> {
         .clone()
 }
 
+mod stream;
 #[cfg(feature = "telemetry")]
 mod telemetry;
 mod ws;
@@ -120,6 +121,19 @@ pub struct RealHost {
     /// shared into every ws descriptor. A conn moves here from `conns` at upgrade and leaves on
     /// close/peer-EOF.
     ws_conns: ws::WsConns,
+    /// Open outbound **streaming** bodies (http-streaming arc), keyed by the id `net_stream_open`
+    /// hands out. Each holds the receiving end of its pump thread's frame channel; dropping the
+    /// entry (an explicit `close`, or host teardown) ends the pump and releases the connection.
+    /// Present only under `ring-http-client` — the reader is reqwest-backed, like `http` above.
+    #[cfg(feature = "ring-http-client")]
+    streams: stream::RealStreams,
+    /// Monotonic id source for `streams`.
+    #[cfg(feature = "ring-http-client")]
+    next_stream: u64,
+    /// Connections switched to `text/event-stream` (http-streaming arc) — the SSE analogue of
+    /// `ws_conns`. A conn moves here from `conns` when a handler answers with `server.sse`, and
+    /// leaves on close or a failed write.
+    sse_conns: stream::SseConns,
     /// The program's argument vector reported through `args.all()` (M2.2). Defaults to the real
     /// process argv (`std::env::args()`), which is exactly what a shipped `noeta build --exe` binary
     /// wants when invoked directly. `noeta run app.noe -- a b c` overrides it via
@@ -237,6 +251,11 @@ impl RealHost {
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
             ws_conns: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "ring-http-client")]
+            streams: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "ring-http-client")]
+            next_stream: 1,
+            sse_conns: Arc::new(Mutex::new(HashMap::new())),
             args: std::env::args().collect(),
             env_overlay: HashMap::new(),
             procs: HashMap::new(),
@@ -714,6 +733,83 @@ impl Network for RealHost {
             ws_conns: self.ws_conns.clone(),
             conn,
         })
+    }
+
+    // --- Streaming bodies (http-streaming arc) ---
+
+    /// Open a real incremental body. Blocks only until the response **head** is in, so a transport
+    /// failure is still the `Err` arm of `stream(...)`; the body then flows on the stream's own
+    /// thread (see [`stream`] for why it needs one).
+    #[cfg(feature = "ring-http-client")]
+    fn net_stream_open(
+        &mut self,
+        request: NetRequest,
+        framing: noeta_stdlib::stream::Framing,
+    ) -> Result<u64, NetError> {
+        let opened = stream::open(self.http.clone(), request, framing)?;
+        let id = self.next_stream;
+        self.next_stream += 1;
+        self.streams.lock().unwrap().insert(id, opened);
+        Ok(id)
+    }
+
+    /// A genuine incremental read: the descriptor blocks on the stream's frame channel on the
+    /// executor's blocking pool, so the isolate's other tasks run while a stream is quiet.
+    #[cfg(feature = "ring-http-client")]
+    fn net_stream_recv(&self, stream: u64) -> Box<dyn ExternIo> {
+        Box::new(stream::RealStreamRecvIo {
+            streams: self.streams.clone(),
+            stream,
+        })
+    }
+
+    /// Release the stream: dropping the receiver ends its pump thread, which drops the reqwest
+    /// response and releases the connection. Idempotent.
+    #[cfg(feature = "ring-http-client")]
+    fn net_stream_close(&mut self, stream: u64) -> Result<(), StdError> {
+        self.streams.lock().unwrap().remove(&stream);
+        Ok(())
+    }
+
+    /// The real host always overrides [`Network::net_stream_recv`] with the async descriptor, so
+    /// the synchronous fallback is unreachable (the accept/reply contract).
+    #[cfg(feature = "ring-http-client")]
+    fn net_stream_recv_next(
+        &mut self,
+        _stream: u64,
+    ) -> Result<Option<noeta_stdlib::stream::Frame>, StdError> {
+        unreachable!("RealHost streams via the async net_stream_recv descriptor")
+    }
+
+    fn net_sse_start(&self, conn: u64) -> Box<dyn ExternIo> {
+        Box::new(stream::RealSseStartIo {
+            conns: self.conns.clone(),
+            sse_conns: self.sse_conns.clone(),
+            conn,
+        })
+    }
+
+    fn net_sse_send(&self, conn: u64, wire: String) -> Box<dyn ExternIo> {
+        Box::new(stream::RealSseSendIo {
+            sse_conns: self.sse_conns.clone(),
+            conn,
+            wire: Some(wire),
+        })
+    }
+
+    fn net_sse_close(&self, conn: u64) -> Box<dyn ExternIo> {
+        Box::new(stream::RealSseCloseIo {
+            sse_conns: self.sse_conns.clone(),
+            conn,
+        })
+    }
+
+    fn net_sse_start_now(&mut self, _conn: u64) -> Result<(), StdError> {
+        unreachable!("RealHost starts event streams via the async descriptor")
+    }
+
+    fn net_sse_send_now(&mut self, _conn: u64, _wire: &str) -> Result<(), StdError> {
+        unreachable!("RealHost writes event streams via the async descriptor")
     }
 
     fn net_ws_upgrade_now(&mut self, _conn: u64, _key: &str) -> Result<(), StdError> {

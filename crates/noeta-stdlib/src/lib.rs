@@ -46,6 +46,7 @@ pub mod fs;
 pub mod handle;
 pub mod host;
 pub mod http_client;
+pub mod http_stream;
 pub mod id;
 pub mod io;
 pub mod iter;

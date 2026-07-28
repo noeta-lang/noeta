@@ -17,6 +17,7 @@
 // expect: stdout "DELETE /users/42 form-fields=0"
 // expect: stdout "POST /form title=[buy milk] note=[café] fields=2 missing=absent"
 // expect: stdout "GET /ws form-fields=0"
+// expect: stdout "GET /events form-fields=0"
 // expect: stdout "served"
 // expect: exit 0
 use std.http.server

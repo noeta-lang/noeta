@@ -190,6 +190,16 @@ pub struct SandboxHost {
     /// most one listener — a differential program calls `http.serve` once — so a single slot
     /// suffices; a second `net_listen` re-arms it.
     inbound: Option<InboundState>,
+    /// Open outbound **streaming** response bodies (http-streaming arc): id → the remaining frames
+    /// of its scripted body, decoded in full at `net_stream_open`. A cursor over a pure function of
+    /// the request, so both backends hand out the identical sequence.
+    ///
+    /// Held by value in the host (not shared behind an `Arc`) so a cloned `SandboxHost` starts from
+    /// its own state — sharing would let one backend's reads advance the other's cursor and break
+    /// the differential by construction.
+    streams: BTreeMap<u64, VecDeque<noeta_ext_abi::stream::Frame>>,
+    /// The next outbound stream id. Starts at 1, like `ids`.
+    next_stream: u64,
     /// The deterministic telemetry recorder (native OTEL): in-progress spans by id, ended spans in
     /// end order, and the counters deriving deterministic span/trace ids. Since spans are write-only
     /// (never program output), this exists only so conformance can assert on emitted spans; the
@@ -241,6 +251,13 @@ struct InboundState {
     /// so an upgraded handler terminates in-oracle exactly like the request script itself.
     ws_conns: BTreeMap<u64, usize>,
     ws_transcript: Vec<(u64, String)>,
+    /// Connections switched to `text/event-stream` (http-streaming arc) — the SSE analogue of
+    /// `ws_conns`. A set rather than a map: unlike a websocket there is no inbound conversation to
+    /// keep a cursor into, only outbound frames.
+    sse_conns: std::collections::BTreeSet<u64>,
+    /// The event-stream bytes each handler wrote, in order (test introspection, like
+    /// `ws_transcript`).
+    sse_transcript: Vec<(u64, String)>,
 }
 
 /// A scripted spawned process (process-handle + streaming arcs): its instant-complete outcome and
@@ -303,6 +320,8 @@ impl SandboxHost {
             procs: BTreeMap::new(),
             next_proc: 1,
             inbound: None,
+            streams: BTreeMap::new(),
+            next_stream: 1,
             tel: TelRecorder {
                 next_span: 1,
                 next_trace: 1,
@@ -322,6 +341,17 @@ impl SandboxHost {
     /// telemetry conformance oracle (native OTEL). Spans not yet ended are not included.
     pub fn recorded_spans(&self) -> &[SpanData] {
         &self.tel.recorded
+    }
+
+    /// The event-stream bytes handlers wrote, as `(conn, wire)` in write order (http-streaming
+    /// arc) — test introspection, so the exact SSE wire format a `sse` handler produced can be
+    /// asserted directly rather than inferred from the program's own output. Empty before any
+    /// `net_listen`.
+    pub fn sse_transcript(&self) -> &[(u64, String)] {
+        self.inbound
+            .as_ref()
+            .map(|state| state.sse_transcript.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Install a shared sink that also receives every ended [`SpanData`]. The telemetry conformance
@@ -462,6 +492,8 @@ impl Network for SandboxHost {
             transcript: Vec::new(),
             ws_conns: BTreeMap::new(),
             ws_transcript: Vec::new(),
+            sse_conns: std::collections::BTreeSet::new(),
+            sse_transcript: Vec::new(),
         });
         Ok(1)
     }
@@ -559,6 +591,78 @@ impl Network for SandboxHost {
             .expect("net_ws_close_now before net_listen")
             .ws_conns
             .remove(&conn);
+        Ok(())
+    }
+
+    // --- Streaming bodies (http-streaming arc) ---
+
+    /// Open a scripted stream: decode the whole deterministic body for `request` up front and hand
+    /// back a cursor over its frames.
+    ///
+    /// Decoding at open (rather than incrementally per `recv`) is what makes a streaming program
+    /// resolve at spawn like every other sandbox leaf — deterministic, ready on the first poll, and
+    /// therefore in-oracle. The frames are a pure function of the request, so both backends compute
+    /// the identical sequence.
+    fn net_stream_open(
+        &mut self,
+        request: crate::NetRequest,
+        framing: noeta_ext_abi::stream::Framing,
+    ) -> Result<u64, noeta_ext_abi::NetError> {
+        let frames = crate::net::sandbox_stream_frames(&request, framing);
+        let id = self.next_stream;
+        self.next_stream += 1;
+        self.streams.insert(id, frames.into());
+        Ok(id)
+    }
+
+    /// Pop the next scripted frame; `None` once the body is exhausted — the deterministic "the
+    /// body ended" that lets a reading loop terminate in-oracle, exactly like the ws conversation.
+    ///
+    /// A stream id that is not open also yields `None` rather than erroring: after `close()` the
+    /// honest answer to "is there more?" is no, and a program that races a close against a pending
+    /// read should see the stream end, not an abort.
+    fn net_stream_recv_next(
+        &mut self,
+        stream: u64,
+    ) -> Result<Option<noeta_ext_abi::stream::Frame>, StdError> {
+        Ok(self
+            .streams
+            .get_mut(&stream)
+            .and_then(std::collections::VecDeque::pop_front))
+    }
+
+    /// Release the stream. Idempotent — closing twice, or closing a drained stream, is fine.
+    fn net_stream_close(&mut self, stream: u64) -> Result<(), StdError> {
+        self.streams.remove(&stream);
+        Ok(())
+    }
+
+    /// Begin an event-stream response: mark the connection as streaming so its frames are recorded
+    /// separately from ordinary replies.
+    fn net_sse_start_now(&mut self, conn: u64) -> Result<(), StdError> {
+        self.inbound
+            .as_mut()
+            .expect("net_sse_start_now before net_listen")
+            .sse_conns
+            .insert(conn);
+        Ok(())
+    }
+
+    /// Record the handler's outbound event-stream bytes (test introspection; the differential
+    /// observes the handler's own output, exactly like replies and ws frames).
+    fn net_sse_send_now(&mut self, conn: u64, wire: &str) -> Result<(), StdError> {
+        self.inbound
+            .as_mut()
+            .expect("net_sse_send_now before net_listen")
+            .sse_transcript
+            .push((conn, wire.to_string()));
+        Ok(())
+    }
+
+    fn net_sse_close_now(&mut self, conn: u64) -> Result<(), StdError> {
+        if let Some(state) = self.inbound.as_mut() {
+            state.sse_conns.remove(&conn);
+        }
         Ok(())
     }
 }
@@ -1340,6 +1444,145 @@ mod tests {
         let transcript = &host.inbound.as_ref().unwrap().transcript;
         assert_eq!(transcript.len(), script.len());
         assert_eq!(transcript[0].0, 0);
-        assert_eq!(transcript[2].1.body, b"re:POST");
+        // Each reply echoes its own request's method — checked against the script rather than at a
+        // fixed index, which would start naming a different request as soon as the script grows.
+        for (i, request) in script.iter().enumerate() {
+            assert_eq!(
+                transcript[i].1.body,
+                format!("re:{}", request.method).into_bytes(),
+                "reply {i}"
+            );
+        }
+    }
+
+    /// http-streaming arc — the outbound stream seam: a scripted body is decoded at open, handed
+    /// out frame by frame, and ends with `None`; `close` releases it and a closed (or unknown)
+    /// stream reads as ended rather than erroring.
+    #[test]
+    fn outbound_streams_hand_out_scripted_frames_then_end() {
+        use noeta_ext_abi::stream::Framing;
+
+        let mut host = SandboxHost::new();
+        let request = crate::NetRequest {
+            method: "GET".to_string(),
+            url: "https://x.test/stream/ndjson".to_string(),
+            headers: vec![],
+            body: vec![],
+            timeout_ms: None,
+        };
+        let stream = host
+            .net_stream_open(request.clone(), Framing::Ndjson)
+            .unwrap();
+
+        let mut seen = Vec::new();
+        while let Some(frame) = host.net_stream_recv_next(stream).unwrap() {
+            seen.push(frame.data);
+        }
+        assert_eq!(seen, ["{\"n\":1}", "{\"n\":2}", "{\"n\":3}"]);
+        // Past the end it stays ended — what lets a `while` loop over `recv` terminate.
+        assert!(host.net_stream_recv_next(stream).unwrap().is_none());
+
+        // Two streams are independent cursors, and closing one does not disturb the other.
+        let a = host
+            .net_stream_open(request.clone(), Framing::Ndjson)
+            .unwrap();
+        let b = host.net_stream_open(request, Framing::Ndjson).unwrap();
+        assert_ne!(a, b);
+        host.net_stream_recv_next(a)
+            .unwrap()
+            .expect("a's first frame");
+        host.net_stream_close(a).unwrap();
+        assert!(
+            host.net_stream_recv_next(a).unwrap().is_none(),
+            "a closed stream reads as ended, not as an error"
+        );
+        assert_eq!(
+            host.net_stream_recv_next(b).unwrap().map(|f| f.data),
+            Some("{\"n\":1}".to_string()),
+            "b's cursor is its own"
+        );
+        // Closing twice, and closing something never opened, are both fine.
+        host.net_stream_close(a).unwrap();
+        host.net_stream_close(9999).unwrap();
+    }
+
+    /// http-streaming arc — the inbound SSE seam: starting a stream marks the connection, every
+    /// write lands in the transcript verbatim, and closing releases it.
+    ///
+    /// The transcript is asserted against the wire bytes the ENCODER produces (rather than a
+    /// hand-written string) so this stays a test of the seam; the encoding itself is pinned
+    /// separately, against the decoder, in `noeta_ext_abi::stream`'s round-trip test.
+    #[test]
+    fn inbound_event_streams_record_what_the_handler_wrote() {
+        use noeta_ext_abi::stream::{Frame, sse_comment_wire};
+
+        let mut host = SandboxHost::new();
+        assert!(
+            host.sse_transcript().is_empty(),
+            "nothing is recorded before a listener exists"
+        );
+        host.net_listen("127.0.0.1:0").unwrap();
+        host.net_sse_start_now(3).unwrap();
+
+        let named = Frame::named("start", "go");
+        host.net_sse_send_now(3, &named.to_sse_wire()).unwrap();
+        host.net_sse_send_now(3, &sse_comment_wire("keepalive"))
+            .unwrap();
+
+        assert_eq!(
+            host.sse_transcript(),
+            [
+                (3, "event: start\ndata: go\n\n".to_string()),
+                (3, ": keepalive\n".to_string()),
+            ]
+        );
+        // Closing is idempotent, and closing something never started is fine.
+        host.net_sse_close_now(3).unwrap();
+        host.net_sse_close_now(3).unwrap();
+        host.net_sse_close_now(404).unwrap();
+        assert_eq!(
+            host.sse_transcript().len(),
+            2,
+            "closing writes nothing to the transcript"
+        );
+    }
+
+    /// The scripted stream body is a pure function of the request, so two hosts decode byte-identical
+    /// frames — the property the differential rests on.
+    #[test]
+    fn scripted_stream_bodies_are_deterministic_across_hosts() {
+        use noeta_ext_abi::stream::Framing;
+
+        let drain = |url: &str, framing| {
+            let mut host = SandboxHost::new();
+            let request = crate::NetRequest {
+                method: "GET".to_string(),
+                url: url.to_string(),
+                headers: vec![],
+                body: vec![],
+                timeout_ms: None,
+            };
+            let stream = host.net_stream_open(request, framing).unwrap();
+            let mut frames = Vec::new();
+            while let Some(frame) = host.net_stream_recv_next(stream).unwrap() {
+                frames.push(frame);
+            }
+            frames
+        };
+        for (url, framing) in [
+            ("https://x.test/stream/sse", Framing::Sse),
+            ("https://x.test/stream/ndjson", Framing::Ndjson),
+            ("https://x.test/stream/lines", Framing::Lines),
+            ("https://x.test/stream/empty", Framing::Sse),
+            ("https://x.test/stream/truncated", Framing::Sse),
+        ] {
+            assert_eq!(drain(url, framing), drain(url, framing), "{url}");
+        }
+        // The truncated body yields only the frame that got its terminating blank line.
+        let truncated = drain("https://x.test/stream/truncated", Framing::Sse);
+        assert_eq!(truncated.len(), 1);
+        assert_eq!(truncated[0].data, "complete");
+        // An empty body yields nothing at all.
+        assert!(drain("https://x.test/stream/empty", Framing::Sse).is_empty());
     }
 }

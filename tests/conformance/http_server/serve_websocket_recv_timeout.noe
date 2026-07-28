@@ -18,6 +18,7 @@
 // expect: stdout "GET /users/42"
 // expect: stdout "DELETE /users/42"
 // expect: stdout "POST /form"
+// expect: stdout "GET /events"
 // expect: stdout "ws got first frame (closed=false)"
 // expect: stdout "ws got second frame (closed=true)"
 // expect: stdout "ws idle, and the peer is gone"

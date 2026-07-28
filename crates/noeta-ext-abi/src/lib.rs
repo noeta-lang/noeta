@@ -42,6 +42,7 @@ pub mod os;
 pub mod p2p;
 pub mod registry;
 pub mod ring1;
+pub mod stream;
 pub mod telemetry;
 
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
@@ -61,6 +62,9 @@ pub use net::{
 };
 pub use os::{ExecIo, ExecResult, Process};
 pub use p2p::{P2pBackend, P2pBroker, P2pReceiveIo};
+// The streaming-body surface (http-streaming arc). Deliberately NOT a glob: the module's own
+// `Stream`-adjacent names would collide with `host::Stream` (the stdin/stdout/stderr enum), and
+// the type here is `FrameStream` precisely so the two never have to be disambiguated.
 pub use registry::{
     ArenaGetter, AssocDerivation, AttrTarget, BundleReceiver, ClassDispatch, ConstraintArity,
     ConstraintField, ConstraintLayout, CtxTypeDispatch, EnumBacking, ExtAssocType, ExtCapability,
@@ -70,6 +74,10 @@ pub use registry::{
     NominalKind, NominalType, PackedConstraint, PackedLayoutKind, RetTy, Scalar, ScalarVec,
     SigType, TraitDispatch, TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch,
     TypedTypeDispatch, VariantValue,
+};
+pub use stream::{
+    Frame, FrameDecoder, FrameStream, Framing, SseCloseIo, SseSendIo, SseSink, StreamRecvIo,
+    Utf8Chunker,
 };
 // The Ring 1 bodies moved to `ring1` (audit-2 F8); the glob keeps every existing path
 // (`noeta_ext_abi::Arg`, `noeta_stdlib::string_method`, ...) compiling unchanged. The shared
