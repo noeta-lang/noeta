@@ -283,6 +283,10 @@ impl NativeCtx for VmCtx<'_, '_> {
         }
     }
 
+    fn bytes_of(&mut self, slot: Slot) -> CtxResult<Option<Vec<u8>>> {
+        Ok(self.get(slot)?.bytes_data())
+    }
+
     fn view(&mut self, slot: Slot) -> CtxResult<NativeValue> {
         Ok(self.get(slot)?.to_native_deep())
     }

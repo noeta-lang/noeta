@@ -169,6 +169,13 @@ impl NativeCtx for EvalCtx<'_> {
         }
     }
 
+    fn bytes_of(&mut self, slot: Slot) -> CtxResult<Option<Vec<u8>>> {
+        Ok(match self.get(slot)? {
+            Value::Bytes(b) => Some(b.as_ref().clone()),
+            _ => None,
+        })
+    }
+
     fn view(&mut self, slot: Slot) -> CtxResult<NativeValue> {
         Ok(value_to_native_deep(self.get(slot)?))
     }

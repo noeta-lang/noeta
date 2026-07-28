@@ -1886,12 +1886,18 @@ impl Checker {
             // (dispatch is by name at runtime; there is nothing static to hold the args against).
             Type::DynTrait(t) => t == bound,
             Type::Named(n, args) => {
-                let Some(impl_args) = self
-                    .symbols
-                    .user_trait_impls
-                    .get(n)
-                    .and_then(|impls| impls.get(bound))
-                else {
+                // A **native** type's impls are recorded under its qualified identity
+                // (`user_trait_impls["para.crdt.GSet"]["Mergeable"]`), while a signature names it
+                // by the short spelling its `ExtType` declares (`GSet`). Resolve through the
+                // import map on a miss, so a native type advertising a native trait satisfies the
+                // bound the same way a user type does.
+                let impls = self.symbols.user_trait_impls.get(n).or_else(|| {
+                    self.imports
+                        .extern_types
+                        .get(n)
+                        .and_then(|qualified| self.symbols.user_trait_impls.get(qualified))
+                });
+                let Some(impl_args) = impls.and_then(|impls| impls.get(bound)) else {
                     return false;
                 };
                 // An instantiated bound demands an impl at that instantiation (argument-wise,

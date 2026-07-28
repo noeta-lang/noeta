@@ -192,6 +192,16 @@ pub trait NativeCtx {
     /// `to_string` propagates as [`CtxError::Abort`] (recorded backend-side).
     fn render(&mut self, slot: Slot) -> CtxResult<String>;
 
+    /// A slot's **raw bytes**, or `None` when it is not a `bytes` value.
+    ///
+    /// [`NativeCtx::view`]'s deep projection renders bytes as a *summary string* (`"<12 bytes>"`)
+    /// so a display/JSON path can never panic on binary — right for that job, lossy for this one.
+    /// A native that genuinely needs the payload (a `Syncable` value's wire encoding, say) reads
+    /// it here instead of parsing the summary back.
+    fn bytes_of(&mut self, _slot: Slot) -> CtxResult<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     /// Marshal a slot's value into the neutral argument view (the deep projection — these are
     /// orchestration paths, never hot loops; elements that stay opaque ride as slots instead).
     /// Errs on a freed/invalid slot (dispatch misuse).
