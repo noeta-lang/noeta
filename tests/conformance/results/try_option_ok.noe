@@ -1,0 +1,21 @@
+// The positive half of the absence-position rule: `?` on an `Option` is fine wherever the enclosing
+// function can actually return `none` — a `?T` return — and at the top level and in a `dyn` context,
+// which defer like every other gradual judgment. Only a declared, concrete, non-`Option` return is
+// rejected (`try_option_return_type.noe`).
+// expect: stdout "some(6)"
+// expect: stdout "none"
+// expect: stdout "a"
+// expect: exit 0
+fn first_doubled(xs: List<int>): ?int {
+    n = xs.first()?
+    return some(n * 2)
+}
+
+// A nested `?` chain: each one short-circuits out of the same `?T` function.
+fn initial(names: List<string>): ?string {
+    return names.first()?.char_at(0)
+}
+
+echo first_doubled([3, 4])
+echo first_doubled([])
+echo initial(["ada", "grace"]) ?? "?"

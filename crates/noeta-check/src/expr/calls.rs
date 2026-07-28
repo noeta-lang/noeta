@@ -386,7 +386,8 @@ impl Checker {
     /// Unwrap the operand type of a `?` (`Expr::Try`) — the one shared judgment for synthesis and
     /// the check-mode seeding arm (poly-deferrals D1): a `Result` yields its `Ok` payload and runs
     /// the error-position `From`-conversion rule (E0057 / `try_conversion_sites`); an `Option`
-    /// yields its payload; a `dyn`/hole defers; anything else is E0012.
+    /// yields its payload and runs the absence-position rule; a `dyn`/hole defers; anything else is
+    /// E0012.
     pub(crate) fn try_unwrap(&mut self, inner: &Type, span: Span) -> Type {
         match inner {
             Type::Result(ok, err) => {
@@ -397,7 +398,10 @@ impl Checker {
                 self.check_try_error(&err, span);
                 (**ok).clone()
             }
-            Type::Option(some) => (**some).clone(),
+            Type::Option(some) => {
+                self.check_try_option(span);
+                (**some).clone()
+            }
             // A hole carries no info; `dyn` defers to runtime — both accept `?` without a
             // diagnostic, yielding the same deferred type.
             t if t.defers_to_runtime() => t.clone(),
@@ -745,10 +749,19 @@ impl Checker {
                 // `Enum.try_from(s)` → `?Enum` / `Enum.from(s)` → `Enum` — the built-in string→case
                 // conversions (PHP `tryFrom`/`from`), reserved on every enum type. Checked before the
                 // variant constructor so the names cannot be captured by a same-named variant.
+                //
+                // A **declared** method of that name wins. An `impl From<Source>` in an enum's body
+                // hoists a `from`, and the `?` conversion already resolves it there, so reserving the
+                // name unconditionally would reject the matching explicit call (`AppError.from(e)`)
+                // as "not assignable to `string`" while `?` accepted the same conversion.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
                     && (name == "try_from" || name == "from")
                     && lookup(env, tn).is_none()
                     && self.symbols.enums.contains_key(tn)
+                    && !self
+                        .symbols
+                        .methods
+                        .contains_key(&(tn.clone(), name.to_string()))
                 {
                     self.check_args(&[Type::String], 1, args, arg_exprs, span, name);
                     let ty = Type::Named(tn.clone(), Vec::new());

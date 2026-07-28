@@ -4056,8 +4056,13 @@ impl<'m> FnCompiler<'m> {
         {
             if let Some(TypeInfo::Enum { fns, .. }) = self.module.types.get(type_name) {
                 // `Enum.try_from(s)` / `Enum.from(s)` — string→case conversion (intercepted before
-                // variant construction, mirroring the checker and the tree-walker).
-                if name == "try_from" || name == "from" {
+                // variant construction, mirroring the checker and the IR interpreter).
+                //
+                // A **declared** method of that name wins: an `impl From<Source>` in the enum's body
+                // hoists a `from` the checker resolves for the `?` conversion (and for an explicit
+                // `Enum.from(e)`), so lowering it to the name-string op would type-check clean and
+                // then abort at runtime with "expects a string".
+                if (name == "try_from" || name == "from") && !fns.contains_key(name) {
                     return self.lower_enum_from_str(type_name, name == "from", args, dst, span);
                 }
                 // An associated function `Enum.f(...)` (the unified body, object-model slice 3):
