@@ -554,6 +554,46 @@ impl Checker {
         ty
     }
 
+    /// Reject a name-keyed reflection turbofish whose type is an **erased type parameter**, and
+    /// report whether it did.
+    ///
+    /// These queries are keyed on a type NAME, and a type parameter has no name at run time: generics
+    /// are erased, so one compiled body serves every instantiation and `T` is only ever the literal
+    /// three characters `T`. Nothing is registered under that key, so `field_specs_of::<T>()` inside
+    /// `fn count_of<T>()` matched nothing and returned the EMPTY schema — indistinguishable from a
+    /// real type that happens to have no fields, and with no diagnostic at all. `construct::<T>(…)`
+    /// answered `Err` the same way. That silent wrong answer is the whole reason this is an error.
+    ///
+    /// Reported as `E0058` — the code for a turbofish instantiation that cannot apply — because that
+    /// is exactly what this is: the type argument is well-formed and in scope, it simply cannot serve
+    /// this application. The alternative is always available and is what the help points at: reflect
+    /// where the type is concrete and pass the result in.
+    ///
+    /// Only the **head** is rejected, matching [`TypeRef::head_name`] — what the query actually keys
+    /// on. `field_specs_of::<List<T>>()` heads at `List`, a real type with no field schema, and keeps
+    /// its honest empty answer.
+    fn reject_erased_type_param(&mut self, ty: &TypeRef, surface: &str) -> bool {
+        let TypeRef::Named { name, args, span } = ty else {
+            return false;
+        };
+        if !args.is_empty() || !self.coloring.type_params.contains_key(name) {
+            return false;
+        }
+        self.error(
+            DiagnosticCode::InvalidTypeArguments,
+            *span,
+            format!(
+                "`{surface}` cannot reflect over the type parameter `{name}` — generics are \
+                 erased, so `{name}` names no type at run time"
+            ),
+        )
+        .help(format!(
+            "reflect where the type is concrete and pass the result in — give this function a \
+             parameter for it and let the caller supply `{surface}::<TheRealType>(…)`"
+        ));
+        true
+    }
+
     /// Check a name-keyed reflection surface's type operand (`field_specs_of`, `construct`).
     ///
     /// The **turbofish** arm carries a real `TypeRef`, so it is resolved like any other type
@@ -577,7 +617,9 @@ impl Checker {
     ) {
         let e = match operand {
             TypeOperand::Static(ty) => {
-                self.check_type_ref(ty);
+                if !self.reject_erased_type_param(ty, surface) {
+                    self.check_type_ref(ty);
+                }
                 return;
             }
             TypeOperand::Dynamic(e) => e,

@@ -259,13 +259,21 @@ pub enum DiagnosticCode {
     /// a differently-typed error out of the function. Declare `impl From<Source>` on the target
     /// error type, or align the function's declared error type.
     TryErrorMismatch,
-    /// A generic application carrying the wrong type arguments. Two sites report it: an explicit
+    /// A generic application carrying the wrong type arguments. Three sites report it: an explicit
     /// turbofish instantiation (`f::<T, ...>(args)`) that cannot apply — the callee is not a generic
     /// function (or not a function at all), or the count does not match the declared type parameters
-    /// — and a **built-in type constructor** applied at the wrong arity in a type reference
-    /// (`List<int, string>`, `Map<int>`). In both cases type arguments bind to the constructor's
-    /// parameters in order; supply exactly one per parameter, or omit `<…>` entirely and let them
-    /// infer.
+    /// —; a **built-in type constructor** applied at the wrong arity in a type reference
+    /// (`List<int, string>`, `Map<int>`); and a **name-keyed reflection turbofish**
+    /// (`field_specs_of::<T>()`, `construct::<T>(…)`, `type_name::<T>()`) whose argument is an erased
+    /// **type parameter**. In the first two cases type arguments bind to the constructor's parameters
+    /// in order; supply exactly one per parameter, or omit `<…>` entirely and let them infer.
+    ///
+    /// The reflection case is the same shape — a turbofish that cannot apply — for a reason peculiar
+    /// to erasure: those queries are keyed on a type NAME, and one compiled body serves every
+    /// instantiation, so inside `fn f<T>()` the argument `T` is only ever the literal characters `T`.
+    /// Nothing is registered under that key, and before this the query answered with the empty schema
+    /// (or an `Err`) and no diagnostic at all — a wrong answer indistinguishable from a real type with
+    /// no fields. Reflect where the type is concrete and pass the result in.
     InvalidTypeArguments,
     /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
     /// that already means something in scope — an enclosing binding, a top-level function or type,
