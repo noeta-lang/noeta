@@ -225,7 +225,15 @@ pub fn qualify_stmt_scoped(
     // "cannot be used as an attribute" error, while the one *inside* resolves to `std.test.Skip`.
     // The scoped table carries no `tier_scopes` of its own, so this substitution happens once.
     let block = match &*stmt {
-        Stmt::TierBlock { span, .. } => Some(*span),
+        Stmt::TierBlock {
+            span,
+            tier: _,
+            tier_span: _,
+            args: _,
+            items: _,
+            doc_text: _,
+            attached: _,
+        } => Some(*span),
         _ => None,
     };
     let map = block
