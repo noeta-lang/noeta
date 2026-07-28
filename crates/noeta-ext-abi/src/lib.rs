@@ -15,6 +15,14 @@
 /// so the future dynamically-loaded-extension path has a handshake to refuse a mismatch with,
 /// instead of undefined behavior through a stale `TypeId`/layout (audit-2 F10).
 ///
+/// **Bump it freely.** "Any change" means any change — an added registration field, a new capability
+/// method with a default, a new `ExtType`, not only something that stops existing code compiling.
+/// Pre-1.0 the cost of a bump is a digit, while the cost of a *missed* bump is a version number that
+/// silently under-describes the contract, which is the one thing this constant exists to prevent. Do
+/// not spend a paragraph deciding whether an addition qualifies; if you touched the contract, bump.
+/// Entries 2–5 below were written under a narrower source-break-only test and read as though the
+/// question were finely balanced — it is not.
+///
 /// **2** — [`registry::ExtFn`] gained the required `param_names` field (so a `name:` label at a
 /// call site binds against a native signature). A registration table written for ABI 1 omits it
 /// and no longer compiles; the composed build reports that as an ABI mismatch naming the package
@@ -31,11 +39,19 @@
 /// its name). A hook itself takes `&DirectiveCtx` and is unaffected, but code that *constructs* one
 /// — in practice a package's own tests — no longer compiles without it.
 ///
-/// The streaming-body surface that landed alongside it is deliberately **not** part of this bump:
-/// the new `Network` capability methods are default-provided and the new `ExtType`/`ExtEnum`
-/// registrations are additive, so nothing written for ABI 3 stops compiling. A source break is what
-/// this constant records — not every addition.
-pub const ABI_VERSION: u32 = 4;
+/// **5** — [`host::Network::net_stream_open`] returns [`stream::StreamHead`] (the stream id plus the
+/// response status/headers/url) instead of a bare `u64`, so a streamed non-2xx is observable at all.
+/// A host that *overrides* it, and an `ExternIo` that calls it through `&mut dyn Host`, both need the
+/// new type. It is deliberately not the additive shape (a separate `net_stream_status(id)` accessor
+/// with a default), because a default there would let a streaming host silently report `200` for a
+/// real `429` — the same invisible failure the change exists to remove.
+///
+/// **6** — the streaming-body surface itself, counted rather than waved through: the `Network`
+/// capability's `net_stream_*` methods, the `SseSink` send/close pair, and the `Frame`/`Framing`/
+/// `FrameStream` registrations. Every one is additive and nothing written for ABI 5 stops compiling
+/// — and under the rule above that is beside the point. They changed the contract, so they get a
+/// number. Retroactive, because they landed while the narrower test was in force.
+pub const ABI_VERSION: u32 = 6;
 
 pub mod args;
 pub mod channel;

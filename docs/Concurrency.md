@@ -254,11 +254,16 @@ Some sources produce values *over time* rather than all at once. The two in the 
 
 ```noeta
 use std.http.client
-use std.http.{Framing, Frame}
+use std.http.{Framing, Frame, HttpError}
 
-async fn tokens(body: string): void {
+// `Result<void, HttpError>` rather than `void`, because the body uses `?`: the operator early-returns
+// the failure, so the signature has to be able to carry one — see [`?` — propagate a
+// failure](Error-Handling#--propagate-a-failure).
+async fn tokens(body: string): Result<void, HttpError> {
     api = client.new("https://api.example.com")
-    stream = client.stream(api.prepare("post", "/v1/chat", body), Framing.Sse)?
+    opened = client.stream(api.prepare("post", "/v1/chat", body), Framing.Sse)?
+    // Check the head before draining the body — see below.
+    stream = opened.error_for_status()?
     mut going = true
     while going {
         next = stream.recv().await
@@ -269,8 +274,17 @@ async fn tokens(body: string): void {
             echo f.data
         }
     }
+    return Ok()
 }
 ```
+
+### The response head
+
+A streamed response has the same two halves as a buffered one — a head and a body — and only the body arrives over time. `FrameStream` therefore carries the head, readable **before** the first `recv()`: `status()`, `ok()`, `header(name)`, and the opt-in `error_for_status()` mirror the same methods on `Response`.
+
+Check it. A rate-limited provider answers a streaming request with `429` and a bare JSON error document, which is not an event stream — so `Framing.Sse` correctly cuts it into **zero** frames, and a reader that only drains cannot tell a rate limit from a model with nothing to say. The head is also where the actionable part lives: `stream.header("retry-after")` tells a backoff loop how long to wait, and a provider's `x-ratelimit-*` headers report the remaining budget.
+
+The split follows the one-shot verbs exactly. Opening a stream returns `Err` only when the request never got off the ground — a transport failure — so plain `?` keeps its single meaning, and `error_for_status()` is how a caller opts a non-2xx into the same short-circuit.
 
 A `FrameStream` is a **handle** on a single consumable body: copies alias it, and it belongs to the task that opened it. A **`Frame`, by contrast, is a value struct** — so by the rule in [Isolates and `Send`](#isolates-and-send) it is `Send`. That is deliberate rather than incidental: it lets one task own the body while others receive frames over a channel, which is the natural shape of a streaming pipeline.
 

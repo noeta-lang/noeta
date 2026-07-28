@@ -34,6 +34,21 @@ pub struct Sites {
     /// — the name here must be present for every `.{ … }`, generic or not. A pure function of the
     /// program.
     pub inferred_object_types: HashMap<Span, String>,
+    /// **Bare payload-free variant patterns**: every `match`-arm
+    /// [`Pattern::Binding`](noeta_ast::Pattern) span (top-level *or* nested) whose name the checker
+    /// resolved to a **payload-free variant of the scrutinee's own enum** → the qualifier to test
+    /// against and the variant's name. `(Some("Type"), "String")` for a bare `String` arm on a
+    /// `Type` scrutinee; `(None, "none")` for a bare `none` on an `?T`, whose built-in `Option` has
+    /// no written type name.
+    ///
+    /// A bare identifier is otherwise a binding, and resolution is **scrutinee-directed**: a name
+    /// that is not a payload-free variant of *this* scrutinee's enum, or any name when the
+    /// scrutinee's type is gradual/`dyn`/unknown, is absent here and stays a binding. Lowering
+    /// rewrites the recorded spans into `Pattern::Variant { bindings: [] }`, so both backends keep
+    /// seeing an ordinary qualified variant pattern and neither needs to know the bare form exists
+    /// — the same "checker recovers what the source elided" seam as
+    /// [`Sites::inferred_object_types`]. A pure function of the program.
+    pub variant_pattern_sites: HashMap<Span, (Option<String>, String)>,
     /// The packed-`List` construction-site map (see [`resolve_packed_list_sites`]).
     pub packed_list_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
     /// `from_bytes::<T>` spans whose packed element type `T` implements `Validate` (validation arc):
@@ -205,6 +220,8 @@ pub(crate) struct SiteMaps {
     pub(crate) construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// See [`Sites::inferred_object_types`].
     pub(crate) inferred_object_types: HashMap<Span, String>,
+    /// See [`Sites::variant_pattern_sites`].
+    pub(crate) variant_pattern_sites: HashMap<Span, (Option<String>, String)>,
     /// List-construction sites whose element type is a `@packed` struct (P-PACK Phase 2), keyed by the
     /// constructing expression's span → the element's flat [`PackedLayout`]. Both backends consult this
     /// via [`resolve_packed_list_sites`] to lay out a `List<packed>` as one contiguous raw-primitive
@@ -317,6 +334,7 @@ impl SiteMaps {
             type_of_sites: self.type_of_sites,
             construction_sites: self.construction_sites,
             inferred_object_types: self.inferred_object_types,
+            variant_pattern_sites: self.variant_pattern_sites,
             packed_list_sites: self.packed_list_sites,
             from_bytes_validated: self.from_bytes_validated,
             typed_module_call_sites: self.typed_module_call_sites,

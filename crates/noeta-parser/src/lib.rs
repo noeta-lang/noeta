@@ -2543,6 +2543,25 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `type_name::<T>()` — a type's qualified runtime identity as a `string`. Exactly
+        // `attributes_of`'s surface (keyword + turbofish + `()`), and exactly its AST discipline: `T`
+        // stays a real `TypeRef` so the linker's namespace rewrite reaches it, and only IR lowering
+        // resolves it to a name. That is the whole feature — flattening it to a string here would
+        // put it beyond qualification and hand back the *unqualified* name, which is the bug
+        // `field_specs_of::<T>()` had.
+        //
+        // There is deliberately no `type_name(expr)` surface: a runtime-string form would be the
+        // identity function on its argument.
+        let type_name = just(T::TypeNameKw)
+            .ignore_then(just(T::ColonColon))
+            .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+            .then_ignore(just(T::LParen))
+            .then_ignore(just(T::RParen))
+            .map_with(move |ty, e| Expr::TypeName {
+                ty,
+                span: ctx.to_span(e.span()),
+            });
+
         // `type_of(value)` — the runtime reflection query. A keyword + parenthesized operand (like a
         // call surface), yielding the value's `Type` descriptor.
         let type_of = just(T::TypeOfKw)
@@ -2835,7 +2854,9 @@ where
             closure,
             if_then_else,
             match_,
-            attributes_of,
+            // One choice-tuple slot for the two keyword+turbofish+`()` queries (the tuple is at
+            // its arity cap): identical surface shape, disjoint keywords.
+            attributes_of.or(type_name),
             // One choice-tuple slot for the two value-reflection queries (the tuple is at its
             // arity cap): same surface shape, disjoint keywords.
             type_of.or(fields_of).or(traits_of),
@@ -5838,6 +5859,13 @@ mod tests {
         // `attributes_of::<T>()` — a keyword + turbofish type argument + `()` — parses to a
         // dedicated reflection node carrying the attribute type.
         insta::assert_snapshot!(pretty("x = attributes_of::<Route>();"));
+    }
+
+    #[test]
+    fn type_name_parses() {
+        // `type_name::<T>()` — `attributes_of`'s surface exactly — parses to a dedicated node that
+        // keeps `T` as a real TYPE (not a string), so the linker's namespace rewrite reaches it.
+        insta::assert_snapshot!(pretty("x = type_name::<Todo>();"));
     }
 
     #[test]

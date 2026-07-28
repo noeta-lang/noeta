@@ -565,6 +565,7 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
         Expr::Ident { .. }
         | Expr::NativeFnRef { .. }
         | Expr::AttributesOf { .. }
+        | Expr::TypeName { .. }
         | Expr::RolesOf { .. }
         | Expr::Str { .. }
         | Expr::Int { .. }
@@ -900,7 +901,10 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_expr(expr, visit);
             q_typeref(ty, visit);
         }
-        Expr::AttributesOf { ty, .. } => q_typeref(ty, visit),
+        // `attributes_of::<T>()` and `type_name::<T>()` both hold a real type reference, and both
+        // qualify here. For `type_name` that rewrite IS the feature: the string it yields is the
+        // *qualified* identity precisely because the type survives to lowering as a type.
+        Expr::AttributesOf { ty, .. } | Expr::TypeName { ty, .. } => q_typeref(ty, visit),
         Expr::FromBytes { ty, blob, .. } => {
             q_typeref(ty, visit);
             q_expr(blob, visit);
@@ -914,12 +918,27 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_typeref(ty, visit);
             args.iter_mut().for_each(|a| q_expr(&mut a.value, visit));
         }
+        // The explicitly-instantiated call of a user generic function. Its **callee** is a name held
+        // inline (not an `Expr::Ident` sub-expression), so it has to be visited here explicitly — the
+        // plain `f(args)` form reaches the very same rewrite through `Expr::Call`'s callee. Missing
+        // it made `gen::<T>(x)` under a `namespace` an E0005 while `gen(x)` resolved, i.e. every
+        // generic function unusable with an explicit turbofish in any namespaced module. It is a
+        // `NameKind::Value` for the same reason the plain callee is: after qualification a function
+        // is bound under its qualified name, exactly like a type used as a value.
         Expr::TypedCall {
-            type_args, args, ..
+            name,
+            name_span,
+            type_args,
+            args,
+            ..
         } => {
+            visit(name, NameKind::Value, Some(*name_span));
             type_args.iter_mut().for_each(|t| q_typeref(t, visit));
             args.iter_mut().for_each(|a| q_expr(&mut a.value, visit));
         }
+        // The method form needs no such visit: a method name is resolved against its receiver's type
+        // (never namespace-qualified), and the receiver — including a bare type name spelling an
+        // associated call, `Box2.pick::<T>(x)` — is a real sub-expression already walked above.
         Expr::TypedMethodCall {
             recv,
             type_args,
@@ -1462,6 +1481,68 @@ mod tests {
             panic!("construct")
         };
         assert!(matches!(name.dynamic(), Some(Expr::Str { value, .. }) if value == "Todo"));
+    }
+
+    /// `type_name::<T>()` qualifies its type — which IS the feature, since the string it lowers to
+    /// is `TypeRef::head_name` of exactly this rewritten reference. A `type_name` desugared to a
+    /// string in the parser would answer with the bare `Todo` and defeat its own purpose.
+    #[test]
+    fn type_name_qualifies_its_type() {
+        let m = map(&[("Todo", "app.storage.Todo")]);
+        let mut stmts = parse_one("n = type_name::<Todo>();\n");
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        let Stmt::Binding { value, .. } = &stmts[0] else {
+            panic!("binding")
+        };
+        let Expr::TypeName { ty, .. } = value else {
+            panic!("type_name")
+        };
+        assert!(matches!(ty, TypeRef::Named { name, .. } if name == "app.storage.Todo"));
+        assert_eq!(ty.head_name(), "app.storage.Todo");
+    }
+
+    /// An explicitly instantiated generic call qualifies its **callee**, and `referenced_names`
+    /// (the same walk, read-only) reports it — so the linker drags the callee's declaration in.
+    ///
+    /// Regression: `Expr::TypedCall` holds its callee as an inline `String`, not as an `Expr::Ident`
+    /// sub-expression, and the walk visited only its type arguments and its arguments. `gen(1)`
+    /// therefore resolved under a `namespace` while `gen::<Todo>(2)` was an E0005 in the same
+    /// module — every generic function unusable with an explicit turbofish.
+    #[test]
+    fn typed_call_callee_qualifies() {
+        let m = map(&[("gen", "app.storage.gen"), ("Todo", "app.storage.Todo")]);
+        let mut stmts = parse_one("b = gen::<Todo>(2);\n");
+        assert!(referenced_names(&stmts[0]).contains("gen"));
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        let Stmt::Binding { value, .. } = &stmts[0] else {
+            panic!("binding")
+        };
+        let Expr::TypedCall {
+            name, type_args, ..
+        } = value
+        else {
+            panic!("typed call")
+        };
+        assert_eq!(name, "app.storage.gen");
+        assert!(matches!(&type_args[0], TypeRef::Named { name, .. } if name == "app.storage.Todo"));
+    }
+
+    /// A **local** of the callee's name suppresses nothing that the plain call form would keep: the
+    /// callee is a `NameKind::Value`, so it follows exactly the `Expr::Call` callee's rules. Pinned
+    /// so the new visit cannot drift into rewriting a shadowed handle.
+    #[test]
+    fn typed_call_callee_respects_a_local_handle() {
+        let m = handles(&[("gen", "app.storage.gen")]);
+        let mut stmts = parse_one("fn f(gen: int): int {\n \x20 return gen::<int>(2);\n}\n");
+        let before = stmts.clone();
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        assert_eq!(before, stmts, "a local binding must suppress the rewrite");
     }
 
     /// A native `use` handle is α-renamed to its canonical identity wherever it is *used as a

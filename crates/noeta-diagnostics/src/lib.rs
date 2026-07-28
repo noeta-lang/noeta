@@ -259,13 +259,21 @@ pub enum DiagnosticCode {
     /// a differently-typed error out of the function. Declare `impl From<Source>` on the target
     /// error type, or align the function's declared error type.
     TryErrorMismatch,
-    /// A generic application carrying the wrong type arguments. Two sites report it: an explicit
+    /// A generic application carrying the wrong type arguments. Three sites report it: an explicit
     /// turbofish instantiation (`f::<T, ...>(args)`) that cannot apply — the callee is not a generic
     /// function (or not a function at all), or the count does not match the declared type parameters
-    /// — and a **built-in type constructor** applied at the wrong arity in a type reference
-    /// (`List<int, string>`, `Map<int>`). In both cases type arguments bind to the constructor's
-    /// parameters in order; supply exactly one per parameter, or omit `<…>` entirely and let them
-    /// infer.
+    /// —; a **built-in type constructor** applied at the wrong arity in a type reference
+    /// (`List<int, string>`, `Map<int>`); and a **name-keyed reflection turbofish**
+    /// (`field_specs_of::<T>()`, `construct::<T>(…)`, `type_name::<T>()`) whose argument is an erased
+    /// **type parameter**. In the first two cases type arguments bind to the constructor's parameters
+    /// in order; supply exactly one per parameter, or omit `<…>` entirely and let them infer.
+    ///
+    /// The reflection case is the same shape — a turbofish that cannot apply — for a reason peculiar
+    /// to erasure: those queries are keyed on a type NAME, and one compiled body serves every
+    /// instantiation, so inside `fn f<T>()` the argument `T` is only ever the literal characters `T`.
+    /// Nothing is registered under that key, and before this the query answered with the empty schema
+    /// (or an `Err`) and no diagnostic at all — a wrong answer indistinguishable from a real type with
+    /// no fields. Reflect where the type is concrete and pass the result in.
     InvalidTypeArguments,
     /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
     /// that already means something in scope — an enclosing binding, a top-level function or type,
@@ -335,17 +343,33 @@ pub enum DiagnosticCode {
     /// the text looks wrong. Dead code the author did not intend is never the intent, so it is
     /// rejected outright — move the catch-all last, or delete the unreachable arm.
     UnreachableMatchArm,
-    /// A bare-identifier `match` pattern whose name is a **payload-free variant** of the scrutinee's
-    /// own enum — `String => …` where the scrutinee is a `Type` declaring `String;`. Pattern
-    /// resolution is deliberately uniform: a bare identifier always *binds*, so this arm matches
-    /// every value instead of the variant the name so plainly reads as.
+    // `E0067` (`VariantShadowedByBinding`) is **retired**. It reported a bare-identifier pattern
+    // naming a payload-free variant of the scrutinee's own enum (`String => …` on a `Type`
+    // declaring `String;`), back when a bare identifier always bound. That spelling now *resolves*
+    // to the variant, so what the code reported is the meaning — there is nothing left to report.
+    // The number stays burned: code assignments are append-only and permanent, so E0067 is never
+    // reused for anything else.
+    /// The bytecode backend could not compile a program the type checker accepted — an **internal
+    /// invariant break**, not a mistake in the source.
     ///
-    /// A payload-carrying variant is call-shaped (`Type.List(inner)`, `some(x)`) and therefore
-    /// unambiguous; only the payload-free case collides with the binding form, and only there is the
-    /// qualified spelling (`Type.String`) mandatory. Reported even on the *first* arm, where nothing
-    /// is yet unreachable — a lone `String => …` on a `Type` scrutinee is already the whole bug.
-    /// Its sibling [`Self::UnreachableMatchArm`] covers the arms such a pattern silently swallows.
-    VariantShadowedByBinding,
+    /// It is in the catalog for one reason: so it can be *rendered*. The compiler covers the whole
+    /// language and the differential oracle holds it there, so this should never reach a user; when
+    /// it did, it arrived as a bare `internal error: the VM cannot compile this program: <reason>`
+    /// with no file and no line, which is indistinguishable from a broken toolchain and cost two
+    /// agents real time. Going through the ordinary renderer puts the offending construct under a
+    /// caret, which turns "the compiler is broken" into "this one expression is". No conformance
+    /// case expects it, and none should: a program that produces it is a bug to fix here.
+    InternalCompilerError,
+    /// A `?` propagated an `Err` all the way **out of the top level** — the failure had nowhere left
+    /// to go, so the program aborts with the error's `message()` and a non-zero exit.
+    ///
+    /// The runtime half of the `?` position rule ([`Self::InvalidTry`] is the static half). Inside a
+    /// function with a *declared* return type the checker rejects the `?` outright; top-level code and
+    /// a `dyn`/inferred return have no declared return to check, so the judgement lands here instead
+    /// of being discarded. Before this existed, `client.get(url)?` at the top level (or in a `void`
+    /// function called from it) printed nothing after the `?`, produced no diagnostic, and **exited
+    /// 0** — a broken program CI reported as green.
+    UnhandledError,
 }
 
 impl DiagnosticCode {
@@ -418,7 +442,8 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidStringEscape,
         DiagnosticCode::ImpossibleTypeTest,
         DiagnosticCode::UnreachableMatchArm,
-        DiagnosticCode::VariantShadowedByBinding,
+        DiagnosticCode::InternalCompilerError,
+        DiagnosticCode::UnhandledError,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -491,7 +516,9 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidStringEscape => "E0064",
             DiagnosticCode::ImpossibleTypeTest => "E0065",
             DiagnosticCode::UnreachableMatchArm => "E0066",
-            DiagnosticCode::VariantShadowedByBinding => "E0067",
+            // "E0067" is retired (see the enum) and deliberately skipped — never reassigned.
+            DiagnosticCode::InternalCompilerError => "E0068",
+            DiagnosticCode::UnhandledError => "E0069",
         }
     }
 
@@ -596,6 +623,23 @@ impl Diagnostic {
     pub fn label(&mut self, span: Span, message: impl Into<String>) -> &mut Diagnostic {
         self.labels.push(Label::new(span, message));
         self
+    }
+
+    /// The [`DiagnosticCode::UnhandledError`] abort: a `?` propagated an `Err` out of the top level,
+    /// so the program stops here with the error's own `message()`. Composed in the catalog rather
+    /// than at either runtime because **both** backends raise it — the differential oracle compares
+    /// diagnostics verbatim, so a single builder is what keeps the two from wording it differently.
+    pub fn unhandled_error(span: Span, message: &str) -> Diagnostic {
+        Diagnostic::error(
+            DiagnosticCode::UnhandledError,
+            span,
+            format!("unhandled error: {message}"),
+        )
+        .with_help(
+            "this `?` has no `Result` to early-return into, so the failure stops here instead of \
+             being discarded — handle it with `match` / `??`, or move the work into a function that \
+             returns `Result<T, E>` and decide at its call site",
+        )
     }
 }
 

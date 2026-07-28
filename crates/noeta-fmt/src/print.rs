@@ -2229,6 +2229,12 @@ impl Printer<'_> {
                 self.type_ref(ty)?,
                 Doc::text(">()"),
             ]),
+            // Turbofish only — there is no call form to resugar into, by design.
+            Expr::TypeName { ty, .. } => Doc::concat([
+                Doc::text("type_name::<"),
+                self.type_ref(ty)?,
+                Doc::text(">()"),
+            ]),
             Expr::TypeOf { value, .. } => {
                 Doc::concat([Doc::text("type_of("), self.expr(value)?, Doc::text(")")])
             }

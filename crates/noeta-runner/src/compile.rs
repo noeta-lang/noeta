@@ -46,6 +46,27 @@ pub enum CompileFailure {
 }
 
 impl CompileFailure {
+    /// A bytecode-backend [`Unsupported`](noeta_compiler::Unsupported) as a reportable failure.
+    ///
+    /// When the compiler knew where it stopped, this is a real diagnostic rendered against real
+    /// source — the same `ariadne` output a type error gets, with the offending construct under a
+    /// caret. That is the whole point: before it, an internal invariant break arrived as one line
+    /// of prose with no file and no line, which reads as a broken toolchain rather than as one
+    /// expression in one function. A span-less `Unsupported` still degrades to that line, which is
+    /// the honest rendering when there is nothing to point at.
+    pub fn from_unsupported(
+        sources: &SourceMap,
+        unsupported: &noeta_compiler::Unsupported,
+    ) -> CompileFailure {
+        match unsupported.diagnostic() {
+            Some(diagnostic) => CompileFailure::Diagnostics {
+                sources: sources.clone(),
+                diagnostics: vec![diagnostic],
+            },
+            None => CompileFailure::Message(unsupported.to_string()),
+        }
+    }
+
     /// The failure as renderable text plus its process exit code — for front-ends that replay
     /// failures over a wire (the DAP's `output` events, MCP tool results) instead of printing.
     pub fn to_text(&self) -> (String, u8) {
@@ -91,10 +112,15 @@ pub fn resolve_providers(
 /// then IR → bytecode. Every program that parses and type-checks compiles to bytecode (the
 /// differential holds the VM at 100% coverage by construction), so an `Err` here is an internal
 /// invariant break, surfaced rather than silently downgraded.
+///
+/// The `Err` is the compiler's own [`Unsupported`](noeta_compiler::Unsupported), **not** a
+/// pre-rendered string: it carries the span, and a caller holding the program's [`SourceMap`] turns
+/// it into a real diagnostic with [`CompileFailure::from_unsupported`]. A caller with no source map
+/// falls back to `to_string()`, which is the old one-line rendering.
 pub fn compile_real(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
-) -> Result<noeta_bytecode::Module, String> {
+) -> Result<noeta_bytecode::Module, noeta_compiler::Unsupported> {
     noeta_compiler::compile_with_sites(
         program,
         checked.sites.clone(),
@@ -104,12 +130,6 @@ pub fn compile_real(
         // A production compile — no debug info (the debugger's `noeta dap` compiles with debug = true).
         false,
     )
-    .map_err(|u| {
-        format!(
-            "internal error: the VM cannot compile this program: {}",
-            u.reason
-        )
-    })
 }
 
 /// The resolved **selection facts** for an entry — everything the front-end decides from manifests
@@ -341,7 +361,9 @@ pub fn compile_whole_file_with(
     }
     let module = match compile_real(&loaded.program, &checked) {
         Ok(module) => Arc::new(module),
-        Err(err) => return Err(CompileFailure::Message(err)),
+        // The source map is already in hand here — nothing to thread — so the run path renders an
+        // internal compile failure exactly like a type error.
+        Err(u) => return Err(CompileFailure::from_unsupported(&loaded.sources, &u)),
     };
     let sources = loaded.sources;
 
@@ -508,6 +530,42 @@ mod tests {
             "a --target selection must re-resolve (and here fail: no manifest declares `dev`)"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An internal compile failure must land in front of the user the way a type error does:
+    /// against real source, with the offending construct under a caret. Before the span it was one
+    /// line of prose with no file and no line — indistinguishable from a broken toolchain, which is
+    /// exactly how it was (mis)read.
+    #[test]
+    fn a_located_internal_failure_renders_against_real_source() {
+        use noeta_span::{Source, SourceId};
+
+        let text = "enum Shape { Circle(int); }\nx = Shape.Circle\n";
+        let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, "main.noe", text)]);
+        let at = text
+            .find("Shape.Circle")
+            .expect("the construct is in the source") as u32;
+        let unsupported = noeta_compiler::Unsupported {
+            reason: "`Shape.Circle` is a data-carrying variant used without arguments".to_string(),
+            span: Some(noeta_span::Span::new_in(SourceId::FIRST, at, at + 12)),
+        };
+        let (text, code) = CompileFailure::from_unsupported(&sources, &unsupported).to_text();
+        assert_eq!(code, 1);
+        assert!(text.contains("E0068"), "carries its catalog code: {text}");
+        assert!(text.contains("main.noe"), "names the file: {text}");
+        assert!(text.contains("Shape.Circle"), "shows the source: {text}");
+
+        // With no span there is nothing to point at, and the honest rendering is the one sentence.
+        let bare = noeta_compiler::Unsupported {
+            reason: "something".to_string(),
+            span: None,
+        };
+        let (text, code) = CompileFailure::from_unsupported(&sources, &bare).to_text();
+        assert_eq!(code, 1);
+        assert_eq!(
+            text,
+            "noeta: internal error: the VM cannot compile this program: something\n"
+        );
     }
 
     #[test]

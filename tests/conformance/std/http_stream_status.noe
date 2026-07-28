@@ -1,0 +1,79 @@
+// A streamed response has a **head**, and it is readable before a single frame is (http-streaming
+// arc).
+//
+// This is the failure the surface exists for. A rate-limited provider answers a streaming request
+// with `429` and a bare JSON error document — not an event stream. The SSE decoder is right to cut
+// that into **zero** frames (a frame dispatches on a blank line, and there are no `data:` fields at
+// all), so before `status()` a rate limit and a model with nothing to say were the same observation:
+// an empty stream. The sandbox scripts exactly that at `/stream/error`.
+//
+// Three things are pinned:
+//
+//   - `status()`/`ok()`/`header()` answer from the opening handshake, with **no** `recv()` first. An
+//     API where you had to consume a frame to learn the request failed would be a quieter version of
+//     the same bug — and on this body there is no frame to consume.
+//   - The actionable part of a 429 survives: `retry-after` is a header, which is why the head
+//     carries headers and not only the status.
+//   - `error_for_status()` is the opt-in door, exactly as on `Response`: plain `?` on `stream(...)`
+//     still means "the request never got off the ground", and a caller who wants a status to
+//     short-circuit spells it. Its `Err` is an `HttpError` of kind `status`, not `protocol` — the
+//     response was perfectly readable HTTP.
+//
+// A 2xx stream keeps answering the same questions, so the head is not a failure-only path.
+// expect: stdout "error head: 429 ok=false retry-after=30"
+// expect: stdout "frames decoded from that body: 0"
+// expect: stdout "error_for_status: status retryable=false / status request to `https://svc.test/stream/error`: the server answered with status 429"
+// expect: stdout "good head: 200 ok=true content-type=text/event-stream"
+// expect: stdout "error_for_status on a 2xx returns the stream: 200"
+// expect: exit 0
+use std.http.client
+use std.http.Framing
+use std.http.HttpError
+
+// `Result<void, HttpError>`, not `void`: the `?`s on the opens early-return a transport failure, so the
+// signature has to be able to carry one (E0012 otherwise). It is the same distinction the case is
+// about — `?` means "never got off the ground", a status is an ordinary answer — now visible in the
+// signature instead of discarded.
+async fn run(): Result<void, HttpError> {
+    api = client.new("https://svc.test")
+
+    // A streamed rate limit. Opening SUCCEEDS — a status is an answer, not a transport failure — so
+    // `?` here does not fire, and everything below is read off the head.
+    limited = client.stream(api.prepare("get", "/stream/error"), Framing.Sse)?
+    retry = limited.header("retry-after") ?? "none"
+    echo "error head: ${limited.status()} ok=${limited.ok()} retry-after=${retry}"
+
+    // …and the body really is invisible to an SSE reader. This is the observation that used to be
+    // the ONLY one available.
+    mut frames = 0
+    mut more = true
+    while more {
+        next = limited.recv().await
+        if next == none {
+            more = false
+        } else {
+            frames = frames + 1
+        }
+    }
+    echo "frames decoded from that body: ${frames}"
+
+    // The opt-in door. A fresh stream, because the one above is drained.
+    again = client.stream(api.prepare("get", "/stream/error"), Framing.Sse)?
+    echo match again.error_for_status() {
+        Ok(_) => "error_for_status: unexpectedly ok",
+        Err(e) => "error_for_status: ${e.kind()} retryable=${e.retryable()} / ${e.message()}",
+    }
+    again.close()
+
+    // The same questions on a healthy stream.
+    good = client.stream(api.prepare("get", "/stream/sse"), Framing.Sse)?
+    ct = good.header("content-type") ?? "none"
+    echo "good head: ${good.status()} ok=${good.ok()} content-type=${ct}"
+    echo match good.error_for_status() {
+        Ok(s) => "error_for_status on a 2xx returns the stream: ${s.status()}",
+        Err(_) => "error_for_status on a 2xx unexpectedly failed",
+    }
+    good.close()
+    return Ok()
+}
+run().await?

@@ -101,7 +101,7 @@ struct ConfigError {
 
 ## `?` — propagate a failure
 
-On a `Result` or `Option`, the postfix `?` unwraps the success value, or **early-returns** the `Err`/`none` from the enclosing function. Using `?` on any other type is E0012. When the propagated `Err`'s type differs from the function's declared error type, `?` converts it through a declared `From` conversion — see [Converting errors at `?`](#converting-errors-at---impl-fromsource).
+On a `Result` or `Option`, the postfix `?` unwraps the success value, or **early-returns** the `Err`/`none` from the enclosing function. Using `?` on any other type is E0012, and so is using it where the early return has nowhere to go — see [The enclosing function has to be able to return what `?` returns](#the-enclosing-function-has-to-be-able-to-return-what--returns). When the propagated `Err`'s type differs from the function's declared error type, `?` converts it through a declared `From` conversion — see [Converting errors at `?`](#converting-errors-at---impl-fromsource).
 
 ```noeta ignore
 use std.id.{next_id}
@@ -135,13 +135,47 @@ echo first_doubled([3, 4])   // some(6)
 echo first_doubled([])       // none
 ```
 
-**The enclosing function has to be able to return that `none`.** A `?` on an `Option` inside a function declared to return anything other than `?T` is **E0012** — the operator early-returns, so the return type must carry what it returns. Supply a value with `??` instead, or match the `Option` and return your own `Err`. A `dyn` or unannotated return (top level, an inferred closure) defers to the runtime, as everywhere in the gradual checker.
+### The enclosing function has to be able to return what `?` returns
+
+`?` is an early return, so the signature must carry what it returns — one rule, applied to whichever half you used:
+
+| `?` on | Needs a return of | Otherwise |
+|---|---|---|
+| an `Option` (it early-returns `none`) | `?T` | **E0012** |
+| a `Result` (it early-returns the `Err`) | `Result<T, E>` | **E0012** |
 
 ```noeta error
 fn head(xs: List<string>): string {
     return xs.first()?   // E0012: `?` on an `Option` early-returns `none`, but this returns `string`
 }
 echo head([])
+```
+
+```noeta error
+use std.http.client
+fn fetch(url: string): void {
+    r = client.get(url)?   // E0012: `?` on a `Result` early-returns its `Err`, but this returns `void`
+    echo r.status()
+}
+fetch("https://example.com")
+```
+
+The fix is whichever of these fits the caller you have in mind:
+
+- **Declare the return.** `?T` for the absence, `Result<T, E>` for the failure — and if the propagated `Err` type differs from `E`, [convert it through `From`](#converting-errors-at---impl-fromsource).
+- **Handle it here.** `match` the `Option`/`Result` and answer with a value of your own, or supply a fallback with [`??`](#--coalesce).
+
+A return type that **defers** — `dyn`, an unannotated closure, or top-level code, which declares no return at all — accepts `?` without a diagnostic, as everywhere in the gradual checker. The judgement then lands at runtime instead of being discarded:
+
+- An `Err` that propagates all the way **out of the top level** aborts the program with the error's `message()` and a **non-zero exit** (**E0069**). Output produced before it is kept and nothing after it runs, exactly as [`panic`](#panic-and-assert) behaves. So a top-level `?` is a legitimate shape for a script's entry point — "do the work, and let a failure stop the program loudly" — and a broken run can never be mistaken for a clean one.
+- A `none` reaching the top is not a failure and ends the program normally.
+
+```noeta ignore
+use std.http.client
+// No declared return at the top level, so `?` is accepted here. A transport failure aborts with
+// E0069 and the error's message rather than exiting 0 in silence.
+r = client.get("https://api.example.com/health")?
+echo r.status()
 ```
 
 ## Converting errors at `?` — `impl From<Source>`
@@ -203,6 +237,7 @@ For genuinely unrecoverable states:
 
 - `panic(msg)` aborts the program (recorded as E0010) with a nonzero exit; output produced before it is kept.
 - `assert(cond)` / `assert(cond, msg)` checks a condition and panics if it is false. It is the basis of the [test runner](Testing); the message is materialized only on failure.
+- An unhandled `Err` reaching the top level is the *third* way a program aborts (E0069, above) — the difference is that nobody wrote it: it is where an ordinary recoverable failure ends up when no frame handled it.
 
 ```noeta
 balance = 5
@@ -215,7 +250,8 @@ assert(balance >= 0, "balance went negative")
 |---|---|
 | A value might be missing | `?T` (`some`/`none`) |
 | An operation might fail, and the caller should decide | `Result<T, E>` |
-| Thread a failure up several call frames | `?` |
+| Thread a failure up several call frames | `?` (the frames in between declare `Result<T, E>`) |
+| Let a failure stop a script, loudly | `?` at the top level (aborts with the error's message, non-zero exit) |
 | Supply a default for a missing value | `??` |
 | A bug / impossible state | `panic` / `assert` |
 

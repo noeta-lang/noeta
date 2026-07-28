@@ -1,0 +1,47 @@
+// The two halves of bare-identifier pattern resolution, each seen through the diagnostic it now
+// produces. A bare name is the scrutinee's own payload-free variant when one of that name exists,
+// and a plain binding otherwise — so the *same* spelling means different things against different
+// scrutinees, and each meaning is checkable.
+//
+// `lone`   — `String` IS a `Type` case, so it covers that case and nothing else: the `match` is
+//            non-exhaustive (E0011), naming exactly the cases left over. Under the old always-binds
+//            rule this arm matched every value and the report was E0067 — retired, because what it
+//            reported is now the meaning.
+// `stray`  — `Missing` is not a `Type` case, so it stays a binding: irrefutable, and the arm below
+//            it is dead (E0066). Resolution never widens to names the scrutinee's enum lacks.
+// `opaque` — resolution is scrutinee-directed. A `dyn` value has no enum to resolve against, so
+//            even `Bool`, which IS a `Type` case, is a plain binding here and closes the match.
+// expect: error E0011 at 26:12
+// expect: error E0066 at 34:9
+// expect: error E0066 at 41:9
+// expect: exit 1
+enum Type {
+    String;
+    Int;
+    Bool;
+    List(inner: string);
+}
+
+fn lone(ty: Type): string {
+    return match ty {
+        String => "string",
+    }
+}
+
+fn stray(ty: Type): string {
+    return match ty {
+        Missing => "?",
+        Type.Int => "int",
+    }
+}
+
+fn opaque(d: dyn): string {
+    return match d {
+        Bool => "bool",
+        Type.Int => "int",
+    }
+}
+
+echo lone(Type.String)
+echo stray(Type.Int)
+echo opaque(Type.Bool)

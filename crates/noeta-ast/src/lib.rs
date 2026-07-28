@@ -1723,6 +1723,22 @@ pub enum Expr {
     /// manifest that returns the materialized `#[T(...)]` attributes (each as a real `T` struct
     /// paired with its annotated target). `ty` is the attribute type between the angle brackets.
     AttributesOf { ty: TypeRef, span: Span },
+    /// The reflection query `type_name::<T>()` — a type's **qualified runtime identity** as a
+    /// `string` (`"app.storage.Todo"`). The same name [`Expr::TypeOf`] reports for a value of that
+    /// type, and the same key the name-keyed registries ([`Expr::FieldSpecsOf`], [`Expr::Construct`],
+    /// [`Expr::Invoke`]) are stored under — so it is the compile-checked way to *write* that key.
+    ///
+    /// `ty` stays a real [`TypeRef`] all the way to lowering, which resolves it with
+    /// [`TypeRef::head_name`]. That is the whole point: namespace qualification runs in the linker
+    /// and rewrites type references, so the name this yields follows a `namespace`, a `use … as`
+    /// alias, and a rename — none of which a hand-written string literal does. Flattening it to a
+    /// string in the parser would put it beyond that rewrite, which is exactly the bug
+    /// `field_specs_of::<T>()` had.
+    ///
+    /// Turbofish only, with no dynamic string surface: `type_name(s)` would be the identity function
+    /// on `s`. An unresolvable `T` is an `E0013`; an erased type *parameter* is an `E0058`, since a
+    /// parameter has no name at run time.
+    TypeName { ty: TypeRef, span: Span },
     /// The reflection query `type_of(value)` — the runtime [`Type`] descriptor of a value. At this
     /// fidelity (B) it is the **head constructor** (`type_of([1])` is `List(Dyn)`, generics erased);
     /// the compile-time full-fidelity path rides the same `Expr` (P2.3). `value` is the operand.
@@ -2198,6 +2214,7 @@ impl Expr {
             | Expr::Coalesce { span, .. }
             | Expr::As { span, .. }
             | Expr::AttributesOf { span, .. }
+            | Expr::TypeName { span, .. }
             | Expr::TypeOf { span, .. }
             | Expr::FieldsOf { span, .. }
             | Expr::TraitsOf { span, .. }
@@ -2241,6 +2258,7 @@ impl Expr {
             | Expr::F64 { .. }
             | Expr::Bool { .. }
             | Expr::AttributesOf { .. }
+            | Expr::TypeName { .. }
             | Expr::RolesOf { .. } => false,
             Expr::Ident { name: n, .. } => n == name,
             Expr::Unary { operand, .. } => operand.mentions(name),
@@ -2360,6 +2378,7 @@ impl Expr {
             | Expr::Bool { .. }
             | Expr::Ident { .. }
             | Expr::AttributesOf { .. }
+            | Expr::TypeName { .. }
             | Expr::RolesOf { .. }
             // A closure is a separate callable: its own `.await`s are not this level's (they are
             // E0040 unless the closure is itself async, which builtins' callbacks are not).

@@ -10,18 +10,69 @@
 //! so the deterministic sandbox and the real reqwest-backed host cut bytes with the identical
 //! decoder and the differential holds by construction.
 
-use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
+use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, Scalar, SigType};
 use noeta_ext_abi::stream::{
-    FRAME_STREAM_TYPE_NAME, FRAME_TYPE_NAME, SSE_SINK_TYPE_NAME, frame_from_value, sse_comment_wire,
+    FRAME_STREAM_TYPE_NAME, FRAME_TYPE_NAME, FrameStream, SSE_SINK_TYPE_NAME, frame_from_value,
+    sse_comment_wire,
 };
 use noeta_ext_abi::{
-    CtxError, CtxOut, ErrorKind, NativeCtx, NativeValue, Slot, StdError, ctx_arity,
+    CtxError, CtxOut, ErrorKind, Host, NativeCtx, NativeValue, Slot, StdError, ctx_arity,
 };
 
 /// The `Frame` value-struct signature, named once.
 pub(crate) const FRAME_SIG: SigType = SigType::Named(FRAME_TYPE_NAME);
 /// `?Frame` — what a `recv` resolves to (`none` = the body ended).
 const OPT_FRAME: SigType = SigType::Option(&FRAME_SIG);
+/// The open reader, for the `error_for_status` result.
+const FRAME_STREAM_SIG: SigType = SigType::Named(FRAME_STREAM_TYPE_NAME);
+/// `Result<FrameStream, HttpError>` — `error_for_status`'s return, the `Response` twin.
+const FRAME_STREAM_RESULT: SigType = SigType::Result(
+    &FRAME_STREAM_SIG,
+    &SigType::Named(noeta_ext_abi::net::HTTP_ERROR_TYPE_NAME),
+);
+
+/// `FrameStream`'s **head** methods — the `Response` accessor surface restricted to what a streamed
+/// response can answer without its body.
+///
+/// Plain methods rather than ctx ones, and that is the point of the split: reading the status is a
+/// pure read off the handle, so it needs no executor, no `await`, and above all no `recv()`. An API
+/// where you had to consume a frame to discover the request failed would be a quieter version of
+/// the bug this surface exists to fix — a streamed `429` whose body is a JSON document decodes to
+/// zero SSE frames, so the "consume one and see" answer is silence.
+pub const FRAME_STREAM_METHODS: &[ExtFn] = &[
+    ExtFn {
+        param_names: &[],
+        name: "status",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Int),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "ok",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Bool),
+    },
+    // The headers are carried, not only the status, because on the failure this surface is named
+    // for the actionable payload is a header and not the body: a 429's `retry-after` (and a
+    // provider's `x-ratelimit-*` budget) is what a backoff loop needs, and the body it would
+    // otherwise have to parse is exactly the part an SSE reader cannot see. The head is already in
+    // hand at open, so exposing it costs one field and no round trip.
+    ExtFn {
+        param_names: &["name"],
+        name: "header",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Option(&SigType::String)),
+    },
+    // The opt-in status-as-error door, identical in shape and reasoning to `Response`'s: a status
+    // is an answer, not a transport failure, so `?` on `stream(...)` keeps meaning "the request
+    // never got off the ground" and a caller who wants a 429 to short-circuit spells it.
+    ExtFn {
+        param_names: &[],
+        name: "error_for_status",
+        params: &[],
+        ret: RetTy::Concrete(FRAME_STREAM_RESULT),
+    },
+];
 
 /// `FrameStream`'s ctx methods: `recv` returns a `Future<?Frame>` the reader awaits (`none` once
 /// the body ends), `close` releases the connection early.
@@ -39,6 +90,59 @@ pub const FRAME_STREAM_CTX_METHODS: &[ExtFn] = &[
         ret: RetTy::Concrete(SigType::Unit),
     },
 ];
+
+/// `FrameStream`'s head-method dispatch — pure reads off the receiver, no host touched.
+pub fn frame_stream_method_dispatch(
+    recv: &mut dyn noeta_ext_abi::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(stream) = recv.as_any().downcast_ref::<FrameStream>() else {
+        return Err(noeta_ext_abi::type_error(method, FRAME_STREAM_TYPE_NAME));
+    };
+    match method {
+        "status" => {
+            noeta_ext_abi::args::want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Int(i64::from(stream.status))))
+        }
+        "ok" => {
+            noeta_ext_abi::args::want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(stream.is_ok())))
+        }
+        "header" => {
+            noeta_ext_abi::args::want_arity(method, args, 1)?;
+            let name = noeta_ext_abi::args::want_str(method, args, 0)?;
+            Ok(match stream.header_value(name) {
+                Some(value) => NativeOut::Some(Box::new(NativeOut::Str(value.to_string()))),
+                None => NativeOut::None,
+            })
+        }
+        "error_for_status" => {
+            noeta_ext_abi::args::want_arity(method, args, 0)?;
+            // The same `Status` kind `Response.error_for_status` produces, for the same reason: a
+            // non-2xx is not `Protocol` (the response was perfectly readable HTTP), and sharing the
+            // kinds would make `kind() == "protocol"` fire for every opted-in rate limit.
+            Ok(if stream.is_ok() {
+                NativeOut::Ok(Box::new(NativeOut::Extern(crate::ExternBox::new(
+                    stream.clone(),
+                ))))
+            } else {
+                NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(
+                    noeta_ext_abi::NetError::new(
+                        noeta_ext_abi::NetErrorKind::Status,
+                        stream.url.clone(),
+                        format!("the server answered with status {}", stream.status),
+                    ),
+                ))))
+            })
+        }
+        _ => Err(noeta_ext_abi::no_method_error(
+            FRAME_STREAM_TYPE_NAME,
+            method,
+        )),
+    }
+}
 
 /// `SseSink`'s ctx methods. All three are driven to completion rather than returning a future: a
 /// frame write is a short push onto an already-open connection, exactly like `Socket.send`, and

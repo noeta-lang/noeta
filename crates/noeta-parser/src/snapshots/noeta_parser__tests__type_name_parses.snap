@@ -1,0 +1,7 @@
+---
+source: crates/noeta-parser/src/lib.rs
+expression: "pretty(\"x = type_name::<Todo>();\")"
+---
+(program @0..24
+  (binding x @0..24
+    (type_name Todo @4..23)))

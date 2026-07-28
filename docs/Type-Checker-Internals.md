@@ -56,6 +56,7 @@ Because the arm is checked against the whole expression's expected type, a misma
 |---|---|
 | Non-exhaustive `match` | E0011 |
 | `?` on a non-fallible value | E0012 |
+| `?` whose early return does not fit the declared return (`Option` → `?T`, `Result` → `Result<T, E>`) | E0012 |
 | Arithmetic type mismatch | E0007 |
 | Unknown trait / invalid impl | E0014 / E0015 |
 | Unknown type | E0013 |

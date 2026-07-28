@@ -44,9 +44,14 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
             }
             result.exit_code
         }
-        Err(err) => {
-            eprintln!("noeta: {err}");
-            1
+        // An internal compile failure renders like any other diagnostic when the compiler knew
+        // where it stopped — the source map is right here.
+        Err(u) => {
+            let (text, code) =
+                noeta_runner::CompileFailure::from_unsupported(&loaded.sources, &u).to_text();
+            eprint!("{text}");
+            let _ = io::stderr().flush();
+            i32::from(code)
         }
     }
 }
@@ -64,7 +69,7 @@ pub(crate) fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
     args: Vec<String>,
-) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), String> {
+) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), noeta_compiler::Unsupported> {
     let (result, trace, _) = run_module_real_host(
         std::sync::Arc::new(compile_real(program, checked)?),
         args,

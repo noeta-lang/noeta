@@ -1,0 +1,69 @@
+// A bare identifier in a `match` arm resolves to a **payload-free variant of the scrutinee's own
+// enum** when one of that name exists, and is a binding otherwise. That puts the short spelling on
+// the form that is unambiguous once the scrutinee is typed — the reverse of the old rule, where the
+// call-shaped `List(inner)` needed no qualification but the payload-free `String` did.
+//
+// `describe` pins that a bare case matches ONLY its own case: `Bool` falls through to the `_`.
+// `full` pins the consequence for exhaustiveness — every case named, none of them qualified, no
+// `_` needed. `show` pins the built-in `Option`: `none` is the correct bare spelling of its
+// payload-free case, so it resolves and the arms may be written in either order (the old rule made
+// `none` a catch-all, so this ordering silently swallowed the `some` arm). `nested` pins that an
+// inner pattern resolves against the FIELD's type, not the outer scrutinee's.
+// expect: stdout "string"
+// expect: stdout "int"
+// expect: stdout "other"
+// expect: stdout "l:x"
+// expect: stdout "empty"
+// expect: stdout "some 3"
+// expect: stdout "ok-empty"
+// expect: stdout "ok 7"
+// expect: stdout "err bad"
+// expect: exit 0
+enum Type {
+    String;
+    Int;
+    Bool;
+    List(inner: string);
+}
+
+fn describe(ty: Type): string {
+    return match ty {
+        String => "string",
+        Int => "int",
+        _ => "other",
+    }
+}
+
+fn full(ty: Type): string {
+    return match ty {
+        String => "s",
+        Int => "i",
+        Bool => "b",
+        List(item) => "l:${item}",
+    }
+}
+
+fn show(o: ?int): string {
+    return match o {
+        none => "empty",
+        some(n) => "some ${n}",
+    }
+}
+
+fn nested(r: Result<?int, string>): string {
+    return match r {
+        Ok(none) => "ok-empty",
+        Ok(some(v)) => "ok ${v}",
+        Err(e) => "err ${e}",
+    }
+}
+
+echo describe(Type.String)
+echo describe(Type.Int)
+echo describe(Type.Bool)
+echo full(Type.List("x"))
+echo show(none)
+echo show(some(3))
+echo nested(Ok(none))
+echo nested(Ok(some(7)))
+echo nested(Err("bad"))

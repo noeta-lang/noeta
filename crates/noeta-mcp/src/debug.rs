@@ -518,11 +518,9 @@ fn compile_debug(entry: &Entry, real_isolates: bool) -> Result<Compiled, String>
 
     let (module, session) =
         noeta_compiler::compile_with_sites_session(&program, checked.sites, real_isolates, true)
-            .map_err(|u| {
-                format!(
-                    "internal error: the VM cannot compile this program: {}\n",
-                    u.reason
-                )
+            .map_err(|u| match u.diagnostic() {
+                Some(diagnostic) => render_mapped(&sources, std::iter::once(&diagnostic)),
+                None => format!("{u}\n"),
             })?;
     Ok(Compiled {
         module,

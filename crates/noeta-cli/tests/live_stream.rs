@@ -212,14 +212,21 @@ fn client_stream_reads_a_real_body_arriving_in_pieces() {
             r#"use std.http.client
 use std.http.Framing
 use std.http.Frame
+use std.http.HttpError
 
 fn blank(): Frame {{
     return Frame {{ event: "", data: "", id: "", retry: none }}
 }}
 
-async fn run(): void {{
+// `Result<void, HttpError>`, not `void`: the `?` below early-returns a failed open, so the signature
+// has to be able to carry one (E0012). It also makes this fixture fail LOUDLY — a failed connection to
+// the stub server aborts with the transport message and a non-zero exit instead of producing an empty
+// stdout that only the `assert_eq!` below would notice.
+async fn run(): Result<void, HttpError> {{
     api = client.new("http://127.0.0.1:{port}")
     stream = client.stream(api.prepare("get", "/events"), Framing.Sse)?
+    // The head, straight off the real handshake and before any frame is consumed.
+    echo "head ${{stream.status()}} ${{stream.ok()}} ${{stream.header("content-type") ?? "none"}}"
     mut going = true
     while going {{
         next = stream.recv().await
@@ -231,8 +238,9 @@ async fn run(): void {{
         }}
     }}
     echo "done"
+    return Ok()
 }}
-run().await
+run().await?
 "#
         ),
     )
@@ -250,9 +258,93 @@ run().await
     // `Hello` proves the frame split across two writes reassembled, and that the CRLF split
     // between writes counted as ONE line ending — treating the lone `\r` as a terminator would
     // have dispatched the frame early as `He`.
-    let expected = "[token] Hello\n[] world\n[] [DONE]\ndone\n";
+    let expected = "head 200 true text/event-stream\n[token] Hello\n[] world\n[] [DONE]\ndone\n";
     assert_eq!(
         stdout, expected,
         "incremental read mismatch (stderr: {stderr})"
+    );
+}
+
+/// A **non-2xx** streamed response over a real socket — the failure `FrameStream.status()` exists
+/// for, on the path where it actually bites.
+///
+/// The server answers `429` with a bare JSON error document and a `retry-after`, which is what a
+/// rate-limited provider really sends. It is not an event stream, so the SSE decoder cuts it into
+/// **zero** frames — correctly. Before the head was carried, that made a rate limit and a model
+/// with nothing to say the same observation, and the sandbox alone cannot prove the real host reads
+/// the status off a live reqwest response.
+#[test]
+#[ignore = "binds a real socket and runs the CLI; run explicitly"]
+fn client_stream_reads_the_head_of_a_real_rate_limited_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the stub server");
+    let port = listener.local_addr().expect("addr").port();
+
+    let body = r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#;
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 1024];
+        let _ = socket.read(&mut buf);
+        let head = format!(
+            "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\n\
+             retry-after: 30\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = socket.write_all(head.as_bytes());
+        let _ = socket.write_all(body.as_bytes());
+        let _ = socket.flush();
+    });
+
+    let dir = scratch("status");
+    let program = dir.join("status.noe");
+    std::fs::write(
+        &program,
+        format!(
+            r#"use std.http.client
+use std.http.Framing
+use std.http.HttpError
+
+// `Result<void, HttpError>`, not `void`: the `?` below early-returns a failed open, so the signature
+// has to be able to carry one (E0012) — and a fixture that could not connect at all now aborts with
+// the transport message instead of quietly printing nothing.
+async fn run(): Result<void, HttpError> {{
+    api = client.new("http://127.0.0.1:{port}")
+    // Opening SUCCEEDS: a status is an answer, not a transport failure, so `?` does not fire.
+    stream = client.stream(api.prepare("post", "/v1/chat", "hi"), Framing.Sse)?
+    echo "status ${{stream.status()}} ok=${{stream.ok()}} retry=${{stream.header("retry-after") ?? "none"}}"
+    mut frames = 0
+    mut going = true
+    while going {{
+        next = stream.recv().await
+        if next == none {{
+            going = false
+        }} else {{
+            frames = frames + 1
+        }}
+    }}
+    echo "frames ${{frames}}"
+    echo match stream.error_for_status() {{
+        Ok(_) => "error_for_status: unexpectedly ok",
+        Err(e) => "error_for_status ${{e.kind()}}",
+    }}
+    return Ok()
+}}
+run().await?
+"#
+        ),
+    )
+    .expect("write the fixture program");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_noeta"))
+        .args(["run", program.to_str().unwrap()])
+        .output()
+        .expect("run the streaming client");
+    let _ = server.join();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout, "status 429 ok=false retry=30\nframes 0\nerror_for_status status\n",
+        "the real host must report the streamed response head (stderr: {stderr})"
     );
 }

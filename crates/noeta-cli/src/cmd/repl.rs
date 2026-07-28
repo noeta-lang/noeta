@@ -80,10 +80,14 @@ pub(crate) fn repl_bootstrap(
     ) {
         Ok(pair) => pair,
         Err(u) => {
-            eprintln!(
-                "noeta: internal error: the VM cannot compile this program: {}",
-                u.reason
-            );
+            // A located internal failure renders like any other diagnostic; a span-less one keeps
+            // the one-line form (`Unsupported`'s `Display`).
+            match u.diagnostic() {
+                Some(diagnostic) => {
+                    emit_diagnostics_mapped(&loaded.sources, std::iter::once(&diagnostic))
+                }
+                None => eprintln!("noeta: {u}"),
+            }
             return Err(ExitCode::FAILURE);
         }
     };

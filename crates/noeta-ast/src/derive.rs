@@ -766,7 +766,7 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
             f(ty);
             visit_expr_types(blob, f);
         }
-        Expr::AttributesOf { ty, .. } => f(ty),
+        Expr::AttributesOf { ty, .. } | Expr::TypeName { ty, .. } => f(ty),
         Expr::RolesOf { ty, .. } => {
             if let Some(ty) = ty {
                 f(ty);

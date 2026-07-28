@@ -879,6 +879,7 @@ impl Resolver {
             | Expr::IntN { .. }
             | Expr::Bool { .. }
             | Expr::AttributesOf { .. }
+            | Expr::TypeName { .. }
             | Expr::RolesOf { .. } => {}
         }
     }

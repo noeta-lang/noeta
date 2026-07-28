@@ -2244,6 +2244,29 @@ impl Interpreter {
         })
     }
 
+    /// How an **unhandled** `Err` payload describes itself for the E0069 abort: a `string` payload as
+    /// itself, an `Error`-implementing payload through its `message()`, anything else through its
+    /// ordinary display — so the abort always names what went wrong, whatever was put in the `Err`.
+    ///
+    /// The `Error` test is the shared trait-membership table (the same one `is dyn Error` consults,
+    /// carrying declared `impl`s, `@derive`s, and native ABI declarations), so it agrees with "would
+    /// a `message()` call resolve" by construction and the VM's twin decides identically.
+    pub(crate) fn unhandled_error_message(&mut self, payload: Value, span: Span) -> Eval<String> {
+        if let Value::Str(s) = &payload {
+            return Ok(s.clone());
+        }
+        let implements_error = crate::value_nominal_name(&payload)
+            .is_some_and(|name| self.reflection.type_implements(&name, "Error"));
+        if !implements_error {
+            return Ok(payload.display());
+        }
+        let rendered = self.call_method(payload, "message", vec![], span)?;
+        Ok(match rendered {
+            Value::Str(s) => s,
+            other => other.display(),
+        })
+    }
+
     /// In-place list `set` for a marked self-update `xs = xs.set(i, v)` (the `xs[i] = v` desugaring).
     /// The receiver was moved out of its binding by the caller; when uniquely owned its slot `i` is
     /// overwritten in place (the displaced element destroyed now, matching copy-and-reassign), else it

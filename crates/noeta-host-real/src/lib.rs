@@ -738,19 +738,25 @@ impl Network for RealHost {
     // --- Streaming bodies (http-streaming arc) ---
 
     /// Open a real incremental body. Blocks only until the response **head** is in, so a transport
-    /// failure is still the `Err` arm of `stream(...)`; the body then flows on the stream's own
-    /// thread (see [`stream`] for why it needs one).
+    /// failure is still the `Err` arm of `stream(...)` and the status/headers the server answered
+    /// with come back with the id; the body then flows on the stream's own thread (see [`stream`]
+    /// for why it needs one).
     #[cfg(feature = "ring-http-client")]
     fn net_stream_open(
         &mut self,
         request: NetRequest,
         framing: noeta_stdlib::stream::Framing,
-    ) -> Result<u64, NetError> {
-        let opened = stream::open(self.http.clone(), request, framing)?;
+    ) -> Result<noeta_stdlib::stream::StreamHead, NetError> {
+        let (opened, head) = stream::open(self.http.clone(), request, framing)?;
         let id = self.next_stream;
         self.next_stream += 1;
         self.streams.lock().unwrap().insert(id, opened);
-        Ok(id)
+        Ok(noeta_stdlib::stream::StreamHead {
+            stream: id,
+            status: head.status,
+            headers: head.headers,
+            url: head.url,
+        })
     }
 
     /// A genuine incremental read: the descriptor blocks on the stream's frame channel on the

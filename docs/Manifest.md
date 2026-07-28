@@ -127,6 +127,12 @@ acme = [
 ]
 ```
 
+That relation only runs one way: several packages may share one root, but **one package may not be
+bound under two roots**. A package has one identity and its modules re-root to one segment, so a
+second key could only be dropped — and a dropped key is a manifest that lies, with `use <that
+key>.…` failing later as "no module". Two keys naming one identity are refused at resolve time,
+naming both.
+
 ## `[patch]` — dev-time path overrides
 
 Point a package identity at a local source tree while you develop it, without editing any

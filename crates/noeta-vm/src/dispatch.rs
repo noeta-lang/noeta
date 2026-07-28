@@ -2435,6 +2435,27 @@ impl<'m> Vm<'m> {
                             // `Err(_)`/`none`: early-return the whole value from this frame, exactly
                             // as `Op::Return` does (the M0 `Unwind::Return`).
                             Some(TryOutcome::Empty) => {
+                                // An `Err` propagating out of the outermost run's BOTTOM frame is
+                                // top-level code: there is no caller to hand it to, and no declared
+                                // return type the checker could have rejected the `?` against (E0012
+                                // covers every declared return). Unwinding here used to end the
+                                // program *quietly at exit 0* — a `client.get(url)?` transport
+                                // failure was completely invisible and CI went green on a broken
+                                // program. Abort with the error's own message instead (E0069); the
+                                // teardown in `Vm::run` reclaims this frame, exactly as `Op::Panic`'s
+                                // does. The tree-walker's `eval_try_ir` mirrors this on an empty
+                                // `call_sites`, so the differential holds. `none` is untouched: an
+                                // absence reaching the top is not a failure.
+                                if self.run_depth == 1
+                                    && frames.len() == 1
+                                    && let Some(payload) = crate::values::result_err_payload(v)
+                                {
+                                    let message = self.unhandled_error_message(payload, *span)?;
+                                    self.out
+                                        .diagnostics
+                                        .push(Diagnostic::unhandled_error(*span, &message));
+                                    return Err(Abort);
+                                }
                                 retain(v);
                                 // Drop the frame locals this `?` abandons before unwinding (Phase 4.2c) —
                                 // destructor-relevant ones fire `destruct`, in the drop pass's order. Each

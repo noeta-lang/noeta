@@ -374,6 +374,7 @@ impl Walker<'_> {
             | Expr::Bool { .. }
             | Expr::Ident { .. }
             | Expr::AttributesOf { .. }
+            | Expr::TypeName { .. }
             | Expr::RolesOf { .. } => {}
         }
     }

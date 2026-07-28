@@ -16,6 +16,7 @@
 use std.http.client
 use std.http.Framing
 use std.http.Frame
+use std.http.HttpError
 
 fn blank(): Frame {
     return Frame { event: "", data: "", id: "", retry: none }
@@ -23,7 +24,12 @@ fn blank(): Frame {
 
 // Read a whole body, rendering each frame's payload as `[payload] ` — so an empty frame is
 // visible as `[]` rather than vanishing into a separator.
-async fn drain(path: string, framing: Framing): string {
+//
+// `Result<string, HttpError>`, not `string`: the `?` on the open early-returns a transport failure,
+// and a function that returns a bare `string` has nowhere to put one (E0012). The declaration is also
+// the honest signature — "the drained body, or why it could not be read" — and it keeps a failed open
+// from reaching the caller as an empty drain.
+async fn drain(path: string, framing: Framing): Result<string, HttpError> {
     api = client.new("https://svc.test")
     stream = client.stream(api.prepare("get", path), framing)?
     mut out = ""
@@ -37,14 +43,16 @@ async fn drain(path: string, framing: Framing): string {
             out = "${out}[${f.data}] "
         }
     }
-    return out
+    return Ok(out)
 }
 
-async fn run(): void {
-    echo "ndjson: ${drain("/stream/ndjson", Framing.Ndjson).await}"
+async fn run(): Result<void, HttpError> {
+    ndjson = drain("/stream/ndjson", Framing.Ndjson).await?
+    echo "ndjson: ${ndjson}"
 
     // The blank line survives as an empty frame here, and is dropped by `Ndjson` above.
-    echo "lines: ${drain("/stream/lines", Framing.Lines).await}"
+    lines = drain("/stream/lines", Framing.Lines).await?
+    echo "lines: ${lines}"
 
     // A line-oriented framing populates only `data`.
     api = client.new("https://svc.test")
@@ -53,5 +61,6 @@ async fn run(): void {
     echo "an ndjson frame carries no event and no id: ${f.event == "" && f.id == ""}"
     // Abandoning the rest of the body deliberately: `close` releases it without draining.
     stream.close()
+    return Ok()
 }
-run().await
+run().await?

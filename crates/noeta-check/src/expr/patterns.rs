@@ -8,9 +8,11 @@ use crate::*;
 /// identifier — which is exactly why it needs naming here.
 const NONE_PATTERN: &str = "none";
 
-/// The E0066 help for the one prelude pattern that is irrefutable *and* reads as a case test.
-const NONE_ARM_HELP: &str = "`none` in pattern position is a bare binding — it matches every \
-                             value, so it has to come last; put the `some(…)` arm first";
+/// The E0066 help for a bare `none` arm that did **not** resolve to the Option case: the scrutinee
+/// is not an option, so the name is an ordinary binding and matches every value.
+const NONE_ARM_HELP: &str = "`none` resolves to the Option case only against an `?T` scrutinee; \
+                             this one is not an option, so `none` here is a plain binding — it \
+                             matches every value and has to come last";
 
 impl Checker {
     /// Type a `match` in *synthesis* position — no expectation reaches the arms, so each arm body
@@ -59,7 +61,7 @@ impl Checker {
             _ => None,
         };
         let mut result = Type::Unknown;
-        // The arm sequence's own soundness (E0066/E0067), threaded through the loop so it reports in
+        // The arm sequence's own soundness (E0066), threaded through the loop so it reports in
         // source order alongside each arm's body diagnostics. `catch_all` is the first unguarded
         // irrefutable arm seen so far — everything after it is dead.
         let mut catch_all: Option<(String, Span)> = None;
@@ -156,46 +158,32 @@ impl Checker {
         result
     }
 
-    /// One arm's **reachability** (E0066) and **variant-shadowing** (E0067) check, folded over the
-    /// arm list: `catch_all` carries the first unguarded irrefutable arm seen so far (its rendered
-    /// pattern text and span), so every later arm is provably dead.
+    /// One arm's **reachability** check (E0066), folded over the arm list: `catch_all` carries the
+    /// first unguarded irrefutable arm seen so far (its rendered pattern text and span), so every
+    /// later arm is provably dead.
     ///
-    /// Irrefutability here is deliberately syntactic — a `_` wildcard or a bare-identifier
-    /// [`Pattern::Binding`], unguarded. Both compile to *no test at all* in either backend (the
-    /// binding form merely names the scrutinee), so nothing downstream can rescue a later arm. A
-    /// guard makes an arm refutable (the checker cannot prove a guard ever true), and every other
-    /// pattern form emits a test.
-    ///
-    /// The two diagnostics are exclusive, most-specific-first: an already-dead arm is E0066 (with
-    /// the qualified spelling folded into its help when the dead pattern is *also* a shadowed
-    /// variant), and only a still-live arm is E0067. So each faulty arm produces exactly one
-    /// diagnostic naming the one thing to fix.
+    /// Irrefutability is a `_` wildcard or an unguarded bare-identifier [`Pattern::Binding`] that
+    /// did **not** resolve to a payload-free variant of the scrutinee's own enum
+    /// ([`Self::payload_free_variant`]) — a resolved one is a case test like any other variant
+    /// pattern and leaves the arms after it live. Both irrefutable forms compile to *no test at all*
+    /// in either backend (the binding form merely names the scrutinee), so nothing downstream can
+    /// rescue a later arm. A guard makes an arm refutable (the checker cannot prove a guard ever
+    /// true), and every other pattern form emits a test.
     fn check_arm_reachability(
         &mut self,
         arm: &MatchArm,
         scrut: &Type,
         catch_all: &mut Option<(String, Span)>,
     ) {
-        // The variant a bare-identifier pattern silently shadows, if any — the fact that turns
-        // "unreachable arm" from a puzzle into an instruction.
-        let shadowed = match &arm.pattern {
-            Pattern::Binding { name, .. } => self
-                .shadowed_payload_free_variant(scrut, name)
-                .map(|qualified| (name.clone(), qualified)),
-            _ => None,
-        };
         if let Some((catch_text, catch_span)) = catch_all.clone() {
-            let help = match &shadowed {
-                Some((name, qualified)) => format!(
-                    "`{name}` here is a binding, not the variant `{qualified}` — write it \
-                     qualified as `{qualified}` so it matches only that case"
-                ),
-                // A bare `none` reads as the Option-none pattern but is a binding like any other,
-                // so it swallows the arms after it. Worth saying outright: the fix is ordering.
-                None if catch_text == NONE_PATTERN => NONE_ARM_HELP.to_string(),
-                None => format!(
+            let help = if catch_text == NONE_PATTERN {
+                // A bare `none` that reached catch-all status is a `none` the scrutinee's type did
+                // not resolve — the one case where the prelude spelling really is just a binding.
+                NONE_ARM_HELP.to_string()
+            } else {
+                format!(
                     "delete this arm, or move the catch-all `{catch_text}` arm to last position"
-                ),
+                )
             };
             self.error(
                 DiagnosticCode::UnreachableMatchArm,
@@ -210,26 +198,14 @@ impl Checker {
             .label(catch_span, "this pattern already matches every value…")
             .label(arm.pattern.span(), "…so this arm is never reached")
             .help(help);
-        } else if let Some((name, qualified)) = &shadowed {
-            self.error(
-                DiagnosticCode::VariantShadowedByBinding,
-                arm.pattern.span(),
-                format!(
-                    "`{name}` here binds the whole value instead of matching the variant \
-                     `{qualified}`: a bare identifier pattern is always a binding, so this arm runs \
-                     for every case"
-                ),
-            )
-            .help(format!(
-                "write the variant qualified as `{qualified}`; a payload-carrying variant is \
-                 call-shaped (`Variant(x)`) and needs no qualification, a payload-free one does"
-            ));
         }
         // Only an *unguarded* wildcard/binding closes the match — a guard leaves the case open.
         if catch_all.is_none() && arm.guard.is_none() {
             let text = match &arm.pattern {
                 Pattern::Wildcard { .. } => Some("_".to_string()),
-                Pattern::Binding { name, .. } => Some(name.clone()),
+                Pattern::Binding { name, .. } if self.is_binding_pattern(scrut, name) => {
+                    Some(name.clone())
+                }
                 _ => None,
             };
             if let Some(text) = text {
@@ -238,26 +214,49 @@ impl Checker {
         }
     }
 
-    /// The qualified spelling of the **payload-free** enum variant a bare-identifier pattern
-    /// shadows, given the scrutinee's type — `Some("Type.String")` for `String` matched against a
-    /// `Type` that declares `String;`.
+    /// Whether a bare identifier `name` really is a **binding** against this scrutinee — the
+    /// negation of [`Self::payload_free_variant`], named so the three consumers that must agree
+    /// (arm reachability, coverage, and [`Self::bind_pattern`]) read the same way.
+    fn is_binding_pattern(&self, scrut: &Type, name: &str) -> bool {
+        self.payload_free_variant(scrut, name).is_none()
+    }
+
+    /// **The one bare-identifier-pattern resolution.** The **payload-free** enum variant a bare
+    /// identifier names, given the type of the value it is matched against — `(Some("Type"),
+    /// "String")` for `String` against a `Type` that declares `String;`.
     ///
-    /// Only a *declared* enum qualifies ([`Type::Named`]): a payload-free variant is the one form
-    /// whose pattern spelling is indistinguishable from a binding, and it is the one form the
-    /// language requires to be written qualified. `Option`/`Result` are deliberately excluded —
-    /// `none` is the *correct* bare spelling of its case, so naming it here would be advice to write
-    /// something that does not exist.
-    fn shadowed_payload_free_variant(&self, scrut: &Type, name: &str) -> Option<String> {
-        let Type::Named(type_name, _) = scrut else {
-            return None;
-        };
-        let key = self.enum_type_key(type_name)?;
-        self.symbols
-            .enums
-            .get(&key)?
-            .iter()
-            .any(|v| v.name == name && v.fields.is_empty())
-            .then(|| format!("{type_name}.{name}"))
+    /// A payload-carrying variant is call-shaped (`Type.List(inner)`, `some(x)`) and so is never
+    /// ambiguous; a payload-free one spelled bare is indistinguishable *in the source* from a
+    /// binding, and this is where the ambiguity is decided: the scrutinee's own enum wins, and
+    /// everything else stays a binding. Resolution is therefore **scrutinee-directed** — a name that
+    /// belongs to some *other* enum, or any name at all when the scrutinee's type is gradual /
+    /// `dyn` / not concretely known, resolves to nothing.
+    ///
+    /// The built-in `Option` joins in on its own terms: `none` is the correct bare spelling of its
+    /// payload-free case and has no written type name, so it resolves with no qualifier (`Ok`/`Err`
+    /// and `some` all carry a payload and never reach here). That is what makes
+    /// `match o { none => …, some(v) => … }` mean what it reads as in either order.
+    pub(crate) fn payload_free_variant(
+        &self,
+        scrut: &Type,
+        name: &str,
+    ) -> Option<(Option<String>, String)> {
+        match scrut {
+            Type::Option(_) if name == NONE_PATTERN => Some((None, NONE_PATTERN.to_string())),
+            Type::Named(type_name, _) => {
+                let key = self.enum_type_key(type_name)?;
+                self.symbols
+                    .enums
+                    .get(&key)?
+                    .iter()
+                    .any(|v| v.name == name && v.fields.is_empty())
+                    // The qualifier is the name as *written* in the scrutinee's type, which is
+                    // exactly what an author would spell in `Type.Variant` — so an import alias
+                    // keeps flowing through the backends' alias resolution unchanged.
+                    .then(|| (Some(type_name.clone()), name.to_string()))
+            }
+            _ => None,
+        }
     }
 
     /// Promote a non-exhaustive `match` to a compile error (`E0011`), and record an *exhaustive*
@@ -310,13 +309,17 @@ impl Checker {
     /// unguarded arms count below. (A guarded arm followed by an irrefutable `_` is still total —
     /// the `_` covers what the guard may decline.)
     pub(crate) fn match_coverage(&self, scrut: &Type, arms: &[MatchArm]) -> MatchCoverage {
-        // A wildcard or bare binding arm catches everything — unless it is guarded.
+        // A wildcard or bare binding arm catches everything — unless it is guarded, or the bare
+        // identifier resolved to a payload-free variant of this very scrutinee's enum, in which
+        // case it is a case test and covers only that one case (counted with the variant arms
+        // below). The same judgement `check_arm_reachability` and `bind_pattern` make.
         if arms.iter().any(|a| {
             a.guard.is_none()
-                && matches!(
-                    a.pattern,
-                    Pattern::Wildcard { .. } | Pattern::Binding { .. }
-                )
+                && match &a.pattern {
+                    Pattern::Wildcard { .. } => true,
+                    Pattern::Binding { name, .. } => self.is_binding_pattern(scrut, name),
+                    _ => false,
+                }
         }) {
             return MatchCoverage::Total;
         }
@@ -361,8 +364,14 @@ impl Checker {
         };
         let covered: HashSet<&str> = arms
             .iter()
+            .filter(|a| a.guard.is_none())
             .filter_map(|a| match &a.pattern {
-                Pattern::Variant { variant, .. } if a.guard.is_none() => Some(variant.as_str()),
+                Pattern::Variant { variant, .. } => Some(variant.as_str()),
+                // A bare payload-free variant covers its case exactly as the qualified spelling
+                // does — so a `match` naming every case bare is exhaustive with no `_`.
+                Pattern::Binding { name, .. } if !self.is_binding_pattern(scrut, name) => {
+                    Some(name.as_str())
+                }
                 _ => None,
             })
             .collect();
@@ -469,10 +478,19 @@ impl Checker {
             // `is T` binds no name here — `synth_match` narrows the scrutinee identifier instead.
             | Pattern::IsType { .. } => {}
             Pattern::Binding { name, span } => {
-                // A bare `none` in pattern position reads as the Option-none case rather than a
-                // fresh binding — exempt it from the reserved-name rule so
-                // `match o { some(v) => …, none => … }` stays legal. It is still an irrefutable
-                // binding underneath, which is why an arm *after* it is E0066.
+                // **The resolution.** A bare identifier naming a payload-free variant of the value's
+                // own enum IS that variant: it binds nothing, it is refutable, and lowering rewrites
+                // this span into a `Pattern::Variant` so both backends see an ordinary case test.
+                // Recorded here rather than in `match_type` because this is the recursive walk —
+                // a nested pattern's scrutinee is the *field's* type (`Ok(none)`, a tuple element,
+                // a variant payload), and each resolves against the type it is actually matched on.
+                if let Some(resolved) = self.payload_free_variant(ty, name) {
+                    self.sites.variant_pattern_sites.insert(*span, resolved);
+                    return;
+                }
+                // A bare `none` the scrutinee did not resolve (a `dyn`/gradual value) still reads as
+                // the Option-none case, so it stays exempt from the reserved-name rule. It is an
+                // irrefutable binding underneath, which is why an arm *after* it is E0066.
                 if name != NONE_PATTERN {
                     self.check_reserved_name(name, *span);
                     // A match-pattern binding lands in the arm's just-pushed frame — any env hit
@@ -544,6 +562,19 @@ impl Checker {
             .enums
             .get(type_name)
             .is_some_and(|vs| vs.iter().any(|v| v.name == variant))
+    }
+
+    /// How many positional payload values `variant` carries, or `None` when the enum has no such
+    /// variant. `Some(0)` is the payload-free case — the distinction [`Self::is_enum_variant`]
+    /// deliberately does not make, and the one that decides whether `Type.Variant` in **value**
+    /// position is a value at all.
+    pub(crate) fn enum_variant_fields(&self, type_name: &str, variant: &str) -> Option<usize> {
+        self.symbols
+            .enums
+            .get(type_name)?
+            .iter()
+            .find(|v| v.name == variant)
+            .map(|v| v.fields.len())
     }
 
     /// Resolve a source-written enum type name to the key it occupies in `symbols.enums` — the name

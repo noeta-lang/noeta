@@ -121,6 +121,11 @@ pub fn sandbox_ws_client_frames() -> Vec<String> {
 ///   time.
 /// - `/stream/truncated` → an SSE body cut off mid-block, with no terminating blank line: the
 ///   complete frame arrives and the partial one is discarded.
+/// - `/stream/error` → what a rate-limited vendor actually answers: a bare JSON error document,
+///   served with a non-2xx head ([`sandbox_stream_head`]). It is **not** an event stream, so under
+///   [`noeta_ext_abi::stream::Framing::Sse`] it decodes to zero frames — which is precisely the
+///   failure `FrameStream.status()` exists to make visible, and why the body is scripted here
+///   rather than described in prose.
 /// - anything else → a single-frame body, so a stream against any URL still terminates.
 pub fn sandbox_stream_body(request: &NetRequest) -> String {
     match path_of(&request.url) {
@@ -137,7 +142,41 @@ pub fn sandbox_stream_body(request: &NetRequest) -> String {
         "/stream/empty" => String::new(),
         // No terminating blank line after `partial` — the truncated-body case.
         "/stream/truncated" => "data: complete\n\ndata: partial".to_string(),
+        // A vendor's rate-limit document, verbatim in the shape one arrives in: one line of JSON,
+        // no `data:` prefix, no blank line. Deliberately NOT event-stream syntax.
+        "/stream/error" => {
+            "{\"error\":{\"message\":\"rate limit exceeded\",\"type\":\"rate_limit_error\"}}"
+                .to_string()
+        }
         path => format!("data: noeta sandbox: {} {path}\n\n", request.method),
+    }
+}
+
+/// The **head** of the sandbox's scripted streaming response: the status and headers that come back
+/// with the opening handshake, before a single body byte is decoded.
+///
+/// The status grammar is [`sandbox_respond`]'s, not a second one: every path takes the status the
+/// buffered responder would have given it, so `/status/503` means the same thing streamed as it does
+/// buffered and there is one table to reason about. `/stream/error` is the single exception, and it
+/// exists to script the case the buffered grammar cannot express — a non-2xx whose body is a JSON
+/// document rather than an event stream, carrying the `retry-after` a backoff actually needs.
+pub fn sandbox_stream_head(request: &NetRequest) -> (u16, Vec<(String, String)>) {
+    let header = |name: &str, value: &str| (name.to_string(), value.to_string());
+    match path_of(&request.url) {
+        "/stream/error" => (
+            429,
+            vec![
+                header("content-type", "application/json"),
+                header("retry-after", "30"),
+            ],
+        ),
+        _ => (
+            sandbox_respond(request).status,
+            vec![header(
+                "content-type",
+                noeta_ext_abi::stream::SSE_CONTENT_TYPE,
+            )],
+        ),
     }
 }
 
@@ -303,6 +342,44 @@ mod tests {
             String::from_utf8(resp.body).unwrap(),
             r#"{"x-a":"1","x-b":"2"}"#
         );
+    }
+
+    #[test]
+    fn the_scripted_stream_head_carries_a_non_2xx_and_its_retry_hint() {
+        // The case `FrameStream.status()` exists for: a rate limit whose BODY is a JSON document,
+        // which under SSE framing decodes to nothing at all. Both halves are asserted together,
+        // because either one alone would look fine.
+        let (status, headers) = sandbox_stream_head(&get("https://x.test/stream/error"));
+        assert_eq!(status, 429);
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(header("retry-after"), Some("30"));
+        assert_eq!(header("content-type"), Some("application/json"));
+        assert_eq!(
+            crate::net::sandbox_stream_frames(
+                &get("https://x.test/stream/error"),
+                noeta_ext_abi::stream::Framing::Sse,
+            ),
+            vec![],
+            "a JSON error document is not an event stream, so SSE cuts it into zero frames"
+        );
+    }
+
+    #[test]
+    fn the_stream_head_shares_the_buffered_status_grammar() {
+        // One status table, not two: `/status/{n}` means the same thing streamed as buffered.
+        for path in ["/status/503", "/status/204", "/echo", "/anything"] {
+            let request = get(&format!("https://x.test{path}"));
+            assert_eq!(
+                sandbox_stream_head(&request).0,
+                sandbox_respond(&request).status,
+                "{path}"
+            );
+        }
     }
 
     #[test]
