@@ -634,6 +634,12 @@ pub struct TierFn {
     /// per-fn or stamped from the block's `@bench(…)` directive args). The one place a runner reads
     /// configuration from. Empty for an unannotated fn in a bare block.
     pub attrs: Vec<Attribute>,
+    /// Whether the fn is `async fn`. A runner invokes a root by **synthesizing a call** to it, and a
+    /// call to an `async fn` evaluates to a `Future` — so without this the future is constructed,
+    /// dropped, and the body never runs at all. (For `@test` that is silent and total: every
+    /// assertion in an async test passes, because none of them executes.) A runner that synthesizes
+    /// a call must `.await` it when this is set.
+    pub is_async: bool,
 }
 
 /// A text-tier block's verbatim body (`@doc { … }`, or any declared `text:` tier — slice 6f,
@@ -939,6 +945,7 @@ pub fn activate_tiers_with(
                     name: name.clone(),
                     span: method.name_span,
                     attrs: method.attrs.clone(),
+                    is_async: method.is_async,
                 });
             }
             if make_bench {
@@ -946,6 +953,7 @@ pub fn activate_tiers_with(
                     name,
                     span: method.name_span,
                     attrs: method.attrs.clone(),
+                    is_async: method.is_async,
                 });
             }
         }
@@ -1121,6 +1129,7 @@ fn resolve_block(
                             name: decl.name.clone(),
                             span: decl.name_span,
                             attrs: decl.attrs.clone(),
+                            is_async: decl.is_async,
                         });
                     }
                 }

@@ -323,6 +323,11 @@ pub(crate) struct TestCase {
     arg: CaseArg,
     /// Where the fn is declared (for the synthesized call's span).
     span: Span,
+    /// Whether the fn is `async fn`, in which case the synthesized call is `.await`ed. Calling one
+    /// without awaiting builds a `Future` and drops it, so the body never runs — and a test whose
+    /// body never runs *passes*, assertions and all. This flag is the difference between an async
+    /// test and a decorative one.
+    is_async: bool,
 }
 
 /// A test case's argument: none (an ordinary zero-arg test), a `#[Data]` row value, or an invalid
@@ -344,6 +349,7 @@ pub(crate) fn test_cases(test: &TierFn) -> Vec<TestCase> {
             display: base,
             arg: CaseArg::None,
             span: test.span,
+            is_async: test.is_async,
         }];
     };
     rows.iter()
@@ -360,6 +366,7 @@ pub(crate) fn test_cases(test: &TierFn) -> Vec<TestCase> {
                 display: format!("{base}[{}]", attr_value_label(row)),
                 arg,
                 span: test.span,
+                is_async: test.is_async,
             }
         })
         .collect()
@@ -513,6 +520,38 @@ pub(crate) fn call_root_stmt(name: &str, args: Vec<Expr>, span: Span) -> Stmt {
     }
 }
 
+/// A statement that calls a tier root, awaiting it when the root is `async fn`. A call to an async
+/// fn evaluates to a `Future`; in statement position that future is constructed and dropped, so the
+/// body never runs. For a `@test` root that is silent and total — every assertion in the body passes
+/// because none of them executes — so the `.await` here is what makes an async test a test.
+///
+/// Top-level `.await` is the ordinary spelling (the synthesized program's statements are top level),
+/// so this needs nothing from the backends beyond what `expr.await` already does.
+pub(crate) fn call_root_stmt_awaited(
+    name: &str,
+    args: Vec<Expr>,
+    span: Span,
+    is_async: bool,
+) -> Stmt {
+    if !is_async {
+        return call_root_stmt(name, args, span);
+    }
+    Stmt::Expr {
+        expr: Expr::Await {
+            expr: Box::new(Expr::Call {
+                callee: Box::new(root_ref(name, span)),
+                args: args
+                    .into_iter()
+                    .map(noeta_ast::CallArg::positional)
+                    .collect(),
+                span,
+            }),
+            span,
+        },
+        span,
+    }
+}
+
 /// A reference to a tier root by name: a bare top-level fn is an [`Expr::Ident`]; a method root
 /// `Type.method` is an [`Expr::Member`] on the bare type name (an associated-function reference /
 /// no-receiver call the compiler resolves at the site). Used both to call a root and to pass a root
@@ -612,7 +651,12 @@ pub(crate) fn run_one_test(
     };
     let display = case.display.clone();
     let mut stmts = setup.to_vec();
-    stmts.push(call_root_stmt(&case.fn_name, args, case.span));
+    stmts.push(call_root_stmt_awaited(
+        &case.fn_name,
+        args,
+        case.span,
+        case.is_async,
+    ));
     let program = Program { stmts, span };
 
     let checked = check_under(&program, editions);
