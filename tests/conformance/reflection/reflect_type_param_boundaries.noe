@@ -1,0 +1,38 @@
+// The three things the erased-type-parameter error must NOT swallow, pinned so a future tightening
+// of it fails here first.
+//
+// * A type that **really has no fields** — an empty struct, an enum — still answers the honest empty
+//   list. That is the answer the erased-`T` case was indistinguishable from, and the whole reason
+//   the erased case had to become a diagnostic rather than "return something".
+// * A **container head** (`List<T>`) is not a type parameter: the query keys on the head name, which
+//   is `List`, a real type with no field schema. Empty, and no error — the rejection matches
+//   `TypeRef::head_name` exactly, not "mentions a parameter anywhere".
+// * The **dynamic string surface** inside a generic body is untouched. Its operand is a runtime
+//   value, so the caller can hand a concrete type name in — which is precisely the workaround the
+//   error's help points at, and it must keep working.
+// expect: stdout "empty struct: 0"
+// expect: stdout "enum: 0"
+// expect: stdout "container head: 0"
+// expect: stdout "dynamic in a generic: 2"
+// expect: stdout "concrete: 2"
+// expect: exit 0
+struct Empty {}
+
+enum Color {
+    Red
+    Blue
+}
+
+struct Todo {
+    id: int
+    title: string
+}
+
+fn container_of<T>(): int { return field_specs_of::<List<T>>().len() }
+fn by_name<T>(name: string): int { return field_specs_of(name).len() }
+
+echo "empty struct: ${field_specs_of::<Empty>().len()}"
+echo "enum: ${field_specs_of::<Color>().len()}"
+echo "container head: ${container_of::<Todo>()}"
+echo "dynamic in a generic: ${by_name::<Todo>("Todo")}"
+echo "concrete: ${field_specs_of::<Todo>().len()}"

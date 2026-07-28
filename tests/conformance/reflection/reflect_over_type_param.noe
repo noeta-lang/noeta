@@ -1,0 +1,25 @@
+// Reflecting over an **erased type parameter** is an error, not a silent empty answer.
+//
+// `field_specs_of` / `construct` are keyed on a type NAME, and a type parameter has no name at run
+// time: generics are erased, so one compiled body serves every instantiation and `T` is only ever
+// the three literal characters `T`. Nothing is registered under that key, so
+// `field_specs_of::<T>()` inside `fn count_of<T>()` returned the EMPTY schema — indistinguishable
+// from a real type that happens to have no fields — while the very same
+// `field_specs_of::<Todo>()` written at the call site answered 2. A silent wrong answer, so:
+// E0058, the code for a turbofish instantiation that cannot apply.
+//
+// `construct::<T>(…)` is the same query under the same erasure, and is pinned alongside so the two
+// surfaces cannot drift apart.
+// expect: error E0058 at 16:49
+// expect: error E0058 at 18:83
+// expect: exit 1
+fn count_of<T>(): int { return field_specs_of::<T>().len() }
+
+fn build_a<T>(fields: Map<string, dyn>): Result<dyn, string> { return construct::<T>(fields) }
+
+struct Todo {
+    id: int
+    title: string
+}
+
+echo count_of::<Todo>()

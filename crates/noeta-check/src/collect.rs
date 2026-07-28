@@ -1499,6 +1499,7 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         Expr::Ident { .. }
         | Expr::NativeFnRef { .. }
         | Expr::AttributesOf { .. }
+        | Expr::TypeName { .. }
         | Expr::RolesOf { .. }
         | Expr::Str { .. }
         | Expr::Int { .. }

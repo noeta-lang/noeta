@@ -328,7 +328,7 @@
         },
         {
           "name": "keyword.other.reflection.noeta",
-          "match": "\\b(type_of|attributes_of|roles_of|fields_of|traits_of|params_of|returns_of|field_specs_of|construct|from_bytes|invoke)\\b"
+          "match": "\\b(type_of|type_name|attributes_of|roles_of|fields_of|traits_of|params_of|returns_of|field_specs_of|construct|from_bytes|invoke)\\b"
         }
       ]
     },

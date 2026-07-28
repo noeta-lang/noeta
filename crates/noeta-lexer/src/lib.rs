@@ -129,6 +129,20 @@ pub enum TokenKind {
     /// reflection surface is lexically distinct.
     #[token("type_of")]
     TypeOfKw,
+    /// The reflection keyword `type_name::<T>()` — a type's **qualified runtime identity** as a
+    /// `string` (`"app.storage.Todo"`), the same name `type_of(value)` reports and the same key the
+    /// name-keyed registries (`field_specs_of`, `construct`, `invoke`) are stored under.
+    ///
+    /// Turbofish only, and deliberately so: a `type_name(name)` taking a runtime string would be the
+    /// identity function on that string. Its whole value is that the compiler resolves the type — so
+    /// a rename, a `use … as` alias, or a `namespace` all follow the expression instead of drifting
+    /// away from a hand-written string literal.
+    ///
+    /// A keyword, like every other reflection surface, and specifically NOT contextual the way
+    /// `channel` is: `name::<T>(…)` is already the general typed-call form, so a contextual
+    /// `type_name` would be indistinguishable from a user generic function of that name.
+    #[token("type_name")]
+    TypeNameKw,
     /// The reflection keyword `fields_of(value)` — a struct/class instance's fields as
     /// `List<FieldEntry>` (`{ name: string, value: dyn }`), the value-level counterpart of
     /// `type_of` (derive layer 3). A keyword for symmetry with the other reflection surfaces.
@@ -433,6 +447,7 @@ impl TokenKind {
             TokenKind::IsKw => "IsKw",
             TokenKind::AttributesOfKw => "AttributesOfKw",
             TokenKind::TypeOfKw => "TypeOfKw",
+            TokenKind::TypeNameKw => "TypeNameKw",
             TokenKind::FieldsOfKw => "FieldsOfKw",
             TokenKind::TraitsOfKw => "TraitsOfKw",
             TokenKind::FromBytesKw => "FromBytesKw",
@@ -546,6 +561,7 @@ impl TokenKind {
             TokenKind::IsKw => "`is`",
             TokenKind::AttributesOfKw => "`attributes_of`",
             TokenKind::TypeOfKw => "`type_of`",
+            TokenKind::TypeNameKw => "`type_name`",
             TokenKind::FieldsOfKw => "`fields_of`",
             TokenKind::TraitsOfKw => "`traits_of`",
             TokenKind::FromBytesKw => "`from_bytes`",
