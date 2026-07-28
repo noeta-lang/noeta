@@ -959,10 +959,22 @@ impl Vm<'_> {
             release(rendered);
             return Ok(message);
         }
+        let type_name = payload.shape().map(|s| s.name.clone()).unwrap_or_default();
+        // A native *fielded* type (`ExtClass`) advertising `Error` keeps its `message` in the class
+        // dispatch rather than the proto table — routed here for the same reason the extern arm
+        // exists, so the trait table stays the single gate and this helper can never fall through to
+        // the wrong dispatch. No std type is in that shape today; the arm is what keeps a future one
+        // from diverging from the tree-walker, whose generic `call_method` routes it automatically.
+        // Borrows its receiver, like the extern path.
+        if self.reg().resolve_fielded(&type_name).is_some() {
+            let rendered = self.call_native_class_method(payload, "message", &[], span)?;
+            let message = rendered.as_string().unwrap_or_default();
+            release(rendered);
+            return Ok(message);
+        }
         // Retain before the consuming re-entry — `run_method_handle` releases the receiver, but the
         // payload is still owned by the enclosing `Result`.
         retain(payload);
-        let type_name = payload.shape().map(|s| s.name.clone()).unwrap_or_default();
         let rendered = self.run_method_handle(&type_name, "message", false, vec![payload], span)?;
         let message = rendered.as_string().unwrap_or_default();
         release(rendered);

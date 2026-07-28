@@ -155,6 +155,43 @@ fn try_on_result_is_clean() {
     assert!(codes(src).is_empty());
 }
 
+// ----- E0012: the `?` POSITION rule, both halves -----
+//
+// `?` is an early return, so the declared return has to carry what it returns: `?T` for an `Option`'s
+// `none`, `Result<T, E>` for a `Result`'s `Err`. The `Result` half was missing, which made
+// `fn work(): void { fallible()? }` check clean, discard the error, and exit 0.
+
+#[test]
+fn try_on_result_in_a_void_function_is_invalid() {
+    let src = "fn g(): Result<int, string> { return Err(\"no\"); }\n\
+               fn f(): void { g()?; }\n";
+    assert_eq!(codes(src), ["E0012"]);
+}
+
+#[test]
+fn try_on_result_in_a_typed_function_is_invalid() {
+    // A concrete non-`Result` return is the same rule as `void`: an `int` slot cannot hold an `Err`.
+    let src = "fn g(): Result<int, string> { return Err(\"no\"); }\n\
+               fn f(): int { return g()?; }\n";
+    assert_eq!(codes(src), ["E0012"]);
+}
+
+#[test]
+fn try_on_option_in_a_void_function_is_invalid() {
+    // The absence half, asserted beside its twin so the symmetry is visible here and not just in prose.
+    let src = "fn f(xs: List<int>): void { xs.first()?; }\n";
+    assert_eq!(codes(src), ["E0012"]);
+}
+
+#[test]
+fn try_on_result_in_a_deferring_function_still_defers() {
+    // `dyn` is the gradual escape: the checker cannot say what the early return must fit, so it does
+    // not pretend to. The judgement lands at runtime (E0069 if the `Err` reaches the top).
+    let src = "fn g(): Result<int, string> { return Err(\"no\"); }\n\
+               fn f(): dyn { return g()?; }\n";
+    assert!(codes(src).is_empty());
+}
+
 #[test]
 fn undeclared_type_annotation_is_e0013() {
     // M1.9 lit up unknown-type checking: an annotation naming nothing declared, imported, or
