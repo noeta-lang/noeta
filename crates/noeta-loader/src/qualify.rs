@@ -57,12 +57,30 @@ pub struct UnitMap {
     pub names: QMap,
     /// Local native-`use` binding name → the canonical name the linker binds it under.
     pub handles: QMap,
+    /// The **block-scoped** rewrite tables of this unit's `@<tier> { … }` blocks, keyed by the
+    /// block's own span; [`qualify_stmt_scoped`] substitutes one in when it is handed that block.
+    ///
+    /// A tier block may open with its own `use`s (`@test { use std.test.{Skip} … }`). Those bind
+    /// *inside the block only*: an active block's items are spliced to top level by tier
+    /// activation, and an inactive block is dropped whole, `use` and all. So they cannot join the
+    /// unit's own tables — a name a block imports must not rewrite a reference outside it — yet
+    /// the references inside the block still need them, and the linker is the only pass that still
+    /// knows what an import resolves to. Each entry is therefore the unit's tables *plus* one
+    /// block's imports, applied only while that block is qualified. Present only for a block that
+    /// actually has `use`s; the nested maps never nest further (a `use` sits at the top of a
+    /// block, never inside a block inside a block).
+    ///
+    /// **Top-level blocks only.** A tier block in *statement* position (nested in a function body,
+    /// loop, or branch) is code, not a file scope: a `use` inside one binds nothing, before this
+    /// table existed and after — its references are the ordinary `E0005` "cannot find … in this
+    /// scope", which is loud, so there is no silent spelling to rescue there.
+    pub tier_scopes: HashMap<noeta_span::Span, UnitMap>,
 }
 
 impl UnitMap {
     /// Whether the unit needs no rewriting at all (a non-namespaced file with no native imports).
     pub fn is_empty(&self) -> bool {
-        self.names.is_empty() && self.handles.is_empty()
+        self.names.is_empty() && self.handles.is_empty() && self.tier_scopes.is_empty()
     }
 }
 
@@ -172,6 +190,19 @@ pub fn qualify_stmt_scoped(
     outer_bound: &HashSet<String>,
     dotted_misses: &mut Vec<(String, noeta_span::Span)>,
 ) {
+    // A tier block that opens with its own `use`s is qualified against its **own** table — the
+    // unit's, plus what the block imports (see [`UnitMap::tier_scopes`]). Scoping it here rather
+    // than folding the block's imports into the unit's table is what keeps a block-scoped import
+    // block-scoped: a `Skip` outside the `@test` block still misses the map and still gets its
+    // "cannot be used as an attribute" error, while the one *inside* resolves to `std.test.Skip`.
+    // The scoped table carries no `tier_scopes` of its own, so this substitution happens once.
+    let block = match &*stmt {
+        Stmt::TierBlock { span, .. } => Some(*span),
+        _ => None,
+    };
+    let map = block
+        .and_then(|span| map.tier_scopes.get(&span))
+        .unwrap_or(map);
     // No empty-map fast path here: even with nothing to rewrite, the walk still collects dotted
     // misses — an entry with no namespace and no imports referencing `geometry.vec.Vec2` must
     // still get the missing-`use` diagnostic. (The plain `qualify_stmt` keeps the fast path.)
@@ -1180,6 +1211,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             handles: QMap::new(),
+            tier_scopes: HashMap::new(),
         }
     }
 
@@ -1191,6 +1223,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            tier_scopes: HashMap::new(),
         }
     }
 

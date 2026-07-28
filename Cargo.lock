@@ -2872,6 +2872,7 @@ version = "0.2.3"
 dependencies = [
  "noeta-diagnostics",
  "noeta-ide",
+ "noeta-parser",
  "noeta-stdlib",
  "serde",
  "serde_json",
@@ -2883,6 +2884,7 @@ dependencies = [
 name = "noeta-mcp"
 version = "0.2.3"
 dependencies = [
+ "futures-util",
  "include_dir",
  "noeta-ast",
  "noeta-bytecode",

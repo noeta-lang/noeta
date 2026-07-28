@@ -49,6 +49,9 @@ noeta-lexer = { workspace = true }
 noeta-compiler = { workspace = true }
 noeta-bytecode = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "macros"] }
+# `FutureExt::catch_unwind`: a panicking tool must become a JSON-RPC error, not a request the client
+# waits on forever (see `NoetaMcp::call_tool`).
+futures-util = { workspace = true }
 rmcp = { workspace = true }
 serde = { workspace = true }
 # Embeds the docs + example corpus (see workspace manifest note) for the M1 Ground-pillar tools.

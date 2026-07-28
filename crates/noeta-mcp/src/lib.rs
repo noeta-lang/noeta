@@ -28,9 +28,9 @@ use noeta_diagnostics::{DiagnosticCode, JsonDiagnostic, to_json};
 use noeta_span::{Source, SourceId, SourceMap};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
-    Implementation, ListResourcesResult, PaginatedRequestParams, ProtocolVersion,
-    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
-    ServerInfo,
+    CallToolRequestParams, CallToolResult, Implementation, ListResourcesResult,
+    PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResult,
+    Resource, ResourceContents, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
@@ -1000,6 +1000,29 @@ Call this whenever `check` returns a code you want to resolve."
 
 #[tool_handler]
 impl ServerHandler for NoetaMcp {
+    /// Dispatch one `tools/call`, **containing a panic in the tool** rather than letting it end the
+    /// request. `#[tool_handler]` would generate exactly this body minus the `catch_unwind`; it
+    /// skips generating one when the impl defines its own.
+    ///
+    /// A tool panic is not a hypothetical: every tool runs the compiler front end over whatever
+    /// source the agent points at. rmcp spawns each request as its own task, so a panic there does
+    /// not kill the server — but it kills the task *before* it can reply, and the client is left
+    /// waiting on a response that will never come, with nothing on the wire to say why. Turning it
+    /// into an `INTERNAL_ERROR` gives the agent something it can read, retry, or report, and leaves
+    /// the session usable. (A stack **overflow** is not an unwind and cannot be caught here — that
+    /// one is prevented up front, by sizing the runtime's threads — see
+    /// [`noeta_parser::SERVER_STACK_SIZE`] and [`run_stdio`].)
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let tool = request.name.to_string();
+        let context = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let router = Self::tool_router();
+        catching_panics(&tool, router.call(context)).await
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.protocol_version = ProtocolVersion::LATEST;
@@ -1255,10 +1278,46 @@ fn split_camel_case(name: &str) -> String {
 /// synchronous), mirroring `noeta_lsp::run_stdio` / `noeta_dap::run_stdio`.
 pub fn run_stdio() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        // Every tool runs the compiler front end on a runtime thread, and tokio's **2 MiB** default
+        // is a quarter of the stack a `main` gets — so a tool that the equivalent CLI verb runs
+        // happily aborted the *whole server* with "thread 'tokio-rt-worker' has overflowed its
+        // stack", taking the client's session down mid-request. tokio hands the same size to the
+        // blocking pool, so this covers `spawn_blocking` work too.
+        .thread_stack_size(noeta_parser::SERVER_STACK_SIZE)
         .enable_all()
         .build()
         .expect("failed to build the MCP-server tokio runtime");
     runtime.block_on(serve());
+}
+
+/// Await a tool's future, turning a **panic** into a JSON-RPC `INTERNAL_ERROR` naming the tool.
+/// Extracted from [`NoetaMcp::call_tool`] so the containment is testable on its own — the tool
+/// router is not a place a panic can be injected.
+async fn catching_panics(
+    tool: &str,
+    call: impl Future<Output = Result<CallToolResult, ErrorData>>,
+) -> Result<CallToolResult, ErrorData> {
+    match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(call)).await {
+        Ok(result) => result,
+        // `&*payload`, not `&payload`: the latter unsizes the *`Box`* to `dyn Any`, so every
+        // downcast misses and every panic renders as "non-string payload".
+        Err(payload) => Err(ErrorData::internal_error(
+            format!("the `{tool}` tool panicked: {}", panic_message(&*payload)),
+            None,
+        )),
+    }
+}
+
+/// The human-readable half of a caught panic payload (`panic!("…")` / a failed `unwrap`), or a
+/// placeholder when the payload is neither of the two standard string shapes.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
 }
 
 async fn serve() {
@@ -1321,6 +1380,43 @@ mod tests {
                 .contains("check")
         );
         assert!(info.capabilities.tools.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_panicking_tool_becomes_a_json_rpc_error() {
+        // A panic inside a tool must reach the client as an error it can read. rmcp spawns each
+        // request as its own task, so an escaping panic does not kill the server — it kills the
+        // task before it replies, leaving the client waiting forever on a response that will never
+        // come. `catching_panics` is what `call_tool` wraps every dispatch in.
+        let err = catching_panics("probe", async { panic!("boom") })
+            .await
+            .expect_err("a panicking tool must produce an error, not a hang");
+        assert!(
+            err.message.contains("`probe`") && err.message.contains("boom"),
+            "the error should name the tool and carry the panic message: {}",
+            err.message
+        );
+        // The happy path is untouched.
+        let ok = catching_panics("probe", async { Ok(CallToolResult::success(vec![])) })
+            .await
+            .expect("a well-behaved tool passes through");
+        assert!(ok.content.is_empty());
+    }
+
+    #[test]
+    fn a_panic_payload_renders_both_standard_shapes() {
+        assert_eq!(
+            panic_message(&"literal" as &(dyn std::any::Any + Send)),
+            "literal"
+        );
+        assert_eq!(
+            panic_message(&String::from("formatted") as &(dyn std::any::Any + Send)),
+            "formatted"
+        );
+        assert_eq!(
+            panic_message(&7u8 as &(dyn std::any::Any + Send)),
+            "<non-string panic payload>"
+        );
     }
 
     /// The gate fixture: drive a real MCP session (client ⇄ server over an in-memory duplex) and
