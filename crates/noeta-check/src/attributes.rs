@@ -37,7 +37,7 @@ impl Checker {
             // all keyed by this identity, so every lookup below uses `key`, not the raw name.
             // There is no global attribute namespace: even std's `#[Skip]` resolves here through
             // `use std.test`.
-            let key = self.attr_key(&attr.name);
+            let key = self.attr_key(attr.name.as_str());
             // The capability gate: only a struct marked `@attribute` may be used as `#[Foo(...)]`.
             if !self.symbols.attributes.contains(&key) {
                 self.error(
@@ -209,9 +209,9 @@ impl Checker {
                 Type::Map(Box::new(Type::String), Box::new(Type::Dyn))
             }
             AttrValue::Struct { type_name, fields } => {
-                let rec_ty = Type::Named(type_name.clone(), Vec::new());
+                let rec_ty = Type::Named(type_name.to_string(), Vec::new());
                 if self.assignable(&rec_ty, expected) {
-                    self.check_attr_struct_fields(type_name, fields, span);
+                    self.check_attr_struct_fields(type_name.as_str(), fields, span);
                     return;
                 }
                 rec_ty
@@ -221,7 +221,7 @@ impl Checker {
                 // against an `?T`/`Result<…>` field; a user enum is its nominal type.
                 "Option" => Type::Option(Box::new(Type::Dyn)),
                 "Result" => Type::Result(Box::new(Type::Dyn), Box::new(Type::Dyn)),
-                _ => Type::Named(enum_name.clone(), Vec::new()),
+                _ => Type::Named(enum_name.to_string(), Vec::new()),
             },
             // A name in attribute position is a type reference — a value of the reflection `Type`
             // enum. It must name a real type (else E0013); a `Type` value is then assignable to a
@@ -232,10 +232,10 @@ impl Checker {
                 // constructor at the wrong arity is E0058. They were previously unchecked, so
                 // `List<int, string, bogus>` in attribute position passed silently — the head name
                 // was validated and the arguments simply were not looked at.
-                self.check_type_args(name, args, span);
-                if !Type::is_builtin_name(name)
+                self.check_type_args(name.as_str(), args, span);
+                if !Type::is_builtin_name(name.as_str())
                     && !PRELUDE_TYPES.contains(&name.as_str())
-                    && !self.symbols.types.contains(name)
+                    && !self.symbols.types.contains(name.as_str())
                 {
                     self.error(
                         DiagnosticCode::UnknownType,

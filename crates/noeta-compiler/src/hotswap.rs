@@ -383,7 +383,7 @@ fn classify<'a>(stmts: &'a [Stmt], src: &'a str) -> Items<'a> {
                 // Key + body text: an edited impl body must register as a difference too, so the
                 // text rides in the target component (compared as a set).
                 items.impls.insert((
-                    decl.trait_name.clone(),
+                    decl.trait_name.to_string(),
                     format!("{} :: {}", decl.target, text(src, decl.span)),
                 ));
             }
@@ -443,7 +443,7 @@ fn compare_fn(old: &FnDecl, old_src: &str, new: &FnDecl, new_src: &str) -> FnCha
 /// change, not a body edit.
 fn fn_signature(decl: &FnDecl, src: &str) -> Vec<String> {
     let mut sig = vec![
-        decl.name.clone(),
+        decl.name.to_string(),
         decl.is_public.to_string(),
         decl.is_async.to_string(),
     ];

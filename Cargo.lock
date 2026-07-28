@@ -2443,6 +2443,7 @@ version = "0.2.3"
 dependencies = [
  "noeta-span",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

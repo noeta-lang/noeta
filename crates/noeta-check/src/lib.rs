@@ -1648,7 +1648,7 @@ impl Checker {
                     .unwrap_or(Type::Unknown);
                 bind(
                     env,
-                    &decl.name,
+                    decl.name.as_str(),
                     Type::Fn {
                         params,
                         ret: Box::new(ret),
@@ -2008,15 +2008,19 @@ impl Checker {
                 // done). Mirrors the per-arm narrowing in `synth_match`.
                 if let Expr::TypeTest { expr, ty, .. } = cond
                     && let Expr::Ident { name, .. } = expr.as_ref()
-                    && !reassigns(then_body, name)
+                    && !reassigns(then_body, name.as_str())
                     // A test that can never hold (E0065 — `x is P` on an `Option<P>`) narrows
                     // nothing: the branch is unreachable, and narrowing it to the payload is what
                     // used to let the dead code type-check.
-                    && lookup(env, name)
+                    && lookup(env, name.as_str())
                         .is_none_or(|t| self.impossible_type_test(t, ty).is_none())
                 {
                     env.push(HashMap::new());
-                    bind(env, name, from_ref_q(ty, &self.imports.extern_types));
+                    bind(
+                        env,
+                        name.as_str(),
+                        from_ref_q(ty, &self.imports.extern_types),
+                    );
                     self.check_block(then_body, env);
                     env.pop();
                 } else {
@@ -2102,46 +2106,51 @@ impl Checker {
                 }
             }
             Stmt::Fn(decl) => {
-                self.check_reserved_name(&decl.name, decl.name_span);
+                self.check_reserved_name(decl.name.as_str(), decl.name_span);
                 // A NESTED fn's name is a value binding in the enclosing body (pre-bound into the
                 // current frame by `bind_nested_fns`, hence `Enclosing` — it must not flag
                 // itself). A top-level fn (depth 1) is in `symbols.functions`, where duplicate
                 // declaration has its own rules; the statics half would self-flag it, so skip.
                 if env.len() > 1 {
-                    self.check_shadow(&decl.name, decl.name_span, env, ShadowScopes::Enclosing);
+                    self.check_shadow(
+                        decl.name.as_str(),
+                        decl.name_span,
+                        env,
+                        ShadowScopes::Enclosing,
+                    );
                 }
                 let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || decl.name.contains('.');
+                self.coloring.in_merged_decl = saved || decl.name.as_str().contains('.');
                 self.check_fn(decl, env, &[], TargetKind::Function);
                 self.coloring.in_merged_decl = saved;
             }
             Stmt::Struct(r) => {
-                self.check_reserved_name(&r.name, r.name_span);
-                self.check_reserved_type_name(&r.name, r.name_span);
+                self.check_reserved_name(r.name.as_str(), r.name_span);
+                self.check_reserved_type_name(r.name.as_str(), r.name_span);
                 let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || r.name.contains('.');
+                self.coloring.in_merged_decl = saved || r.name.as_str().contains('.');
                 self.check_struct(r, env);
                 self.coloring.in_merged_decl = saved;
             }
             Stmt::Class(c) => {
-                self.check_reserved_name(&c.name, c.name_span);
-                self.check_reserved_type_name(&c.name, c.name_span);
+                self.check_reserved_name(c.name.as_str(), c.name_span);
+                self.check_reserved_type_name(c.name.as_str(), c.name_span);
                 let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || c.name.contains('.');
+                self.coloring.in_merged_decl = saved || c.name.as_str().contains('.');
                 self.check_class(c, env);
                 self.coloring.in_merged_decl = saved;
             }
             Stmt::Enum(e) => {
-                self.check_reserved_name(&e.name, e.name_span);
-                self.check_reserved_type_name(&e.name, e.name_span);
+                self.check_reserved_name(e.name.as_str(), e.name_span);
+                self.check_reserved_type_name(e.name.as_str(), e.name_span);
                 let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || e.name.contains('.');
+                self.coloring.in_merged_decl = saved || e.name.as_str().contains('.');
                 self.check_enum(e, env);
                 self.coloring.in_merged_decl = saved;
             }
             Stmt::Impl(decl) => {
                 let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || decl.target.contains('.');
+                self.coloring.in_merged_decl = saved || decl.target.as_str().contains('.');
                 self.check_standalone_impl(decl, env);
                 self.coloring.in_merged_decl = saved;
             }
@@ -2284,7 +2293,9 @@ impl Checker {
             if target == TargetKind::Method
                 && matches!(dir.name.as_str(), "test" | "bench")
                 && let Some(ty) = self.coloring.current_type.clone()
-                && !self.receiver_of(&ty, &decl.name).allows_associated_call()
+                && !self
+                    .receiver_of(&ty, decl.name.as_str())
+                    .allows_associated_call()
             {
                 self.error(
                     DiagnosticCode::InvalidDirectiveSite,
@@ -2336,7 +2347,10 @@ impl Checker {
         // A slot set that failed the pre-pass fixpoint (polymorphic recursion through a
         // composite forward, D2a) is a clear error at the declaration — the static table cannot
         // enumerate its instantiations.
-        if self.symbols.forwarding_poisoned.contains(&decl.name)
+        if self
+            .symbols
+            .forwarding_poisoned
+            .contains(decl.name.as_str())
             && self.coloring.fn_depth == 0
             && target == TargetKind::Function
         {
@@ -2358,7 +2372,7 @@ impl Checker {
         let next_forwarding = if target == TargetKind::Function && self.coloring.fn_depth == 0 {
             self.symbols
                 .forwarding
-                .get(&decl.name)
+                .get(decl.name.as_str())
                 .map(|f| f.iter().map(|s| s.template.clone()).collect())
                 .unwrap_or_default()
         } else if target == TargetKind::Function {
@@ -2390,7 +2404,7 @@ impl Checker {
         // parameters of its own (it captures the enclosing locals instead).
         if self.coloring.fn_depth == 1 && !self.coloring.current_forwarding.is_empty() {
             self.sites.forwarding_fns.insert(
-                decl.name.clone(),
+                decl.name.to_string(),
                 self.coloring.current_forwarding.len() as u32,
             );
         }

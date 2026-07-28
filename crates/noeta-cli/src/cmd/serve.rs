@@ -252,7 +252,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         if let Some(entry) = entry {
             let sp = Span::empty_at(0);
             let ident = |name: &str| Expr::Ident {
-                name: name.to_string(),
+                name: noeta_ast::Name::canonical(name),
                 span: sp,
             };
             let callee = Expr::Member {
@@ -399,7 +399,7 @@ pub(crate) fn serve_parallel_impl(
     let hot = std::env::var_os("NOETA_HOT").is_some();
     let sp = Span::empty_at(0);
     let ident = |name: &str| Expr::Ident {
-        name: name.to_string(),
+        name: noeta_ast::Name::canonical(name),
         span: sp,
     };
     let handler = if hot {

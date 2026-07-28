@@ -51,11 +51,26 @@
 //! The **derivation** carries most of the weight, and is the part worth keeping: a field whose
 //! declared type mentions `TypeRef` must be qualified, a field whose type mentions another AST node
 //! must be recursed into, and a field of `Span`/`bool`/`i64`/… is inert — no human judgement, read
-//! straight off the declaration. Only fields whose declared type is *name-shaped* (`String`,
-//! `Option<String>`, `Vec<(String, Span)>`) are genuinely ambiguous — a `String` is a qualifiable
-//! declaration name or a local binding or literal text, and nothing but a human knows which — and
-//! **those are exactly the rows [`TABLE`] holds**, plus the handful of type-shaped fields that are
-//! deliberately not walked. Roughly 390 fields; fewer than a hundred judgements.
+//! straight off the declaration.
+//!
+//! Since the [`Name`](noeta_ast::Name) newtype landed, **the qualifiable half is derived too**. A
+//! `String` in this AST used to be a qualifiable declaration name *or* a local binding *or* a member
+//! name *or* literal text, so each one needed a hand-written [`TABLE`] row — and a row is exactly
+//! where a wrong judgement hides. Splitting the primitive moved that judgement to the declaration:
+//! whoever adds a field says which of the two it is by choosing its type, `derived_verdict` answers
+//! [`Verdict::Name`] for a `Name` with nobody's opinion involved, and a new `Name` field the walk
+//! misses fails this gate with no row written at all.
+//!
+//! What still needs a human is the residue: a `String`, which the walk must not touch — but which
+//! must not be touched for *different reasons* (a local binding, a member name, a globally-scoped
+//! tier name, literal text), and the reason is what [`Verdict::Unqualified`] records. Roughly 390
+//! fields; a few dozen judgements, all of them about names that stay put.
+//!
+//! [`the_declared_type_decides_which_names_qualify`] pins the correspondence in both directions, so
+//! neither half can drift: a row may add history to a `Name` field but never overrule its type, and
+//! a `String` classified `Name` has to appear on a short, named list of positions the walk *reaches*
+//! without rewriting (there is exactly one: a member chain's segments, visited as one dotted
+//! candidate).
 //!
 //! ## How the check is run
 //!
@@ -73,11 +88,12 @@
 //! ## What it deliberately does not do
 //!
 //! It does not check the *other* fifteen files that match on `Expr`. Their walks answer different
-//! questions (lowering, formatting, hover), and a single classification cannot serve them. The
-//! follow-on that would — a `Name` newtype with `Unqualified`/`Qualified` states, so the walk is
-//! *derived* from the classification instead of checked against it — is what this gate exists to
-//! make safe: it pins the current behavior field by field, so that refactor has an oracle.
+//! questions (lowering, formatting, hover), and a single classification cannot serve them. What
+//! reaches those files instead is the type: a name they must not confuse with a runtime string is
+//! a [`Name`](noeta_ast::Name) there too, and the compiler rejects the confusion without this gate
+//! having to know anything about their walks.
 
+use noeta_ast::Name as AstName;
 use noeta_ast::{
     AssocTypeDecl, AttrArg, AttrValue, Attribute, CallArg, ClassDecl, ClosureBody, Decorators,
     DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, ForeignDirective,
@@ -296,12 +312,6 @@ const TABLE: &[Row] = &[
         ),
     ),
     // ---- TypeRef --------------------------------------------------------------------------
-    Row("TypeRef::Named", "name", Name("the nominal leaf itself")),
-    Row(
-        "TypeRef::DynTrait",
-        "trait_name",
-        Name("a trait object's trait qualifies like any nominal leaf"),
-    ),
     Row(
         "TypeRef::AssocProjection",
         "name",
@@ -436,33 +446,13 @@ const TABLE: &[Row] = &[
     ),
     Row("FieldDecl", "mut_field", Inert("a mutability flag")),
     Row("FieldDecl", "is_public", Inert("a visibility flag")),
-    Row(
-        "StructDecl",
-        "name",
-        Name("the declaration's own qualified identity"),
-    ),
     Row("StructDecl", "is_public", Inert("a visibility flag")),
-    Row(
-        "ClassDecl",
-        "name",
-        Name("the declaration's own qualified identity"),
-    ),
     Row("ClassDecl", "is_public", Inert("a visibility flag")),
-    Row(
-        "EnumDecl",
-        "name",
-        Name("the declaration's own qualified identity"),
-    ),
     Row("EnumDecl", "is_public", Inert("a visibility flag")),
     Row(
         "VariantDecl",
         "name",
         Unqualified("a variant is reached through its (now-qualified) enum"),
-    ),
-    Row(
-        "TraitDecl",
-        "name",
-        Name("the declaration's own qualified identity"),
     ),
     Row("TraitDecl", "is_public", Inert("a visibility flag")),
     Row("TraitMethod", "has_default", Inert("a flag")),
@@ -476,7 +466,6 @@ const TABLE: &[Row] = &[
         "trait_name",
         Name("qualifies iff it is a user trait — a built-in is absent from the module map"),
     ),
-    Row("ImplDecl", "target", Name("the type being implemented for")),
     Row(
         "ImplDecl",
         "assoc_bindings",
@@ -499,11 +488,6 @@ const TABLE: &[Row] = &[
         "TypeParam",
         "name",
         Unqualified("a generic parameter is scoped to its declaration, not to a module"),
-    ),
-    Row(
-        "TraitBound",
-        "name",
-        Name("a bound names a trait — a real type reference"),
     ),
     Row(
         "Decorators",
@@ -533,11 +517,6 @@ const TABLE: &[Row] = &[
              name that appears nowhere in the source; a hook that needs a RESOLVED type wants a \
              new declared argument kind, not a silent rewrite of every hook's strings",
         ),
-    ),
-    Row(
-        "DeriveSpec",
-        "name",
-        Name("the derived trait — a real type reference"),
     ),
     Row(
         "DeriveSpec",
@@ -645,10 +624,24 @@ fn derived_verdict(field_ty: &str) -> Option<Verdict> {
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .any(|w| w == t)
     };
-    // A field mentioning `String` is NEVER derived, whatever else its type holds: a string in this
-    // AST is a declaration name, a local binding, a member name, or literal text, and only a human
-    // knows which. Checked before everything else so that a future `Vec<(String, Span)>` cannot
-    // slip through as "inert, it has a Span in it".
+    // `Name` FIRST, and before `String`: a [`noeta_ast::Name`] *is* the classification. The field
+    // types this gate reads used to be ambiguous — a `String` is a qualifiable declaration name or
+    // a local binding or a member name or literal text, and only a human knew which — so each one
+    // needed a hand-written `TABLE` row, and a row is exactly where a wrong judgement can hide.
+    // Splitting the primitive moved that judgement to the declaration: whoever adds a field says
+    // which of the two it is *by choosing its type*, and a new `Name` field the walk fails to
+    // visit fails this gate with no row written at all.
+    if mentions("Name") {
+        return Some(Name(
+            "a `Name` — the type says the qualifier owns this position",
+        ));
+    }
+    // A field mentioning `String` is NEVER derived, whatever else its type holds. `Name` took the
+    // qualifiable half away, but the remainder is still ambiguous between a local binding, a member
+    // name, a globally-scoped tier name and literal text — the walk must not touch any of them, but
+    // it must not touch them for *different reasons*, and the reason is what `Unqualified` records.
+    // Checked before everything else below so that a future `Vec<(String, Span)>` cannot slip
+    // through as "inert, it has a Span in it".
     if mentions("String") {
         return None;
     }
@@ -683,7 +676,7 @@ fn sentinel(node: &str, field: &str) -> String {
 
 fn ident(node: &str, field: &str) -> Expr {
     Expr::Ident {
-        name: sentinel(node, field),
+        name: AstName::written(sentinel(node, field)),
         span: SP,
     }
 }
@@ -694,7 +687,7 @@ fn bx(node: &str, field: &str) -> Box<Expr> {
 
 fn tref(node: &str, field: &str) -> TypeRef {
     TypeRef::Named {
-        name: sentinel(node, field),
+        name: AstName::written(sentinel(node, field)),
         args: Vec::new(),
         span: SP,
     }
@@ -714,7 +707,7 @@ fn arg(node: &str, field: &str) -> CallArg {
 
 fn attr(node: &str, field: &str) -> Attribute {
     Attribute {
-        name: sentinel(node, field),
+        name: AstName::written(sentinel(node, field)),
         name_span: SP,
         args: Vec::new(),
         span: SP,
@@ -726,7 +719,7 @@ fn attr(node: &str, field: &str) -> Attribute {
 /// report a false negative for `TraitMethod::sig` and friends).
 fn fn_with(node: &str, field: &str) -> FnDecl {
     FnDecl {
-        name: "zqfn".into(),
+        name: AstName::written("zqfn"),
         name_span: SP,
         is_public: false,
         type_params: Vec::new(),
@@ -759,7 +752,7 @@ fn type_param_with(node: &str, field: &str) -> TypeParam {
     TypeParam {
         name: "Zqtp".into(),
         bounds: vec![TraitBound {
-            name: sentinel(node, field),
+            name: AstName::written(sentinel(node, field)),
             args: Vec::new(),
             span: SP,
         }],
@@ -769,7 +762,7 @@ fn type_param_with(node: &str, field: &str) -> TypeParam {
 
 fn impl_block_with(node: &str, field: &str) -> ImplBlock {
     ImplBlock {
-        trait_name: sentinel(node, field),
+        trait_name: AstName::written(sentinel(node, field)),
         trait_span: SP,
         trait_args: Vec::new(),
         methods: Vec::new(),
@@ -916,7 +909,7 @@ fn expr_variants() -> Vec<Expr> {
             span: SP,
         },
         Expr::Object(ObjectLit {
-            type_name: Some(f("Object", "0")),
+            type_name: Some(AstName::written(f("Object", "0"))),
             type_name_span: SP,
             fields: Vec::new(),
             spread: None,
@@ -984,7 +977,7 @@ fn expr_variants() -> Vec<Expr> {
             span: SP,
         },
         Expr::TypedCall {
-            name: f("TypedCall", "name"),
+            name: AstName::written(f("TypedCall", "name")),
             name_span: SP,
             type_args: vec![tref(&n("TypedCall"), "type_args")],
             args: vec![arg(&n("TypedCall"), "args")],
@@ -1088,7 +1081,7 @@ fn expr_variants() -> Vec<Expr> {
         },
         // `ObjectLit`'s and `FieldInit`'s own fields.
         Expr::Object(ObjectLit {
-            type_name: Some(sentinel("ObjectLit", "type_name")),
+            type_name: Some(AstName::written(sentinel("ObjectLit", "type_name"))),
             type_name_span: SP,
             fields: vec![
                 FieldInit {
@@ -1135,7 +1128,7 @@ fn expr_variants() -> Vec<Expr> {
         Expr::As {
             expr: Box::new(Expr::Int { value: 0, span: SP }),
             ty: TypeRef::Named {
-                name: "Zqhost".into(),
+                name: AstName::written("Zqhost"),
                 args: typeref_variants(),
                 span: SP,
             },
@@ -1162,7 +1155,7 @@ fn pattern_variants() -> Vec<Pattern> {
             span: SP,
         },
         Pattern::Variant {
-            type_name: Some(sentinel(&n("Variant"), "type_name")),
+            type_name: Some(AstName::written(sentinel(&n("Variant"), "type_name"))),
             variant: sentinel(&n("Variant"), "variant"),
             bindings: vec![Pattern::IsType {
                 ty: tref(&n("Variant"), "bindings"),
@@ -1188,12 +1181,12 @@ fn typeref_variants() -> Vec<TypeRef> {
     let n = |v: &str| format!("TypeRef::{v}");
     vec![
         TypeRef::Named {
-            name: sentinel(&n("Named"), "name"),
+            name: AstName::written(sentinel(&n("Named"), "name")),
             args: vec![tref(&n("Named"), "args")],
             span: SP,
         },
         TypeRef::DynTrait {
-            trait_name: sentinel(&n("DynTrait"), "trait_name"),
+            trait_name: AstName::written(sentinel(&n("DynTrait"), "trait_name")),
             span: SP,
         },
         TypeRef::Optional {
@@ -1229,7 +1222,7 @@ fn attr_value_variants() -> Vec<AttrArg> {
         span: SP,
     };
     let tr = |node: &str, field: &str| AttrValue::TypeRef {
-        name: sentinel(node, field),
+        name: AstName::written(sentinel(node, field)),
         args: Vec::new(),
     };
     vec![
@@ -1241,16 +1234,16 @@ fn attr_value_variants() -> Vec<AttrArg> {
         one(AttrValue::Set(vec![tr(&n("Set"), "0")])),
         one(AttrValue::Map(vec![("k".into(), tr(&n("Map"), "0"))])),
         one(AttrValue::Enum {
-            enum_name: sentinel(&n("Enum"), "enum_name"),
+            enum_name: AstName::written(sentinel(&n("Enum"), "enum_name")),
             variant: sentinel(&n("Enum"), "variant"),
             args: vec![tr(&n("Enum"), "args")],
         }),
         one(AttrValue::Struct {
-            type_name: sentinel(&n("Struct"), "type_name"),
+            type_name: AstName::written(sentinel(&n("Struct"), "type_name")),
             fields: vec![("f".into(), tr(&n("Struct"), "fields"))],
         }),
         one(AttrValue::TypeRef {
-            name: sentinel(&n("TypeRef"), "name"),
+            name: AstName::written(sentinel(&n("TypeRef"), "name")),
             args: vec![tref(&n("TypeRef"), "args")],
         }),
         // `AttrArg`'s own fields.
@@ -1286,11 +1279,11 @@ fn stmt_variants() -> Vec<Stmt> {
             span: SP,
         },
         Stmt::Fn(FnDecl {
-            name: f("Fn", "0"),
+            name: AstName::written(f("Fn", "0")),
             ..fn_with("zq", "unused")
         }),
         Stmt::Enum(EnumDecl {
-            name: f("Enum", "0"),
+            name: AstName::written(f("Enum", "0")),
             name_span: SP,
             is_public: false,
             type_params: Vec::new(),
@@ -1302,7 +1295,7 @@ fn stmt_variants() -> Vec<Stmt> {
             span: SP,
         }),
         Stmt::Struct(StructDecl {
-            name: f("Struct", "0"),
+            name: AstName::written(f("Struct", "0")),
             name_span: SP,
             is_public: false,
             type_params: Vec::new(),
@@ -1313,7 +1306,7 @@ fn stmt_variants() -> Vec<Stmt> {
             span: SP,
         }),
         Stmt::Class(ClassDecl {
-            name: f("Class", "0"),
+            name: AstName::written(f("Class", "0")),
             name_span: SP,
             is_public: false,
             type_params: Vec::new(),
@@ -1325,17 +1318,17 @@ fn stmt_variants() -> Vec<Stmt> {
             span: SP,
         }),
         Stmt::Impl(ImplDecl {
-            trait_name: f("Impl", "0"),
+            trait_name: AstName::written(f("Impl", "0")),
             trait_span: SP,
             trait_args: Vec::new(),
-            target: "Zqtarget".into(),
+            target: AstName::written("Zqtarget"),
             target_span: SP,
             methods: Vec::new(),
             assoc_bindings: Vec::new(),
             span: SP,
         }),
         Stmt::Trait(TraitDecl {
-            name: f("Trait", "0"),
+            name: AstName::written(f("Trait", "0")),
             name_span: SP,
             is_public: false,
             type_params: Vec::new(),
@@ -1401,7 +1394,7 @@ fn stmt_variants() -> Vec<Stmt> {
             args: vec![AttrArg {
                 name: None,
                 value: AttrValue::TypeRef {
-                    name: f("TierBlock", "args"),
+                    name: AstName::written(f("TierBlock", "args")),
                     args: Vec::new(),
                 },
                 span: SP,
@@ -1421,7 +1414,7 @@ fn decl_probes() -> Vec<Stmt> {
         // FnDecl (and, through it, TierDecl, Param, TypeParam, TraitBound, Attribute, AttrArg,
         // AttrValue, MethodDirective).
         Stmt::Fn(FnDecl {
-            name: s("FnDecl", "name"),
+            name: AstName::written(s("FnDecl", "name")),
             name_span: SP,
             is_public: false,
             type_params: vec![
@@ -1430,12 +1423,12 @@ fn decl_probes() -> Vec<Stmt> {
                     name: s("TypeParam", "name"),
                     bounds: vec![
                         TraitBound {
-                            name: s("TraitBound", "name"),
+                            name: AstName::written(s("TraitBound", "name")),
                             args: vec![tref("TraitBound", "args")],
                             span: SP,
                         },
                         TraitBound {
-                            name: s("TypeParam", "bounds"),
+                            name: AstName::written(s("TypeParam", "bounds")),
                             args: Vec::new(),
                             span: SP,
                         },
@@ -1459,14 +1452,14 @@ fn decl_probes() -> Vec<Stmt> {
             attrs: vec![
                 attr("FnDecl", "attrs"),
                 Attribute {
-                    name: s("Attribute", "name"),
+                    name: AstName::written(s("Attribute", "name")),
                     name_span: SP,
                     args: {
                         let mut args = attr_value_variants();
                         args.push(AttrArg {
                             name: None,
                             value: AttrValue::TypeRef {
-                                name: s("Attribute", "args"),
+                                name: AstName::written(s("Attribute", "args")),
                                 args: Vec::new(),
                             },
                             span: SP,
@@ -1483,7 +1476,7 @@ fn decl_probes() -> Vec<Stmt> {
                     args: vec![AttrArg {
                         name: None,
                         value: AttrValue::TypeRef {
-                            name: s("MethodDirective", "args"),
+                            name: AstName::written(s("MethodDirective", "args")),
                             args: Vec::new(),
                         },
                         span: SP,
@@ -1497,7 +1490,7 @@ fn decl_probes() -> Vec<Stmt> {
                     args: vec![AttrArg {
                         name: None,
                         value: AttrValue::TypeRef {
-                            name: s("FnDecl", "directives"),
+                            name: AstName::written(s("FnDecl", "directives")),
                             args: Vec::new(),
                         },
                         span: SP,
@@ -1511,9 +1504,9 @@ fn decl_probes() -> Vec<Stmt> {
             tier: Some(TierDecl {
                 name: s("TierDecl", "name"),
                 name_span: SP,
-                config: Some((s("TierDecl", "config"), SP)),
+                config: Some((AstName::written(s("TierDecl", "config")), SP)),
                 text: Some((s("TierDecl", "text"), SP)),
-                expr: Some((s("TierDecl", "expr"), SP)),
+                expr: Some((AstName::written(s("TierDecl", "expr")), SP)),
                 span: SP,
             }),
             captures: vec![(s("FnDecl", "captures"), SP)],
@@ -1525,7 +1518,7 @@ fn decl_probes() -> Vec<Stmt> {
             tier: Some(TierDecl {
                 name: "zqt".into(),
                 name_span: SP,
-                config: Some((s("FnDecl", "tier"), SP)),
+                config: Some((AstName::written(s("FnDecl", "tier")), SP)),
                 text: None,
                 expr: None,
                 span: SP,
@@ -1534,7 +1527,7 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // StructDecl (and FieldDecl, Decorators, DeriveSpec, RoleTag, ImplBlock).
         Stmt::Struct(StructDecl {
-            name: s("StructDecl", "name"),
+            name: AstName::written(s("StructDecl", "name")),
             name_span: SP,
             is_public: false,
             type_params: vec![type_param_with("StructDecl", "type_params")],
@@ -1555,7 +1548,7 @@ fn decl_probes() -> Vec<Stmt> {
             impls: vec![
                 impl_block_with("StructDecl", "impls"),
                 ImplBlock {
-                    trait_name: s("ImplBlock", "trait_name"),
+                    trait_name: AstName::written(s("ImplBlock", "trait_name")),
                     trait_span: SP,
                     trait_args: vec![tref("ImplBlock", "trait_args")],
                     methods: vec![fn_with("ImplBlock", "methods")],
@@ -1566,14 +1559,14 @@ fn decl_probes() -> Vec<Stmt> {
             decorators: Decorators {
                 derives: vec![
                     DeriveSpec {
-                        name: s("Decorators", "derives"),
+                        name: AstName::written(s("Decorators", "derives")),
                         args: Vec::new(),
                         bindings: Vec::new(),
                         via: None,
                         span: SP,
                     },
                     DeriveSpec {
-                        name: s("DeriveSpec", "name"),
+                        name: AstName::written(s("DeriveSpec", "name")),
                         args: vec![tref("DeriveSpec", "args")],
                         bindings: vec![MemberBinding {
                             member: "m".into(),
@@ -1588,12 +1581,12 @@ fn decl_probes() -> Vec<Stmt> {
                 attribute: Some(vec![(s("Decorators", "attribute"), SP)]),
                 role: Some(vec![
                     RoleTag {
-                        enum_name: s("Decorators", "role"),
+                        enum_name: AstName::written(s("Decorators", "role")),
                         variant: "V".into(),
                         span: SP,
                     },
                     RoleTag {
-                        enum_name: s("RoleTag", "enum_name"),
+                        enum_name: AstName::written(s("RoleTag", "enum_name")),
                         variant: s("RoleTag", "variant"),
                         span: SP,
                     },
@@ -1607,7 +1600,7 @@ fn decl_probes() -> Vec<Stmt> {
                     args: vec![AttrArg {
                         name: None,
                         value: AttrValue::TypeRef {
-                            name: s("Decorators", "foreign"),
+                            name: AstName::written(s("Decorators", "foreign")),
                             args: Vec::new(),
                         },
                         span: SP,
@@ -1619,7 +1612,7 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // ClassDecl.
         Stmt::Class(ClassDecl {
-            name: s("ClassDecl", "name"),
+            name: AstName::written(s("ClassDecl", "name")),
             name_span: SP,
             is_public: false,
             type_params: vec![type_param_with("ClassDecl", "type_params")],
@@ -1632,7 +1625,7 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // A second struct, to carry `StructDecl::decorators` on its own.
         Stmt::Struct(StructDecl {
-            name: "Zqs2".into(),
+            name: AstName::written("Zqs2"),
             name_span: SP,
             is_public: false,
             type_params: Vec::new(),
@@ -1644,7 +1637,7 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // EnumDecl (and VariantDecl).
         Stmt::Enum(EnumDecl {
-            name: s("EnumDecl", "name"),
+            name: AstName::written(s("EnumDecl", "name")),
             name_span: SP,
             is_public: false,
             type_params: vec![type_param_with("EnumDecl", "type_params")],
@@ -1674,7 +1667,7 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // TraitDecl (and TraitMethod, AssocTypeDecl).
         Stmt::Trait(TraitDecl {
-            name: s("TraitDecl", "name"),
+            name: AstName::written(s("TraitDecl", "name")),
             name_span: SP,
             is_public: false,
             type_params: vec![type_param_with("TraitDecl", "type_params")],
@@ -1707,10 +1700,10 @@ fn decl_probes() -> Vec<Stmt> {
         }),
         // ImplDecl.
         Stmt::Impl(ImplDecl {
-            trait_name: s("ImplDecl", "trait_name"),
+            trait_name: AstName::written(s("ImplDecl", "trait_name")),
             trait_span: SP,
             trait_args: vec![tref("ImplDecl", "trait_args")],
-            target: s("ImplDecl", "target"),
+            target: AstName::written(s("ImplDecl", "target")),
             target_span: SP,
             methods: vec![fn_with("ImplDecl", "methods")],
             assoc_bindings: vec![("Item".into(), tref("ImplDecl", "assoc_bindings"))],
@@ -2085,5 +2078,85 @@ fn the_qualifier_binds_every_field() {
         "`..` is banned in this file's AST patterns — bind every field, deliberately-unused ones \
          as `field: _`, so that adding a field to an AST node is a compile error here:\n  {}",
         offenders.join("\n  ")
+    );
+}
+
+/// **The declared type is the classification.** The `Name` newtype exists so that "this position
+/// holds a name the qualifier owns" is a fact about the AST rather than a row someone remembered to
+/// write here, and this test pins the correspondence in both directions:
+///
+/// * a `Name`-typed field may not be classified as anything but [`Verdict::Name`] — a `TABLE` row
+///   is welcome to add history or a caveat, but it may not overrule the type; and
+/// * a field classified `Name` must *be* `Name`-typed, except for the short list below, which is
+///   spelled out so that "a `String` the walk nevertheless reaches" stays a stated exception rather
+///   than a habit.
+///
+/// Without the second half, the first would rot: someone could reclassify a `String` as a name and
+/// the gate would demand a rewrite the type never sanctioned.
+#[test]
+fn the_declared_type_decides_which_names_qualify() {
+    /// `String` fields the walk legitimately **reaches** without ever rewriting them in place.
+    ///
+    /// One entry, and it earns it: a member chain may spell a qualified reference, so the collapse
+    /// hands the visitor the whole dotted prefix as one synthesized candidate — which is why this
+    /// field's sentinel comes back. The chain's own segment strings are never assigned to; a
+    /// collapse rebuilds the node. As a *field*, `Expr::Member::name` is a member name on the
+    /// receiver's type, exactly like `Expr::FieldSet::field`, and typing it `Name` would claim the
+    /// qualifier rewrites it.
+    const REACHED_BUT_NOT_REWRITTEN: &[(&str, &str)] = &[("Expr::Member", "name")];
+
+    let declared = declared_fields();
+    let mut wrong = Vec::new();
+    for (node, field, ty) in &declared {
+        let is_name_typed = ty
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| w == "Name");
+        let verdict = verdict_for(node, field, ty);
+        let classified_name = matches!(verdict, Some(Verdict::Name(_)));
+        if is_name_typed && !classified_name {
+            wrong.push(format!(
+                "{node}.{field}: {ty} is a `Name`, but TABLE classifies it as {} — a row may not \
+                 overrule the type",
+                verdict.map_or("nothing", |v| v.label())
+            ));
+        }
+        if classified_name
+            && !is_name_typed
+            && !REACHED_BUT_NOT_REWRITTEN.contains(&(node.as_str(), field.as_str()))
+        {
+            wrong.push(format!(
+                "{node}.{field}: {ty} is classified `Name` but is not declared `Name`. If the \
+                 qualifier rewrites it, change the field's type; if it only reaches it, add it to \
+                 REACHED_BUT_NOT_REWRITTEN and say why"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n  "));
+
+    // Non-vacuity: the correspondence above is only worth checking if `Name` fields actually exist
+    // and the derivation — not a leftover row — is what classifies most of them.
+    let name_typed = declared
+        .iter()
+        .filter(|(_, _, ty)| {
+            ty.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|w| w == "Name")
+        })
+        .count();
+    assert!(
+        name_typed >= 20,
+        "only {name_typed} `Name`-typed AST fields — the conversion has been undone somewhere"
+    );
+    let derived_not_tabled = declared
+        .iter()
+        .filter(|(node, field, ty)| {
+            ty.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|w| w == "Name")
+                && !TABLE.iter().any(|r| r.0 == node && r.1 == field)
+        })
+        .count();
+    assert!(
+        derived_not_tabled >= 8,
+        "only {derived_not_tabled} `Name` fields are classified by the type alone — if every one \
+         also has a TABLE row, the derivation is never exercised and can rot"
     );
 }

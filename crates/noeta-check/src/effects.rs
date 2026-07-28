@@ -42,7 +42,7 @@ impl Checker {
         // The arguments cross into the fresh isolate — check the called function's declared parameter
         // types (a direct-call callee), so a `class` argument is rejected without re-synthesizing args.
         if let Expr::Ident { name, .. } = callee.as_ref()
-            && let Some(sig) = self.symbols.functions.get(name)
+            && let Some(sig) = self.symbols.functions.get(name.as_str())
         {
             for param in sig.params.clone() {
                 if !self.is_send(&param, &mut Vec::new()) {

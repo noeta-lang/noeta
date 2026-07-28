@@ -134,22 +134,29 @@ impl Checker {
         // Only `self` is bound in a method body (prelude-redesign EX.1 — member access is
         // explicit): `self.field` types through `synth_member`; a bare field name is an unknown
         // name with a targeted hint (see the `Expr::Ident` fallback in `synth`).
-        let fields: Vec<(String, Type)> =
-            vec![("self".to_string(), self_type(&r.name, &r.type_params))];
+        let fields: Vec<(String, Type)> = vec![(
+            "self".to_string(),
+            self_type(r.name.as_str(), &r.type_params),
+        )];
         for f in &r.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.validate_field_defaults(&r.fields, env);
-        self.check_derives(&r.name, &r.decorators.derives, &r.fields, &r.methods);
-        let standalone = self.standalone_for(&r.name);
+        self.check_derives(
+            r.name.as_str(),
+            &r.decorators.derives,
+            &r.fields,
+            &r.methods,
+        );
+        let standalone = self.standalone_for(r.name.as_str());
         // A struct carries in-body `impl Trait { }` blocks and inherent methods (the unified body),
         // checked exactly as a class's — coherence over its impls, then each method body.
         self.check_coherence(&r.decorators.derives, &r.impls, &standalone);
         self.check_attrs(&r.decorators.attrs, TargetKind::Struct);
         // Inside the type's own body, its (always-public) fields are accessible; the marker is
         // uniform with classes (a struct simply has no private fields to gate).
-        let saved_type = self.coloring.current_type.replace(r.name.clone());
+        let saved_type = self.coloring.current_type.replace(r.name.to_string());
         for block in &r.impls {
             self.check_impl(block);
         }
@@ -175,20 +182,27 @@ impl Checker {
         // Only `self` is bound in a method body (prelude-redesign EX.1 — member access is
         // explicit): `self.field` types through `synth_member`; a bare field name is an unknown
         // name with a targeted hint (see the `Expr::Ident` fallback in `synth`).
-        let fields: Vec<(String, Type)> =
-            vec![("self".to_string(), self_type(&c.name, &c.type_params))];
+        let fields: Vec<(String, Type)> = vec![(
+            "self".to_string(),
+            self_type(c.name.as_str(), &c.type_params),
+        )];
         for f in &c.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.validate_field_defaults(&c.fields, env);
-        self.check_derives(&c.name, &c.decorators.derives, &c.fields, &c.methods);
-        let standalone = self.standalone_for(&c.name);
+        self.check_derives(
+            c.name.as_str(),
+            &c.decorators.derives,
+            &c.fields,
+            &c.methods,
+        );
+        let standalone = self.standalone_for(c.name.as_str());
         self.check_coherence(&c.decorators.derives, &c.impls, &standalone);
         self.check_attrs(&c.decorators.attrs, TargetKind::Class);
         // Inside the class's own methods/destructor its private fields are accessible — on `self`
         // and on any same-type value (the type-scoped privacy rule, object-model slice 2d).
-        let saved_type = self.coloring.current_type.replace(c.name.clone());
+        let saved_type = self.coloring.current_type.replace(c.name.to_string());
         for block in &c.impls {
             self.check_impl(block);
         }
@@ -229,8 +243,8 @@ impl Checker {
             // looks at.
             self.check_param_attrs(&variant.fields);
         }
-        self.check_derives(&e.name, &e.decorators.derives, &[], &e.methods);
-        let standalone = self.standalone_for(&e.name);
+        self.check_derives(e.name.as_str(), &e.decorators.derives, &[], &e.methods);
+        let standalone = self.standalone_for(e.name.as_str());
         // An enum carries in-body `impl Trait { }` blocks and inherent methods (the unified body,
         // object-model slice 3), checked exactly as a class's — coherence over its impls, then each
         // method body.
@@ -240,8 +254,8 @@ impl Checker {
         // unlike a struct/class — there is no implicit per-field scope; a method `match`es on
         // `self`). Bind `self` to the enum type so that `match self` is exhaustiveness-checked, and
         // set `current_type` for the same type-scoped resolution a class uses.
-        let self_ty = Type::Named(e.name.clone(), Vec::new());
-        let saved_type = self.coloring.current_type.replace(e.name.clone());
+        let self_ty = Type::Named(e.name.to_string(), Vec::new());
+        let saved_type = self.coloring.current_type.replace(e.name.to_string());
         for block in &e.impls {
             self.check_impl(block);
         }
@@ -295,7 +309,7 @@ impl Checker {
         for p in params {
             for bound in &p.bounds {
                 // A bound may name a built-in trait or a user-defined one (L1, UT3).
-                if let Some(decl) = self.symbols.user_traits.get(&bound.name) {
+                if let Some(decl) = self.symbols.user_traits.get(bound.name.as_str()) {
                     let arity = decl.type_params.len();
                     if !bound.args.is_empty() && bound.args.len() != arity {
                         let msg = if arity == 0 {
@@ -321,7 +335,7 @@ impl Checker {
                     }
                     continue;
                 }
-                if BuiltinTrait::from_name(&bound.name).is_some() {
+                if BuiltinTrait::from_name(bound.name.as_str()).is_some() {
                     if !bound.args.is_empty() {
                         self.error(
                             DiagnosticCode::UnknownTrait,
@@ -382,8 +396,8 @@ impl Checker {
             TypeRef::AssocProjection { .. } => {}
             // `dyn Trait` — the trait must resolve to a built-in or user-defined trait (L1, UT4).
             TypeRef::DynTrait { trait_name, span } => {
-                if BuiltinTrait::from_name(trait_name).is_none()
-                    && !self.symbols.user_traits.contains_key(trait_name)
+                if BuiltinTrait::from_name(trait_name.as_str()).is_none()
+                    && !self.symbols.user_traits.contains_key(trait_name.as_str())
                 {
                     self.error(
                         DiagnosticCode::UnknownTrait,
@@ -394,20 +408,21 @@ impl Checker {
                 }
             }
             TypeRef::Named { name, args, span } => {
-                if !Type::is_builtin_name(name)
+                if !Type::is_builtin_name(name.as_str())
                     && !PRELUDE_TYPES.contains(&name.as_str())
-                    && !self.coloring.type_params.contains_key(name)
-                    && !self.symbols.types.contains(name)
+                    && !self.coloring.type_params.contains_key(name.as_str())
+                    && !self.symbols.types.contains(name.as_str())
                     // A native extern type is a valid annotation only when `use`-imported into this
                     // file (`use std.id.Uuid` → `extern_types["Uuid"]`), like a user type — it is no
                     // longer globally in scope by bare name.
-                    && !self.imports.extern_types.contains_key(name)
+                    && !self.imports.extern_types.contains_key(name.as_str())
                     // A module-qualified type rooted at a retained user import (`use geometry.vec`
                     // then `vec.Vec2` in an *isolated* check — REPL/session, a docs fragment): the
                     // linker resolves the dotted head in a full link, and an unlinked fragment
                     // tolerates it exactly like other unresolved external names (F1). Root-only —
                     // std namespace members keep their exact-key resolution and stay strict.
                     && !name
+                        .as_str()
                         .split_once('.')
                         .is_some_and(|(root, _)| self.symbols.types.contains(root))
                 {
@@ -439,14 +454,14 @@ impl Checker {
                 // Key-capability gate (extern-types X4): a `Map<K, _>` key / `Set<T>` element
                 // formed from an extern type requires it key-capable — a mutable handle's hash
                 // or order could go stale under a key, so `Map<FileHandle, _>` is a type error.
-                let key_role = keyed_container_role(name);
+                let key_role = keyed_container_role(name.as_str());
                 if let Some((role, is_set)) = key_role
                     && let Some(TypeRef::Named {
                         name: key_name,
                         span: key_span,
                         ..
                     }) = args.first()
-                    && self.named_key_capable(key_name, is_set) == Some(false)
+                    && self.named_key_capable(key_name.as_str(), is_set) == Some(false)
                 {
                     self.error(
                         DiagnosticCode::TypeMismatch,
@@ -459,7 +474,7 @@ impl Checker {
                          value kind (struct/enum) ordering structurally",
                     );
                 }
-                self.check_type_args(name, args, *span);
+                self.check_type_args(name.as_str(), args, *span);
             }
         }
     }

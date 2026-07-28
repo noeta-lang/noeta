@@ -6167,15 +6167,21 @@ fn attr_value_to_eval(
             enum_name,
             variant,
             args,
-        } => builtin_enum(enum_name, variant, args.iter().map(recur).collect()),
+        } => builtin_enum(
+            enum_name.as_str(),
+            variant,
+            args.iter().map(recur).collect(),
+        ),
         A::Struct { type_name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-            let def = Rc::new(fresh_type_def(type_name, &names, true));
+            let def = Rc::new(fresh_type_def(type_name.as_str(), &names, true));
             // `def.fields` is `names` (same order), so the recursed values are already slot-ordered.
             let slots: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::Object(Rc::new(ObjectValue::new(def, slots)))
         }
-        A::TypeRef { name, args } => build_type_value(&reflection.type_ref_repr(name, args)),
+        A::TypeRef { name, args } => {
+            build_type_value(&reflection.type_ref_repr(name.as_str(), args))
+        }
     }
 }
 
@@ -6220,9 +6226,8 @@ fn runtime_matches(
         // collection, function) implements no declared trait and never matches; the trait name was
         // canonicalized at lowering (`resolve_type_aliases`), so this is one string comparison.
         // Mirrors the VM's `NarrowTarget::DynTrait`.
-        TypeRef::DynTrait { trait_name, .. } => {
-            value_nominal_name(value).is_some_and(|n| reflection.type_implements(&n, trait_name))
-        }
+        TypeRef::DynTrait { trait_name, .. } => value_nominal_name(value)
+            .is_some_and(|n| reflection.type_implements(&n, trait_name.as_str())),
         // A `Self::Name` projection has no static runtime head (resolution is per-impl at the
         // checker), so narrowing to one stays the permissive dynamic top — deliberately, and now
         // UNLIKE the precise `dyn Trait` above: a projection names a concrete per-impl type, not a
@@ -6246,7 +6251,7 @@ fn runtime_matches(
             // The built-in heads, exhaustive over `BuiltinTy` so this and the VM's `narrow_head` —
             // the two halves of the differential — cannot drift apart. `None` means the name has no
             // built-in head and falls through to the nominal match below.
-            let builtin_ok = noeta_ast::BuiltinTy::from_name_any(name).and_then(|b| {
+            let builtin_ok = noeta_ast::BuiltinTy::from_name_any(name.as_str()).and_then(|b| {
                 use noeta_ast::BuiltinTy;
                 Some(match b {
                     BuiltinTy::Int => matches!(value, Value::Int(_)),
@@ -7100,8 +7105,10 @@ fn match_pattern(
             // its own name (`Framing.Sse`) — resolve the binding to that name rather than making
             // the comparison lenient, which would let two enums sharing a variant name match.
             if let Some(type_name) = type_name {
-                let expected = native_names.get(type_name).unwrap_or(type_name);
-                if &enum_value.enum_name != expected {
+                let expected = native_names
+                    .get(type_name.as_str())
+                    .map_or(type_name.as_str(), String::as_str);
+                if enum_value.enum_name != expected {
                     return None;
                 }
             }

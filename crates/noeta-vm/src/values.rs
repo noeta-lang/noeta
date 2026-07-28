@@ -555,15 +555,24 @@ pub(crate) fn attr_value_to_vm(
             enum_name,
             variant,
             args,
-        } => make_attr_enum(enum_name, variant, args.iter().map(recur).collect()),
+        } => make_attr_enum(
+            enum_name.as_str(),
+            variant,
+            args.iter().map(recur).collect(),
+        ),
         A::Struct { type_name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-            let shape =
-                noeta_object::intern_shape(Shape::object(ShapeKind::Struct, type_name, names));
+            let shape = noeta_object::intern_shape(Shape::object(
+                ShapeKind::Struct,
+                type_name.as_str(),
+                names,
+            ));
             let values: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::object(shape, values)
         }
-        A::TypeRef { name, args } => build_type_value(&reflection.type_ref_repr(name, args)),
+        A::TypeRef { name, args } => {
+            build_type_value(&reflection.type_ref_repr(name.as_str(), args))
+        }
     }
 }
 
