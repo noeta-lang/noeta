@@ -1019,6 +1019,43 @@ fn type_of_synthesizes_the_prelude_type_enum() {
     assert!(codes(src).is_empty());
 }
 
+/// Every prelude enum is a *declared* enum to the checker, registered from the one shared table
+/// both backends seed their runtime type environments from — so naming a case checks clean and a
+/// `match` on it is exhaustiveness-checked. `Ordering` was the hole on this side: the two backends
+/// knew it and the checker did not, so a non-exhaustive `match o { Ordering.Less => … }` passed
+/// E0011 and then aborted with "no match arm matched the value Ordering.Greater" at run time.
+#[test]
+fn every_prelude_enum_is_registered_and_nameable() {
+    for decl in noeta_ast::reflect::prelude_enums() {
+        let variant = &decl.variants[0].name;
+        // A payload-carrying first variant would need arguments; every prelude enum's is fieldless
+        // today, and this says so rather than silently skipping if that ever changes.
+        assert!(
+            decl.variants[0].fields.is_empty(),
+            "`{}.{variant}` grew a payload — the naming probe below needs updating",
+            decl.name
+        );
+        let src = format!("x = {}.{variant};\necho x;\n", decl.name);
+        assert!(
+            codes(&src).is_empty(),
+            "`{}.{variant}` must name a prelude enum case: {:?}",
+            decl.name,
+            codes(&src)
+        );
+    }
+}
+
+#[test]
+fn a_non_exhaustive_match_on_a_prelude_enum_is_reported() {
+    // `Ordering` has three cases; two arms and no catch-all is E0011 — the same rule every other
+    // enum gets, now that the checker registers it from the shared prelude table.
+    let src = "o = 5.compare(2);\nlabel = match o { Ordering.Less => \"l\", Ordering.Equal => \"e\" };\necho label;\n";
+    assert_eq!(codes(src), vec!["E0011"]);
+    // With the third arm it checks clean.
+    let src = "o = 5.compare(2);\nlabel = match o { Ordering.Less => \"l\", Ordering.Equal => \"e\", Ordering.Greater => \"g\" };\necho label;\n";
+    assert!(codes(src).is_empty());
+}
+
 #[test]
 fn deriving_distinct_traits_with_an_impl_is_coherent() {
     // Different traits never conflict — only a repeated one does.

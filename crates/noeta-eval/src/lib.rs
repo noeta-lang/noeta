@@ -1381,26 +1381,45 @@ impl Interpreter {
             builtin_enum("Option", "none", vec![]),
             false,
         );
-        // The built-in `Ordering` enum is namable like any other, so `Ordering.Less` can be
-        // constructed directly (not only received from `.compare()`); its variants carry no data
-        // and build the same `EnumValue` `compare` returns.
-        global.declare(
-            "Ordering".to_string(),
-            Value::EnumType(Rc::new(EnumDef {
-                name: "Ordering".to_string(),
-                variants: ["Less", "Equal", "Greater"]
-                    .into_iter()
-                    .map(|name| VariantInfo {
-                        name: name.to_string(),
-                        field_names: Vec::new(),
-                    })
-                    .collect(),
-                derives_comparable: false,
-                derives_tojson: false,
-                methods: HashMap::new(),
-            })),
-            false,
-        );
+        // Every **prelude enum** is namable like any other, so `Ordering.Less`, `Type.Unit`,
+        // `Semantic.TrustBoundary`, `Layout.Row`, and `Cancelled.Cancelled` can be *constructed*
+        // and not only received or matched — a construction builds the same value `.compare()` /
+        // `type_of()` return. The declarations come from the one shared table
+        // (`noeta_ast::reflect::prelude_enums`) the checker and the compiler read too: a hand-kept
+        // list here is exactly how everything but `Ordering` came to type-check and then abort with
+        // E0005. Declared before the program's own statements, so a user declaration shadows it.
+        for decl in noeta_ast::reflect::prelude_enums() {
+            global.declare(
+                decl.name.to_string(),
+                Value::EnumType(Rc::new(EnumDef {
+                    name: decl.name.to_string(),
+                    variants: decl
+                        .variants
+                        .iter()
+                        .map(|v| VariantInfo {
+                            name: v.name.clone(),
+                            field_names: v.field_names(),
+                        })
+                        .collect(),
+                    derives_comparable: false,
+                    derives_tojson: false,
+                    methods: HashMap::new(),
+                })),
+                false,
+            );
+        }
+        // The prelude **structs** — `Attributed`, `RoleBinding`, `ParamInfo`, `FieldEntry`,
+        // `FieldSpec`, `TierRoot`, `TierText` — from the same shared table the materializations
+        // read. Registering them is what makes a source-written `FieldEntry { name: "a", value: 1 }`
+        // construct instead of aborting with E0005 after checking clean, and because the literal
+        // and the materialized value now come from one field list they are the *same* value.
+        for decl in noeta_ast::reflect::prelude_structs() {
+            global.declare(
+                decl.name.to_string(),
+                Value::Type(Rc::new(fresh_type_def(decl.name, &decl.fields, true))),
+                false,
+            );
+        }
         Interpreter {
             stdout: String::new(),
             stderr: String::new(),
@@ -1857,22 +1876,8 @@ impl Interpreter {
                 // and the checker read; the `EnumDef` carries the **short** name the runtime value
                 // and every match pattern compare against (S1 identity note). A payload variant's
                 // field names are positional placeholders (only the count is load-bearing).
-                UseKind::ExtEnum(qualified) if reg.find_enum_qualified(&qualified).is_some() => {
-                    let en = reg.find_enum_qualified(&qualified).unwrap();
-                    Value::EnumType(Rc::new(EnumDef {
-                        name: en.name.to_string(),
-                        variants: en
-                            .variants
-                            .iter()
-                            .map(|v| VariantInfo {
-                                name: v.name.to_string(),
-                                field_names: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
-                            })
-                            .collect(),
-                        derives_comparable: false,
-                        derives_tojson: false,
-                        methods: HashMap::new(),
-                    }))
+                UseKind::ExtEnum(qualified) if native_type_value(reg, &qualified).is_some() => {
+                    native_type_value(reg, &qualified).expect("guard checked it resolves")
                 }
                 // A native **fielded type** (`use geo.Handle` / `use geo.Point`, native-extensibility
                 // S2 + fielded unification): bind the imported short name to a **constructible**
@@ -1884,29 +1889,9 @@ impl Interpreter {
                 // qualified identity) is the single source of fields, and the def carries the **short**
                 // name a value stamps; matches the VM's `ext_fielded_type_info` seed.
                 UseKind::ExtClass(qualified) | UseKind::ExtStruct(qualified)
-                    if reg.resolve_fielded(&qualified).is_some() =>
+                    if native_type_value(reg, &qualified).is_some() =>
                 {
-                    let cl = reg.resolve_fielded(&qualified).unwrap();
-                    let is_struct = cl.kind == noeta_stdlib::FieldedKind::Struct;
-                    Value::Type(Rc::new(TypeDef {
-                        name: cl.name.to_string(),
-                        fields: cl
-                            .fields
-                            .iter()
-                            .map(|f| FieldSpec {
-                                name: f.name.to_string(),
-                            })
-                            .collect(),
-                        methods: HashMap::new(),
-                        destructor: None,
-                        is_struct,
-                        structural_eq: is_struct,
-                        key_capable: std::cell::Cell::new(false),
-                        derives_comparable: false,
-                        derives_tojson: false,
-                        opaque: false,
-                        field_defaults: Vec::new(),
-                    }))
+                    native_type_value(reg, &qualified).expect("guard checked it resolves")
                 }
                 _ => {
                     Value::Type(Rc::new(TypeDef {
@@ -1938,6 +1923,21 @@ impl Interpreter {
                 _ => imported.name.clone(),
             };
             self.scope.declare(local, value, false);
+            // A **group** import (`use std.http`, or a concrete native module) additionally binds
+            // every native type reachable under it, keyed by its **qualified identity** — the name
+            // the loader's QMap rewrites the dotted spelling `http.Framing` to. So `http.Framing.Sse`
+            // resolves to the same `EnumType` a leaf `use std.http.{Framing}` binds, and builds a
+            // value carrying the same short runtime name (`EnumDef::name`) — which is what makes the
+            // two spellings equal, `is`-comparable, and matchable against each other.
+            if let UseKind::Namespace(prefix) | UseKind::Module(prefix) =
+                reg.classify_use(path, &imported.name)
+            {
+                for (_, qualified) in reg.namespace_types(&prefix) {
+                    if let Some(value) = native_type_value(reg, &qualified) {
+                        self.scope.declare(qualified, value, false);
+                    }
+                }
+            }
         }
     }
 
@@ -1953,8 +1953,8 @@ impl Interpreter {
         let fields = shape.fields;
         let attr_def = Rc::new(fresh_type_def(type_name, &fields, shape.is_struct));
         let attributed_def = Rc::new(fresh_type_def(
-            "Attributed",
-            &["target".to_string(), "value".to_string()],
+            noeta_ast::reflect::ATTRIBUTED,
+            &noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::ATTRIBUTED),
             true,
         ));
         let items: Vec<Value> = self
@@ -1984,8 +1984,8 @@ impl Interpreter {
     /// (P2.7.)
     fn materialize_roles(&self, role_enum: Option<&str>) -> Value {
         let binding_def = Rc::new(fresh_type_def(
-            "RoleBinding",
-            &["target".to_string(), "role".to_string()],
+            noeta_ast::reflect::ROLE_BINDING,
+            &noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::ROLE_BINDING),
             true,
         ));
         let items: Vec<Value> = self
@@ -2022,12 +2022,7 @@ impl Interpreter {
     fn materialize_params(&self, target: &str) -> Value {
         let info_def = Rc::new(fresh_type_def(
             noeta_ast::reflect::PARAM_INFO,
-            &[
-                "name".to_string(),
-                "type".to_string(),
-                "optional".to_string(),
-                "attrs".to_string(),
-            ],
+            &noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::PARAM_INFO),
             true,
         ));
         let items: Vec<Value> = self
@@ -2071,11 +2066,7 @@ impl Interpreter {
     fn materialize_field_specs(&self, type_name: &str) -> Value {
         let spec_def = Rc::new(fresh_type_def(
             noeta_ast::reflect::FIELD_SPEC,
-            &[
-                "name".to_string(),
-                "type".to_string(),
-                "optional".to_string(),
-            ],
+            &noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::FIELD_SPEC),
             true,
         ));
         let items: Vec<Value> = self
@@ -2225,7 +2216,7 @@ impl Interpreter {
     fn materialize_fields(&self, value: &Value) -> Value {
         let entry_def = Rc::new(fresh_type_def(
             noeta_ast::reflect::FIELD_ENTRY,
-            &["name".to_string(), "value".to_string()],
+            &noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::FIELD_ENTRY),
             true,
         ));
         let items: Vec<Value> = match value {
@@ -5542,18 +5533,25 @@ fn numeric_scalar(value: &Value) -> Option<noeta_stdlib::NumScalar> {
     }
 }
 
-/// Construct a built-in `Result`/`Option`/`Ordering` value (`Ok`/`Err`/`some`/`none`, or
-/// `Ordering.Less`/`Equal`/`Greater`). These reuse the ordinary [`EnumValue`] representation, so
-/// they participate in `match` and equality like any enum; only `Result`/`Option`'s display and
-/// the `?`/`??` operators treat them specially.
+/// Construct a built-in enum value — a `Result`/`Option` case (`Ok`/`Err`/`some`/`none`), a
+/// prelude-enum case (`Ordering.Less`, `Type.List(…)`, `Semantic.Sink`, …), or an attribute
+/// argument's user-enum case. These reuse the ordinary [`EnumValue`] representation, so they
+/// participate in `match` and equality like any enum; only `Result`/`Option`'s display and the
+/// `?`/`??` operators treat them specially.
 fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
-    // The built-in enums' defined variant order (`none < some`, `Ok < Err`,
-    // `Less < Equal < Greater`) — must agree with the VM's shape indices.
-    let variant_index = match variant {
-        "none" | "Ok" | "Less" => 0,
-        "some" | "Err" | "Equal" => 1,
-        _ => 2,
-    };
+    // The variant's declaration index — derived `Comparable`'s primary key, and what a
+    // source-written `Ordering.Less` carries, so a materialized value orders identically to a
+    // constructed one. A prelude enum answers from the shared declaration table; `Option`/`Result`
+    // (constructed through `none`/`some`/`Ok`/`Err`, not by naming the enum, so absent from that
+    // table) keep their defined order here. Anything else is a user enum reached through an
+    // attribute argument, whose declaration this function cannot see.
+    let variant_index = noeta_ast::reflect::prelude_variant_index(enum_name, variant)
+        .map(|i| i as usize)
+        .unwrap_or(match variant {
+            "none" | "Ok" => 0,
+            "some" | "Err" => 1,
+            _ => usize::MAX,
+        });
     Value::Enum(Rc::new(EnumValue {
         enum_name: enum_name.to_string(),
         variant: variant.to_string(),
@@ -5956,6 +5954,60 @@ fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
         }
     };
     builtin_enum(TYPE_ENUM, repr.variant_name(), data)
+}
+
+/// The runtime **type handle** a registered native type binds to, or `None` when the qualified
+/// identity names no registered enum or fielded type.
+///
+/// One builder for every spelling that reaches a native type: a leaf import (`use std.http.{Framing}`,
+/// bound under the short local name) and a group import's dotted form (`use std.http` +
+/// `http.Framing`, which the loader rewrites to the qualified identity and which binds under that).
+/// Both must produce the *same* handle, because the values they construct are compared, narrowed,
+/// and matched against each other — and the thing that makes them the same is that the `EnumDef` /
+/// `TypeDef` carries the type's **short** name whichever key it was bound under (the S1 identity
+/// note: that is the name a native-returned value stamps). A payload variant's field names are
+/// positional placeholders; only the count is load-bearing.
+fn native_type_value(
+    reg: &'static noeta_stdlib::registry::Registry,
+    qualified: &str,
+) -> Option<Value> {
+    if let Some(en) = reg.find_enum_qualified(qualified) {
+        return Some(Value::EnumType(Rc::new(EnumDef {
+            name: en.name.to_string(),
+            variants: en
+                .variants
+                .iter()
+                .map(|v| VariantInfo {
+                    name: v.name.to_string(),
+                    field_names: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
+                })
+                .collect(),
+            derives_comparable: false,
+            derives_tojson: false,
+            methods: HashMap::new(),
+        })));
+    }
+    let cl = reg.resolve_fielded(qualified)?;
+    let is_struct = cl.kind == noeta_stdlib::FieldedKind::Struct;
+    Some(Value::Type(Rc::new(TypeDef {
+        name: cl.name.to_string(),
+        fields: cl
+            .fields
+            .iter()
+            .map(|f| FieldSpec {
+                name: f.name.to_string(),
+            })
+            .collect(),
+        methods: HashMap::new(),
+        destructor: None,
+        is_struct,
+        structural_eq: is_struct,
+        key_capable: std::cell::Cell::new(false),
+        derives_comparable: false,
+        derives_tojson: false,
+        opaque: false,
+        field_defaults: Vec::new(),
+    })))
 }
 
 /// A minimal `TypeDef` for a reflection-materialized struct (no methods, derives, or destructor) —

@@ -1,0 +1,50 @@
+// Every **prelude enum** is namable at run time, not only matchable: `Ordering`, `Type`,
+// `Semantic`, `Layout`, and `Cancelled` are seeded into both backends from the one shared
+// declaration table (`noeta_ast::reflect::prelude_enums`) the checker registers from. Before that
+// table, only `Ordering` was seeded, so `Type.Unit` / `Semantic.TrustBoundary` / `Layout.Row` /
+// `Cancelled.Cancelled` type-checked and then aborted with E0005 at run time — the value existed
+// statically and not dynamically.
+//
+// A constructed case must also be *the same value* the runtime materializes, so a reflected type or
+// role can be compared with `==` instead of destructured with `match`: the last block asserts that
+// round-trip, including a payload-carrying `Type.List(Type.Int)`.
+// expect: stdout "Ordering.Less"
+// expect: stdout "Type.Unit"
+// expect: stdout "Type.List(Type.Int)"
+// expect: stdout "Semantic.TrustBoundary"
+// expect: stdout "Layout.Row"
+// expect: stdout "Cancelled.Cancelled"
+// expect: stdout "type eq: true"
+// expect: stdout "list eq: true"
+// expect: stdout "type neq: false"
+// expect: stdout "ordering eq: true"
+// expect: stdout "role eq: true"
+// expect: exit 0
+@attribute(Function)
+@role(Semantic.TrustBoundary)
+struct Gate { name: string }
+
+#[Gate("admin")]
+fn admin(): void {
+    return;
+}
+
+echo Ordering.Less;
+echo Type.Unit;
+echo Type.List(Type.Int);
+echo Semantic.TrustBoundary;
+echo Layout.Row;
+echo Cancelled.Cancelled;
+
+echo "type eq: ${type_of(5) == Type.Int}";
+echo "list eq: ${type_of([1]) == Type.List(Type.Int)}";
+echo "type neq: ${type_of("s") == Type.Int}";
+echo "ordering eq: ${5.compare(2) == Ordering.Greater}";
+
+mut matched = false;
+for binding in roles_of() {
+    if binding.role == Semantic.TrustBoundary {
+        matched = true;
+    }
+}
+echo "role eq: ${matched}";

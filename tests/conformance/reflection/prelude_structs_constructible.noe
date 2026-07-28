@@ -1,0 +1,41 @@
+// The prelude **structs** — the record types the reflection surface hands you — are constructible
+// by literal, like the prelude enums beside them. They used to type-check and then abort with E0005
+// at run time: the checker registered them and neither backend did, so `FieldEntry { name: "a",
+// value: 1 }` was a value the type system believed in and the runtime had never heard of.
+//
+// One shared table (`noeta_ast::reflect::prelude_structs`) now states each one's field list, and
+// every site reads it — the checker's records, both backends' type environments, and all five
+// materializations (`attributes_of` / `roles_of` / `params_of` / `fields_of` / `field_specs_of`),
+// which each carried their own hand-copied copy. So a constructed value and a materialized one are
+// the same value, which the equality assertions below are the point of.
+// expect: stdout "FieldEntry {name: \"a\", value: 1}"
+// expect: stdout "fields eq: true"
+// expect: stdout "RoleBinding {target: \"t\", role: Semantic.Sink}"
+// expect: stdout "roles eq: true"
+// expect: stdout "Attributed {target: \"t\", value: 1}"
+// expect: stdout "TierText {target: \"t\", text: \"x\"}"
+// expect: stdout "tier root: run_me"
+// expect: exit 0
+@attribute(Function)
+@role(Semantic.Sink)
+struct Drain { name: string }
+
+#[Drain("out")]
+fn run_me(): void {
+    return;
+}
+
+struct P { a: int; b: string }
+
+echo FieldEntry { name: "a", value: 1 };
+echo "fields eq: ${fields_of(P { a: 1, b: "x" })[0] == FieldEntry { name: "a", value: 1 }}";
+
+echo RoleBinding { target: "t", role: Semantic.Sink };
+echo "roles eq: ${roles_of()[0] == RoleBinding { target: "run_me", role: Semantic.Sink }}";
+
+echo Attributed { target: "t", value: 1 };
+echo TierText { target: "t", text: "x" };
+
+root = TierRoot { name: "run_me", run: run_me };
+echo "tier root: ${root.name}";
+root.run();

@@ -1,0 +1,36 @@
+// A native enum reached through a **group** import (`use std.http` → `http.Framing.Sse`) is the
+// same value as one reached through a leaf import (`use std.http.{Framing}` → `Framing.Sse`).
+//
+// The qualified spelling used to be unreachable: it type-checked and then died at *compile* time
+// with `internal error: the VM cannot compile this program: type member used as a value` — a
+// namespace handle was registered as an opaque *type*, so `http.Framing` lowered as a member access
+// on it. That is the same "a variant that checks clean is not a value" hole as the prelude enums,
+// on the extension-registered path. It matters because two packages can export the same short name
+// (`std.http.Framing` and a provider package's `Framing`), and then the dotted spelling is the only
+// one a program that needs both can write.
+//
+// Both spellings must agree on *identity*, not just on compiling: the loader rewrites the dotted
+// prefix to the type's qualified identity, both backends register it under that key, and the value
+// they build carries the type's short runtime name — the name a native-returned variant stamps. So
+// the four combinations below (equality, `is`, `match` across spellings, `type_of`) all line up.
+// expect: stdout "Framing.Sse"
+// expect: stdout "Framing.Sse"
+// expect: stdout "eq: true"
+// expect: stdout "is: true"
+// expect: stdout "match: sse"
+// expect: stdout "type: Type.Enum(std.http.Framing, [])"
+// expect: stdout "type: Type.Enum(std.http.Framing, [])"
+// expect: exit 0
+use std.http
+use std.http.{Framing}
+
+qualified = http.Framing.Sse;
+leaf = Framing.Sse;
+
+echo qualified;
+echo leaf;
+echo "eq: ${qualified == leaf}";
+echo "is: ${qualified is Framing}";
+echo "match: ${match qualified { Framing.Sse => "sse", _ => "other" }}";
+echo "type: ${type_of(qualified)}";
+echo "type: ${type_of(leaf)}";

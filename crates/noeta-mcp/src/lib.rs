@@ -469,14 +469,10 @@ modules are resolved so imports check). Run this before claiming Noeta code comp
         &self,
         Parameters(args): Parameters<CheckArgs>,
     ) -> Result<Json<CheckOutput>, ErrorData> {
-        let sources = resolve_sources(&args.source, &args.file)?;
-        // Check under the entry's package edition (from its `noeta.toml`), default for inline source.
-        let root_edition = args
-            .file
-            .as_deref()
-            .map(|f| noeta_pm::manifest::root_edition(std::path::Path::new(f)))
-            .unwrap_or_default();
-        Ok(Json(run_check(&sources, root_edition)))
+        // The whole program — siblings *and* dependency packages — under the entry's package
+        // edition (from its `noeta.toml`), the default for inline source.
+        let resolved = resolve_workspace(&args.source, &args.file)?;
+        Ok(Json(run_check(&resolved)))
     }
 
     /// Search the Noeta documentation — the first stop before writing unfamiliar Noeta.
@@ -1065,26 +1061,105 @@ impl ServerHandler for NoetaMcp {
     }
 }
 
-/// Turn a `check`-style `source`/`file` pair into the ordered source list (entry first, then
-/// sibling modules) that the salsa `Workspace` is built from. Inline `source` is a lone entry; a
-/// `file` pulls in siblings. Shared by `check` and every M3 analysis tool (see [`analyze::prepare`]).
-pub(crate) fn resolve_sources(
+/// Everything one `check`-style `source`/`file` request analyzes over: the ordered sources, the
+/// dependency packages, and the root package's edition — i.e. **the whole program**, not just the
+/// files that happen to sit beside the entry.
+#[derive(Debug)]
+pub(crate) struct ResolvedWorkspace {
+    /// Entry at index 0, then sibling modules, then each dependency package's modules — the
+    /// loader's canonical [`SourceId`] assignment ([`noeta_loader::workspace_sources`]), so a span
+    /// from any of them resolves back to its file by index.
+    pub sources: Vec<Source>,
+    /// The dependency packages as salsa inputs. Empty for inline `source`, for a bare script with
+    /// no manifest, and whenever resolution fails (see [`resolve_workspace`]).
+    pub deps: Vec<noeta_db::DepSources>,
+    /// The root package's language edition — what the entry and its siblings are analyzed under
+    /// (each dependency carries its own).
+    pub edition: noeta_lexer::Edition,
+}
+
+impl ResolvedWorkspace {
+    /// The **member** sources — the entry and its sibling modules, i.e. everything ahead of the
+    /// dependency packages' modules in the canonical ordering.
+    pub fn members(&self) -> &[Source] {
+        let dep_len: usize = self.deps.iter().map(|d| d.modules.len()).sum();
+        &self.sources[..self.sources.len() - dep_len]
+    }
+
+    /// Build the salsa [`Workspace`](noeta_db::Workspace) for this program: the members under the
+    /// root package's edition, each dependency package's modules under its own. The one place the
+    /// MCP surface turns a request into a program, so no tool can accidentally analyze a
+    /// dependency-less slice of one.
+    pub fn workspace(&self, db: &noeta_db::LangDatabase) -> noeta_db::Workspace {
+        let (entry, modules) = self
+            .members()
+            .split_first()
+            .expect("resolve_workspace always yields at least the entry");
+        noeta_db::workspace_with_deps(db, entry, modules, &self.deps, self.edition)
+    }
+}
+
+/// Turn a `check`-style `source`/`file` pair into the workspace the salsa `Workspace` is built
+/// from. Inline `source` is a lone entry with no dependencies; a `file` pulls in its sibling
+/// modules **and resolves its `noeta.toml` dependency graph**, exactly as the LSP does
+/// (`noeta_ide::workspace`) and for the same reason: without the dependency packages, a program
+/// that imports one is analyzed as a program whose imports do not exist. That made `check` report
+/// an E0019/E0029 on code `noeta run` compiles cleanly, and made `reflect` miss every role a
+/// dependency's `@role`-bearing attribute confers — the attribute *application* sits in the entry,
+/// so it was listed, while the `@role` tag that gives it meaning sat in the unlinked package.
+///
+/// Resolution is the **query** walk (no lockfile refresh): answering an agent's question must not
+/// rewrite `noeta.lock` as a side effect — the same rule the editor path follows. A resolution
+/// failure degrades to no dependencies rather than failing the request; the entry's own analysis is
+/// still worth returning, and the unresolved import then surfaces as an ordinary diagnostic.
+pub(crate) fn resolve_workspace(
     source: &Option<String>,
     file: &Option<String>,
-) -> Result<Vec<Source>, ErrorData> {
+) -> Result<ResolvedWorkspace, ErrorData> {
     match (source, file) {
-        (Some(text), None) => Ok(vec![Source::new(
-            SourceId::FIRST,
-            "<inline>".to_string(),
-            text.clone(),
-        )]),
+        (Some(text), None) => Ok(ResolvedWorkspace {
+            sources: vec![Source::new(
+                SourceId::FIRST,
+                "<inline>".to_string(),
+                text.clone(),
+            )],
+            deps: Vec::new(),
+            edition: noeta_lexer::Edition::default(),
+        }),
         (None, Some(path)) => {
-            let raw = noeta_loader::read_workspace(Path::new(path))
-                .map_err(|e| ErrorData::invalid_params(format!("cannot read {path}: {e}"), None))?;
-            let mut sources = Vec::with_capacity(raw.modules.len() + 1);
-            sources.push(raw.entry);
-            sources.extend(raw.modules);
-            Ok(sources)
+            let path = Path::new(path);
+            let raw = noeta_loader::read_workspace(path).map_err(|e| {
+                ErrorData::invalid_params(format!("cannot read {}: {e}", path.display()), None)
+            })?;
+            let packages = noeta_pm::manifest::dependency_packages_query(path).unwrap_or_default();
+            // THE one ordering authority — the same `SourceId` assignment the CLI's
+            // `link_with_deps` and the startup cache use, so a dependency module's span located
+            // here names the same file the compiler would.
+            let sources = noeta_loader::workspace_sources(&raw, &packages);
+            let mut next = 1 + raw.modules.len();
+            let deps = packages
+                .iter()
+                .map(|package| {
+                    let modules = sources[next..next + package.modules.len()].to_vec();
+                    next += package.modules.len();
+                    noeta_db::DepSources {
+                        root: package.root.clone(),
+                        key: package.key.clone(),
+                        renames: package
+                            .dep_renames
+                            .iter()
+                            .map(|(local, global)| (local.clone(), global.clone()))
+                            .collect(),
+                        modules,
+                        edition: package.edition,
+                    }
+                })
+                .collect();
+            Ok(ResolvedWorkspace {
+                sources,
+                deps,
+                edition: noeta_pm::manifest::root_edition(path),
+            })
         }
         (Some(_), Some(_)) => Err(ErrorData::invalid_params(
             "provide either `source` or `file`, not both",
@@ -1097,18 +1172,15 @@ pub(crate) fn resolve_sources(
     }
 }
 
-/// Run the whole-workspace check over `sources` (entry at index 0) and resolve the diagnostics into
-/// the canonical `JsonDiagnostic` form (the same one `noeta check --format json` emits). Uses a
-/// fresh `LangDatabase` — the memoization is per call in M0.
-fn run_check(sources: &[Source], root_edition: noeta_lexer::Edition) -> CheckOutput {
+/// Run the whole-program check over `resolved` — the entry, its siblings, **and** its dependency
+/// packages — and resolve the diagnostics into the canonical `JsonDiagnostic` form (the same one
+/// `noeta check --format json` emits). Uses a fresh `LangDatabase` — the memoization is per call.
+fn run_check(resolved: &ResolvedWorkspace) -> CheckOutput {
     let db = noeta_db::LangDatabase::default();
-    let (entry, modules) = sources
-        .split_first()
-        .expect("resolve_sources always yields at least the entry");
-    let ws = noeta_db::workspace(&db, entry, modules, root_edition);
+    let ws = resolved.workspace(&db);
     let checked = noeta_db::linked_checked(&db, ws);
     // The `SourceMap` resolves each diagnostic's span → file + line/column (entry is SourceId 0).
-    let source_map = SourceMap::new(sources.to_vec());
+    let source_map = SourceMap::new(resolved.sources.clone());
     let diagnostics: Vec<JsonDiagnostic> = checked
         .diagnostics
         .iter()
@@ -1206,14 +1278,7 @@ mod tests {
     use super::*;
 
     fn check_source(text: &str) -> CheckOutput {
-        run_check(
-            &[Source::new(
-                SourceId::FIRST,
-                "<inline>".to_string(),
-                text.to_string(),
-            )],
-            noeta_lexer::Edition::DEFAULT,
-        )
+        run_check(&resolve_workspace(&Some(text.to_string()), &None).expect("inline source"))
     }
 
     #[test]
@@ -1242,7 +1307,7 @@ mod tests {
 
     #[test]
     fn missing_arguments_is_an_invalid_params_error() {
-        let err = resolve_sources(&None, &None).unwrap_err();
+        let err = resolve_workspace(&None, &None).unwrap_err();
         assert!(err.message.contains("source"));
     }
 

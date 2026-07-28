@@ -116,6 +116,37 @@ echo match type_of(5) {
 
 `Type` variants include the scalars `Type.Int`, `Type.Float`, `Type.F32`, `Type.F64`, `Type.IntN(bits, signed)`, `Type.Bool`, `Type.String`, `Type.Bytes`, `Type.Unit`, `Type.Dyn`; the containers `Type.List(inner)`, `Type.Set(inner)`, `Type.Map(k, v)`, `Type.Option(inner)`, `Type.Result(ok, err)`; `Type.Fn(params, ret)` and `Type.Union(members)`; the trait object `Type.DynTrait(name)`; and the nominals `Type.Struct(name, args)`, `Type.Enum(name, args)`, `Type.Class(name, args)`, `Type.Named(name, args)`. Collection literals carry their resolved element type as a runtime tag that survives a `dyn` launder (a content-changing op like `.set` drops the tag to head-only).
 
+### The prelude enums are ordinary enums
+
+`Type` is one of five enums the language declares for you — `Ordering` (what `.compare()` returns), `Type`, `Semantic` (the built-in role vocabulary), `Layout` (the `@packed` storage vocabulary), and `Cancelled` (the `Err` payload of a cancelled `join`). Each is namable like any enum you declare yourself: you can annotate with it, `match` on it exhaustively, **and construct a case by name**. A constructed case is the very same value the runtime hands you, so `==` works and you are not forced into a `match` just to ask one question:
+
+```noeta
+echo type_of(5) == Type.Int                   // true
+echo type_of([1]) == Type.List(Type.Int)      // true
+echo 5.compare(2) == Ordering.Greater         // true
+```
+
+The prelude **structs** are ordinary structs in the same way — `Attributed`, `RoleBinding`, `ParamInfo`, `FieldEntry`, `FieldSpec`, `TierRoot`, `TierText` are constructible by literal, and a constructed one equals the materialized one field for field:
+
+```noeta
+struct P { a: int; b: string }
+
+echo fields_of(P { a: 1, b: "x" })[0] == FieldEntry { name: "a", value: 1 }   // true
+```
+
+(`ParamInfo` and `FieldSpec` are the exception a literal cannot currently spell: their `type` field collides with the `type` keyword in struct-literal position. Reading `p.type` off one works.)
+
+Each shadows like any prelude name: declaring your own `enum Ordering` or `struct FieldEntry` replaces it for that program.
+
+A **native** enum — one an extension registers, like `std.http`'s `Framing` — behaves the same, and does so under either spelling. A leaf import binds the short name; a group import lets you dot into the namespace, which is the spelling you need when two packages export the same short name:
+
+```noeta
+use std.http
+use std.http.{Framing}
+
+echo http.Framing.Sse == Framing.Sse   // true — one type, two spellings
+```
+
 ### `params_of(name): List<ParamInfo>`
 
 Reflects a **callable's parameters** by name — one `ParamInfo` per parameter, in declaration order: `{ name: string, type: Type, optional: bool, attrs: List<dyn> }`. The name is a top-level function's bare name or a method's qualified `Type.method` (the same target keying the attribute manifest). `type` is the parameter's *declared* type as the same `Type` ADT `type_of` returns, `optional` reports whether a call may omit the parameter (it declared a default), and `attrs` holds the parameter's own `#[...]` attribute instances:
@@ -238,6 +269,8 @@ Validation runs through one shared planner, so both backends accept, reject, and
 
 Materializes every `#[T(...)]` attribute in the program — each entry's `.value` is a real `T`, and `.target` is the annotated declaration's name:
 
+**"In the program" means every file the program is built from**, not only the declarations something imported. A data attribute is a **link root**: an annotated declaration in a sibling module, or in a dependency package, is part of the program whether or not any `use` names it — which is the whole point of tagging a function for discovery. So a `#[Tool]`-scanning framework finds the tools nothing statically references, and finds them by their **qualified** target name (`app.tools.run`, matching `type_of`'s naming under a `namespace`). Visibility does not gate discovery either: a module-private `#[Tool] fn` is a registration, and `invoke(a.target, args)` really calls it — reflection and dispatch see the same set by construction. What the rule does *not* do is drag in unannotated code: a sibling's unannotated function that nothing imports stays out of the program, exactly as before.
+
 ```noeta check
 @attribute
 struct Route { path: string }
@@ -268,6 +301,8 @@ for b in attributes_of::<Builds>() {
 ### `roles_of(): List<RoleBinding>` / `roles_of::<RoleEnum>(): List<RoleBinding>`
 
 The compile-time `(declaration, role)` index built from `@role(...)` tags — each binding has a `.target` and a `.role`. The optional turbofish scopes the query to a single `@semantic` enum (the mirror of `attributes_of::<T>()`): `roles_of::<Semantic>()` returns only the bindings whose role is a `Semantic` variant, while bare `roles_of()` returns the whole index. The enum is resolved at compile time (closed-world); naming a non-`@semantic` type is an error (E0031).
+
+It reads the same manifest `attributes_of` does, so it has the same reach: every annotated declaration in the program, including ones no `use` names, and including a role conferred by a *dependency package's* `@role`-bearing attribute. `.role` is a real enum value, so it compares directly — `if b.role == Semantic.TrustBoundary { … }`.
 
 ### `invoke(recv, name, args): Result<dyn, dyn>` / `invoke(name, args): Result<dyn, dyn>`
 

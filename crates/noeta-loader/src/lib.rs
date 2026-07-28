@@ -1612,6 +1612,54 @@ fn link_core(
         });
     }
 
+    // **A data attribute is a link root.** A `#[...]` exists precisely so that something which never
+    // names a declaration can still find it — `attributes_of::<Tool>()` discovers it, `invoke` calls
+    // it by name — so an annotated declaration in a pooled module belongs to the program even though
+    // no `use` reaches it. Without this rule the manifest held only the annotated declarations the
+    // entry happened to import *by name*: a sibling's `pub fn` that nothing imported and a
+    // module-private one were both absent, so the registration mechanism attributes exist for could
+    // not see its own registrations, and `attributes_of` / `roles_of` contradicted their documented
+    // "every `#[T(...)]` attribute in the program".
+    //
+    // Scoped to the annotation, not to the file: only the *annotated* declaration is a root, dragged
+    // in with the same same-module closure an imported one gets. An unannotated, unimported helper
+    // stays out, so this is emphatically not "compile the whole directory" — a module contributes
+    // exactly what it asked to be discovered by, plus whatever that needs in order to run.
+    // Visibility does not gate it either, for the same reason it does not gate the closure: `#[Tool]`
+    // on a non-`pub` fn is a registration, and reflection dispatches by name, not by import.
+    //
+    // The entry is a `module_views` member too when it declares a namespace, but `merged_q` is
+    // pre-seeded with its declarations (they are the program's tail), so its own annotated
+    // declarations are never merged a second time.
+    for mv in &module_views {
+        for stmt in mv.stmts {
+            let Some(name) = qualifiable_decl_name(stmt) else {
+                continue;
+            };
+            if !carries_data_attribute(stmt) {
+                continue;
+            }
+            let name = name.to_string();
+            if merge_one_dep(
+                &name,
+                mv,
+                &mv.namespace,
+                &module_maps,
+                &mut merged_q,
+                &mut imported,
+            ) {
+                expand_module_refs(
+                    vec![name],
+                    mv,
+                    &mv.namespace,
+                    &module_maps,
+                    &mut merged_q,
+                    &mut imported,
+                );
+            }
+        }
+    }
+
     // A standalone `impl Trait for T {}` in a pooled module (a sibling, or a dependency's own module)
     // has no import name, so the `use`-driven merge above never pulls it — yet coherence requires an
     // impl to travel with its target type (a `dyn Trait` coercion or a bound check needs to see it).
@@ -1772,6 +1820,54 @@ fn qualifiable_decl_name(stmt: &Stmt) -> Option<&str> {
         // (e.g. aether's `Middleware`) is "unknown" once the package is linked as a dependency.
         Stmt::Trait(decl) => Some(&decl.name),
         _ => None,
+    }
+}
+
+/// Whether a top-level declaration carries a `#[...]` **data attribute** anywhere inside it — on
+/// itself, or on a member the reflection manifest keys under it (a method, a field, an enum
+/// variant, a parameter, an in-body `impl` block's method).
+///
+/// This is the "is it a link root" test: an annotated declaration is part of the program whether or
+/// not a `use` reaches it, because the annotation *is* the reference (see the root loop in
+/// [`link_core`]). Members count because their attributes are keyed under the owning declaration
+/// (`Type.method`, `Type.field`, `build#target`) — a `#[Route]` on a method of a class nothing
+/// imported is exactly as discoverable-by-design as one on a free function.
+///
+/// Only `#[...]` data attributes count; a `@derive`/`@role`/`@semantic`/`@packed` **directive** does
+/// not. A directive drives codegen on a declaration that is already in the program — it is not a
+/// registration something else goes looking for — so making it a root would drag in declarations no
+/// reflection query can ever return. (A `@role` still reaches the manifest, transitively: it rides
+/// on an `@attribute` struct, and the *applications* of that struct are what this test finds.)
+fn carries_data_attribute(stmt: &Stmt) -> bool {
+    let on_fn = |decl: &noeta_ast::FnDecl| {
+        !decl.attrs.is_empty() || decl.params.iter().any(|p| !p.attrs.is_empty())
+    };
+    let on_impls =
+        |impls: &[noeta_ast::ImplBlock]| impls.iter().any(|block| block.methods.iter().any(&on_fn));
+    match stmt {
+        Stmt::Fn(decl) => on_fn(decl),
+        Stmt::Struct(decl) => {
+            !decl.decorators.attrs.is_empty()
+                || decl.fields.iter().any(|f| !f.attrs.is_empty())
+                || decl.methods.iter().any(&on_fn)
+                || on_impls(&decl.impls)
+        }
+        Stmt::Class(decl) => {
+            !decl.decorators.attrs.is_empty()
+                || decl.fields.iter().any(|f| !f.attrs.is_empty())
+                || decl.methods.iter().any(&on_fn)
+                || on_impls(&decl.impls)
+        }
+        Stmt::Enum(decl) => {
+            !decl.decorators.attrs.is_empty()
+                || decl.variants.iter().any(|v| !v.attrs.is_empty())
+                || decl.methods.iter().any(&on_fn)
+                || on_impls(&decl.impls)
+        }
+        Stmt::Trait(decl) => {
+            !decl.decorators.attrs.is_empty() || decl.methods.iter().any(|m| on_fn(&m.sig))
+        }
+        _ => false,
     }
 }
 
@@ -1963,7 +2059,7 @@ fn build_module_map(
             }
         }
     }
-    add_native_attribute_aliases(&mut map, own_stmts, reg);
+    add_native_type_aliases(&mut map, own_stmts, reg);
     qualify::UnitMap {
         names: map,
         handles: if canonical_handles {
@@ -2034,21 +2130,37 @@ fn canonical_use_binding(
     }
 }
 
-/// Fold a module's native **attribute** imports into its rewrite map, so a `#[Skip]` /
-/// `attributes_of::<Skip>()` written after `use std.test.{Skip}` rewrites to its qualified identity
-/// `std.test.Skip` — the one FQN the checker's gate keys on, the reflection manifest carries, and the
-/// test/bench/mcp/doc runners read (D2b: one identity everywhere). Mirrors the checker's `use`
-/// classification (`classify_use`), but keeps **only** attribute-kind imports (`is_ext_attribute`):
-/// every other native import stays the checker's `extern_types` job, so this rewrite never touches a
-/// type or value name — its blast radius is attribute names alone. A leaf `use std.test.{Skip}` binds
-/// `Skip`; a group `use std.test` / concrete `use std.test.mod` binds the projected `test.Skip` form.
-fn add_native_attribute_aliases(
+/// Fold a module's **native type** imports into its rewrite map, so every spelling of a native type
+/// rewrites to the one qualified identity the rest of the toolchain keys on (`std.http.Framing`,
+/// `std.test.Skip`) — the FQN the checker seeds its symbol tables under, the reflection manifest
+/// carries, both backends build shapes from, and the test/bench/mcp/doc runners read. Mirrors the
+/// checker's `use` classification (`classify_use`).
+///
+/// Two spellings reach here. A **leaf** import (`use std.test.{Skip}`) binds the short local name;
+/// a **group** import (`use std.http`, or a concrete module `use std.test.mod`) binds the projected
+/// dotted form (`http.Framing`). Aliasing the group form is what makes `http.Framing.Sse` work at
+/// all: the collapse in [`qualify`] turns the dotted prefix into a single `Ident(std.http.Framing)`
+/// with `.Sse` still on it, which is exactly the shape a leaf-imported `Framing.Sse` reaches the
+/// backends as. Without the alias the chain stayed `((http).Framing).Sse`, the compiler saw a member
+/// access on the namespace handle, and the program died at *compile* time with an internal
+/// "type member used as a value" — while `use std.http.{Framing}` + `Framing.Sse` worked. That
+/// asymmetry is not a curiosity: two packages exporting the same short name (`std.http.Framing` and
+/// `para.ai.provider.Framing`) cannot both be leaf-imported, so the dotted form is the *only*
+/// spelling available to a program that needs both.
+///
+/// A **local declaration wins**: a name a file declares itself is not rewritten to a native type of
+/// the same name, matching the shadowing rule the rest of the prelude follows.
+fn add_native_type_aliases(
     map: &mut qualify::QMap,
     own_stmts: &[Stmt],
     reg: &noeta_ext_abi::registry::Registry,
 ) {
     use noeta_ext_abi::registry::UseKind;
+    let declared: HashSet<&str> = own_stmts.iter().filter_map(decl_name).collect();
     let mut alias = |local: String, qualified: String| {
+        if declared.contains(local.as_str()) {
+            return;
+        }
         map.insert(qualified.clone(), qualified.clone());
         map.insert(local, qualified);
     };
@@ -2059,19 +2171,25 @@ fn add_native_attribute_aliases(
         for n in names {
             let local = n.local();
             match reg.classify_use(path, &n.name) {
+                // A leaf import of a native attribute struct. (Other leaf-imported native types are
+                // the checker's `extern_types` job and already resolve; aliasing them here too would
+                // rewrite a *value* spelling the backends bind under the short name.)
                 UseKind::ExtStruct(qualified) if reg.is_ext_attribute(&qualified) => {
                     alias(local.to_string(), qualified);
                 }
-                UseKind::Namespace(prefix) => {
+                // A group import — every native **value type** under the namespace, by its dotted
+                // spelling. Enums, fielded types (classes/structs), and attribute structs only: a
+                // native **trait** is keyed by its *short* name throughout the checker (`impl
+                // fx.Pixels for T`, a `T: Pixels` bound, `dyn Pixels`), so rewriting its dotted
+                // spelling to the qualified identity makes the `impl` name a trait the checker has
+                // never heard of. A trait is a contract, not a value — nothing constructs one — so
+                // it needs no dotted alias in the first place.
+                UseKind::Namespace(prefix) | UseKind::Module(prefix) => {
                     for (rel, q) in reg.namespace_types(&prefix) {
-                        if reg.is_ext_attribute(&q) {
-                            alias(format!("{local}.{rel}"), q);
-                        }
-                    }
-                }
-                UseKind::Module(qualified) => {
-                    for (rel, q) in reg.namespace_types(&qualified) {
-                        if reg.is_ext_attribute(&q) {
+                        let is_value_type = reg.find_enum_qualified(&q).is_some()
+                            || reg.resolve_fielded(&q).is_some()
+                            || reg.is_ext_attribute(&q);
+                        if is_value_type {
                             alias(format!("{local}.{rel}"), q);
                         }
                     }
@@ -3729,5 +3847,132 @@ mod tests {
             "the sibling's `use std.math` must ride along: {:?}",
             retained_uses(&linked)
         );
+    }
+
+    // --- a data attribute is a link root -------------------------------------------------------
+    //
+    // `#[...]` exists so something that never names a declaration can still find it. An annotated
+    // declaration therefore belongs to the program whether or not a `use` reaches it — otherwise
+    // `attributes_of` / `roles_of` see only what the entry happened to import, and the registration
+    // mechanism cannot see its own registrations.
+
+    /// The module every root test links against: three `#[Marked]` functions (one imported, one
+    /// exported-but-unreferenced, one module-private) plus an unannotated, unreferenced helper.
+    fn marked_module() -> RawModule {
+        module(
+            "tools.noe",
+            "namespace app.tools;\n\
+             @attribute(Function)\n@role(Semantic.TrustBoundary)\npub struct Marked { name: string }\n\
+             #[Marked(\"a\")]\npub fn imported(): string { return \"a\"; }\n\
+             #[Marked(\"b\")]\npub fn unimported(): string { return \"b\"; }\n\
+             #[Marked(\"c\")]\nfn hidden(): string { return \"c\"; }\n\
+             pub fn unannotated(): string { return \"d\"; }\n",
+        )
+    }
+
+    #[test]
+    fn an_annotated_sibling_declaration_links_without_an_import() {
+        let linked = link(
+            "main.noe",
+            "use app.tools.{Marked, imported}\necho imported();\n",
+            noeta_lexer::Edition::default(),
+            &[marked_module()],
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "imported"), "the imported one merges");
+        assert!(
+            has_fn(&linked, "unimported"),
+            "an exported-but-unreferenced annotated fn is a root"
+        );
+        assert!(
+            has_fn(&linked, "hidden"),
+            "visibility does not gate the rule — a `#[Marked]` non-`pub` fn is a registration"
+        );
+    }
+
+    /// The rule is scoped to the *annotation*, not to the file: an unannotated declaration nothing
+    /// references stays out, so this is not "compile the whole directory".
+    #[test]
+    fn an_unannotated_unreferenced_sibling_declaration_stays_out() {
+        let linked = link(
+            "main.noe",
+            "use app.tools.{Marked, imported}\necho imported();\n",
+            noeta_lexer::Edition::default(),
+            &[marked_module()],
+        )
+        .expect("links");
+        assert!(
+            !has_fn(&linked, "unannotated"),
+            "an unannotated, unreferenced declaration must not be dragged in"
+        );
+    }
+
+    /// A module the entry never imports *at all* still contributes its annotated declarations —
+    /// the case a `#[Tool]`-scanning framework depends on, where no file references the tools.
+    #[test]
+    fn an_entirely_unimported_module_contributes_its_annotated_declarations() {
+        let linked = link(
+            "main.noe",
+            "echo 1;\n",
+            noeta_lexer::Edition::default(),
+            &[marked_module()],
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "imported"));
+        assert!(has_fn(&linked, "unimported"));
+        assert!(has_fn(&linked, "hidden"));
+        assert!(
+            has_struct(&linked, "Marked"),
+            "the attribute struct rides in on the closure, so the manifest can materialize it"
+        );
+        assert!(!has_fn(&linked, "unannotated"));
+    }
+
+    /// An annotated declaration is merged with the same **closure** an imported one gets, so the
+    /// helper it calls travels with it and the merged program still compiles.
+    #[test]
+    fn an_annotated_root_drags_in_its_same_module_helper() {
+        let sibling = module(
+            "tools.noe",
+            "namespace app.tools;\n\
+             @attribute(Function)\npub struct Marked { name: string }\n\
+             #[Marked(\"a\")]\npub fn tool(): string { return shout(); }\n\
+             fn shout(): string { return \"hi\"; }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "echo 1;\n",
+            noeta_lexer::Edition::default(),
+            &[sibling],
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "tool"));
+        assert!(
+            has_fn(&linked, "shout"),
+            "the annotated root's internal helper must ride along"
+        );
+    }
+
+    /// The entry declares a namespace, so it is a resolution candidate *and* a `module_views`
+    /// member — its own annotated declarations must not be merged a second time.
+    #[test]
+    fn a_namespaced_entrys_own_annotated_declaration_merges_once() {
+        let linked = link(
+            "main.noe",
+            "namespace app.main;\n\
+             @attribute(Function)\nstruct Marked { name: string }\n\
+             #[Marked(\"a\")]\nfn tool(): string { return \"a\"; }\n\
+             echo tool();\n",
+            noeta_lexer::Edition::default(),
+            &[],
+        )
+        .expect("links");
+        let tools = linked
+            .program
+            .stmts
+            .iter()
+            .filter(|s| matches!(s, Stmt::Fn(f) if leaf(&f.name) == "tool"))
+            .count();
+        assert_eq!(tools, 1, "the entry's own declaration is not duplicated");
     }
 }

@@ -16,6 +16,18 @@ use App.Billing.{Invoice, Receipt};
 
 — resolve against those declared namespaces: each imported name's *real* declaration (a class, struct, enum, or function) is pulled from the providing module and **merged into a single `Program`** ahead of the entry's own statements. Both backends then run the merged program unchanged, so the differential oracle is preserved by construction — there is no module-aware runtime, only one linked program.
 
+## What gets merged: imports, their closure, and every annotated declaration
+
+Three things put a pooled module's declaration into the merged program:
+
+1. an **import** naming it (the `use`-driven merge above);
+2. the **same-module closure** of anything already merged — the internal helper an exported `fn` calls, the module-local type it names in a parameter/return/field, a standalone `impl` whose target type is present. Visibility does not gate an intra-module reference, so a non-`pub` helper is pulled;
+3. a **`#[...]` data attribute** anywhere on it — on the declaration itself, or on a method, field, variant, or parameter.
+
+The third is `carries_data_attribute`, and it exists because an attribute's whole purpose is to make a declaration findable by something that never names it: `attributes_of::<Tool>()` discovers it and `invoke` calls it by name. Merging only along `use` edges meant the manifest held just the annotated declarations the entry happened to import — the registration mechanism could not see its own registrations, and reflection could not report what dispatch could reach. An annotated root is merged with the same closure an imported one gets, so it also *runs*.
+
+It is scoped to the annotation, not the file: an unannotated declaration nothing references still stays out, so this is not whole-directory compilation. A `@derive`/`@role`/`@packed` **directive** is deliberately not a root — it drives codegen on a declaration already in the program rather than registering one for discovery. (A `@role` still reaches the manifest transitively: it rides on an `@attribute` struct, and it is the *applications* of that struct that are roots.)
+
 ## Backward-compatible by construction
 
 Linking is purely additive. A `use` that **no** loaded module provides is left in place, so the runtime falls back to its M0 *opaque-stub* behavior (an imported name with an unknown shape that literals still construct). A single file with no sibling modules therefore links to exactly itself, and the whole existing single-file corpus is unaffected — real resolution lights up only when a sibling module actually provides the imported name, in which case the `use` is trimmed (so no duplicate opaque stub shadows the real declaration).

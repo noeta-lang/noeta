@@ -28,11 +28,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use noeta_ast::{Expr, Stmt};
+use noeta_ast::Expr;
 // `render` is re-exported here for `watch`'s diagnostic rendering (`crate::render`).
 use noeta_diagnostics::render;
-use noeta_parser::parse_fragment;
-use noeta_span::SourceId;
 
 // The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
@@ -1362,36 +1360,20 @@ pub(crate) fn run_declared_tier(
     // tier `<runner>([TierText { target: "<decl>", text: "<body>" }, …])` — is built as AST
     // directly: the runner (and, in a namespaced entry, a root) carries its **link-qualified**
     // dotted name, which is an identifier to the resolved program but would parse as member
-    // access from text. The root *declaration* is textual (no names to qualify) and only
-    // synthesized when the program doesn't already declare one: the checker knows it as a
-    // prelude type — that is what lets the runner's package name `List<TierRoot>` standalone —
-    // but the backends build record literals from real declarations, and a declaration of the
-    // same name shadows the prelude registration by design.
+    // access from text.
+    //
+    // The root *type* needs no synthesized declaration: `TierRoot`/`TierText` are prelude structs
+    // both backends register from the shared table, so the literal below constructs like any other.
+    // (It used to need one — a textual `struct TierRoot { … }` appended when the program declared
+    // none — because the backends registered no prelude structs at all and the literal would have
+    // aborted with E0005. A program that declares its own still shadows the prelude one, as before.)
     let is_text = tier.text.is_some();
-    let (root_ty, root_decl) = if is_text {
-        (
-            noeta_ast::reflect::TIER_TEXT,
-            "struct TierText { target: string  text: string }",
-        )
+    let root_ty = if is_text {
+        noeta_ast::reflect::TIER_TEXT
     } else {
-        (
-            noeta_ast::reflect::TIER_ROOT,
-            "struct TierRoot { name: string  run: () -> void }",
-        )
+        noeta_ast::reflect::TIER_ROOT
     };
     let mut program = activated.program;
-    let declares_root_ty = program
-        .stmts
-        .iter()
-        .any(|s| matches!(s, Stmt::Struct(d) if d.name == root_ty));
-    if !declares_root_ty {
-        let fragment = parse_fragment(SourceId(u32::MAX), "<tier-dispatch>", root_decl);
-        if !fragment.diagnostics.is_empty() {
-            eprintln!("noeta: internal error synthesizing the `{name}` dispatch");
-            return ExitCode::from(2);
-        }
-        program.stmts.extend(fragment.program.stmts);
-    }
     let span = program.span;
     let field = |name: &str, value: Expr| noeta_ast::FieldInit {
         name: name.to_string(),

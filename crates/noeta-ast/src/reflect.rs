@@ -1312,6 +1312,24 @@ pub enum AdtFields {
     IntWidth,
 }
 
+impl AdtFields {
+    /// This payload shape as the positional [`PreludeFieldTy`] list [`prelude_enums`] carries — the
+    /// projection that lets the `Type` entry of the prelude table be *derived* from
+    /// [`TypeRepr::adt_fields`] instead of re-listed beside it.
+    pub fn field_types(self) -> Vec<PreludeFieldTy> {
+        use PreludeFieldTy as F;
+        match self {
+            AdtFields::None => Vec::new(),
+            AdtFields::Types(n) => vec![F::SelfEnum; n],
+            AdtFields::NameAndArgs => vec![F::Str, F::ListOfSelf],
+            AdtFields::TypeList => vec![F::ListOfSelf],
+            AdtFields::ParamsAndRet => vec![F::ListOfSelf, F::SelfEnum],
+            AdtFields::Name => vec![F::Str],
+            AdtFields::IntWidth => vec![F::Int, F::Bool],
+        }
+    }
+}
+
 /// One sample [`TypeRepr`] per variant. Running each through the exhaustive
 /// [`TypeRepr::variant_name`] / [`TypeRepr::adt_fields`] matches yields the prelude `Type` enum's
 /// full declaration — so the checker registers the ADT from the reflection descriptor itself
@@ -1801,6 +1819,224 @@ pub const LAYOUT_ENUM: &str = "Layout";
 /// `Row` (AoS, the bare-`@packed` default) and `Column` (SoA, P-SIMD). The single source of truth
 /// the parser validates `@packed(Layout.…)` against and completion offers.
 pub const LAYOUT_VARIANTS: &[&str] = &["Row", "Column"];
+
+/// The `Ordering` prelude enum's name — what `.compare()` returns and derived `Comparable` orders
+/// by. Namable like any other prelude enum, so `Ordering.Less` is constructible, not only receivable.
+pub const ORDERING_ENUM: &str = "Ordering";
+
+/// The `Ordering.*` variants, in declaration order. The order is load-bearing (`Less < Equal <
+/// Greater`): it is the variant index derived `Comparable` compares by, and both backends bake it
+/// into the values `.compare()` returns.
+pub const ORDERING_VARIANTS: &[&str] = &["Less", "Equal", "Greater"];
+
+/// The `Cancelled` prelude enum's name (Track A.8) — the `Err` payload of `h.join(): Result<T,
+/// Cancelled>`. A one-variant marker enum, namable and constructible like the rest.
+pub const CANCELLED_ENUM: &str = "Cancelled";
+
+/// The `Cancelled.*` variants — the single `Cancelled` marker case.
+pub const CANCELLED_VARIANTS: &[&str] = &["Cancelled"];
+
+/// The declared type of one prelude-enum variant's payload field — the closed vocabulary
+/// [`PreludeEnum`] needs to describe every prelude variant. Deliberately tiny: the prelude enums
+/// are fixed declarations, and this is exactly the set their payloads use. A consumer that types
+/// fields (the checker) maps each arm onto its own lattice; a consumer that only lays out slots
+/// (both backends) needs nothing but the field *count*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreludeFieldTy {
+    /// The enum itself — a recursive `Type` field (`Type.List(inner: Type)`).
+    SelfEnum,
+    /// `List<Self>` — a recursive list field (`Type.Union(members: List<Type>)`).
+    ListOfSelf,
+    Str,
+    Int,
+    Bool,
+}
+
+/// One prelude enum variant: its name and its positional payload fields (empty for a fieldless
+/// case).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreludeVariant {
+    pub name: String,
+    pub fields: Vec<PreludeFieldTy>,
+}
+
+impl PreludeVariant {
+    /// The variant's positional **slot names**, synthesized `_0`, `_1`, … — the same convention a
+    /// native enum's payload uses ([`crate`]-external `ext_enum_type_info`), and for the same
+    /// reason: a prelude variant's payload is positional, so only the slot *count* is load-bearing.
+    /// Enum equality, matching, and display all compare by enum name + variant + positional data,
+    /// never by field name.
+    pub fn field_names(&self) -> Vec<String> {
+        (0..self.fields.len()).map(|i| format!("_{i}")).collect()
+    }
+}
+
+/// A **prelude enum**: one of the enums the language itself declares, which a program can name,
+/// match on, and construct without declaring anything.
+///
+/// This is the *one* registration every consumer reads — the checker's symbol tables, the
+/// tree-walker's global scope, and the compiler's type environment. Before it existed each of the
+/// three carried its own hand-written variant list, and the lists disagreed: only `Ordering` was
+/// seeded into the two backends, so `Type.Unit` / `Semantic.TrustBoundary` / `Layout.Row` /
+/// `Cancelled.Cancelled` type-checked and then aborted with E0005 at run time; and only `Ordering`
+/// was *missing* from the checker's enum table, so a non-exhaustive `match` on it passed the
+/// exhaustiveness rule and aborted at run time instead. A single table cannot drift that way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreludeEnum {
+    /// The enum's name, as a program spells it.
+    pub name: &'static str,
+    /// Its variants, in declaration order — the order that fixes each variant's index, which is
+    /// what derived `Comparable` orders by and what both backends bake into a constructed value.
+    pub variants: Vec<PreludeVariant>,
+    /// Whether the enum is implicitly `@semantic` — role-eligible, so `@role(Enum.Variant)` names
+    /// it. True only for [`SEMANTIC_ENUM`].
+    pub semantic: bool,
+}
+
+impl PreludeEnum {
+    /// The variant of this name, or `None` if the enum has no such case.
+    pub fn variant(&self, name: &str) -> Option<&PreludeVariant> {
+        self.variants.iter().find(|v| v.name == name)
+    }
+
+    /// The variant's **declaration index** — derived `Comparable`'s primary key.
+    pub fn variant_index(&self, name: &str) -> Option<u32> {
+        self.variants
+            .iter()
+            .position(|v| v.name == name)
+            .map(|i| i as u32)
+    }
+}
+
+/// Every prelude enum, in registration order — the one table the checker and both backends build
+/// their `Ordering` / `Cancelled` / `Semantic` / `Layout` / `Type` declarations from.
+///
+/// `Option` and `Result` are deliberately absent: they are constructed through the `none` / `some`
+/// / `Ok` / `Err` prelude bindings rather than by naming the enum, so there is no `Option.none`
+/// spelling for this table to make work.
+///
+/// The `Type` entry is *derived* from [`type_adt_variants`] rather than listed, so adding a
+/// [`TypeRepr`] variant cannot leave the constructible ADT one case short.
+pub fn prelude_enums() -> Vec<PreludeEnum> {
+    let fieldless = |names: &[&str]| -> Vec<PreludeVariant> {
+        names
+            .iter()
+            .map(|name| PreludeVariant {
+                name: (*name).to_string(),
+                fields: Vec::new(),
+            })
+            .collect()
+    };
+    vec![
+        PreludeEnum {
+            name: ORDERING_ENUM,
+            variants: fieldless(ORDERING_VARIANTS),
+            semantic: false,
+        },
+        PreludeEnum {
+            name: CANCELLED_ENUM,
+            variants: fieldless(CANCELLED_VARIANTS),
+            semantic: false,
+        },
+        PreludeEnum {
+            name: SEMANTIC_ENUM,
+            variants: fieldless(SEMANTIC_VARIANTS),
+            semantic: true,
+        },
+        PreludeEnum {
+            name: LAYOUT_ENUM,
+            variants: fieldless(LAYOUT_VARIANTS),
+            semantic: false,
+        },
+        PreludeEnum {
+            name: TYPE_ENUM,
+            variants: type_adt_variants()
+                .iter()
+                .map(|repr| PreludeVariant {
+                    name: repr.variant_name().to_string(),
+                    fields: repr.adt_fields().field_types(),
+                })
+                .collect(),
+            semantic: false,
+        },
+    ]
+}
+
+/// The `Attributed<T>` prelude struct's name — `{ target: string, value: T }`, the element type of
+/// `attributes_of::<T>()`'s result.
+pub const ATTRIBUTED: &str = "Attributed";
+
+/// A **prelude struct**: one of the record types the language declares for you, and the *only*
+/// statement of its field list. Everything that builds or registers one reads it from here — the
+/// checker's records, both backends' `attributes_of` / `roles_of` / `params_of` / `fields_of` /
+/// `field_specs_of` materializations, and the type environments that make a source-written literal
+/// construct. Before the table those field lists were hand-copied at eight sites across two
+/// backends, and neither backend registered the types at all, so `FieldEntry { name: "a", value: 1
+/// }` type-checked and aborted with E0005 at run time — the struct half of the prelude-enum hole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreludeStruct {
+    /// The struct's name, as a program spells it.
+    pub name: &'static str,
+    /// Its fields, in **slot order** — the order a materialized instance's values are built in, and
+    /// the order a shape interns them under, so a materialized value and a constructed one are the
+    /// same value.
+    pub fields: Vec<String>,
+}
+
+/// Every prelude struct, in registration order. The counterpart of [`prelude_enums`].
+///
+/// `ParamInfo` and `FieldSpec` are registered like the rest even though a source literal cannot
+/// currently spell them (their `type` field collides with the `type` keyword in struct-literal
+/// position): the registration is what makes their materialization read one field list rather than
+/// two, and the day the literal becomes spellable it constructs.
+pub fn prelude_structs() -> Vec<PreludeStruct> {
+    let s = |name: &'static str, fields: &[&str]| PreludeStruct {
+        name,
+        fields: fields.iter().map(|f| (*f).to_string()).collect(),
+    };
+    vec![
+        s(ATTRIBUTED, &["target", "value"]),
+        s(ROLE_BINDING, &["target", "role"]),
+        s(PARAM_INFO, &["name", "type", "optional", "attrs"]),
+        s(FIELD_ENTRY, &["name", "value"]),
+        s(FIELD_SPEC, &["name", "type", "optional"]),
+        s(TIER_ROOT, &["name", "run"]),
+        s(TIER_TEXT, &["target", "text"]),
+    ]
+}
+
+/// The fields of the prelude struct `name`, in slot order — the lookup every materialization site
+/// uses instead of re-listing them. Panics for a name that is not a prelude struct: every call site
+/// passes one of the constants above, so a miss is a programming error, not a runtime condition.
+pub fn prelude_struct_fields(name: &str) -> Vec<String> {
+    prelude_structs()
+        .into_iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("`{name}` is not a prelude struct"))
+        .fields
+}
+
+/// The **declaration index** of `variant` in the prelude enum `enum_name`, or `None` when the pair
+/// names no prelude variant (a user enum, or `Option`/`Result`). Both backends stamp this onto the
+/// values they materialize — a reflected `type_of(…)` value and a source-written `Type.Int` then
+/// order identically under derived `Comparable`, instead of one of them being unordered.
+pub fn prelude_variant_index(enum_name: &str, variant: &str) -> Option<u32> {
+    prelude_enums()
+        .iter()
+        .find(|e| e.name == enum_name)
+        .and_then(|e| e.variant_index(variant))
+}
+
+/// The positional **slot names** of `variant` in the prelude enum `enum_name`, or `None` when the
+/// pair names no prelude variant. The shape-building counterpart of [`prelude_variant_index`], so a
+/// materialized prelude enum value and a source-constructed one intern the *same* shape.
+pub fn prelude_variant_field_names(enum_name: &str, variant: &str) -> Option<Vec<String>> {
+    prelude_enums()
+        .iter()
+        .find(|e| e.name == enum_name)
+        .and_then(|e| e.variant(variant))
+        .map(|v| v.field_names())
+}
 
 /// Push each field's `#[...]` attributes, keyed by the qualified `Type.field` name (mirroring the
 /// `Type.method` convention), so a `#[Column(...)]` on a property surfaces distinctly per owner.

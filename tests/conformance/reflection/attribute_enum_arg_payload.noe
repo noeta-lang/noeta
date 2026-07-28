@@ -1,0 +1,25 @@
+// An **enum literal with a payload** as an attribute argument keeps its enum name when displayed,
+// exactly as a source-constructed variant does. The VM used to mark any payload-carrying attribute
+// enum as a built-in `Result`/`Option` — the flag that *suppresses* the enum name — so
+// `Mode.Fast(3)` reflected as `Fast(3)` in the VM and `Mode.Fast(3)` in the interpreter: a
+// differential mismatch no corpus case had reached, because none carried a payload here.
+// A payload-free variant, and a real `Result`/`Option`, keep rendering as they always did.
+// expect: stdout "Mode.Fast(3)"
+// expect: stdout "Mode.Slow"
+// expect: stdout "Ok(1)"
+// expect: exit 0
+enum Mode { Fast(n: int); Slow }
+
+@attribute(Function)
+struct Cfg { mode: dyn }
+
+#[Cfg(mode: Mode.Fast(3))]
+fn fast(): void { return }
+
+#[Cfg(mode: Mode.Slow)]
+fn slow(): void { return }
+
+for c in attributes_of::<Cfg>() {
+    echo c.value.mode;
+}
+echo Ok(1);

@@ -1036,28 +1036,51 @@ impl ModuleCompiler {
     /// Pass 1: register every top-level `type`/`class`/`enum`/`use` so bodies compiled later
     /// can resolve them, and reserve a placeholder prototype for each class `fn`.
     fn register_types(&mut self, program: &Program) {
-        // The built-in `Ordering` enum is namable like any other (so `Ordering.Less` can be
-        // constructed, not only received from `.compare()`); registered first so a user `enum
-        // Ordering` would shadow it. Its variants carry no data, matching `make_ordering`.
-        self.types.insert(
-            "Ordering".to_string(),
-            TypeInfo::Enum {
-                variants: ["Less", "Equal", "Greater"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        (
-                            v.to_string(),
-                            VariantSlots {
-                                index: i as u32,
-                                fields: Vec::new(),
-                            },
-                        )
-                    })
-                    .collect(),
-                fns: HashMap::new(),
-            },
-        );
+        // Every **prelude enum** is namable like any other, so `Ordering.Less`, `Type.Unit`,
+        // `Semantic.TrustBoundary`, `Layout.Row`, and `Cancelled.Cancelled` lower to `MakeEnum`
+        // rather than failing name resolution at run time. The declarations come from the one
+        // shared table (`noeta_ast::reflect::prelude_enums`) the checker and the tree-walker read
+        // too — the hand-kept list that used to sit here covered only `Ordering`, which is how
+        // everything else came to type-check and then abort with E0005. Registered first, so a user
+        // `enum Ordering` shadows the prelude one.
+        for decl in noeta_ast::reflect::prelude_enums() {
+            self.types.insert(
+                decl.name.to_string(),
+                TypeInfo::Enum {
+                    variants: decl
+                        .variants
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            (
+                                v.name.clone(),
+                                VariantSlots {
+                                    index: i as u32,
+                                    fields: v.field_names(),
+                                },
+                            )
+                        })
+                        .collect(),
+                    fns: HashMap::new(),
+                },
+            );
+        }
+        // The prelude **structs** — `Attributed`, `RoleBinding`, `ParamInfo`, `FieldEntry`,
+        // `FieldSpec`, `TierRoot`, `TierText` — from the same shared table the materializations
+        // read, so a source-written `FieldEntry { name: "a", value: 1 }` lowers to `MakeStruct`
+        // with the shape a materialized one carries instead of aborting with E0005 after checking
+        // clean. Value structs, so `==` is structural. Registered first, so a user declaration of
+        // the same name shadows the prelude one.
+        for decl in noeta_ast::reflect::prelude_structs() {
+            self.structural_eq_types.insert(decl.name.to_string());
+            self.types.insert(
+                decl.name.to_string(),
+                TypeInfo::Struct {
+                    fields: decl.fields,
+                    fns: HashMap::new(),
+                },
+            );
+        }
         for stmt in &program.stmts {
             match stmt {
                 noeta_ast::Stmt::Struct(decl) => {
@@ -1192,7 +1215,7 @@ impl ModuleCompiler {
                     for imported in names {
                         use noeta_ext_abi::registry::UseKind;
                         match self.registry.classify_use(path, &imported.name) {
-                            UseKind::Module(_) | UseKind::MemberFn { .. } => continue,
+                            UseKind::MemberFn { .. } => continue,
                             // A native enum (`use shade.Hue`, native-extensibility S1b): register it
                             // as a **constructible** type handle keyed by the imported short name — so
                             // `Hue.Red` / `Hue.Labeled(x)` lower exactly like a `.noe` enum. The
@@ -1227,6 +1250,32 @@ impl ModuleCompiler {
                                         .insert(imported.name.clone(), ext_fielded_type_info(cl));
                                 }
                             }
+                            // A **group** import (`use std.http`, or a concrete native module):
+                            // register every native type reachable under it, keyed by its
+                            // **qualified identity** — the name the loader's QMap rewrites the
+                            // dotted spelling (`http.Framing`) to, and the same name a leaf import
+                            // resolves to. So `http.Framing.Sse` lowers to the identical `MakeEnum`
+                            // that `use std.http.{Framing}` + `Framing.Sse` does. A namespace handle
+                            // is not a *type*, and registering it as `TypeInfo::Opaque` is what made
+                            // the dotted spelling die at compile time with a span-less internal
+                            // "type member used as a value".
+                            UseKind::Namespace(prefix) | UseKind::Module(prefix) => {
+                                for (_, qualified) in self.registry.namespace_types(&prefix) {
+                                    if let Some(en) = self.registry.find_enum_qualified(&qualified)
+                                    {
+                                        self.types
+                                            .insert(qualified.clone(), ext_enum_type_info(en));
+                                    } else if let Some(cl) =
+                                        self.registry.resolve_fielded(&qualified)
+                                    {
+                                        if cl.kind == noeta_ext_abi::FieldedKind::Struct {
+                                            self.structural_eq_types.insert(qualified.clone());
+                                        }
+                                        self.types
+                                            .insert(qualified.clone(), ext_fielded_type_info(cl));
+                                    }
+                                }
+                            }
                             _ => {
                                 self.types.insert(imported.name.clone(), TypeInfo::Opaque);
                             }
@@ -1240,6 +1289,31 @@ impl ModuleCompiler {
         // key-capable (the fixpoint spans passes — a session's later entry can complete a nested
         // chain declared earlier).
         self.key_capable_types = noeta_ast::key_capable_packed(&self.packed_fields);
+    }
+
+    /// The **runtime name** a value of the registered type `key` carries in its shape.
+    ///
+    /// For a native type addressed by its **qualified identity** — the spelling the loader rewrites
+    /// a group-imported `http.Framing` to — this is the type's *short* name, because that is the
+    /// identity a native-returned value stamps and the one a `Framing.Sse` pattern compares against.
+    /// For everything else (a `.noe` declaration, a leaf-imported native type) the key already *is*
+    /// the runtime name.
+    ///
+    /// Without the mapping the two spellings of one native type build two different shapes:
+    /// `http.Framing.Sse` and `Framing.Sse` compare unequal, `is` answers false, and a `match` on
+    /// one misses the other — a quieter failure than the compile error the qualified spelling used
+    /// to give, and a worse one.
+    fn runtime_type_name(&self, key: &str) -> String {
+        if !key.contains('.') {
+            return key.to_string();
+        }
+        if let Some(en) = self.registry.find_enum_qualified(key) {
+            return en.name.to_string();
+        }
+        if let Some(cl) = self.registry.resolve_fielded(key) {
+            return cl.name.to_string();
+        }
+        key.to_string()
     }
 
     /// Pass 2: compile each class/struct method (and a class's `destruct` block) into its reserved
@@ -4228,23 +4302,37 @@ impl<'m> FnCompiler<'m> {
         {
             enum Member {
                 EmptyVariant(u32),
-                Unsupported(&'static str),
+                Unsupported(String),
                 FieldAccess,
             }
+            // Every message names the offending expression. The compiler's `Unsupported` carries no
+            // span (it surfaces as `internal error: the VM cannot compile this program: <reason>`
+            // with nothing to grep for), so the reason string is the only handle a reader gets —
+            // "type member used as a value" told them neither which member nor which type.
             let kind = match self.module.types.get(type_name) {
                 Some(TypeInfo::Enum { variants, .. }) => match variants.get(name) {
                     Some(v) if v.fields.is_empty() => Member::EmptyVariant(v.index),
-                    Some(_) => Member::Unsupported("data-carrying variant used without arguments"),
-                    None => Member::Unsupported("unknown enum variant"),
+                    Some(_) => Member::Unsupported(format!(
+                        "`{type_name}.{name}` is a data-carrying variant used without arguments"
+                    )),
+                    None => Member::Unsupported(format!("`{type_name}` has no variant `{name}`")),
                 },
-                Some(_) => Member::Unsupported("type member used as a value"),
+                Some(_) => Member::Unsupported(format!(
+                    "`{type_name}.{name}`: `{type_name}` is a type, and `{name}` is not one of its \
+                     values"
+                )),
                 None => Member::FieldAccess,
             };
             match kind {
                 Member::EmptyVariant(index) => {
                     let shape = self.module.intern_shape(
-                        Shape::enum_variant(type_name.clone(), name.to_string(), Vec::new(), false)
-                            .with_variant_index(index),
+                        Shape::enum_variant(
+                            self.module.runtime_type_name(type_name),
+                            name.to_string(),
+                            Vec::new(),
+                            false,
+                        )
+                        .with_variant_index(index),
                     );
                     self.code.push(Op::MakeEnum {
                         dst,
@@ -4353,7 +4441,7 @@ impl<'m> FnCompiler<'m> {
         let shape = self.module.intern_shape(
             Shape::object_equatable(
                 kind,
-                type_name.to_string(),
+                self.module.runtime_type_name(type_name),
                 decl_fields.to_vec(),
                 structural_eq,
             )
@@ -4490,7 +4578,7 @@ impl<'m> FnCompiler<'m> {
         };
         let shape = self.module.intern_shape(
             Shape::enum_variant(
-                type_name.to_string(),
+                self.module.runtime_type_name(type_name),
                 variant.to_string(),
                 slots.fields,
                 false,
@@ -4528,12 +4616,13 @@ impl<'m> FnCompiler<'m> {
             Some(TypeInfo::Enum { variants, .. }) => variants.clone(),
             _ => unreachable!("lower_enum_from_str is only reached for enum types"),
         };
+        let runtime_name = self.module.runtime_type_name(type_name);
         let mut cases: Vec<(String, u32)> = variants
             .into_iter()
             .filter(|(_, slots)| slots.fields.is_empty())
             .map(|(vname, slots)| {
                 let shape = self.module.intern_shape(
-                    Shape::enum_variant(type_name.to_string(), vname.clone(), Vec::new(), false)
+                    Shape::enum_variant(runtime_name.clone(), vname.clone(), Vec::new(), false)
                         .with_variant_index(slots.index),
                 );
                 (vname, shape)

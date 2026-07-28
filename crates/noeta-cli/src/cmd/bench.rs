@@ -508,7 +508,12 @@ pub(crate) fn measure_iterations(
             inclusive: false,
             span,
         },
-        body: vec![call_root_stmt_awaited(&bench.name, Vec::new(), span, bench.is_async)],
+        body: vec![call_root_stmt_awaited(
+            &bench.name,
+            Vec::new(),
+            span,
+            bench.is_async,
+        )],
         span,
     });
     let program = Program {

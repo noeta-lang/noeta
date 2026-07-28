@@ -29,25 +29,26 @@ impl Prepared {
 }
 
 /// Build a workspace from a `check`-style request. `source` is a lone inline entry; `file` pulls in
-/// its sibling `.noe` modules so imports resolve. Exactly one must be present.
+/// its sibling `.noe` modules **and its `noeta.toml` dependency packages**, so every import
+/// resolves and every tool sees the same program the compiler does. Exactly one must be present.
+///
+/// The dependency half is not a nicety: the role a package's `@role`-bearing attribute confers is
+/// declared *in that package*, so with the package unlinked `reflect` listed the attribute and
+/// reported no role at all. Each source is analyzed under its own package's edition (the root's for
+/// the entry and its siblings) — [`crate::ResolvedWorkspace::workspace`] is the single place that
+/// decision is made, so no tool can analyze a dependency-less slice of a program by accident.
 pub fn prepare(
     source: &Option<String>,
     file: &Option<String>,
 ) -> Result<Prepared, rmcp::ErrorData> {
-    let sources = crate::resolve_sources(source, file)?;
+    let resolved = crate::resolve_workspace(source, file)?;
     let db = LangDatabase::default();
-    // The entry's package edition (from its `noeta.toml`), or the default for an inline `source`
-    // — the entry and its siblings are one package (this path resolves no dependencies), so every
-    // source is analyzed under it (editions arc).
-    let edition = file
-        .as_deref()
-        .map(|f| noeta_pm::manifest::root_edition(std::path::Path::new(f)))
-        .unwrap_or_default();
-    let (entry, modules) = sources
-        .split_first()
-        .expect("resolve_sources always yields at least the entry");
-    let ws = noeta_db::workspace(&db, entry, modules, edition);
-    Ok(Prepared { db, ws, sources })
+    let ws = resolved.workspace(&db);
+    Ok(Prepared {
+        db,
+        ws,
+        sources: resolved.sources,
+    })
 }
 
 /// A resolved source location: 1-based line and column plus the raw byte offset. The column counts

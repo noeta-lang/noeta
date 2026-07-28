@@ -15,25 +15,15 @@ impl Checker {
     /// element type of `attributes_of::<T>()`'s result; it is an ordinary generic struct so member
     /// access (`a.target`, `a.value`) and `value`'s instantiation to `T` reuse the generic path.
     pub(crate) fn register_prelude(&mut self) {
-        self.symbols.types.insert("Attributed".to_string());
-        self.symbols.records.insert(
-            "Attributed".to_string(),
-            vec![
-                ("target".to_string(), Type::String),
-                (
-                    "value".to_string(),
-                    Type::Named("T".to_string(), Vec::new()),
-                ),
-            ],
+        self.register_prelude_struct(
+            noeta_ast::reflect::ATTRIBUTED,
+            &[Type::String, Type::Named("T".to_string(), Vec::new())],
         );
-        self.symbols
-            .generic_types
-            .insert("Attributed".to_string(), vec!["T".to_string()]);
-        self.symbols
-            .type_kinds
-            .insert("Attributed".to_string(), noeta_types::TypeKind::Struct);
-        self.register_type_enum();
-        self.register_cancelled();
+        self.symbols.generic_types.insert(
+            noeta_ast::reflect::ATTRIBUTED.to_string(),
+            vec!["T".to_string()],
+        );
+        self.register_prelude_enums();
         self.register_semantic_prelude();
         self.register_tier_prelude();
         self.register_extension_attributes();
@@ -505,47 +495,20 @@ impl Checker {
         }
     }
 
-    /// Register the prelude `Semantic` enum and `RoleBinding` struct. `Semantic` is the language's
-    /// built-in role vocabulary (every variant payload-free, so matchable bare) and is implicitly
-    /// `@semantic`, so `@role(Semantic.EntryPoint)` is always valid; a user promotes any enum to the
-    /// same status with `@semantic`. `RoleBinding { target: string, role: Enum }` is the element type
-    /// of `roles_of()`'s result — `role` is the abstract `Enum` kind because a binding's role may be
-    /// any `@semantic` enum, not a single fixed type. Both register like any prelude type, so a user
-    /// declaration of the same name shadows them and the backends materialize the matching shapes.
+    /// Register the prelude structs that ride alongside the prelude *enums* — `RoleBinding`,
+    /// `ParamInfo`, `FieldEntry`, `FieldSpec`. (The enums themselves, `Semantic` included, come from
+    /// the one shared table in [`register_prelude_enums`](Self::register_prelude_enums).)
+    ///
+    /// `RoleBinding { target: string, role: Enum }` is the element type of `roles_of()`'s result —
+    /// `role` is the abstract `Enum` kind because a binding's role may be any `@semantic` enum, not
+    /// a single fixed type. Each registers like any prelude type, so a user declaration of the same
+    /// name shadows it and the backends materialize the matching shapes.
     pub(crate) fn register_semantic_prelude(&mut self) {
-        let variants = noeta_ast::reflect::SEMANTIC_VARIANTS
-            .iter()
-            .map(|name| VariantInfo {
-                name: name.to_string(),
-                fields: Vec::new(),
-            })
-            .collect();
-        self.symbols
-            .types
-            .insert(noeta_ast::reflect::SEMANTIC_ENUM.to_string());
-        self.symbols
-            .enums
-            .insert(noeta_ast::reflect::SEMANTIC_ENUM.to_string(), variants);
-        self.symbols.type_kinds.insert(
-            noeta_ast::reflect::SEMANTIC_ENUM.to_string(),
-            noeta_types::TypeKind::Enum,
-        );
-        self.symbols
-            .semantic_enums
-            .insert(noeta_ast::reflect::SEMANTIC_ENUM.to_string());
-        self.symbols.type_kinds.insert(
-            noeta_ast::reflect::ROLE_BINDING.to_string(),
-            noeta_types::TypeKind::Struct,
-        );
-        self.symbols
-            .types
-            .insert(noeta_ast::reflect::ROLE_BINDING.to_string());
-        self.symbols.records.insert(
-            noeta_ast::reflect::ROLE_BINDING.to_string(),
-            vec![
-                ("target".to_string(), Type::String),
-                ("role".to_string(), Type::Kind(noeta_types::TypeKind::Enum)),
-            ],
+        let type_adt = || Type::Named(noeta_ast::reflect::TYPE_ENUM.to_string(), Vec::new());
+        // `RoleBinding { target: string, role: Enum }`.
+        self.register_prelude_struct(
+            noeta_ast::reflect::ROLE_BINDING,
+            &[Type::String, Type::Kind(noeta_types::TypeKind::Enum)],
         );
         // `ParamInfo { name: string, type: Type, optional: bool, attrs: List<dyn> }` — the element
         // type of `params_of()`'s result. `type` is the prelude `Type` enum (the same ADT `type_of`
@@ -556,86 +519,56 @@ impl Checker {
         // `attrs` is `List<dyn>` because a parameter's attributes are heterogeneous — `#[Arg]` and
         // `#[Sensitive]` are different structs — so there is no one element type to name. A consumer
         // recovers the one it cares about by narrowing (`if a is Arg { … }`), the same way it would
-        // with any `dyn`. Registered like any prelude struct, so a user declaration of the same name
-        // shadows it.
-        self.symbols.type_kinds.insert(
-            noeta_ast::reflect::PARAM_INFO.to_string(),
-            noeta_types::TypeKind::Struct,
-        );
-        self.symbols
-            .types
-            .insert(noeta_ast::reflect::PARAM_INFO.to_string());
-        self.symbols.records.insert(
-            noeta_ast::reflect::PARAM_INFO.to_string(),
-            vec![
-                ("name".to_string(), Type::String),
-                (
-                    "type".to_string(),
-                    Type::Named(noeta_ast::reflect::TYPE_ENUM.to_string(), Vec::new()),
-                ),
-                ("optional".to_string(), Type::Bool),
-                ("attrs".to_string(), Type::List(Box::new(Type::Dyn))),
+        // with any `dyn`.
+        self.register_prelude_struct(
+            noeta_ast::reflect::PARAM_INFO,
+            &[
+                Type::String,
+                type_adt(),
+                Type::Bool,
+                Type::List(Box::new(Type::Dyn)),
             ],
         );
         // `FieldEntry { name: string, value: dyn }` — the element type of `fields_of()`'s result
-        // (derive layer 3). Registered like `ParamInfo`; shadowable like any prelude type.
-        self.symbols.type_kinds.insert(
-            noeta_ast::reflect::FIELD_ENTRY.to_string(),
-            noeta_types::TypeKind::Struct,
-        );
-        self.symbols
-            .types
-            .insert(noeta_ast::reflect::FIELD_ENTRY.to_string());
-        self.symbols.records.insert(
-            noeta_ast::reflect::FIELD_ENTRY.to_string(),
-            vec![
-                ("name".to_string(), Type::String),
-                ("value".to_string(), Type::Dyn),
-            ],
-        );
+        // (derive layer 3).
+        self.register_prelude_struct(noeta_ast::reflect::FIELD_ENTRY, &[Type::String, Type::Dyn]);
         // `FieldSpec { name: string, type: Type, optional: bool }` — the element type of the
         // TYPE-level `field_specs_of::<T>()` / `field_specs_of(name)` query. The type-level twin of
         // `FieldEntry`: `type` is the field's declared type as the same `Type` ADT `type_of` returns
         // (precise, from the declaration — not a value's erased head), and `optional` reports whether
-        // the field declared a default. Registered like `ParamInfo`; shadowable like any prelude type.
-        self.symbols.type_kinds.insert(
-            noeta_ast::reflect::FIELD_SPEC.to_string(),
-            noeta_types::TypeKind::Struct,
+        // the field declared a default.
+        self.register_prelude_struct(
+            noeta_ast::reflect::FIELD_SPEC,
+            &[Type::String, type_adt(), Type::Bool],
         );
+    }
+
+    /// Register one **prelude struct**: its field *names* come from the shared declaration table
+    /// ([`noeta_ast::reflect::prelude_structs`]) — the same table both backends materialize and
+    /// construct these values from — and its field *types* from the caller, since the checker
+    /// lattice is not visible to `noeta-ast`. Splitting it that way is what stops the checker and
+    /// the backends from coming to disagree about *which* fields a prelude struct has.
+    ///
+    /// Registered like any prelude type (before `collect`), so a user declaration of the same name
+    /// shadows it. Panics unless `types` has exactly one entry per table field: both sides describe
+    /// one fixed declaration, so a mismatch is a programming error, and every program's first check
+    /// runs this.
+    fn register_prelude_struct(&mut self, name: &str, types: &[Type]) {
+        let fields = noeta_ast::reflect::prelude_struct_fields(name);
+        assert_eq!(
+            fields.len(),
+            types.len(),
+            "prelude struct `{name}`: {} field(s) in the shared table, {} type(s) here",
+            fields.len(),
+            types.len()
+        );
+        self.symbols.types.insert(name.to_string());
         self.symbols
-            .types
-            .insert(noeta_ast::reflect::FIELD_SPEC.to_string());
+            .type_kinds
+            .insert(name.to_string(), noeta_types::TypeKind::Struct);
         self.symbols.records.insert(
-            noeta_ast::reflect::FIELD_SPEC.to_string(),
-            vec![
-                ("name".to_string(), Type::String),
-                (
-                    "type".to_string(),
-                    Type::Named(noeta_ast::reflect::TYPE_ENUM.to_string(), Vec::new()),
-                ),
-                ("optional".to_string(), Type::Bool),
-            ],
-        );
-        // `Layout { Row, Column }` — the storage-layout vocabulary `@packed(Layout.…)` names.
-        // Directive vocabulary like `Semantic` (the parser resolves the argument syntactically);
-        // registered so hover/completion/docs see one authoritative enum, and shadowable like any
-        // prelude type. Not role-eligible: it stays out of `semantic_enums`.
-        let layout_variants = noeta_ast::reflect::LAYOUT_VARIANTS
-            .iter()
-            .map(|name| VariantInfo {
-                name: name.to_string(),
-                fields: Vec::new(),
-            })
-            .collect();
-        self.symbols
-            .types
-            .insert(noeta_ast::reflect::LAYOUT_ENUM.to_string());
-        self.symbols
-            .enums
-            .insert(noeta_ast::reflect::LAYOUT_ENUM.to_string(), layout_variants);
-        self.symbols.type_kinds.insert(
-            noeta_ast::reflect::LAYOUT_ENUM.to_string(),
-            noeta_types::TypeKind::Enum,
+            name.to_string(),
+            fields.into_iter().zip(types.iter().cloned()).collect(),
         );
     }
 
@@ -647,95 +580,69 @@ impl Checker {
     /// `attributes_of::<Config>()`, whose `target` matches `name`. Registered like any prelude
     /// type, so a user declaration shadows it.
     pub(crate) fn register_tier_prelude(&mut self) {
-        let name = noeta_ast::reflect::TIER_ROOT.to_string();
-        self.symbols.types.insert(name.clone());
-        self.symbols
-            .type_kinds
-            .insert(name.clone(), noeta_types::TypeKind::Struct);
-        self.symbols.records.insert(
-            name,
-            vec![
-                ("name".to_string(), Type::String),
-                (
-                    "run".to_string(),
-                    Type::Fn {
-                        params: Vec::new(),
-                        ret: Box::new(Type::Unit),
-                    },
-                ),
+        self.register_prelude_struct(
+            noeta_ast::reflect::TIER_ROOT,
+            &[
+                Type::String,
+                Type::Fn {
+                    params: Vec::new(),
+                    ret: Box::new(Type::Unit),
+                },
             ],
         );
         // Its text-tier counterpart (text-tiers arc): one `TierText` per activated verbatim body.
-        let name = noeta_ast::reflect::TIER_TEXT.to_string();
-        self.symbols.types.insert(name.clone());
-        self.symbols
-            .type_kinds
-            .insert(name.clone(), noeta_types::TypeKind::Struct);
-        self.symbols.records.insert(
-            name,
-            vec![
-                ("target".to_string(), Type::String),
-                ("text".to_string(), Type::String),
-            ],
-        );
+        self.register_prelude_struct(noeta_ast::reflect::TIER_TEXT, &[Type::String, Type::String]);
     }
 
-    /// Register the prelude `Cancelled` enum (Track A.8) — the typed marker `h.join()` returns as
-    /// the `Err` of its `Result<T, Cancelled>` when the joined task was cancelled. A single
-    /// payload-free variant (`Cancelled.Cancelled`), so it is matchable bare and `Send` — modeled
-    /// on `Ordering`. Registered like any prelude type, so a user declaration of the same name
-    /// shadows it and both backends materialize the matching shape.
-    pub(crate) fn register_cancelled(&mut self) {
-        self.symbols.types.insert("Cancelled".to_string());
-        self.symbols.enums.insert(
-            "Cancelled".to_string(),
-            vec![VariantInfo {
-                name: "Cancelled".to_string(),
-                fields: Vec::new(),
-            }],
-        );
-        self.symbols
-            .type_kinds
-            .insert("Cancelled".to_string(), noeta_types::TypeKind::Enum);
+    /// Register **every prelude enum** — `Ordering`, `Cancelled`, `Semantic`, `Layout`, and the
+    /// reflection `Type` ADT — from the one shared declaration table,
+    /// [`noeta_ast::reflect::prelude_enums`], which both backends also seed their runtime type
+    /// environments from. One table is the point: while the checker and the two backends each kept
+    /// their own list, the three disagreed in both directions — `Type`/`Semantic`/`Layout`/
+    /// `Cancelled` type-checked and then aborted with E0005 because neither backend had them, and
+    /// `Ordering` skipped the exhaustiveness rule (E0011) because the checker did not.
+    ///
+    /// Each registers like any prelude type — before `collect`, so a user declaration of the same
+    /// name shadows it — and the enums that are role vocabularies (`Semantic`) additionally join
+    /// `semantic_enums`, so `@role(Semantic.EntryPoint)` resolves.
+    pub(crate) fn register_prelude_enums(&mut self) {
+        for decl in noeta_ast::reflect::prelude_enums() {
+            let variants: Vec<VariantInfo> = decl
+                .variants
+                .iter()
+                .map(|v| VariantInfo {
+                    name: v.name.clone(),
+                    fields: v
+                        .fields
+                        .iter()
+                        .map(|f| prelude_field_type(decl.name, *f))
+                        .collect(),
+                })
+                .collect();
+            self.symbols.types.insert(decl.name.to_string());
+            self.symbols.enums.insert(decl.name.to_string(), variants);
+            self.symbols
+                .type_kinds
+                .insert(decl.name.to_string(), noeta_types::TypeKind::Enum);
+            if decl.semantic {
+                self.symbols.semantic_enums.insert(decl.name.to_string());
+            }
+        }
     }
+}
 
-    /// Register the prelude `Type` enum — the ADT `type_of` returns, mirroring the type lattice so
-    /// reflected types are pattern-matchable (`match type_of(x) { Type.List(e) => … }`). It is a
-    /// recursive enum: payload-carrying variants reference `Type` itself.
-    pub(crate) fn register_type_enum(&mut self) {
-        use noeta_ast::reflect::AdtFields;
-        let ty = || Type::Named("Type".to_string(), Vec::new());
-        let list_of_ty = || Type::List(Box::new(ty()));
-        // The variant list is *derived* from `TypeRepr` rather than re-listed here: the reflection
-        // descriptor is what both backends materialize a `Type` value from, so the enum the checker
-        // registers must be exactly its shape. A hand-kept parallel table could disagree — this one
-        // cannot, and adding a `TypeRepr` variant fails to compile in `noeta-ast` until it is
-        // handled there. Order is preserved (variant ordinals are baked into compiled programs).
-        let variants: Vec<VariantInfo> = noeta_ast::reflect::type_adt_variants()
-            .iter()
-            .map(|repr| VariantInfo {
-                name: repr.variant_name().to_string(),
-                fields: match repr.adt_fields() {
-                    AdtFields::None => Vec::new(),
-                    AdtFields::Types(n) => (0..n).map(|_| ty()).collect(),
-                    // The three nominal kinds + the unknown-kind `Named` fallback.
-                    AdtFields::NameAndArgs => vec![Type::String, list_of_ty()],
-                    AdtFields::TypeList => vec![list_of_ty()],
-                    AdtFields::ParamsAndRet => vec![list_of_ty(), ty()],
-                    // A trait object `dyn Trait` carries its trait name — so `params_of` can recover
-                    // the interface a parameter is bound to (service injection). A bare `dyn` param
-                    // is still `Type.Dyn`.
-                    AdtFields::Name => vec![Type::String],
-                    // `Type.IntN(bits: int, signed: bool)` — a fixed-width integer's descriptor.
-                    AdtFields::IntWidth => vec![Type::Int, Type::Bool],
-                },
-            })
-            .collect();
-        self.symbols.types.insert("Type".to_string());
-        self.symbols.enums.insert("Type".to_string(), variants);
-        self.symbols
-            .type_kinds
-            .insert("Type".to_string(), noeta_types::TypeKind::Enum);
+/// Map one prelude-enum payload field's declared shape onto the checker lattice. `enum_name` is the
+/// enum the field belongs to, so the two recursive arms (`Type.List(inner: Type)`,
+/// `Type.Union(members: List<Type>)`) name the right type without the table having to spell it.
+fn prelude_field_type(enum_name: &str, field: noeta_ast::reflect::PreludeFieldTy) -> Type {
+    use noeta_ast::reflect::PreludeFieldTy as F;
+    let this = || Type::Named(enum_name.to_string(), Vec::new());
+    match field {
+        F::SelfEnum => this(),
+        F::ListOfSelf => Type::List(Box::new(this())),
+        F::Str => Type::String,
+        F::Int => Type::Int,
+        F::Bool => Type::Bool,
     }
 }
 
