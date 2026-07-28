@@ -1,0 +1,38 @@
+// `attributes_of::<T>()` sees **every** `#[T(...)]` in the program, not only the ones the entry
+// happened to import by name. A data attribute is a link root: an annotated declaration in a
+// sibling module is merged whether or not a `use` reaches it, because the annotation *is* the
+// reference — that is the entire point of tagging a function for discovery.
+//
+// The entry imports exactly one of the three annotated functions. Before the rule, the other two —
+// a `pub` one nothing imports and a module-private one — were absent from the manifest, so a
+// registration mechanism could not see its own registrations. Reflection and dispatch agree: each
+// discovered target is then `invoke`d by name and really runs.
+// expect: stdout "app.tools.imported"
+// expect: stdout "imported/app.tools.imported"
+// expect: stdout "unimported/app.tools.unimported"
+// expect: stdout "private/app.tools.hidden"
+// expect: stdout "ran: app.tools.imported"
+// expect: stdout "ran: app.tools.unimported"
+// expect: stdout "ran: app.tools.hidden"
+// expect: stdout "role: app.tools.hidden Semantic.TrustBoundary"
+// expect: exit 0
+namespace app.main;
+
+use app.tools.{Marked, imported};
+
+echo imported();
+
+for a in attributes_of::<Marked>() {
+    echo "${a.value.name}/${a.target}";
+}
+for a in attributes_of::<Marked>() {
+    echo match invoke(a.target, []) {
+        Ok(v) => "ran: ${v}",
+        Err(e) => "failed: ${e}",
+    };
+}
+for b in roles_of() {
+    if b.target == "app.tools.hidden" {
+        echo "role: ${b.target} ${b.role}";
+    }
+}

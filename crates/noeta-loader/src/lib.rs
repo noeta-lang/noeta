@@ -1612,6 +1612,54 @@ fn link_core(
         });
     }
 
+    // **A data attribute is a link root.** A `#[...]` exists precisely so that something which never
+    // names a declaration can still find it — `attributes_of::<Tool>()` discovers it, `invoke` calls
+    // it by name — so an annotated declaration in a pooled module belongs to the program even though
+    // no `use` reaches it. Without this rule the manifest held only the annotated declarations the
+    // entry happened to import *by name*: a sibling's `pub fn` that nothing imported and a
+    // module-private one were both absent, so the registration mechanism attributes exist for could
+    // not see its own registrations, and `attributes_of` / `roles_of` contradicted their documented
+    // "every `#[T(...)]` attribute in the program".
+    //
+    // Scoped to the annotation, not to the file: only the *annotated* declaration is a root, dragged
+    // in with the same same-module closure an imported one gets. An unannotated, unimported helper
+    // stays out, so this is emphatically not "compile the whole directory" — a module contributes
+    // exactly what it asked to be discovered by, plus whatever that needs in order to run.
+    // Visibility does not gate it either, for the same reason it does not gate the closure: `#[Tool]`
+    // on a non-`pub` fn is a registration, and reflection dispatches by name, not by import.
+    //
+    // The entry is a `module_views` member too when it declares a namespace, but `merged_q` is
+    // pre-seeded with its declarations (they are the program's tail), so its own annotated
+    // declarations are never merged a second time.
+    for mv in &module_views {
+        for stmt in mv.stmts {
+            let Some(name) = qualifiable_decl_name(stmt) else {
+                continue;
+            };
+            if !carries_data_attribute(stmt) {
+                continue;
+            }
+            let name = name.to_string();
+            if merge_one_dep(
+                &name,
+                mv,
+                &mv.namespace,
+                &module_maps,
+                &mut merged_q,
+                &mut imported,
+            ) {
+                expand_module_refs(
+                    vec![name],
+                    mv,
+                    &mv.namespace,
+                    &module_maps,
+                    &mut merged_q,
+                    &mut imported,
+                );
+            }
+        }
+    }
+
     // A standalone `impl Trait for T {}` in a pooled module (a sibling, or a dependency's own module)
     // has no import name, so the `use`-driven merge above never pulls it — yet coherence requires an
     // impl to travel with its target type (a `dyn Trait` coercion or a bound check needs to see it).
@@ -1772,6 +1820,54 @@ fn qualifiable_decl_name(stmt: &Stmt) -> Option<&str> {
         // (e.g. aether's `Middleware`) is "unknown" once the package is linked as a dependency.
         Stmt::Trait(decl) => Some(&decl.name),
         _ => None,
+    }
+}
+
+/// Whether a top-level declaration carries a `#[...]` **data attribute** anywhere inside it — on
+/// itself, or on a member the reflection manifest keys under it (a method, a field, an enum
+/// variant, a parameter, an in-body `impl` block's method).
+///
+/// This is the "is it a link root" test: an annotated declaration is part of the program whether or
+/// not a `use` reaches it, because the annotation *is* the reference (see the root loop in
+/// [`link_core`]). Members count because their attributes are keyed under the owning declaration
+/// (`Type.method`, `Type.field`, `build#target`) — a `#[Route]` on a method of a class nothing
+/// imported is exactly as discoverable-by-design as one on a free function.
+///
+/// Only `#[...]` data attributes count; a `@derive`/`@role`/`@semantic`/`@packed` **directive** does
+/// not. A directive drives codegen on a declaration that is already in the program — it is not a
+/// registration something else goes looking for — so making it a root would drag in declarations no
+/// reflection query can ever return. (A `@role` still reaches the manifest, transitively: it rides
+/// on an `@attribute` struct, and the *applications* of that struct are what this test finds.)
+fn carries_data_attribute(stmt: &Stmt) -> bool {
+    let on_fn = |decl: &noeta_ast::FnDecl| {
+        !decl.attrs.is_empty() || decl.params.iter().any(|p| !p.attrs.is_empty())
+    };
+    let on_impls =
+        |impls: &[noeta_ast::ImplBlock]| impls.iter().any(|block| block.methods.iter().any(&on_fn));
+    match stmt {
+        Stmt::Fn(decl) => on_fn(decl),
+        Stmt::Struct(decl) => {
+            !decl.decorators.attrs.is_empty()
+                || decl.fields.iter().any(|f| !f.attrs.is_empty())
+                || decl.methods.iter().any(&on_fn)
+                || on_impls(&decl.impls)
+        }
+        Stmt::Class(decl) => {
+            !decl.decorators.attrs.is_empty()
+                || decl.fields.iter().any(|f| !f.attrs.is_empty())
+                || decl.methods.iter().any(&on_fn)
+                || on_impls(&decl.impls)
+        }
+        Stmt::Enum(decl) => {
+            !decl.decorators.attrs.is_empty()
+                || decl.variants.iter().any(|v| !v.attrs.is_empty())
+                || decl.methods.iter().any(&on_fn)
+                || on_impls(&decl.impls)
+        }
+        Stmt::Trait(decl) => {
+            !decl.decorators.attrs.is_empty() || decl.methods.iter().any(|m| on_fn(&m.sig))
+        }
+        _ => false,
     }
 }
 
@@ -3729,5 +3825,132 @@ mod tests {
             "the sibling's `use std.math` must ride along: {:?}",
             retained_uses(&linked)
         );
+    }
+
+    // --- a data attribute is a link root -------------------------------------------------------
+    //
+    // `#[...]` exists so something that never names a declaration can still find it. An annotated
+    // declaration therefore belongs to the program whether or not a `use` reaches it — otherwise
+    // `attributes_of` / `roles_of` see only what the entry happened to import, and the registration
+    // mechanism cannot see its own registrations.
+
+    /// The module every root test links against: three `#[Marked]` functions (one imported, one
+    /// exported-but-unreferenced, one module-private) plus an unannotated, unreferenced helper.
+    fn marked_module() -> RawModule {
+        module(
+            "tools.noe",
+            "namespace app.tools;\n\
+             @attribute(Function)\n@role(Semantic.TrustBoundary)\npub struct Marked { name: string }\n\
+             #[Marked(\"a\")]\npub fn imported(): string { return \"a\"; }\n\
+             #[Marked(\"b\")]\npub fn unimported(): string { return \"b\"; }\n\
+             #[Marked(\"c\")]\nfn hidden(): string { return \"c\"; }\n\
+             pub fn unannotated(): string { return \"d\"; }\n",
+        )
+    }
+
+    #[test]
+    fn an_annotated_sibling_declaration_links_without_an_import() {
+        let linked = link(
+            "main.noe",
+            "use app.tools.{Marked, imported}\necho imported();\n",
+            noeta_lexer::Edition::default(),
+            &[marked_module()],
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "imported"), "the imported one merges");
+        assert!(
+            has_fn(&linked, "unimported"),
+            "an exported-but-unreferenced annotated fn is a root"
+        );
+        assert!(
+            has_fn(&linked, "hidden"),
+            "visibility does not gate the rule — a `#[Marked]` non-`pub` fn is a registration"
+        );
+    }
+
+    /// The rule is scoped to the *annotation*, not to the file: an unannotated declaration nothing
+    /// references stays out, so this is not "compile the whole directory".
+    #[test]
+    fn an_unannotated_unreferenced_sibling_declaration_stays_out() {
+        let linked = link(
+            "main.noe",
+            "use app.tools.{Marked, imported}\necho imported();\n",
+            noeta_lexer::Edition::default(),
+            &[marked_module()],
+        )
+        .expect("links");
+        assert!(
+            !has_fn(&linked, "unannotated"),
+            "an unannotated, unreferenced declaration must not be dragged in"
+        );
+    }
+
+    /// A module the entry never imports *at all* still contributes its annotated declarations —
+    /// the case a `#[Tool]`-scanning framework depends on, where no file references the tools.
+    #[test]
+    fn an_entirely_unimported_module_contributes_its_annotated_declarations() {
+        let linked = link(
+            "main.noe",
+            "echo 1;\n",
+            noeta_lexer::Edition::default(),
+            &[marked_module()],
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "imported"));
+        assert!(has_fn(&linked, "unimported"));
+        assert!(has_fn(&linked, "hidden"));
+        assert!(
+            has_struct(&linked, "Marked"),
+            "the attribute struct rides in on the closure, so the manifest can materialize it"
+        );
+        assert!(!has_fn(&linked, "unannotated"));
+    }
+
+    /// An annotated declaration is merged with the same **closure** an imported one gets, so the
+    /// helper it calls travels with it and the merged program still compiles.
+    #[test]
+    fn an_annotated_root_drags_in_its_same_module_helper() {
+        let sibling = module(
+            "tools.noe",
+            "namespace app.tools;\n\
+             @attribute(Function)\npub struct Marked { name: string }\n\
+             #[Marked(\"a\")]\npub fn tool(): string { return shout(); }\n\
+             fn shout(): string { return \"hi\"; }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "echo 1;\n",
+            noeta_lexer::Edition::default(),
+            &[sibling],
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "tool"));
+        assert!(
+            has_fn(&linked, "shout"),
+            "the annotated root's internal helper must ride along"
+        );
+    }
+
+    /// The entry declares a namespace, so it is a resolution candidate *and* a `module_views`
+    /// member — its own annotated declarations must not be merged a second time.
+    #[test]
+    fn a_namespaced_entrys_own_annotated_declaration_merges_once() {
+        let linked = link(
+            "main.noe",
+            "namespace app.main;\n\
+             @attribute(Function)\nstruct Marked { name: string }\n\
+             #[Marked(\"a\")]\nfn tool(): string { return \"a\"; }\n\
+             echo tool();\n",
+            noeta_lexer::Edition::default(),
+            &[],
+        )
+        .expect("links");
+        let tools = linked
+            .program
+            .stmts
+            .iter()
+            .filter(|s| matches!(s, Stmt::Fn(f) if leaf(&f.name) == "tool"))
+            .count();
+        assert_eq!(tools, 1, "the entry's own declaration is not duplicated");
     }
 }
