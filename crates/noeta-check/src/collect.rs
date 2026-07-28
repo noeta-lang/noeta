@@ -269,6 +269,11 @@ impl Checker {
                         })
                         .collect();
                     self.symbols.records.insert(r.name.clone(), fields);
+                    // Where this type was declared — the span whose `SourceId` the package orphan
+                    // rule resolves the type's package from.
+                    self.symbols
+                        .type_decl_spans
+                        .insert(r.name.clone(), r.name_span);
                     if let Some(directive) = &r.decorators.packed {
                         self.symbols.packed_structs.insert(r.name.clone());
                         if directive.layout == noeta_ast::PackedLayout::Column {
@@ -363,6 +368,9 @@ impl Checker {
                         })
                         .collect();
                     self.symbols.records.insert(c.name.clone(), fields);
+                    self.symbols
+                        .type_decl_spans
+                        .insert(c.name.clone(), c.name_span);
                     if c.decorators.validated.is_some() {
                         self.symbols.validated_types.insert(c.name.clone());
                     }
@@ -469,6 +477,9 @@ impl Checker {
                         .collect();
                     self.symbols.enums.insert(e.name.clone(), variants);
                     self.symbols.types.insert(e.name.clone());
+                    self.symbols
+                        .type_decl_spans
+                        .insert(e.name.clone(), e.name_span);
                     self.symbols
                         .type_kinds
                         .insert(e.name.clone(), noeta_types::TypeKind::Enum);

@@ -493,12 +493,18 @@ fn hot_watcher(
         // rendered diagnostics also ride the channel's error slot to live LiveView clients
         // (the browser overlay, server-hmr L3) — waking the run thread to deliver promptly.
         // The hot-reparsed entry is one source (id 0), checked under the entry package's edition.
+        // It is the entry alone, with no dependency modules re-linked, so package provenance stays
+        // unknown here and the orphan rule stands down — the full link/check path judges it.
         let mut editions = noeta_lexer::EditionMap::new();
         editions.set(
             noeta_span::SourceId::FIRST,
             noeta_pm::manifest::root_edition(&entry),
         );
-        let checked = crate::context::check_under(&new_program, &editions);
+        let opts = noeta_check::CheckOptions {
+            editions,
+            ..noeta_check::CheckOptions::default()
+        };
+        let checked = crate::context::check_under(&new_program, &opts);
         if !checked.diagnostics.is_empty() {
             let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "<entry>", &new_src);
             let mut rendered = String::new();

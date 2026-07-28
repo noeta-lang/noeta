@@ -288,7 +288,7 @@ fn run_file_tests(file: &std::path::Path, opts: &TestOptions, label: Option<&str
 
     let mut outcomes = run_tests(
         &setup,
-        &run.editions,
+        &run.opts,
         &cases,
         activated.program.span,
         jobs,
@@ -587,7 +587,7 @@ pub(crate) fn default_jobs() -> usize {
 /// order, so the report is deterministic regardless of completion order.
 pub(crate) fn run_tests(
     setup: &[Stmt],
-    editions: &noeta_lexer::EditionMap,
+    opts: &noeta_check::CheckOptions,
     cases: &[TestCase],
     span: Span,
     jobs: usize,
@@ -608,7 +608,7 @@ pub(crate) fn run_tests(
                     if idx >= cases.len() {
                         break;
                     }
-                    let outcome = run_one_test(setup, editions, &cases[idx], span);
+                    let outcome = run_one_test(setup, opts, &cases[idx], span);
                     let failed = !outcome.passed;
                     results.lock().unwrap().push((idx, outcome));
                     if fail_fast && failed {
@@ -633,7 +633,7 @@ pub(crate) fn run_tests(
 /// panicking the worker.
 pub(crate) fn run_one_test(
     setup: &[Stmt],
-    editions: &noeta_lexer::EditionMap,
+    opts: &noeta_check::CheckOptions,
     case: &TestCase,
     span: Span,
 ) -> TestOutcome {
@@ -659,7 +659,7 @@ pub(crate) fn run_one_test(
     ));
     let program = Program { stmts, span };
 
-    let checked = check_under(&program, editions);
+    let checked = check_under(&program, opts);
     if !checked.diagnostics.is_empty() {
         return TestOutcome {
             name: display,

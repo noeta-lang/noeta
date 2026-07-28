@@ -300,8 +300,12 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
     from_check_output(noeta_check::check_all_cancellable(
         &parsed.0.program,
-        source_edition_map(db, src),
-        false,
+        noeta_check::CheckOptions {
+            // A single-source check has no package graph, so provenance stays unknown and the
+            // orphan rule stands down; the whole-workspace queries below carry the real map.
+            editions: source_edition_map(db, src),
+            ..noeta_check::CheckOptions::default()
+        },
         &|| db.unwind_if_revision_cancelled(),
     ))
 }
@@ -316,8 +320,11 @@ pub fn checked_ide(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
     from_check_output(noeta_check::check_all_cancellable(
         &parsed.0.program,
-        source_edition_map(db, src),
-        true,
+        noeta_check::CheckOptions {
+            record_expr_types: true,
+            editions: source_edition_map(db, src),
+            ..noeta_check::CheckOptions::default()
+        },
         &|| db.unwind_if_revision_cancelled(),
     ))
 }
@@ -893,6 +900,26 @@ pub fn workspace_editions(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexe
     map
 }
 
+/// The per-source [`PackageMap`](noeta_span::PackageMap) for a whole workspace — every member
+/// source under the root package, every dependency module under its own package's global key. The
+/// salsa analogue of the loader's `Linked::packages`, so [`linked_checked_from`] can enforce the
+/// package orphan rule over the merged program. Entry-independent, like [`workspace_editions`], and
+/// public for the same reason: a consumer re-checking a *derived* program (a tier-activated one,
+/// say) keeps the same `SourceId`s and so the same map.
+pub fn workspace_packages(db: &dyn salsa::Database, ws: Workspace) -> noeta_span::PackageMap {
+    let mut map = noeta_span::PackageMap::new();
+    for src in ws.members(db).iter().copied() {
+        map.set(SourceId(src.id(db)), noeta_span::PackageOrigin::Root);
+    }
+    for dm in ws.dep_modules(db).iter() {
+        map.set(
+            SourceId(dm.src(db).id(db)),
+            noeta_span::PackageOrigin::Dependency(dm.key(db).clone()),
+        );
+    }
+    map
+}
+
 /// Type-check the program linked from `entry` — the workspace analogue of [`checked`], memoized
 /// per `(ws, entry)`. A load failure carries its diagnostics straight through (there is no
 /// program to check).
@@ -907,8 +934,11 @@ pub fn linked_checked_from(
         // `expr_types`/`f32_literal_sites` and the prelude-redesign handle-site maps.
         Ok(program) => from_check_output(noeta_check::check_all_cancellable(
             program,
-            workspace_editions(db, ws),
-            false,
+            noeta_check::CheckOptions {
+                editions: workspace_editions(db, ws),
+                packages: workspace_packages(db, ws),
+                ..noeta_check::CheckOptions::default()
+            },
             &|| db.unwind_if_revision_cancelled(),
         )),
         Err(diags) => Checked {
@@ -939,8 +969,12 @@ pub fn linked_checked_ide_from(
     match &linked_from(db, ws, entry).program {
         Ok(program) => from_check_output(noeta_check::check_all_cancellable(
             program,
-            workspace_editions(db, ws),
-            true,
+            noeta_check::CheckOptions {
+                record_expr_types: true,
+                editions: workspace_editions(db, ws),
+                packages: workspace_packages(db, ws),
+                ..noeta_check::CheckOptions::default()
+            },
             &|| db.unwind_if_revision_cancelled(),
         )),
         Err(diags) => Checked {

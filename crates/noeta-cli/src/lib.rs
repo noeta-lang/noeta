@@ -1435,8 +1435,14 @@ pub(crate) fn run_declared_tier(
     ));
     // One check over the whole dispatch program: the user's code, the stamped attributes, the
     // runner's signature, and the synthesized call all validate together — under the project's
-    // per-package editions (the user code keeps its source ids; the synthesized nodes are default).
-    let checked = context::check_under(&program, &linked.editions);
+    // per-package editions and package provenance (the user code keeps its source ids; the
+    // synthesized nodes are default/unattributed).
+    let opts = noeta_check::CheckOptions {
+        editions: linked.editions.clone(),
+        packages: linked.packages.clone(),
+        ..noeta_check::CheckOptions::default()
+    };
+    let checked = context::check_under(&program, &opts);
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return ExitCode::from(1);

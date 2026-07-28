@@ -237,6 +237,14 @@ impl Checker {
                 .user_traits
                 .entry(local.clone())
                 .or_insert(decl);
+            // Remember that this name is a *registry* trait when it actually took the slot. Its
+            // synthesized declaration carries a placeholder `Span::new(0, 0)` — which points at the
+            // ENTRY source — so the package orphan rule must not read a package off it; a native
+            // trait belongs to no package the checker can see. A shadowed one is a real `.noe`
+            // trait with a real span, so it is deliberately not recorded.
+            if native_won {
+                self.symbols.native_traits.insert(local.clone());
+            }
             // The trait's structural `Self`-constraint (slice 3) is recorded ONLY when the native
             // trait actually occupies the slot — a same-named user `trait` shadows it and carries no
             // such constraint, so recording it under a shadow would enforce a phantom shape.

@@ -1,0 +1,11 @@
+// A cross-module standalone `impl` **inside one dependency package** is accepted: the trait, the
+// type, and the impl are all package `lib`, in three different files. The package orphan rule
+// (E0070) draws its line at the package boundary, so it must not touch this — and the entry, in a
+// different package again, still sees the impl through the merged program.
+// expect: stdout "flushed"
+// expect: exit 0
+use lib.types.{Store, NullStore};
+
+fn label(x: dyn Store): string { return x.label() }
+
+echo label(NullStore.new())

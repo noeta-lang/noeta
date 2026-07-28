@@ -1,0 +1,5 @@
+namespace b.thing;
+
+pub struct Thing {
+    id: int
+}

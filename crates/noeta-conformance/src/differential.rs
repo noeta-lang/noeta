@@ -143,7 +143,7 @@ pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
             // become a `Workspace`, the `linked` query merges them, and both backends consume the
             // workspace queries — the multi-file analogue of the single-file path below.
             match noeta_loader::read_workspace(&case.entry) {
-                Ok(raw) => compare_backends_workspace(&name, &raw, &mut report),
+                Ok(raw) => compare_backends_workspace(&name, &raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
         } else {
@@ -226,10 +226,26 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
 fn compare_backends_workspace(
     name: &str,
     raw: &noeta_loader::RawWorkspace,
+    entry: &std::path::Path,
     report: &mut DiffReport,
 ) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
+    // A case with package subdirectories is a *dependency graph*, so it becomes a workspace WITH
+    // deps — otherwise its `use <pkg>.…` resolves to nothing, the link fails, and the case would
+    // sit silently in the "not run" tally rather than being compared. Package-less cases (every
+    // pre-existing one) take the same deps-free workspace they always did.
+    let deps = crate::dep_sources(entry, (raw.modules.len() + 1) as u32);
+    let ws = if deps.is_empty() {
+        noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT)
+    } else {
+        noeta_db::workspace_with_deps(
+            &db,
+            &raw.entry,
+            &raw.modules,
+            &deps,
+            noeta_lexer::Edition::DEFAULT,
+        )
+    };
 
     let program = match &noeta_db::linked(&db, ws).program {
         Ok(program) => program,

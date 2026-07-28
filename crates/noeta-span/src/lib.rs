@@ -223,9 +223,126 @@ impl SourceMap {
     }
 }
 
+/// Which **package** a source came from.
+///
+/// The linker merges every package's modules into one program, so a package boundary survives
+/// linking only as a side-table (see [`PackageMap`]). This is the identity that table records.
+///
+/// Deliberately *not* a namespace: a `namespace` is declared per file and has no required
+/// relationship to the package that shipped it, so two packages may declare namespaces under one
+/// root and one package may spread across several. Only the loader knows which package it read a
+/// file from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PackageOrigin {
+    /// The **root** package — the program being compiled: its entry file and the sibling modules
+    /// beside it. Unnamed because the loader is handed an entry path, not a manifest; "the root
+    /// package" is how a diagnostic refers to it.
+    Root,
+    /// A **dependency** package, named by the globally-unique link segment the resolver assigned it
+    /// (the consumer's dependency key for a direct dependency, a synthesized unique segment for a
+    /// transitive-only one) — the same segment its declarations are addressed under after
+    /// re-rooting, so the name in a diagnostic is the name in the source.
+    Dependency(String),
+}
+
+impl std::fmt::Display for PackageOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PackageOrigin::Root => f.write_str("the root package"),
+            PackageOrigin::Dependency(key) => write!(f, "package `{key}`"),
+        }
+    }
+}
+
+/// Which package each source of a merged program came from, keyed by [`SourceId`] — the package
+/// analogue of `noeta_edition::EditionMap`, and the carrier the checker's package orphan rule reads.
+///
+/// The loader merges every package's modules into **one** program, so a package boundary cannot be a
+/// property of the program: the merged statement list mixes declarations from many packages, and by
+/// the time the checker runs, nothing in the AST says where a declaration came from. Each
+/// declaration's span already carries the [`SourceId`] of the file it was parsed from, so this
+/// side-table recovers "which package declared this?" from any span.
+///
+/// **An unrecorded source has *unknown* provenance, and every provenance-dependent rule stands
+/// down.** A single-file check, a REPL fragment, a synthetic program, and compile-time generated
+/// code are all unrecorded, so [`Self::at`] answers `None` and the orphan rule cannot fire on a
+/// guess. An empty map means "provenance is unknown everywhere", which is exactly what a plain
+/// `check_all` wants — never "everything is one package".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackageMap {
+    by_source: std::collections::HashMap<SourceId, PackageOrigin>,
+}
+
+impl PackageMap {
+    /// An empty map — every source's package is unknown.
+    pub fn new() -> PackageMap {
+        PackageMap::default()
+    }
+
+    /// Record that the source `id` was read from `origin`.
+    pub fn set(&mut self, id: SourceId, origin: PackageOrigin) {
+        self.by_source.insert(id, origin);
+    }
+
+    /// The package the source `id` came from, or `None` when it was never recorded.
+    pub fn source_package(&self, id: SourceId) -> Option<&PackageOrigin> {
+        self.by_source.get(&id)
+    }
+
+    /// The package that declared whatever `span` points at — [`Self::source_package`] of the span's
+    /// owning source. The per-span lookup a whole-program rule uses to compare two declarations'
+    /// packages.
+    pub fn at(&self, span: Span) -> Option<&PackageOrigin> {
+        self.source_package(span.source)
+    }
+
+    /// Whether nothing has been recorded — i.e. provenance is unknown for every source.
+    pub fn is_empty(&self) -> bool {
+        self.by_source.is_empty()
+    }
+
+    /// How many sources have a recorded package.
+    pub fn len(&self) -> usize {
+        self.by_source.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_map_defaults_an_unrecorded_source_to_unknown() {
+        // Unknown, never "the root package": a rule that reads this must stand down rather than
+        // judge a single-file or synthetic program as though it were a resolved dependency graph.
+        let map = PackageMap::new();
+        assert!(map.is_empty());
+        assert_eq!(map.source_package(SourceId(0)), None);
+        assert_eq!(map.at(Span::new_in(SourceId(3), 0, 1)), None);
+    }
+
+    #[test]
+    fn package_map_recovers_a_recorded_source_and_span() {
+        let mut map = PackageMap::new();
+        map.set(SourceId(0), PackageOrigin::Root);
+        map.set(SourceId(2), PackageOrigin::Dependency("glue".to_string()));
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.source_package(SourceId(0)), Some(&PackageOrigin::Root));
+        assert_eq!(
+            map.at(Span::new_in(SourceId(2), 4, 8)),
+            Some(&PackageOrigin::Dependency("glue".to_string()))
+        );
+        assert_eq!(map.source_package(SourceId(9)), None);
+    }
+
+    #[test]
+    fn a_package_origin_names_itself_for_a_diagnostic() {
+        assert_eq!(PackageOrigin::Root.to_string(), "the root package");
+        assert_eq!(
+            PackageOrigin::Dependency("vendor_a".to_string()).to_string(),
+            "package `vendor_a`"
+        );
+    }
 
     #[test]
     fn span_merge_and_len() {

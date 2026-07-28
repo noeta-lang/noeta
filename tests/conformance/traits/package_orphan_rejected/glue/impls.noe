@@ -1,0 +1,10 @@
+// The orphan: package `glue` declares neither `Speaks` (package `a`) nor `Thing` (package `b`), yet
+// implements one for the other. Rejected by the package orphan rule (E0070) at the `impl`.
+namespace glue.impls;
+
+use a.speaks.{Speaks};
+use b.thing.{Thing};
+
+impl Speaks for Thing {
+    fn speak(): string { return "glue says ${self.id}" }
+}

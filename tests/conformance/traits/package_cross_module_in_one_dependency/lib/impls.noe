@@ -1,0 +1,11 @@
+// A SECOND module of the same package carries the standalone impl. The orphan rule's boundary is
+// the **package**, not the file, so this is legal and must stay legal — the cross-module standalone
+// impl is exactly the shape that was broken once before (a standalone impl's trait membership not
+// surviving the module boundary) and re-breaking it is this rule's main regression risk.
+namespace lib.impls;
+
+use lib.types.{Store, NullStore};
+
+impl Store for NullStore {
+    fn label(): string { return "flushed" }
+}

@@ -63,7 +63,8 @@ Because the arm is checked against the whole expression's expected type, a misma
 | Missing signature at a boundary | E0022 |
 | Cannot infer a binding | E0023 |
 | Bound not satisfied | E0025 |
-| Conflicting trait impls (coherence) | E0027 |
+| Conflicting trait impls (coherence uniqueness) | E0027 |
+| `impl Trait for Type` in a package declaring neither (the coherence orphan rule) | E0070 |
 | Invalid `.as<T>()` narrow | E0028 |
 
 The resulting contract in one line: **no holes at named boundaries, inference in the interior, and `dyn` as the one explicit escape.**

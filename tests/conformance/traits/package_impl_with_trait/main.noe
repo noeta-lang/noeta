@@ -1,0 +1,11 @@
+// The orphan rule's first accepted half: the `impl` lives in the **trait's** package, and the type
+// is foreign. Cross-package is not itself the offense — implementing from a package that owns
+// neither side is.
+// expect: stdout "a says 7"
+// expect: exit 0
+use a.speaks.{Speaks};
+use b.thing.{Thing};
+
+fn say(x: dyn Speaks): string { return x.speak() }
+
+echo say(Thing.new(7))

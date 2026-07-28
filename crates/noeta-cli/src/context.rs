@@ -82,26 +82,32 @@ pub(crate) fn load_linked(
 }
 
 /// Rewrap a linker result as the runner's [`Loaded`], so type-checking goes through
-/// [`Loaded::check`] — the editions-threading choke point — instead of a hand-paired
+/// [`Loaded::check`] — the editions/provenance threading choke point — instead of a hand-paired
 /// `check_all_with_editions(&linked.program, linked.editions.clone())`.
 pub(crate) fn loaded(linked: noeta_loader::Linked) -> Loaded {
     Loaded {
         program: linked.program,
         sources: linked.sources,
         editions: linked.editions,
+        packages: linked.packages,
     }
 }
 
 /// Type-check a program **synthesized from** an already-linked one (a per-test case, a bench
 /// measurement loop, a tier-dispatch program, a hot-swap candidate) under the parent workspace's
-/// editions. SourceIds survive the synthesis (the new nodes carry existing or synthetic spans),
-/// so the parent's edition map stays valid. The crate's single hand-written
-/// `check_all_with_editions` call site — whole linked programs go through [`Loaded::check`].
+/// [`noeta_check::CheckOptions`] — its per-source editions *and* its package provenance. SourceIds
+/// survive the synthesis (the new nodes carry existing or synthetic spans), so both maps stay valid.
+/// The crate's single hand-written whole-`CheckOptions` call site — whole linked programs go through
+/// [`Loaded::check`].
+///
+/// It takes the options **as one value** rather than a map per concern: the two used to be paired by
+/// hand at every one of these call sites, which is precisely how a second per-source map would end
+/// up threaded through half of them.
 pub(crate) fn check_under(
     program: &noeta_ast::Program,
-    editions: &noeta_lexer::EditionMap,
+    opts: &noeta_check::CheckOptions,
 ) -> noeta_check::Checked {
-    noeta_check::check_all_with_editions(program, editions.clone())
+    noeta_check::check_all_with(program, opts.clone())
 }
 
 /// Resolve which provider owns `tier` under the target's map and, when a dependency package's
@@ -132,7 +138,9 @@ pub(crate) fn provider_escape(
 /// activation and whole-program type-check diagnostics (rendered against the workspace sources).
 pub(crate) struct TierRun {
     pub(crate) activated: noeta_check::Activated,
-    pub(crate) editions: noeta_lexer::EditionMap,
+    /// The workspace's check configuration — per-source editions and package provenance — so a
+    /// per-case re-check ([`check_under`]) judges the same program the whole-program check did.
+    pub(crate) opts: noeta_check::CheckOptions,
 }
 
 /// The outcome of [`tier_prologue`]: either the invocation was fully handled (delegated to a
@@ -193,12 +201,16 @@ pub(crate) fn tier_prologue(
     // editions ride structurally — so a broken tier fn is a compile error reported a single time
     // here rather than redundantly inside every per-case run.
     let noeta_loader::Linked {
-        sources, editions, ..
+        sources,
+        editions,
+        packages,
+        ..
     } = linked;
     let checking = Loaded {
         program: activated.program,
         sources,
         editions,
+        packages,
     };
     let checked = checking.check();
     if !checked.diagnostics.is_empty() {
@@ -206,11 +218,18 @@ pub(crate) fn tier_prologue(
         return Prologue::Ran(ExitCode::from(1));
     }
     let Loaded {
-        program, editions, ..
+        program,
+        editions,
+        packages,
+        ..
     } = checking;
     activated.program = program;
     Prologue::Ready(Box::new(TierRun {
         activated,
-        editions,
+        opts: noeta_check::CheckOptions {
+            editions,
+            packages,
+            ..noeta_check::CheckOptions::default()
+        },
     }))
 }
