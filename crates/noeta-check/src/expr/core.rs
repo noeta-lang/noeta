@@ -589,7 +589,7 @@ impl Checker {
         )
         .help(format!(
             "reflect where the type is concrete and pass the result in — give this function a \
-             parameter for it and let the caller supply `{surface}::<TheRealType>(…)`"
+             parameter for it and let the caller supply `{surface}::<TheRealType>`"
         ));
         true
     }
@@ -1339,6 +1339,18 @@ impl Checker {
                     .help(format!("did you mean `x is {base}`?"));
                 }
                 Type::Bool
+            }
+            // `type_name::<T>()` — a type's qualified runtime identity as a `string`. The type is
+            // resolved like any annotation (an unresolvable `T` is E0013), and an erased type
+            // *parameter* is the same E0058 the name-keyed queries report: a parameter has no name
+            // at run time, so a `type_name::<T>()` inside `fn f<T>()` could only ever yield the
+            // literal `"T"`, which names nothing. Unlike `attributes_of`, there is no forwarding
+            // escape: this lowers to a compile-time constant, with no runtime node to feed a slot.
+            Expr::TypeName { ty, .. } => {
+                if !self.reject_erased_type_param(ty, "type_name") {
+                    self.check_type_ref(ty);
+                }
+                Type::String
             }
             Expr::AttributesOf { ty, span } => {
                 self.check_type_ref(ty);

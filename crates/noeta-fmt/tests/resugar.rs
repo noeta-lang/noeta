@@ -130,6 +130,12 @@ fn reflection_turbofish_round_trips() {
     );
 }
 
+/// `type_name::<T>()` is turbofish-only — there is no call form for the printer to drift into.
+#[test]
+fn type_name_turbofish_round_trips() {
+    preserved("struct T {\n    a: int\n}\n\nname = type_name::<T>()\n");
+}
+
 #[test]
 fn authored_reflection_string_is_not_sugared() {
     // The dynamic surface takes a runtime `string`, and a literal that happens to spell a local

@@ -528,8 +528,11 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 rec!(h);
             }
         }
-        // Leaves.
-        Expr::Str { .. }
+        // Leaves. `type_name::<T>()` is one on purpose: it is NOT a forwarding consumer, because a
+        // type parameter there is rejected outright (E0058) rather than resolved through a hidden
+        // slot — the string it yields is a compile-time constant, with no runtime node to feed.
+        Expr::TypeName { .. }
+        | Expr::Str { .. }
         | Expr::Int { .. }
         | Expr::IntN { .. }
         | Expr::Float { .. }

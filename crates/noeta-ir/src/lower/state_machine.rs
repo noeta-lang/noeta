@@ -1250,6 +1250,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         | Expr::Bool { .. }
         | Expr::Ident { .. }
         | Expr::AttributesOf { .. }
+        | Expr::TypeName { .. }
         | Expr::RolesOf { .. } => {}
     }
 }

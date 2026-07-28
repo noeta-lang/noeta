@@ -1602,6 +1602,12 @@ impl Lowerer<'_> {
                 *span,
             )),
             Expr::Str { value, .. } => Ok(Atom::Const(Const::Str(value.clone()))),
+            // `type_name::<T>()` — a **compile-time constant string**, with no runtime node at all:
+            // by the time lowering runs the program is linked, so this `TypeRef` already carries its
+            // qualified identity (`app.storage.Todo`) and there is nothing left to look up. Resolved
+            // through the same `TypeRef::head_name` the name-keyed reflection queries use, which is
+            // what makes the two agree by construction rather than by convention.
+            Expr::TypeName { ty, .. } => Ok(Atom::Const(Const::Str(ty.head_name()))),
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
             // magnitude's bit pattern is the runtime i64 word (a `u64` with the high bit set boxes as

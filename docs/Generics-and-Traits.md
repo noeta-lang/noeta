@@ -75,6 +75,8 @@ user  = load::<User>("{\"name\": \"Ada\"}")   // same body, per-instantiation de
 
 Forwarding works from a **top-level generic function** and from a **nested `fn`** inside one, and a **composite** parameter forwards too (`List<T>`, `Box<T>` in a `::<...>` position), not just the bare `T`. The boundaries, all reported statically: a **generic method's** own parameter does not forward into a call-site-typed position (E0058); an instantiation the call site cannot pin must be spelled with a turbofish (E0023); and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure.
 
+The **name-keyed** reflection turbofishes are the exception, and take no `T` at all: `field_specs_of::<T>()`, `construct::<T>(…)` and `type_name::<T>()` are keyed on a type *name*, which an erased parameter does not have, so a parameter there is E0058 rather than a silent empty answer. Reflect where the type is concrete and pass the result in — see [Reflection over a type parameter](Attributes-and-Reflection#reflection-over-a-type-parameter).
+
 ## Generic functions as values
 
 A generic function referenced as a **value** in an expected-type position instantiates against the expectation and carries the precise monomorphic function type — no turbofish needed:

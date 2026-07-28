@@ -116,6 +116,41 @@ echo match type_of(5) {
 
 `Type` variants include the scalars `Type.Int`, `Type.Float`, `Type.F32`, `Type.F64`, `Type.IntN(bits, signed)`, `Type.Bool`, `Type.String`, `Type.Bytes`, `Type.Unit`, `Type.Dyn`; the containers `Type.List(inner)`, `Type.Set(inner)`, `Type.Map(k, v)`, `Type.Option(inner)`, `Type.Result(ok, err)`; `Type.Fn(params, ret)` and `Type.Union(members)`; the trait object `Type.DynTrait(name)`; and the nominals `Type.Struct(name, args)`, `Type.Enum(name, args)`, `Type.Class(name, args)`, `Type.Named(name, args)`. Collection literals carry their resolved element type as a runtime tag that survives a `dyn` launder (a content-changing op like `.set` drops the tag to head-only).
 
+### `type_name::<T>(): string`
+
+A type's **qualified runtime identity**, as a `string` — the same name `type_of` reports inside `Type.Struct(name, args)`, and the same key the name-keyed queries (`field_specs_of(name)`, `construct(name, …)`, `invoke(name, …)`) are stored under. It is how you *write* that key without hand-writing it:
+
+```noeta
+namespace app.storage
+
+pub struct Todo {
+    pub id: int
+}
+
+echo type_name::<Todo>()                        // app.storage.Todo
+echo field_specs_of(type_name::<Todo>()).len()  // 1
+```
+
+Turbofish only — a `type_name(s)` taking a runtime string would be the identity function on `s`. The value of the surface is that the **compiler** resolves the type: the name follows a `namespace`, a `use … as` alias, and a rename, none of which a string literal does. A name-keyed repository (`Repository.new(type_name::<Todo>(), "todos", "id")`) is the motivating case — before this it had to be handed `"app.storage.Todo"` spelled out by hand, and nothing checked it.
+
+An unresolvable type is `E0013`, exactly as in any other annotation. A generic **type parameter** is `E0058` — see below.
+
+### Reflection over a type parameter
+
+`field_specs_of::<T>()`, `construct::<T>(…)` and `type_name::<T>()` are keyed on a type **name**, and generics are erased: one compiled body serves every instantiation, so inside `fn f<T>()` the argument `T` is only ever the literal character `T`, which names nothing. That is `E0058`.
+
+```noeta error
+fn count_of<T>(): int {
+    return field_specs_of::<T>().len()   // E0058 — `T` names no type at run time
+}
+
+echo count_of::<int>()
+```
+
+Reflect where the type is concrete and pass the result in — take a `List<FieldSpec>` (or a `string` from `type_name::<Todo>()`) as a parameter, and let the caller supply it. The runtime-string surfaces stay open for exactly this: `field_specs_of(name)` inside a generic body is fine, because its operand is a value the caller can hand in.
+
+(`attributes_of::<T>()` is the one reflection turbofish that *does* accept a forwarded type parameter: it rides the hidden type-argument slot a generic call already carries. The name-keyed queries have no such slot.)
+
 ### The prelude enums are ordinary enums
 
 `Type` is one of five enums the language declares for you — `Ordering` (what `.compare()` returns), `Type`, `Semantic` (the built-in role vocabulary), `Layout` (the `@packed` storage vocabulary), and `Cancelled` (the `Err` payload of a cancelled `join`). Each is namable like any enum you declare yourself: you can annotate with it, `match` on it exhaustively, **and construct a case by name**. A constructed case is the very same value the runtime hands you, so `==` works and you are not forced into a `match` just to ask one question:

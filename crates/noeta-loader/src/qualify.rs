@@ -534,6 +534,7 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
         Expr::Ident { .. }
         | Expr::NativeFnRef { .. }
         | Expr::AttributesOf { .. }
+        | Expr::TypeName { .. }
         | Expr::RolesOf { .. }
         | Expr::Str { .. }
         | Expr::Int { .. }
@@ -869,7 +870,10 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_expr(expr, visit);
             q_typeref(ty, visit);
         }
-        Expr::AttributesOf { ty, .. } => q_typeref(ty, visit),
+        // `attributes_of::<T>()` and `type_name::<T>()` both hold a real type reference, and both
+        // qualify here. For `type_name` that rewrite IS the feature: the string it yields is the
+        // *qualified* identity precisely because the type survives to lowering as a type.
+        Expr::AttributesOf { ty, .. } | Expr::TypeName { ty, .. } => q_typeref(ty, visit),
         Expr::FromBytes { ty, blob, .. } => {
             q_typeref(ty, visit);
             q_expr(blob, visit);
@@ -1444,6 +1448,26 @@ mod tests {
             panic!("construct")
         };
         assert!(matches!(name.dynamic(), Some(Expr::Str { value, .. }) if value == "Todo"));
+    }
+
+    /// `type_name::<T>()` qualifies its type — which IS the feature, since the string it lowers to
+    /// is `TypeRef::head_name` of exactly this rewritten reference. A `type_name` desugared to a
+    /// string in the parser would answer with the bare `Todo` and defeat its own purpose.
+    #[test]
+    fn type_name_qualifies_its_type() {
+        let m = map(&[("Todo", "app.storage.Todo")]);
+        let mut stmts = parse_one("n = type_name::<Todo>();\n");
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        let Stmt::Binding { value, .. } = &stmts[0] else {
+            panic!("binding")
+        };
+        let Expr::TypeName { ty, .. } = value else {
+            panic!("type_name")
+        };
+        assert!(matches!(ty, TypeRef::Named { name, .. } if name == "app.storage.Todo"));
+        assert_eq!(ty.head_name(), "app.storage.Todo");
     }
 
     /// An explicitly instantiated generic call qualifies its **callee**, and `referenced_names`

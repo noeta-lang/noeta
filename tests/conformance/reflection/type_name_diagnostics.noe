@@ -1,0 +1,18 @@
+// `type_name::<T>()`'s two rejections, both inherited for free from keeping `T` a real type
+// reference rather than a string:
+//
+// * an **unresolvable** type is E0013, resolved exactly like any other annotation — a `type_name`
+//   that silently answered `"Ghost"` would be worse than useless, since the whole point is that the
+//   string is compile-checked;
+// * an erased type **parameter** is E0058, the same rejection `field_specs_of::<T>()` /
+//   `construct::<T>(…)` report and for the same reason: one compiled body serves every
+//   instantiation, so `T` names no type at run time and this could only ever yield `"T"`.
+//
+// There is deliberately no forwarding escape here (the way `attributes_of::<T>()` has one):
+// `type_name` lowers to a compile-time constant, so there is no runtime node for a hidden
+// type-argument slot to feed.
+// expect: error E0058 at 17:40
+// expect: error E0013 at 18:18
+// expect: exit 1
+fn n<T>(): string { return type_name::<T>() }
+echo type_name::<Ghost>()
