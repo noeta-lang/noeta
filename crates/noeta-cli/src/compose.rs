@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use noeta_pm::graph::{self, NativeCrate};
+use noeta_pm::graph::{self, NativeCrate, ResolvedCommandBinding};
 use sha2::{Digest, Sha256};
 
 /// The env guard that marks a composed binary: set on delegation so the composed toolchain (which
@@ -105,10 +105,7 @@ pub fn maybe_delegate(entry: &Path) -> Result<Option<graph::ResolvedGraph>, Exit
     if resolved.native_crates.is_empty() {
         return Ok(Some(resolved));
     }
-    match delegate(
-        &resolved.native_crates,
-        &resolved.trusted_command_identities,
-    ) {
+    match delegate(&resolved.native_crates, &resolved.command_bindings) {
         Ok(never) => match never {},
         Err(err) => {
             eprintln!("noeta: cannot compose the toolchain for this app's native dependencies:");
@@ -134,9 +131,9 @@ enum Never {}
 
 fn delegate(
     crates: &[NativeCrate],
-    trusted_command_identities: &[String],
+    command_bindings: &[ResolvedCommandBinding],
 ) -> Result<Never, String> {
-    let binary = compose_binary(crates, trusted_command_identities, ShimKind::Toolchain)?;
+    let binary = compose_binary(crates, command_bindings, ShimKind::Toolchain)?;
     exec(&binary)
 }
 
@@ -153,7 +150,7 @@ pub fn compose_runner_binary(entry: &Path) -> Result<Option<PathBuf>, String> {
     }
     let binary = compose_binary(
         &resolved.native_crates,
-        &resolved.trusted_command_identities,
+        &resolved.command_bindings,
         ShimKind::Runner,
     )?;
     Ok(Some(binary))
@@ -257,26 +254,19 @@ const AOT_ARCHIVE_NAME: &str = "libnoeta_composed_aot.a";
 /// building it on a miss. Shared by the toolchain delegation and the runner-artifact base.
 fn compose_binary(
     crates: &[NativeCrate],
-    trusted_command_identities: &[String],
+    command_bindings: &[ResolvedCommandBinding],
     kind: ShimKind,
 ) -> Result<PathBuf, String> {
     let entries = resolve_entries(crates)?;
     let toolchain = toolchain_source()?;
-    let key = compose_key(&entries, &toolchain, trusted_command_identities, kind, &[]);
+    let key = compose_key(&entries, &toolchain, command_bindings, kind, &[]);
     let dir = compose_dir(&key)?;
     // Content-addressed: the key covers the entry crates' package trees, the toolchain source form,
     // the running binary's build identity, and the shim kind — a hit means this exact composition
     // already built (the binary was copied into the compose dir as its own artifact).
     let binary = dir.join("bin").join(BIN_NAME);
     if !binary.is_file() {
-        build(
-            &dir,
-            &entries,
-            &toolchain,
-            trusted_command_identities,
-            &binary,
-            kind,
-        )?;
+        build(&dir, &entries, &toolchain, command_bindings, &binary, kind)?;
     }
     Ok(binary)
 }
@@ -487,7 +477,7 @@ fn toolchain_source() -> Result<ToolchainSource, String> {
 fn compose_key(
     entries: &[Entry],
     toolchain: &ToolchainSource,
-    trusted_command_identities: &[String],
+    command_bindings: &[ResolvedCommandBinding],
     kind: ShimKind,
     rings: &[String],
 ) -> String {
@@ -502,11 +492,16 @@ fn compose_key(
         h.update(b"ring:");
         h.update(ring);
     }
-    // Which packages' commands are trusted changes the shim (and the CLI surface), so a change in
-    // `[trust].commands` must recompose (Phase 4).
-    for identity in trusted_command_identities {
+    // The command bindings change the shim (and the CLI surface), so any edit to `[trust.commands]`
+    // — a new binding, a dropped one, or a rename of the local or exported name — must recompose
+    // (Phase 4). Fold each binding's three parts in, delimited, so distinct bindings can't alias.
+    for b in command_bindings {
         h.update(b"cmd:");
-        h.update(identity);
+        h.update(&b.local);
+        h.update(b"=");
+        h.update(&b.provider);
+        h.update(b":");
+        h.update(&b.exported);
     }
     match toolchain {
         ToolchainSource::Workspace(root) => {
@@ -571,7 +566,7 @@ fn build(
     dir: &Path,
     entries: &[Entry],
     toolchain: &ToolchainSource,
-    trusted_command_identities: &[String],
+    command_bindings: &[ResolvedCommandBinding],
     cached: &Path,
     kind: ShimKind,
 ) -> Result<(), String> {
@@ -589,7 +584,7 @@ fn build(
     .map_err(|err| format!("writing shim Cargo.toml: {err}"))?;
     std::fs::write(
         dir.join("src").join("main.rs"),
-        shim_main_rs(entries, trusted_command_identities, kind),
+        shim_main_rs(entries, command_bindings, kind),
     )
     .map_err(|err| format!("writing shim main.rs: {err}"))?;
     let names: Vec<&str> = entries.iter().map(|e| e.identity.as_str()).collect();
@@ -1108,16 +1103,16 @@ fn toolchain_patch_section(src_root: &Path) -> String {
 }
 
 /// The generated shim entry point: aggregate every entry crate's exported `NOETA_EXTENSIONS`
-/// slice and hand the whole toolchain to `run_cli`, along with the **command-trusted units** —
-/// the extension units of exactly the entries whose *package identity* the root app authorized in
-/// `[trust].commands` (Phase 4). Trust is tied to the providing package, never to a name: matching
-/// namespace-root strings would over-trust every package sharing a scope root (trusting `para/db`'s
-/// commands must not trust all of `para/*`), and for a scope-keyed package the dependency's root
-/// segment does not even equal what its extensions report as root — the defect this shape fixes.
+/// slice and hand the whole toolchain to `run_cli`, along with the **command bindings** — one per
+/// `[trust.commands]` entry, each pairing the local name the command is registered under with the
+/// exported command and the providing entry's units (Phase 4). Trust is tied to the providing
+/// package identity (never to a namespace-root string, which would over-trust every package sharing
+/// a scope root — trusting `para/db`'s commands must not trust all of `para/*`), and the local name
+/// is what resolves a collision between two packages exporting the same command name.
 /// `Box::leak` is fine — the units live for the process, exactly like the stock binary's statics.
 fn shim_main_rs(
     entries: &[Entry],
-    trusted_command_identities: &[String],
+    command_bindings: &[ResolvedCommandBinding],
     kind: ShimKind,
 ) -> String {
     let mut out = String::new();
@@ -1133,28 +1128,27 @@ fn shim_main_rs(
         ));
     }
     match kind {
-        // The dev toolchain: hand the whole extension set to `run_cli`, plus the command-trusted
-        // subset — only these entries' units may contribute `noeta <cmd>` subcommands.
+        // The dev toolchain: hand the whole extension set to `run_cli`, plus one command binding per
+        // `[trust.commands]` entry — `run_cli` registers the provider's `exported` command under the
+        // `local` name. A binding whose provider isn't among the entries can't arise (the graph only
+        // resolves bindings for native packages, which all become entries), but skip defensively so
+        // a stray one drops the command rather than mis-indexing a sibling.
         ShimKind::Toolchain => {
-            let any_trusted = entries
-                .iter()
-                .any(|e| trusted_command_identities.contains(&e.identity));
-            let mutable = if any_trusted { "mut " } else { "" };
-            out.push_str(&format!(
-                "    let {mutable}command_units: Vec<&'static (dyn noeta_ext_abi::Extension + Sync)> = Vec::new();\n"
-            ));
-            for (n, e) in entries.iter().enumerate() {
-                if trusted_command_identities.contains(&e.identity) {
-                    out.push_str(&format!(
-                        "    command_units.extend_from_slice(ext{n}::NOETA_EXTENSIONS); // command-trusted: {}\n",
-                        e.identity
-                    ));
-                }
+            out.push_str("    let command_bindings: Vec<noeta_cli::CommandBinding> = vec![\n");
+            for b in command_bindings {
+                let Some(n) = entries.iter().position(|e| e.identity == b.provider) else {
+                    continue;
+                };
+                out.push_str(&format!(
+                    "        noeta_cli::CommandBinding {{ local: {:?}, exported: {:?}, units: ext{n}::NOETA_EXTENSIONS }}, // {}\n",
+                    b.local, b.exported, b.provider
+                ));
             }
+            out.push_str("    ];\n");
             out.push_str(
                 "    noeta_cli::run_cli(\n\
                  \x20       Box::leak(units.into_boxed_slice()),\n\
-                 \x20       Box::leak(command_units.into_boxed_slice()),\n\
+                 \x20       &command_bindings,\n\
                  \x20   )\n}\n",
             );
         }
@@ -1592,26 +1586,39 @@ mod tests {
         assert!(!lib.contains("run_stapled_with_extensions"), "{lib}");
     }
 
-    #[test]
-    fn shim_main_aggregates_unit_slices() {
-        let main = shim_main_rs(&entries(), &["acme/imgfx".to_string()], ShimKind::Toolchain);
-        assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"));
-        assert!(main.contains("noeta_cli::run_cli("));
-        // The command-trusted package's units are registered for commands too (Phase 4): trust is
-        // keyed by the providing package's IDENTITY, so run_cli receives the trusted unit set
-        // itself — no root-name strings anywhere.
-        assert!(main.contains(
-            "command_units.extend_from_slice(ext0::NOETA_EXTENSIONS); // command-trusted: acme/imgfx"
-        ));
-        assert!(main.contains("Box::leak(command_units.into_boxed_slice()),"));
+    /// A resolved command binding for the shim tests.
+    fn binding(local: &str, provider: &str, exported: &str) -> ResolvedCommandBinding {
+        ResolvedCommandBinding {
+            local: local.to_string(),
+            provider: provider.to_string(),
+            exported: exported.to_string(),
+        }
     }
 
     #[test]
-    fn shim_main_registers_commands_for_a_scope_keyed_identity_only_when_trusted() {
+    fn shim_main_aggregates_unit_slices() {
+        let bindings = vec![binding("blur", "acme/imgfx", "blur")];
+        let main = shim_main_rs(&entries(), &bindings, ShimKind::Toolchain);
+        assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"));
+        assert!(main.contains("noeta_cli::run_cli("));
+        // The binding emits a `CommandBinding` tying the local name to the provider's exported
+        // command and its units — trust keyed by the providing package's IDENTITY (its entry index),
+        // no root-name strings anywhere.
+        assert!(
+            main.contains(
+                "noeta_cli::CommandBinding { local: \"blur\", exported: \"blur\", units: ext0::NOETA_EXTENSIONS }"
+            ),
+            "{main}"
+        );
+        assert!(main.contains("&command_bindings,"));
+    }
+
+    #[test]
+    fn shim_main_registers_commands_for_a_scope_keyed_identity_only_when_bound() {
         // The para/db-shaped defect: a scope-keyed package's dependency ROOT SEGMENT (`db`) differs
         // from its extensions' namespace root (`para`), so any root-name matching drops (or, matched
-        // the other way, over-grants) its commands. Keyed by identity, the trusted entry's units are
-        // registered for commands and an untrusted sibling's are excluded.
+        // the other way, over-grants) its commands. Keyed by identity (the entry index), a binding
+        // for `para/db` emits against ext0 only; the untrusted sibling ext1 gets no binding.
         let entries = vec![
             Entry {
                 identity: "para/db".to_string(),
@@ -1632,48 +1639,61 @@ mod tests {
                 ring_features: vec![],
             },
         ];
-        let main = shim_main_rs(&entries, &["para/db".to_string()], ShimKind::Toolchain);
+        let bindings = vec![binding("migrate", "para/db", "migrate")];
+        let main = shim_main_rs(&entries, &bindings, ShimKind::Toolchain);
         // Both packages' units join the toolchain…
         assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS); // para/db"));
         assert!(main.contains("units.extend_from_slice(ext1::NOETA_EXTENSIONS); // para/p2p"));
-        // …but only the command-trusted package's units register commands: trusting `para/db`
-        // must NOT trust every `para/*` package's commands.
+        // …but only the bound package's command is registered, and against ext0 (para/db): trusting
+        // `para/db` must NOT trust every `para/*` package's commands.
         assert!(
             main.contains(
-                "command_units.extend_from_slice(ext0::NOETA_EXTENSIONS); // command-trusted: para/db"
+                "noeta_cli::CommandBinding { local: \"migrate\", exported: \"migrate\", units: ext0::NOETA_EXTENSIONS }"
             ),
             "{main}"
         );
         assert!(
-            !main.contains("command_units.extend_from_slice(ext1::NOETA_EXTENSIONS);"),
-            "the untrusted sibling's units must not register commands:\n{main}"
+            !main.contains("units: ext1::NOETA_EXTENSIONS }"),
+            "the untrusted sibling's units must not back a command binding:\n{main}"
         );
-        // And no name-string matching survives in the generated shim.
-        assert!(!main.contains("trusted_command_roots"), "{main}");
     }
 
     #[test]
-    fn shim_main_with_no_trusted_commands_passes_an_empty_unit_set() {
+    fn shim_main_emits_a_renamed_binding_under_its_local_name() {
+        // The escape hatch: a binding whose local name differs from the exported command name is
+        // emitted under the local name, resolving a collision with another package's same-named
+        // command. The provider's exported name is what run_cli looks up in the units.
+        let bindings = vec![binding("undo", "acme/imgfx", "rollback")];
+        let main = shim_main_rs(&entries(), &bindings, ShimKind::Toolchain);
+        assert!(
+            main.contains(
+                "noeta_cli::CommandBinding { local: \"undo\", exported: \"rollback\", units: ext0::NOETA_EXTENSIONS }"
+            ),
+            "{main}"
+        );
+    }
+
+    #[test]
+    fn shim_main_with_no_bindings_emits_an_empty_binding_list() {
         let main = shim_main_rs(&entries(), &[], ShimKind::Toolchain);
-        assert!(main.contains(
-            "let command_units: Vec<&'static (dyn noeta_ext_abi::Extension + Sync)> = Vec::new();"
-        ));
-        assert!(!main.contains("command_units.extend_from_slice"));
-        assert!(main.contains("Box::leak(command_units.into_boxed_slice()),"));
+        assert!(main.contains("let command_bindings: Vec<noeta_cli::CommandBinding> = vec!["));
+        assert!(!main.contains("noeta_cli::CommandBinding {"));
+        assert!(main.contains("&command_bindings,"));
     }
 
     #[test]
     fn runner_shim_main_installs_units_and_runs_stapled() {
         // dev-deps D4c: the runner shim installs the native runtime units then runs the stapled
         // program — no `run_cli`, no command-trust (a stapled artifact exposes no CLI).
-        let main = shim_main_rs(&entries(), &["acme/imgfx".to_string()], ShimKind::Runner);
+        let bindings = vec![binding("blur", "acme/imgfx", "blur")];
+        let main = shim_main_rs(&entries(), &bindings, ShimKind::Runner);
         assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"));
         assert!(main.contains("noeta_runner::run_stapled_with_extensions(Box::leak("));
         assert!(
             !main.contains("run_cli"),
             "the runner base must not call run_cli"
         );
-        assert!(!main.contains("command_units"));
+        assert!(!main.contains("command_bindings"));
     }
 
     /// The compose dir's own target dir is build scratch and is dropped once the artifact is

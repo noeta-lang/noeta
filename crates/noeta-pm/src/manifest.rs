@@ -193,9 +193,14 @@ pub struct Trust {
     /// Packages permitted to compile + run their native Rust crate (which also runs its `cargo`
     /// build — `build.rs`/proc-macros). Any native-declaring package not listed here is refused.
     pub native: std::collections::BTreeSet<String>,
-    /// Packages permitted to contribute `noeta <subcommand>` CLI commands. A command from an
-    /// unlisted package is silently omitted (a capability the user never asked for).
-    pub commands: std::collections::BTreeSet<String>,
+    /// The commands a dependency may contribute, each bound to the **local name** it appears under
+    /// (`noeta <local>`). Keyed by that local name → the providing package and the command it
+    /// exported (`[trust.commands]` / `migrate = "para/db"`, or `undo = "para/db:rollback"` to
+    /// rename). The binding *is* the grant: an entry both authorizes the provider to contribute this
+    /// one command and fixes the name it appears under, so two packages exporting the same command
+    /// name coexist under distinct local names rather than colliding. A command from a package with
+    /// no entry here is never registered (a capability the user never asked for).
+    pub commands: std::collections::BTreeMap<String, Binding>,
     /// Which registry **scopes** (the `company` segment) this project demands carry verified
     /// provenance (namespace-protection #1, require-provenance). A dependency resolved from a required
     /// scope whose release is unsigned is a hard resolve error — the consumer's own guarantee, held
@@ -216,6 +221,24 @@ pub struct Trust {
     /// tier (`operator`/`publisher`/`imported`) makes `noeta audit` **fail** the build, merely **warn**,
     /// or is ignored (`off`). Default: every tier warns; a project opts a tier up to `fail` for CI.
     pub advisories: AdvisoryPolicy,
+}
+
+/// A single entry in a `[trust.commands]` (or, from Slice 2, `[trust.directives]`) table: the
+/// providing package and the name that package exported the command/directive under. The table
+/// **key** is the local name the project uses; this is the resolved right-hand side. Written
+/// `local = "company/package"` (exported name == local name) or `local = "company/package:exported"`
+/// to rename — the first `:` splits the identity (which contains a `/`, never a `:`) from the
+/// exported name, so the exported half may itself contain any character (a command name may hold a
+/// space, e.g. `remote add`). The binding is both the authorization and the name mapping in one
+/// entry, so a package is never named twice to be trusted and bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binding {
+    /// The providing package identity (`company/package`) — the same identity `[trust].native`
+    /// authorizes. Validated as a [`PackageName`] at parse time so a typo fails loudly.
+    pub provider: String,
+    /// The name the provider declared the command/directive under (its `ExtCommand`/`ExtDirective`
+    /// `name`). Equal to the local key unless a `:exported` suffix renamed it.
+    pub exported: String,
 }
 
 /// The `[db]` table — a project's default database wiring for `noeta migrate` (and any tooling that
@@ -1533,12 +1556,69 @@ fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
     let advisories = parse_advisory_policy(trust_table)?;
     Ok(Trust {
         native: parse_list("native")?,
-        commands: parse_list("commands")?,
+        commands: parse_binding_table(trust_table, "commands")?,
         require_provenance,
         require_transparency,
         publish_cooldown,
         advisories,
     })
+}
+
+/// Parse a `[trust.<field>]` binding table (`local = "company/package[:exported]"`) into a
+/// local-name → [`Binding`] map. This is the shape both `[trust.commands]` and `[trust.directives]`
+/// use: the key is the local name the project addresses the capability under, the value names the
+/// providing package and (optionally, after a `:`) the name that package exported it under.
+///
+/// The pre-mapping array form (`commands = ["company/package"]`) is refused with a migration
+/// message — it granted every command a package shipped, blanket, which is exactly what the local
+/// binding replaces.
+fn parse_binding_table(
+    trust_table: &toml::Table,
+    field: &str,
+) -> Result<BTreeMap<String, Binding>, String> {
+    let Some(value) = trust_table.get(field) else {
+        return Ok(BTreeMap::new());
+    };
+    // A leftover array is the old blanket-by-package form — name the replacement rather than the
+    // generic "must be a table", since this is a migration a reader is likely mid-way through.
+    if value.is_array() {
+        return Err(format!(
+            "`trust.{field}` is now a table mapping each local name to its provider — write \
+             `[trust.{field}]` with `name = \"company/package\"` entries (add `:exported` to rename), \
+             not an array of package identities"
+        ));
+    }
+    let table = value.as_table().ok_or_else(|| {
+        format!("`trust.{field}` must be a table of `local = \"company/package[:exported]\"`")
+    })?;
+    let mut out = BTreeMap::new();
+    for (local, spec_value) in table {
+        let spec = spec_value.as_str().ok_or_else(|| {
+            format!("`trust.{field}.{local}` must be a string `\"company/package[:exported]\"`")
+        })?;
+        // The identity is `company/package` (a `/`, never a `:`), so the FIRST colon unambiguously
+        // begins the exported name; everything after it is that name verbatim. No colon → the
+        // exported name is the local key (the common, no-rename case).
+        let (provider, exported) = match spec.split_once(':') {
+            Some((p, e)) => (p, e),
+            None => (spec, local.as_str()),
+        };
+        PackageName::parse(provider).map_err(|err| format!("`trust.{field}.{local}`: {err}"))?;
+        if exported.is_empty() {
+            return Err(format!(
+                "`trust.{field}.{local}`: the exported name after `:` is empty — drop the `:` to \
+                 bind the provider's own `{local}`, or name the command it exports"
+            ));
+        }
+        out.insert(
+            local.clone(),
+            Binding {
+                provider: provider.to_string(),
+                exported: exported.to_string(),
+            },
+        );
+    }
+    Ok(out)
 }
 
 /// Parse `[trust].advisories` (advisory-intake arc, tier 5): either a bare action string applied to
@@ -2277,13 +2357,34 @@ mod tests {
             "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
              [trust]\n\
              native = [\"acme/imgfx\", \"acme/simd\"]\n\
-             commands = [\"acme/scaffold\"]\n",
+             [trust.commands]\n\
+             scaffold = \"acme/scaffold\"\n\
+             gen = \"acme/scaffold:generate\"\n",
         )
         .expect("valid");
         assert!(m.trust().native.contains("acme/imgfx"));
         assert!(m.trust().native.contains("acme/simd"));
-        assert!(m.trust().commands.contains("acme/scaffold"));
-        assert!(!m.trust().commands.contains("acme/imgfx"));
+        // The no-rename form: exported name defaults to the local key.
+        let scaffold = m.trust().commands.get("scaffold").expect("bound");
+        assert_eq!(scaffold.provider, "acme/scaffold");
+        assert_eq!(scaffold.exported, "scaffold");
+        // The rename form: `local = "provider:exported"`.
+        let renamed = m.trust().commands.get("gen").expect("bound");
+        assert_eq!(renamed.provider, "acme/scaffold");
+        assert_eq!(renamed.exported, "generate");
+        assert!(!m.trust().commands.contains_key("acme/imgfx"));
+    }
+
+    #[test]
+    fn trust_rejects_the_pre_mapping_command_array() {
+        let err = Manifest::parse(
+            "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n\
+             [trust]\ncommands = [\"acme/scaffold\"]\n",
+        )
+        .expect_err("the array form is retired")
+        .to_string();
+        assert!(err.contains("trust.commands"), "{err}");
+        assert!(err.contains("table"), "{err}");
     }
 
     #[test]
@@ -2412,8 +2513,20 @@ mod tests {
     fn trust_rejects_a_malformed_identity() {
         // A typo'd grant must fail loudly, not silently authorize nothing.
         assert!(Manifest::parse("[trust]\nnative = [\"not-an-identity\"]\n").is_err());
-        assert!(Manifest::parse("[trust]\ncommands = [42]\n").is_err());
         assert!(Manifest::parse("[trust]\nnative = \"acme/x\"\n").is_err()); // must be an array
+        // A command binding's provider is validated as an identity, and its value must be a string.
+        assert!(
+            Manifest::parse("[trust.commands]\nmigrate = \"not-an-identity\"\n").is_err(),
+            "a malformed provider identity must fail"
+        );
+        assert!(
+            Manifest::parse("[trust.commands]\nmigrate = 42\n").is_err(),
+            "a non-string binding value must fail"
+        );
+        assert!(
+            Manifest::parse("[trust.commands]\nmigrate = \"acme/db:\"\n").is_err(),
+            "an empty exported name after `:` must fail"
+        );
     }
 
     #[test]

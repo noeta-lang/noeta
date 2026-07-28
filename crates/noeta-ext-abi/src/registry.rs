@@ -3873,8 +3873,19 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             }),
         ),
         (
+            // Command names are enforced unique only among **std-root** units. A dependency's
+            // commands reach the CLI through a `[trust.commands]` binding that fixes a distinct
+            // local name, so two dependency packages exporting the same command name coexist (the
+            // binding resolves the collision) rather than making the assembled binary refuse to
+            // start — the escape hatch that per-command binding exists to provide.
             "command",
-            collect(&|e| e.commands().iter().map(|c| (c.name, e.name())).collect()),
+            collect(&|e| {
+                if e.root() == "std" {
+                    e.commands().iter().map(|c| (c.name, e.name())).collect()
+                } else {
+                    Vec::new()
+                }
+            }),
         ),
     ] {
         if let Some(((a, b), name)) = dup_of(names) {

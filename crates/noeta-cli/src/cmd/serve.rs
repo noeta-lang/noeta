@@ -40,8 +40,14 @@ fn entry_ident(program: &noeta_ast::Program, name: &str) -> String {
         .to_string()
 }
 
-pub(crate) fn ext_command_clap(ext: &'static noeta_stdlib::ExtCommand) -> clap::Command {
-    let mut cmd = clap::Command::new(ext.name).about(ext.about);
+/// Build the clap subcommand for an extension command, registered under `name` — the local name a
+/// `[trust.commands]` binding chose (equal to `ext.name` for std's own commands, which register
+/// under their exported names).
+pub(crate) fn ext_command_clap(
+    name: &'static str,
+    ext: &'static noeta_stdlib::ExtCommand,
+) -> clap::Command {
+    let mut cmd = clap::Command::new(name).about(ext.about);
     for spec in ext.args {
         cmd = cmd.arg(match spec.kind {
             noeta_stdlib::ArgKind::Path => clap::Arg::new(spec.name)

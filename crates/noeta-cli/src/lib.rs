@@ -849,6 +849,31 @@ enum CacheAction {
     Clear,
 }
 
+/// A resolved `[trust.commands]` binding, handed to [`run_cli`] by the composed shim (package-manager
+/// Phase 4): the local name a dependency command is registered under (`noeta <local>`), the name the
+/// providing package exported it under, and that package's extension units — the `exported` command
+/// lives in one of them. The binding both authorizes the command and fixes its local name, so two
+/// packages exporting the same command name coexist under distinct local names.
+pub struct CommandBinding {
+    /// The name the command is registered + dispatched under.
+    pub local: &'static str,
+    /// The command name the providing package's extension declared (its `ExtCommand::name`).
+    pub exported: &'static str,
+    /// The providing package's extension units; the `exported` command is one unit's `ExtCommand`.
+    pub units: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
+}
+
+impl std::fmt::Debug for CommandBinding {
+    // `dyn Extension` is not `Debug`; the unit count is the useful part.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandBinding")
+            .field("local", &self.local)
+            .field("exported", &self.exported)
+            .field("units", &self.units.len())
+            .finish()
+    }
+}
+
 /// The whole toolchain as a library entry (package-manager Phase 3, N3.0): the stock binary calls
 /// this with no extras; a **composed** binary (an app whose dependency graph carries native
 /// extension crates) calls it with the extra units, which register alongside the std units before
@@ -857,7 +882,7 @@ enum CacheAction {
 /// toolchain, not a runner.
 pub fn run_cli(
     extra: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
-    command_extras: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
+    command_bindings: &[CommandBinding],
 ) -> ExitCode {
     // First-party toolchain extensions that ship with every binary (stock or composed), in their own
     // namespaces — the HTML body formatter (`noeta-html`) which reflows `@html` bodies under
@@ -867,19 +892,55 @@ pub fn run_cli(
         vec![&noeta_html::HTML_EXTENSION, &noeta_css::CSS_EXTENSION];
     units.extend_from_slice(extra);
     noeta_stdlib::registry::install_with_extras(&units);
-    // Phase 4: a dependency's `ExtCommand`s reach the CLI only if the root app command-trusts its
-    // PACKAGE (`[trust].commands`). The composer passes the trusted packages' extension units here
-    // (`command_extras` ⊆ `extra`), so trust is keyed by the providing package's identity — never
-    // by matching root-name strings, which would over-trust every package sharing a scope root
-    // (trusting `para/db`'s commands must not trust all of `para/*`) and, for a scope-keyed
-    // dependency, didn't even match its extensions' actual root. std's own commands (root `"std"`)
-    // are always available. The stock binary passes an empty list — it has only std units.
-    let trusted_commands: Vec<_> = noeta_stdlib::registry::extensions()
-        .iter()
-        .filter(|ext| ext.root() == "std")
-        .flat_map(|ext| ext.commands().iter())
-        .chain(command_extras.iter().flat_map(|ext| ext.commands().iter()))
+    // Phase 4: std's own commands (root `"std"`) are always available under their own names. A
+    // dependency's `ExtCommand` reaches the CLI only through a `[trust.commands]` binding, which
+    // names the providing package and the command it exported and fixes the LOCAL name it is
+    // registered + dispatched under — so trust is keyed by package identity (never a root-name
+    // string, which would over-trust every package sharing a scope root — trusting `para/db`'s
+    // commands must not trust all of `para/*`), and two packages exporting the same command name
+    // coexist under distinct local names. The stock binary passes no bindings.
+    //
+    // Each entry pairs the local name (a `'static` name — std's exported name or a binding's local
+    // name, both of which clap needs by `&'static str`) with its `ExtCommand`.
+    let mut trusted_commands: Vec<(&'static str, &'static noeta_stdlib::ExtCommand)> =
+        noeta_stdlib::registry::extensions()
+            .iter()
+            .filter(|ext| ext.root() == "std")
+            .flat_map(|ext| ext.commands().iter())
+            .map(|c| (c.name, c))
+            .collect();
+    // A binding's local name may not shadow a built-in: the core CLI verbs and std's own commands
+    // are reserved (both are already registered). A shadow is a manifest error, not a silent
+    // override.
+    let reserved: std::collections::HashSet<String> = <Cli as clap::CommandFactory>::command()
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .chain(trusted_commands.iter().map(|(name, _)| name.to_string()))
         .collect();
+    for binding in command_bindings {
+        let Some(ext) = binding
+            .units
+            .iter()
+            .flat_map(|unit| unit.commands().iter())
+            .find(|c| c.name == binding.exported)
+        else {
+            eprintln!(
+                "noeta: `[trust.commands]` binds `{}` to a command `{}` its provider does not \
+                 export — check the exported command name",
+                binding.local, binding.exported
+            );
+            return ExitCode::from(2);
+        };
+        if reserved.contains(binding.local) {
+            eprintln!(
+                "noeta: `[trust.commands]` binds `{}`, but that is already a built-in `noeta` \
+                 command — pick another local name (the `[trust.commands]` key)",
+                binding.local
+            );
+            return ExitCode::from(2);
+        }
+        trusted_commands.push((binding.local, ext));
+    }
     // P-AOT L2: if this executable is a `noeta build --exe` artifact (a bundle stapled onto a copy
     // of the runtime), run the embedded program directly — the shipped app is not the toolchain, so
     // its CLI verbs are irrelevant. A plain `noeta` binary has no trailer and falls through to the
@@ -918,8 +979,8 @@ pub fn run_cli(
                 .hide(true)
                 .action(clap::ArgAction::SetTrue),
         );
-    for ext in &trusted_commands {
-        cli = cli.subcommand(ext_command_clap(ext));
+    for (local, ext) in &trusted_commands {
+        cli = cli.subcommand(ext_command_clap(local, ext));
     }
     // An unknown subcommand may be a command contributed by a *native dependency* — visible only
     // inside the app's composed toolchain (Phase 3). Before rendering clap's error, try composing
@@ -957,7 +1018,7 @@ pub fn run_cli(
         }
     };
     if let Some((name, sub)) = matches.subcommand()
-        && let Some(ext) = trusted_commands.iter().find(|c| c.name == name)
+        && let Some((_, ext)) = trusted_commands.iter().find(|(local, _)| *local == name)
     {
         return ext_command_dispatch(ext, sub);
     }

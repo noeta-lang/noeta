@@ -1002,7 +1002,7 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
             native_count += 1;
             flags.push("native");
         }
-        if trust.commands.contains(&pkg.identity) {
+        if trust.commands.values().any(|b| b.provider == pkg.identity) {
             command_count += 1;
             flags.push("commands");
         }
@@ -1016,7 +1016,7 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
 
     println!("\n  Elevated authority (granted in [trust]):");
     println!("    native   : {}", render_trust_list(&trust.native));
-    println!("    commands : {}", render_trust_list(&trust.commands));
+    println!("    commands : {}", render_binding_table(&trust.commands));
     println!(
         "\n  {native_count} package(s) run native code, {command_count} may add CLI commands — all \
          authorized (an unauthorized native dependency would have failed resolution)."
@@ -1718,6 +1718,29 @@ pub(crate) fn render_trust_list(set: &std::collections::BTreeSet<String>) -> Str
         "(none)".to_string()
     } else {
         set.iter().cloned().collect::<Vec<_>>().join(", ")
+    }
+}
+
+/// Render a `[trust.commands]`/`[trust.directives]` binding table for `noeta audit` — each local
+/// name with the package it resolves to, showing the exported name only when it was renamed
+/// (`undo → para/db:rollback`), so the common no-rename case stays terse.
+pub(crate) fn render_binding_table(
+    table: &std::collections::BTreeMap<String, noeta_pm::manifest::Binding>,
+) -> String {
+    if table.is_empty() {
+        "(none)".to_string()
+    } else {
+        table
+            .iter()
+            .map(|(local, b)| {
+                if b.exported == *local {
+                    format!("{local} → {}", b.provider)
+                } else {
+                    format!("{local} → {}:{}", b.provider, b.exported)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 

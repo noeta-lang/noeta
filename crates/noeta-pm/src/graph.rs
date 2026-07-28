@@ -37,6 +37,20 @@ use crate::store::{Store, hash_tree};
 
 /// The resolved dependency graph: the packages the loader links (each a re-rooted [`DepPackage`]),
 /// plus the pinned coordinates for the lockfile (P2.4c).
+/// A resolved `[trust.commands]` binding — the manifest's local-name → `{provider, exported}`
+/// [`Binding`](crate::manifest::Binding) with its provider validated against the resolved graph (a
+/// native package actually present). The composer turns each into a shim registration that exposes
+/// the provider's `exported` command under `local`.
+#[derive(Debug, Clone)]
+pub struct ResolvedCommandBinding {
+    /// The name the command is registered under (`noeta <local>`) — the `[trust.commands]` key.
+    pub local: String,
+    /// The providing package identity (`company/package`).
+    pub provider: String,
+    /// The command name the provider's extension declared (its `ExtCommand::name`).
+    pub exported: String,
+}
+
 #[derive(Debug)]
 pub struct ResolvedGraph {
     /// One entry per resolved package identity, ready for [`noeta_loader::link_with_deps`], sorted by
@@ -49,13 +63,14 @@ pub struct ResolvedGraph {
     /// composed-toolchain build (N3.2) compiles in. Empty for a pure-Noeta graph, which is the
     /// signal that no composition is needed. Sorted by identity (deterministic compose key).
     pub native_crates: Vec<NativeCrate>,
-    /// The **package identities** (`company/package`) of the native packages the root app authorized
-    /// to contribute CLI commands (`[trust].commands`, package-manager Phase 4). The composer ties
-    /// command registration to these entries' extension units in the shim, so `run_cli` registers a
-    /// dependency's `noeta <cmd>` only when its *package* is command-trusted — never by namespace-root
-    /// name matching, which would over-trust every package sharing a scope root (trusting `para/db`
-    /// must not trust all of `para/*`). std's own commands are always allowed. Sorted + deduped.
-    pub trusted_command_identities: Vec<String>,
+    /// The resolved `[trust.commands]` bindings (package-manager Phase 4): each local name a
+    /// dependency command is registered under, tied to the providing package identity and the name
+    /// that package exported. The composer emits these into the shim so `run_cli` registers a
+    /// dependency's command *under its local name* — trust keyed by package identity (never by
+    /// namespace-root name matching, which would over-trust every package sharing a scope root), and
+    /// the local name resolving collisions between two packages exporting the same command name.
+    /// std's own commands are always allowed and never appear here. Sorted by local name.
+    pub command_bindings: Vec<ResolvedCommandBinding>,
     /// scope (`company`) → the trust root established for it during the walk (provenance, Phase 4
     /// #2 / Phase 5) — a registry-served Ed25519 key or a keyless-verified OIDC identity — to be
     /// **pinned** in `noeta.lock` (trust-on-first-use). Empty when no registry dependency carried
@@ -241,7 +256,7 @@ fn resolve_graph_impl(
             packages: Vec::new(),
             locked: Vec::new(),
             native_crates: Vec::new(),
-            trusted_command_identities: Vec::new(),
+            command_bindings: Vec::new(),
             scope_trust: BTreeMap::new(),
             root_edition: crate::edition::Edition::DEFAULT,
             log_trust: None,
@@ -338,6 +353,7 @@ fn resolve_graph_impl(
         walker.instances,
         &root_edges,
         &manifest.trust().commands,
+        // (assemble validates each binding's provider against the resolved native packages)
         scope_trust,
         root_edition,
         registry_ids,
@@ -1766,7 +1782,7 @@ fn provenance_decision(
 fn assemble(
     instances: BTreeMap<String, Instance>,
     root_edges: &BTreeMap<String, Vec<String>>,
-    trusted_commands: &std::collections::BTreeSet<String>,
+    command_trust: &BTreeMap<String, crate::manifest::Binding>,
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
     root_edition: crate::edition::Edition,
     registry_identities: std::collections::BTreeSet<String>,
@@ -1838,12 +1854,12 @@ fn assemble(
     let mut packages = Vec::with_capacity(instances.len());
     let mut locked = Vec::with_capacity(instances.len());
     let mut native_crates = Vec::new();
-    // A native package's commands register only if the root app command-trusts its identity; record
-    // the trusted identities so the composer can tie command registration to exactly those packages'
-    // extension units (Phase 4). Identity — never the root segment: a scope-keyed package's segment
+    // A command can only come from a native package (its `ExtCommand`s live in the compiled crate),
+    // so record which resolved identities are native — the `[trust.commands]` bindings validate
+    // against this set below. Identity — never the root segment: a scope-keyed package's segment
     // (`db` for `para/db`) is not what its extensions report as root, and root-name matching would
     // over-trust every package sharing a scope root.
-    let mut trusted_command_identities: Vec<String> = Vec::new();
+    let mut native_identities: HashSet<String> = HashSet::new();
     for (identity, inst) in &instances {
         let key = global[identity].clone();
         // A local dependency key re-roots to the global segment of the package it resolves to. A
@@ -1883,22 +1899,45 @@ fn assemble(
                 crate_dir: inst.dir.join(native),
                 content_hash: inst.content_hash.clone(),
             });
-            // Commands only exist inside a native package; grant its commands only if command-trusted.
-            if trusted_commands.contains(identity) {
-                trusted_command_identities.push(identity.clone());
-            }
+            native_identities.insert(identity.clone());
         }
+    }
+    // Resolve each `[trust.commands]` binding against the native packages actually in the graph. A
+    // binding is the grant, so a provider that is not a native dependency is a manifest error worth
+    // naming — never a silent no-op. (Whether the exported command actually exists is decided in the
+    // composed toolchain, where the compiled `ExtCommand` names are visible; the graph never sees
+    // them.)
+    let mut command_bindings: Vec<ResolvedCommandBinding> = Vec::new();
+    for (local, binding) in command_trust {
+        if !instances.contains_key(&binding.provider) {
+            return Err(PmError::Conflict(format!(
+                "`[trust.commands]` binds `{local}` to `{provider}`, which is not a dependency — \
+                 add `{provider}` to `[dependencies]` (and `[trust].native`) to use its commands",
+                provider = binding.provider
+            )));
+        }
+        if !native_identities.contains(&binding.provider) {
+            return Err(PmError::Conflict(format!(
+                "`[trust.commands]` binds `{local}` to `{provider}`, but `{provider}` ships no \
+                 native crate — only a native package contributes `noeta <command>` commands",
+                provider = binding.provider
+            )));
+        }
+        command_bindings.push(ResolvedCommandBinding {
+            local: local.clone(),
+            provider: binding.provider.clone(),
+            exported: binding.exported.clone(),
+        });
     }
     // Sort by global segment so the loader's SourceId assignment and the startup-cache key are
     // deterministic regardless of walk order.
     packages.sort_by(|a, b| a.key.cmp(&b.key));
-    trusted_command_identities.sort();
-    trusted_command_identities.dedup();
+    // `command_trust` is a BTreeMap, so `command_bindings` is already in local-name order.
     Ok(ResolvedGraph {
         packages,
         locked,
         native_crates,
-        trusted_command_identities,
+        command_bindings,
         scope_trust,
         root_edition,
         log_trust: None,
@@ -2948,17 +2987,17 @@ mod tests {
 
     #[test]
     fn command_trust_gates_which_native_packages_may_add_commands() {
-        // A native dep trusted for native but NOT for commands contributes no trusted command
-        // identity; adding it to `[trust].commands` surfaces its package identity for the composer.
+        // A native dep with no `[trust.commands]` entry contributes no binding; adding one binds a
+        // local name to the package identity + exported command for the composer.
         let base = std::env::temp_dir().join("noeta_graph_test_cmd_trust");
-        let make = |commands_trust: bool| -> Vec<String> {
+        let make = |commands_trust: bool| -> Vec<ResolvedCommandBinding> {
             let _ = std::fs::remove_dir_all(&base);
             let app = base.join("app");
             let dep = base.join("imgfx");
             std::fs::create_dir_all(&app).unwrap();
             std::fs::create_dir_all(dep.join("native")).unwrap();
             let commands = if commands_trust {
-                "commands = [\"acme/imgfx\"]\n"
+                "[trust.commands]\nblur = \"acme/imgfx\"\n"
             } else {
                 ""
             };
@@ -2989,14 +3028,18 @@ mod tests {
             .unwrap();
             resolve_graph(&app.join("main.noe"))
                 .expect("resolves")
-                .trusted_command_identities
+                .command_bindings
         };
-        // Native-trusted but not command-trusted → the package composes, but no command identity.
+        // No `[trust.commands]` entry → the package composes, but contributes no command binding.
         assert!(make(false).is_empty());
-        // Command-trusted → its package IDENTITY (not its root segment) is surfaced, so the shim
-        // ties command registration to exactly this package's extension units — a scope-keyed
-        // package (`para/db`) must not be matched (or over-matched) by root-name strings.
-        assert_eq!(make(true), vec!["acme/imgfx".to_string()]);
+        // A binding surfaces the local name, the package IDENTITY (not its root segment), and the
+        // exported command — so the shim ties registration to exactly this package's units. A
+        // scope-keyed package (`para/db`) must not be matched (or over-matched) by root-name strings.
+        let bindings = make(true);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].local, "blur");
+        assert_eq!(bindings[0].provider, "acme/imgfx");
+        assert_eq!(bindings[0].exported, "blur");
     }
 
     #[test]

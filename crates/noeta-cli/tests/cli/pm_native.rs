@@ -22,7 +22,8 @@ fn composed_project(name: &str) -> PathBuf {
         app.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
          [dependencies]\nimgfx = { path = \"../imgfx\" }\n\
-         [trust]\nnative = [\"acme/imgfx\"]\ncommands = [\"acme/imgfx\"]\n",
+         [trust]\nnative = [\"acme/imgfx\"]\n\
+         [trust.commands]\nfx-info = \"acme/imgfx\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -1153,7 +1154,8 @@ pub fn triple(args: &[NativeValue]) -> Result<NativeOut, StdError> {
         format!(
             "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
              [dependencies]\ngitfx = {{ git = \"file://{}\" }}\n\
-             [trust]\nnative = [\"acme/gitfx\"]\ncommands = [\"acme/gitfx\"]\n",
+             [trust]\nnative = [\"acme/gitfx\"]\n\
+             [trust.commands]\ngfx-info = \"acme/gitfx\"\n",
             pkg.display()
         ),
     )
@@ -1456,10 +1458,13 @@ pub fn triple(args: &[NativeValue]) -> Result<NativeOut, StdError> {
         .stderr(predicate::str::contains("imgfx-info"))
         .stdout(predicate::str::contains("registry-index native extension ok").not());
 
-    // 5. WITH `[trust].commands` the command-trust change recomposes and the command dispatches.
+    // 5. WITH a `[trust.commands]` binding the command-trust change recomposes and the command
+    //    dispatches under its bound local name (here the same as its exported name).
     std::fs::write(
         app.join("noeta.toml"),
-        manifest("\n[trust]\nnative = [\"acme/imgfx\"]\ncommands = [\"acme/imgfx\"]\n"),
+        manifest(
+            "\n[trust]\nnative = [\"acme/imgfx\"]\n[trust.commands]\nimgfx-info = \"acme/imgfx\"\n",
+        ),
     )
     .unwrap();
     composed_env(&mut lang())
