@@ -4,7 +4,7 @@ assertion_line: 1049
 expression: "pretty(\"enum E { Empty; Code(n: int); } echo match x { E.Empty => 0, E.Code(n) => n, _ => -1 };\")"
 ---
 (program @0..87
-  (enum E [Empty Code(n)] @0..31)
+  (enum E [Empty Code(n: int)] @0..31)
   (echo @32..87
     (match @37..86
       (ident x @43..44)

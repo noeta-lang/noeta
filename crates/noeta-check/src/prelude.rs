@@ -773,6 +773,7 @@ fn synth_trait_decl(
                     ty: Some(stdlib::sig_to_typeref(reg, p)),
                     default: None,
                     span: sp,
+                    positional: false,
                 })
                 .collect();
             let sig = FnDecl {

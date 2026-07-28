@@ -622,6 +622,7 @@ impl<'m> Vm<'m> {
                             ty: None,
                             default: None,
                             span,
+                            positional: false,
                         })
                         .collect(),
                     ret: None,

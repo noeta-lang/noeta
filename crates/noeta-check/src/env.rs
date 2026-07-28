@@ -15,6 +15,72 @@ pub(crate) struct VariantInfo {
     pub(crate) fields: Vec<Type>,
 }
 
+/// How a user method may be **reached** — the receiver discipline behind E0047 (prelude-redesign
+/// EX.2). Three-valued, because "does the body need a receiver?" and "may it be called on a value?"
+/// are not the same question once a trait is involved.
+///
+/// This used to be a `bool` ("is it an instance method?") with the third state encoded as *absence
+/// from the table* — which worked only by accident: the associated-call site read a missing entry
+/// with `unwrap_or(false)` and the instance-call site with `unwrap_or(true)`, so an unclassified
+/// method happened to be permitted both ways. Two call sites with opposite defaults is a
+/// coincidence, not a design, and it reads as a bug from either side alone; the turbofish site,
+/// which used one default for both directions, had already drifted out of agreement with it. The
+/// state is named here instead, so a reader sees three cases and a `match` makes them decide.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Receiver {
+    /// The body reads `self`, so a call must supply one: `x.m(…)` only. `T.m(…)` is E0047 — and
+    /// really does fail at run time ("no field `f` on unit"), because nothing binds `self`.
+    Instance,
+    /// A self-less **inherent** function: `T.m(…)` only. `x.m(…)` is E0047 — the receiver would be
+    /// evaluated and then silently discarded.
+    Associated,
+    /// A self-less method belonging to a **trait's interface**: reachable **both** ways. The trait's
+    /// contract puts it in the instance interface (`x.m(…)` — and that is how `dyn Trait` dispatches
+    /// it), while the body needs no receiver, so calling it on the type (`T.m(…)`) is equally
+    /// well-defined. Both spellings reach the same prototype at run time.
+    Either,
+}
+
+impl Receiver {
+    /// The classification of a method that is **not** part of a trait's interface: derived purely
+    /// from whether the body mentions `self` (well-defined because member access is explicit, EX.1).
+    pub(crate) fn inherent(uses_self: bool) -> Self {
+        if uses_self {
+            Receiver::Instance
+        } else {
+            Receiver::Associated
+        }
+    }
+
+    /// The classification of a method a trait's interface supplies — an `impl Trait` block's own
+    /// method (in-body or standalone) or a hoisted default. A body that reads `self` still needs a
+    /// receiver; a self-less one is reachable either way.
+    pub(crate) fn trait_method(uses_self: bool) -> Self {
+        if uses_self {
+            Receiver::Instance
+        } else {
+            Receiver::Either
+        }
+    }
+
+    /// Whether `T.m(…)` (no receiver) is legal.
+    pub(crate) fn allows_associated_call(self) -> bool {
+        !matches!(self, Receiver::Instance)
+    }
+
+    /// Whether `x.m(…)` (with a receiver) is legal.
+    pub(crate) fn allows_instance_call(self) -> bool {
+        !matches!(self, Receiver::Associated)
+    }
+
+    /// Whether a handle bound off the **type** (`T.m` in value position) carries the receiver as its
+    /// first parameter. `Either` reads as instance here — which is exactly what the absent entry
+    /// already meant, so a trait method's handle keeps its instance shape.
+    pub(crate) fn handle_takes_receiver(self) -> bool {
+        !matches!(self, Receiver::Associated)
+    }
+}
+
 /// A callable signature, as far as annotations reveal it: the parameter types (for arity +
 /// argument checking) and the return type. Used for both top-level functions and user methods.
 /// `params`/`ret` are **erased** (generic parameters replaced by `dyn`); a generic *function* also

@@ -419,6 +419,7 @@ pub fn plan_builtin_via(
             ty: Some(named(type_name, span)),
             default: None,
             span,
+            positional: false,
         }],
         ret: Some(ret),
         ..empty_fn(name, span)
@@ -558,6 +559,7 @@ pub fn plan_native_derive(methods: &[(String, usize, String)], span: Span) -> Ve
                     ty: Some(named("dyn", span)),
                     default: None,
                     span,
+                    positional: false,
                 })
                 .collect();
             let callee = match handler.rsplit_once('.') {

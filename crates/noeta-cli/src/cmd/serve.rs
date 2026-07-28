@@ -286,6 +286,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                             ty: None,
                             default: None,
                             span: sp,
+                            positional: false,
                         }],
                         ret: None,
                         body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
@@ -410,6 +411,7 @@ pub(crate) fn serve_parallel_impl(
                 ty: None,
                 default: None,
                 span: sp,
+                positional: false,
             }],
             ret: None,
             body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {

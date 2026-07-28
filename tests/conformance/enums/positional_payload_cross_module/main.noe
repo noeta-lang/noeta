@@ -1,0 +1,47 @@
+// A **positional** enum payload may name an imported type — and the fully-qualified path too. All
+// four spellings of "wrap a type in a variant" now work; three of them did not, and there was no
+// spelling that worked for a cross-module positional payload at all:
+//
+//   positional, same file       Leaf(Local)             ok
+//   named, cross-module         Named(u: User)          ok
+//   positional, cross-module    Imported(User)          E0013 "unknown type `User`"
+//   positional, qualified       Qualified(App.Models.User)   syntax error
+//
+// The cause was the representation: a positional payload parsed through the *parameter* grammar,
+// so its type landed in the field's `name` with `ty: None`. Module qualification rewrites `ty`, so
+// it never saw the type (while the named form's `ty` was rewritten correctly), and an identifier is
+// not a type, so a dotted path could not parse. The payload's type lives in `ty` now, which is also
+// what lets a positional payload be any type at all — `List<User>`, `?int`, a tuple.
+// expect: stdout "ada"
+// expect: stdout "bob"
+// expect: stdout "cyd"
+// expect: stdout "1"
+// expect: exit 0
+namespace App.Main;
+
+use App.Models.User;
+
+struct Local { tag: string }
+
+enum Wrap {
+    Imported(User);
+    Qualified(App.Models.User);
+    Named(u: User);
+    LocalOne(Local);
+    Many(List<User>);
+}
+
+fn name_of(w: Wrap): string {
+    return match w {
+        Wrap.Imported(u) => u.name,
+        Wrap.Qualified(u) => u.name,
+        Wrap.Named(u) => u.name,
+        Wrap.LocalOne(l) => l.tag,
+        Wrap.Many(us) => "${us.len()}",
+    };
+}
+
+echo name_of(Wrap.Imported(User { name: "ada" }));
+echo name_of(Wrap.Qualified(User { name: "bob" }));
+echo name_of(Wrap.Named(User { name: "cyd" }));
+echo name_of(Wrap.Many([User { name: "d" }]));

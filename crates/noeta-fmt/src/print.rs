@@ -1027,6 +1027,24 @@ impl Printer<'_> {
         Ok(Doc::concat(parts))
     }
 
+    /// One enum-variant payload field. A **positional** one (`Leaf(User)`) prints its type alone:
+    /// the source wrote no name, and the `_0` in the AST is a synthesized slot name that must not
+    /// reach the output. A named one (`Leaf(u: User)`) prints exactly like a parameter.
+    fn variant_field(&self, field: &Param) -> Result<Doc, FmtError> {
+        if !field.positional {
+            return self.param(field);
+        }
+        let mut parts = Vec::new();
+        for a in &field.attrs {
+            parts.push(self.attribute(a)?);
+            parts.push(Doc::text(" "));
+        }
+        if let Some(ty) = &field.ty {
+            parts.push(self.type_ref(ty)?);
+        }
+        Ok(Doc::concat(parts))
+    }
+
     fn type_params(&self, tps: &[TypeParam]) -> Result<Doc, FmtError> {
         if tps.is_empty() {
             return Ok(Doc::nil());
@@ -1388,7 +1406,7 @@ impl Printer<'_> {
         if !v.fields.is_empty() {
             let mut fs = Vec::new();
             for f in &v.fields {
-                fs.push(self.param(f)?);
+                fs.push(self.variant_field(f)?);
             }
             parts.push(Doc::concat([
                 Doc::text("("),

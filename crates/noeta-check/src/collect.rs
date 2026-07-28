@@ -147,33 +147,41 @@ impl Checker {
         type_tps: &HashSet<String>,
         type_generics: &[(String, Vec<BoundReq>)],
     ) {
-        self.collect_method_sig_classified(type_name, m, type_tps, type_generics, true);
+        self.collect_method_sig_classified(type_name, m, type_tps, type_generics, false);
     }
 
     /// [`Self::collect_method_sig`] with control over the receiver classification.
     ///
-    /// `classify_instance: false` registers the SIGNATURE only, leaving `method_instance` untouched.
-    /// That is what a standalone `impl Trait for T` needs: instance-ness is inferred from whether a
-    /// body mentions `self`, and a trait method whose implementation happens not to need `self`
-    /// (`fn greet(who: string): string { return "hi " ~ who }`) is still part of the trait's
-    /// *instance* interface — classifying it from the body would make `c.greet(…)` an E0047
-    /// ("associated function") even though the runtime dispatches it on the instance. An absent
-    /// entry already reads as "instance" at the call site, which is the pre-existing behavior for
-    /// these methods; only their types were missing.
+    /// `trait_provided` says whether a **trait's interface** supplies this method — an `impl Trait`
+    /// block's own method, in-body or standalone. It changes what a *self-less* body means: an
+    /// inherent one is an associated function ([`Receiver::Associated`], `T.m(…)` only), a trait's
+    /// is reachable either way ([`Receiver::Either`]), because the trait's contract puts it in the
+    /// instance interface — `dyn Trait` dispatches it on a value — while its body needs no receiver.
+    /// A body that *does* read `self` is [`Receiver::Instance`] either way; the trait cannot conjure
+    /// a receiver for it, and calling such a method as `T.m(…)` aborts at run time.
+    ///
+    /// This flag used to be `classify_instance`, and `false` meant "record nothing" — leaving the
+    /// third state to the accident of two call sites disagreeing about the default. Recording it
+    /// makes the standalone spelling say what it means, and incidentally closes the case that
+    /// accident got wrong: a standalone impl whose body reads `self`, called as `T.m(…)`, checked
+    /// clean and then died with "no field `x` on unit".
     fn collect_method_sig_classified(
         &mut self,
         type_name: &str,
         m: &FnDecl,
         type_tps: &HashSet<String>,
         type_generics: &[(String, Vec<BoundReq>)],
-        classify_instance: bool,
+        trait_provided: bool,
     ) {
-        if classify_instance {
-            self.symbols.method_instance.insert(
-                (type_name.to_string(), m.name.clone()),
-                m.body.iter().any(|s| s.mentions("self")),
-            );
-        }
+        let uses_self = m.body.iter().any(|s| s.mentions("self"));
+        let receiver = if trait_provided {
+            Receiver::trait_method(uses_self)
+        } else {
+            Receiver::inherent(uses_self)
+        };
+        self.symbols
+            .method_receiver
+            .insert((type_name.to_string(), m.name.clone()), receiver);
         let own_generics: Vec<(String, Vec<BoundReq>)> = m
             .type_params
             .iter()
@@ -325,13 +333,21 @@ impl Checker {
                             )
                         })
                         .collect();
-                    let methods: Vec<&FnDecl> = r
-                        .methods
-                        .iter()
-                        .chain(r.impls.iter().flat_map(|b| b.methods.iter()))
-                        .collect();
-                    for m in methods {
+                    // Inherent methods classify from their bodies; an `impl Trait { … }` block's do
+                    // not (see `collect_method_sig_classified`). Registration order matches the
+                    // flattened walk this replaces — inherent first, so a same-named impl method
+                    // still wins.
+                    for m in &r.methods {
                         self.collect_method_sig(&r.name, m, &tps, &struct_generics);
+                    }
+                    for (m, provided) in impl_block_methods(&r.impls) {
+                        self.collect_method_sig_classified(
+                            &r.name,
+                            m,
+                            &tps,
+                            &struct_generics,
+                            provided,
+                        );
                     }
                     self.bake_impl_assoc(&r.name, &r.impls, &tps, &struct_generics);
                 }
@@ -418,13 +434,17 @@ impl Checker {
                     self.symbols
                         .type_params
                         .insert(c.name.clone(), c.type_params.clone());
-                    let methods: Vec<&FnDecl> = c
-                        .methods
-                        .iter()
-                        .chain(c.impls.iter().flat_map(|b| b.methods.iter()))
-                        .collect();
-                    for m in methods {
+                    for m in &c.methods {
                         self.collect_method_sig(&c.name, m, &tps, &class_generics);
+                    }
+                    for (m, provided) in impl_block_methods(&c.impls) {
+                        self.collect_method_sig_classified(
+                            &c.name,
+                            m,
+                            &tps,
+                            &class_generics,
+                            provided,
+                        );
                     }
                     self.bake_impl_assoc(&c.name, &c.impls, &tps, &class_generics);
                 }
@@ -434,17 +454,16 @@ impl Checker {
                         .iter()
                         .map(|v| VariantInfo {
                             name: v.name.clone(),
-                            // A variant's **accurate** payload types (via `variant_field_type`, R2b),
-                            // exactly as a struct's field types live in `self.symbols.records`: one source of
-                            // truth for enum-construction type-argument inference **and** the `Send`
-                            // classifier **and** destructor-relevance. (Previously `field_type(&p.ty)`,
-                            // which is `Unknown` for a positional payload whose type parses into the
-                            // `Param`'s *name* — an `Unknown` that silently classified an enum wrapping
-                            // a `class` as `Send`, unlike the equivalent struct.)
+                            // A variant's payload types, read from the annotation exactly as a
+                            // struct's field types are (R2b): one source of truth for
+                            // enum-construction type-argument inference, the `Send` classifier, and
+                            // destructor-relevance. This needed a `variant_field_type` helper that
+                            // rebuilt a positional payload's type out of the `Param`'s *name*; the
+                            // parser puts it in `ty` now, so the plain field rule reaches both forms.
                             fields: v
                                 .fields
                                 .iter()
-                                .map(|v| variant_field_type(v, &self.imports.extern_types))
+                                .map(|v| field_type(&v.ty, &self.imports.extern_types))
                                 .collect(),
                         })
                         .collect();
@@ -497,6 +516,15 @@ impl Checker {
                         .collect();
                     for m in &e.methods {
                         self.collect_method_sig(&e.name, m, &tps, &enum_generics);
+                    }
+                    for (m, provided) in impl_block_methods(&e.impls) {
+                        self.collect_method_sig_classified(
+                            &e.name,
+                            m,
+                            &tps,
+                            &enum_generics,
+                            provided,
+                        );
                     }
                     self.bake_impl_assoc(&e.name, &e.impls, &tps, &enum_generics);
                 }
@@ -744,13 +772,14 @@ impl Checker {
                 .iter()
                 .map(|(n, t)| (n.as_str(), t))
                 .collect();
+            let provided = trait_supplies_instance_interface(&d.trait_name);
             for m in &d.methods {
                 if assoc.is_empty() {
-                    self.collect_method_sig_classified(&d.target, m, &tps, &generics, false);
+                    self.collect_method_sig_classified(&d.target, m, &tps, &generics, provided);
                 } else {
                     let resolved = subst_self_assoc_in_fn(m, &assoc);
                     self.collect_method_sig_classified(
-                        &d.target, &resolved, &tps, &generics, false,
+                        &d.target, &resolved, &tps, &generics, provided,
                     );
                 }
             }
@@ -980,9 +1009,14 @@ impl Checker {
                 .unwrap_or(Type::Unknown),
             m.is_async,
         );
-        self.symbols
-            .method_instance
-            .insert(key.clone(), m.body.iter().any(|s| s.mentions("self")));
+        // Every method reaching here comes from a trait: a hoisted UT5 default, or a `@derive`
+        // plan's bridge/forward. So a self-less one is `Either` like any other trait method — an
+        // omitted default is reachable as `T.m()` (the documented UT5 spelling) *and* on a value,
+        // exactly as the same body written out in the `impl` block would be.
+        self.symbols.method_receiver.insert(
+            key.clone(),
+            Receiver::trait_method(m.body.iter().any(|s| s.mentions("self"))),
+        );
         self.symbols.methods.insert(
             key,
             FnSig {
@@ -1049,9 +1083,16 @@ impl Checker {
                 .iter()
                 .map(|(n, t)| (n.as_str(), t))
                 .collect();
+            let provided = trait_supplies_instance_interface(&b.trait_name);
             for m in &b.methods {
                 let resolved = subst_self_assoc_in_fn(m, &map);
-                self.collect_method_sig(type_name, &resolved, type_tps, type_generics);
+                self.collect_method_sig_classified(
+                    type_name,
+                    &resolved,
+                    type_tps,
+                    type_generics,
+                    provided,
+                );
             }
         }
     }
@@ -1564,4 +1605,28 @@ fn subst_self_assoc_in_fn(m: &FnDecl, bindings: &HashMap<&str, &TypeRef>) -> FnD
         out.ret = Some(subst_self_assoc(ret, bindings));
     }
     out
+}
+
+/// Whether an `impl <trait_name>` block's methods belong to the trait's **instance interface** —
+/// the question that decides whether a self-less one is [`Receiver::Either`] (reachable both ways)
+/// or [`Receiver::Associated`] (on the type only).
+///
+/// True for every user, native, and built-in trait *except* one whose method is associated by
+/// contract ([`BuiltinTrait::associated_method`] — `From::from` builds a value rather than acting
+/// on one, and the checker already refuses a `from` body that mentions `self`). Deciding it from
+/// the closed built-in set rather than from `symbols.user_traits` keeps it independent of source
+/// order: an `impl` written above its `trait` must classify like one written below it, and during
+/// this walk the trait table is only half-populated.
+fn trait_supplies_instance_interface(trait_name: &str) -> bool {
+    BuiltinTrait::from_name(trait_name).is_none_or(|t| !t.associated_method())
+}
+
+/// Every method of every in-body `impl Trait { … }` block, paired with whether its trait supplies an
+/// instance interface ([`trait_supplies_instance_interface`]) — the one place the struct, class, and
+/// enum walks agree on how to classify a block's methods.
+fn impl_block_methods(impls: &[ImplBlock]) -> impl Iterator<Item = (&FnDecl, bool)> {
+    impls.iter().flat_map(|b| {
+        let provided = trait_supplies_instance_interface(&b.trait_name);
+        b.methods.iter().map(move |m| (m, provided))
+    })
 }

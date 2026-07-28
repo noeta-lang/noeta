@@ -9,7 +9,7 @@ expression: pretty(src)
   (use std.id [next_id] @712..733)
   (struct Item [price qty] @735..772)
   (enum-backed Status [Pending Paid Refunded] @774..868)
-  (enum OrderError [Empty NegativePrice(index)] @870..931)
+  (enum OrderError [Empty NegativePrice(index: int)] @870..931)
   (class Order [id customer items mut status] @933..1571
     (fn new [id customer items] @1028..1184
       (return @1096..1178

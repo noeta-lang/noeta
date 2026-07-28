@@ -1,0 +1,15 @@
+// The other half of the parity, and a check-vs-run divergence it closes: an `impl Trait` method
+// whose body reads `self` is instance-only in BOTH spellings. The in-body form already said so;
+// the standalone form recorded no classification at all, so `Standalone.greet(...)` type-checked
+// and then aborted at run time with "no field `id` on unit" — nothing had bound `self`. E0047, at
+// the call, exactly as the in-body twin reports it.
+// expect: error E0047 at 15:6
+// expect: exit 1
+trait Greeter { fn greet(who: string): string }
+
+struct Standalone { id: int }
+impl Greeter for Standalone {
+    fn greet(who: string): string { return who ~ self.id }
+}
+
+echo Standalone.greet("x")

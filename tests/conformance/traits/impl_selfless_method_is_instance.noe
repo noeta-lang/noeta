@@ -1,0 +1,44 @@
+// The receiver discipline for a **self-less method an `impl Trait` block provides** — all four
+// cells of the (spelling × call form) matrix, pinned together so none can regress alone.
+//
+// A trait method belongs to the trait's *instance* interface: `dyn Trait` dispatches it on a value,
+// and every implementor is expected to answer `x.m(…)`. When its body happens not to need `self`,
+// calling it on the type is equally well-defined — both spellings reach the same prototype. So all
+// four cells are legal, and the in-body and standalone spellings of one declaration say the same
+// thing about it.
+//
+// They did not. The in-body block's methods were flattened into the type's own walk and classified
+// from the body, so `x.greet(…)` on a self-less one was E0047 "associated function" — while the
+// identical code written as a standalone impl checked clean. (A first attempt at parity forced the
+// other direction and broke `En.greet(…)` instead; two rejections is not one fix. The classification
+// is three-valued now — instance / associated / either — instead of a `bool` whose third state was
+// two call sites disagreeing about a default.)
+// expect: stdout "in-body assoc"
+// expect: stdout "in-body inst"
+// expect: stdout "standalone assoc"
+// expect: stdout "standalone inst"
+// expect: stdout "dyn inst"
+// expect: exit 0
+trait Greeter {
+    fn greet(who: string): string
+}
+
+struct InBody {
+    id: int
+    impl Greeter {
+        fn greet(who: string): string { return who }
+    }
+}
+
+struct Standalone { id: int }
+impl Greeter for Standalone {
+    fn greet(who: string): string { return who }
+}
+
+fn through_dyn(g: dyn Greeter): string { return g.greet("dyn inst") }
+
+echo InBody.greet("in-body assoc")
+echo InBody { id: 1 }.greet("in-body inst")
+echo Standalone.greet("standalone assoc")
+echo Standalone { id: 1 }.greet("standalone inst")
+echo through_dyn(InBody { id: 1 })
