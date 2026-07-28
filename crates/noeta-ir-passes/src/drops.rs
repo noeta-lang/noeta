@@ -116,6 +116,11 @@ struct ScopeFrame {
     /// *after* that drop does not redundantly re-drop them. (An early exit reached *before* a local's
     /// last use still drops it — that name is not yet in this set when the exit is emitted.)
     dropped: std::collections::HashSet<String>,
+    /// The block's `live_out` — the names that are still live where this scope ends, so the block
+    /// does **not** abandon them: they flow out to an enclosing scope, or back around a loop's
+    /// back-edge into a later iteration. The fall-through scope-exit drops have always consulted
+    /// this; an early exit must too (see [`collect_exit_drops`]).
+    live_out: VarSet,
     is_loop_body: bool,
 }
 
@@ -161,7 +166,18 @@ fn collect_exit_drops(
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for frame in scopes.iter().rev() {
         for (name, relevant) in frame.constructed.iter().rev() {
-            if moved_out.contains(name) || frame.dropped.contains(name) || !seen.insert(name) {
+            // A value still **live at this scope's exit** is not abandoned here — it flows out to an
+            // enclosing scope, or back around a loop's back-edge into a later iteration. Dropping it
+            // nulls a slot still in use, which is exactly what a `mut` accumulator reassigned before
+            // a `break`/`continue` suffered: `mut n = 0; for … { if p { n = n + 1; continue } }`
+            // recorded `n` in the `if`'s frame, and the exit reclaimed it, so the next iteration read
+            // a cleared slot. The fall-through path has always applied this test; this is the same
+            // one, on the early-exit path.
+            if moved_out.contains(name)
+                || frame.dropped.contains(name)
+                || frame.live_out.contains(name)
+                || !seen.insert(name)
+            {
                 continue;
             }
             drops.push((name.clone(), *relevant));
@@ -247,6 +263,7 @@ fn rewrite_block(
     scopes.push(ScopeFrame {
         constructed: Vec::new(),
         dropped: std::collections::HashSet::new(),
+        live_out: live.live_out.clone(),
         is_loop_body,
     });
     let mut out: Vec<Stmt> = Vec::with_capacity(block.stmts.len());

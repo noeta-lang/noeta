@@ -1,0 +1,82 @@
+// A `mut` local reassigned inside a block that then `break`s or `continue`s is **live across the
+// exit** — it flows back around the loop's back-edge, or out to the enclosing scope — so the
+// early-exit reclamation must leave it alone. It did not: the drop pass attributed the reassignment
+// to the innermost scope frame and the exit dropped it, so the next read saw a cleared slot and the
+// accumulator came back as unit. (`n = n + 100; continue` compiled to `Move r0 <- r5; Drop r5;
+// Drop r0; Jump`.) The fall-through scope-exit drops had always excluded a name in `live_out`;
+// `collect_exit_drops` now applies the same test.
+//
+// Correct at top level before the fix and after it, so every case here is inside a `fn`.
+// expect: stdout "continue=102"
+// expect: stdout "break=102"
+// expect: stdout "list=[\"s\"]"
+// expect: stdout "while=[\"x\"]"
+// expect: stdout "nested=(1, 9)"
+// expect: exit 0
+
+fn with_continue(): int {
+    mut n = 0
+    for x in [1, 2, 3] {
+        if x == 1 {
+            n = n + 100
+            continue
+        }
+        n = n + 1
+    }
+    return n
+}
+
+fn with_break(): int {
+    mut n = 0
+    for x in [1, 2, 3] {
+        n = n + 1
+        if x == 2 {
+            n = n + 100
+            break
+        }
+    }
+    return n
+}
+
+// A heap value, not a scalar — the reclamation path that actually frees something.
+fn with_a_list(): List<string> {
+    mut a: List<string> = []
+    for x in ["s", "t"] {
+        if x == "s" {
+            a = a ~ [x]
+            continue
+        }
+    }
+    return a
+}
+
+fn with_a_while(): List<string> {
+    mut a: List<string> = []
+    mut i = 0
+    while i < 2 {
+        i = i + 1
+        if i == 1 {
+            a = a ~ ["x"]
+            continue
+        }
+    }
+    return a
+}
+
+// The exit's value must still reach the caller when the accumulator rides out in a tuple.
+fn with_a_tuple(): (int, int) {
+    mut n = 0
+    for x in [1, 2] {
+        if x == 1 {
+            n = n + 1
+            continue
+        }
+    }
+    return (n, 9)
+}
+
+echo "continue=" ~ with_continue()
+echo "break=" ~ with_break()
+echo "list=" ~ with_a_list()
+echo "while=" ~ with_a_while()
+echo "nested=" ~ with_a_tuple()
