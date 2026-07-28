@@ -546,6 +546,19 @@ impl Checker {
             .is_some_and(|vs| vs.iter().any(|v| v.name == variant))
     }
 
+    /// How many positional payload values `variant` carries, or `None` when the enum has no such
+    /// variant. `Some(0)` is the payload-free case — the distinction [`Self::is_enum_variant`]
+    /// deliberately does not make, and the one that decides whether `Type.Variant` in **value**
+    /// position is a value at all.
+    pub(crate) fn enum_variant_fields(&self, type_name: &str, variant: &str) -> Option<usize> {
+        self.symbols
+            .enums
+            .get(type_name)?
+            .iter()
+            .find(|v| v.name == variant)
+            .map(|v| v.fields.len())
+    }
+
     /// Resolve a source-written enum type name to the key it occupies in `symbols.enums` — the name
     /// itself for a user/prelude enum, or, for a **native** enum imported `use pkg.TheEnum`, the
     /// qualified identity its local short name aliases to. A native enum is seeded under its

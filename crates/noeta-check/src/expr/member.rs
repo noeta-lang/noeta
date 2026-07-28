@@ -606,11 +606,38 @@ impl Checker {
         // `Type.Variant` (a nullary enum constructor like `Status.Paid`) reads as the enum type. For a
         // generic enum a payload-free variant pins no parameter, so its arguments infer to `dyn`
         // (R2b) — keeping the arity consistent with a payload variant of the same enum.
+        //
+        // A **payload-carrying** variant in value position is not that, and used to fall through
+        // here as if it were: `Shape.Circle` where `Circle(int)` typed as `Shape` and then died in
+        // the backend with `internal error: the VM cannot compile this program`. That is the
+        // checks-clean-then-fails shape — a value the type system believes in that neither runtime
+        // has heard of — reached through the enum-member spelling. Naming the variant as a
+        // *constructor value* (`Fn(int) -> Shape`, the way `some`/`Ok` are first-class) is a real
+        // feature and a real slice; until it exists the honest answer is a static error, because
+        // the expression has no value at run time.
         if let Expr::Ident { name: tn, .. } = receiver
             && let Some(key) = self.enum_type_key(tn)
-            && self.is_enum_variant(&key, name)
+            && let Some(fields) = self.enum_variant_fields(&key, name)
         {
-            return self.enum_construction_type(&key, name, &[], member_span);
+            if fields == 0 {
+                return self.enum_construction_type(&key, name, &[], member_span);
+            }
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                member_span,
+                format!(
+                    "`{tn}.{name}` carries {fields} value{}, so it is a constructor and not a value",
+                    match fields {
+                        1 => "",
+                        _ => "s",
+                    }
+                ),
+            )
+            .help(format!(
+                "construct it with its arguments — `{tn}.{name}(…)`; a payload-carrying variant \
+                 cannot yet be passed around as a function"
+            ));
+            return Type::Unknown;
         }
         // `Type.method` in value position (not the callee of a call) is an unbound **method handle**:
         // a callable taking the receiver as its first argument (prelude-redesign MH). Guarded to a
