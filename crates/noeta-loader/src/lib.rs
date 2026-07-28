@@ -1683,7 +1683,19 @@ fn link_core(
     // - The **entry's own** declarations are the program's tail (`entry_stmts`), not `imported`, so a
     //   sibling's `impl Decoder for Target` against a `Target` the entry declares saw an absent type
     //   and was dropped.
-    let mut seen_impls: HashSet<(String, String)> = HashSet::new();
+    //
+    // The dedup set answers the *same* question from the other side — "is this impl already in the
+    // program?" — so it is seeded from the program rather than starting empty. An entry that declares
+    // a `namespace` is a `module_views` member like any other, so the scan below meets the entry's
+    // own `impl Marker for Box2` again; with the entry's types now in `merged_types` (above) an empty
+    // set made that a second copy, and coherence correctly called it E0027 "implemented more than
+    // once". Named declarations are protected from exactly this by `merged_q`'s entry seeding, but an
+    // impl introduces no name, so (target, trait) is its identity and this is where it is seeded.
+    let mut seen_impls: HashSet<(String, String)> = imported
+        .iter()
+        .chain(entry_stmts.iter())
+        .filter_map(standalone_impl_key)
+        .collect();
     loop {
         // Owned, and recomputed per round: the scan below pushes into `imported`, so it cannot hold
         // a borrow of it, and the round after must see whatever this one merged.
@@ -2492,6 +2504,20 @@ fn decl_name(stmt: &Stmt) -> Option<&str> {
         // A user-defined trait is an importable name (L1) — `use pkg.mod.{MyTrait}` brings it into
         // scope for `dyn MyTrait`, a `<T: MyTrait>` bound, or an `impl MyTrait for T`.
         Stmt::Trait(decl) => Some(&decl.name),
+        _ => None,
+    }
+}
+
+/// The identity of a **standalone** `impl Trait for Target` — `(target, trait)`, as spelled in the
+/// statement, so it is the *qualified* pair once the statement has been through
+/// [`qualify::qualify_stmt`]. `None` for every other statement.
+///
+/// An impl declares no name, so it is absent from every name-keyed table the linker dedups with
+/// (`merged_q`, `unit_origins`); this pair is what "the same impl" means instead. Coherence allows a
+/// type one impl per trait, which is precisely why the pair identifies it.
+fn standalone_impl_key(stmt: &Stmt) -> Option<(String, String)> {
+    match stmt {
+        Stmt::Impl(decl) => Some((decl.target.clone(), decl.trait_name.clone())),
         _ => None,
     }
 }
