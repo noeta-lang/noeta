@@ -4287,7 +4287,10 @@ mod render_tests {
         assert_eq!(SigType::Var(0).render(), "T");
         assert_eq!(SigType::Var(1).render(), "U");
         assert_eq!(SigType::Var(7).render(), "T2");
-        assert_eq!(SigType::BoundedVar(0, &["Mergeable"]).render(), "T: Mergeable");
+        assert_eq!(
+            SigType::BoundedVar(0, &["Mergeable"]).render(),
+            "T: Mergeable"
+        );
         // A conjunction renders the way the surface spells it.
         assert_eq!(
             SigType::BoundedVar(0, &["Mergeable", "Syncable"]).render(),
