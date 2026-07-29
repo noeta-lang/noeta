@@ -2,7 +2,6 @@
 //! isolates, plus the tier-fn attribute helpers the bench runner shares.
 
 use std::io::{self, Write};
-use std::process::ExitCode;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
@@ -44,7 +43,7 @@ pub(crate) fn cmd_test(
     names: &[String],
     json: bool,
     target: &Option<String>,
-) -> ExitCode {
+) -> u8 {
     let opts = TestOptions {
         fail_fast,
         jobs,
@@ -63,7 +62,7 @@ pub(crate) fn cmd_test(
                 return report_json(&[], &[], 0);
             }
             println!("{}", empty_message(any_declared, group, names));
-            ExitCode::SUCCESS
+            0
         }
         FileTests::Collected {
             outcomes,
@@ -95,7 +94,7 @@ struct TestOptions<'a> {
 enum FileTests {
     /// The tier prologue short-circuited — compose delegation, a `--target` that does not make the
     /// `test` tier live, or a load/activation/type error already rendered. Carries its exit code.
-    Ran(ExitCode),
+    Ran(u8),
     /// The file ran, but selected no tests. `any_declared` distinguishes "declares none at all"
     /// from "declares some, and the `--group`/`--name` filters kept none".
     None { any_declared: bool },
@@ -123,7 +122,7 @@ fn empty_message(any_declared: bool, group: &Option<String>, names: &[String]) -
 /// name that appears in two modules stays distinguishable. A file whose prologue fails (a type
 /// error, say) is reported through its own already-rendered diagnostics and fails the run, but does
 /// not stop the remaining files — a broken module must not hide every other module's results.
-fn test_directory(dir: &std::path::Path, opts: &TestOptions) -> ExitCode {
+fn test_directory(dir: &std::path::Path, opts: &TestOptions) -> u8 {
     let TestOptions {
         fail_fast,
         group,
@@ -133,8 +132,9 @@ fn test_directory(dir: &std::path::Path, opts: &TestOptions) -> ExitCode {
     } = *opts;
     // Probe compose once for the directory rather than once per file: if this project pins a
     // different toolchain, the delegated run owns the whole directory.
-    if let Err(code) = crate::compose::maybe_delegate(dir) {
-        return code;
+    if crate::compose::maybe_delegate(dir).is_err() {
+        // Composition needed but failed (a fixed exit-1 delegation); the tier subsystem is `u8`.
+        return 1;
     }
     let files = crate::cmd::check::noe_files(dir);
     let mut outcomes: Vec<TestOutcome> = Vec::new();
@@ -152,7 +152,7 @@ fn test_directory(dir: &std::path::Path, opts: &TestOptions) -> ExitCode {
             .into_owned();
         match run_file_tests(file, opts, Some(&label)) {
             FileTests::Ran(code) => {
-                if code != ExitCode::SUCCESS {
+                if code != 0 {
                     broken += 1;
                 }
             }
@@ -176,7 +176,7 @@ fn test_directory(dir: &std::path::Path, opts: &TestOptions) -> ExitCode {
             return report_json(&[], &[], 0);
         }
         println!("{}", empty_message(any_declared, group, names));
-        return ExitCode::SUCCESS;
+        return 0;
     }
     let code = if json {
         report_json(&outcomes, &skipped, total)
@@ -191,7 +191,7 @@ fn test_directory(dir: &std::path::Path, opts: &TestOptions) -> ExitCode {
             plural(broken),
             if broken == 1 { "its" } else { "their" }
         );
-        return ExitCode::from(1);
+        return 1;
     }
     code
 }
@@ -709,7 +709,7 @@ pub(crate) fn run_one_test(
 /// outcomes (name = the report label: fn name / `#[Name]`, `[row]`-suffixed for data cases), the
 /// skipped labels, and the totals. The seam the editor's test explorer parses; same exit-code
 /// semantics as the human report.
-pub(crate) fn report_json(outcomes: &[TestOutcome], skipped: &[String], total: usize) -> ExitCode {
+pub(crate) fn report_json(outcomes: &[TestOutcome], skipped: &[String], total: usize) -> u8 {
     let passed = outcomes.iter().filter(|o| o.passed).count();
     let failed = outcomes.len() - passed;
     let not_run = total.saturating_sub(skipped.len() + outcomes.len());
@@ -728,14 +728,10 @@ pub(crate) fn report_json(outcomes: &[TestOutcome], skipped: &[String], total: u
     });
     println!("{json}");
     let _ = io::stdout().flush();
-    if failed == 0 && not_run == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    }
+    if failed == 0 && not_run == 0 { 0 } else { 1 }
 }
 
-pub(crate) fn report(outcomes: &[TestOutcome], skipped: &[String], total: usize) -> ExitCode {
+pub(crate) fn report(outcomes: &[TestOutcome], skipped: &[String], total: usize) -> u8 {
     let mut passed = 0usize;
     for outcome in outcomes {
         if outcome.passed {
@@ -769,9 +765,5 @@ pub(crate) fn report(outcomes: &[TestOutcome], skipped: &[String], total: usize)
     println!("{}", parts.join(", "));
     let _ = io::stdout().flush();
 
-    if failed == 0 && not_run == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    }
+    if failed == 0 && not_run == 0 { 0 } else { 1 }
 }

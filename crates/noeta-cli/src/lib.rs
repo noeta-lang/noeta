@@ -45,13 +45,12 @@ mod compose;
 mod context;
 mod docgen;
 mod output;
+mod tier_runner;
 mod watch;
 
-use cmd::bench::cmd_bench;
 use cmd::build::{cmd_build, cmd_dump};
 use cmd::cache::cmd_cache;
 use cmd::check::cmd_check;
-use cmd::doc::cmd_doc;
 use cmd::expand::cmd_expand;
 use cmd::fmt::cmd_fmt;
 use cmd::grammar::cmd_grammar_treesitter;
@@ -65,7 +64,7 @@ use cmd::repl::cmd_repl;
 use cmd::run::{cmd_run, execute_real_host, try_run_stapled};
 use cmd::serve::{ext_command_clap, ext_command_dispatch};
 use cmd::servers::{cmd_dap, cmd_lsp, cmd_mcp, cmd_profile};
-use cmd::test::{call_stmt, cmd_test};
+use cmd::test::call_stmt;
 use cmd::upgrade::cmd_upgrade;
 use output::emit_diagnostics_mapped;
 
@@ -888,8 +887,14 @@ pub fn run_cli(
     // namespaces — the HTML body formatter (`noeta-html`) which reflows `@html` bodies under
     // `noeta fmt`, and the CSS formatter (`noeta-css`) it delegates `<style>` blocks to. Prepended to
     // the caller's `extra` (a composed app's dependency units) so all are installed before any lookup.
-    let mut units: Vec<&'static (dyn noeta_stdlib::Extension + Sync)> =
-        vec![&noeta_html::HTML_EXTENSION, &noeta_css::CSS_EXTENSION];
+    // …plus the CLI-layer unit that registers std's native dev-tier runners (registry-dispatched
+    // tier runners, Part B): `test`/`bench`/`doc` are `std` tiers whose runners live here, above
+    // stdlib, so they attach to the `std` root from this crate rather than from `noeta-stdlib`.
+    let mut units: Vec<&'static (dyn noeta_stdlib::Extension + Sync)> = vec![
+        &noeta_html::HTML_EXTENSION,
+        &noeta_css::CSS_EXTENSION,
+        &tier_runner::STD_TIER_RUNNERS_UNIT,
+    ];
     units.extend_from_slice(extra);
     noeta_stdlib::registry::install_with_extras(&units);
     // Phase 4: std's own commands (root `"std"`) are always available under their own names. A
@@ -1034,6 +1039,11 @@ pub fn run_cli(
             jit_stats,
             args,
         } => cmd_run(&file, &tier, &target, no_cache, jit_stats, &args),
+        // The three std dev-tier verbs are thin aliases that enter the shared registry-seam dispatch
+        // (Part B): each stashes its parsed flags, then resolves std's native runner by identity and
+        // invokes it — so `noeta test` reaches `cmd_test` exactly as a program `@tier` runner and a
+        // third-party tier reach theirs, through `find_tier_runner_scoped`. `cmd_test`/`cmd_bench`/
+        // `cmd_doc` keep their bodies (including honoring a `--target` provider override).
         Command::Test {
             file,
             fail_fast,
@@ -1042,7 +1052,17 @@ pub fn run_cli(
             names,
             json,
             target,
-        } => cmd_test(&file, fail_fast, jobs, &group, &names, json, &target),
+        } => {
+            tier_runner::set_test_opts(tier_runner::TestOpts {
+                fail_fast,
+                jobs,
+                group,
+                names,
+                json,
+                target,
+            });
+            tier_runner::dispatch_std_tier("test", &file)
+        }
         Command::Bench {
             file,
             iterations,
@@ -1052,16 +1072,18 @@ pub fn run_cli(
             baseline,
             max_regress,
             target,
-        } => cmd_bench(
-            &file,
-            iterations,
-            &names,
-            json,
-            &save_baseline,
-            &baseline,
-            max_regress,
-            &target,
-        ),
+        } => {
+            tier_runner::set_bench_opts(tier_runner::BenchOpts {
+                iterations,
+                names,
+                json,
+                save_baseline,
+                baseline,
+                max_regress,
+                target,
+            });
+            tier_runner::dispatch_std_tier("bench", &file)
+        }
         Command::Doc {
             file,
             package,
@@ -1071,16 +1093,23 @@ pub fn run_cli(
             root,
             non_builtin,
             lint,
-        } => cmd_doc(
-            &file,
-            &package,
-            &out,
-            &target,
-            api,
-            root.as_deref(),
-            non_builtin,
-            lint,
-        ),
+        } => {
+            // `doc`'s file argument is optional; the runner reads it back from the stashed opts (its
+            // `--api`/`--package`/directory variants are not file-driven), so the seam's `TierRun`
+            // carries the entry (or `.`) only for contract fidelity.
+            let file_arg = file.clone().unwrap_or_else(|| PathBuf::from("."));
+            tier_runner::set_doc_opts(tier_runner::DocOpts {
+                file,
+                package,
+                out,
+                target,
+                api,
+                root,
+                non_builtin,
+                lint,
+            });
+            tier_runner::dispatch_std_tier("doc", &file_arg)
+        }
         Command::Build {
             file,
             out,
@@ -1376,9 +1405,13 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     let activated = noeta_check::activate_tiers_with(&linked.program, &[&name], &ctx);
     let tier = match activated.registry.resolve_provider(&name, &providers) {
         Ok(noeta_check::ResolvedProvider::Declared(d)) => d.clone(),
-        // A built-in name or an unknown one — not this fallback's command; clap's error (or the
-        // external probe) is the right answer.
-        Ok(noeta_check::ResolvedProvider::Extension) => return None,
+        // An extension tier resolved by identity: if it ships a native runner, invoke it through the
+        // same registry seam the std verbs use (unifying std, package, and third-party tiers on one
+        // resolve-then-invoke path). Otherwise it is an inline-only or expression tier — fall through
+        // to the external-binary probe / clap error.
+        Ok(noeta_check::ResolvedProvider::Extension) => {
+            return tier_runner::dispatch_generic_tier(&name, &file);
+        }
         Err(err) => {
             // The name is tier-shaped (the target maps it) but the provider doesn't resolve —
             // that is a real user error, not fall-through material.
@@ -1389,7 +1422,9 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
             return None;
         }
     };
-    Some(run_declared_tier(&name, &linked, activated, tier))
+    Some(ExitCode::from(run_declared_tier(
+        &name, &linked, activated, tier,
+    )))
 }
 
 /// Run a declared tier's dispatch over an already-activated program: type-check, synthesize the
@@ -1400,10 +1435,10 @@ pub(crate) fn run_declared_tier(
     linked: &noeta_loader::Linked,
     activated: noeta_check::Activated,
     tier: noeta_check::DeclaredTier,
-) -> ExitCode {
+) -> u8 {
     if !activated.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
-        return ExitCode::from(1);
+        return 1;
     }
     // An expression tier has no runner semantics — its blocks are expressions in ordinary code,
     // evaluated wherever they appear; there is nothing for a subcommand to run.
@@ -1412,7 +1447,7 @@ pub(crate) fn run_declared_tier(
             "`{name}` is an expression tier — its `@{name} {{ … }}` blocks are values in \
              ordinary code (run the program instead: `noeta run <file>`)"
         );
-        return ExitCode::from(2);
+        return 2;
     }
     // The activated code roots for this tier. This dispatch is reached only for a **program-declared**
     // provider (`provider_escape` sends a std/extension tier down the native path instead), so its
@@ -1514,7 +1549,7 @@ pub(crate) fn run_declared_tier(
     let checked = context::check_under(&program, &opts);
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
-        return ExitCode::from(1);
+        return 1;
     }
     match execute_real_host(&program, &checked, std::env::args().collect()) {
         Ok((result, trace)) => {
@@ -1524,9 +1559,16 @@ pub(crate) fn run_declared_tier(
             if trace.len() >= 2 {
                 eprint!("{}", noeta_vm::render_trace(&trace, &linked.sources));
             }
-            ExitCode::from(result.exit_code.clamp(0, 255) as u8)
+            result.exit_code.clamp(0, 255) as u8
         }
-        Err(u) => noeta_runner::CompileFailure::from_unsupported(&linked.sources, &u).report(),
+        // `to_text` yields the pre-rendered failure and its `u8` code — the tier subsystem's exit
+        // type — where `CompileFailure::report` would hand back a `std::process::ExitCode`.
+        Err(u) => {
+            let failure = noeta_runner::CompileFailure::from_unsupported(&linked.sources, &u);
+            let (text, code) = failure.to_text();
+            let _ = io::stderr().write_all(text.as_bytes());
+            code
+        }
     }
 }
 

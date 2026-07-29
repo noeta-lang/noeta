@@ -128,6 +128,10 @@ pub fn builtin_extension_names() -> Vec<&'static str> {
         .collect();
     names.push(noeta_html::HTML_EXTENSION.name());
     names.push(noeta_css::CSS_EXTENSION.name());
+    // The CLI-layer unit that registers std's native dev-tier runners (Part B). It attaches to the
+    // `std` root but ships no documented surface, so the publish lint must count it among the
+    // toolchain's own units rather than flagging it as a package squatting `std`.
+    names.push(crate::tier_runner::STD_TIER_RUNNERS_UNIT.name());
     names
 }
 

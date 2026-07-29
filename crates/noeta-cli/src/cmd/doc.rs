@@ -3,7 +3,6 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::ExitCode;
 
 use noeta_pm::registry;
 use noeta_runner::resolve_providers;
@@ -21,13 +20,13 @@ use crate::{compose, docgen};
 /// Fetch a published package's stored documentation artifact from the registry: `name` picks the
 /// highest published version, `name@1.2.0` an exact one. Prints the `docs.json` to stdout, or —
 /// with `--out` — writes it and renders the Markdown tree from it (no source needed).
-pub(crate) fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
+pub(crate) fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> u8 {
     let (name, version) = match spec.split_once('@') {
         Some((n, v)) => match semver::Version::parse(v) {
             Ok(version) => (n.to_string(), Some(version)),
             Err(err) => {
                 eprintln!("noeta: `{v}` is not a version: {err}");
-                return ExitCode::from(2);
+                return 2;
             }
         },
         None => (spec.to_string(), None),
@@ -36,7 +35,7 @@ pub(crate) fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
         Ok(index) => index,
         Err(err) => {
             eprintln!("noeta: {err}");
-            return ExitCode::from(1);
+            return 1;
         }
     };
     let version = match version {
@@ -47,7 +46,7 @@ pub(crate) fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
                 Ok(r) => r,
                 Err(err) => {
                     eprintln!("noeta: {err}");
-                    return ExitCode::from(1);
+                    return 1;
                 }
             };
             // Auto-picking is a *new* selection — never land on a yanked release.
@@ -57,7 +56,7 @@ pub(crate) fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
                 Some(r) => r.version.clone(),
                 None => {
                     eprintln!("noeta: registry has no package `{name}`");
-                    return ExitCode::from(1);
+                    return 1;
                 }
             }
         }
@@ -66,11 +65,11 @@ pub(crate) fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
         Ok(Some(docs)) => docs,
         Ok(None) => {
             eprintln!("noeta: no docs stored for `{name}@{version}`");
-            return ExitCode::from(1);
+            return 1;
         }
         Err(err) => {
             eprintln!("noeta: {err}");
-            return ExitCode::from(1);
+            return 1;
         }
     };
     // The hosted registry renders these same docs in a browser; point there when one is
@@ -89,17 +88,17 @@ pub(crate) fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
                     plural(done.decls),
                     dir.display(),
                 );
-                ExitCode::SUCCESS
+                0
             }
             Err(err) => {
                 eprintln!("noeta: {err}");
-                ExitCode::from(1)
+                1
             }
         },
         None => {
             print!("{docs}");
             let _ = io::stdout().flush();
-            ExitCode::SUCCESS
+            0
         }
     }
 }
@@ -131,7 +130,7 @@ pub(crate) fn cmd_doc_api(
     root: Option<&str>,
     non_builtin: bool,
     lint: bool,
-) -> ExitCode {
+) -> u8 {
     // The publish namespace lint: the scoped extensions' whole surface must sit under their own
     // roots (and, for `--non-builtin`, never claim a toolchain-owned root). Report every offender
     // and refuse (exit 2) before emitting anything — the publish gate.
@@ -156,7 +155,7 @@ pub(crate) fn cmd_doc_api(
             for v in &violations {
                 eprintln!("  - {v}");
             }
-            return ExitCode::from(2);
+            return 2;
         }
     }
     let scope = if non_builtin {
@@ -176,16 +175,16 @@ pub(crate) fn cmd_doc_api(
                     plural(done.decls),
                     out_dir.display(),
                 );
-                ExitCode::SUCCESS
+                0
             }
             Err(err) => {
                 eprintln!("noeta: {err}");
-                ExitCode::from(2)
+                2
             }
         },
         None => {
             print!("{json}");
-            ExitCode::SUCCESS
+            0
         }
     }
 }
@@ -200,7 +199,7 @@ pub(crate) fn cmd_doc(
     root: Option<&str>,
     non_builtin: bool,
     lint: bool,
-) -> ExitCode {
+) -> u8 {
     // `--api`: the registry-backed path — the intrinsic surface (stdlib + composed native modules)
     // as a schema-1 `docs.json`, organized by module. No local source involved.
     if api {
@@ -217,7 +216,8 @@ pub(crate) fn cmd_doc(
     // The compose probe hands back the graph it resolved (default selection) for the load below
     // (audit-5 F2); the `--out` generator path never links, so it simply drops it.
     let resolved = match compose::maybe_delegate(file) {
-        Err(code) => return code,
+        // Composition needed but failed (a fixed exit-1 delegation); the tier subsystem is `u8`.
+        Err(_) => return 1,
         Ok(resolved) => resolved,
     };
     if let Some(code) = target_gate(file, target, "doc") {
@@ -230,7 +230,7 @@ pub(crate) fn cmd_doc(
         eprintln!(
             "noeta: `--out` documents a package — name its entry `.noe` file, not a directory"
         );
-        return ExitCode::from(2);
+        return 2;
     }
     // A **directory**: extract from every `.noe` beneath it. There is no entry to link, so the
     // provider dispatch and the whole-program load below have nothing to act on — extraction works
@@ -239,11 +239,11 @@ pub(crate) fn cmd_doc(
         let rendered = render_docs(&doc_sources(file));
         if rendered.is_empty() {
             eprintln!("noeta: no `@doc` blocks found");
-            return ExitCode::SUCCESS;
+            return 0;
         }
         print!("{rendered}");
         let _ = io::stdout().flush();
-        return ExitCode::SUCCESS;
+        return 0;
     }
     // `--out`: the generator path — a registry-ready artifact from a bare parse, before (and
     // independent of) the extraction/provider machinery below.
@@ -261,11 +261,11 @@ pub(crate) fn cmd_doc(
                     plural(done.decls),
                     out_dir.display(),
                 );
-                ExitCode::SUCCESS
+                0
             }
             Err(err) => {
                 eprintln!("noeta: {err}");
-                ExitCode::from(2)
+                2
             }
         };
     }
@@ -282,7 +282,7 @@ pub(crate) fn cmd_doc(
         Ok(map) => map,
         Err(err) => {
             eprintln!("noeta: {err}");
-            return ExitCode::from(2);
+            return 2;
         }
     };
     if providers.get("doc").is_some_and(|p| p != "std") {
@@ -309,11 +309,11 @@ pub(crate) fn cmd_doc(
     let out = render_docs(&doc_sources(file));
     if out.is_empty() {
         eprintln!("noeta: no `@doc` blocks found");
-        return ExitCode::SUCCESS;
+        return 0;
     }
     print!("{out}");
     let _ = io::stdout().flush();
-    ExitCode::SUCCESS
+    0
 }
 
 /// The sources `noeta doc` extracts from: every `.noe` beneath a directory, or — for a file — the
