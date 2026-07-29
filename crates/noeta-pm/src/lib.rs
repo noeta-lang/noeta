@@ -78,6 +78,11 @@ mod git_auth;
 mod resolve;
 mod store;
 
+/// Hermetic, per-process fixture directories for this crate's unit tests — the one place a test
+/// temp path is built, so no two processes ever share one. Test builds only.
+#[cfg(test)]
+mod test_temp;
+
 /// The git **authorship** helpers backing the committer signal (`noeta update`/`add`) — re-exported so
 /// front-ends reach them without the rest of the git-fetch internals (which keep `Store` private).
 pub use git::{Authorship, authorship, commit_web_url, repo_web_url};

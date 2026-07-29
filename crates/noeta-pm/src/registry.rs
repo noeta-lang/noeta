@@ -2094,9 +2094,7 @@ mod tests {
     }
 
     fn mem(name: &str) -> LocalIndex {
-        let dir = std::env::temp_dir().join(format!("noeta_registry_test_{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        LocalIndex::open_at(dir).unwrap()
+        LocalIndex::open_at(crate::test_temp::unique_path(name)).unwrap()
     }
 
     #[test]
@@ -2104,10 +2102,8 @@ mod tests {
         // The local index's read is lossy by design (an unknown shape degrades resolution
         // gracefully) — but publish's read-modify-REWRITE must never silently delete what the
         // parse skipped (e.g. an entry written by a newer toolchain).
-        let dir = std::env::temp_dir().join("noeta_registry_lossy_rewrite");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let index = LocalIndex::open_at(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("registry-lossy-rewrite");
+        let index = LocalIndex::open_at(dir.path().to_path_buf()).unwrap();
         index
             .publish("acme/lib", &release(1, 0, 0, "v1.0.0"))
             .expect("first publish");
