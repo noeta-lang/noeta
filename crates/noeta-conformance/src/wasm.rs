@@ -155,7 +155,7 @@ pub fn run_wasm_differential(root: &Path, only: Option<&Path>) -> Result<WasmDif
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry, None) {
+            match noeta_loader::read_workspace(&case.entry, crate::case_root(&case.entry).as_ref()) {
                 Ok(raw) => diff_workspace(&name, &raw, &tools, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
