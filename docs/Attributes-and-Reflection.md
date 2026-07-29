@@ -163,7 +163,7 @@ So if you write such a walk, write it without a `_` and let the checker list wha
 
 `fields_of(value)` returns a struct/class instance's fields as `List<FieldEntry>` — each `{ name: string, value: dyn }`, in declaration order (any other value yields the empty list). It is the value-level counterpart of `type_of`, and what lets a fully-defaulted trait implement *structural* behavior over `self` in pure Noeta — no macro system:
 
-```noeta check
+```noeta
 trait Inspectable {
     fn inspect(): string {
         mut out = "{"
@@ -173,6 +173,8 @@ trait Inspectable {
 }
 @derive(Inspectable)
 struct User { name: string; id: int }
+
+echo User { name: "ada", id: 1 }.inspect()   // { name: ada id: 1 }
 ```
 
 ### `traits_of(value): List<string>` — trait-membership reflection
@@ -250,7 +252,7 @@ echo count_of::<int>()
 
 The fix is to hand the query a **name** instead of a type, through the runtime-string arm each of them already has — and inside a generic function that name is available, because `type_name::<T>()` [forwards](Generics-and-Traits#asking-what-t-is-called):
 
-```noeta check
+```noeta
 struct Todo { id: int }
 
 fn count_of<T>(): int {
@@ -630,7 +632,7 @@ Materializes every `#[T(...)]` attribute in the program — each entry's `.value
 
 **"In the program" means every file the program is built from**, not only the declarations something imported. A data attribute is a **link root**: an annotated declaration in a sibling module, or in a dependency package, is part of the program whether or not any `use` names it — which is the whole point of tagging a function for discovery. So a `#[Tool]`-scanning framework finds the tools nothing statically references, and finds them by their **qualified** target name (`app.tools.run`, matching `type_of`'s naming inside a module). Visibility does not gate discovery either: a module-private `#[Tool] fn` is a registration, and `invoke(a.target, args)` really calls it — reflection and dispatch see the same set by construction. What the rule does *not* do is drag in unannotated code: a sibling's unannotated function that nothing imports stays out of the program, exactly as before.
 
-```noeta check
+```noeta
 @attribute
 struct Route { path: string }
 
