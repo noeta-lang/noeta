@@ -1,0 +1,54 @@
+// Forwarding a method's own `T` into a call reached through a **compound receiver**
+// (`self.inner.load::<T>(…)`) is `E0058`, and this pins the boundary AND the wording — because the
+// wording was wrong for a full arc. The slots a body forwards through are computed by a purely
+// syntactic pre-pass, before checking; naming `Store.load` from `self.inner.load` means typing
+// `self.inner` first, which is a checking result, so the pre-pass registers nothing for this site
+// and the call has no slot to pass through.
+//
+// What the diagnostic must NOT say is what it used to: that "call-site-typed forwarding is
+// supported in top-level generic functions only". It is supported from a generic method — this
+// very file compiles `Store.load`'s own `json.try_parse::<T>` — so the old message sent an author
+// away from a construct that works. Its help was worse: it advised spelling an explicit turbofish
+// (`load::<...>`), which the failing line already spells.
+//
+// The route that does work is `forward_receiver_bound_local.noe`, which the help now names: bind
+// the receiver to a local, and the call is spelled on a bare name again.
+// expect: error E0058 at 48:16
+// expect: exit 1
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+class Store {
+    pub tag: string
+
+    fn new(): Store {
+        return Store { tag: "s" };
+    }
+
+    fn load<T>(text: string): Result<T, JsonError> {
+        if self.tag == "" {
+            return json.try_parse::<T>("{}");
+        }
+        return json.try_parse::<T>(text);
+    }
+}
+
+class Cache {
+    pub inner: Store
+
+    fn new(): Cache {
+        return Cache { inner: Store.new() };
+    }
+
+    fn get<T>(text: string): Result<T, JsonError> {
+        return self.inner.load::<T>(text);
+    }
+}
+
+c = Cache.new();
+r = c.get::<Order>("{\"id\": 1}");
+echo "unreached ${r}";

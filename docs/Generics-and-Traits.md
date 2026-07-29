@@ -77,6 +77,38 @@ Forwarding works from a **top-level generic function**, from a **nested `fn`** i
 
 The boundaries. An instantiation the call site cannot pin must be spelled with a turbofish (E0023), and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure. A generic **type**'s parameter does not forward from a method body (E0058): it reaches the body through the receiver's type tag, which records the instantiation's *name* but no build recipe, so take the type as the method's own parameter instead.
 
+One more, and it is about **spelling** rather than about what a parameter is. The slots a body forwards through are computed by a pass that runs before checking and reads the source as written, so it registers a forward from a call spelled on a **bare name** — `json.try_parse::<T>(s)`, `f::<T>(x)`, `self.load::<T>(s)`, `store.load::<T>(s)`, `Store.load::<T>(s)`. A receiver that is itself an expression (`self.inner.load::<T>(s)`) names its callee only once checking has typed it, which is too late, and is E0058. Bind the receiver first and the call is spelled on a name again:
+
+```noeta check
+use std.json
+use std.json.JsonError
+
+struct Order { id: int }
+
+class Store {
+    pub tag: string
+    fn new(): Store { return Store { tag: "s" } }
+
+    fn load<T>(text: string): Result<T, JsonError> {
+        echo self.tag
+        return json.try_parse::<T>(text)
+    }
+}
+
+class Cache {
+    pub inner: Store
+    fn new(): Cache { return Cache { inner: Store.new() } }
+
+    fn get<T>(text: string): Result<T, JsonError> {
+        s = self.inner                  // `self.inner.load::<T>(text)` here would be E0058
+        return s.load::<T>(text)
+    }
+}
+
+c = Cache.new()
+o = c.get::<Order>("{\"id\": 1}")
+```
+
 The last one is a **runtime** boundary, and the only one that is. A forwarding method must be called by a name the checker can resolve a receiver type for, because that is what pins the instantiation. The four dynamic ways into a method — a `dyn` receiver, a bound handle (`v.m`), an unbound handle (`T.m`), and `invoke(v, "m", args)` — carry none, so a forwarding method reached through one of them **aborts** naming the callee rather than guessing. It is the same judgment `type_name::<T>()` makes on a value built at no known instantiation: a plausible-looking wrong type would travel silently, and the fix belongs at the call site that lost it.
 
 ```noeta error

@@ -1808,7 +1808,7 @@ impl Checker {
         span: Span,
         recv_args: &[Type],
         supplied_at: &[usize],
-        hidden_site: Option<(Span, String)>,
+        hidden_site: Option<(Span, String, ForwardSpelling)>,
         env: &mut Env,
     ) -> Type {
         // Seed with the receiver's type arguments (instance call); the call's own arguments then
@@ -1851,7 +1851,7 @@ impl Checker {
         span: Span,
         seed: HashMap<String, Type>,
         supplied_at: &[usize],
-        hidden_site: Option<(Span, String)>,
+        hidden_site: Option<(Span, String, ForwardSpelling)>,
         env: &mut Env,
     ) -> Type {
         let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
@@ -1947,8 +1947,10 @@ impl Checker {
         // `hidden_site` is the whole-call span lowering keys on, paired with the KEY the callee's
         // slot layout is recorded under — a bare `fn` name, or `Type.method` for a method (Axis A),
         // which is why it is not simply `name`: two classes may declare `load`. `None` at a call
-        // that has no channel to supply them through.
-        if let Some((call_span, key)) = hidden_site
+        // that has no channel to supply them through. The third element is how this call was
+        // SPELLED, which is what the pre-pass's reach is a property of — see [`ForwardSpelling`],
+        // and the E0058 below that is the only consumer.
+        if let Some((call_span, key, spelling)) = hidden_site
             && let Some(fwd) = self.symbols.forwarding.get(key.as_str()).cloned()
             // A poisoned callee (diverging slot set, D2a) already carries the one clear error at
             // its declaration; resolving its partial slots here would only cascade noise.
@@ -1989,20 +1991,64 @@ impl Checker {
                         .position(|t| t == &sigma)
                     {
                         Some(j) => hidden.push(noeta_ext_abi::HiddenArg::Forward(j as u32)),
+                        // No matching slot in this body. What to say depends entirely on how the
+                        // call was SPELLED ([`ForwardSpelling`]), because the pre-pass that builds
+                        // the slot table is syntactic — it is the spelling, not the resolved
+                        // callee, that decided whether a slot could be registered. Getting this
+                        // wrong is worse than silence: the previous single message claimed
+                        // forwarding lives in top-level generic functions only (it has worked from
+                        // generic methods since the generic-forwarding arc, and fires *inside* a
+                        // top-level fn in the inferred case) and advised a turbofish the failing
+                        // source had usually already spelled.
                         None => {
-                            self.error(
+                            let d = self.error(
                                 DiagnosticCode::InvalidTypeArguments,
                                 span,
-                                format!(
-                                    "cannot forward `{sigma}` into `{name}` here: \
-                                     call-site-typed forwarding is supported in top-level \
-                                     generic functions only"
-                                ),
-                            )
-                            .help(format!(
-                                "spell the instantiation with an explicit turbofish \
-                                 (`{name}::<...>`) so `{sigma}` is recognized as forwarded"
-                            ));
+                                match spelling {
+                                    ForwardSpelling::CompoundReceiver => format!(
+                                        "cannot forward `{sigma}` into `{name}` here: a compound \
+                                         receiver is typed by checking, while the slots a body \
+                                         forwards through are computed before it — forwarding \
+                                         reaches a call spelled on a BARE NAME \
+                                         (`json.try_parse::<{sigma}>`, `self.{name}::<...>`, \
+                                         `Type.{name}::<...>`), from a top-level generic `fn` and \
+                                         a generic method alike"
+                                    ),
+                                    ForwardSpelling::Inferred => format!(
+                                        "cannot forward `{sigma}` into `{name}` here: this body \
+                                         carries no forwarding slot for `{sigma}` — one is \
+                                         registered from an EXPLICIT turbofish, never from an \
+                                         instantiation the arguments or the expected type inferred"
+                                    ),
+                                    ForwardSpelling::Turbofish => format!(
+                                        "cannot forward `{sigma}` into `{name}` here: `{name}` \
+                                         forwards the slot `{sigma}`, and this body carries no \
+                                         matching one — a body carries exactly the slots its own \
+                                         forwarded sites spell"
+                                    ),
+                                },
+                            );
+                            match spelling {
+                                // Verified: `r = self.inner; r.load::<T>(text)` compiles and
+                                // decodes per instantiation — a bare-name receiver is the spelling
+                                // the pre-pass registers a slot from.
+                                ForwardSpelling::CompoundReceiver => {
+                                    d.help(format!(
+                                        "bind the receiver to a local and call on that name: \
+                                         `r = <receiver>;` then `r.{name}::<...>(...)`"
+                                    ));
+                                }
+                                ForwardSpelling::Inferred => {
+                                    d.help(format!(
+                                        "spell the instantiation with an explicit turbofish \
+                                         (`{name}::<...>`) so `{sigma}` is recognized as forwarded"
+                                    ));
+                                }
+                                // The turbofish is already spelled on a name the pre-pass sees, so
+                                // there is no route to point at — a help here would only repeat
+                                // what the source does. Say nothing rather than something false.
+                                ForwardSpelling::Turbofish => {}
+                            }
                         }
                     }
                     continue;

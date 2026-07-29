@@ -1,0 +1,34 @@
+---
+source: crates/noeta-check/tests/diagnostics.rs
+expression: out
+---
+================ E0058 forwarding into a call whose instantiation was inferred ================
+[E0058] Error: cannot forward `T` into `inner` here: this body carries no forwarding slot for `T` — one is registered from an EXPLICIT turbofish, never from an instantiation the arguments or the expected type inferred
+   ╭─[ snippet.noe:2:36 ]
+   │
+ 2 │ fn outer<T>(x: T): string { return inner(x); }
+   │                                    ──┬──  
+   │                                      ╰──── cannot forward `T` into `inner` here: this body carries no forwarding slot for `T` — one is registered from an EXPLICIT turbofish, never from an instantiation the arguments or the expected type inferred
+   │ 
+   │ Help: spell the instantiation with an explicit turbofish (`inner::<...>`) so `T` is recognized as forwarded
+───╯
+
+================ E0058 forwarding through a compound receiver ================
+[E0058] Error: cannot forward `T` into `label` here: a compound receiver is typed by checking, while the slots a body forwards through are computed before it — forwarding reaches a call spelled on a BARE NAME (`json.try_parse::<T>`, `self.label::<...>`, `Type.label::<...>`), from a top-level generic `fn` and a generic method alike
+   ╭─[ snippet.noe:7:36 ]
+   │
+ 7 │     fn label<T>(): string { return self.inner.label::<T>(); }
+   │                                    ───────────┬───────────  
+   │                                               ╰───────────── cannot forward `T` into `label` here: a compound receiver is typed by checking, while the slots a body forwards through are computed before it — forwarding reaches a call spelled on a BARE NAME (`json.try_parse::<T>`, `self.label::<...>`, `Type.label::<...>`), from a top-level generic `fn` and a generic method alike
+   │ 
+   │ Help: bind the receiver to a local and call on that name: `r = <receiver>;` then `r.label::<...>(...)`
+───╯
+
+================ E0058 forwarding a callee's composite slot through a member turbofish ================
+[E0058] Error: cannot forward `List<T>` into `mid` here: `mid` forwards the slot `List<T>`, and this body carries no matching one — a body carries exactly the slots its own forwarded sites spell
+   ╭─[ snippet.noe:6:54 ]
+   │
+ 6 │ fn outer<T>(h: Holder, xs: List<T>): string { return h.mid::<T>(xs); }
+   │                                                      ───────┬──────  
+   │                                                             ╰──────── cannot forward `List<T>` into `mid` here: `mid` forwards the slot `List<T>`, and this body carries no matching one — a body carries exactly the slots its own forwarded sites spell
+───╯
