@@ -47,6 +47,18 @@ A **top-level** tier block may open with its own `use`s, so a dependency only th
 
 Such an import binds **inside the block only** — the same name used outside it resolves to nothing, exactly as if the `use` were not there — and it is dropped with the block when the tier is inactive, so it never reaches a production build. Everything the block's own code can name through it works the same as a top-level `use`, including the attribute names that `#[…]` resolves. (A block in *statement* position — nested in a function body, loop, or branch — is code, not a file scope: a `use` inside one binds nothing and its references are the ordinary "cannot find … in this scope" error.)
 
+That holds for **any** module, not just `std`: a sibling module or a dependency package is imported the same way, in either spelling, and the module it names is linked into the program just as a top-level `use` would link it.
+
+```noeta ignore
+@test {
+    use probe.lib.side.{Thing}      // or: use probe.lib.side, then `side.Thing`
+
+    fn builds(): void { assert(Thing { n: 3 }.n == 3) }
+}
+```
+
+An import naming a module that does not exist is a link error (`E0019`) reported where it is written, whether or not the tier is active — so a typo surfaces at `noeta check`, not as a pile of unresolved names the first time you run `noeta test`.
+
 ### `@debug` — conditional inline code
 
 `@debug { … }` is code in *statement* position: instrumentation you want compiled in only sometimes.
