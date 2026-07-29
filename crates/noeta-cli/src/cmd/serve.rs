@@ -5,11 +5,12 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use noeta_ast::{Expr, Stmt};
 use noeta_diagnostics::render;
 use noeta_pm::{graph, manifest};
 use noeta_runner::compile::Loaded;
 use noeta_runner::compile_real;
-use noeta_span::SourceMap;
+use noeta_span::{SourceMap, Span};
 use noeta_vm::VmBackend;
 
 use crate::cmd::run::{p2p_app_namespace, run_program};
@@ -20,49 +21,101 @@ use crate::{compose, watch};
 const HANDLER: &str = "fetch";
 
 /// The module the serve entry call names, qualified — see [`EntryCall::module`](noeta_stdlib::EntryCall).
-/// The multi-core path builds its own call rather than going through an `EntryCall`, so it names
-/// the module here; both must stay the same module.
+/// The multi-core path never reaches `run_file` (it binds the listener itself), so it assembles the
+/// same `EntryCall` from here; both paths therefore name one module and build one call.
 const SERVE_ENTRY_MODULE: &str = "std.http.server";
 
-/// The name a synthesized entry call must use to reach the program's `name` function — `name`
-/// itself, or the **qualified** spelling the linker gave it. An entry file that declares a
-/// `namespace` has its own top-level declarations rewritten to qualified identities (`fn fetch`
-/// becomes `todo.main.fetch`), so a trailing `server.serve(port, fetch, host)` naming the bare
-/// identifier resolves to nothing — which surfaced as "cannot find `fetch` in this scope" pointing
-/// at a file whose `fn fetch` is right there. Falls back to `name` when nothing matches, so a
-/// genuinely missing handler still reports against the name the user is expected to define.
-fn entry_ident(program: &noeta_ast::Program, name: &str) -> String {
-    let suffix = format!(".{name}");
-    program
-        .stmts
-        .iter()
-        .filter_map(|stmt| match stmt {
-            noeta_ast::Stmt::Fn(decl) => Some(decl.name.as_str()),
-            _ => None,
-        })
-        .find(|decl| *decl == name || decl.ends_with(&suffix))
-        .unwrap_or(name)
-        .to_string()
-}
-
-/// Split an [`EntryCall`](noeta_stdlib::EntryCall)'s module into the `use` path that binds it and
-/// the local name the call spells — `"std.http.server"` → `(["std", "http"], "server")`. A bare
-/// name binds nothing (`(vec![], "server")`) and resolves through the program's own imports.
-fn entry_module(module: &str) -> (Vec<String>, &str) {
-    match module.rsplit_once('.') {
-        Some((path, local)) => (path.split('.').map(str::to_string).collect(), local),
-        None => (Vec::new(), module),
+/// The statements a synthesized [`EntryCall`](noeta_stdlib::EntryCall) contributes to the entry
+/// program: the `use` that binds the module the call names, then the call —
+/// `use std.http.server` + `server.serve(port, fetch, host)`.
+///
+/// Both go to the **loader** ([`noeta_loader::load_with_deps_appending`]), which appends them before
+/// linking, so they resolve the way the same two lines written into the file would: the import pulls
+/// in the module it names (a dependency package's `.noe` submodule otherwise binds nothing at all),
+/// and the call's names are qualified and α-renamed alongside the entry's own. A module named by a
+/// single bare segment brings no `use` — it binds nothing and leaves resolution to the program's own
+/// imports (see `EntryCall::module`).
+///
+/// A synthetic span (offset 0) throughout: these nodes are compiler-generated, so no diagnostic
+/// should ever need to locate them in the file. The program supplies any identifier the call names
+/// (`fetch`, `up`); a missing one surfaces as an ordinary check error against the name the command
+/// documents.
+fn entry_tail(entry: &noeta_stdlib::EntryCall) -> Vec<Stmt> {
+    let sp = Span::empty_at(0);
+    let ident = |name: &str| Expr::Ident {
+        name: noeta_ast::Name::canonical(name),
+        span: sp,
+    };
+    let mut stmts = Vec::new();
+    let mut path: Vec<String> = entry.module.split('.').map(str::to_string).collect();
+    let local = path.pop().unwrap_or_default();
+    if !path.is_empty() {
+        stmts.push(Stmt::Use {
+            path,
+            names: vec![noeta_ast::UseName {
+                name: local.clone(),
+                alias: None,
+                span: sp,
+            }],
+            span: sp,
+        });
     }
-}
-
-/// Whether the program already binds `local` with a `use` — an entry file that imported the module
-/// itself. Re-importing it would be a second binding of the same name (E0020), so the synthetic
-/// `use` is only added when the program has none.
-fn already_imports(program: &noeta_ast::Program, local: &str) -> bool {
-    program.stmts.iter().any(|stmt| match stmt {
-        noeta_ast::Stmt::Use { names, .. } => names.iter().any(|n| n.local() == local),
-        _ => false,
-    })
+    let hot = std::env::var_os("NOETA_HOT").is_some();
+    let args: Vec<Expr> = entry
+        .args
+        .iter()
+        .map(|arg| match arg {
+            noeta_stdlib::EntryArg::Int(value) => Expr::Int {
+                value: *value,
+                span: sp,
+            },
+            noeta_stdlib::EntryArg::Str(value) => Expr::Str {
+                value: value.clone(),
+                span: sp,
+            },
+            // In hot mode (server-hmr W1), late-bind an identifier argument through a trampoline
+            // closure `fn(req) => fetch(req)`: the serve loop captures its handler argument ONCE at
+            // startup, but the trampoline's body re-resolves the global per call — so a hot swap
+            // rebinding `fetch` reaches the live loop.
+            noeta_stdlib::EntryArg::Ident(name) if hot => Expr::Closure {
+                params: vec![noeta_ast::Param {
+                    attrs: Vec::new(),
+                    name: "req".to_string(),
+                    name_span: sp,
+                    ty: None,
+                    default: None,
+                    span: sp,
+                    positional: false,
+                }],
+                ret: None,
+                body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
+                    callee: Box::new(ident(name)),
+                    args: vec![noeta_ast::CallArg::positional(ident("req"))],
+                    span: sp,
+                })),
+                span: sp,
+            },
+            noeta_stdlib::EntryArg::Ident(name) => ident(name),
+        })
+        .collect();
+    let call = Expr::Call {
+        callee: Box::new(Expr::Member {
+            receiver: Box::new(ident(&local)),
+            name: entry.func.to_string(),
+            name_span: sp,
+            span: sp,
+        }),
+        args: args
+            .into_iter()
+            .map(noeta_ast::CallArg::positional)
+            .collect(),
+        span: sp,
+    };
+    stmts.push(Stmt::Expr {
+        expr: call,
+        span: sp,
+    });
+    stmts
 }
 
 /// Build the clap subcommand for an extension command, registered under `name` — the local name a
@@ -234,9 +287,6 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         entry: Option<&noeta_stdlib::EntryCall>,
         banner: Option<&str>,
     ) -> u8 {
-        use noeta_ast::{Expr, Stmt};
-        use noeta_span::Span;
-
         // An extension command drives a program run; a native-dep app delegates to its composed
         // toolchain like every other verb (composition failure is fatal, never a stock fallback).
         let resolved = match compose::maybe_delegate(file) {
@@ -258,11 +308,17 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 }
             },
         };
-        let linked = match noeta_loader::load_with_deps(
+        // The entry call and the `use` that binds it, handed to the *loader* rather than pushed
+        // onto the linked program: a synthesized statement has to go through the linker exactly as
+        // a handwritten one does, or its import resolves nothing and its names are left unqualified
+        // (see `load_with_deps_appending`).
+        let tail = entry.map(entry_tail).unwrap_or_default();
+        let linked = match noeta_loader::load_with_deps_appending(
             file,
             manifest::root_edition(file),
             &deps,
             &package_uses,
+            &tail,
         ) {
             Err(err) => {
                 eprintln!("noeta: cannot read {}: {err}", file.display());
@@ -279,95 +335,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         };
         // Rewrap as the runner's `Loaded` so the type check below rides `Loaded::check` — the
         // editions-threading choke point (audit-3 F8).
-        let mut loaded = crate::context::loaded(linked);
-
-        // Synthesize `<module>.<func>(<args>)` as a trailing top-level statement. The program
-        // supplies any identifiers the call names (`fetch`); a missing one surfaces as an
-        // ordinary check error. A synthetic span (offset 0) is fine — this node is
-        // compiler-generated, never the subject of a diagnostic the user needs to locate.
-        if let Some(entry) = entry {
-            let sp = Span::empty_at(0);
-            let ident = |name: &str| Expr::Ident {
-                name: noeta_ast::Name::canonical(name),
-                span: sp,
-            };
-            // The call names the module's LAST segment and brings its own `use` — a synthesized
-            // statement has to carry the imports it needs, exactly as a handwritten one would.
-            // Without it `server.serve(…)` resolved only in programs that happened to import
-            // `std.http.server`, and every other one failed with "cannot find `server` in this
-            // scope" against the entry file's line 1 — a synthetic span, so the error pointed at a
-            // line that had nothing to do with it.
-            let (use_path, local) = entry_module(entry.module);
-            if !use_path.is_empty() && !already_imports(&loaded.program, local) {
-                loaded.program.stmts.push(Stmt::Use {
-                    path: use_path,
-                    names: vec![noeta_ast::UseName {
-                        name: local.to_string(),
-                        alias: None,
-                        span: sp,
-                    }],
-                    span: sp,
-                });
-            }
-            let callee = Expr::Member {
-                receiver: Box::new(ident(local)),
-                name: entry.func.to_string(),
-                name_span: sp,
-                span: sp,
-            };
-            let hot = std::env::var_os("NOETA_HOT").is_some();
-            let args: Vec<Expr> = entry
-                .args
-                .iter()
-                .map(|arg| match arg {
-                    noeta_stdlib::EntryArg::Int(value) => Expr::Int {
-                        value: *value,
-                        span: sp,
-                    },
-                    noeta_stdlib::EntryArg::Str(value) => Expr::Str {
-                        value: value.clone(),
-                        span: sp,
-                    },
-                    // In hot mode (server-hmr W1), late-bind an identifier argument through a
-                    // trampoline closure `fn(req) => fetch(req)`: the serve loop captures its
-                    // handler argument ONCE at startup, but the trampoline's body re-resolves the
-                    // global per call — so a hot swap rebinding `fetch` reaches the live loop.
-                    noeta_stdlib::EntryArg::Ident(name) if hot => Expr::Closure {
-                        params: vec![noeta_ast::Param {
-                            attrs: Vec::new(),
-                            name: "req".to_string(),
-                            name_span: sp,
-                            ty: None,
-                            default: None,
-                            span: sp,
-                            positional: false,
-                        }],
-                        ret: None,
-                        body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
-                            callee: Box::new(ident(&entry_ident(&loaded.program, name))),
-                            args: vec![noeta_ast::CallArg::positional(ident("req"))],
-                            span: sp,
-                        })),
-                        span: sp,
-                    },
-                    noeta_stdlib::EntryArg::Ident(name) => {
-                        ident(&entry_ident(&loaded.program, name))
-                    }
-                })
-                .collect();
-            let call = Expr::Call {
-                callee: Box::new(callee),
-                args: args
-                    .into_iter()
-                    .map(noeta_ast::CallArg::positional)
-                    .collect(),
-                span: sp,
-            };
-            loaded.program.stmts.push(Stmt::Expr {
-                expr: call,
-                span: sp,
-            });
-        }
+        let loaded = crate::context::loaded(linked);
 
         // Armed, not printed: the serve loop emits it once the listener is actually bound, so a
         // bind clash or a check error is never preceded by "listening on …".
@@ -409,9 +377,6 @@ pub(crate) fn serve_parallel_impl(
     host: &str,
     workers: usize,
 ) -> u8 {
-    use noeta_ast::{Expr, Stmt};
-    use noeta_span::Span;
-
     let resolved = match compose::maybe_delegate(file) {
         Err(_) => return 1,
         Ok(resolved) => resolved,
@@ -428,11 +393,24 @@ pub(crate) fn serve_parallel_impl(
             }
         },
     };
-    let linked = match noeta_loader::load_with_deps(
+    // The multi-core entry call is the same `server.serve(port, fetch, host)` the single-worker path
+    // makes, built the same way and handed to the loader the same way — including the hot-mode
+    // handler trampoline, which `entry_tail` applies to an `Ident` argument (server-hmr F5).
+    let tail = entry_tail(&noeta_stdlib::EntryCall {
+        module: SERVE_ENTRY_MODULE,
+        func: "serve",
+        args: vec![
+            noeta_stdlib::EntryArg::Int(port),
+            noeta_stdlib::EntryArg::Ident(HANDLER),
+            noeta_stdlib::EntryArg::Str(host.to_string()),
+        ],
+    });
+    let linked = match noeta_loader::load_with_deps_appending(
         file,
         manifest::root_edition(file),
         &deps,
         &package_uses,
+        &tail,
     ) {
         Err(err) => {
             eprintln!("noeta: cannot read {}: {err}", file.display());
@@ -449,81 +427,7 @@ pub(crate) fn serve_parallel_impl(
     };
     // Rewrap as the runner's `Loaded` so the type check below rides `Loaded::check` — the
     // editions-threading choke point (audit-3 F8).
-    let mut loaded = crate::context::loaded(linked);
-
-    // In hot mode (`--parallel --watch`, server-hmr F5) the handler is a TRAMPOLINE
-    // `fn(req) => fetch(req)`, so the serve loop's one-shot handler capture late-binds `fetch`
-    // per request and a swap that rebinds `fetch` reaches every worker's live loop (the same
-    // trick the single-worker hot path uses). A plain run passes `fetch` directly.
-    let hot = std::env::var_os("NOETA_HOT").is_some();
-    let sp = Span::empty_at(0);
-    let ident = |name: &str| Expr::Ident {
-        name: noeta_ast::Name::canonical(name),
-        span: sp,
-    };
-    let handler = if hot {
-        Expr::Closure {
-            params: vec![noeta_ast::Param {
-                attrs: Vec::new(),
-                name: "req".to_string(),
-                name_span: sp,
-                ty: None,
-                default: None,
-                span: sp,
-                positional: false,
-            }],
-            ret: None,
-            body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
-                callee: Box::new(ident(&entry_ident(&loaded.program, HANDLER))),
-                args: vec![noeta_ast::CallArg::positional(ident("req"))],
-                span: sp,
-            })),
-            span: sp,
-        }
-    } else {
-        ident(&entry_ident(&loaded.program, HANDLER))
-    };
-    // Same synthetic import the single-worker path adds (`entry_module`): the multi-core entry call
-    // is the same `server.serve(…)`, so it must bind `server` the same way.
-    let (use_path, local) = entry_module(SERVE_ENTRY_MODULE);
-    if !already_imports(&loaded.program, local) {
-        loaded.program.stmts.push(Stmt::Use {
-            path: use_path,
-            names: vec![noeta_ast::UseName {
-                name: local.to_string(),
-                alias: None,
-                span: sp,
-            }],
-            span: sp,
-        });
-    }
-    let call = Expr::Call {
-        callee: Box::new(Expr::Member {
-            receiver: Box::new(ident(local)),
-            name: "serve".to_string(),
-            name_span: sp,
-            span: sp,
-        }),
-        args: vec![
-            Expr::Int {
-                value: port,
-                span: sp,
-            },
-            handler,
-            Expr::Str {
-                value: host.to_string(),
-                span: sp,
-            },
-        ]
-        .into_iter()
-        .map(noeta_ast::CallArg::positional)
-        .collect(),
-        span: sp,
-    };
-    loaded.program.stmts.push(Stmt::Expr {
-        expr: call,
-        span: sp,
-    });
+    let loaded = crate::context::loaded(linked);
 
     let checked = loaded.check();
     if !checked.diagnostics.is_empty() {
@@ -545,7 +449,7 @@ pub(crate) fn serve_parallel_impl(
 
     // Hot multi-core (F5): each worker runs the debug-session hot path; ONE watcher deposits into
     // the shared broadcast queue and every worker drains it, so a swap spans the whole fleet.
-    if hot {
+    if std::env::var_os("NOETA_HOT").is_some() {
         return serve_parallel_hot(
             file,
             &loaded.program,
