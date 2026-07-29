@@ -1155,6 +1155,60 @@ fn value_repr_name(ty: &TypeRepr) -> String {
     }
 }
 
+/// A scalar wire value handed to `Enum.from(v)` / `Enum.try_from(v)` — the neutral probe both
+/// backends build from their own runtime value before asking [`variant_for_wire`] which case it
+/// names, so the two cannot disagree about what matches.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WireProbe {
+    Str(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+impl WireProbe {
+    /// Whether this probe is the backing value `backing`. Numeric widening follows the language
+    /// lattice, exactly as the JSON decode door's tag matching does (`int <: float`): an integer
+    /// probe selects a `float`-backed case, and a fractional probe never selects an `int`-backed one.
+    fn selects_backing(&self, backing: &AttrValue) -> bool {
+        match (self, backing) {
+            (WireProbe::Str(a), AttrValue::Str(b)) => a == b,
+            (WireProbe::Int(a), AttrValue::Int(b)) => a == b,
+            (WireProbe::Float(a), AttrValue::Float(b)) => a == b,
+            (WireProbe::Int(a), AttrValue::Float(b)) => (*a as f64) == *b,
+            (WireProbe::Bool(a), AttrValue::Bool(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Which payload-free case of an enum a wire value names, given each case's `(name, backing)` in
+/// declaration order — the shared decision behind `Enum.from` / `Enum.try_from` in both backends.
+///
+/// **Backing first, across every case; then case name, across every case.** A backed enum's backing
+/// is the value its JSON Schema advertises and the value a real document carries, so a wire-facing
+/// conversion has to read it that way — reading it any other way is exactly what left `Enum.from`
+/// unusable on untrusted input despite looking like the door for it. The case name stays accepted as
+/// a second pass, so a plain enum is unchanged (its cases have no backing, so the first pass matches
+/// nothing) and every program that already spelled a backed enum's case name keeps working.
+///
+/// The two passes are ordered rather than interleaved precisely so that an enum backing one case with
+/// another case's name resolves by *backing* — deterministically, and identically in both backends —
+/// rather than by whichever happened to come first in the declaration.
+///
+/// A **payload-carrying** case is never selected: there is no payload to supply, so callers exclude
+/// it from `cases` rather than have it matched and then built wrong.
+pub fn variant_for_wire(cases: &[(&str, Option<&AttrValue>)], probe: &WireProbe) -> Option<usize> {
+    cases
+        .iter()
+        .position(|(_, backing)| backing.is_some_and(|b| probe.selects_backing(b)))
+        .or_else(|| {
+            cases
+                .iter()
+                .position(|(name, _)| matches!(probe, WireProbe::Str(s) if s == name))
+        })
+}
+
 /// What a `construct(name, fields)` target string names — the shared resolution both backends run,
 /// so the two agree on every accept, every reject, and every message.
 #[derive(Debug)]

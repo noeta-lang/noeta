@@ -428,6 +428,11 @@ impl EnumDef {
 struct VariantInfo {
     name: String,
     field_names: Vec<String>,
+    /// The variant's **backing value** in a backed enum (`enum Plan: string { Free = "free" }`),
+    /// folded through the shared `fold_const_expr`; `None` for a plain enum's case, a native or
+    /// prelude enum (neither is backed), and a backing that is not a literal. What `Enum.from` /
+    /// `Enum.try_from` match on first — the wire value the enum's schema advertises.
+    backing: Option<noeta_ast::AttrValue>,
 }
 
 /// A constructed enum value.
@@ -1424,6 +1429,7 @@ impl Interpreter {
                         .map(|v| VariantInfo {
                             name: v.name.clone(),
                             field_names: v.field_names(),
+                            backing: None,
                         })
                         .collect(),
                     derives_comparable: false,
@@ -2647,10 +2653,14 @@ impl Interpreter {
         })))
     }
 
-    /// `MyEnum.try_from(s)` → `?MyEnum` (`some(case)` if `s` names a payload-free case, else `none`)
-    /// and `MyEnum.from(s)` → `MyEnum` (the case, or a panic if `s` names none) — the PHP `tryFrom`/
-    /// `from` pair, matched by case **name**. A payload-carrying variant is not name-constructible
-    /// (no payload to supply), so it never matches. The VM's `Op::EnumFromStr` mirrors this exactly.
+    /// `MyEnum.try_from(v)` → `?MyEnum` (`some(case)` if `v` names a payload-free case, else `none`)
+    /// and `MyEnum.from(v)` → `MyEnum` (the case, or a panic if `v` names none) — the aborting /
+    /// recoverable pair, matched by **backing value first, then case name**
+    /// ([`noeta_ast::reflect::variant_for_wire`] owns that rule, so the VM's `Op::EnumFromStr` cannot
+    /// disagree). A payload-carrying variant is never selected: there is no payload to supply.
+    ///
+    /// `try_from` is the door for untrusted input — an enum value off a wire — which is why the
+    /// backing is what it reads: a backed enum's backing is exactly what its JSON Schema advertises.
     fn enum_from_string(
         &mut self,
         def: &Rc<EnumDef>,
@@ -2662,44 +2672,53 @@ impl Interpreter {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                format!("`{}.{method}` takes one string argument", def.name()),
+                format!("`{}.{method}` takes one argument", def.name()),
             ));
         }
-        let Value::Str(key) = &args[0] else {
+        let Some(probe) = wire_probe(&args[0]) else {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!(
-                    "`{}.{method}` expects a string, found {}",
+                    "`{}.{method}` expects a string or a backing value, found {}",
                     def.name(),
                     args[0].type_name()
                 ),
             ));
         };
-        let key = key.clone();
-        // Match only a payload-free case of this name (a payload variant cannot be built from a name).
-        let matched = def.variant(&key).is_some_and(|v| v.field_names.is_empty());
-        if matched {
-            let value = Value::Enum(Rc::new(EnumValue {
-                enum_name: def.name().to_string(),
-                variant_index: def.variant_index(&key),
-                variant: key,
-                data: vec![],
-                reflect: None,
-            }));
-            if method == "from" {
-                Ok(value)
-            } else {
-                Ok(builtin_enum("Option", "some", vec![value]))
+        // Only payload-free cases are candidates — a payload variant has nothing to supply its data.
+        let cases: Vec<(&str, Option<&noeta_ast::AttrValue>)> = def
+            .variants
+            .iter()
+            .filter(|v| v.field_names.is_empty())
+            .map(|v| (v.name.as_str(), v.backing.as_ref()))
+            .collect();
+        match noeta_ast::reflect::variant_for_wire(&cases, &probe) {
+            Some(i) => {
+                let name = cases[i].0.to_string();
+                let value = Value::Enum(Rc::new(EnumValue {
+                    enum_name: def.name().to_string(),
+                    variant_index: def.variant_index(&name),
+                    variant: name,
+                    data: vec![],
+                    reflect: None,
+                }));
+                if method == "from" {
+                    Ok(value)
+                } else {
+                    Ok(builtin_enum("Option", "some", vec![value]))
+                }
             }
-        } else if method == "from" {
-            Err(self.runtime_error(
+            None if method == "from" => Err(self.runtime_error(
                 DiagnosticCode::Panic,
                 span,
-                format!("panic: `{}` has no case `{key}`", def.name()),
-            ))
-        } else {
-            Ok(builtin_enum("Option", "none", vec![]))
+                format!(
+                    "panic: `{}` has no case `{}`",
+                    def.name(),
+                    args[0].display()
+                ),
+            )),
+            None => Ok(builtin_enum("Option", "none", vec![])),
         }
     }
 
@@ -5994,6 +6013,21 @@ impl Interpreter {
     }
 }
 
+/// The neutral [`noeta_ast::reflect::WireProbe`] for a runtime value handed to `Enum.from` /
+/// `Enum.try_from`, or `None` when the value is not a scalar an enum can be backed by. The VM's twin
+/// classifies its own `Value` the same way, so the shared matcher sees identical probes.
+fn wire_probe(value: &Value) -> Option<noeta_ast::reflect::WireProbe> {
+    use noeta_ast::reflect::WireProbe;
+    Some(match value {
+        Value::Str(s) => WireProbe::Str(s.clone()),
+        Value::Int(n) => WireProbe::Int(*n),
+        Value::Float(f) => WireProbe::Float(*f),
+        Value::F32(f) => WireProbe::Float(*f as f64),
+        Value::Bool(b) => WireProbe::Bool(*b),
+        _ => return None,
+    })
+}
+
 /// The `Result.Err(msg)` returned when a by-name `invoke` cannot resolve (unknown name, wrong
 /// arity, non-string name, non-list args, or a non-invokable receiver). The VM builds the same
 /// value from `Op::Invoke`'s baked `err_shape`.
@@ -6265,6 +6299,7 @@ fn native_type_value(
                 .map(|v| VariantInfo {
                     name: v.name.to_string(),
                     field_names: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
+                    backing: None,
                 })
                 .collect(),
             derives_comparable: false,

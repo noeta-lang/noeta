@@ -284,6 +284,23 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
     }
 }
 
+/// The neutral [`noeta_ast::reflect::WireProbe`] for a value handed to `Enum.from` / `Enum.try_from`,
+/// or `None` when it is not a scalar an enum can be backed by. The tree-walker's twin classifies its
+/// own `Value` the same way, so the shared matcher sees identical probes on both sides.
+pub(crate) fn wire_probe(value: Value) -> Option<noeta_ast::reflect::WireProbe> {
+    use noeta_ast::reflect::WireProbe;
+    if let Some(s) = value.as_string() {
+        return Some(WireProbe::Str(s.to_string()));
+    }
+    if let Some(n) = value.as_int() {
+        return Some(WireProbe::Int(n));
+    }
+    if let Some(f) = value.as_float() {
+        return Some(WireProbe::Float(f));
+    }
+    value.as_bool().map(WireProbe::Bool)
+}
+
 /// Lift a shared stdlib [`noeta_stdlib::Output`] into a freshly-owned VM `Value` (refcount 1,
 /// owned by the destination register). Mirrors the tree-walker's `output_to_value`.
 pub(crate) fn stdlib_output_to_value(output: noeta_stdlib::Output) -> Value {

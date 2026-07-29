@@ -701,6 +701,12 @@ impl Interpreter {
             .map(|v| VariantInfo {
                 name: v.name.clone(),
                 field_names: v.fields.iter().map(|f| f.name.clone()).collect(),
+                // The backing a wire→case conversion matches on, through the one `fold_const_expr`
+                // the reflection manifest and the checker's decode recipes also fold with.
+                backing: v
+                    .backed_value
+                    .as_ref()
+                    .and_then(noeta_ast::reflect::fold_const_expr),
             })
             .collect();
         let methods = en

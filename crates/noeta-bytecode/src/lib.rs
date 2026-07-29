@@ -580,17 +580,20 @@ pub enum Op {
         /// onto the built value so `type_of` recovers the enum's type arguments after a `dyn` launder.
         reflect: Option<u32>,
     },
-    /// `dst = Enum.try_from(s)` / `Enum.from(s)` — construct a **payload-free** enum case from the
-    /// string in `arg`, matched by case name (the PHP `tryFrom`/`from` pair). `cases` lists every
-    /// payload-free `(name, shape)` of the enum. On a hit: `from` (`panic = true`) yields the case
-    /// itself; `try_from` (`panic = false`) wraps it as `Option.some` (`some_shape`). On a miss:
-    /// `from` raises an `E0010` panic at `span`; `try_from` yields `Option.none` (`none_shape`). A
-    /// non-string `arg` raises `E0007`.
+    /// `dst = Enum.try_from(v)` / `Enum.from(v)` — construct a **payload-free** enum case from the
+    /// wire value in `arg`, matched by **backing first, then case name**
+    /// ([`noeta_ast::reflect::variant_for_wire`] owns that rule, shared with the tree-walker).
+    /// `cases` lists every payload-free case of the enum as `(name, backing, shape)`, in declaration
+    /// order — the backing is baked in because the VM has no reflection entry for a prelude or native
+    /// enum to read it back from. On a hit: `from` (`panic = true`) yields the case itself; `try_from`
+    /// (`panic = false`) wraps it as `Option.some` (`some_shape`). On a miss: `from` raises an `E0010`
+    /// panic at `span`; `try_from` yields `Option.none` (`none_shape`). A non-scalar `arg` raises
+    /// `E0007`.
     EnumFromStr {
         dst: Reg,
         arg: Reg,
         enum_name: NameId,
-        cases: Box<[(NameId, u32)]>,
+        cases: Box<[(NameId, Option<noeta_ast::AttrValue>, u32)]>,
         some_shape: u32,
         none_shape: u32,
         panic: bool,
