@@ -208,12 +208,23 @@ The payload-free cases are spelled **bare** here: the scrutinee is a `Type`, so 
 
 `Type` has exactly **23** variants, and the whole list matters if you write a `_`-free walk over it: the scalars `Type.Int`, `Type.Float`, `Type.F32`, `Type.F64`, `Type.IntN(bits, signed)`, `Type.Bool`, `Type.String`, `Type.Bytes`, `Type.Unit`, `Type.Dyn`, `Type.Never`; the containers `Type.List(inner)`, `Type.Set(inner)`, `Type.Map(k, v)`, `Type.Option(inner)`, `Type.Result(ok, err)`; `Type.Fn(params, ret)` and `Type.Union(members)`; the trait object `Type.DynTrait(name)`; and the nominals `Type.Struct(name, args)`, `Type.Enum(name, args)`, `Type.Class(name, args)`, `Type.Named(name, args)`. Collection literals carry their resolved element type as a runtime tag that survives a `dyn` launder (a content-changing op like `.set` drops the tag to head-only).
 
-`Type.Never` is the one variant `type_of` can never produce — no value has type `never`. It reaches you through the *declaration* channel instead, which is the clearest illustration of why that channel is the ADT's main one:
+`type_of` reports what a value **is**, which means three variants only ever reach you through the *declaration* channel. `Type.Never` is uninhabited, so no value has it; a value behind a `dyn Trait` binding reports its own concrete type, not `Type.DynTrait`; and a value of a union type reports the member it actually holds, not `Type.Union`. All three are ordinary answers from `params_of`/`returns_of` — the clearest illustration of why that is the ADT's main channel:
 
 ```noeta
-fn boom(): never { panic("unreachable") }
+trait Speaks { fn speak(): string }
+struct Dog { name: string }
+impl Speaks for Dog { fn speak(): string { return "woof" } }
 
-echo returns_of("boom")      // some(Type.Never)
+fn boom(): never { panic("unreachable") }
+fn handle(pet: dyn Speaks, n: int | string): void { return }
+
+echo returns_of("boom")                                  // some(Type.Never)
+for p in params_of("handle") { echo "${p.name}: ${p.type}" }
+// pet: Type.DynTrait(Speaks)
+// n: Type.Union([Type.Int, Type.String])
+
+// The same two facts from the value side, which reports what the values are:
+echo type_of(Dog { name: "Rex" })                        // Type.Struct(Dog, [])
 ```
 
 ### `type_name::<T>(): string`

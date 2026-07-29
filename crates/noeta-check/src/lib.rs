@@ -710,7 +710,15 @@ fn type_to_repr_top(
     match ty {
         // An abstract kind-type (`Enum`/`Struct`/`Class`) has no precise static head — the runtime
         // value is a concrete enum/struct/class — so it defers to the runtime `type_of` path.
-        Type::Dyn | Type::Unknown | Type::Union(_) | Type::Kind(_) => None,
+        //
+        // A **trait object** defers for the same reason, and this arm is why. `type_to_repr` maps
+        // `DynTrait` to `TypeRepr::Dyn`, which is right in a *nested/declared* position (`params_of`
+        // has its own decoder and does report `Type.DynTrait(Trait)` there) but is a wrong answer at
+        // a `type_of` site: the value behind a `dyn Trait` binding carries its own concrete tag, so
+        // baking `Type.Dyn` erased a fact the runtime path recovers. `type_of(v)` on a `dyn Sp`
+        // parameter reported `Type.Dyn` while the same value laundered through a bare `dyn` hop
+        // reported `Type.Struct(D, [])` — one value, two answers, from one query.
+        Type::Dyn | Type::DynTrait(_) | Type::Unknown | Type::Union(_) | Type::Kind(_) => None,
         concrete => Some(type_to_repr(concrete, kinds, true)),
     }
 }

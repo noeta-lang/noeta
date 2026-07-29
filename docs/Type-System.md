@@ -203,6 +203,8 @@ Two edges worth knowing:
 - **Non-nominal values never match.** Scalars, collections, and functions carry no nominal type, so they implement no *declared* trait. `42 is dyn Display` is `false` even though `echo 42` works — the built-in base types' protocol behavior is structural, not a registered `impl`, and only registered impls count. Use the head test (`x is int`) for built-ins.
 - **`Self::Name` projections stay permissive.** A `.as<Self::Item>()`-style associated-type target has no runtime head to test (the binding is per-impl, and the erased value carries no impl identity), so it still matches any value — unlike the now-precise trait-object target.
 
+`dyn Trait` is a *declared* bound, never a value's own type, and the two reflection queries split on exactly that line: `type_of(x)` on a value held behind a `dyn Trait` binding reports the **concrete** type (`Type.Struct(Dog, [])`), because that is what the value is, while `params_of` on a `fn f(x: dyn Speaks)` reports `Type.DynTrait(Speaks)`, because that is what the signature says. Neither is the other's answer, and a framework injecting a service by its interface needs both.
+
 ## Abstract kind-types
 
 `Struct`, `Class`, and `Enum` are supertypes of every declared type of that kind — useful for runtime kind tests against a `dyn`:
