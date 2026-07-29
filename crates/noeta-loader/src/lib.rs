@@ -1811,6 +1811,55 @@ fn link_core(
         }
     }
 
+    // A merged binding keeps its short name (it gains no qualified identity), so two modules that
+    // each export a capturing declaration over a same-named module binding would land two `x`s in
+    // one flat scope — and the later one would silently win for both. That is a genuine ambiguity
+    // the linker must not adjudicate, so it is an error naming both sides. (Declarations cannot
+    // reach this: they merge under qualified identities.)
+    //
+    // A merged statement keeps the span of the module it was cloned from, so the module each one
+    // came from is its source — the same identity `source_maps` below keys on.
+    let module_of = |stmt: &Stmt| -> String {
+        module_views
+            .iter()
+            .find(|mv| {
+                mv.stmts
+                    .first()
+                    .is_some_and(|first| first.span().source == stmt.span().source)
+            })
+            .map_or_else(|| "another module".to_string(), |mv| mv.namespace.join("."))
+    };
+    let mut binding_origin: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for (name, module) in imported.iter().flat_map(|stmt| match stmt {
+        Stmt::Binding { name, .. } => vec![(name.clone(), module_of(stmt))],
+        Stmt::Destructure { targets, .. } => targets
+            .iter()
+            .map(|(name, _)| (name.clone(), module_of(stmt)))
+            .collect(),
+        _ => Vec::new(),
+    }) {
+        if let Some(first) = binding_origin.insert(name.clone(), module.clone())
+            && first != module
+        {
+            errors.push(LoadDiagnostic {
+                source: entry.clone(),
+                diagnostic: Diagnostic::error(
+                    DiagnosticCode::NameCollision,
+                    Span::empty_at(0),
+                    format!(
+                        "the module-level binding `{name}` is needed by declarations merged from \
+                         both `{first}` and `{module}`, and a binding keeps its own name in the \
+                         merged program"
+                    ),
+                )
+                .with_help(
+                    "rename one of them, or move the shared value behind a function both modules call",
+                ),
+            });
+        }
+    }
+
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -1883,6 +1932,18 @@ fn retain_fresh(
 struct ModuleView<'a> {
     namespace: Vec<String>,
     stmts: &'a [Stmt],
+}
+
+/// Whether `stmt` is a top-level **value binding** introducing `name` — `x = …` or a destructure
+/// naming it. Unlike a class/fn/type it gains no qualified identity (it stays `x` in the flat merged
+/// scope), so it is not a [`qualifiable_decl_name`]; it is still a thing a merged declaration can
+/// need, through a `use (…)` capture.
+fn binds_top_level_value(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Binding { name: bound, .. } => bound == name,
+        Stmt::Destructure { targets, .. } => targets.iter().any(|(bound, _)| bound == name),
+        _ => false,
+    }
 }
 
 /// The namespace a module declares (`namespace App.Models;`), if any.
@@ -2005,6 +2066,13 @@ fn merge_module_closure(
 /// another module's export — those resolve elsewhere) and is not already merged (deduped through
 /// `merged_q` on the qualified identity, so a declaration reached two ways lands once). The boolean
 /// tells the caller whether to expand this declaration's own references in turn.
+///
+/// A top-level **value binding** is deliberately NOT reachable this way: the names driving this come
+/// from `referenced_names`, a harmless over-approximation for declarations (merging one that turns
+/// out to be unneeded is inert) but not for a binding, which *runs* its initializer. A parameter
+/// that happens to share a module binding's name would otherwise drag that binding, and its side
+/// effects, into a program that never asked for it. Bindings arrive through
+/// [`merge_one_capture`] instead, whose seed — a `use (…)` clause — is exact.
 fn merge_one_dep(
     name: &str,
     module: &ModuleView,
@@ -2013,11 +2081,52 @@ fn merge_one_dep(
     merged_q: &mut HashSet<String>,
     imported: &mut Vec<Stmt>,
 ) -> bool {
-    let Some(decl) = module
-        .stmts
-        .iter()
-        .find(|s| qualifiable_decl_name(s) == Some(name))
-    else {
+    merge_matching(
+        module,
+        path,
+        module_maps,
+        merged_q,
+        imported,
+        name,
+        |stmt| qualifiable_decl_name(stmt) == Some(name),
+    )
+}
+
+/// Merge the same-module top-level **value binding** a merged declaration's `use (…)` names, and
+/// report whether it was freshly merged. A capture is the one way a sealed body reaches a module
+/// binding, so this seed is exact rather than an over-approximation — see [`merge_one_dep`].
+fn merge_one_capture(
+    name: &str,
+    module: &ModuleView,
+    path: &[String],
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::UnitMap>,
+    merged_q: &mut HashSet<String>,
+    imported: &mut Vec<Stmt>,
+) -> bool {
+    merge_matching(
+        module,
+        path,
+        module_maps,
+        merged_q,
+        imported,
+        name,
+        |stmt| binds_top_level_value(stmt, name),
+    )
+}
+
+/// The shared body of [`merge_one_dep`] and [`merge_one_capture`]: find the first same-module
+/// statement `matches` accepts, merge it under its qualified identity (deduped), and report whether
+/// this call is the one that merged it.
+fn merge_matching(
+    module: &ModuleView,
+    path: &[String],
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::UnitMap>,
+    merged_q: &mut HashSet<String>,
+    imported: &mut Vec<Stmt>,
+    name: &str,
+    matches: impl Fn(&Stmt) -> bool,
+) -> bool {
+    let Some(decl) = module.stmts.iter().find(|s| matches(s)) else {
         return false;
     };
     if !merged_q.insert(format!("{}.{name}", path.join("."))) {
@@ -2048,15 +2157,79 @@ fn expand_module_refs(
         let Some(decl) = module
             .stmts
             .iter()
-            .find(|s| qualifiable_decl_name(s) == Some(&name))
+            .find(|s| qualifiable_decl_name(s) == Some(&name) || binds_top_level_value(s, &name))
         else {
             continue;
         };
+        // A merged binding expands too: its initializer (`conn = connect()`) names declarations of
+        // the same module, which have to travel with it.
         for referenced in qualify::referenced_names(decl) {
             if merge_one_dep(&referenced, module, path, module_maps, merged_q, imported) {
                 work.push(referenced);
             }
         }
+        // A `use (…)` capture is the ONE way a sealed body reaches a module-level value binding, so
+        // the capture list is the exact edge set from a declaration to the bindings it needs. Merge
+        // each one: without it an imported (or attribute-discovered) `pub fn f() use (x)` lands in
+        // the program with its binding left behind in the module it came from, and `x` resolves to
+        // nothing — E0005 "cannot capture `x`" against a declaration the consumer never wrote.
+        //
+        // Precise on purpose: seeded from `captures`, never from `referenced_names` — see
+        // `merge_one_dep` for why a binding must not ride the coarser seed.
+        for captured in captures_of(decl) {
+            if merge_one_capture(&captured, module, path, module_maps, merged_q, imported) {
+                work.push(captured);
+            }
+        }
+        // A merged **binding** carries an initializer that has to evaluate in the consumer's
+        // program, and an initializer names its module's other bindings directly — top-level code
+        // is not a sealed body, so `todos = repository(conn)` reaches `conn` with no capture clause
+        // to declare it. Those are edges too, and the *free* names are the exact set: subtracting
+        // everything the statement binds itself keeps a closure parameter inside the initializer
+        // from dragging a same-named module binding along with it.
+        if binds_any_top_level_value(decl) {
+            let bound = qualify::bound_value_names(decl);
+            for referenced in qualify::referenced_names(decl) {
+                if bound.contains(&referenced) {
+                    continue;
+                }
+                if merge_one_capture(&referenced, module, path, module_maps, merged_q, imported) {
+                    work.push(referenced);
+                }
+            }
+        }
+    }
+}
+
+/// Whether `stmt` is a top-level value binding at all (`x = …` or a destructure) — the statements
+/// whose initializers run in the merged program, so their free names are merge edges.
+fn binds_any_top_level_value(stmt: &Stmt) -> bool {
+    matches!(stmt, Stmt::Binding { .. } | Stmt::Destructure { .. })
+}
+
+/// Every `use (…)` capture on a top-level declaration: a free function's own, and the methods' of a
+/// class/struct/`impl` block. Shallow by design — a *nested* `fn`'s captures resolve at ITS
+/// declaration site (inside the enclosing body), so a module binding it names is necessarily
+/// captured by the enclosing top-level function too, and is reached through that.
+fn captures_of(stmt: &Stmt) -> Vec<String> {
+    let names = |methods: &[noeta_ast::FnDecl]| -> Vec<String> {
+        methods
+            .iter()
+            .flat_map(|m| m.captures.iter().map(|(n, _)| n.clone()))
+            .collect()
+    };
+    match stmt {
+        Stmt::Fn(decl) => decl.captures.iter().map(|(n, _)| n.clone()).collect(),
+        Stmt::Class(decl) => names(&decl.methods)
+            .into_iter()
+            .chain(decl.impls.iter().flat_map(|b| names(&b.methods)))
+            .collect(),
+        Stmt::Struct(decl) => names(&decl.methods)
+            .into_iter()
+            .chain(decl.impls.iter().flat_map(|b| names(&b.methods)))
+            .collect(),
+        Stmt::Impl(decl) => names(&decl.methods),
+        _ => Vec::new(),
     }
 }
 
@@ -4288,6 +4461,170 @@ mod tests {
                 .any(|s| matches!(s, Stmt::Use { .. })),
             "no top-level `use` may appear: {:?}",
             linked.program.stmts
+        );
+    }
+
+    /// Whether the merged program declares a top-level value binding `name`.
+    fn has_binding(linked: &Linked, name: &str) -> bool {
+        linked
+            .program
+            .stmts
+            .iter()
+            .any(|s| matches!(s, Stmt::Binding { name: n, .. } if n == name))
+    }
+
+    /// A `use (…)` capture is a reference to a module-level binding, so importing the function has
+    /// to bring the binding with it. Without this the import lands in the program and its capture
+    /// resolves to nothing — E0005 against a declaration the consumer never wrote, and the only way
+    /// to consume the package was to not use captures at all.
+    #[test]
+    fn an_imported_fn_drags_in_the_binding_it_captures() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             fn seed(): int { return 7; }\n\
+             x = seed();\n\
+             pub fn reader() use (x): int { return x; }\n",
+        );
+        let entry = "use app.lib.reader;\nn = reader();\necho n;\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "reader"));
+        assert!(
+            has_binding(&linked, "x"),
+            "the captured module binding travels with the import: {:?}",
+            linked.program.stmts
+        );
+        assert!(
+            has_fn(&linked, "seed"),
+            "and the binding's own initializer keeps expanding the closure"
+        );
+    }
+
+    /// A method's captures count too — the declaration site of a method's `use (…)` is the module
+    /// top level, exactly like a free function's.
+    #[test]
+    fn an_imported_class_drags_in_the_binding_its_method_captures() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             base = 10;\n\
+             pub class Counter {\n\
+               n: int\n\
+               fn new(): Counter { return Counter { n: 0 }; }\n\
+               fn total() use (base): int { return self.n + base; }\n\
+             }\n",
+        );
+        let entry = "use app.lib.Counter;\nc = Counter.new();\necho c.total();\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        assert!(
+            has_binding(&linked, "base"),
+            "a method's capture drags its module binding too: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// An **attribute-discovered** root (a declaration nothing imports, merged because its `#[…]`
+    /// annotation is the reference) reaches the same closure — including through a callee. This is
+    /// the shape that made `noeta check .` report errors against a *sibling* file: checking the
+    /// module that merely declares the attribute dragged the annotated fn and its helper in, and
+    /// left the helper's captured binding behind.
+    #[test]
+    fn an_attribute_root_drags_in_the_binding_its_callee_captures() {
+        let annotated = module(
+            "routes.noe",
+            "namespace app.routes;\n\
+             use app.attrs.Mark;\n\
+             x = 3;\n\
+             fn helper() use (x): int { return x; }\n\
+             #[Mark(\"/cap\")]\n\
+             fn handler(): int { return helper(); }\n",
+        );
+        let entry = "namespace app.attrs;\n@attribute\npub struct Mark { path: string }\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&annotated),
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "handler"), "the annotated root is merged");
+        assert!(has_fn(&linked, "helper"), "and its callee");
+        assert!(
+            has_binding(&linked, "x"),
+            "and the callee's captured binding: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// A binding is merged from the **capture** seed only, never from the reference seed. A
+    /// parameter that shares a module binding's name is not a reference to it, and merging a
+    /// binding is not inert — it runs its initializer in the consumer's program.
+    #[test]
+    fn a_parameter_sharing_a_binding_name_does_not_drag_the_binding() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             limit = 99;\n\
+             pub fn clamp(limit: int): int { return limit; }\n",
+        );
+        let entry = "use app.lib.clamp;\necho clamp(3);\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "clamp"));
+        assert!(
+            !has_binding(&linked, "limit"),
+            "the module binding is not dragged in by a same-named parameter: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// A merged binding keeps its own name, so two modules needing same-named bindings is a real
+    /// ambiguity — named, not silently resolved in favour of whichever merged last.
+    #[test]
+    fn two_modules_needing_a_same_named_binding_collide() {
+        let a = module(
+            "a.noe",
+            "namespace app.a;\n\
+             shared = 1;\n\
+             pub fn from_a() use (shared): int { return shared; }\n",
+        );
+        let b = module(
+            "b.noe",
+            "namespace app.b;\n\
+             shared = 2;\n\
+             pub fn from_b() use (shared): int { return shared; }\n",
+        );
+        let entry = "use app.a.from_a;\nuse app.b.from_b;\necho from_a() + from_b();\n";
+        let errors = link("main.noe", entry, noeta_lexer::Edition::DEFAULT, &[a, b])
+            .expect_err("the two `shared` bindings cannot both be `shared`");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.diagnostic.message.contains("shared")
+                    && e.diagnostic.message.contains("app.a")
+                    && e.diagnostic.message.contains("app.b")),
+            "the error names the binding and both modules: {:?}",
+            errors
+                .iter()
+                .map(|e| e.diagnostic.message.clone())
+                .collect::<Vec<_>>()
         );
     }
 }
