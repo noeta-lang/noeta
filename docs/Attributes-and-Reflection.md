@@ -100,7 +100,7 @@ With that settled, the question you have picks the surface:
 | Is this value a `Todo`? (you can name the candidates) | `x is Todo` / `x.as<Todo>()` | Not reflection. Checked, and it narrows. |
 | Does this value's type implement `Store`? | `x is dyn Store` | Same — one known trait, checked. |
 | What type is this value, whatever it turns out to be? | [`type_of(x)`](#type_ofvalue-type) | The `Type` ADT, for a walk with no candidate set. |
-| What is this type *called*, as a `string`? | [`type_name::<T>()`](#type_namet-string) | The key every name-keyed query below is stored under. |
+| What is this type *called*, as a `string`? | [`type_name::<T>()`](#type_namet-string) when you can spell the type; the head-name accessor on a [`Type`](#type_ofvalue-type) you are already holding | Either way the qualified identity — the key every name-keyed query below is stored under. Never hand-write the string. |
 | Which traits does this value's type implement — all of them? | [`traits_of(x)`](#traits_ofvalue-liststring--trait-membership-reflection) | A list of names, for a report. `is dyn Trait` for a decision. |
 | What fields does this *value* carry, with their values? | [`fields_of(x)`](#fields_ofvalue--value-level-field-reflection) | Runtime-erased types — it sees values. |
 | What fields does this *type* declare, with their types and defaults? | [`field_specs_of`](#field_specs_oft-listfieldspec--field_specs_ofname-listfieldspec) | Declared types, precise. Ask with `variants_of`. |
@@ -125,7 +125,7 @@ Every surface takes a **value**, a **type** (turbofish), or a runtime **string**
 
 That last row is the axis worth internalizing. `params_of`, `returns_of` and `invoke` have no static arm at all, because nothing about them is static: the target is a `#[Tool]` manifest entry's `.target`, a router action, an argv subcommand. **The other surfaces produce names; these three consume them.** Adding a turbofish to `invoke` would be adding a slower way to write a call you could already write directly.
 
-Passing a bare `Foo` where a string is wanted is `E0003` (`found `::` expected `(`` on the turbofish-less three; `found `(` expected `::`` on the turbofish-only ones) — the parser refuses the wrong axis before typing ever runs.
+Reaching for the wrong axis is a **parse** error, `E0003` — `params_of::<Foo>()` and `attributes_of("Foo")` both fail at the operand, before typing ever runs. That is deliberate: a surface's operand shape is part of what it *is*, so getting it wrong is not a type mismatch to be coerced away.
 
 ### When the `Type` ADT earns its keep
 
@@ -153,7 +153,7 @@ for p in params_of("create") {
 
 Three properties make the ADT irreplaceable by a name string, and the walk above uses all three:
 
-1. **Many types have no name.** `Type.Union(members)`, `Type.Fn(params, ret)`, `Type.Option(inner)`, `Type.IntN(bits, signed)` — there is nothing to look up. A names-as-strings design has to either invent a spelling and re-parse it or drop the type on the floor.
+1. **Most types have no *key*.** Only a nominal — a declared struct, class, or enum — has a name the name-keyed queries can answer for. `Type.Union(members)`, `Type.Fn(params, ret)`, `Type.Option(inner)`, `Type.IntN(bits, signed)` have a head to print but nothing to look up, and their arguments are not in the head at all. A names-as-strings design has to invent a spelling and then re-parse it.
 2. **The walk recurses, so `inner` must be a *value*.** `?List<string>` is two constructors deep before it reaches something a schema can name; `render` gets `inner` handed to it and calls itself. A head name would have to be re-resolved at every level.
 3. **Exhaustiveness is the totality proof.** `Type` is an ordinary enum, so a `match` over it with no `_` is checked (E0011). That is how a schema-deriving walk *knows* it is total: every shape it cannot represent gets a deliberate error message rather than falling into a catch-all and emitting a silently-wrong empty schema. `para/ai`'s tool-schema walk is written exactly this way — all 23 arms, no `_`, and the unrepresentable ones return `Err` carrying a sentence about what to declare instead ("`bytes` has no tool-argument encoding — take a `string` and decode it in the tool").
 
