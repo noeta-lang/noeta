@@ -1,0 +1,7 @@
+// The package module that *does* exist — so the entry's typo has a near neighbor to be suggested,
+// and the failure is "no such module", not "no such package".
+namespace probe.side;
+
+pub struct Thing {
+    n: int
+}

@@ -464,7 +464,11 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
 /// test body, not the individual runner. A scoped thread lets `f` borrow its inputs directly; only
 /// the owned result crosses the join.
 pub fn on_deep_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
-    // Matches `noeta_parser::DEEP_PARSE_STACK` — comfortably above any single case's needs.
+    // This is the *interpreter's* budget, not the parser's: it used to be written as "matches
+    // `noeta_parser::DEEP_PARSE_STACK`", which stopped being true when that constant was sized
+    // against a measured per-nesting-level cost and grew to 256 MiB. Nothing here needs to track it
+    // — a corpus case's depth is its call depth, not its syntactic nesting — so the number stands on
+    // its own: comfortably above any single case's needs.
     const DEEP_STACK: usize = 64 * 1024 * 1024;
     std::thread::scope(|scope| {
         match std::thread::Builder::new()

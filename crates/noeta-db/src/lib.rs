@@ -569,11 +569,20 @@ pub fn workspace(
 /// and siblings take `root_edition`; each dependency's modules take that package's own edition. Each
 /// dep module becomes a [`DepModule`] input carrying its re-root info, so cross-package
 /// `use <dep-key>.…` resolves in the salsa graph exactly as in the CLI's `load_with_deps`.
+///
+/// `package_uses` is the whole program's per-package `@name` resolution tables
+/// (`[directives]`/`[tiers]`), resolved on the query path (`noeta_pm::graph::resolve_graph_query`)
+/// exactly as the editor's `noeta_ide::workspace::sync` does — so a renamed text tier
+/// (`[tiers] docs = "std:doc"`) lexes verbatim through this path, not only the editor's. A caller
+/// with no manifest bindings (an inline source, a synthetic filesystem-only dependency graph) passes
+/// an empty [`PackageUses`](noeta_span::PackageUses), which is behavior-identical to before this
+/// parameter existed.
 pub fn workspace_with_deps(
     db: &LangDatabase,
     entry: &Source,
     modules: &[Source],
     deps: &[DepSources],
+    package_uses: &noeta_span::PackageUses,
     root_edition: noeta_lexer::Edition,
     paths: &[noeta_loader::ModulePath],
 ) -> Workspace {
@@ -596,11 +605,7 @@ pub fn workspace_with_deps(
             ));
         }
     }
-    // The per-package `@name` tables ride only on the editor's directory workspace (built in
-    // `noeta_ide::workspace::sync` straight through [`Workspace::new`]), not on this deps helper —
-    // its callers (`noeta-mcp`, `noeta-conformance`) do not resolve renamed `@name`s and pass no
-    // tables; an empty map is behavior-identical to before this field existed.
-    Workspace::new(db, members, dep_inputs, WorkspaceUses::default())
+    Workspace::new(db, members, dep_inputs, WorkspaceUses(package_uses.clone()))
 }
 
 /// Reclaim the resident content of a [`SourceProgram`] whose file was **deleted** from a workspace
@@ -1693,6 +1698,7 @@ mod tests {
             &entry,
             &[],
             std::slice::from_ref(&dep),
+            &noeta_span::PackageUses::new(),
             noeta_lexer::Edition::DEFAULT,
             &[],
         );
@@ -1711,6 +1717,56 @@ mod tests {
                 .iter()
                 .any(|s| format!("{s:?}").contains("greeting")),
             "the dependency's greeting declaration must be linked in"
+        );
+    }
+
+    #[test]
+    fn workspace_with_deps_lexes_a_renamed_text_tier_verbatim() {
+        // Per-package tier-naming arc (3g), harness seam: the `workspace_with_deps` path (used by
+        // `noeta-mcp` and `noeta-conformance`) now carries the whole program's `@name` tables, so a
+        // `[tiers] docs = "std:doc"` binding — the root package renaming std's `doc` **text** tier
+        // under a local `@docs` — lexes the `@docs { … }` body verbatim, exactly as the loader does
+        // under `noeta run`/`noeta check` and the editor does through `sync`. The db twin of the IDE's
+        // `workspace_captures_a_renamed_text_tier_bound_in_the_manifest`.
+        let mut db = LangDatabase::default();
+        // Seed std's `doc` as the known verbatim ext tier the `docs = "std:doc"` binding lands on.
+        seed_ext_env(&mut db, vec!["doc".to_string()]);
+        // Load-bearing: the bare `"` (and `<angle>` bits) make this a hard lex error as code; only the
+        // per-package text-tier resolution captures it verbatim as one `DocText`.
+        let entry = Source::new(
+            SourceId(0),
+            "main.noe",
+            "@docs {\n# Widget\n\nA bare \" quote and <angle> bits: invalid as code, fine as markdown.\n}\nfn add(a: int, b: int): int { return a + b }\n",
+        );
+        // The root package binds local `@docs` → std's `doc` tier, keyed by `PackageOrigin::Root`
+        // (members are Root, see `workspace_packages`) — the same shape `resolve_graph_query` yields
+        // for a `[tiers]` table.
+        let mut package_uses = noeta_span::PackageUses::new();
+        package_uses.set(
+            noeta_span::PackageOrigin::Root,
+            "docs".to_string(),
+            noeta_span::PackageUse {
+                provider_roots: vec!["std".to_string()],
+                exported: "doc".to_string(),
+            },
+        );
+        let ws = workspace_with_deps(
+            &db,
+            &entry,
+            &[],
+            &[],
+            &package_uses,
+            noeta_lexer::Edition::DEFAULT,
+        );
+        let entry_src = ws.members(&db)[0];
+        let toks = tokens_in(&db, ws, entry_src);
+        assert!(
+            toks.0
+                .tokens
+                .iter()
+                .any(|t| t.kind == noeta_lexer::TokenKind::DocText),
+            "the renamed tier's body must be captured as one verbatim DocText token, got {:?}",
+            toks.0.tokens.iter().map(|t| t.kind).collect::<Vec<_>>()
         );
     }
 }

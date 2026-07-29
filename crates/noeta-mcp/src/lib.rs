@@ -1096,6 +1096,12 @@ pub(crate) struct ResolvedWorkspace {
     /// The dependency packages as salsa inputs. Empty for inline `source`, for a bare script with
     /// no manifest, and whenever resolution fails (see [`resolve_workspace`]).
     pub deps: Vec<noeta_db::DepSources>,
+    /// The whole program's per-package `@name` resolution tables (`[directives]`/`[tiers]`), from the
+    /// same query-path graph resolve that produced [`Self::deps`]. Threaded onto the salsa
+    /// [`Workspace`](noeta_db::Workspace) so a renamed text tier (`[tiers] docs = "std:doc"`) lexes
+    /// verbatim under the MCP surface exactly as it does under `noeta run`/`noeta check` and the
+    /// editor (per-package tier-naming arc, 3g). Empty for inline `source` and manifest-less scripts.
+    pub package_uses: noeta_span::PackageUses,
     /// The root package's language edition — what the entry and its siblings are analyzed under
     /// (each dependency carries its own).
     pub edition: noeta_lexer::Edition,
@@ -1121,7 +1127,15 @@ impl ResolvedWorkspace {
             .members()
             .split_first()
             .expect("resolve_workspace always yields at least the entry");
-        noeta_db::workspace_with_deps(db, entry, modules, &self.deps, self.edition, &self.paths)
+        noeta_db::workspace_with_deps(
+            db,
+            entry,
+            modules,
+            &self.deps,
+            &self.package_uses,
+            self.edition,
+            &self.paths,
+        )
     }
 }
 
@@ -1150,6 +1164,7 @@ pub(crate) fn resolve_workspace(
                 text.clone(),
             )],
             deps: Vec::new(),
+            package_uses: noeta_span::PackageUses::new(),
             edition: noeta_lexer::Edition::default(),
             paths: Vec::new(),
         }),
@@ -1163,7 +1178,15 @@ pub(crate) fn resolve_workspace(
                             None,
                         )
                     })?;
-            let packages = noeta_pm::manifest::dependency_packages_query(path).unwrap_or_default();
+            // The query-path graph resolve (no lockfile refresh — answering a question must not
+            // rewrite `noeta.lock`) yields both the dependency packages AND the per-package `@name`
+            // tables, so a renamed text tier lexes verbatim exactly as under the CLI and editor. A
+            // resolution failure degrades to no dependencies and no bindings (empty tables), the same
+            // quiet degrade the old `dependency_packages_query(...).unwrap_or_default()` gave.
+            let (packages, package_uses) = match noeta_pm::graph::resolve_graph_query(path) {
+                Ok(graph) => (graph.packages, graph.package_uses),
+                Err(_) => (Vec::new(), noeta_span::PackageUses::new()),
+            };
             // THE one ordering authority — the same `SourceId` assignment the CLI's
             // `link_with_deps` and the startup cache use, so a dependency module's span located
             // here names the same file the compiler would.
@@ -1191,6 +1214,7 @@ pub(crate) fn resolve_workspace(
             Ok(ResolvedWorkspace {
                 sources,
                 deps,
+                package_uses,
                 edition: noeta_pm::manifest::root_edition(path),
                 paths: raw.paths,
             })

@@ -1062,52 +1062,111 @@ pub fn parse_fragment(id: SourceId, name: &str, text: &str) -> Fragment {
     }
 }
 
-/// Parse a token stream into a [`Program`].
+/// Stack one level of delimiter nesting costs the parser, **debug build, worst measured shape**.
+///
+/// This is the number every other constant in this block is derived from, so the derivation is
+/// visible rather than folded into three independently chosen magic numbers. It is measured, not
+/// guessed: parse a shape at depth *d* on a worker of size *S* and binary-search the depth at which
+/// it aborts. The cliff moves *linearly* with *S* — 16 MiB holds 38 levels, 32 MiB holds 78, 64 MiB
+/// holds 158 — which pins the slope at ~412 KiB per level. The worst shape found is nested function
+/// values (`fn() { return fn() { return … } }`); ordinary statement nesting (`if`/`while`/`for`)
+/// costs ~330 KiB and delimiter-only nesting (`[[[…]]]`, `{"k": {"k": …}}`) far less. 512 KiB is the
+/// measured worst rounded up, ~25% above it.
+///
+/// **Why a debug build is the number that matters.** In a release build the same parse survives
+/// depth 255 on a *1 MiB* stack: release frames are small enough that `chumsky`'s `recursive`
+/// combinator — which calls `stacker::maybe_grow(64 KiB, 1 MiB, …)` — can always move the recursion
+/// onto a fresh heap segment before the current one runs out, so the thread stack stops mattering
+/// entirely. A debug build's monomorphized frames cost ~412 KiB per level, six times chumsky's
+/// hard-coded **64 KiB red zone**, so `maybe_grow` waves the recursion through with far less space
+/// left than the next level needs and a fresh 1 MiB segment is overrun after two levels. That is why
+/// heap segments cannot rescue a debug parse, and why the raw thread stack is the binding resource:
+/// every budget below is sized in raw stack, and the red zone is the reason it has to be.
+const STACK_PER_NESTING_LEVEL: usize = 512 * 1024;
+
 /// The deepest delimiter nesting the parser accepts. The recursive-descent grammar uses stack
 /// proportional to `(`/`[`/`{` nesting, so unbounded depth would overflow the stack (a hard crash
-/// that the module loader's parse-error recovery cannot catch). Past this generous limit, deep
-/// nesting becomes an ordinary [`DiagnosticCode::NestingTooDeep`] (E0032) — no real program nests
-/// hundreds of delimiters deep, while an adversarial or generated one no longer crashes the process.
-const MAX_NESTING_DEPTH: usize = 256;
+/// that the module loader's parse-error recovery cannot catch). Past this limit, deep nesting
+/// becomes an ordinary [`DiagnosticCode::NestingTooDeep`] (E0032) — no real program nests a hundred
+/// delimiters deep, while an adversarial or generated one no longer crashes the process.
+///
+/// It was 256, which the parser could not actually deliver: in a debug build the deep-stack worker
+/// aborted the process between depth 159 and 202 depending on the shape, so 55 to 97 levels of
+/// *legal, under-the-limit* input crashed instead of parsing. 128 is a limit the worker can hold
+/// with room to spare (see [`DEEP_PARSE_STACK`]), and it is generous by every comparable measure:
+/// `rustc`'s default recursion limit is 128, C99 requires only 63 levels of nested parentheses, and
+/// the deepest file anywhere in this repo's corpus — 1128 `.noe` files, including generated ones —
+/// nests 8.
+const MAX_NESTING_DEPTH: usize = 128;
 
 /// Nesting depth up to which parsing *may* run inline on the caller's stack. Beyond it, parsing
 /// moves to a worker thread with a large stack ([`DEEP_PARSE_STACK`]) so even input near
-/// [`MAX_NESTING_DEPTH`] cannot overflow whatever stack the caller happens to have. The
-/// overwhelming majority of programs nest far less than this.
+/// [`MAX_NESTING_DEPTH`] cannot overflow whatever stack the caller happens to have.
 ///
 /// A depth under this limit is **necessary but not sufficient** for an inline parse: the caller's
 /// stack must also have [`INLINE_PARSE_HEADROOM`] free. This limit alone used to be the whole test,
 /// against a documented assumption that the smallest stack a parse ever runs on is "a ~2 MiB test
 /// thread" — and that assumption was false in both directions. A tokio runtime gives its workers
 /// exactly 2 MiB (so the servers parse on the smallest stack in the system), and in a debug build
-/// **four** nested `if` statements in one function are enough to overflow 2 MiB — a quarter of what
-/// this limit permits inline. Ordinary real-world modules therefore aborted the MCP/LSP process.
-const INLINE_NESTING_DEPTH: usize = 16;
+/// **four** nested `if` statements in one function are enough to overflow 2 MiB.
+///
+/// It was 16, which did not fit the headroom it is paired with: 16 levels of the worst shape need
+/// ~6.6 MiB, so a caller holding just over [`INLINE_PARSE_HEADROOM`] passed the check and then
+/// overflowed — measured, a 6.2 MiB caller aborts on 15 nested function values while a 6.0 MiB one
+/// is safe *because* it falls under the headroom and gets offloaded. 8 keeps the whole inline range
+/// inside the headroom with half again to spare (the assertion below is what enforces that), and
+/// costs nothing in practice: the deepest of this repo's 1128 `.noe` files nests 8 delimiters, so
+/// real input still parses inline and only deeper-than-any-real-file input pays a thread spawn.
+const INLINE_NESTING_DEPTH: usize = 8;
 
 /// Stack a parse must find free before it runs **inline** on the caller's thread. A caller with less
 /// is served on the deep-stack worker instead, at the cost of one thread spawn per *file*.
 ///
-/// Measured on the debug build (the worst case — release frames are far smaller): nesting depth 4
-/// overflows a 2 MiB thread, while depths 4, 8 and 16 all fit in 4 MiB, since `chumsky`'s
-/// `recursive` combinators move onto heap stack segments (`stacker`) once the thread stack runs
-/// low. 4 MiB is therefore the measured requirement across the whole inline range up to
-/// [`INLINE_NESTING_DEPTH`], and this is that with half again for margin. It stays under a `main`
-/// thread's 8 MiB default, so the CLI keeps parsing inline exactly as before.
+/// Sized to cover [`INLINE_NESTING_DEPTH`] levels at [`STACK_PER_NESTING_LEVEL`] (4 MiB) with half
+/// again for margin. It stays under a `main` thread's 8 MiB default, so the CLI keeps parsing
+/// inline, and under [`SERVER_STACK_SIZE`], so the servers do too.
 ///
 /// `stacker::remaining_stack()` answers "how much is left"; when it cannot tell (`None`), the
 /// conservative answer is to offload.
 const INLINE_PARSE_HEADROOM: usize = 6 * 1024 * 1024;
 
-/// Stack size for the deep-nesting worker thread.
+/// Stack size for the deep-nesting worker thread — the stack that has to hold a parse at
+/// [`MAX_NESTING_DEPTH`], since the pre-pass has already rejected anything deeper.
 ///
-/// Measured on the debug build: it holds statement nesting to depth ~180 and overflows by ~200 —
-/// short of [`MAX_NESTING_DEPTH`], so the depth limit is **not** the binding constraint there and a
-/// legal-but-very-deep file can still abort the process. Raising this does not close the gap
-/// (depth 255 overflows a 1 GiB stack too): past ~190 the binding constraint is `chumsky`'s
-/// hard-coded 64 KiB `stacker` red zone, which a debug build's frames can overrun between two grow
-/// checks. Closing it properly means lowering [`MAX_NESTING_DEPTH`] to a depth that is provably
-/// safe, which is a language-visible change to where E0032 fires; tracked in `plans/backlog.md`.
-const DEEP_PARSE_STACK: usize = 64 * 1024 * 1024;
+/// [`MAX_NESTING_DEPTH`] × [`STACK_PER_NESTING_LEVEL`] is 64 MiB; this is that with a **4×** margin,
+/// which is what [`DEEP_STACK_MARGIN`] and the assertion below pin down. The margin is deliberately
+/// large because the failure it prevents is a process abort on untrusted input, not a wrong answer:
+/// it absorbs a future grammar change that makes frames heavier, a platform whose frames are wider,
+/// and any nesting shape more expensive than the worst one measured. It costs nothing to hold —
+/// thread stacks are reserved address space that commits page by page, and the worker is spawned at
+/// most once per file and joined before the next, so the resident cost is the depth actually parsed.
+///
+/// This was 64 MiB paired with a limit of 256, which is where the process abort came from. The old
+/// note here concluded that raising the stack "does not close the gap (depth 255 overflows a 1 GiB
+/// stack too)". That conclusion is wrong, and re-measuring is what showed the shape of the fix: the
+/// overflow depth is exactly linear in this constant (16 MiB → 38 levels, 32 → 78, 64 → 158, 128 →
+/// past 255), so stack size and depth limit are two knobs on the same budget. Both moved here, so
+/// the budget holds with margin instead of being met exactly.
+const DEEP_PARSE_STACK: usize = 256 * 1024 * 1024;
+
+/// How much more stack the deep worker carries than the deepest legal parse is measured to need.
+/// See [`DEEP_PARSE_STACK`] for why it is this large.
+const DEEP_STACK_MARGIN: usize = 4;
+
+// The three budgets above are a derivation, not three independent numbers, and these assertions are
+// what keep them one. Raising `MAX_NESTING_DEPTH`, lowering `DEEP_PARSE_STACK`, or widening the
+// inline range without moving its headroom stops the build instead of reintroducing a process abort
+// on deeply nested input. What they cannot catch is the grammar itself getting more expensive per
+// level — `STACK_PER_NESTING_LEVEL` is an empirical constant, and only a real parse can check it.
+// `the_deepest_legal_parse_fits_its_modeled_budget` is that check.
+const _: () = assert!(
+    INLINE_NESTING_DEPTH * STACK_PER_NESTING_LEVEL <= INLINE_PARSE_HEADROOM,
+    "an inline parse at INLINE_NESTING_DEPTH must fit INLINE_PARSE_HEADROOM"
+);
+const _: () = assert!(
+    MAX_NESTING_DEPTH * STACK_PER_NESTING_LEVEL * DEEP_STACK_MARGIN <= DEEP_PARSE_STACK,
+    "a parse at MAX_NESTING_DEPTH must fit DEEP_PARSE_STACK with DEEP_STACK_MARGIN to spare"
+);
 
 /// Stack size a long-lived server should give the threads it runs the compiler front end on — the
 /// LSP/DAP/MCP runtimes, whose platform default (tokio's 2 MiB) is *below* what a parse of an
@@ -6261,6 +6320,127 @@ mod tests {
         assert!(
             parsed.diagnostics.is_empty(),
             "exactly the limit should be accepted: {:?}",
+            parsed.diagnostics
+        );
+    }
+
+    /// Source nesting `depth` function values inside one another — the most stack-hungry shape
+    /// found, at ~412 KiB of debug stack per level (ordinary `if` nesting costs ~330 KiB, a bare
+    /// `[[[…]]]` far less). Its delimiter depth is `depth + 1`: the `()` of the innermost `fn`
+    /// header opens one level below the `depth` open braces.
+    fn nested_function_values(depth: usize) -> String {
+        let mut src = String::from("x = ");
+        for _ in 0..depth {
+            src.push_str("fn() { return ");
+        }
+        src.push('1');
+        for _ in 0..depth {
+            src.push_str(" }");
+        }
+        src.push_str(";\n");
+        src
+    }
+
+    #[test]
+    fn the_deepest_legal_parse_fits_its_modeled_budget() {
+        // The guard on `STACK_PER_NESTING_LEVEL` itself. The compile-time assertions next to it can
+        // only check that the three budgets are consistent *with each other*; they take the per-level
+        // cost on faith, and it is the one number in the derivation that a grammar change can
+        // invalidate silently. So parse the worst-known shape at exactly `MAX_NESTING_DEPTH`, on a
+        // thread sized to the model with **no** margin at all — the margin `DEEP_PARSE_STACK`
+        // carries is what production gets, and spending it here would hide exactly what this is
+        // watching for.
+        //
+        // It fails the way a stack overflow fails: by aborting the test process, loudly, with the
+        // message below already printed. That is the point — if the grammar grows past the model,
+        // this is red long before `DEEP_PARSE_STACK`'s 4× margin is gone and real input starts
+        // aborting. Re-measure and move `STACK_PER_NESTING_LEVEL` (and, if it has moved far, the
+        // depth limit) rather than enlarging this thread.
+        //
+        // `parse_inner` rather than `parse`, so the thread under test *is* the stack under test:
+        // `parse_in` would offload this depth to the (much larger) worker and measure nothing.
+        let budget = MAX_NESTING_DEPTH * STACK_PER_NESTING_LEVEL;
+        let src = nested_function_values(MAX_NESTING_DEPTH);
+        let source = Source::new(SourceId::FIRST, "deep.noe", src);
+        let lexed = noeta_lexer::lex(&source);
+        assert_eq!(
+            nesting_depth(&lexed.tokens).0,
+            MAX_NESTING_DEPTH,
+            "the probe must sit exactly on the limit, or it is measuring the wrong depth"
+        );
+        eprintln!(
+            "parsing {MAX_NESTING_DEPTH} levels on {} MiB — an abort here means the grammar now \
+             costs more than STACK_PER_NESTING_LEVEL ({} KiB/level); re-measure it",
+            budget / (1024 * 1024),
+            STACK_PER_NESTING_LEVEL / 1024
+        );
+        let parsed = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(budget)
+                .spawn_scoped(scope, || {
+                    parse_inner(
+                        &source,
+                        &lexed.tokens,
+                        Edition::DEFAULT,
+                        &noeta_lexer::TextTiers::default(),
+                    )
+                })
+                .expect("spawn the modeled-budget probe thread")
+                .join()
+                .expect("the modeled-budget probe panicked")
+        });
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "a parse at the limit should be clean: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.program.stmts.len(), 1);
+    }
+
+    #[test]
+    fn the_worst_shape_at_the_limit_diagnoses_one_level_deeper() {
+        // The language-visible half: `MAX_NESTING_DEPTH` is the accept/reject boundary for the
+        // *most expensive* shape too, not only for the cheap `[[[…]]]` the other tests use. Both
+        // sides run through the real `parse` entry point, so this is also the end-to-end proof that
+        // the deep-stack worker delivers the limit the pre-pass promises.
+        let at_limit = parse_str(&nested_function_values(MAX_NESTING_DEPTH));
+        assert!(
+            at_limit.diagnostics.is_empty(),
+            "the worst shape at the limit should parse: {:?}",
+            at_limit.diagnostics
+        );
+        let past_limit = parse_str(&nested_function_values(MAX_NESTING_DEPTH + 1));
+        assert_eq!(past_limit.diagnostics.len(), 1);
+        assert_eq!(
+            past_limit.diagnostics[0].code,
+            DiagnosticCode::NestingTooDeep
+        );
+    }
+
+    #[test]
+    fn a_caller_just_over_the_headroom_survives_the_deepest_inline_parse() {
+        // The bug the pairing of `INLINE_NESTING_DEPTH` with `INLINE_PARSE_HEADROOM` used to have:
+        // at 16 levels the inline range needed ~6.6 MiB while the headroom asked for 6, so a caller
+        // holding *just over* the headroom passed the check and then overflowed — measured, a
+        // 6.2 MiB caller aborted on 15 nested function values. Anything under the headroom was safe
+        // only by accident, because falling short is what got it offloaded.
+        //
+        // So probe the worst case for the inline path: the deepest shape that still parses inline,
+        // on the smallest stack that still counts as "enough headroom". A `stack_size` request is
+        // the whole thread, and `remaining_stack` is measured a few frames in, so ask for a little
+        // over the headroom to land just above it.
+        let src = nested_function_values(INLINE_NESTING_DEPTH);
+        let parsed = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(INLINE_PARSE_HEADROOM + 128 * 1024)
+                .spawn_scoped(scope, || parse_str(&src))
+                .expect("spawn the headroom probe thread")
+                .join()
+                .expect("a caller just over INLINE_PARSE_HEADROOM must survive an inline parse")
+        });
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "the headroom probe should parse cleanly: {:?}",
             parsed.diagnostics
         );
     }

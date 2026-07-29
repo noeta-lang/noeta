@@ -1,0 +1,11 @@
+// A dependency package's module (the case's `probe/` subdirectory is one package, keyed and rooted
+// by its directory name). Nothing outside the entry's `@test` block ever names these declarations.
+namespace probe.side;
+
+pub struct Thing {
+    n: int
+}
+
+pub fn make(): int {
+    return 3
+}

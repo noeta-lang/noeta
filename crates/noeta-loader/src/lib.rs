@@ -1707,6 +1707,7 @@ pub fn link_parsed_with_deps(
 /// This decides collisions only. Whether a resolved declaration is *merged* is a program-wide
 /// question with a program-wide answer (`merged_q`, keyed on the qualified identity): several files
 /// legitimately import one declaration, and it must land in the linked program exactly once.
+#[derive(Clone)]
 enum Origin {
     Local,
     Import(Vec<String>),
@@ -2084,6 +2085,45 @@ fn link_core(
                 }
             }
             other => {
+                // **A tier block's own `use`s drive linking too.** The block-scope overlay
+                // ([`qualify::UnitMap::tier_scopes`]) already qualifies the block's references to
+                // the module's identity — but qualifying a name is not linking it: a `.noe` module
+                // only reaches the merged program when some `use` *merges* its declarations, and
+                // the collection above walks the entry's **top-level** statements only. So
+                // `@test { use probe.lib.side.{Thing} … }` produced a perfectly qualified
+                // `probe.lib.side.Thing` that nothing declared — `noeta check` saw a qualified
+                // name it does not adjudicate and reported nothing, and `noeta test` failed every
+                // use site with "cannot find type … in this scope". A std import inside the same
+                // block worked throughout, because an extension module resolves through the
+                // registry and never needs the unit graph at all.
+                //
+                // Driven unconditionally, not per active tier: which tiers are live is the *build
+                // target*'s call, taken downstream in `noeta_check::tiers` (the loader has no
+                // active set, and the linked program is one memoized salsa value shared by
+                // `check`/`run`/`test`). Merging is safe regardless — every merged declaration
+                // lands under its **qualified** identity, so it binds no short name, collides with
+                // nothing, and is unreferenced (hence stripped with the block) in a build where
+                // the tier is inactive. This is also exactly what a top-level `use` that only the
+                // `@test` block references already does.
+                //
+                // The unresolved remainder is deliberately **dropped** rather than retained: the
+                // `use` statement itself stays *inside* the block (a rewrite table, not a hoisted
+                // import), so an inactive build drops it with the block and leaves nothing
+                // dangling. Activation inlines the block's items — the `use` among them — and the
+                // retained binding is created then.
+                if let Stmt::TierBlock { items, .. } = other {
+                    // Block-scoped name table: the unit's, plus the block's own declarations. A
+                    // `use` binds in one scope, so the E0020 question is answered per scope —
+                    // and a block importing the same declaration the file already imports is the
+                    // same import, not a clash.
+                    let mut block_origins = entry_origins.clone();
+                    block_origins.extend(unit_origins(items));
+                    for item in items {
+                        if let Stmt::Use { path, names, .. } = item {
+                            drive_use(path, names, &mut block_origins, &mut imported, &mut errors);
+                        }
+                    }
+                }
                 // The entry's own declarations and statements qualify against the entry's map (its
                 // own namespace + its resolved imports), with the whole tail's bindings in scope.
                 let mut stmt = other.clone();
@@ -5003,6 +5043,74 @@ mod tests {
             "@test {\n  use std.test.{Skip}\n  #[Skip(\"later\")]\n  fn f(text: string): string { return text; }\n}\necho 1;\n",
             noeta_lexer::Edition::default(),
             &[],
+        )
+        .expect("links");
+        assert!(
+            !linked
+                .program
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Use { .. })),
+            "no top-level `use` may appear: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// A sibling module exporting the type a tier block imports — the `.noe` half of the repro that
+    /// qualification alone could not fix (a std import inside a block always worked, because an
+    /// extension module resolves through the registry and never needs the unit graph).
+    fn side_module() -> RawModule {
+        module(
+            "side.noe",
+            "namespace probe.lib.side;\npub struct Thing { n: int }\npub fn make(): int { return 3 }\n",
+        )
+    }
+
+    #[test]
+    fn a_tier_blocks_use_links_a_loaded_module() {
+        // Qualifying a name is not linking it: the block-scope overlay rewrote `Thing` to
+        // `probe.lib.side.Thing`, but nothing merged the declaration, so `noeta check` reported
+        // nothing and `noeta test` failed with "cannot find type `probe.lib.side.Thing` in this
+        // scope". The block's `use` must drive the merge exactly as a top-level one does.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use probe.lib.side.{Thing}\n  fn t(): void { x = Thing { n: 3 } }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[side_module()],
+        )
+        .expect("links");
+        assert!(
+            has_struct(&linked, "Thing"),
+            "the block-imported declaration must be in the merged program: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    #[test]
+    fn a_tier_blocks_whole_module_use_links_the_module() {
+        // The second import form (`use probe.lib.side` + `side.Thing`) merges every `pub`
+        // declaration, and failed identically before the fix.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use probe.lib.side\n  fn t(): void { x = side.Thing { n: side.make() } }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[side_module()],
+        )
+        .expect("links");
+        assert!(has_struct(&linked, "Thing"), "the module's type merges");
+        assert!(has_fn(&linked, "make"), "the module's fn merges");
+    }
+
+    #[test]
+    fn a_tier_blocks_use_of_a_module_is_still_not_hoisted() {
+        // Linking the module must not hoist the import: the `use` stays inside the block, so an
+        // inactive build drops it with the block. The merged declaration is harmless there — it
+        // carries a qualified identity, so it binds no short name and nothing references it.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use probe.lib.side.{Thing}\n  fn t(): void { x = Thing { n: 3 } }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[side_module()],
         )
         .expect("links");
         assert!(
