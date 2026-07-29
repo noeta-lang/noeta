@@ -884,10 +884,25 @@ fn collect_type_aliases(
 /// rewritten to the qualified identity by the loader's native-type aliasing, and a name written
 /// qualified in source needs no rewrite at all. Built from this program's own `use` statements, so a
 /// short name the program never imported is left exactly as written.
+///
+/// **A local declaration wins**, the same shadowing rule the loader's own native-type aliasing
+/// follows: a name the linked program declares itself is never rewritten to a native enum of that
+/// name. (A declaration under a `namespace` links to a qualified name and could not collide in the
+/// first place; the guard is what covers the un-namespaced case.)
 fn collect_native_enum_imports(
     program: &AstProgram,
     registry: &'static noeta_ext_abi::registry::Registry,
 ) -> HashMap<String, String> {
+    let declared: HashSet<&str> = program
+        .stmts
+        .iter()
+        .filter_map(|stmt| match stmt {
+            AstStmt::Struct(d) => Some(d.name.as_str()),
+            AstStmt::Class(d) => Some(d.name.as_str()),
+            AstStmt::Enum(d) => Some(d.name.as_str()),
+            _ => None,
+        })
+        .collect();
     let mut map = HashMap::new();
     for stmt in &program.stmts {
         let AstStmt::Use { path, names, .. } = stmt else {
@@ -895,9 +910,13 @@ fn collect_native_enum_imports(
         };
         let prefix = path.join(".");
         for n in names {
+            let local = n.local();
+            if declared.contains(local) {
+                continue;
+            }
             let qualified = format!("{prefix}.{}", n.name);
             if let Some(en) = registry.find_enum_qualified(&qualified) {
-                map.insert(n.local().to_string(), en.qualified());
+                map.insert(local.to_string(), en.qualified());
             }
         }
     }
