@@ -650,6 +650,7 @@ pub fn lower_with_sites_opts(
         synth_step_name: None,
         synth_step_captures: None,
         type_aliases: collect_type_aliases(program, registry),
+        native_enum_imports: collect_native_enum_imports(program, registry),
         expr_tiers: noeta_ast::desugar::expr_tier_handlers(program)
             .into_iter()
             .collect(),
@@ -703,6 +704,13 @@ struct Lowerer<'a> {
     ///
     /// A plain (non-aliased) *user* import needs no entry — its local name is already the tag.
     type_aliases: HashMap<String, String>,
+    /// The **qualified identity** each leaf-imported native ENUM's local name denotes (`Framing` →
+    /// `std.http.Framing`), built from the program's own `use` statements — the rewrite
+    /// [`Lowerer::lower_type_operand`] applies so a reflection turbofish keys on the name the
+    /// reflection artifact registers the type under. Import-driven rather than a registry-wide
+    /// short-name lookup on purpose: only a name this program actually imported is rewritten, so a
+    /// program's own `Framing` is never redirected to a native type it never mentioned.
+    native_enum_imports: HashMap<String, String>,
     /// The program's declared expression-tier handlers (tier name → handler fn name), so an
     /// [`Expr::TierExpr`] lowers as the handler call it means — the same
     /// [`noeta_ast::desugar::tier_expr_call`] construction the checker typed. The checker gated
@@ -861,6 +869,35 @@ fn collect_type_aliases(
             } else if n.alias.is_some() {
                 // A renamed user (or opaque) import: narrows against the imported leaf name.
                 map.insert(local, n.name.clone());
+            }
+        }
+    }
+    map
+}
+
+/// The **qualified identity** each leaf-imported native enum's local name denotes (`use
+/// std.http.{Framing}` → `Framing` ⇒ `std.http.Framing`, honoring `as` renames) — the key the
+/// reflection artifact registers a native enum under, and the name `type_of` reports for one of its
+/// values.
+///
+/// Only the *leaf* form needs an entry: a group import (`use std.http` → `http.Framing`) is already
+/// rewritten to the qualified identity by the loader's native-type aliasing, and a name written
+/// qualified in source needs no rewrite at all. Built from this program's own `use` statements, so a
+/// short name the program never imported is left exactly as written.
+fn collect_native_enum_imports(
+    program: &AstProgram,
+    registry: &'static noeta_ext_abi::registry::Registry,
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for stmt in &program.stmts {
+        let AstStmt::Use { path, names, .. } = stmt else {
+            continue;
+        };
+        let prefix = path.join(".");
+        for n in names {
+            let qualified = format!("{prefix}.{}", n.name);
+            if let Some(en) = registry.find_enum_qualified(&qualified) {
+                map.insert(n.local().to_string(), en.qualified());
             }
         }
     }
@@ -1658,15 +1695,40 @@ impl Lowerer<'_> {
     /// the type under, and exactly what the dynamic string surface would have been handed. Flattening
     /// it at parse time instead put it beyond the linker's namespace rewrite, and
     /// `field_specs_of::<Todo>()` under a `namespace` silently answered with the empty schema.
+    ///
+    /// One spelling the linker deliberately leaves short is a **leaf**-imported native type
+    /// (`use std.http.{Framing}`): the loader aliases only native *attribute* structs there, since
+    /// rewriting the rest would also rewrite the value spelling the backends bind under. Those
+    /// resolve through the checker instead — so the head name arrives short, while the reflection
+    /// artifact keys a native enum on the qualified identity `type_of` stamps on its values. Left
+    /// alone, `variants_of::<Framing>()` folded to a name nothing is registered under and answered
+    /// the empty list, right after the program imported the type. [`Self::native_enum_imports`]
+    /// carries the one rewrite that closes it.
     fn lower_type_operand(
         &mut self,
         operand: &TypeOperand,
         out: &mut Vec<Stmt>,
     ) -> Result<Atom, Unsupported> {
         match operand {
-            TypeOperand::Static(ty) => Ok(Atom::Const(Const::Str(ty.head_name()))),
+            TypeOperand::Static(ty) => Ok(Atom::Const(Const::Str(self.reflection_head_name(ty)))),
             TypeOperand::Dynamic(e) => self.lower_expr(e, out),
         }
+    }
+
+    /// The **name a reflection surface keys on** for a statically written type: its linked head
+    /// name, with a leaf-imported native enum's short spelling resolved to the qualified identity
+    /// the reflection artifact registers it under (see [`Lowerer::native_enum_imports`]).
+    ///
+    /// Shared by the turbofish operands (`field_specs_of::<T>()`, `variants_of::<T>()`,
+    /// `construct::<T>(…)`) and by `type_name::<T>()`, which is the surface whose whole job is to
+    /// hand that name to the others — so the two agree by construction rather than by convention,
+    /// and `variants_of(type_name::<Framing>())` answers what `variants_of::<Framing>()` does.
+    fn reflection_head_name(&self, ty: &TypeRef) -> String {
+        let name = ty.head_name();
+        self.native_enum_imports
+            .get(name.as_str())
+            .cloned()
+            .unwrap_or(name)
     }
 
     /// Lower an expression to an [`Atom`], emitting the `let`s that compute any
@@ -1730,7 +1792,9 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
-            Expr::TypeName { ty, .. } => Ok(Atom::Const(Const::Str(ty.head_name()))),
+            Expr::TypeName { ty, .. } => {
+                Ok(Atom::Const(Const::Str(self.reflection_head_name(ty))))
+            }
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
             // magnitude's bit pattern is the runtime i64 word (a `u64` with the high bit set boxes as
