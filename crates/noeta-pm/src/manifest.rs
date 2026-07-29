@@ -2498,8 +2498,7 @@ mod tests {
 
     #[test]
     fn reads_declared_cargo_features() {
-        let dir = std::env::temp_dir().join(format!("noeta-pm-feat-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("pm-feat");
         std::fs::write(
             dir.join("Cargo.toml"),
             "[package]\nname = \"imgfx-native\"\nversion = \"0.1.0\"\n\n\
@@ -2517,7 +2516,6 @@ mod tests {
         )
         .unwrap();
         assert!(cargo_features(&dir).unwrap().is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- `package.native` (package-manager Phase 3, N3.1) --------------------------------------
@@ -3123,9 +3121,7 @@ mod tests {
 
     #[test]
     fn add_dependency_writes_and_widens_a_repeated_key_into_a_scope() {
-        let dir = std::env::temp_dir().join("noeta_add_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("add-test");
         let path = dir.join(MANIFEST_NAME);
         std::fs::write(&path, "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
 
@@ -3196,9 +3192,7 @@ mod tests {
 
     #[test]
     fn native_rings_reads_the_native_table() {
-        let dir = std::env::temp_dir().join("noeta_native_rings_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("native-rings-test");
         std::fs::write(
             dir.join(MANIFEST_NAME),
             "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
