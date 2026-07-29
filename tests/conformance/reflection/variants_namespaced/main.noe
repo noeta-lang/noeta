@@ -4,7 +4,7 @@
 //
 // The turbofish stays a `TypeRef` until lowering for precisely this reason: the linker's namespace
 // qualification rewrites type *references*, so flattening `T` to a string literal at parse time would
-// ask for the bare key `Priority` while the registry holds `app.triage.Priority` — the empty answer
+// ask for the bare key `Priority` while the registry holds `app.main.Priority` — the empty answer
 // with no diagnostic that `field_specs_namespaced` pins for the struct side.
 //
 // The dynamic surface is checked alongside on purpose: it takes a genuine runtime string, so
@@ -13,13 +13,14 @@
 //
 // A `main.noe` on purpose: only a directory case goes through `noeta_loader::load` and the linker,
 // so a bare `.noe` here could not observe the bug it pins.
-// expect: stdout "qualified identity: Type.Enum(app.triage.Priority, [])"
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
+// expect: stdout "qualified identity: Type.Enum(app.main.Priority, [])"
 // expect: stdout "turbofish: 2"
 // expect: stdout "by qualified string: 2"
 // expect: stdout "by bare string: 0"
-// expect: stdout "payload type: Type.Named(app.triage.Ticket, [])"
+// expect: stdout "payload type: Type.Named(app.main.Ticket, [])"
 // expect: exit 0
-namespace app.triage
 
 pub struct Ticket {
     pub id: int
@@ -34,7 +35,7 @@ p = Priority.Low
 echo "qualified identity: ${type_of(p)}"
 
 echo "turbofish: ${variants_of::<Priority>().len()}"
-echo "by qualified string: ${variants_of("app.triage.Priority").len()}"
+echo "by qualified string: ${variants_of("app.main.Priority").len()}"
 echo "by bare string: ${variants_of("Priority").len()}"
 
 // A payload's declared type is qualified by the same linker pass, so a cross-module payload reports

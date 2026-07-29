@@ -1,0 +1,16 @@
+// A library module exporting a class. Its path is not declared: the case is package `App` and the
+// file is `Models.noe`, so the module IS `App.Models`. It has no executable top-level statements —
+// it is only `use`d by the entry (main.noe).
+
+pub class User {
+    pub name: string
+    pub id: int
+
+    fn new(name: string, id: int): User {
+        return User { name: name, id: id };
+    }
+
+    fn greeting(): string {
+        return "Hi, ${self.name}";
+    }
+}

@@ -1,4 +1,0 @@
-namespace App.Geo;
-pub struct Amount {
-    meters: int
-}

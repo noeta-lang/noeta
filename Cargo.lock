@@ -2598,6 +2598,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-loader",
  "noeta-parser",
+ "noeta-pm",
  "noeta-span",
  "noeta-stdlib",
  "noeta-value",

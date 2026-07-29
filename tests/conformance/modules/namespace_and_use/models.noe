@@ -1,7 +1,0 @@
-// The `App.Models` library module the entry imports with the single `use` form.
-namespace App.Models;
-
-pub struct User {
-    pub name: string
-    pub id: int
-}

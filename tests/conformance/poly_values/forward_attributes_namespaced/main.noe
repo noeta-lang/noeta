@@ -12,11 +12,12 @@
 // A `main.noe` on purpose: the harness runs a *single-file* case straight from source text, with no
 // loader and therefore no namespace qualification at all, so in a bare `.noe` the short and
 // qualified names coincide and the case could not observe the property it claims to pin.
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
 // expect: stdout "1"
 // expect: stdout "1"
 // expect: stdout "GET"
 // expect: exit 0
-namespace app.storage
 
 @attribute
 struct Route {

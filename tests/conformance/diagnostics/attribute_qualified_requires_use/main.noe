@@ -3,7 +3,7 @@
 // names resolve through the same import machinery as types, so a spelled-out FQN needs its `use`.
 // expect: error E0019 at 8:3
 // expect: exit 1
-namespace app;
+// (No `namespace`: the entry of package `shapes` derives `shapes.main` from its own file name.)
 
 #[shapes.Marker]
 struct Thing { id: int }

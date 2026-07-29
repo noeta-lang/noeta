@@ -4,8 +4,8 @@
 // generics are erased and the runtime registries are name-keyed. Written as `type_name::<Task>()` it
 // is compile-checked, rename-safe, and — as here — independent of what the importer calls the type.
 //
-// The entry has no namespace of its own, so nothing but the linker's import map can supply the
-// qualification; the type reaching lowering as a `TypeRef` rather than a string is what lets it.
+// The entry is a different module (`app.main`), so nothing but the linker's import map can supply
+// the qualification; the type reaching lowering as a `TypeRef` rather than a string is what lets it.
 // expect: stdout "aliased: app.storage.Todo"
 // expect: stdout "direct: app.storage.Todo"
 // expect: stdout "agrees with type_of: true"

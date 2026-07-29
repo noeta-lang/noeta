@@ -142,7 +142,7 @@ pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
             // A multi-file fixture flows through the salsa module graph (M1.9.3): its sources
             // become a `Workspace`, the `linked` query merges them, and both backends consume the
             // workspace queries — the multi-file analogue of the single-file path below.
-            match noeta_loader::read_workspace(&case.entry, None) {
+            match crate::read_case_workspace(&case.entry) {
                 Ok(raw) => compare_backends_workspace(&name, &raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }

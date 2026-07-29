@@ -9,7 +9,6 @@
 // expect: stdout "Item 0 has a negative price"
 // expect: exit 0
 
-namespace App.Orders;
 
 use App.Models.User;
 use std.id.{next_id};

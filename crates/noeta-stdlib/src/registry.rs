@@ -848,43 +848,64 @@ pub fn assemble_with_extras(
 
 /// Assemble (std ∪ `extra`) as an **interned** `&'static` registry — the per-session entry
 /// (instance-registry IR5) for hosts that create sessions repeatedly. The whole pipeline hands out
-/// `&'static Registry`, so a per-session assembly must leak; interning by the unit **pointer set**
-/// bounds that leak by *distinct configurations* instead of by session count (a game engine
-/// reloading levels re-uses one assembly forever). Fallible: a mis-assembled unit set (duplicate
-/// identities, a type namespaced outside its unit's root) is an `Err` for the host to surface,
-/// never a panic out of a library entry point.
+/// `&'static Registry`, so a per-session assembly must leak; interning by the unit set bounds that
+/// leak by *distinct configurations* instead of by session count (a game engine reloading levels
+/// re-uses one assembly forever). Fallible: a mis-assembled unit set (duplicate identities, a type
+/// namespaced outside its unit's root) is an `Err` for the host to surface, never a panic out of a
+/// library entry point.
+///
+/// # Why the key is the units themselves
+///
+/// The table is keyed by **unit identity** — the `&'static dyn Extension` references the caller
+/// passed, compared whole (see [`same_units`]). Two earlier keys were both wrong, in opposite
+/// directions, and each produced the same silent failure: a session handed *another* session's
+/// registry, so its own extension resolved as an unknown name.
+///
+/// * **Data pointers** collide, because an extension type is typically a unit struct and distinct
+///   **zero-sized** statics share one address — any two ZST extensions hashed to the same key.
+/// * **Names** collide too, one level up: two *different* extension objects may legitimately share
+///   a `name()` (a host that links a plugin's v1 and v2 surface, or builds a unit set per feature
+///   flag). `Registry::new`'s uniqueness sweep only rejects a duplicate name *within* one set, so it
+///   never sees this — the second session simply got the first's assembly.
+///
+/// Comparing the references whole distinguishes both: a ZST's vtable carries its type even when its
+/// address does not. A false *negative* (two vtable copies for one type across codegen units) costs
+/// one extra assembly — a bounded leak, never a wrong registry — which is the direction to err in.
 pub fn interned_with_extras(
     extra: &[&'static (dyn Extension + Sync)],
 ) -> Result<&'static noeta_ext_abi::registry::Registry, String> {
-    use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static INTERNED: OnceLock<
-        Mutex<HashMap<Vec<&'static str>, &'static noeta_ext_abi::registry::Registry>>,
-    > = OnceLock::new();
-    // Key on the extras' **names**, order-normalized. Extension names are unique by construction —
-    // `Registry::new`'s uniqueness sweep rejects a duplicate — so a name set *is* a configuration.
-    //
-    // This used to key on the units' data pointers, which is unsound: an extension type is
-    // typically a unit struct, and distinct **zero-sized** statics share one address, so any two
-    // ZST extensions collided onto the same key. Two sessions with disjoint extension sets then
-    // silently shared whichever registry was interned first — the second session's own extension
-    // resolved as an unknown name. Silent and configuration-dependent, which is the worst shape for
-    // an embedding host to debug.
-    let mut key: Vec<&'static str> = extra.iter().map(|e| e.name()).collect();
-    key.sort_unstable();
+    type Units = Vec<&'static (dyn Extension + Sync)>;
+    static INTERNED: OnceLock<Mutex<Vec<(Units, &'static noeta_ext_abi::registry::Registry)>>> =
+        OnceLock::new();
+    // Order-normalized by name so `[&A, &B]` and `[&B, &A]` are one configuration. Names are unique
+    // within any set that assembles (`Registry::try_new` rejects a duplicate), so this is a total
+    // order on every input that gets interned; a set that does *not* assemble returns `Err` below
+    // and is never stored.
+    let mut key: Units = extra.to_vec();
+    key.sort_unstable_by_key(|unit| unit.name());
     let mut interned = INTERNED
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
         .expect("registry intern table poisoned");
-    if let Some(registry) = interned.get(&key) {
+    if let Some((_, registry)) = interned.iter().find(|(units, _)| same_units(units, &key)) {
         return Ok(registry);
     }
     let mut units = std_units();
     units.extend_from_slice(extra);
     let registry: &'static _ =
         Box::leak(Box::new(noeta_ext_abi::registry::Registry::try_new(units)?));
-    interned.insert(key, registry);
+    interned.push((key, registry));
     Ok(registry)
+}
+
+/// Whether two name-sorted unit lists are the **same units** — pairwise reference identity, vtable
+/// included (see [`interned_with_extras`] for why the vtable is the load-bearing half).
+fn same_units(
+    a: &[&'static (dyn Extension + Sync)],
+    b: &[&'static (dyn Extension + Sync)],
+) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| std::ptr::eq(*x, *y))
 }
 
 /// All registered extensions.

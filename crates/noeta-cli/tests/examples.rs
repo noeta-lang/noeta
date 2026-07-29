@@ -37,6 +37,25 @@ fn noe_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Whether checking or running the example at `path` would **compose a toolchain** — a real cargo
+/// build of a composed binary, minutes cold and heavy enough to fail under load. That is what its
+/// owning package's own gates pay for, not this sweep.
+///
+/// The test is the example's manifest declaring **dependencies**, not merely existing. A manifest
+/// with none costs nothing to check, and there is a reason to write one: it is what makes a
+/// directory a package, which is what makes its modules derive their paths instead of declaring
+/// them (`examples/` is package `App`, so `Models.noe` is `App.Models`). Excluding on the file's
+/// presence alone would have silently dropped every core example the moment that landed.
+fn composes_a_toolchain(dir: &Path) -> bool {
+    let manifest = dir.join("noeta.toml");
+    let Ok(text) = std::fs::read_to_string(&manifest) else {
+        return false;
+    };
+    noeta_pm::manifest::Manifest::parse(&text)
+        .map(|m| !m.dependencies().is_empty())
+        .unwrap_or(false)
+}
+
 /// `noeta <verb> <path>`, run from the example's own directory so its `noeta.toml` (and therefore
 /// its package scope deps) resolve exactly as they do for a user standing in that directory.
 fn noeta(verb: &str, path: &Path) -> std::process::Output {
@@ -66,11 +85,11 @@ fn every_example_still_compiles() {
     noe_files(&examples_root(), &mut examples);
     assert!(!examples.is_empty(), "examples/ has no .noe files to check");
 
-    // Scope: examples whose directory declares package dependencies (a `noeta.toml`) are NOT
-    // checked here. Checking one composes a toolchain — a real cargo build of the composed binary
-    // (the "composing the toolchain" path), which costs minutes cold and is heavy enough to fail
-    // under load. That cost belongs to the package that owns them (each `para` package repo gates
-    // its own examples), not to a blanket sweep here.
+    // Scope: examples whose directory declares package **dependencies** are NOT checked here.
+    // Checking one composes a toolchain — a real cargo build of the composed binary (the
+    // "composing the toolchain" path), which costs minutes cold and is heavy enough to fail under
+    // load. That cost belongs to the package that owns them (each `para` package repo gates its own
+    // examples), not to a blanket sweep here.
     //
     // What stays is the core-language set — and that is where the rot actually was: the sealed-fn
     // and no-shadowing rules broke `liveview_counter.noe` and `liveview_html_counter.noe`, both
@@ -79,7 +98,7 @@ fn every_example_still_compiles() {
         .iter()
         .filter(|path| {
             let dir = path.parent().expect("an example has a parent directory");
-            !dir.join("noeta.toml").is_file()
+            !composes_a_toolchain(dir)
         })
         .collect();
     assert!(
@@ -136,13 +155,13 @@ fn examples_with_expected_stdout_produce_it() {
     let mut examples = Vec::new();
     noe_files(&examples_root(), &mut examples);
 
-    // Same scoping as the check sweep: an example with a `noeta.toml` would compose a toolchain
-    // to run it, which is its owning package's cost to pay, not this gate's.
+    // Same scoping as the check sweep: an example whose manifest declares dependencies would
+    // compose a toolchain to run it, which is its owning package's cost to pay, not this gate's.
     let core: Vec<PathBuf> = examples
         .into_iter()
         .filter(|path| {
             let dir = path.parent().expect("an example has a parent directory");
-            !dir.join("noeta.toml").is_file()
+            !composes_a_toolchain(dir)
         })
         .collect();
 

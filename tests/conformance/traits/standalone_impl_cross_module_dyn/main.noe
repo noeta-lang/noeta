@@ -23,7 +23,6 @@
 // expect: stdout "[\"pkg.lib.Decoder\"]"
 // expect: stdout "late-hi"
 // expect: exit 0
-namespace pkg.main;
 
 use pkg.lib.{MyCodec, Codec};
 
