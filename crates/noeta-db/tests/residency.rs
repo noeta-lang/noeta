@@ -13,7 +13,7 @@
 
 use noeta_alloc_probe::{TrackingAlloc, live_bytes};
 use noeta_db::{
-    Edition, LangDatabase, Workspace, linked_bytecode_from, linked_checked_ide_from,
+    Edition, LangDatabase, Workspace, WorkspaceUses, linked_bytecode_from, linked_checked_ide_from,
     release_source, source_program,
 };
 use noeta_span::{Source, SourceId};
@@ -40,7 +40,12 @@ fn big_source() -> String {
 fn cycle(db: &mut LangDatabase, base_src: noeta_db::SourceProgram, text: &str, release: bool) {
     let scratch = Source::new(SourceId(1), "scratch.noe", text);
     let src = source_program(db, &scratch, Edition::DEFAULT);
-    let ws = Workspace::new(db, vec![base_src, src], Vec::new());
+    let ws = Workspace::new(
+        db,
+        vec![base_src, src],
+        Vec::new(),
+        WorkspaceUses::default(),
+    );
     // Populate the fat memos: the merged program, its type index, and its compiled module.
     let _ = linked_checked_ide_from(db, ws, src);
     let _ = linked_bytecode_from(db, ws, src);
@@ -105,7 +110,12 @@ fn released_source_reads_back_empty_and_recomputes_cleanly() {
     let text = big_source();
     let scratch = Source::new(SourceId(1), "scratch.noe", &text);
     let src = source_program(&db, &scratch, Edition::DEFAULT);
-    let ws = Workspace::new(&db, vec![base_src, src], Vec::new());
+    let ws = Workspace::new(
+        &db,
+        vec![base_src, src],
+        Vec::new(),
+        WorkspaceUses::default(),
+    );
 
     // Before release: the scratch module compiles cleanly to a non-trivial module.
     assert!(linked_bytecode_from(&db, ws, src).0.is_ok());

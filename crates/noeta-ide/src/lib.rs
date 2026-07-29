@@ -4507,6 +4507,51 @@ mod tests {
     }
 
     #[test]
+    fn workspace_captures_a_renamed_text_tier_bound_in_the_manifest() {
+        // Per-package tier-naming arc (3g), editor seam: a `noeta.toml` binds std's `doc` **text**
+        // tier under a local `@docs` (`[tiers] docs = "std:doc"`). The IDE lexes through its own salsa
+        // `ast`/`tokens_in` query, not the loader — so it must resolve the SAME per-package text-tier
+        // set the loader now does, or the `@docs { … }` markdown body (a bare `"` opens an
+        // unterminated string when tokenized as code, `<`/`>` are stray operators) is a hard lex error
+        // and the file diagnoses red. The editor twin of the CLI's
+        // `a_renamed_text_tier_captures_under_its_local_name`; `test_store` seeds std so `doc` is a
+        // known verbatim ext tier and the `docs = "std:doc"` binding lands on it.
+        let dir = temp_workspace(
+            "renamed_text_tier_manifest",
+            &[(
+                "noeta.toml",
+                "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n[tiers]\ndocs = \"std:doc\"\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = test_store();
+        store.open(
+            &entry_uri,
+            "@docs {\n# Widget\n\nA bare \" quote and <angle> bits: invalid as code, fine as markdown.\n}\nfn add(a: int, b: int): int { return a + b }\n".to_string(),
+        );
+
+        // Load-bearing: without the per-package resolution the body lexes as code and the bare quote
+        // is an unterminated-string lex error. With the manifest's `docs` bound to a text tier for the
+        // root package, the body captures verbatim and the document is clean.
+        let (diags, _text) = store.diagnostics(&entry_uri).unwrap();
+        assert!(
+            diags.is_empty(),
+            "a manifest-renamed text tier must capture in the editor; got {diags:?}"
+        );
+
+        // And directly: the workspace-aware lex emits the body as one verbatim `DocText` token — the
+        // salsa twin of the loader's per-package re-lex — rather than a stream of code tokens.
+        let (cache, program, _sid) = store
+            .doc_cache(&entry_uri)
+            .expect("entry is an open member");
+        let toks = noeta_db::tokens_in(&store.db, cache.workspace, program);
+        assert!(
+            toks.0.tokens.iter().any(|t| t.kind == TokenKind::DocText),
+            "the renamed tier's body must be captured as one DocText token"
+        );
+    }
+
+    #[test]
     fn change_reuses_the_workspace_without_rebuilding() {
         let dir = temp_workspace(
             "incremental",
