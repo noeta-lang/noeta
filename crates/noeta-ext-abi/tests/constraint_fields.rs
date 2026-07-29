@@ -110,6 +110,7 @@ const REGISTRY: &str = "crates/noeta-ext-abi/src/registry.rs";
 const STDLIB_JSON: &str = "crates/noeta-stdlib/src/json.rs";
 const VM_NATIVE_CTX: &str = "crates/noeta-vm/src/native_ctx.rs";
 const CLI_SERVE: &str = "crates/noeta-cli/src/cmd/serve.rs";
+const CLI_LIB: &str = "crates/noeta-cli/src/lib.rs";
 const EMBED_CONSTRAINTS: &str = "crates/noeta-embed/tests/ext_constraint_enforcement.rs";
 const EMBED_INSTANCE: &str = "crates/noeta-embed/tests/instance_registry.rs";
 const CONFORMANCE_STRUCT_SEAM: &str = "crates/noeta-conformance/tests/ext_struct_seam.rs";
@@ -941,7 +942,10 @@ const TABLE: &[Row] = &[
     Row(
         "ExtCommand",
         "name",
-        Data(Anchor(CLI_SERVE, "clap::Command::new(ext.name)")),
+        // Slice-1 command binding: the exported `name` is matched against a `[trust.commands]`
+        // binding's `exported` to register a dependency command under its local name (the clap
+        // subcommand is then `Command::new(local)`, no longer `Command::new(ext.name)`).
+        Data(Anchor(CLI_LIB, "c.name == binding.exported")),
     ),
     Row(
         "ExtCommand",

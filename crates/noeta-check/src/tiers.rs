@@ -336,11 +336,27 @@ impl TierRegistry {
             }
             return None;
         }
-        // Ambient: only a **std** extension tier (a third-party extension tier is reachable solely
-        // through a binding — never ambient) or a program `@tier` of that bare name.
-        let std_root = [BUILTIN_PROVIDER.to_string()];
-        if let Some(t) = self.reg().find_ext_tier_scoped(&std_root, local) {
-            return Some(ResolvedTier::Ext(t, BUILTIN_PROVIDER.to_string()));
+        // Ambient (no `[tiers]` binding for this name). With **no binding regime in effect at all**
+        // — an empty table: a bare script, an embed session, a single-file check — resolve GLOBALLY
+        // (any provider root), the tier counterpart of the directive ambient fallback
+        // (`resolve_ext_directive_at`). Without it a session extension's own tier (root ≠ `"std"`,
+        // with no manifest to bind it in) reads as unknown. When a binding regime IS in effect, a
+        // third-party extension tier stays reachable **only** through a binding, so ambient is
+        // std-scoped there (the per-package opt-in). A program `@tier` of the bare name resolves either way.
+        if uses.is_empty() {
+            if let Some(t) = self.reg().find_ext_tier(local) {
+                let root = self
+                    .reg()
+                    .ext_tier_root(local)
+                    .unwrap_or(BUILTIN_PROVIDER)
+                    .to_string();
+                return Some(ResolvedTier::Ext(t, root));
+            }
+        } else {
+            let std_root = [BUILTIN_PROVIDER.to_string()];
+            if let Some(t) = self.reg().find_ext_tier_scoped(&std_root, local) {
+                return Some(ResolvedTier::Ext(t, BUILTIN_PROVIDER.to_string()));
+            }
         }
         self.declared(local).map(ResolvedTier::Declared)
     }
