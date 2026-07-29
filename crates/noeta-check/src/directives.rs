@@ -138,6 +138,21 @@ impl DirectiveRegistry {
             .map(DirectiveKind::ExtDirective)
     }
 
+    /// Resolve `@name` against only the **globally-scoped** halves — built-in directives and tiers
+    /// (extension or program-declared). Extension *directives* are deliberately excluded: they resolve
+    /// **per-package** (per-package naming arc), which needs the using package's binding table and so
+    /// is done in the checker, not here. `None` means "not a built-in or tier" — the caller then tries
+    /// the per-package directive resolution.
+    pub fn lookup_builtin_or_tier(&self, name: &str) -> Option<DirectiveKind<'_>> {
+        if let Some(d) = BuiltinDirective::from_name(name) {
+            return Some(DirectiveKind::Builtin(d));
+        }
+        if let Some(t) = self.tiers.extension_tiers().find(|t| t.name == name) {
+            return Some(DirectiveKind::ExtTier(t));
+        }
+        self.tiers.declared(name).map(DirectiveKind::DeclaredTier)
+    }
+
     /// Every offerable `@name`: the built-ins in declaration order, then the extension tiers, then
     /// the program-declared ones. De-duplicated by name, first occurrence winning — a program that
     /// re-declares an extension tier is a second *provider* of one name, not a second name.
@@ -231,6 +246,22 @@ impl Checker {
     /// syntax error no extension could make legal. Deciding here is what opens the name-space,
     /// and it also folds the old parser-level errors into the one placement check: `@tier` on a
     /// type is now a misplacement like any other, rather than a separate `UnexpectedToken`.
+    /// Resolve an extension `@name` **for the package that wrote it** (per-package naming arc): the
+    /// span's package (via [`Self::package_at`]) → its `[directives]` binding for `name` → the
+    /// provider's [`ExtDirective`](noeta_ext_abi::registry::ExtDirective), matched by the provider's
+    /// namespace root + exported name. `None` when the package binds no such name — or the span's
+    /// provenance is unknown (a single-file check has no manifest, so only built-in directives resolve).
+    pub(crate) fn resolve_ext_directive_at(
+        &self,
+        span: Span,
+        name: &str,
+    ) -> Option<&'static noeta_ext_abi::registry::ExtDirective> {
+        let origin = self.package_at(span)?;
+        let use_ = self.config.package_uses.get(origin, name)?;
+        self.reg()
+            .find_ext_directive_scoped(&use_.provider_roots, &use_.exported)
+    }
+
     fn check_foreign_directives(&mut self, at: &noeta_ast::Decorated<'_>) {
         let decorators = at.decorators;
         if decorators.foreign.is_empty() {
@@ -239,18 +270,9 @@ impl Checker {
         // Over the registry the check already holds — collected once for the whole program.
         let registry = DirectiveRegistry::from_tiers(self.symbols.tier_registry.clone());
         for f in &decorators.foreign {
-            match registry.lookup(&f.name) {
-                // An extension directive: legal here unless it restricts its sites.
-                Some(DirectiveKind::ExtDirective(d)) => {
-                    self.check_declared_sites(
-                        &f.name,
-                        d.sites,
-                        at.site,
-                        Some(at.name),
-                        f.name_span,
-                    );
-                    self.check_declared_args(d, &f.args, f.name_span);
-                }
+            // Built-ins and tiers resolve globally; an extension DIRECTIVE resolves per-package (only a
+            // `@name` this package bound in `[directives]`), so it is handled in the `None` arm below.
+            match registry.lookup_builtin_or_tier(&f.name) {
                 // `@tier` decorates the `fn` that runs a tier, never a type.
                 Some(DirectiveKind::Builtin(BuiltinDirective::Tier)) => {
                     self.error(
@@ -294,23 +316,56 @@ impl Checker {
                         format!("`@{d}` does not apply to {} `{}`", at.site.label(), at.name),
                     );
                 }
-                None => {
-                    let known: Vec<String> = registry.all().into_iter().map(|e| e.name).collect();
-                    let d = self.error(
-                        DiagnosticCode::UnknownDirective,
-                        f.name_span,
-                        format!("unknown directive `@{}`", f.name),
-                    );
-                    match noeta_diagnostics::closest(&f.name, known.iter().map(String::as_str)) {
-                        Some(s) => d.help(format!("did you mean `@{s}`?")),
-                        None => d.help(format!(
-                            "the directives that decorate a declaration are {}",
-                            BuiltinDirective::decorator_list()
-                        )),
-                    };
-                }
+                // `lookup_builtin_or_tier` never yields an extension directive — those resolve
+                // per-package, in the `None` arm below.
+                Some(DirectiveKind::ExtDirective(_)) => unreachable!(),
+                // Not a built-in or tier: resolve it as a per-package extension directive — legal here
+                // unless it restricts its sites. Unmapped/unknown falls through to the diagnostic.
+                None => match self.resolve_ext_directive_at(f.name_span, &f.name) {
+                    Some(d) => {
+                        self.check_declared_sites(
+                            &f.name,
+                            d.sites,
+                            at.site,
+                            Some(at.name),
+                            f.name_span,
+                        );
+                        self.check_declared_args(d, &f.args, f.name_span);
+                    }
+                    None => self.report_unmapped_directive(&f.name, f.name_span, &registry),
+                },
             }
         }
+    }
+
+    /// Report a `@name` that resolved to no built-in, tier, or bound extension directive. If the name
+    /// IS a directive some linked extension provides, this package simply did not bind it — say so and
+    /// point at `[directives]`; otherwise it is an unknown directive with a "did you mean" hint.
+    fn report_unmapped_directive(&mut self, name: &str, span: Span, registry: &DirectiveRegistry) {
+        if self.reg().find_ext_directive(name).is_some() {
+            self.error(
+                DiagnosticCode::UnknownDirective,
+                span,
+                format!("`@{name}` is a directive a dependency provides, but this package does not bind it"),
+            )
+            .help(format!(
+                "bind it in `[directives]`: `{name} = \"<dependency>\"` (add `:exported` to rename)"
+            ));
+            return;
+        }
+        let known: Vec<String> = registry.all().into_iter().map(|e| e.name).collect();
+        let d = self.error(
+            DiagnosticCode::UnknownDirective,
+            span,
+            format!("unknown directive `@{name}`"),
+        );
+        match noeta_diagnostics::closest(name, known.iter().map(String::as_str)) {
+            Some(s) => d.help(format!("did you mean `@{s}`?")),
+            None => d.help(format!(
+                "the directives that decorate a declaration are {}",
+                BuiltinDirective::decorator_list()
+            )),
+        };
     }
 }
 

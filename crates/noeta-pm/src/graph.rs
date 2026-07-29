@@ -51,6 +51,40 @@ pub struct ResolvedCommandBinding {
     pub exported: String,
 }
 
+/// Resolve a package's `[directives]`/`[tiers]` bindings against **its own** dependency edges: each
+/// local `@name` → the provider namespace root segment(s) (its dependency key → the resolved provider
+/// identities → their `root_segment`) and the exported name. A scope dependency key covers several
+/// members, hence a list; the built-in `"std"` provider resolves to root `"std"`. This is what makes a
+/// `@name` resolve in the package's own context — the same edges a `use <key>.…` resolves through.
+fn resolve_package_uses(
+    bindings: &BTreeMap<String, crate::manifest::UseBinding>,
+    edges: &BTreeMap<String, Vec<String>>,
+    instances: &BTreeMap<String, Instance>,
+) -> std::collections::HashMap<String, noeta_span::PackageUse> {
+    bindings
+        .iter()
+        .map(|(local, b)| {
+            let provider_roots = if b.provider_key == crate::manifest::BUILTIN_PROVIDER {
+                vec![crate::manifest::BUILTIN_PROVIDER.to_string()]
+            } else {
+                edges
+                    .get(&b.provider_key)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| instances.get(id).map(|i| i.root_segment.clone()))
+                    .collect()
+            };
+            (
+                local.clone(),
+                noeta_span::PackageUse {
+                    provider_roots,
+                    exported: b.exported.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 pub struct ResolvedGraph {
     /// One entry per resolved package identity, ready for [`noeta_loader::link_with_deps`], sorted by
@@ -71,6 +105,17 @@ pub struct ResolvedGraph {
     /// the local name resolving collisions between two packages exporting the same command name.
     /// std's own commands are always allowed and never appear here. Sorted by local name.
     pub command_bindings: Vec<ResolvedCommandBinding>,
+    /// The **root** package's resolved `[directives]` bindings (local `@name` → provider namespace
+    /// root(s) + exported), in the root's own dependency context. Each dependency's are carried on its
+    /// [`noeta_loader::DepPackage`]; this is the root's, which has no `DepPackage`. Kept separate (rather
+    /// than only inside [`Self::package_uses`]) because the reuse/query paths thread it back through
+    /// `DepPackage`s + this, and rebuild the combined map at the check seam.
+    pub root_directives: std::collections::HashMap<String, noeta_span::PackageUse>,
+    /// The whole program's per-package `@`-name resolution tables (`[directives]`): every dependency's
+    /// keyed by its [`PackageOrigin::Dependency`] link segment, the root's by [`PackageOrigin::Root`].
+    /// The checker reads this via a span's `SourceId`. Built once here where every package's directives
+    /// and its link segment are both known.
+    pub package_uses: noeta_span::PackageUses,
     /// scope (`company`) → the trust root established for it during the walk (provenance, Phase 4
     /// #2 / Phase 5) — a registry-served Ed25519 key or a keyless-verified OIDC identity — to be
     /// **pinned** in `noeta.lock` (trust-on-first-use). Empty when no registry dependency carried
@@ -166,6 +211,10 @@ struct Instance {
     /// dependency contributes exactly one identity; a **scope** dependency (`key = [ … ]`) contributes
     /// one per member package, all sharing the scope, so a key may map to several.
     edges: BTreeMap<String, Vec<String>>,
+    /// This package's own `[directives]` table (local `@name` → dependency key + exported), captured
+    /// from its manifest. Resolved to provider namespace roots in [`assemble`], once every edge is
+    /// known, using **this** package's own edges — so a `@name` resolves in the package's own context.
+    directives: BTreeMap<String, crate::manifest::UseBinding>,
     /// Whether this instance was materialized from a root `[patch]` override (dev-time path
     /// override) — carried into [`LockedPackage::patched`] so the lock writer can omit it.
     patched: bool,
@@ -257,6 +306,8 @@ fn resolve_graph_impl(
             locked: Vec::new(),
             native_crates: Vec::new(),
             command_bindings: Vec::new(),
+            root_directives: std::collections::HashMap::new(),
+            package_uses: noeta_span::PackageUses::new(),
             scope_trust: BTreeMap::new(),
             root_edition: crate::edition::Edition::DEFAULT,
             log_trust: None,
@@ -354,6 +405,7 @@ fn resolve_graph_impl(
         &root_edges,
         &manifest.trust().commands,
         // (assemble validates each binding's provider against the resolved native packages)
+        manifest.directives(),
         scope_trust,
         root_edition,
         registry_ids,
@@ -759,6 +811,7 @@ impl Walker<'_> {
                 source,
                 native: pkg.native.clone(),
                 edges: BTreeMap::new(),
+                directives: child_manifest.directives().clone(),
                 patched,
             },
         );
@@ -1783,6 +1836,7 @@ fn assemble(
     instances: BTreeMap<String, Instance>,
     root_edges: &BTreeMap<String, Vec<String>>,
     command_trust: &BTreeMap<String, crate::manifest::Binding>,
+    root_directives: &BTreeMap<String, crate::manifest::UseBinding>,
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
     root_edition: crate::edition::Edition,
     registry_identities: std::collections::BTreeSet<String>,
@@ -1871,11 +1925,15 @@ fn assemble(
             .map(|(local_key, children)| (local_key.clone(), global[&children[0]].clone()))
             .collect();
         let modules = crate::sources::read_package_sources(&inst.dir).unwrap_or_default();
+        // Resolve this dependency's own `[directives]` against ITS edges — a `@name` in this package's
+        // source resolves in this package's dependency context, not the root's.
+        let directives = resolve_package_uses(&inst.directives, &inst.edges, &instances);
         packages.push(noeta_loader::DepPackage {
             key,
             root: inst.root_segment.clone(),
             modules,
             dep_renames,
+            directives,
             // A native package's modules live in its Rust extension (composed in downstream), not the
             // link pool — so the loader retains, rather than flags, a `use` under its key.
             native: inst.native.is_some(),
@@ -1933,11 +1991,30 @@ fn assemble(
     // deterministic regardless of walk order.
     packages.sort_by(|a, b| a.key.cmp(&b.key));
     // `command_trust` is a BTreeMap, so `command_bindings` is already in local-name order.
+    // The root's `[directives]` resolve against the root's edges (the same context its source uses).
+    let root_directives = resolve_package_uses(root_directives, root_edges, &instances);
+    // The whole-program per-package table: the root under `Root`, each dependency under its link
+    // segment (`dep.key`), keyed exactly as the loader's `PackageMap` records each source's origin.
+    let mut package_uses = noeta_span::PackageUses::new();
+    for (local, u) in &root_directives {
+        package_uses.set(noeta_span::PackageOrigin::Root, local.clone(), u.clone());
+    }
+    for dep in &packages {
+        for (local, u) in &dep.directives {
+            package_uses.set(
+                noeta_span::PackageOrigin::Dependency(dep.key.clone()),
+                local.clone(),
+                u.clone(),
+            );
+        }
+    }
     Ok(ResolvedGraph {
         packages,
         locked,
         native_crates,
         command_bindings,
+        root_directives,
+        package_uses,
         scope_trust,
         root_edition,
         log_trust: None,
@@ -2983,6 +3060,53 @@ mod tests {
         let err = resolve_graph(&entry).expect_err("must fail");
         assert!(err.message().contains("acme/imgfx"), "{err}");
         assert!(err.message().contains("Cargo.toml"), "{err}");
+    }
+
+    #[test]
+    fn directive_bindings_resolve_to_the_provider_namespace_root() {
+        // A `[directives]` binding resolves, in the ROOT's own dependency context, to the provider
+        // package's namespace root + exported name — what the checker matches an `ExtDirective`
+        // against. Renaming (`local = "dep-key:exported"`) is carried through.
+        let base = std::env::temp_dir().join("noeta_graph_test_directives");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let dep = base.join("imgfx");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nfx = { path = \"../imgfx\" }\n\
+             [directives]\nblur = \"fx\"\nsharpen = \"fx:crispen\"\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        std::fs::write(
+            dep.join("noeta.toml"),
+            "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dep.join("imgfx.noe"),
+            "namespace imgfx;\npub fn one(): int { return 1; }\n",
+        )
+        .unwrap();
+
+        let g = resolve_graph(&app.join("main.noe")).expect("resolves");
+        // The provider `fx` (dep-key) → the dependency `acme/imgfx`, whose namespace root is `imgfx`.
+        let blur = g.root_directives.get("blur").expect("bound");
+        assert_eq!(blur.provider_roots, vec!["imgfx".to_string()]);
+        assert_eq!(blur.exported, "blur");
+        // Rename: `sharpen` locally, `crispen` as the provider exports it.
+        let sharpen = g.root_directives.get("sharpen").expect("bound");
+        assert_eq!(sharpen.provider_roots, vec!["imgfx".to_string()]);
+        assert_eq!(sharpen.exported, "crispen");
+        // And the whole-program table keys the root's bindings under `PackageOrigin::Root`.
+        let via_uses = g
+            .package_uses
+            .get(&noeta_span::PackageOrigin::Root, "blur")
+            .expect("root binds blur");
+        assert_eq!(via_uses.exported, "blur");
     }
 
     #[test]

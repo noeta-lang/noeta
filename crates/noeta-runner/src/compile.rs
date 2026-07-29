@@ -142,7 +142,20 @@ pub struct FrontFacts {
     pub active: Vec<String>,
     pub providers: BTreeMap<String, String>,
     pub deps: Vec<noeta_loader::DepPackage>,
+    /// The whole program's per-package `@`-name resolution tables (`[directives]`; `[tiers]` later),
+    /// keyed by [`noeta_span::PackageOrigin`]. Resolved with the dependency graph and carried to the
+    /// checker so a `@name` resolves in the package that wrote it.
+    pub package_uses: noeta_span::PackageUses,
     pub edition: noeta_pm::edition::Edition,
+}
+
+/// A dependency graph a single invocation already resolved (the compose probe) and hands back so the
+/// command path does not resolve it twice — the re-rooted packages the loader links, plus the whole
+/// program's per-package `@`-name tables ([`resolve_front_with`]).
+#[derive(Debug)]
+pub struct ResolvedFront {
+    pub packages: Vec<noeta_loader::DepPackage>,
+    pub package_uses: noeta_span::PackageUses,
 }
 
 /// Resolve the selection facts for `file` (see [`FrontFacts`]). A bad target fails fast, before
@@ -163,7 +176,7 @@ pub fn resolve_front_with(
     file: &Path,
     tiers: &[String],
     target: &Option<String>,
-    resolved_deps: Option<Vec<noeta_loader::DepPackage>>,
+    reused: Option<ResolvedFront>,
 ) -> Result<FrontFacts, CompileFailure> {
     // The active tier set is the union of any `--target`'s live tiers (from `noeta.toml`) and any
     // explicit `--tier` flags.
@@ -185,14 +198,14 @@ pub fn resolve_front_with(
     // both the cache key (so a dep or target-dep change never serves stale bytecode — the dep
     // fold covers the content, so the target name itself needs no extra key material) and the
     // loader (so `use <dep-key>.…` resolves).
-    let deps = match (target, resolved_deps) {
+    let (deps, package_uses) = match (target, reused) {
         // The caller's pre-resolved graph IS this selection (both are the default,
         // lock-refreshing resolve) — reuse it rather than resolving the same graph twice.
-        (None, Some(deps)) => deps,
+        (None, Some(reused)) => (reused.packages, reused.package_uses),
         // A `--target` layers `[targets.<name>.dependencies]` onto the globals — a legitimately
         // *different* selection than the compose probe's default resolve, so the target path
         // re-resolves rather than contorting the probe to anticipate every target (audit-5 F2).
-        _ => manifest::dependency_packages_for(file, target.as_deref())
+        _ => manifest::dependency_selection_for(file, target.as_deref())
             .map_err(|err| CompileFailure::Message(err.to_string()))?,
     };
     // The entry's effective language edition (follow-on F1) — part of the compilation identity.
@@ -201,6 +214,7 @@ pub fn resolve_front_with(
         active,
         providers,
         deps,
+        package_uses,
         edition,
     })
 }
@@ -221,6 +235,10 @@ pub struct Loaded {
     /// — the provenance the package orphan rule (E0070) reads. `SourceId`s survive tier activation,
     /// so the map stays valid against the activated program, exactly as [`Loaded::editions`] does.
     pub packages: noeta_span::PackageMap,
+    /// The per-package `@`-name resolution tables (`[directives]`; `[tiers]` later), keyed by
+    /// [`noeta_span::PackageOrigin`] — read by the checker via a span's `SourceId` so a `@name`
+    /// resolves in the package that wrote it. Carried alongside `packages`, from the same resolve.
+    pub package_uses: noeta_span::PackageUses,
 }
 
 impl Loaded {
@@ -231,6 +249,7 @@ impl Loaded {
         noeta_check::CheckOptions {
             editions: self.editions.clone(),
             packages: self.packages.clone(),
+            package_uses: self.package_uses.clone(),
             ..noeta_check::CheckOptions::default()
         }
     }
@@ -281,6 +300,7 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
         sources,
         editions,
         packages,
+        package_uses: facts.package_uses.clone(),
     })
 }
 
@@ -314,9 +334,9 @@ pub fn load_default_project(file: &Path) -> Result<Loaded, CompileFailure> {
 /// the same graph moments earlier.
 pub fn load_default_project_with(
     file: &Path,
-    resolved_deps: Option<Vec<noeta_loader::DepPackage>>,
+    reused: Option<ResolvedFront>,
 ) -> Result<Loaded, CompileFailure> {
-    let facts = resolve_front_with(file, &[], &None, resolved_deps)?;
+    let facts = resolve_front_with(file, &[], &None, reused)?;
     load_project(file, &facts)
 }
 
@@ -344,9 +364,9 @@ pub fn compile_whole_file_with(
     tiers: &[String],
     target: &Option<String>,
     no_cache: bool,
-    resolved_deps: Option<Vec<noeta_loader::DepPackage>>,
+    reused: Option<ResolvedFront>,
 ) -> Result<Compiled, CompileFailure> {
-    let facts = resolve_front_with(file, tiers, target, resolved_deps)?;
+    let facts = resolve_front_with(file, tiers, target, reused)?;
 
     // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
     let cache = open_startup_cache(
@@ -511,6 +531,15 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_edition::Edition::DEFAULT,
+            directives: Default::default(),
+        }
+    }
+
+    /// A reused default-selection graph carrying one dep and no `@`-name tables.
+    fn a_reused() -> ResolvedFront {
+        ResolvedFront {
+            packages: vec![a_dep()],
+            package_uses: noeta_span::PackageUses::new(),
         }
     }
 
@@ -529,7 +558,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let entry = dir.join("main.noe");
         std::fs::write(&entry, "echo 1\n").unwrap();
-        let facts = resolve_front_with(&entry, &[], &None, Some(vec![a_dep()]))
+        let facts = resolve_front_with(&entry, &[], &None, Some(a_reused()))
             .expect("default selection resolves");
         assert_eq!(
             facts.deps.len(),
@@ -543,7 +572,7 @@ mod tests {
         // handed-in deps were NOT silently used for it.
         let target = Some("dev".to_string());
         assert!(
-            resolve_front_with(&entry, &[], &target, Some(vec![a_dep()])).is_err(),
+            resolve_front_with(&entry, &[], &target, Some(a_reused())).is_err(),
             "a --target selection must re-resolve (and here fail: no manifest declares `dev`)"
         );
         let _ = std::fs::remove_dir_all(&dir);

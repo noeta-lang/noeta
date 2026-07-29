@@ -2822,6 +2822,23 @@ impl Registry {
         self.ext_directives().find(|d| d.name == name)
     }
 
+    /// Resolve an extension directive **scoped to a set of provider namespace roots** (per-package
+    /// naming arc): the `exported` directive declared by a unit whose [`Extension::root`] is one of
+    /// `provider_roots`. This is how a `@name` resolves to the specific provider a using package's
+    /// `[directives]` binding named, rather than the first global match — so two packages exporting
+    /// the same directive name never shadow each other. `provider_roots` empty → no match.
+    pub fn find_ext_directive_scoped(
+        &self,
+        provider_roots: &[String],
+        exported: &str,
+    ) -> Option<&'static ExtDirective> {
+        self.units
+            .iter()
+            .filter(|u| provider_roots.iter().any(|r| r == u.root()))
+            .flat_map(|u| u.directives().iter())
+            .find(|d| d.name == exported)
+    }
+
     /// Every installed extension's tier-body formatters `(language, fn)`, in install order.
     pub fn ext_body_formatters(&self) -> impl Iterator<Item = &'static BodyFormatter> + '_ {
         self.units.iter().flat_map(|e| e.body_formatters().iter())

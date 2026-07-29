@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+noeta-span = { workspace = true }
 noeta-edition = { workspace = true }
 noeta-cache = { workspace = true }
 noeta-check = { workspace = true }

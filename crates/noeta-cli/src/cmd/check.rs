@@ -161,10 +161,10 @@ pub(crate) fn cmd_check(
         } else {
             None
         };
-        let deps = match reusable {
-            Some(graph) => graph.packages,
+        let (deps, package_uses) = match reusable {
+            Some(graph) => (graph.packages, graph.package_uses),
             None => match graph::resolve_graph(dir_entries[0]) {
-                Ok(graph) => graph.packages,
+                Ok(graph) => (graph.packages, graph.package_uses),
                 Err(err) => {
                     for entry in dir_entries {
                         eprintln!("noeta: {}: {err}", entry.display());
@@ -219,6 +219,7 @@ pub(crate) fn cmd_check(
                     let opts = noeta_check::CheckOptions {
                         editions: editions.unwrap_or_else(|| parsed.editions().clone()),
                         packages: parsed.packages().clone(),
+                        package_uses: package_uses.clone(),
                         ..noeta_check::CheckOptions::default()
                     };
                     let program = linked.program;

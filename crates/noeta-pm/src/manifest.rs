@@ -40,7 +40,7 @@ pub const MANIFEST_NAME: &str = "noeta.toml";
 
 /// The built-in/stdlib tier provider — always available; every other provider must be a declared
 /// `[dependencies]` key.
-const BUILTIN_PROVIDER: &str = "std";
+pub(crate) const BUILTIN_PROVIDER: &str = "std";
 
 /// A parsed `noeta.toml`: the package's identity (`[package]`, absent for a bare script), its
 /// declared dependencies (`[dependencies]`, keyed by **import root**), and its build targets.
@@ -48,6 +48,11 @@ const BUILTIN_PROVIDER: &str = "std";
 pub struct Manifest {
     package: Option<PackageMeta>,
     dependencies: BTreeMap<String, Dependency>,
+    /// The `[directives]` table: the extension `@`-directives this package's own source uses, each a
+    /// local `@name` → the dependency (by this package's import-root key) that provides it and the name
+    /// it exported. Per-package (see [`UseBinding`]); resolution of a `@name` is scoped to the package
+    /// that wrote it. Authorization to run the provider's native code stays root-only (`[trust].native`).
+    directives: BTreeMap<String, UseBinding>,
     targets: BTreeMap<String, Target>,
     trust: Trust,
     registries: Registries,
@@ -238,6 +243,25 @@ pub struct Binding {
     pub provider: String,
     /// The name the provider declared the command/directive under (its `ExtCommand`/`ExtDirective`
     /// `name`). Equal to the local key unless a `:exported` suffix renamed it.
+    pub exported: String,
+}
+
+/// A per-package `[directives]` / `[tiers]` binding: the local `@name` a package's own source writes,
+/// resolved to a provider named by one of **this package's** dependency import-root keys, and the name
+/// that provider exported. Written `local = "para"` (exported name == local) or `local = "para:html"`
+/// to rename.
+///
+/// Unlike [`Binding`] (`[trust.commands]`: root-only, keyed by global package **identity**), these are
+/// **per-package** and keyed by the using package's own dependency **keys** — the same context a
+/// `use <key>.…` resolves in. So two packages can each name the tier/directive they use from a shared
+/// provider differently, and a package renames to avoid a collision between two providers' same-named
+/// tiers. Authorization is separate and stays root-only (`[trust].native`); this table only names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseBinding {
+    /// A dependency import-root key of the package this table belongs to (a `[dependencies]` key), or
+    /// the built-in provider `"std"` where the table permits it (`[tiers]`, for `test`/`debug`/…).
+    pub provider_key: String,
+    /// The tier/directive name the provider declared. Equal to the local key unless `:exported` renamed it.
     pub exported: String,
 }
 
@@ -825,6 +849,17 @@ pub fn dependency_packages_for(
     Ok(crate::graph::resolve_graph_for(entry, target)?.packages)
 }
 
+/// As [`dependency_packages_for`], but also returns the whole program's per-package `@`-name tables
+/// (`[directives]`; `[tiers]` later) — the [`noeta_span::PackageUses`] the checker resolves `@name`
+/// through. One resolve produces both, so the front-end need not resolve the graph twice.
+pub fn dependency_selection_for(
+    entry: &Path,
+    target: Option<&str>,
+) -> Result<(Vec<noeta_loader::DepPackage>, noeta_span::PackageUses), PmError> {
+    let g = crate::graph::resolve_graph_for(entry, target)?;
+    Ok((g.packages, g.package_uses))
+}
+
 /// As [`dependency_packages`], but a pure **query** ([`crate::graph::resolve_graph_query`]): no
 /// lockfile refresh. What the IDE calls — opening a file in the editor must not rewrite
 /// `noeta.lock` (or silently re-pin versions) as a side effect of making hover/completions work.
@@ -988,6 +1023,7 @@ impl Manifest {
         let table: toml::Table = text.parse().map_err(|err| format!("{err}"))?;
         let package = parse_package(&table)?;
         let dependencies = parse_dependencies(&table)?;
+        let directives = parse_use_bindings(&table, "directives", &dependencies, false)?;
         let trust = parse_trust(&table)?;
         let registries = parse_registries(&table)?;
         let db = parse_db(&table)?;
@@ -998,6 +1034,7 @@ impl Manifest {
             return Ok(Manifest {
                 package,
                 dependencies,
+                directives,
                 targets,
                 trust,
                 registries,
@@ -1082,6 +1119,7 @@ impl Manifest {
         Ok(Manifest {
             package,
             dependencies,
+            directives,
             targets,
             trust,
             registries,
@@ -1113,6 +1151,12 @@ impl Manifest {
     /// The declared dependencies, keyed by local **import root** (the dependency-table key).
     pub fn dependencies(&self) -> &BTreeMap<String, Dependency> {
         &self.dependencies
+    }
+
+    /// The `[directives]` table — the extension `@`-directives this package's source uses, each local
+    /// `@name` → the dependency (this package's import-root key) that provides it and its exported name.
+    pub fn directives(&self) -> &BTreeMap<String, UseBinding> {
+        &self.directives
     }
 
     /// The `[patch]` overrides (dev-time path override): package identity → the local tree that
@@ -1614,6 +1658,68 @@ fn parse_binding_table(
             local.clone(),
             Binding {
                 provider: provider.to_string(),
+                exported: exported.to_string(),
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Parse a per-package `[directives]` / `[tiers]` table (`local = "dep-key[:exported]"`) into a
+/// local-name → [`UseBinding`] map. The provider is named by one of **this package's** dependency
+/// import-root keys (`dependencies`), so a `@name` resolves in the same context a `use <key>.…`
+/// does. `allow_builtin` permits the built-in `"std"` provider (for `[tiers]`, whose `test`/`debug`/…
+/// come from the stdlib); `[directives]` passes `false` — a directive always comes from a dependency.
+fn parse_use_bindings(
+    table: &toml::Table,
+    field: &str,
+    dependencies: &BTreeMap<String, Dependency>,
+    allow_builtin: bool,
+) -> Result<BTreeMap<String, UseBinding>, String> {
+    let Some(value) = table.get(field) else {
+        return Ok(BTreeMap::new());
+    };
+    let entries = value
+        .as_table()
+        .ok_or_else(|| format!("`{field}` must be a table of `local = \"dep-key[:exported]\"`"))?;
+    let mut out = BTreeMap::new();
+    for (local, spec_value) in entries {
+        let spec = spec_value.as_str().ok_or_else(|| {
+            format!("`{field}.{local}` must be a string `\"dep-key[:exported]\"`")
+        })?;
+        // First `:` splits the provider key from the exported name; no colon → exported == local.
+        let (provider_key, exported) = match spec.split_once(':') {
+            Some((p, e)) => (p, e),
+            None => (spec, local.as_str()),
+        };
+        if provider_key.is_empty() {
+            return Err(format!(
+                "`{field}.{local}`: the provider dependency key is empty"
+            ));
+        }
+        if exported.is_empty() {
+            return Err(format!(
+                "`{field}.{local}`: the exported name after `:` is empty — drop the `:` to bind the \
+                 provider's own `{local}`, or name the {} it exports",
+                field.trim_end_matches('s')
+            ));
+        }
+        let is_builtin = allow_builtin && provider_key == BUILTIN_PROVIDER;
+        if !is_builtin && !dependencies.contains_key(provider_key) {
+            let std_hint = if allow_builtin {
+                format!(" (or the built-in `\"{BUILTIN_PROVIDER}\"`)")
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "`{field}.{local}` names provider `{provider_key}`, which is not a `[dependencies]` \
+                 key{std_hint} — add `{provider_key}` to `[dependencies]` to use its {field}"
+            ));
+        }
+        out.insert(
+            local.clone(),
+            UseBinding {
+                provider_key: provider_key.to_string(),
                 exported: exported.to_string(),
             },
         );
@@ -2373,6 +2479,38 @@ mod tests {
         assert_eq!(renamed.provider, "acme/scaffold");
         assert_eq!(renamed.exported, "generate");
         assert!(!m.trust().commands.contains_key("acme/imgfx"));
+    }
+
+    #[test]
+    fn directives_bind_local_names_to_a_dependency_and_exported_name() {
+        let m = Manifest::parse(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\npara = { path = \"../para\" }\n\
+             [directives]\n\
+             openapi = \"para\"\n\
+             oapi = \"para:openapi\"\n",
+        )
+        .expect("valid");
+        // No-rename: exported defaults to the local key.
+        let openapi = m.directives().get("openapi").expect("bound");
+        assert_eq!(openapi.provider_key, "para");
+        assert_eq!(openapi.exported, "openapi");
+        // Rename: `local = "dep-key:exported"`.
+        let oapi = m.directives().get("oapi").expect("bound");
+        assert_eq!(oapi.provider_key, "para");
+        assert_eq!(oapi.exported, "openapi");
+    }
+
+    #[test]
+    fn a_directive_naming_an_undeclared_dependency_is_an_error() {
+        let err = Manifest::parse(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [directives]\nopenapi = \"para\"\n",
+        )
+        .expect_err("provider must be a declared dependency")
+        .to_string();
+        assert!(err.contains("directives.openapi"), "{err}");
+        assert!(err.contains("[dependencies]"), "{err}");
     }
 
     #[test]

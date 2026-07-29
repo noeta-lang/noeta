@@ -22,6 +22,7 @@ fn composed_project(name: &str) -> PathBuf {
         app.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
          [dependencies]\nimgfx = { path = \"../imgfx\" }\n\
+         [directives]\nfx_spec = \"imgfx\"\nfx_shape = \"imgfx\"\n\
          [trust]\nnative = [\"acme/imgfx\"]\n\
          [trust.commands]\nfx-info = \"acme/imgfx\"\n",
     )

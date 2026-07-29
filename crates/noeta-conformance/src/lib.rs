@@ -333,6 +333,7 @@ fn dep_packages(dir: &Path) -> Vec<noeta_loader::DepPackage> {
                 dep_renames: std::collections::BTreeMap::new(),
                 native: false,
                 edition: noeta_lexer::Edition::DEFAULT,
+                directives: Default::default(),
             })
         })
         .collect()

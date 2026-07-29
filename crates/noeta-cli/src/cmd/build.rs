@@ -27,7 +27,16 @@ pub(crate) fn cmd_dump(
     };
     // Same whole-file compile as `run` (so the disassembly is exactly what the VM runs), and a cache
     // participant — a cached module is byte-identical to a fresh compile, so the disassembly matches.
-    match compile_whole_file_with(file, tiers, target, false, resolved.map(|g| g.packages)) {
+    match compile_whole_file_with(
+        file,
+        tiers,
+        target,
+        false,
+        resolved.map(|g| noeta_runner::compile::ResolvedFront {
+            packages: g.packages,
+            package_uses: g.package_uses,
+        }),
+    ) {
         Ok(compiled) => {
             print!("{}", compiled.module.disassemble());
             let _ = io::stdout().flush();
@@ -66,11 +75,19 @@ pub(crate) fn cmd_build(
     }
     // Same whole-file compile + startup cache as `run`/`dump`. The emit format doesn't affect the
     // module, so a `build` shares cache entries with a `run` of the same source — each warms the other.
-    let module =
-        match compile_whole_file_with(file, tiers, target, false, resolved.map(|g| g.packages)) {
-            Ok(compiled) => compiled.module,
-            Err(failure) => return failure.report(),
-        };
+    let module = match compile_whole_file_with(
+        file,
+        tiers,
+        target,
+        false,
+        resolved.map(|g| noeta_runner::compile::ResolvedFront {
+            packages: g.packages,
+            package_uses: g.package_uses,
+        }),
+    ) {
+        Ok(compiled) => compiled.module,
+        Err(failure) => return failure.report(),
+    };
     let module = module.as_ref();
     if native {
         emit_native(file, out, module)

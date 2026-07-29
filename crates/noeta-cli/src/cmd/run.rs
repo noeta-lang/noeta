@@ -169,7 +169,16 @@ pub(crate) fn cmd_run(
     // Everything else — resolve tiers, consult the startup cache, and (on a miss) load → check →
     // compile — is the shared whole-file pipeline. On success run the module with the program's
     // pass-through args; on failure report it.
-    match compile_whole_file_with(file, tiers, target, no_cache, resolved.map(|g| g.packages)) {
+    match compile_whole_file_with(
+        file,
+        tiers,
+        target,
+        no_cache,
+        resolved.map(|g| noeta_runner::compile::ResolvedFront {
+            packages: g.packages,
+            package_uses: g.package_uses,
+        }),
+    ) {
         Ok(compiled) => run_compiled_module(
             compiled.module,
             &compiled.sources,

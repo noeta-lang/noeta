@@ -61,6 +61,13 @@ pub struct Linked {
     /// generating directive may sit on a *dependency's* declaration, which would make "the root
     /// package" the wrong answer rather than merely a missing one.
     pub packages: noeta_span::PackageMap,
+    /// Per-package `@`-name resolution tables (`[directives]`; `[tiers]` later), keyed by
+    /// [`PackageOrigin`](noeta_span::PackageOrigin) — the parallel of [`Self::packages`] for
+    /// extension `@name` resolution. Built by the package manager from each package's manifest in
+    /// its own dependency context; the checker resolves a `@name` by the package that wrote it.
+    /// The loader itself has no manifest data, so its own constructions leave this empty; the
+    /// driver that resolved the graph fills it in (it holds the resolved tables).
+    pub package_uses: noeta_span::PackageUses,
     /// Every **non-Noeta file** a compile-time directive expansion read (an OpenAPI spec and the
     /// documents it `$ref`s, say), as the hooks reported them.
     ///
@@ -250,6 +257,12 @@ pub struct DepPackage {
     /// unrepresentable here rather than silently degrading to the default. (`noeta-edition` is the
     /// bottom-of-DAG vocabulary crate, so depending on the type costs the loader nothing.)
     pub edition: noeta_lexer::Edition,
+    /// This package's resolved `[directives]` bindings: local `@name` → the provider namespace root(s)
+    /// and exported name (per-package naming arc). Resolved by the package manager in **this** package's
+    /// dependency context; the loader keys them by this package's [`PackageOrigin`] into the checker's
+    /// per-package directive tables so a `@name` resolves in the source that wrote it. Empty for a
+    /// package that uses no extension directives.
+    pub directives: std::collections::HashMap<String, noeta_span::PackageUse>,
 }
 
 /// Re-root a namespace/use path in place: replace its leading segment per the rules
@@ -488,6 +501,7 @@ pub fn link(
         sources: SourceMap::new(sources),
         editions,
         packages,
+        package_uses: noeta_span::PackageUses::new(),
         reads,
     })
 }
@@ -723,6 +737,7 @@ pub fn link_with_deps(
         sources: SourceMap::new(sources),
         editions,
         packages,
+        package_uses: noeta_span::PackageUses::new(),
         reads,
     })
 }
@@ -2662,6 +2677,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let dep_b = DepPackage {
             key: "b".to_string(),
@@ -2673,6 +2689,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         // The entry need not import the deps: their sources are assembled (and thus keyed in the
         // editions map) whether or not a declaration is pulled into the merge.
@@ -2727,6 +2744,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use webclient.client.Client;\nc = Client { base: \"x\" };\n";
         let linked = link_with_deps(
@@ -2764,6 +2782,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use webclient.clientt.Client;\nc = Client { base: \"x\" };\n";
         let errors = link_with_deps(
@@ -2795,6 +2814,7 @@ mod tests {
             dep_renames: Default::default(),
             native: true,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use imgfx.fx;\necho fx.double(21);\n";
         let linked = link_with_deps(
@@ -2835,6 +2855,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         }
     }
 
@@ -2900,6 +2921,7 @@ mod tests {
             dep_renames: Default::default(),
             native: true,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use imgfx.fx;\necho fx.double(21);\n";
         let linked = link_with_deps(
@@ -3071,6 +3093,7 @@ mod tests {
             dep_renames: Default::default(),
             native: true,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use imgtx.fx;\necho fx.double(21);\n";
         let errors = link_with_deps(
@@ -3113,6 +3136,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use webclient.client.Client;\nc = Client { body: Body { text: \"hi\" } };\n";
         let linked = link_with_deps(
@@ -3144,6 +3168,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let b = DepPackage {
             key: "beta".to_string(),
@@ -3155,6 +3180,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry =
             "use alpha.core.Ping;\nuse beta.core.Pong;\np = Ping { n: 1 };\nq = Pong { n: 2 };\n";
@@ -3195,6 +3221,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let api = DepPackage {
             key: "para".to_string(),
@@ -3213,6 +3240,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use para.aether.serve.{drive};\nuse para.api.middleware.{apply};\n";
         let linked = link_with_deps(
@@ -3322,6 +3350,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let errs = link_with_deps(
             "main.noe",
@@ -3360,6 +3389,7 @@ mod tests {
             dep_renames: app_renames,
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let json = DepPackage {
             key: "pkg_json".to_string(),
@@ -3371,6 +3401,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use app.core.Widget;\nw = Widget { v: Value { n: 1 } };\n";
         let linked = link_with_deps(
@@ -3405,6 +3436,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let sibling = module(
             "lib.noe",
@@ -3475,6 +3507,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use geo.circle.area;\necho area(2.0);\n";
         let linked = link_with_deps(
@@ -3871,6 +3904,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use mathx.lib.twice;\necho twice(21);\n";
         let linked = link_with_deps(
@@ -3904,6 +3938,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use widgets.lib.origin;\np = origin();\necho p.x;\n";
         let linked = link_with_deps(
@@ -3938,6 +3973,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use chain.lib.go;\ni = go(3);\necho i.v;\n";
         let linked = link_with_deps(
@@ -3979,6 +4015,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use svc.lib.{Shape, S};\necho S.new().go();\n";
         let linked = link_with_deps(

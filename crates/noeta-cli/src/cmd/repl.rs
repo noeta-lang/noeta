@@ -55,7 +55,10 @@ pub(crate) fn repl_bootstrap(
     // compose probe's graph (default selection) is reused rather than resolved again (audit-5 F2).
     let loaded = match noeta_runner::compile::load_default_project_with(
         path,
-        resolved.map(|g| g.packages),
+        resolved.map(|g| noeta_runner::compile::ResolvedFront {
+            packages: g.packages,
+            package_uses: g.package_uses,
+        }),
     ) {
         Ok(loaded) => loaded,
         Err(failure) => return Err(failure.report()),

@@ -307,6 +307,55 @@ impl PackageMap {
     }
 }
 
+/// One resolved per-package `@`-name binding (`[directives]` / `[tiers]`): the provider namespace
+/// **root** segment(s) the local `@name` resolves to — a scope dependency key covers several member
+/// packages, hence a list — and the name the provider exported. Matched against an extension unit by
+/// `unit.root() ∈ provider_roots && declared-name == exported`, the same root-namespace identity the
+/// module system uses. Built per-package in the loader from a package's manifest table, in that
+/// package's own dependency context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageUse {
+    /// The provider package(s)' namespace root segment(s) this local name resolves to.
+    pub provider_roots: Vec<String>,
+    /// The tier/directive name the provider declared.
+    pub exported: String,
+}
+
+/// Per-package `@`-name resolution tables, keyed by the **using** package and then the local `@name`
+/// it writes in source. The checker recovers a `@name`'s package from its span's [`SourceId`]
+/// (via [`PackageMap`]) and looks the local name up here. An absent entry means the package binds no
+/// such name — resolution reports it unmapped, rather than reaching into a global namespace.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackageUses {
+    by_package:
+        std::collections::HashMap<PackageOrigin, std::collections::HashMap<String, PackageUse>>,
+}
+
+impl PackageUses {
+    /// An empty set of tables.
+    pub fn new() -> PackageUses {
+        PackageUses::default()
+    }
+
+    /// Record that `origin`'s source binds local `@name` to `use_`.
+    pub fn set(&mut self, origin: PackageOrigin, local: String, use_: PackageUse) {
+        self.by_package
+            .entry(origin)
+            .or_default()
+            .insert(local, use_);
+    }
+
+    /// Resolve local `@name` for a given using package, or `None` when that package binds no such name.
+    pub fn get(&self, origin: &PackageOrigin, local: &str) -> Option<&PackageUse> {
+        self.by_package.get(origin)?.get(local)
+    }
+
+    /// Whether nothing has been recorded (no package binds any `@`-name — the single-file default).
+    pub fn is_empty(&self) -> bool {
+        self.by_package.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

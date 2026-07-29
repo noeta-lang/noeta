@@ -75,10 +75,21 @@ pub(crate) fn load_linked(
 ) -> Result<noeta_loader::Linked, ExitCode> {
     // The shared front half (drift firewall): deps + edition resolve exactly as `noeta run`'s
     // pipeline resolves them; the verbs stage tier activation themselves.
-    let facts =
-        noeta_runner::compile::resolve_front_with(file, &[], &None, resolved.map(|g| g.packages))
-            .map_err(|f| f.report())?;
-    noeta_runner::compile::load_linked(file, &facts).map_err(|f| f.report())
+    let facts = noeta_runner::compile::resolve_front_with(
+        file,
+        &[],
+        &None,
+        resolved.map(|g| noeta_runner::compile::ResolvedFront {
+            packages: g.packages,
+            package_uses: g.package_uses,
+        }),
+    )
+    .map_err(|f| f.report())?;
+    // The loader has no manifest data, so it leaves `package_uses` empty; fill it from the resolved
+    // facts (which hold the per-package `@`-name tables) so `loaded(..)`’s check resolves directives.
+    let mut linked = noeta_runner::compile::load_linked(file, &facts).map_err(|f| f.report())?;
+    linked.package_uses = facts.package_uses;
+    Ok(linked)
 }
 
 /// Rewrap a linker result as the runner's [`Loaded`], so type-checking goes through
@@ -90,6 +101,7 @@ pub(crate) fn loaded(linked: noeta_loader::Linked) -> Loaded {
         sources: linked.sources,
         editions: linked.editions,
         packages: linked.packages,
+        package_uses: linked.package_uses,
     }
 }
 
@@ -204,6 +216,7 @@ pub(crate) fn tier_prologue(
         sources,
         editions,
         packages,
+        package_uses,
         ..
     } = linked;
     let checking = Loaded {
@@ -211,6 +224,7 @@ pub(crate) fn tier_prologue(
         sources,
         editions,
         packages,
+        package_uses,
     };
     let checked = checking.check();
     if !checked.diagnostics.is_empty() {

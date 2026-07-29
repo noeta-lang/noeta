@@ -166,6 +166,13 @@ pub struct CheckOptions {
     /// the orphan rule stands down — the right answer for a single-file check or a synthetic
     /// program, which have no package graph to judge against.
     pub packages: PackageMap,
+    /// Per-package `@`-name resolution tables (`[directives]`; `[tiers]` later), keyed by
+    /// [`PackageOrigin`](noeta_span::PackageOrigin): the loader/pm builds them from each package's
+    /// manifest in that package's own dependency context. The checker resolves a `@name` by the
+    /// package that wrote it (via the span's `SourceId` through [`Self::packages`]). Empty means no
+    /// package binds any extension `@name` — the single-file default, where only built-in directives
+    /// and program-declared tiers resolve.
+    pub package_uses: noeta_span::PackageUses,
 }
 
 impl std::fmt::Debug for CheckOptions {
@@ -263,6 +270,7 @@ fn check_all_impl(program: &Program, opts: CheckOptions, cancel: &dyn Fn()) -> C
             registry: opts.registry,
             editions: opts.editions,
             packages: opts.packages,
+            package_uses: opts.package_uses,
             ..Config::default()
         },
         ..Checker::default()
@@ -449,6 +457,7 @@ impl SessionChecker {
                 registry: opts.registry,
                 editions: opts.editions,
                 packages: opts.packages,
+                package_uses: opts.package_uses,
             },
             ..Checker::default()
         };
@@ -1205,6 +1214,12 @@ struct Config {
     /// package from its span via [`Checker::package_at`]. Empty — the default — means provenance is
     /// unknown, and the package orphan rule ([`Checker::check_package_orphan`]) does not fire.
     packages: PackageMap,
+    /// Per-package `@`-name resolution tables (`[directives]`; `[tiers]` later), keyed by
+    /// [`PackageOrigin`](noeta_span::PackageOrigin). The checker resolves an extension `@name` by the
+    /// package that wrote it — [`Checker::package_at`] gives the [`PackageOrigin`], then this maps the
+    /// local name to the provider namespace root(s) and exported name. Empty — the default — means no
+    /// package binds any extension `@name`, so only built-in directives and program tiers resolve.
+    package_uses: noeta_span::PackageUses,
 }
 
 // `Clone` so a [`SessionChecker`] entry is transactional (clone-before, restore-on-error) —
@@ -2200,7 +2215,7 @@ impl Checker {
                 // (the adjacency form), so an extension's own `@`-directive arrives here too. It
                 // is not a tier: resolve it as a directive and site-check it against what it wraps,
                 // rather than reporting "unknown dev-tier" about a name the registry knows.
-                if let Some(d) = self.reg().find_ext_directive(tier) {
+                if let Some(d) = self.resolve_ext_directive_at(*tier_span, tier) {
                     self.check_ext_directive_block(d, items, *tier_span);
                 } else if !self.symbols.tier_registry.is_known(tier) {
                     self.diags
@@ -2299,7 +2314,7 @@ impl Checker {
             // then it is legal here — it is not a tier, so "unknown dev-tier" would be the wrong
             // complaint about a name the registry knows perfectly well. Its sites gate exactly as a
             // tier's do below.
-            let ext_directive = self.reg().find_ext_directive(&dir.name);
+            let ext_directive = self.resolve_ext_directive_at(dir.name_span, &dir.name);
             if ext_directive.is_none() && !self.symbols.tier_registry.is_known(&dir.name) {
                 let d = tiers::unknown_tier_diagnostic(self.reg(), &dir.name, dir.name_span);
                 self.diags.push(d);
