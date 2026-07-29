@@ -61,7 +61,7 @@ pub struct Linked {
     /// generating directive may sit on a *dependency's* declaration, which would make "the root
     /// package" the wrong answer rather than merely a missing one.
     pub packages: noeta_span::PackageMap,
-    /// Per-package `@`-name resolution tables (`[directives]`; `[tiers]` later), keyed by
+    /// Per-package `@`-name resolution tables (`[directives]` and `[tiers]` alike), keyed by
     /// [`PackageOrigin`](noeta_span::PackageOrigin) — the parallel of [`Self::packages`] for
     /// extension `@name` resolution. Built by the package manager from each package's manifest in
     /// its own dependency context; the checker resolves a `@name` by the package that wrote it.
@@ -257,11 +257,12 @@ pub struct DepPackage {
     /// unrepresentable here rather than silently degrading to the default. (`noeta-edition` is the
     /// bottom-of-DAG vocabulary crate, so depending on the type costs the loader nothing.)
     pub edition: noeta_lexer::Edition,
-    /// This package's resolved `[directives]` bindings: local `@name` → the provider namespace root(s)
-    /// and exported name (per-package naming arc). Resolved by the package manager in **this** package's
-    /// dependency context; the loader keys them by this package's [`PackageOrigin`] into the checker's
-    /// per-package directive tables so a `@name` resolves in the source that wrote it. Empty for a
-    /// package that uses no extension directives.
+    /// This package's resolved `@name` bindings — its `[directives]` and `[tiers]` merged into one map
+    /// (local `@name` → the provider namespace root(s) and exported name, per-package naming arc; a
+    /// `@name` is one namespace, so the two tables cannot collide). Resolved by the package manager in
+    /// **this** package's dependency context; the loader keys them by this package's [`PackageOrigin`]
+    /// into the checker's per-package `@name` tables so a `@name` resolves in the source that wrote it.
+    /// Empty for a package that uses no extension `@`-directives or tiers.
     pub directives: std::collections::HashMap<String, noeta_span::PackageUse>,
 }
 
