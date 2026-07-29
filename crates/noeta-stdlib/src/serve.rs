@@ -89,7 +89,10 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
             SigType::Fn(&[REQUEST_SIG], &SigType::Dyn),
             SigType::Optional(&SigType::String),
         ],
-        ret: RetTy::Concrete(SigType::Unit),
+        // `never`, not `void`: the accept loop runs until the process is interrupted, so nothing
+        // after this call ever runs. A tier runner reads this to know it must not put
+        // `server.serve(…)` into the setup every test shares — it would block the runner forever.
+        ret: RetTy::Concrete(SigType::Never),
     },
     // `websocket(handler) -> Response` (server-hmr L0) — the connection-hijack response: returned
     // from a `fetch` handler, it upgrades the request's connection to a websocket and runs

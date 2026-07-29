@@ -38,6 +38,7 @@
 use std::collections::HashSet;
 
 use noeta_ast::{Expr, FnDecl, Program, Stmt};
+use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
 /// Why the shared setup does not run a top-level statement. `None` from [`setup_drop`] means the
@@ -56,10 +57,9 @@ pub enum SetupDrop {
     /// block it forever — this is the drop the whole filter exists for, and now the only one
     /// justified by the language rather than by syntax.
     Diverges,
-    /// A `while` loop, or a statement containing one. Unbounded by construction: whether a `while`
-    /// terminates is undecidable, and a top-level `while true { … }` is exactly the hand-rolled
-    /// event-loop shape the runner must not enter. Dropped conservatively **and reported** —
-    /// see [`dropped_setup_warnings`].
+    /// A `while true { … }` with no `break` that targets it — a loop that provably never exits, so
+    /// the runner would sit in it forever. Only *this* loop shape is dropped; an ordinary
+    /// condition-driven `while` is setup and runs. Reported — see [`dropped_setup_warnings`].
     UnboundedLoop,
     /// `return` / `break` / `continue` at the top level — control flow with no enclosing target in
     /// the synthesized per-case program. Dropped because there is nothing for it to do, not because
@@ -73,7 +73,7 @@ impl SetupDrop {
         match self {
             SetupDrop::Output => "it is program output, not setup",
             SetupDrop::Diverges => "it does not return (`never`), so running it would not finish",
-            SetupDrop::UnboundedLoop => "a `while` loop is not known to terminate",
+            SetupDrop::UnboundedLoop => "`while true` with no `break` never exits",
             SetupDrop::ControlFlow => "top-level control flow has nothing to act on here",
         }
     }
@@ -99,9 +99,33 @@ pub fn is_tier_setup(stmt: &Stmt, diverging: &HashSet<Span>) -> bool {
 /// `if` and `for` are kept because they terminate structurally: a conditional runs one branch once,
 /// and a `for` walks an iterable. A fixture seeded by a top-level `for` is ordinary setup and used
 /// to vanish. They are dropped only when they *contain* something that does not finish, which is
-/// the same question asked one level down.
+/// the same question asked one level down. `while` is kept on the same terms, except for the one
+/// shape that provably never exits (see [`SetupDrop::UnboundedLoop`]).
 ///
-/// `while` is the residual hole and is dropped wholesale — see [`SetupDrop::UnboundedLoop`].
+/// # Direction, and why this is not [`crate::subst::stmt_diverges`]
+///
+/// The two analyses ask about the same property from opposite sides, and both are sound *for their
+/// own consumer*:
+///
+/// - `stmt_diverges` is **must-diverge**, and under-approximates: E0048 may only reject a function
+///   it is *sure* falls off its end, so an unrecognized construct must count as falling through.
+/// - This is **may-diverge**, and over-approximates: the runner may only run a statement it is sure
+///   finishes, so anything doubtful is dropped — dropping is now *reported*
+///   ([`dropped_setup_warnings`]), while a wrong "it finishes" hangs the runner with no output at
+///   all.
+///
+/// They share the divergence *vocabulary* ([`body_breaks`](crate::subst::body_breaks), the
+/// `never` type) rather than one implementation, because collapsing them would force one consumer
+/// onto the other's unsound side.
+///
+/// # Residual holes
+///
+/// Divergence is **declared, not inferred**, so a call that reaches a non-returning function
+/// *indirectly* is not seen: `fn boot(): void { os.exit(0) }` with a top-level `boot()` types as
+/// `void`, joins the setup, and exits the runner. The fix is local and checkable — declare
+/// `fn boot(): never` — and the failure is loud (the run ends) rather than the silent wrong answer
+/// this module exists to remove. Likewise, a `for` over an endless generator, and a `while` whose
+/// condition happens never to become false, are kept and would not finish.
 pub fn setup_drop(stmt: &Stmt, diverging: &HashSet<Span>) -> Option<SetupDrop> {
     match stmt {
         Stmt::Echo { .. } => Some(SetupDrop::Output),
@@ -111,8 +135,21 @@ pub fn setup_drop(stmt: &Stmt, diverging: &HashSet<Span>) -> Option<SetupDrop> {
         // The behavioural question, answered by the type system rather than by the statement's
         // shape: `conn.migrate(…)` returns and runs; `os.exit(…)` does not and does not.
         Stmt::Expr { span, .. } => diverging.contains(span).then_some(SetupDrop::Diverges),
-        // A `while` is the language's unbounded-iteration form. Nothing here can prove it stops.
-        Stmt::While { .. } => Some(SetupDrop::UnboundedLoop),
+        // `while true { … }` with no `break` targeting it is the hand-rolled event loop — the one
+        // loop shape the runner must never enter. Every *other* `while` is ordinary setup and runs.
+        //
+        // The `true`-and-no-`break` test is not a heuristic invented here: it is the same rule
+        // [`crate::subst::stmt_diverges`] uses to decide E0048 ("this function must return a
+        // value"), reusing its [`body_breaks`] outright, so the compiler and the runner agree about
+        // which loops end.
+        Stmt::While { cond, body, .. } => {
+            if matches!(cond, Expr::Bool { value: true, .. }) && !crate::subst::body_breaks(body) {
+                Some(SetupDrop::UnboundedLoop)
+            } else {
+                body.iter()
+                    .find_map(|s| setup_drop(s, diverging).filter(blocks_completion))
+            }
+        }
         // Bodies that DO execute at the top level, so a non-finishing statement inside them makes
         // the whole statement non-finishing. Recursion is over statements only, and deliberately
         // does not descend into declarations: `fn main() { os.exit(0) }` is a declaration the setup
@@ -165,6 +202,47 @@ pub struct SetupWarning {
     /// The tier fns that capture one of `names` — the tests whose result the drop can silently
     /// change.
     pub fns: Vec<String>,
+}
+
+impl SetupWarning {
+    /// This warning as an ordinary [`Diagnostic`], so a runner renders it through the same path as
+    /// every other diagnostic — file, line, caret, help — instead of inventing a message format of
+    /// its own.
+    pub fn diagnostic(&self) -> Diagnostic {
+        let names = join(&self.names, '`');
+        let fns = join(&self.fns, '`');
+        let mut diagnostic = Diagnostic::warning(
+            DiagnosticCode::DroppedTierSetup,
+            self.span,
+            format!(
+                "this statement is not part of the shared setup ({}), but it writes to {names}, \
+                 which {fns} capture{} — so {} will see {} unwritten",
+                self.drop.reason(),
+                if self.fns.len() == 1 { "s" } else { "" },
+                if self.fns.len() == 1 {
+                    "that test"
+                } else {
+                    "those tests"
+                },
+                if self.names.len() == 1 { "it" } else { "them" },
+            ),
+        );
+        diagnostic.help(
+            "do the work inside a binding (`applied = conn.migrate(\"migrations\")`) or in a helper \
+             the tests call — a binding runs once per test, in that test's own isolate",
+        );
+        diagnostic
+    }
+}
+
+/// `a`, `b` and `c`, each wrapped in `q`.
+fn join(items: &[String], q: char) -> String {
+    let quoted: Vec<String> = items.iter().map(|i| format!("{q}{i}{q}")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// Every dropped top-level statement that writes to a binding one of the `selected` tier fns

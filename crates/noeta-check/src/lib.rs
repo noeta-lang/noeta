@@ -91,10 +91,10 @@ mod forwarding;
 mod packed;
 mod prelude;
 mod relevance;
+pub mod setup;
 mod sites;
 mod stdlib;
 mod subst;
-pub mod setup;
 pub mod tiers;
 mod traits;
 

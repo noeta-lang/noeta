@@ -138,6 +138,15 @@ pub(crate) fn provider_escape(
 /// activation and whole-program type-check diagnostics (rendered against the workspace sources).
 pub(crate) struct TierRun {
     pub(crate) activated: noeta_check::Activated,
+    /// The top-level statements that **do not return** (`noeta_check::Checked::diverging_stmts`),
+    /// harvested from the whole-program check above. The shared-setup filter reads it to keep
+    /// `conn.migrate(…)` while dropping `server.serve(…)` — the behavioural question that replaced
+    /// a filter written in terms of statement syntax. It must come from the check of *this* program:
+    /// an empty set would silently assert that nothing diverges.
+    pub(crate) diverging: std::collections::HashSet<noeta_span::Span>,
+    /// The workspace's sources, kept so a runner can render a span against the file it came from —
+    /// the dropped-setup warning (`E0071`) points at a real line in a real file.
+    pub(crate) sources: noeta_span::SourceMap,
     /// The workspace's check configuration — per-source editions and package provenance — so a
     /// per-case re-check ([`check_under`]) judges the same program the whole-program check did.
     pub(crate) opts: noeta_check::CheckOptions,
@@ -217,15 +226,18 @@ pub(crate) fn tier_prologue(
         emit_diagnostics_mapped(&checking.sources, checked.diagnostics.iter());
         return Prologue::Ran(ExitCode::from(1));
     }
+    let diverging = checked.diverging_stmts;
     let Loaded {
         program,
         editions,
         packages,
-        ..
+        sources,
     } = checking;
     activated.program = program;
     Prologue::Ready(Box::new(TierRun {
         activated,
+        diverging,
+        sources,
         opts: noeta_check::CheckOptions {
             editions,
             packages,

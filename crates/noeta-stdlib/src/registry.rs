@@ -5980,12 +5980,15 @@ const OS_FNS: &[ExtFn] = &[
         params: &[Str, SigType::Optional(&SigType::List(&Str))],
         ret: Concrete(PROCESS_SIG),
     },
-    // `exit(code?)` types as unit; it never actually returns.
+    // `exit(code?)` — the archetypal diverging call: it unwinds the backend with
+    // `ErrorKind::Exit` and the process is gone. Declared `never`, not `void`: "returns nothing"
+    // and "does not return" are different facts, and only the second one tells a tier runner
+    // that `os.exit(run())` at the top of a CLI entry must not join the shared test setup.
     ExtFn {
         param_names: &["code"],
         name: "exit",
         params: &[SigType::Optional(&Int)],
-        ret: Concrete(SigType::Unit),
+        ret: Concrete(SigType::Never),
     },
     // `shell_quote(s)` — POSIX-shell-safe quoting for the explicit `sh -c` escape hatch.
     ExtFn {

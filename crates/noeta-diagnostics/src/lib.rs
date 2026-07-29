@@ -387,6 +387,21 @@ pub enum DiagnosticCode {
     /// unaffected — the boundary is the package, not the file. The escape hatch is the newtype: wrap
     /// the foreign type in a local one and `@derive(Trait, via: field)`.
     OrphanImpl,
+    /// **Warning.** A tier runner (`noeta test`/`noeta bench`) left a top-level statement out of the
+    /// shared setup, and a selected tier fn `use (…)`-captures a binding that statement writes to.
+    ///
+    /// Every case runs as `<shared setup> + <call the tier fn>`, and the setup is the file's
+    /// declarations, bindings, and top-level effects that *finish* — so the runner never exits or
+    /// blocks on the program's own `os.exit(…)` / `server.serve(…)` / `while true { … }`. What made
+    /// that policy dangerous was not the drop, it was the **silence**: a kept
+    /// `conn = db.connect(…)` beside a dropped `conn.migrate(…)` handed every test a live, working,
+    /// **empty** database, and the only signal was the database's own `no such table: users`.
+    ///
+    /// This is that missing signal. It fires only where the coupling is real — the statement writes
+    /// a name the selected test captures — and names both sides, so the fix (move the work into a
+    /// binding, or into a helper the test calls) is obvious from the message. Advisory: the tests
+    /// still run.
+    DroppedTierSetup,
 }
 
 impl DiagnosticCode {
@@ -462,6 +477,7 @@ impl DiagnosticCode {
         DiagnosticCode::InternalCompilerError,
         DiagnosticCode::UnhandledError,
         DiagnosticCode::OrphanImpl,
+        DiagnosticCode::DroppedTierSetup,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -538,6 +554,7 @@ impl DiagnosticCode {
             DiagnosticCode::InternalCompilerError => "E0068",
             DiagnosticCode::UnhandledError => "E0069",
             DiagnosticCode::OrphanImpl => "E0070",
+            DiagnosticCode::DroppedTierSetup => "E0071",
         }
     }
 
