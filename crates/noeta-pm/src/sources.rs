@@ -52,7 +52,20 @@ pub fn package_root_of(dir: &Path) -> Option<PackageRoot> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default();
-    Some(PackageRoot::new(root, vec![name]))
+    // A migration/seed is a program the driver runs, named for *when* it runs — never a module.
+    // Take the directories from the manifest so a project that moved them is still honored; the
+    // constructor's defaults cover a project that declared none.
+    let db = parsed.db();
+    let data: Vec<String> = [db.migrations.clone(), db.seeds.clone()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let root = PackageRoot::new(root, vec![name]);
+    Some(if data.is_empty() {
+        root
+    } else {
+        root.with_data_dirs(data)
+    })
 }
 
 #[cfg(test)]
