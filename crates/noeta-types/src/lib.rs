@@ -220,6 +220,12 @@ impl Type {
             | Type::String
             | Type::Bytes
             | Type::Dyn
+            // The bottom type is spelled `never` at the surface (`BuiltinTy::Never`) and reflects
+            // as its own `TypeRepr::Never`, so its name-key is that same word — which is exactly
+            // what `Display` already writes, and what `TypeRef::head_name` folds for the surface
+            // spelling. No instantiation can be `never`, so this arm is unreachable through the
+            // forwarding table; it is here because the match is exhaustive on purpose.
+            | Type::Never
             | Type::Kind(_) => self.to_string(),
             Type::Unknown | Type::Fn { .. } | Type::Union(_) | Type::Tuple(_) => String::new(),
         }
