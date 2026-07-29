@@ -1,8 +1,12 @@
-// `json.parse::<T>` is rejected at check time when `T` has no JSON decoding — an enum here (a sum
-// with no canonical JSON form; only value structs, scalars, lists, options and string-keyed maps
-// decode). A compile-time E0007, so both backends agree (the program never runs).
-// expect: error E0007 at 7:5
+// `json.parse::<T>` is still rejected at check time when `T` has no JSON decoding. A *payload-free*
+// enum decodes now (see `enums/decode_plain_enum_field`), so the undecodable shape this pins is an
+// enum with a **payload-carrying** variant: a data-carrying sum has no canonical JSON spelling, and
+// decoding only its payload-free half would accept documents against a schema that cannot describe
+// the type — so the enum declines as a whole. Such a case is built by `construct("Shape.Circle", […])`
+// instead, where the payload is named data rather than a guessed encoding.
+// A compile-time E0007, so both backends agree (the program never runs).
+// expect: error E0007 at 11:5
 use std.{json};
-enum Color { Red; Green; Blue; }
-c = json.parse::<Color>("\"Red\"");
+enum Shape { Dot; Circle(r: int); }
+c = json.parse::<Shape>("\"Dot\"");
 echo c;

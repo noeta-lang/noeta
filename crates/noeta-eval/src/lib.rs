@@ -428,6 +428,11 @@ impl EnumDef {
 struct VariantInfo {
     name: String,
     field_names: Vec<String>,
+    /// The variant's **backing value** in a backed enum (`enum Plan: string { Free = "free" }`),
+    /// folded through the shared `fold_const_expr`; `None` for a plain enum's case, a native or
+    /// prelude enum (neither is backed), and a backing that is not a literal. What `Enum.from` /
+    /// `Enum.try_from` match on first — the wire value the enum's schema advertises.
+    backing: Option<noeta_ast::AttrValue>,
 }
 
 /// A constructed enum value.
@@ -1424,6 +1429,7 @@ impl Interpreter {
                         .map(|v| VariantInfo {
                             name: v.name.clone(),
                             field_names: v.field_names(),
+                            backing: None,
                         })
                         .collect(),
                     derives_comparable: false,
@@ -2178,14 +2184,18 @@ impl Interpreter {
         Value::list(items)
     }
 
-    /// `construct(name, fields)` — build a struct/class value of the type named by `name_val` from the
-    /// field values `fields_val` (declaration order), reusing the SAME construction path as a
-    /// `T { … }` literal so defaults and full-initialization are honored identically. Returns a
-    /// `Result<dyn, string>`: an unknown type, a non-list `fields`, an arity/scalar-type mismatch, or a
-    /// missing non-defaulted field is a recoverable `Err(message)`; success is `Ok(value)`. Validation
-    /// runs through the shared `plan_construct` (so the VM agrees on every accept/reject and every
-    /// message), then the accepted values feed `construct_object`, which fills the remaining
-    /// defaulted fields — so the two never both report a missing field.
+    /// `construct(name, fields)` — build a value of the type named by `name_val` from the field values
+    /// `fields_val` (declaration order), reusing the SAME construction path as a literal so defaults
+    /// and full-initialization are honored identically. Returns a `Result<dyn, string>`: an unknown
+    /// type, a non-list `fields`, an arity/scalar-type mismatch, or a missing non-defaulted field is a
+    /// recoverable `Err(message)`; success is `Ok(value)`. Validation runs through the shared
+    /// `plan_construct` (so the VM agrees on every accept/reject and every message), then the accepted
+    /// values feed `construct_object`, which fills the remaining defaulted fields — so the two never
+    /// both report a missing field.
+    ///
+    /// `name` spells a struct/class (`"ServerOpts"`) or an **enum case** (`"Shape.Circle"`), whose
+    /// `fields` are that variant's payload; `resolve_construct_target` decides which, so both backends
+    /// read the same spelling identically.
     fn construct_dynamic(&mut self, name_val: Value, fields_val: Value, span: Span) -> Eval<Value> {
         let Value::Str(type_name) = &name_val else {
             return Ok(invoke_err(format!(
@@ -2194,15 +2204,38 @@ impl Interpreter {
             )));
         };
         let type_name = type_name.clone();
-        // Only a declared struct/class is constructible; an enum or an unknown name is a clean `Err`
-        // (checked before field validation, so an unknown type reports as such, not "no field X").
-        match self.reflection.type_named(&type_name).map(|t| t.kind) {
-            Some(noeta_ast::reflect::TypeKind::Struct | noeta_ast::reflect::TypeKind::Class) => {}
-            _ => {
-                return Ok(invoke_err(format!(
-                    "`{type_name}` is not a constructible struct or class"
-                )));
+        // What the name refers to, decided once and shared with the VM. Resolved before any field
+        // validation, so an unconstructible name reports as such rather than as "no field X".
+        match noeta_ast::reflect::resolve_construct_target(&self.reflection, &type_name) {
+            noeta_ast::reflect::ConstructTarget::Rejected(msg) => return Ok(invoke_err(msg)),
+            noeta_ast::reflect::ConstructTarget::Variant {
+                enum_name,
+                variant,
+                index,
+                payload,
+            } => {
+                // An enum case is built directly rather than through `construct_object`: a variant has
+                // no defaults, no slot table and no methods of its own to inherit, so the payload
+                // values ARE the value. Pure, so it needs no `&mut self` and the reflection borrow
+                // above stays live through it.
+                return Ok(
+                    match plan_variant_payload(&type_name, &payload, &fields_val) {
+                        Err(msg) => invoke_err(msg),
+                        Ok(data) => builtin_enum(
+                            "Result",
+                            "Ok",
+                            vec![Value::Enum(Rc::new(EnumValue {
+                                enum_name: enum_name.to_string(),
+                                variant: variant.to_string(),
+                                data,
+                                variant_index: index as usize,
+                                reflect: None,
+                            }))],
+                        ),
+                    },
+                );
             }
+            noeta_ast::reflect::ConstructTarget::Fielded => {}
         }
         // The `fields` argument is either a `List<dyn>` (positional, declaration order) or a
         // `Map<string, dyn>` (named — the sparse, any-order form a framework binding `--field` flags
@@ -2620,10 +2653,14 @@ impl Interpreter {
         })))
     }
 
-    /// `MyEnum.try_from(s)` → `?MyEnum` (`some(case)` if `s` names a payload-free case, else `none`)
-    /// and `MyEnum.from(s)` → `MyEnum` (the case, or a panic if `s` names none) — the PHP `tryFrom`/
-    /// `from` pair, matched by case **name**. A payload-carrying variant is not name-constructible
-    /// (no payload to supply), so it never matches. The VM's `Op::EnumFromStr` mirrors this exactly.
+    /// `MyEnum.try_from(v)` → `?MyEnum` (`some(case)` if `v` names a payload-free case, else `none`)
+    /// and `MyEnum.from(v)` → `MyEnum` (the case, or a panic if `v` names none) — the aborting /
+    /// recoverable pair, matched by **backing value first, then case name**
+    /// ([`noeta_ast::reflect::variant_for_wire`] owns that rule, so the VM's `Op::EnumFromStr` cannot
+    /// disagree). A payload-carrying variant is never selected: there is no payload to supply.
+    ///
+    /// `try_from` is the door for untrusted input — an enum value off a wire — which is why the
+    /// backing is what it reads: a backed enum's backing is exactly what its JSON Schema advertises.
     fn enum_from_string(
         &mut self,
         def: &Rc<EnumDef>,
@@ -2635,44 +2672,53 @@ impl Interpreter {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                format!("`{}.{method}` takes one string argument", def.name()),
+                format!("`{}.{method}` takes one argument", def.name()),
             ));
         }
-        let Value::Str(key) = &args[0] else {
+        let Some(probe) = wire_probe(&args[0]) else {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!(
-                    "`{}.{method}` expects a string, found {}",
+                    "`{}.{method}` expects a string or a backing value, found {}",
                     def.name(),
                     args[0].type_name()
                 ),
             ));
         };
-        let key = key.clone();
-        // Match only a payload-free case of this name (a payload variant cannot be built from a name).
-        let matched = def.variant(&key).is_some_and(|v| v.field_names.is_empty());
-        if matched {
-            let value = Value::Enum(Rc::new(EnumValue {
-                enum_name: def.name().to_string(),
-                variant_index: def.variant_index(&key),
-                variant: key,
-                data: vec![],
-                reflect: None,
-            }));
-            if method == "from" {
-                Ok(value)
-            } else {
-                Ok(builtin_enum("Option", "some", vec![value]))
+        // Only payload-free cases are candidates — a payload variant has nothing to supply its data.
+        let cases: Vec<(&str, Option<&noeta_ast::AttrValue>)> = def
+            .variants
+            .iter()
+            .filter(|v| v.field_names.is_empty())
+            .map(|v| (v.name.as_str(), v.backing.as_ref()))
+            .collect();
+        match noeta_ast::reflect::variant_for_wire(&cases, &probe) {
+            Some(i) => {
+                let name = cases[i].0.to_string();
+                let value = Value::Enum(Rc::new(EnumValue {
+                    enum_name: def.name().to_string(),
+                    variant_index: def.variant_index(&name),
+                    variant: name,
+                    data: vec![],
+                    reflect: None,
+                }));
+                if method == "from" {
+                    Ok(value)
+                } else {
+                    Ok(builtin_enum("Option", "some", vec![value]))
+                }
             }
-        } else if method == "from" {
-            Err(self.runtime_error(
+            None if method == "from" => Err(self.runtime_error(
                 DiagnosticCode::Panic,
                 span,
-                format!("panic: `{}` has no case `{key}`", def.name()),
-            ))
-        } else {
-            Ok(builtin_enum("Option", "none", vec![]))
+                format!(
+                    "panic: `{}` has no case `{}`",
+                    def.name(),
+                    args[0].display()
+                ),
+            )),
+            None => Ok(builtin_enum("Option", "none", vec![])),
         }
     }
 
@@ -5967,6 +6013,21 @@ impl Interpreter {
     }
 }
 
+/// The neutral [`noeta_ast::reflect::WireProbe`] for a runtime value handed to `Enum.from` /
+/// `Enum.try_from`, or `None` when the value is not a scalar an enum can be backed by. The VM's twin
+/// classifies its own `Value` the same way, so the shared matcher sees identical probes.
+fn wire_probe(value: &Value) -> Option<noeta_ast::reflect::WireProbe> {
+    use noeta_ast::reflect::WireProbe;
+    Some(match value {
+        Value::Str(s) => WireProbe::Str(s.clone()),
+        Value::Int(n) => WireProbe::Int(*n),
+        Value::Float(f) => WireProbe::Float(*f),
+        Value::F32(f) => WireProbe::Float(*f as f64),
+        Value::Bool(b) => WireProbe::Bool(*b),
+        _ => return None,
+    })
+}
+
 /// The `Result.Err(msg)` returned when a by-name `invoke` cannot resolve (unknown name, wrong
 /// arity, non-string name, non-list args, or a non-invokable receiver). The VM builds the same
 /// value from `Op::Invoke`'s baked `err_shape`.
@@ -5978,6 +6039,56 @@ fn invoke_err(message: String) -> Value {
 /// name-keyed field values `construct_object` consumes, paired with the shared planner's validation
 /// outcome (deferred so the type-kind check and the plan error surface as one `Result.Err`).
 type ConstructResolve = (Vec<(String, Span, Value)>, Result<(), String>);
+
+/// Validate a `construct("Enum.Variant", fields)` payload against the variant's declared schema and
+/// order it into the positional `data` an enum value carries.
+///
+/// The two accepted `fields` shapes are the same two a struct takes and mean the same things — a
+/// `List<dyn>` in declaration order, a `Map<string, dyn>` keyed by the payload names `variants_of`
+/// reports (`_0`/`_1` for a positional payload) — and both go through the *same* shared planners a
+/// struct's fields do, so a payload mismatch is worded exactly like a field mismatch. Only the value
+/// extraction is backend-local; every accept/reject decision is shared, and the VM's twin is a
+/// mirror of this function (`plans/backend-mirror.md`).
+fn plan_variant_payload(
+    case_name: &str,
+    payload: &[noeta_ast::reflect::FieldSpecData<'_>],
+    fields_val: &Value,
+) -> Result<Vec<Value>, String> {
+    match fields_val {
+        Value::List(items) => {
+            let values: Vec<Value> = (*items.to_rc_vec()).clone();
+            let reprs: Vec<noeta_ast::reflect::TypeRepr> =
+                values.iter().map(eval_type_repr).collect();
+            noeta_ast::reflect::plan_construct(case_name, payload, &reprs)?;
+            Ok(values)
+        }
+        Value::Map(entries, _) => {
+            let provided: Vec<(String, Value)> = entries
+                .iter()
+                .filter_map(|(k, v)| match k {
+                    noeta_stdlib::MapKey::Str(s) => Some((s.as_str().to_owned(), v.clone())),
+                    _ => None,
+                })
+                .collect();
+            let reprs: Vec<(String, noeta_ast::reflect::TypeRepr)> = provided
+                .iter()
+                .map(|(n, v)| (n.clone(), eval_type_repr(v)))
+                .collect();
+            noeta_ast::reflect::plan_construct_named(case_name, payload, &reprs)?;
+            let names: Vec<String> = provided.iter().map(|(n, _)| n.clone()).collect();
+            Ok(
+                noeta_ast::reflect::plan_variant_payload_order(payload, &names)
+                    .into_iter()
+                    .map(|i| provided[i].1.clone())
+                    .collect(),
+            )
+        }
+        other => Err(format!(
+            "construct fields must be a list or a map, found {}",
+            other.type_name()
+        )),
+    }
+}
 
 /// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).
 /// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.
@@ -6188,6 +6299,7 @@ fn native_type_value(
                 .map(|v| VariantInfo {
                     name: v.name.to_string(),
                     field_names: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
+                    backing: None,
                 })
                 .collect(),
             derives_comparable: false,
@@ -6777,6 +6889,10 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             variant,
             variant_index,
             fields,
+            // The `Validate` re-entry is a decode-door concern: `materialize_recipe` intercepts a
+            // flagged variant and runs the validator before calling in here, so by this point the
+            // flag has already been honored (and an ordinary dispatch's variant never sets it).
+            has_validator: _,
         } => Value::Enum(Rc::new(EnumValue {
             enum_name,
             variant,

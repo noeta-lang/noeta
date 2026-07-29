@@ -147,6 +147,15 @@ pub enum NativeOut {
         variant: String,
         variant_index: u32,
         fields: Vec<NativeOut>,
+        /// Propagated from [`TypeRecipe::Enum::has_validator`] — the exact twin of
+        /// [`NativeOut::Struct::has_validator`]: when set, the backend re-enters to run this enum's
+        /// `Validate::validate` on the built value, so a **decode door** enforces an enum's
+        /// invariants on the same terms it enforces a struct's (`docs/Validation.md`).
+        ///
+        /// A dispatch returning an enum it built itself passes `false`: a native function's return
+        /// value is not untrusted input crossing a door, so nothing re-enters and the flag costs it
+        /// nothing.
+        has_validator: bool,
     },
     /// A native-declared **fielded-type** instance (native-extensibility S2, unified) — a REAL
     /// language `Object` the backend materializes with named fields, distinct from an anonymous
@@ -516,6 +525,84 @@ pub enum TypeRecipe {
         /// (zero cost for a non-validated type).
         has_validator: bool,
     },
+    /// A declared **enum** type: its name and its variants in declaration order, each carrying the
+    /// wire value that selects it ([`VariantRecipe::tag`]).
+    ///
+    /// **A decode accepts exactly what the type's JSON Schema advertises**, which is the whole reason
+    /// this form exists. A *backed* enum's schema enumerates its backings (`enum Tier: string { Free
+    /// = "free" }` derives `{"enum": ["free"]}`), so `"free"` decodes; a *plain* enum's schema
+    /// enumerates its case names (`{"enum": ["Positive"]}`), so `"Positive"` does. Describing a
+    /// document with one vocabulary and decoding it with another is exactly the asymmetry that left
+    /// an enum reflectable but not buildable, so the tag is the one place the two are tied together.
+    ///
+    /// Every variant here is **payload-free**. A payload-carrying variant has no canonical JSON
+    /// spelling — a discriminated union has several, and no single one is accepted by every
+    /// consumer's strict mode — so the checker's `type_to_recipe` declines such an enum whole rather
+    /// than decoding its payload-free half, which would advertise a schema the decode could not
+    /// honor. That variant is built by `construct("Enum.Variant", payload)` instead, where the
+    /// payload is named data rather than a guessed encoding.
+    Enum {
+        name: String,
+        variants: Vec<VariantRecipe>,
+        /// Whether this enum implements the `Validate` built-in trait — the enum twin of
+        /// [`TypeRecipe::Struct::has_validator`], honoring the identical decode-door contract: a
+        /// freshly decoded variant runs `validate()` before it escapes the door.
+        has_validator: bool,
+    },
+}
+
+/// One payload-free variant of a [`TypeRecipe::Enum`]: its case name, its declaration index, and the
+/// wire value that selects it.
+///
+/// `index` is carried rather than derived from position because it is what both backends stamp on the
+/// built value ([`NativeOut::Variant::variant_index`] — what a derived `Comparable` orders by, and
+/// what keeps the tree-walker's `EnumValue` and the VM's interned shape identical).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct VariantRecipe {
+    /// The variant's declared case name (`Free`) — the identity the built value carries, whatever
+    /// wire value selected it.
+    pub name: String,
+    /// The variant's declaration index.
+    pub index: u32,
+    /// The wire value that selects this variant.
+    pub tag: VariantTag,
+}
+
+/// The wire value that selects one variant of a [`TypeRecipe::Enum`] — what a decode matches against,
+/// and what a rejection lists as accepted.
+///
+/// A plain enum's variant carries [`VariantTag::Name`] rather than a `Str` of its own case name so the
+/// two stay distinguishable after the fact: they decode identically, but nothing downstream has to
+/// guess whether a string tag came from a backing or from the declaration — a distinction that stops
+/// being cosmetic the moment a backed enum backs one case with another case's name.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum VariantTag {
+    /// A plain (unbacked) enum's variant: the **case name** is the wire value, matching the case-name
+    /// schema such an enum derives.
+    Name,
+    /// A `string`-backed variant's backing.
+    Str(String),
+    /// An `int`-backed variant's backing.
+    Int(i64),
+    /// A `float`-backed variant's backing.
+    Float(f64),
+    /// A `bool`-backed variant's backing.
+    Bool(bool),
+}
+
+impl VariantTag {
+    /// This tag's accepted wire value as **JSON text**, for the list a rejection names (`expected one
+    /// of "free", "paid"`). [`VariantTag::Name`] needs the case name, which lives on the
+    /// [`VariantRecipe`] rather than here, so it is passed in.
+    pub fn render(&self, case_name: &str) -> String {
+        match self {
+            VariantTag::Name => crate::json_text::json_string(case_name),
+            VariantTag::Str(s) => crate::json_text::json_string(s),
+            VariantTag::Int(n) => n.to_string(),
+            VariantTag::Float(f) => crate::format_float(*f),
+            VariantTag::Bool(b) => b.to_string(),
+        }
+    }
 }
 
 /// One field of a [`TypeRecipe::Struct`]: its name, the recipe its value decodes through, and what

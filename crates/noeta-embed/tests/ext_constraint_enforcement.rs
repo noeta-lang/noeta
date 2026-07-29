@@ -99,6 +99,7 @@ fn kern_dispatch(
             variant: "Warm".to_string(),
             variant_index: 0,
             fields: vec![],
+            has_validator: false,
         }),
         // A `Widget` instance — fields in declared slot order (label, tag, secret).
         "widget" => Ok(NativeOut::Instance {

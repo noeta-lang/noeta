@@ -1,0 +1,30 @@
+// A **backed** enum decodes by its BACKING VALUE, not by its case name — because the backing is what
+// its JSON Schema advertises (`enum Tier: string { Free = "free" }` derives `{"enum": ["free"]}`).
+// Accepting the case name instead would mean describing a document with one vocabulary and decoding
+// it with another, which is the asymmetry this arc exists to remove: the case name is therefore a
+// clean, path-carrying rejection, not a quiet second spelling.
+//
+// Backings are literals of any scalar type, so an `int`-backed enum decodes from JSON numbers.
+// expect: stdout "ok: Plan.Paid / Code.Missing"
+// expect: stdout "case name refused: unknown_variant / tier: \"Free\" is not a variant of `Plan`: expected one of \"free\", \"paid\""
+// expect: stdout "unknown backing: unknown_variant / code: 500 is not a variant of `Code`: expected one of 200, 404"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+enum Plan: string { Free = "free"; Paid = "paid" }
+enum Code: int { Ok = 200; Missing = 404 }
+
+@derive(Deserialize<Json>)
+struct Account { tier: Plan  code: Code }
+
+fn describe(r: Result<Account, JsonError>): string {
+    return match r {
+        Ok(v) => "ok: ${v.tier} / ${v.code}",
+        Err(e) => "${e.kind()} / ${e.message()}",
+    }
+}
+
+echo describe(json.try_parse::<Account>("{\"tier\": \"paid\", \"code\": 404}"))
+echo "case name refused: " ~ describe(json.try_parse::<Account>("{\"tier\": \"Free\", \"code\": 200}"))
+echo "unknown backing: " ~ describe(json.try_parse::<Account>("{\"tier\": \"free\", \"code\": 500}"))
