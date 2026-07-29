@@ -539,9 +539,18 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(receiver);
             args.iter().for_each(&mut *f);
         }
-        Rvalue::Call { callee, args, .. } => {
+        // A forwarding call's `type_args` are operands like any other — a pass-through slot reads
+        // the enclosing fn's `$ty` local, so skipping them here would let that local look dead and
+        // be dropped out from under the call.
+        Rvalue::Call {
+            callee,
+            args,
+            type_args,
+            ..
+        } => {
             f(callee);
             args.iter().for_each(&mut *f);
+            type_args.iter().for_each(&mut *f);
         }
         Rvalue::Method { receiver, args, .. }
         | Rvalue::TraitMethod { receiver, args, .. } => {
