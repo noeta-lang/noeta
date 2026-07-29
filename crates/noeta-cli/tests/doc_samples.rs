@@ -107,9 +107,7 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
         };
     }
 
-    let dir = std::env::temp_dir().join(format!("noeta_doc_sample_{idx}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create sample dir");
+    let dir = noeta_test_temp::TempDir::new(&format!("doc-sample-{idx}"));
     let path = dir.join("main.noe");
     std::fs::write(&path, &sample.code).expect("write sample");
 
@@ -126,7 +124,6 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
         .arg(&path)
         .output()
         .expect("spawn noeta");
-    let _ = std::fs::remove_dir_all(&dir);
 
     let ran = output.status.success();
     let expect_error = sample.tag == "error";

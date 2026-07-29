@@ -14,7 +14,12 @@ fn serve_routes_a_real_request() {
     // `noeta serve` synthesizes `server.serve(<port>, fetch)`, so the program supplies `fetch` and
     // `use std.http.server` (binding the local `server`); the `Request`/`Response` types are imported
     // like any native type.
-    let app = std::env::temp_dir().join("noeta_serve_integration_app.noe");
+    // The program file goes in a per-process fixture directory. It used to be one fixed name under
+    // the system temp dir, which every checkout and every concurrent run of this test shared — and
+    // the teardown below `remove_file`s it, so one run could delete the program another run's server
+    // had not finished reading.
+    let dir = noeta_test_temp::TempDir::new("serve-app");
+    let app = dir.join("app.noe");
     std::fs::write(
         &app,
         "use std.http.server\n\
@@ -26,7 +31,17 @@ fn serve_routes_a_real_request() {
     )
     .unwrap();
 
-    let port = 8231; // a high port unlikely to collide on a dev/CI box
+    // The *other* machine-global resource, and the one a per-process fixture directory cannot fix: a
+    // fixed port. Two concurrent runs of this test — two checkouts, or two `--ignored` invocations —
+    // had the second server fail to bind 8231 and die, which surfaced on the client side as
+    // `Connection reset by peer`, naming nothing. Ask the kernel for a free port instead and hand it
+    // to the child. Releasing the listener before the child binds leaves a window the OS could fill
+    // from elsewhere, but it is microseconds against a fixed port that is contended for the whole
+    // run; closing it fully would need `noeta serve` to accept an inherited socket, which it does not.
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a free port");
+        probe.local_addr().expect("the probe has an address").port()
+    };
     let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
         .args(["serve", app.to_str().unwrap(), "--port", &port.to_string()])
         .stderr(Stdio::null())
@@ -62,10 +77,9 @@ fn serve_routes_a_real_request() {
         Ok::<String, String>(resp)
     })();
 
-    // Always tear the server down, whatever the assertion outcome.
+    // Always tear the server down, whatever the assertion outcome. The program file goes with `dir`.
     let _ = child.kill();
     let _ = child.wait();
-    let _ = std::fs::remove_file(&app);
 
     let resp = outcome.expect("request/response round trip");
     assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
