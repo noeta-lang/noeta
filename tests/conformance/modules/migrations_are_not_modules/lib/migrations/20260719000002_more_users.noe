@@ -1,0 +1,3 @@
+// A migration is a program the driver runs, named for *when* it runs. `20260719000002_more_users`
+// is not a legal module segment, and the walk must never ask it to be one.
+echo "migration"

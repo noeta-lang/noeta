@@ -190,7 +190,15 @@ impl Authorship {
 /// stays quiet rather than failing the command.
 pub fn authorship(url: &str, sha: &str, since: Option<&str>) -> Result<Authorship, PmError> {
     let short = &sha[..sha.len().min(12)];
-    let dir = std::env::temp_dir().join(format!("noeta-authorship-{}-{short}", std::process::id()));
+    // Pid **and** a per-process counter: two concurrent `authorship` calls in one process would
+    // otherwise share a scratch clone whenever they were asked about the same commit, and the
+    // `remove_dir_all` below would delete the other's clone out from under it.
+    static SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SCRATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "noeta-authorship-{}-{n}-{short}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     let dir_str = dir
         .to_str()
@@ -301,6 +309,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::test_temp::TempDir;
 
     /// Whether `git` is available — the fetch tests are meaningless without it and skip gracefully
     /// (though this project is itself a git repo, so it's essentially always present).
@@ -312,7 +321,7 @@ mod tests {
     }
 
     fn git(args: &[&str], cwd: &Path) {
-        let status = Command::new("git")
+        let out = Command::new("git")
             .args(args)
             .current_dir(cwd)
             .env("GIT_AUTHOR_NAME", "t")
@@ -320,18 +329,23 @@ mod tests {
             .env("GIT_COMMITTER_NAME", "t")
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .output()
-            .unwrap()
-            .status;
-        assert!(status.success(), "git {args:?} failed");
+            .unwrap();
+        // The stderr is the whole diagnosis when setup fails (a bare "git [...] failed" once hid a
+        // fixture-path collision for a long time), so carry it into the panic.
+        assert!(
+            out.status.success(),
+            "git {args:?} in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
-    /// Build a throwaway local git repo with a tagged commit, returning its path (usable as a `file`
-    /// URL — git accepts local paths).
-    fn tagged_repo(name: &str, tag: &str) -> PathBuf {
-        let repo = std::env::temp_dir().join(format!("noeta_git_test_{name}"));
-        let _ = std::fs::remove_dir_all(&repo);
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&["init", "-q"], &repo);
+    /// Build a throwaway local git repo with a tagged commit in its own fixture directory, returning
+    /// the guard (its path is usable as a `file` URL — git accepts local paths). Keep the guard
+    /// alive for the whole test: dropping it deletes the repo.
+    fn tagged_repo(name: &str, tag: &str) -> TempDir {
+        let repo = TempDir::new(name);
+        git(&["init", "-q"], repo.path());
         std::fs::write(
             repo.join("noeta.toml"),
             "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
@@ -342,9 +356,9 @@ mod tests {
             "namespace lib.core;\npub fn v(): int { return 1; }\n",
         )
         .unwrap();
-        git(&["add", "."], &repo);
-        git(&["commit", "-q", "-m", "release"], &repo);
-        git(&["tag", tag], &repo);
+        git(&["add", "."], repo.path());
+        git(&["commit", "-q", "-m", "release"], repo.path());
+        git(&["tag", tag], repo.path());
         repo
     }
 
@@ -354,12 +368,11 @@ mod tests {
             return;
         }
         let repo = tagged_repo("fetch", "v1.0.0");
-        let store_dir = std::env::temp_dir().join("noeta_git_test_store");
-        let _ = std::fs::remove_dir_all(&store_dir);
-        let store = Store::open_at(store_dir).unwrap();
+        let store_dir = TempDir::new("fetch-store");
+        let store = Store::open_at(store_dir.path()).unwrap();
 
         let tag = GitRef::Tag("v1.0.0".to_string());
-        let fetched = fetch(repo.to_str().unwrap(), &tag, &store).unwrap();
+        let fetched = fetch(repo.path().to_str().unwrap(), &tag, &store).unwrap();
         assert_eq!(fetched.sha.len(), 40, "a full commit SHA");
         assert!(store.contains(&fetched.sha));
         // The working tree is materialized; `.git` is stripped.
@@ -368,7 +381,7 @@ mod tests {
         assert!(!fetched.content_hash.is_empty());
 
         // A second fetch is served from the store (idempotent) and agrees on the SHA + hash.
-        let again = fetch(repo.to_str().unwrap(), &tag, &store).unwrap();
+        let again = fetch(repo.path().to_str().unwrap(), &tag, &store).unwrap();
         assert_eq!(again.sha, fetched.sha);
         assert_eq!(again.content_hash, fetched.content_hash);
     }
@@ -379,9 +392,10 @@ mod tests {
             return;
         }
         let repo = tagged_repo("missingtag", "v1.0.0");
-        let store = Store::open_at(std::env::temp_dir().join("noeta_git_test_store2")).unwrap();
+        let store_dir = TempDir::new("missingtag-store");
+        let store = Store::open_at(store_dir.path()).unwrap();
         let err = fetch(
-            repo.to_str().unwrap(),
+            repo.path().to_str().unwrap(),
             &GitRef::Tag("v9.9.9".to_string()),
             &store,
         )
@@ -397,53 +411,43 @@ mod tests {
             return;
         }
         // A repo with a commit but no tag; force a known default branch name for the branch case.
-        let repo = std::env::temp_dir().join("noeta_git_test_head");
-        let _ = std::fs::remove_dir_all(&repo);
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&["init", "-q", "-b", "trunk"], &repo);
+        let repo = TempDir::new("head");
+        git(&["init", "-q", "-b", "trunk"], repo.path());
         std::fs::write(
             repo.join("noeta.toml"),
             "[package]\nname = \"acme/lib\"\nversion = \"0.0.0\"\n",
         )
         .unwrap();
         std::fs::write(repo.join("lib.noe"), "namespace lib.core;\n").unwrap();
-        git(&["add", "."], &repo);
-        git(&["commit", "-q", "-m", "wip"], &repo);
-        let expected = super::run_git(["-C", repo.to_str().unwrap(), "rev-parse", "HEAD"])
+        git(&["add", "."], repo.path());
+        git(&["commit", "-q", "-m", "wip"], repo.path());
+        let url = repo.path().to_str().unwrap();
+        let expected = super::run_git(["-C", url, "rev-parse", "HEAD"])
             .unwrap()
             .trim()
             .to_string();
 
-        let store = Store::open_at(std::env::temp_dir().join("noeta_git_test_store_head")).unwrap();
-        let head = fetch(repo.to_str().unwrap(), &GitRef::Head, &store).unwrap();
+        let store_dir = TempDir::new("head-store");
+        let store = Store::open_at(store_dir.path()).unwrap();
+        let head = fetch(url, &GitRef::Head, &store).unwrap();
         assert_eq!(head.sha, expected, "HEAD resolves to the tip commit");
         assert!(head.path.join("lib.noe").is_file());
 
-        let branch = fetch(
-            repo.to_str().unwrap(),
-            &GitRef::Branch("trunk".to_string()),
-            &store,
-        )
-        .unwrap();
+        let branch = fetch(url, &GitRef::Branch("trunk".to_string()), &store).unwrap();
         assert_eq!(
             branch.sha, expected,
             "the named branch resolves to the same tip"
         );
 
         // A branch that does not exist is a clean error.
-        let err = fetch(
-            repo.to_str().unwrap(),
-            &GitRef::Branch("nope".to_string()),
-            &store,
-        )
-        .unwrap_err();
+        let err = fetch(url, &GitRef::Branch("nope".to_string()), &store).unwrap_err();
         assert!(err.message().contains("no branch"), "got: {err}");
     }
     /// Commit `file` (created with unique content) authored by `name <email>`.
     fn commit_as(repo: &Path, file: &str, name: &str, email: &str) {
         std::fs::write(repo.join(file), format!("// {file}\n")).unwrap();
         let run = |args: &[&str]| {
-            let ok = Command::new("git")
+            let out = Command::new("git")
                 .args(args)
                 .current_dir(repo)
                 .env("GIT_AUTHOR_NAME", name)
@@ -451,10 +455,13 @@ mod tests {
                 .env("GIT_COMMITTER_NAME", name)
                 .env("GIT_COMMITTER_EMAIL", email)
                 .output()
-                .unwrap()
-                .status
-                .success();
-            assert!(ok, "git {args:?} failed");
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} in {}: {}",
+                repo.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         run(&["add", "."]);
         run(&["commit", "-q", "-m", file]);
@@ -465,14 +472,9 @@ mod tests {
         if !git_available() {
             return;
         }
-        let repo = std::env::temp_dir().join(format!("noeta_authorship_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&repo);
-        std::fs::create_dir_all(&repo).unwrap();
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
+        let fixture = TempDir::new("authorship");
+        let repo = fixture.path();
+        git(&["init", "-q"], repo);
         let url = repo.to_str().unwrap();
         let head = || {
             super::run_git(["-C", url, "rev-parse", "HEAD"])
@@ -482,13 +484,13 @@ mod tests {
         };
         // History: Alice (v0.9.0), then two more commits — one by Alice, one by first-timer Bob —
         // making up the v1.0.0 release; the release *range* spans both, not just the tip.
-        commit_as(&repo, "a.noe", "Alice", "alice@example.com");
+        commit_as(repo, "a.noe", "Alice", "alice@example.com");
         let v0 = head();
-        git(&["tag", "v0.9.0"], &repo);
-        commit_as(&repo, "b.noe", "Alice", "alice@example.com");
-        commit_as(&repo, "c.noe", "Bob", "bob@example.com");
+        git(&["tag", "v0.9.0"], repo);
+        commit_as(repo, "b.noe", "Alice", "alice@example.com");
+        commit_as(repo, "c.noe", "Bob", "bob@example.com");
         let v1 = head();
-        git(&["tag", "v1.0.0"], &repo);
+        git(&["tag", "v1.0.0"], repo);
 
         // Explicit baseline (an upgrade from v0.9.0): Bob is new across v0..v1; Alice is established.
         let up = authorship(url, &v1, Some(&v0)).unwrap();

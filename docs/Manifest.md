@@ -116,6 +116,12 @@ The source forms:
 
 A dependency table must name **exactly one** of `path`, `git`, or `version`.
 
+**The key is the prefix its modules derive under.** A dependency's module paths are not declared by
+the dependency — they are derived from where its files sit, under the key *you* wrote (see
+[Modules](Modules#where-a-modules-path-comes-from)). So `codec = { … }` puts a `parse.noe` at
+`codec.parse`, and renaming the key renames every import path, with nothing inside the package able
+to override it.
+
 **Scope dependencies.** An array value binds several packages that share one `company` scope under a
 single import root:
 
@@ -126,6 +132,13 @@ acme = [
   { version = "^2.0", package = "acme/codec" },
 ]
 ```
+
+A scope array's members each get the package's own root segment appended to the key, so their
+modules derive **one segment deeper** than under a plain key: `acme/codec`'s `parse.noe` is
+`acme.codec.parse` here, where `codec = { package = "acme/codec" }` would make it `codec.parse`.
+That is the difference between the two forms, and it is why a family of packages published to be
+addressed as `scope.package.module` — the first-party `para/*` set is the standard case — must be
+bound with the array form to keep those addresses.
 
 That relation only runs one way: several packages may share one root, but **one package may not be
 bound under two roots**. A package has one identity and its modules re-root to one segment, so a

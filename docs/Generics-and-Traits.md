@@ -157,7 +157,7 @@ fn decode<T>(text: string): Result<T, JsonError> {
 echo decode::<Order>("{\"id\": 1}")
 ```
 
-The answer is the **qualified** identity, byte-identical to what the concrete `type_name::<Order>()` yields at the same site — `namespace`, `use … as` alias and rename all followed. That agreement is the whole contract: the string exists to key a name-keyed registry, so a forwarded parameter answering the short name would silently miss every namespaced type.
+The answer is the **qualified** identity, byte-identical to what the concrete `type_name::<Order>()` yields at the same site — the declaring module's path, a `use … as` alias and a rename all followed. That agreement is the whole contract: the string exists to key a name-keyed registry, so a forwarded parameter answering the short name would silently miss every type declared in a module.
 
 It is also what opens the *other* name-keyed queries to a generic body. Their **turbofish** arm stays a compile-time key, so `field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` over a parameter remain E0058 — but each has a **runtime-string** arm, and `type_name::<T>()` now supplies it:
 

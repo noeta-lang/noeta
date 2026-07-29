@@ -15,8 +15,6 @@ Prefer to poke at it first? The [playground](https://play.noeta.dev) runs Noeta 
 ## A thirty-second taste
 
 ```noeta
-namespace Demo
-
 struct Item { price: float  qty: int }
 
 enum OrderError {

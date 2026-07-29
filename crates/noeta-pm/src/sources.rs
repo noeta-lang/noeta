@@ -52,7 +52,20 @@ pub fn package_root_of(dir: &Path) -> Option<PackageRoot> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default();
-    Some(PackageRoot::new(root, vec![name]))
+    // A migration/seed is a program the driver runs, named for *when* it runs — never a module.
+    // Take the directories from the manifest so a project that moved them is still honored; the
+    // constructor's defaults cover a project that declared none.
+    let db = parsed.db();
+    let data: Vec<String> = [db.migrations.clone(), db.seeds.clone()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let root = PackageRoot::new(root, vec![name]);
+    Some(if data.is_empty() {
+        root
+    } else {
+        root.with_data_dirs(data)
+    })
 }
 
 #[cfg(test)]
@@ -60,13 +73,10 @@ mod tests {
     use super::*;
     use crate::manifest::MANIFEST_NAME;
     use noeta_loader::ModulePath;
-    use std::path::PathBuf;
 
     /// A fresh temp package root, matching this crate's existing test convention (`store`/`lock`).
-    fn tmp_package(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("noeta_sources_test_{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create the package root");
+    fn tmp_package(name: &str) -> crate::test_temp::TempDir {
+        let dir = crate::test_temp::TempDir::new(name);
         write(
             &dir.join(MANIFEST_NAME),
             "[package]\nname = \"local/pkg\"\nversion = \"0.1.0\"\n",
@@ -168,7 +178,7 @@ mod tests {
         write(&root.join("src/main.noe"), "");
 
         let found = package_root(&root.join("src/main.noe")).expect("a root package");
-        assert_eq!(found.dir, root);
+        assert_eq!(found.dir, root.path());
         assert_eq!(found.prefix, vec!["pkg".to_string()]);
     }
 

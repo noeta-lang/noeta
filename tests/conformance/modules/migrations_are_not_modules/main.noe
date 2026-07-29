@@ -1,0 +1,9 @@
+// A package's `migrations/` and `seeds/` directories hold **programs, not modules** — a migration
+// is named for when it runs, so deriving a module path from its stem yields a segment no `use`
+// could spell (E0074). Before the walk pruned them, every project wired for `noeta migrate`
+// failed to check on files whose names are exactly right for what they are.
+// expect: stdout "ready"
+// expect: exit 0
+use lib.ready;
+
+echo ready()
