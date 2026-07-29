@@ -116,11 +116,17 @@ pub(crate) fn cmd_check(
     // (`noeta_loader::parse_dir`/`link_entry` — per-entry semantics identical to
     // `load_with_deps`). Diagnostics still dedup/order by (file, span, code), so output is
     // unchanged.
-    let mut by_dir: std::collections::BTreeMap<PathBuf, (Option<noeta_loader::PackageRoot>, Vec<&PathBuf>)> =
-        std::collections::BTreeMap::new();
+    let mut by_dir: std::collections::BTreeMap<
+        PathBuf,
+        (Option<noeta_loader::PackageRoot>, Vec<&PathBuf>),
+    > = std::collections::BTreeMap::new();
     for entry in &entries {
         let (dir, root) = entry_pool(entry);
-        by_dir.entry(dir).or_insert((root, Vec::new())).1.push(entry);
+        by_dir
+            .entry(dir)
+            .or_insert((root, Vec::new()))
+            .1
+            .push(entry);
     }
 
     // The directory the compose probe's graph belongs to: the checked path itself when it is a

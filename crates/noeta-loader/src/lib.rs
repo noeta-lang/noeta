@@ -604,11 +604,15 @@ pub fn link(
         path: &entry_path,
         program: &mut entry_parsed.program,
     }];
-    units.extend(module_programs.iter_mut().map(|(index, program)| DerivedUnit {
-        source: &sources[*index],
-        path: &siblings[*index - 1].path,
-        program,
-    }));
+    units.extend(
+        module_programs
+            .iter_mut()
+            .map(|(index, program)| DerivedUnit {
+                source: &sources[*index],
+                path: &siblings[*index - 1].path,
+                program,
+            }),
+    );
     let path_diagnostics = apply_derived_paths(units);
     if !path_diagnostics.is_empty() {
         return Err(path_diagnostics);
@@ -1155,9 +1159,8 @@ impl ParsedDir {
             // entry however it likes; falling back to "is it the same file" keeps an entry linking
             // against its own package instead of degrading to a lone-file check.
             .or_else(|| {
-                (0..self.modules.len()).find(|&i| {
-                    same_file(Path::new(self.sources[i].name()), Path::new(name))
-                })
+                (0..self.modules.len())
+                    .find(|&i| same_file(Path::new(self.sources[i].name()), Path::new(name)))
             })
     }
 
@@ -1582,14 +1585,10 @@ pub fn apply_derived_paths(units: Vec<DerivedUnit<'_>>) -> Vec<LoadDiagnostic> {
         }
         claimed.insert(derived.clone(), unit.source.name().to_string());
 
-        match unit
-            .program
-            .stmts
-            .iter_mut()
-            .find_map(|stmt| match stmt {
-                Stmt::Namespace { path, span } => Some((path, span)),
-                _ => None,
-            }) {
+        match unit.program.stmts.iter_mut().find_map(|stmt| match stmt {
+            Stmt::Namespace { path, span } => Some((path, span)),
+            _ => None,
+        }) {
             Some((declared, span)) if declared != derived => {
                 let message = format!(
                     "this module declares `namespace {}`, but its path derives as `{}`",

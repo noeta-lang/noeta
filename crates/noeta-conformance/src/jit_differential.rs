@@ -195,12 +195,12 @@ fn compare_tiers_workspace(
     let deps = crate::dep_sources(entry, (raw.modules.len() + 1) as u32);
     let ws = if deps.is_empty() {
         noeta_db::workspace(
-        &db,
-        &raw.entry,
-        &raw.modules,
-        noeta_lexer::Edition::DEFAULT,
-        &raw.paths,
-    )
+            &db,
+            &raw.entry,
+            &raw.modules,
+            noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
+        )
     } else {
         noeta_db::workspace_with_deps(
             &db,

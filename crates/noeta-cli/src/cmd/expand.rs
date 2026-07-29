@@ -84,7 +84,11 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
     > = std::collections::BTreeMap::new();
     for entry in &entries {
         let (dir, root) = super::check::entry_pool(entry);
-        by_dir.entry(dir).or_insert((root, Vec::new())).1.push(entry);
+        by_dir
+            .entry(dir)
+            .or_insert((root, Vec::new()))
+            .1
+            .push(entry);
     }
     // The directory the compose probe's graph belongs to — only that group may reuse it, since
     // another directory could resolve a different (nested) manifest.

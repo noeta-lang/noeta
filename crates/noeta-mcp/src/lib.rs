@@ -1155,9 +1155,14 @@ pub(crate) fn resolve_workspace(
         }),
         (None, Some(path)) => {
             let path = Path::new(path);
-            let raw = noeta_loader::read_workspace(path, noeta_pm::sources::package_root(path).as_ref()).map_err(|e| {
-                ErrorData::invalid_params(format!("cannot read {}: {e}", path.display()), None)
-            })?;
+            let raw =
+                noeta_loader::read_workspace(path, noeta_pm::sources::package_root(path).as_ref())
+                    .map_err(|e| {
+                        ErrorData::invalid_params(
+                            format!("cannot read {}: {e}", path.display()),
+                            None,
+                        )
+                    })?;
             let packages = noeta_pm::manifest::dependency_packages_query(path).unwrap_or_default();
             // THE one ordering authority — the same `SourceId` assignment the CLI's
             // `link_with_deps` and the startup cache use, so a dependency module's span located

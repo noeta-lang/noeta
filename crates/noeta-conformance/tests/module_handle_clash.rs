@@ -97,15 +97,15 @@ fn check_then_run(entry: &str, siblings: &[(&str, &str)]) -> String {
         &siblings,
         noeta_loader::ModulePath::Declared,
     )
-        .unwrap_or_else(|errors| {
-            panic!(
-                "the program must link: {:?}",
-                errors
-                    .iter()
-                    .map(|e| (e.diagnostic.code.code(), e.diagnostic.message.clone()))
-                    .collect::<Vec<_>>()
-            )
-        });
+    .unwrap_or_else(|errors| {
+        panic!(
+            "the program must link: {:?}",
+            errors
+                .iter()
+                .map(|e| (e.diagnostic.code.code(), e.diagnostic.message.clone()))
+                .collect::<Vec<_>>()
+        )
+    });
 
     let checked = noeta_check::check_all(&linked.program);
     assert!(

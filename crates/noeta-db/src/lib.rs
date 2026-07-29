@@ -558,9 +558,7 @@ pub fn workspace(
     let members = std::iter::once(entry)
         .chain(modules)
         .enumerate()
-        .map(|(i, s)| {
-            source_program_at(db, s, root_edition, path_at(paths, i))
-        })
+        .map(|(i, s)| source_program_at(db, s, root_edition, path_at(paths, i)))
         .collect();
     // No manifest on this deps-free path → no `[tiers]`/`[directives]` bindings, so no renamed text
     // tiers (a member's own `@tier(…, text)` is discovered by the per-file token scan regardless).
@@ -582,9 +580,7 @@ pub fn workspace_with_deps(
     let members = std::iter::once(entry)
         .chain(modules)
         .enumerate()
-        .map(|(i, s)| {
-            source_program_at(db, s, root_edition, path_at(paths, i))
-        })
+        .map(|(i, s)| source_program_at(db, s, root_edition, path_at(paths, i)))
         .collect();
     let mut dep_inputs = Vec::new();
     for dep in deps {
@@ -948,24 +944,23 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
             path: &entry.module_path(db).0,
             program: entry_program,
         }];
-        units.extend(module_owned.iter_mut().enumerate().map(|(i, (src, program))| {
-            noeta_loader::DerivedUnit {
-                source: &unit_sources[i],
-                path: &src.module_path(db).0,
-                program,
-            }
-        }));
         units.extend(
-            dep_programs
+            module_owned
                 .iter_mut()
-                .zip(&dep_srcs)
                 .enumerate()
-                .map(|(i, (program, src))| noeta_loader::DerivedUnit {
-                    source: &unit_sources[dep_offset + i],
+                .map(|(i, (src, program))| noeta_loader::DerivedUnit {
+                    source: &unit_sources[i],
                     path: &src.module_path(db).0,
                     program,
                 }),
         );
+        units.extend(dep_programs.iter_mut().zip(&dep_srcs).enumerate().map(
+            |(i, (program, src))| noeta_loader::DerivedUnit {
+                source: &unit_sources[dep_offset + i],
+                path: &src.module_path(db).0,
+                program,
+            },
+        ));
         let path_diagnostics = noeta_loader::apply_derived_paths(units);
         if !path_diagnostics.is_empty() {
             return unlinked(
@@ -978,12 +973,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     let entry_program: &Program = entry_owned.as_ref().unwrap_or(&entry_ast.0.program);
 
     let result = if dep_programs.is_empty() {
-        noeta_loader::link_parsed(
-            &entry_source,
-            entry_program,
-            &module_programs,
-            &broken_refs,
-        )
+        noeta_loader::link_parsed(&entry_source, entry_program, &module_programs, &broken_refs)
     } else {
         let dep_refs: Vec<&Program> = dep_programs.iter().collect();
         // The IDE query links from re-rooted dep *sources* but does not carry the resolved native

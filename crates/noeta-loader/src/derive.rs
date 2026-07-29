@@ -186,7 +186,13 @@ fn is_path_segment(segment: &str) -> bool {
 fn legalize(segment: &str) -> String {
     let mut out: String = segment
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if out.is_empty() || out.starts_with(|c: char| c.is_ascii_digit()) {
         out.insert(0, '_');
@@ -289,14 +295,26 @@ mod tests {
 
     #[test]
     fn the_relative_path_becomes_the_module_path() {
-        assert_eq!(derived(&["para", "api"], "middleware.noe"), ["para", "api", "middleware"]);
-        assert_eq!(derived(&["para", "db"], "query.noe"), ["para", "db", "query"]);
-        assert_eq!(derived(&["dirscan"], "deep/nested.noe"), ["dirscan", "deep", "nested"]);
+        assert_eq!(
+            derived(&["para", "api"], "middleware.noe"),
+            ["para", "api", "middleware"]
+        );
+        assert_eq!(
+            derived(&["para", "db"], "query.noe"),
+            ["para", "db", "query"]
+        );
+        assert_eq!(
+            derived(&["dirscan"], "deep/nested.noe"),
+            ["dirscan", "deep", "nested"]
+        );
     }
 
     #[test]
     fn case_is_preserved_verbatim() {
-        assert_eq!(derived(&["pkg"], "Helpers/URI.noe"), ["pkg", "Helpers", "URI"]);
+        assert_eq!(
+            derived(&["pkg"], "Helpers/URI.noe"),
+            ["pkg", "Helpers", "URI"]
+        );
     }
 
     #[test]
@@ -311,9 +329,15 @@ mod tests {
     #[test]
     fn a_leading_src_is_not_a_segment() {
         assert_eq!(derived(&["dirscan"], "src/human.noe"), ["dirscan", "human"]);
-        assert_eq!(derived(&["dirscan"], "src/deep/nested.noe"), ["dirscan", "deep", "nested"]);
+        assert_eq!(
+            derived(&["dirscan"], "src/deep/nested.noe"),
+            ["dirscan", "deep", "nested"]
+        );
         // Only when it leads: a `src` deeper in the tree is an ordinary directory.
-        assert_eq!(derived(&["pkg"], "vendor/src/thing.noe"), ["pkg", "vendor", "src", "thing"]);
+        assert_eq!(
+            derived(&["pkg"], "vendor/src/thing.noe"),
+            ["pkg", "vendor", "src", "thing"]
+        );
     }
 
     #[test]
