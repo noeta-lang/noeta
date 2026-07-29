@@ -199,6 +199,13 @@ macro_rules! __delegate_host_capability {
             ) -> Box<dyn $crate::ExternIo> {
                 self.$field.os_exec_spawn(command, args)
             }
+            fn os_try_spawn(
+                &mut self,
+                command: &str,
+                args: &[String],
+            ) -> Result<u64, $crate::os::OsError> {
+                self.$field.os_try_spawn(command, args)
+            }
             fn os_spawn(
                 &mut self,
                 command: &str,
@@ -252,6 +259,20 @@ macro_rules! __delegate_host_capability {
                 handle: u64,
             ) -> Result<Option<String>, $crate::StdError> {
                 self.$field.os_proc_read_stderr_line(handle)
+            }
+            fn os_proc_read_spawn(
+                &mut self,
+                handle: u64,
+                read: $crate::os::ProcRead,
+            ) -> Box<dyn $crate::ExternIo> {
+                self.$field.os_proc_read_spawn(handle, read)
+            }
+            fn os_proc_try_write_stdin(
+                &mut self,
+                handle: u64,
+                data: &str,
+            ) -> Result<(), $crate::os::OsError> {
+                self.$field.os_proc_try_write_stdin(handle, data)
             }
             fn os_proc_write_stdin(
                 &mut self,

@@ -1858,7 +1858,36 @@ impl Checker {
                         }
                     }
                     None => {
-                        let vty = self.check(value, &Type::Unknown, env);
+                        // **Resolve the name before checking the value.** A bare `x = …` whose name
+                        // already resolves is a *reassignment*, and then the binding's own type —
+                        // not `Unknown` — is the expectation the value is checked against. Looking
+                        // the name up only afterwards is what made
+                        // `mut acc: List<int> = [1, 2]` / `acc = []` an `E0023` whose help
+                        // suggested the annotation the code already carried: the value was checked
+                        // against `Unknown` and the un-inferable-literal gate below fired before
+                        // anything had discovered the obvious expectation sitting one line above.
+                        //
+                        // `mut x = …` is a fresh declaration, never a reassignment; the two
+                        // compound-assignment desugars (`x.f = v`, `x ??= y`) run their own checks
+                        // and deliberately change the binding's type, so both keep the open
+                        // expectation. Those are exactly the cases the branches below exempt.
+                        let target = (!*mut_decl
+                            && !matches!(value, Expr::FieldSet { .. } | Expr::Coalesce { .. }))
+                        .then(|| lookup(env, name))
+                        .flatten()
+                        .cloned();
+                        // The expectation flows only into a literal the target type is *shaped*
+                        // for, and only once that type is resolved. An unresolved target is the
+                        // accumulator pattern (`mut acc = []` then `acc = [1]`): its hole is
+                        // filled by what this write synthesizes, so checking against the hole
+                        // would freeze `List<?>` instead of refining it to `List<int>`.
+                        let expectation = target.as_ref().filter(|ty| {
+                            !ty.contains_unknown() && self.absorbs_expectation(value, ty)
+                        });
+                        let vty = match expectation {
+                            Some(expected) => self.check(value, expected, env),
+                            None => self.check(value, &Type::Unknown, env),
+                        };
                         if self.type_relevant(&vty) {
                             self.relevance.locals.insert(*name_span);
                         }
@@ -1867,7 +1896,14 @@ impl Checker {
                         // its element/payload type is fixed yet undeterminable — `E0023`, fixable
                         // with an annotation. A `mut` binding is exempt: it is an accumulator whose
                         // later writes supply the type (L3).
-                        if !*mut_decl && is_uninferable_literal(value) {
+                        //
+                        // `E0023` is a *binding-site* diagnostic — nothing in reach determines the
+                        // type — so a reassignment of an already-**resolved** binding is never one:
+                        // that binding's type is the answer. A reassignment of an unresolved one
+                        // (`mut acc = []` then `acc = []`) still is, since the write refines
+                        // nothing.
+                        let undeterminable = target.as_ref().is_none_or(Type::contains_unknown);
+                        if !*mut_decl && undeterminable && is_uninferable_literal(value) {
                             self.error(
                                 DiagnosticCode::CannotInfer,
                                 value.span(),
@@ -1899,8 +1935,9 @@ impl Checker {
                         } else {
                             // A bare `x = …` reassigns an existing binding, or introduces a fresh
                             // immutable one. Reassignment is now enforced **statically** — the
-                            // tree-walker deferred both of these to the runtime:
-                            match lookup(env, name) {
+                            // tree-walker deferred both of these to the runtime. `target` is the
+                            // resolution done above, before the value was checked.
+                            match &target {
                                 Some(existing) => {
                                     if !lookup_mutable(env, name) {
                                         // (1) Mutability: an immutable binding cannot be reassigned.

@@ -482,9 +482,22 @@ pub trait Os {
     // `std::process::Child` with drained pipes (CLI-only). ---
 
     /// Spawn `command` with `args` (verbatim — no shell) **without waiting**, returning an opaque
-    /// handle id. The child runs concurrently with the program. A command that cannot be started
-    /// at all (not found, not executable) is an `Io` error, exactly like [`Self::os_exec`].
-    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError>;
+    /// handle id. The child runs concurrently with the program. A command that cannot be started at
+    /// all (not found, not executable) is a classified [`crate::os::OsError`] — the value the
+    /// recoverable `os.try_spawn` door hands the program.
+    ///
+    /// **This is the primitive**, not [`Self::os_spawn`]: a host that can fail to start a child can
+    /// always say *why*, and a door that throws that away can never be recovered from. The aborting
+    /// door is derived from it below.
+    fn os_try_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, crate::os::OsError>;
+
+    /// The **aborting** spawn door (`os.spawn`) — an `Io` error (`E0021`), exactly like
+    /// [`Self::os_exec`]. Derived from [`Self::os_try_spawn`] so the two doors report the identical
+    /// message by construction; a host never implements both.
+    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError> {
+        self.os_try_spawn(command, args)
+            .map_err(crate::os::OsError::into_std_error)
+    }
 
     /// The OS process id of a spawned child, or `None` if `handle` is not a live handle.
     fn os_proc_pid(&self, handle: u64) -> Option<i64>;
@@ -539,8 +552,47 @@ pub trait Os {
     /// [`Self::os_proc_read_line`]. `wait` still returns the whole captured stderr.
     fn os_proc_read_stderr_line(&mut self, handle: u64) -> Result<Option<String>, StdError>;
 
-    /// Write `data` to the child's stdin. An error if the child has no stdin or it is closed.
-    fn os_proc_write_stdin(&mut self, handle: u64, data: &str) -> Result<(), StdError>;
+    /// Build the work descriptor for an **awaitable** streaming read — the twin of every blocking
+    /// read above, selected by [`crate::os::ProcRead`] (`read_line_async`, `read_err_line_async`,
+    /// `read_async(n)`).
+    ///
+    /// One method for all three because the only difference between them is which buffer and how
+    /// much: an asymmetric async surface would leave whichever read lacked a twin able to park the
+    /// isolate's whole scheduler, which is the exact condition this exists to remove.
+    ///
+    /// Default: a [`crate::os::ProcReadIo`] resolving through the blocking methods at spawn
+    /// (deterministic in the sandbox — the scripted child's output is already complete, so it is
+    /// instantly ready and in-oracle); `RealHost` overrides it with a blocking-pool body over the
+    /// child's shared stream buffer, so the read genuinely overlaps the isolate's other tasks. The
+    /// [`Self::os_proc_wait_spawn`] analogue for a streaming read.
+    fn os_proc_read_spawn(
+        &mut self,
+        handle: u64,
+        read: crate::os::ProcRead,
+    ) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::os::ProcReadIo { handle, read })
+    }
+
+    /// Write `data` to the child's stdin, reporting a classified [`crate::os::OsError`] — the value
+    /// the recoverable `Process.try_write` door hands the program.
+    ///
+    /// **This is the primitive**, for the same reason [`Self::os_try_spawn`] is: a write to a child
+    /// that has exited is an ordinary condition (the server crashed mid-call), and the
+    /// check-then-write race a program would otherwise use to avoid it cannot be closed from the
+    /// language — the child can die in the gap between the liveness poll and the write.
+    fn os_proc_try_write_stdin(
+        &mut self,
+        handle: u64,
+        data: &str,
+    ) -> Result<(), crate::os::OsError>;
+
+    /// The **aborting** write door (`Process.write`) — an `Io` error (`E0021`). Derived from
+    /// [`Self::os_proc_try_write_stdin`] so the two doors report the identical message by
+    /// construction; a host never implements both.
+    fn os_proc_write_stdin(&mut self, handle: u64, data: &str) -> Result<(), StdError> {
+        self.os_proc_try_write_stdin(handle, data)
+            .map_err(crate::os::OsError::into_std_error)
+    }
 
     /// Close the child's stdin, signalling end-of-input to it (a program reading until EOF then
     /// unblocks). Idempotent.
