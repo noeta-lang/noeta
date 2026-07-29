@@ -3,7 +3,6 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::ExitCode;
 use std::time::Instant;
 
 use noeta_ast::{AttrValue, Expr, Program, Stmt};
@@ -57,7 +56,7 @@ pub(crate) struct BenchOptions<'a> {
 enum FileBenches {
     /// The tier prologue short-circuited (delegation, a `--target` that does not make `bench`
     /// live, or a rendered diagnostic). Carries its exit code.
-    Ran(ExitCode),
+    Ran(u8),
     /// The file ran but selected no benchmarks. `any_declared` separates "declares none" from
     /// "declares some, and `--name` kept none".
     None { any_declared: bool },
@@ -90,7 +89,7 @@ pub(crate) fn cmd_bench(
     baseline: &Option<String>,
     max_regress: Option<f64>,
     target: &Option<String>,
-) -> ExitCode {
+) -> u8 {
     let opts = BenchOptions {
         iterations_override,
         names,
@@ -107,7 +106,7 @@ pub(crate) fn cmd_bench(
         FileBenches::Ran(code) => code,
         FileBenches::None { any_declared } => {
             println!("{}", empty_bench_message(any_declared, names));
-            ExitCode::SUCCESS
+            0
         }
         FileBenches::Collected(outcomes) => report_benches(&outcomes, &opts, 0),
     }
@@ -127,9 +126,10 @@ fn empty_bench_message(any_declared: bool, names: &[String]) -> &'static str {
 /// Outcomes are labelled with the file they came from, so a bench name shared by two modules stays
 /// distinguishable. Labelling happens *after* each file's baseline load/save, which key on the
 /// bare fn name — so a directory run diffs against exactly the baselines a per-file run wrote.
-fn bench_directory(dir: &std::path::Path, opts: &BenchOptions) -> ExitCode {
-    if let Err(code) = crate::compose::maybe_delegate(dir) {
-        return code;
+fn bench_directory(dir: &std::path::Path, opts: &BenchOptions) -> u8 {
+    if crate::compose::maybe_delegate(dir).is_err() {
+        // Composition needed but failed (a fixed exit-1 delegation); the tier subsystem is `u8`.
+        return 1;
     }
     let mut outcomes: Vec<BenchOutcome> = Vec::new();
     let mut broken = 0usize;
@@ -142,7 +142,7 @@ fn bench_directory(dir: &std::path::Path, opts: &BenchOptions) -> ExitCode {
             .into_owned();
         match run_file_benches(file, opts, Some(&label)) {
             FileBenches::Ran(code) => {
-                if code != ExitCode::SUCCESS {
+                if code != 0 {
                     broken += 1;
                 }
             }
@@ -152,7 +152,7 @@ fn bench_directory(dir: &std::path::Path, opts: &BenchOptions) -> ExitCode {
     }
     if outcomes.is_empty() && broken == 0 {
         println!("{}", empty_bench_message(any_declared, opts.names));
-        return ExitCode::SUCCESS;
+        return 0;
     }
     report_benches(&outcomes, opts, broken)
 }
@@ -203,7 +203,7 @@ fn run_file_benches(
             Ok(map) => Some(map),
             Err(err) => {
                 eprintln!("noeta: {err}");
-                return FileBenches::Ran(ExitCode::from(2));
+                return FileBenches::Ran(2);
             }
         },
         None => None,
@@ -261,7 +261,7 @@ fn run_file_benches(
         && let Err(err) = save_bench_baseline(file, name, &outcomes)
     {
         eprintln!("noeta: cannot save baseline `{name}`: {err}");
-        return FileBenches::Ran(ExitCode::from(2));
+        return FileBenches::Ran(2);
     }
     if let Some(l) = label {
         for outcome in &mut outcomes {
@@ -273,7 +273,7 @@ fn run_file_benches(
 
 /// Print the summary (human or `--json`) and decide the exit code. `broken` counts files whose
 /// prologue failed — they rendered their own diagnostics and fail the run.
-fn report_benches(outcomes: &[BenchOutcome], opts: &BenchOptions, broken: usize) -> ExitCode {
+fn report_benches(outcomes: &[BenchOutcome], opts: &BenchOptions, broken: usize) -> u8 {
     let total = outcomes.len();
     let failed = outcomes.iter().filter(|o| o.per_iter_ns.is_none()).count();
     // The CI gate: any bench past the allowed regression fails the run (their names on stderr —
@@ -321,9 +321,9 @@ fn report_benches(outcomes: &[BenchOutcome], opts: &BenchOptions, broken: usize)
     }
     let _ = io::stdout().flush();
     if failed == 0 && regressed.is_empty() && broken == 0 {
-        ExitCode::SUCCESS
+        0
     } else {
-        ExitCode::from(1)
+        1
     }
 }
 

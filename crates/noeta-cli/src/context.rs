@@ -11,12 +11,23 @@
 //! per-test case, a bench loop, a tier-dispatch call) through [`check_under`] — the crate's one
 //! remaining hand-paired `check_all_with_editions` call.
 
-use std::process::ExitCode;
+use std::io::Write;
 
 use noeta_runner::compile::Loaded;
 
 use crate::output::emit_diagnostics_mapped;
 use crate::{compose, run_declared_tier};
+
+/// Print a [`noeta_runner::CompileFailure`] to stderr and yield its **`u8`** exit code — the tier
+/// subsystem speaks the native-runner seam's `u8` exit codes (0 ok, 1 program error, 2 setup
+/// failure) end to end, so `CompileFailure::report` (which returns a `std::process::ExitCode` the
+/// seam cannot read) is unwrapped to the code here. `ExitCode` reappears only at the CLI's outer
+/// clap boundary, where a verb wraps this crate's `u8` back into one.
+fn report_u8(f: &noeta_runner::CompileFailure) -> u8 {
+    let (text, code) = f.to_text();
+    let _ = std::io::stderr().write_all(text.as_bytes());
+    code
+}
 
 /// For a tier runner: whether its `tier` is live under `--target`. `Ok(true)` when no target was
 /// given (the runner always runs); `Ok(false)` when a target was given but does not make `tier`
@@ -46,7 +57,7 @@ pub(crate) fn target_gate(
     entry: &std::path::Path,
     target: &Option<String>,
     tier: &str,
-) -> Option<ExitCode> {
+) -> Option<u8> {
     match tier_active_in_target(entry, target, tier) {
         Ok(true) => None,
         Ok(false) => {
@@ -54,11 +65,11 @@ pub(crate) fn target_gate(
                 "tier `{tier}` is not active in target `{}`",
                 target.as_deref().unwrap_or_default()
             );
-            Some(ExitCode::SUCCESS)
+            Some(0)
         }
         Err(err) => {
             eprintln!("noeta: {err}");
-            Some(ExitCode::from(1))
+            Some(1)
         }
     }
 }
@@ -72,7 +83,7 @@ pub(crate) fn target_gate(
 pub(crate) fn load_linked(
     file: &std::path::Path,
     resolved: Option<noeta_pm::graph::ResolvedGraph>,
-) -> Result<noeta_loader::Linked, ExitCode> {
+) -> Result<noeta_loader::Linked, u8> {
     // The shared front half (drift firewall): deps + edition resolve exactly as `noeta run`'s
     // pipeline resolves them; the verbs stage tier activation themselves.
     let facts = noeta_runner::compile::resolve_front_with(
@@ -84,10 +95,10 @@ pub(crate) fn load_linked(
             package_uses: g.package_uses,
         }),
     )
-    .map_err(|f| f.report())?;
+    .map_err(|f| report_u8(&f))?;
     // The loader has no manifest data, so it leaves `package_uses` empty; fill it from the resolved
     // facts (which hold the per-package `@`-name tables) so `loaded(..)`’s check resolves directives.
-    let mut linked = noeta_runner::compile::load_linked(file, &facts).map_err(|f| f.report())?;
+    let mut linked = noeta_runner::compile::load_linked(file, &facts).map_err(|f| report_u8(&f))?;
     linked.package_uses = facts.package_uses;
     Ok(linked)
 }
@@ -131,7 +142,7 @@ pub(crate) fn provider_escape(
     linked: &noeta_loader::Linked,
     activated: noeta_check::Activated,
     providers: &std::collections::BTreeMap<String, String>,
-) -> Result<noeta_check::Activated, ExitCode> {
+) -> Result<noeta_check::Activated, u8> {
     match activated.registry.resolve_provider(tier, providers) {
         Ok(noeta_check::ResolvedProvider::Extension) => Ok(activated),
         Ok(noeta_check::ResolvedProvider::Declared(d)) => {
@@ -140,7 +151,7 @@ pub(crate) fn provider_escape(
         }
         Err(err) => {
             eprintln!("noeta: {err}");
-            Err(ExitCode::from(2))
+            Err(2)
         }
     }
 }
@@ -160,7 +171,9 @@ pub(crate) struct TierRun {
 /// return the exit code), or the program is loaded, activated, and checked clean under the
 /// native runner.
 pub(crate) enum Prologue {
-    Ran(ExitCode),
+    /// The invocation was fully handled; carries the native-runner-seam `u8` exit code (a verb
+    /// wraps it back into a `std::process::ExitCode` at the clap boundary).
+    Ran(u8),
     /// Boxed: `TierRun` carries a whole activated program, and the enum crosses a return
     /// boundary per verb invocation (clippy::large_enum_variant).
     Ready(Box<TierRun>),
@@ -177,7 +190,9 @@ pub(crate) fn tier_prologue(
     // The compose probe hands back the graph it resolved (default selection) for the load below
     // — the tier verbs always load under the default selection (audit-5 F2).
     let resolved = match compose::maybe_delegate(file) {
-        Err(code) => return Prologue::Ran(code),
+        // Composition needed but failed (`maybe_delegate` yields a fixed exit-1 `ExitCode`); the
+        // tier subsystem speaks `u8`, so surface it as code 1.
+        Err(_) => return Prologue::Ran(1),
         Ok(resolved) => resolved,
     };
     if let Some(code) = target_gate(file, target, tier) {
@@ -194,7 +209,7 @@ pub(crate) fn tier_prologue(
         Ok(map) => map,
         Err(err) => {
             eprintln!("noeta: {err}");
-            return Prologue::Ran(ExitCode::from(2));
+            return Prologue::Ran(2);
         }
     };
     // Activate the tier: inline its `@<tier>` blocks as ordinary top-level declarations and
@@ -211,7 +226,7 @@ pub(crate) fn tier_prologue(
     };
     if !activated.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
-        return Prologue::Ran(ExitCode::from(1));
+        return Prologue::Ran(1);
     }
 
     // Type-check the activated program once — through the runner's `Loaded`, so the per-source
@@ -234,7 +249,7 @@ pub(crate) fn tier_prologue(
     let checked = checking.check();
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(&checking.sources, checked.diagnostics.iter());
-        return Prologue::Ran(ExitCode::from(1));
+        return Prologue::Ran(1);
     }
     let Loaded {
         program,
