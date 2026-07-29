@@ -2856,7 +2856,7 @@ mod tests {
             )
             .unwrap();
             std::fs::write(
-                d.join(format!("{pkg}.noe")),
+                d.join("m.noe"),
                 format!("namespace para.{pkg}.m;\npub fn one(): int {{ return 1; }}\n"),
             )
             .unwrap();
@@ -2892,6 +2892,15 @@ mod tests {
             assert_eq!(
                 p.root, "para",
                 "scope member para/{pkg} re-roots from its scope"
+            );
+            // …and its modules derive under `{key}.{package segment}` — the scope-array prefix, so
+            // `m.noe` is `para.<pkg>.m`, exactly what it declares. (A *plain* key would give the
+            // shallower `para.m`: which of the two applies is a property of the manifest entry, not
+            // of the package, which is why the resolver records it rather than guessing.)
+            assert_eq!(
+                p.modules[0].path.derived(),
+                Some(["para".to_string(), pkg.to_string(), "m".to_string()].as_slice()),
+                "scope member para/{pkg} derives under the scope prefix"
             );
         }
     }
