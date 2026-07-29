@@ -1792,9 +1792,7 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
-            Expr::TypeName { ty, .. } => {
-                Ok(Atom::Const(Const::Str(self.reflection_head_name(ty))))
-            }
+            Expr::TypeName { ty, .. } => Ok(Atom::Const(Const::Str(self.reflection_head_name(ty)))),
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
             // magnitude's bit pattern is the runtime i64 word (a `u64` with the high bit set boxes as
