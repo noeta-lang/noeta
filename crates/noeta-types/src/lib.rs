@@ -218,6 +218,7 @@ impl Type {
             | Type::IntN { .. }
             | Type::Bool
             | Type::String
+            | Type::Never
             | Type::Bytes
             | Type::Dyn
             | Type::Kind(_) => self.to_string(),
