@@ -1834,6 +1834,92 @@ pub struct ExtTier {
     pub handler: Option<&'static str>,
 }
 
+/// One activated **code root** handed to a native tier runner — the ABI mirror of the prelude
+/// `TierRoot` value a program `@tier` runner receives. `name` is the collected fn/method's
+/// **link-qualified** identifier: `@test fn foo` yields `"foo"`, and an entry inside a `namespace`
+/// yields its dotted link name (the same string the CLI puts in the synthesized
+/// `runner([TierRoot { name: "…", … }, …])` fragment). Borrowed, not `&'static`: the CLI collects
+/// these from an activated program at run time, so a native runner reads them for the duration of
+/// the call and never retains them.
+#[derive(Debug, Clone, Copy)]
+pub struct TierRoot<'a> {
+    /// The collected root's link-qualified name.
+    pub name: &'a str,
+}
+
+/// One activated **text body** handed to a native tier runner — the ABI mirror of the prelude
+/// `TierText` value a text tier's program runner receives (`@doc { … }` → markdown). Borrowed for
+/// the same reason as [`TierRoot`].
+#[derive(Debug, Clone, Copy)]
+pub struct TierText<'a> {
+    /// The link-qualified name of the declaration the block decorates (`@doc { … } fn foo` →
+    /// `"foo"`), or empty for a standalone block tier that decorates nothing.
+    pub target: &'a str,
+    /// The block's verbatim body text, exactly as the lexer captured it.
+    pub text: &'a str,
+}
+
+/// The activated payload a native tier runner receives alongside the driver context — a **code**
+/// tier's collected roots or a **text** tier's collected bodies, discriminated so one runner slot
+/// serves both tier shapes. The counterpart of the `List<TierRoot>` / `List<TierText>` argument a
+/// program `@tier` runner is dispatched with.
+#[derive(Debug, Clone, Copy)]
+pub enum TierRoots<'a> {
+    /// A code tier (`test`/`bench`): the collected fn/method roots, in declaration order.
+    Code(&'a [TierRoot<'a>]),
+    /// A text tier (`doc`): the collected verbatim bodies, in source order.
+    Text(&'a [TierText<'a>]),
+}
+
+/// The full activation a [`TierRunner`] is invoked over: the entry file the tier was run on, plus
+/// the collected roots. The file rides along because a native runner drives the program through the
+/// [`CommandCtx`](crate::CommandCtx) — [`run_file`](crate::CommandCtx::run_file)/load, exactly as an
+/// [`ExtCommand`](crate::ExtCommand) does — rather than receiving in-process closures the way a
+/// program `@tier` runner receives its roots' `run` handles. The roots themselves are still passed
+/// (a native `doc` extractor reads them; a `test` driver may cross-check them) so the native seam
+/// carries the same information the program seam does.
+#[derive(Debug, Clone, Copy)]
+pub struct TierRun<'a> {
+    /// The entry file `noeta <tier> <file>` named — what the runner loads and runs.
+    pub file: &'a std::path::Path,
+    /// The activated roots for this tier.
+    pub roots: TierRoots<'a>,
+}
+
+/// The **native tier runner** an extension registers for one of its [`ExtTier`]s — the code/text
+/// counterpart of [`ExtTier::handler`] (which is the *expression*-tier evaluator). Where `handler`
+/// names a Noeta function an `@<name> { … }` value block desugars into, a runner is a Rust fn
+/// pointer the CLI calls **in-process** to *drive* the tier: it receives the same [`CommandCtx`]
+/// driver an [`ExtCommand`] does (so it can `run_file`/load on the real host) plus the tier's
+/// activated roots ([`TierRun`]), and returns the process exit code (0 ok, 1 program error, 2 setup
+/// failure) exactly like [`ExtCommand::run`].
+///
+/// This is the seam that lets `noeta test`/`bench`/`doc` stop being hardcoded clap verbs and become
+/// registry-dispatched the same way a program-declared `@tier(name) fn runner` and an expression
+/// tier already are. std's real runners are native and live in the CLI layer (`cmd_test`'s parallel
+/// executor, `cmd_bench`'s measurement, `cmd_doc`'s extractor), so std registers them from *there*,
+/// not from this crate — the wiring that resolves a tier to its runner and invokes it belongs to
+/// the CLI. A tier with no runner (an inline-only tier like `debug`, or an expression tier like
+/// `json` that uses [`ExtTier::handler`] instead) simply registers none.
+pub type TierRunner = for<'a> fn(&mut dyn crate::CommandCtx, &TierRun<'a>) -> u8;
+
+/// A [`TierRunner`] paired with the [`ExtTier`] name it drives — what [`Extension::tier_runners`]
+/// returns. Kept a separate registration list rather than a field on [`ExtTier`] because the tier
+/// *declarations* live beneath the CLI (in `noeta-stdlib`) while std's native runners live *in* the
+/// CLI, so the two cannot be spelled in one literal; an extension that both declares a tier and
+/// ships its runner from the same crate lists it in both [`Extension::tiers`] and here, matched by
+/// [`tier`](Self::tier). `Copy`/`'static`-clean like the rest of the ABI (it holds a `&'static str`
+/// and a fn pointer, no owned data).
+#[derive(Debug, Clone, Copy)]
+pub struct ExtTierRunner {
+    /// The [`ExtTier::name`] this runs — the runner attaches to the tier of this name declared by a
+    /// unit sharing the runner's [`Extension::root`] (so a rename/rescope resolves to the right one,
+    /// exactly as [`Registry::find_ext_tier_scoped`] resolves the declaration).
+    pub tier: &'static str,
+    /// The native driver invoked with the collected roots.
+    pub run: TierRunner,
+}
+
 /// An extension-declared **`@`-directive** — a name an extension adds to the decorator
 /// name-space, so `@openapi("petstore.yaml")` on a declaration is a directive the compiler knows
 /// rather than a syntax error.
@@ -2142,6 +2228,16 @@ pub trait Extension: Sync {
     }
     /// The extension's declared dev-tiers (tier-extensions port). Default empty.
     fn tiers(&self) -> &'static [ExtTier] {
+        &[]
+    }
+    /// The extension's **native tier runners** (registry-dispatched tier runners) — the code/text
+    /// counterpart of an expression tier's [`ExtTier::handler`], keyed by [`ExtTierRunner::tier`] to
+    /// one of this unit's [`Extension::tiers`]. Default empty: a tier need not ship a native runner
+    /// (`debug` is inline-only, `json` uses a `handler`), and a package that only *declares* tiers
+    /// leaves the runners to whichever layer owns them — std's `test`/`bench`/`doc` runners are
+    /// native and register from the CLI, not here. A defaulted method keeps every existing extension
+    /// source-compatible.
+    fn tier_runners(&self) -> &'static [ExtTierRunner] {
         &[]
     }
     /// The extension's declared prelude attributes (tier knobs and metadata). Default empty.
@@ -2816,6 +2912,38 @@ impl Registry {
             .filter(|u| provider_roots.iter().any(|r| r == u.root()))
             .flat_map(|u| u.tiers().iter())
             .find(|t| t.name == exported)
+    }
+
+    /// Every installed extension's native tier runners, in install order (registry-dispatched tier
+    /// runners) — the runner twin of [`Registry::ext_tiers`].
+    pub fn ext_tier_runners(&self) -> impl Iterator<Item = &'static ExtTierRunner> + '_ {
+        self.units.iter().flat_map(|e| e.tier_runners().iter())
+    }
+
+    /// The native runner registered for the tier named `name`, if any — the runner twin of
+    /// [`Registry::find_ext_tier`], and how a registry-dispatched `noeta <tier> <file>` recovers the
+    /// native driver to invoke over the tier's activated roots. A bare-name lookup, unambiguous only
+    /// while no two units register a runner for the same tier name; per-package resolution goes
+    /// through [`Registry::find_tier_runner_scoped`].
+    pub fn find_tier_runner(&self, name: &str) -> Option<&'static ExtTierRunner> {
+        self.ext_tier_runners().find(|r| r.tier == name)
+    }
+
+    /// Resolve a native tier runner **scoped to a set of provider namespace roots** — the runner
+    /// twin of [`Registry::find_ext_tier_scoped`]. The runner for the `exported` tier registered by
+    /// a unit whose [`Extension::root`] is one of `provider_roots`, so two providers shipping a
+    /// same-named tier (`std` and `criterion` both `bench`) route to their own runners. Empty
+    /// `provider_roots` → no match.
+    pub fn find_tier_runner_scoped(
+        &self,
+        provider_roots: &[String],
+        exported: &str,
+    ) -> Option<&'static ExtTierRunner> {
+        self.units
+            .iter()
+            .filter(|u| provider_roots.iter().any(|r| r == u.root()))
+            .flat_map(|u| u.tier_runners().iter())
+            .find(|r| r.tier == exported)
     }
 
     /// Every installed extension's **verbatim-body** tier names — the text tiers (`doc` →
@@ -4236,6 +4364,12 @@ pub fn find_ext_tier(name: &str) -> Option<&'static ExtTier> {
     default_registry().and_then(|r| r.find_ext_tier(name))
 }
 
+/// The native runner for the tier named `name` on the process-global default registry — see
+/// [`Registry::find_tier_runner`].
+pub fn find_tier_runner(name: &str) -> Option<&'static ExtTierRunner> {
+    default_registry().and_then(|r| r.find_tier_runner(name))
+}
+
 pub fn ext_body_formatters() -> impl Iterator<Item = &'static BodyFormatter> {
     default_registry()
         .into_iter()
@@ -4784,6 +4918,136 @@ mod runtime_registry_tests {
             validate(&[&STD_A, &STD_B]).is_err(),
             "a duplicate tier name across std units must refuse to assemble"
         );
+    }
+
+    #[test]
+    fn a_native_tier_runner_is_stored_reachable_and_invocable() {
+        // The registry-dispatched tier-runner seam (Part A): an extension registers a native runner
+        // for one of its `ExtTier`s through `Extension::tier_runners`, matched to the declaration by
+        // name. std's real `test`/`bench`/`doc` runners register from the CLI layer (they are native
+        // and live there), so this mock unit stands in for that consumer — it both *declares* the
+        // `audit` tier and *ships* its runner, exercising the whole shape: stored, reachable by name
+        // and scoped to the provider, and invoked over the collected roots with the same driver
+        // (`CommandCtx`) an `ExtCommand` gets.
+        use crate::{CommandCtx, EntryCall};
+        use std::path::{Path, PathBuf};
+
+        // A native runner: drive the program exactly as a command does, then report over the roots.
+        // Its return threads the payload back out so the assertions can prove it saw both arms.
+        fn audit_run(ctx: &mut dyn CommandCtx, run: &TierRun<'_>) -> u8 {
+            let _ = ctx.run_file(run.file, None, None);
+            match run.roots {
+                TierRoots::Code(roots) => roots.len() as u8,
+                TierRoots::Text(bodies) => 100 + bodies.len() as u8,
+            }
+        }
+
+        struct RunnerUnit;
+        impl Extension for RunnerUnit {
+            fn name(&self) -> &'static str {
+                "audit.tools"
+            }
+            fn root(&self) -> &'static str {
+                "audit"
+            }
+            fn modules(&self) -> &'static [ExtModule] {
+                &[]
+            }
+            fn tiers(&self) -> &'static [ExtTier] {
+                &[ExtTier {
+                    name: "audit",
+                    sites: &[TierSite::Function],
+                    config: None,
+                    text: None,
+                    expr: None,
+                    handler: None,
+                }]
+            }
+            fn tier_runners(&self) -> &'static [ExtTierRunner] {
+                &[ExtTierRunner {
+                    tier: "audit",
+                    run: audit_run,
+                }]
+            }
+        }
+        static RUNNER_UNIT: RunnerUnit = RunnerUnit;
+
+        // A driver that records the file it was asked to run — the seam must reach `run_file`.
+        #[derive(Default)]
+        struct RecCtx {
+            ran: Option<PathBuf>,
+        }
+        impl CommandCtx for RecCtx {
+            fn run_file(
+                &mut self,
+                file: &Path,
+                _entry: Option<&EntryCall>,
+                _banner: Option<&str>,
+            ) -> u8 {
+                self.ran = Some(file.to_path_buf());
+                0
+            }
+        }
+
+        let reg = Registry::new(vec![&RUNNER_UNIT]);
+
+        // The declaration and its runner coexist and match by name.
+        assert!(
+            reg.find_ext_tier("audit").is_some(),
+            "the tier declaration is registered"
+        );
+        let runner = reg
+            .find_tier_runner("audit")
+            .expect("the native runner is reachable by tier name");
+        assert_eq!(runner.tier, "audit");
+        // A tier with no registered runner (`debug`/`json`) resolves to `None`.
+        assert!(reg.find_tier_runner("bench").is_none());
+
+        // Scoped resolution lands on the runner of the provider whose root the caller named — the
+        // runner twin of `find_ext_tier_scoped`, so two providers' same-named runners never shadow.
+        assert!(
+            reg.find_tier_runner_scoped(&["audit".to_string()], "audit")
+                .is_some(),
+            "scoped lookup finds the provider's runner"
+        );
+        assert!(
+            reg.find_tier_runner_scoped(&["other".to_string()], "audit")
+                .is_none(),
+            "a foreign provider root does not match"
+        );
+
+        // Invoke the runner end to end: it drives the ctx and reads the collected roots. The code
+        // arm carries `TierRoot`s…
+        let mut ctx = RecCtx::default();
+        let file = Path::new("app.noe");
+        let code_roots = [TierRoot { name: "foo" }, TierRoot { name: "bar" }];
+        let code = (runner.run)(
+            &mut ctx,
+            &TierRun {
+                file,
+                roots: TierRoots::Code(&code_roots),
+            },
+        );
+        assert_eq!(code, 2, "the runner saw both code roots");
+        assert_eq!(
+            ctx.ran.as_deref(),
+            Some(file),
+            "the runner drove `run_file` on the entry, exactly as a command does"
+        );
+
+        // …and the text arm carries `TierText`s through the very same slot.
+        let text_roots = [TierText {
+            target: "doc.me",
+            text: "# hi",
+        }];
+        let text_code = (runner.run)(
+            &mut ctx,
+            &TierRun {
+                file,
+                roots: TierRoots::Text(&text_roots),
+            },
+        );
+        assert_eq!(text_code, 101, "the runner saw one text body");
     }
 
     /// A unit with only types, under its own name and root (the `NsUnit` helper hardcodes
