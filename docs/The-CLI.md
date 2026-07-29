@@ -257,8 +257,10 @@ connections across cores (no `SO_REUSEPORT`, no extra dependency). All workers s
 and drain together on Ctrl-C. `--parallel --watch` hot-reloads across the whole fleet — a swap
 **broadcasts** to every worker's live session, so all cores serve the new code without a restart.
 (Reactive/LiveView state is per-worker: signals and WebSocket subscribers live in the worker that
-handled the connection, so a LiveView app still runs best single-worker — the sticky-routing
-question is a separate follow-on.)
+handled the connection. That is a constraint on where an app's **source of truth** sits, not a bar
+on serving a LiveView across cores — an app backed by a database serves fine on all of them, since
+each worker opens its own connection and drains its own change notifications, while an app whose
+truth is an in-memory signal wants a single worker until session state is shared.)
 
 `--watch` works on **any** command (`noeta run --watch`, `noeta test --watch`, …): a file watcher
 restarts the command on change — with the startup cache, a restart is a few milliseconds.
