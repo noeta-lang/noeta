@@ -196,11 +196,15 @@ fn compare_tiers_workspace(
     let ws = if deps.is_empty() {
         noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT)
     } else {
+        // No `@name` tables: the corpus's dependency graph is synthesized from the case's
+        // subdirectories (`crate::dep_sources`), not from a `noeta.toml`, so no package binds a
+        // `[tiers]`/`[directives]` local name — an empty `PackageUses` is behavior-identical.
         noeta_db::workspace_with_deps(
             &db,
             &raw.entry,
             &raw.modules,
             &deps,
+            &noeta_span::PackageUses::new(),
             noeta_lexer::Edition::DEFAULT,
         )
     };
