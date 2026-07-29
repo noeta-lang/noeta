@@ -13,6 +13,7 @@ mod bench;
 mod build;
 mod cache;
 mod check;
+mod derivation;
 mod doc;
 mod expand;
 mod fmt;
