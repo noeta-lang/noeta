@@ -77,7 +77,7 @@ Forwarding works from a **top-level generic function** and from a **nested `fn`*
 
 ### Asking what `T` is called
 
-`type_name::<T>()` forwards too, and it is the cheapest forward there is: it wants the instantiation's **name** and nothing else, so it rides the same hidden slot with no recipe involved — which means it also serves an instantiation that *has* no recipe, an enum for instance.
+`type_name::<T>()` forwards too, and it is the cheapest forward there is: it wants the instantiation's **name** and nothing else, so it rides the same hidden slot with no recipe involved — which means it also serves an instantiation that *has* no recipe, a `class` for instance.
 
 ```noeta check
 use std.{json}

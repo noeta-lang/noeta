@@ -20,7 +20,9 @@
 //! With `serde_json`'s default features its object map is a `BTreeMap`, so keys arrive sorted —
 //! deterministic, and matching the language's sorted-key maps.
 
-use crate::registry::{FieldDefault, FieldRecipe, NativeOut, Scalar, TypeRecipe};
+use crate::registry::{
+    FieldDefault, FieldRecipe, NativeOut, Scalar, TypeRecipe, VariantRecipe, VariantTag,
+};
 use crate::{ErrorKind, ExternValue, StdError};
 use serde_json::Value as JsonValue;
 use std::any::Any;
@@ -67,6 +69,13 @@ pub enum JsonErrorKind {
     /// (validation arc): the invariant, not the JSON shape, failed. Carries the validator's own
     /// message as the detail and the path to the failing value.
     Validation,
+    /// A value of the right JSON *kind* for a target enum that names none of its variants
+    /// (`"gold"` for `enum Tier: string { Free = "free"; Paid = "paid" }`). Split out of
+    /// [`JsonErrorKind::Mismatch`] because the two want different responses: a mismatch means the
+    /// document has the wrong *shape*, while this means it has the right shape and an
+    /// out-of-vocabulary *value* — which a caller can act on, since the detail lists every accepted
+    /// one. A JSON object where an enum was expected is still a `Mismatch`.
+    UnknownVariant,
 }
 
 impl JsonErrorKind {
@@ -78,6 +87,7 @@ impl JsonErrorKind {
             JsonErrorKind::MissingField => "missing_field",
             JsonErrorKind::UnknownType => "unknown_type",
             JsonErrorKind::Validation => "validation",
+            JsonErrorKind::UnknownVariant => "unknown_variant",
         }
     }
 }
@@ -176,6 +186,29 @@ impl JsonError {
             path: path.to_string(),
             detail: format!(
                 "field `{field}` of `{type_name}` is absent and its baked default is unusable: {why}"
+            ),
+            line: None,
+            column: None,
+        }
+    }
+
+    /// A value of the right JSON kind for `type_name` that names none of its variants. The detail
+    /// lists **every** accepted wire value, in declaration order, because that list is the actionable
+    /// half: a caller re-prompting a model, or rendering the failure to a user, otherwise has to go
+    /// back to the schema to say what would have worked.
+    fn unknown_variant(
+        path: &str,
+        type_name: &str,
+        found: &Json,
+        accepted: &[String],
+    ) -> JsonError {
+        JsonError {
+            kind: JsonErrorKind::UnknownVariant,
+            path: path.to_string(),
+            detail: format!(
+                "{} is not a variant of `{type_name}`: expected one of {}",
+                json_scalar_text(found),
+                accepted.join(", ")
             ),
             line: None,
             column: None,
@@ -444,7 +477,83 @@ fn decode(json: &Json, recipe: &TypeRecipe, path: &mut String) -> Result<NativeO
             }
             _ => Err(JsonError::mismatch(path, name, json)),
         },
+        TypeRecipe::Enum {
+            name,
+            variants,
+            has_validator,
+        } => decode_variant(json, name, variants, *has_validator, path),
     }
+}
+
+/// Walk one JSON value against a [`TypeRecipe::Enum`]: select the variant whose
+/// [`VariantTag`] the value matches, and build it as a payload-free [`NativeOut::Variant`] the
+/// backend materializes into a real enum value (not a string standing in for one, so a `match` over
+/// the result is exhaustive and `==` against a source-written case holds).
+///
+/// **Two rejections, deliberately distinct.** A value of the wrong JSON *kind* for every tag (an
+/// object where a string-backed enum was expected) is an ordinary [`JsonErrorKind::Mismatch`], the
+/// same answer any other recipe gives a wrong-shaped value. A value of the *right* kind that simply
+/// names no case is a [`JsonErrorKind::UnknownVariant`] listing every accepted wire value. Both carry
+/// the path, so an enum three levels down reports `items[2].tier: …` — the decode-door contract in
+/// `docs/Validation.md` — and neither can panic or fall through to a silently-wrong value, because
+/// the walk has no default arm: a tag matches or the walk fails.
+///
+/// The tag order is declaration order, so a (declaration-level) duplicate backing resolves to the
+/// first case that claims it, deterministically and identically in both backends.
+fn decode_variant(
+    json: &Json,
+    name: &str,
+    variants: &[VariantRecipe],
+    has_validator: bool,
+    path: &str,
+) -> Result<NativeOut, JsonError> {
+    let matched = variants.iter().find(|v| tag_matches(&v.tag, &v.name, json));
+    if let Some(variant) = matched {
+        return Ok(NativeOut::Variant {
+            enum_name: name.to_string(),
+            variant: variant.name.clone(),
+            variant_index: variant.index,
+            fields: Vec::new(),
+            has_validator,
+        });
+    }
+    // Nothing matched. Distinguish "wrong shape" from "unknown value" by asking whether *any* tag
+    // could ever have accepted a value of this JSON kind.
+    let kind_is_addressable = variants.iter().any(|v| tag_kind_matches(&v.tag, json));
+    if !kind_is_addressable {
+        return Err(JsonError::mismatch(path, name, json));
+    }
+    let accepted: Vec<String> = variants.iter().map(|v| v.tag.render(&v.name)).collect();
+    Err(JsonError::unknown_variant(path, name, json, &accepted))
+}
+
+/// Whether `json` is exactly the wire value `tag` selects on. Numeric widening follows the same
+/// lattice rule the scalar recipes use (`int <: float`): a JSON integer selects a `float`-backed
+/// case, a fractional number never selects an `int`-backed one.
+fn tag_matches(tag: &VariantTag, case_name: &str, json: &Json) -> bool {
+    match (tag, json) {
+        (VariantTag::Name, Json::Str(s)) => s == case_name,
+        (VariantTag::Str(b), Json::Str(s)) => s == b,
+        (VariantTag::Int(b), Json::Int(n)) => n == b,
+        (VariantTag::Float(b), Json::Float(f)) => f == b,
+        (VariantTag::Float(b), Json::Int(n)) => (*n as f64) == *b,
+        (VariantTag::Bool(b), Json::Bool(v)) => v == b,
+        _ => false,
+    }
+}
+
+/// Whether `tag` selects on values of `json`'s *kind* at all — the "could this ever have matched?"
+/// question that separates a shape failure from an out-of-vocabulary value. Deliberately the
+/// kind-only half of [`tag_matches`], so the two cannot drift into disagreeing about which JSON kinds
+/// an enum addresses.
+fn tag_kind_matches(tag: &VariantTag, json: &Json) -> bool {
+    matches!(
+        (tag, json),
+        (VariantTag::Name | VariantTag::Str(_), Json::Str(_))
+            | (VariantTag::Int(_), Json::Int(_))
+            | (VariantTag::Float(_), Json::Float(_) | Json::Int(_))
+            | (VariantTag::Bool(_), Json::Bool(_))
+    )
 }
 
 /// Decide what an **absent** struct field decodes to, or fail with the missing-field error.
@@ -486,6 +595,22 @@ fn fill_absent_field(
         _ if matches!(field.recipe, TypeRecipe::Option(_)) => Ok(NativeOut::None),
         FieldDefault::Dynamic => Err(JsonError::dynamic_default(path, &field.name, type_name)),
         FieldDefault::Required => Err(JsonError::missing_field(path, &field.name, type_name)),
+    }
+}
+
+/// A **scalar** JSON value as its own JSON text, for the enum rejection that quotes what it was
+/// handed alongside the values it would have accepted — so the two read in one vocabulary (`"gold" is
+/// not a variant of `Tier`: expected one of "free", "paid"`) rather than mixing a rendered value with
+/// a kind name. A composite never reaches the enum door (it fails as a `Mismatch` first), so it falls
+/// back to its kind name rather than growing a second serializer.
+fn json_scalar_text(json: &Json) -> String {
+    match json {
+        Json::Str(s) => noeta_ext_abi::json_text::json_string(s),
+        Json::Int(n) => n.to_string(),
+        Json::Float(f) => noeta_ext_abi::format_float(*f),
+        Json::Bool(b) => b.to_string(),
+        Json::Null => "null".to_string(),
+        Json::Array(_) | Json::Object(_) => format!("a JSON {}", json_kind(json)),
     }
 }
 

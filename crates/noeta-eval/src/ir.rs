@@ -701,6 +701,12 @@ impl Interpreter {
             .map(|v| VariantInfo {
                 name: v.name.clone(),
                 field_names: v.fields.iter().map(|f| f.name.clone()).collect(),
+                // The backing a wire→case conversion matches on, through the one `fold_const_expr`
+                // the reflection manifest and the checker's decode recipes also fold with.
+                backing: v
+                    .backed_value
+                    .as_ref()
+                    .and_then(noeta_ast::reflect::fold_const_expr),
             })
             .collect();
         let methods = en
@@ -2153,9 +2159,22 @@ impl Interpreter {
             // `Result.Err(JsonError)`) carries a path-rich extern; a recipe decode of `T` itself
             // never yields one, only a wrapper's `Err` does.
             NativeOut::Extern(e) => MatOut::Value(Value::Extern(Rc::new(RefCell::new(e)))),
-            // A native enum value (native-extensibility S1) — a call-site-typed door does not
-            // decode one from a JSON recipe, but a native `Result`/`Option` wrapper may carry one,
-            // so materialize it through the ordinary (non-recipe) path.
+            // An enum value: decoded from a `TypeRecipe::Enum` (enum-construction arc), or carried by
+            // a native `Result`/`Option` wrapper (native-extensibility S1). Both build through the
+            // ordinary `materialize_native` path, so a decoded case is indistinguishable from a
+            // source-written one. Only a recipe door sets `has_validator`, and it re-enters exactly
+            // as a struct's does — the case is built first, then `validate()` runs, so a rejection
+            // short-circuits before this node becomes a `Value`.
+            out @ NativeOut::Variant {
+                has_validator: true,
+                ..
+            } => {
+                let value = crate::materialize_native(out);
+                if let Some(rejection) = self.run_validator(value.clone(), path, span)? {
+                    return Ok(MatOut::Rejected(rejection));
+                }
+                MatOut::Value(value)
+            }
             out @ NativeOut::Variant { .. } => MatOut::Value(crate::materialize_native(out)),
             // A native class instance (native-extensibility S2) — like a `Variant`, never decoded
             // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one.

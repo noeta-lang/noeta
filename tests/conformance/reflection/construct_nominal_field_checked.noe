@@ -1,0 +1,56 @@
+// `construct` type-checks a **nominal** field's value, not only a concrete-scalar one.
+//
+// Only the scalar half used to be checked, so a raw `Map` handed to a struct-typed field was stored,
+// answered `Ok`, and survived `.as<Outer>()` — where `type_of` on the field then reported the
+// *declared* type, actively misdescribing the value — before aborting at the first field read with
+// `no field ... on map`, several layers from its cause. An enum-typed field took an `int` the same
+// way. Both are now the same clean `Err` a scalar mismatch already was.
+//
+// A real instance still passes, and the check is kind-agnostic about names (a declared field type
+// reaches reflection as `Type.Named(Inner)` while a value classifies as `Type.Struct(Inner)`), so it
+// neither false-rejects nor depends on which spelling a declaration happened to produce.
+// expect: stdout "map into a struct field: field `inner` of `Outer` expects Inner, got map"
+// expect: stdout "int into an enum field: field `m` of `Holder` expects Mood, got int"
+// expect: stdout "named form too: field `inner` of `Outer` expects Inner, got map"
+// expect: stdout "real instance: Outer {label: \"hi\", inner: Inner {a: 2}}"
+// expect: stdout "narrowing refuses the rejected build: none"
+// expect: exit 0
+struct Inner { a: int }
+struct Outer { label: string  inner: Inner }
+enum Mood { Up; Down }
+struct Holder { m: Mood }
+
+fn say(r: Result<dyn, string>): string {
+    return match r {
+        Ok(v) => "${v}",
+        Err(e) => e,
+    }
+}
+
+mut positional: List<dyn> = []
+positional = positional ~ ["hi"]
+positional = positional ~ [{"a": 2}]
+echo "map into a struct field: " ~ say(construct("Outer", positional))
+
+mut ints: List<dyn> = []
+ints = ints ~ [7]
+echo "int into an enum field: " ~ say(construct("Holder", ints))
+
+mut named: Map<string, dyn> = {}
+named["label"] = "hi"
+named["inner"] = {"a": 2}
+echo "named form too: " ~ say(construct("Outer", named))
+
+mut good: List<dyn> = []
+good = good ~ ["hi"]
+good = good ~ [Inner { a: 2 }]
+echo "real instance: " ~ say(construct("Outer", good))
+
+// The rejected build never becomes a value at all, so nothing downstream can read a wrong field.
+echo "narrowing refuses the rejected build: " ~ match construct("Outer", named) {
+    Ok(v) => match v.as<Outer>() {
+        some(o) => "narrowed",
+        none => "none",
+    },
+    Err(e) => "none",
+}

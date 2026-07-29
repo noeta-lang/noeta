@@ -596,4 +596,28 @@ impl Checker {
             .filter(|q| self.symbols.enums.contains_key(q.as_str()))
             .cloned()
     }
+
+    /// The argument type of `Enum.from` / `Enum.try_from` — what a wire→case conversion accepts.
+    ///
+    /// A **backed** enum accepts its backing values, because a backing is the wire value its JSON
+    /// Schema advertises and the value a real document carries. `string` stays accepted alongside,
+    /// so a plain enum is unchanged and every program that already spelled the case name keeps
+    /// working. Derived from the *folded backings* rather than from a separately tracked backing
+    /// annotation, so the type the checker accepts and the values the backends match cannot drift.
+    pub(crate) fn enum_probe_type(&self, type_name: &str) -> Type {
+        let Some(variants) = self.symbols.enums.get(type_name) else {
+            return Type::String;
+        };
+        let mut members: Vec<Type> = vec![Type::String];
+        for v in variants {
+            match &v.backing {
+                Some(noeta_ast::AttrValue::Int(_)) => members.push(Type::Int),
+                Some(noeta_ast::AttrValue::Float(_)) => members.push(Type::Float),
+                Some(noeta_ast::AttrValue::Bool(_)) => members.push(Type::Bool),
+                // A string backing adds nothing — `string` is already accepted.
+                _ => {}
+            }
+        }
+        Type::union(members)
+    }
 }

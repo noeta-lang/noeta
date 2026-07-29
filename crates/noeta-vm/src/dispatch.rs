@@ -2315,23 +2315,34 @@ impl<'m> Vm<'m> {
                         span,
                     } => {
                         let enum_name = module.name(*enum_name);
-                        let key = match regs[fbase + *arg as usize].as_string() {
-                            Some(s) => s,
-                            None => {
-                                let kind = if *panic { "from" } else { "try_from" };
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!(
-                                        "`{enum_name}.{kind}` expects a string, found {}",
-                                        regs[fbase + *arg as usize].type_name()
-                                    ),
-                                ));
-                            }
+                        let value = regs[fbase + *arg as usize];
+                        let Some(probe) = crate::values::wire_probe(value) else {
+                            let kind = if *panic { "from" } else { "try_from" };
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "`{enum_name}.{kind}` expects a string or a backing value, \
+                                     found {}",
+                                    value.type_name()
+                                ),
+                            ));
                         };
-                        let matched = cases.iter().find(|(name, _)| module.name(*name) == key);
+                        // Backing first, then case name — the shared rule the tree-walker also runs,
+                        // over the case names and backings baked in at compile time.
+                        let names: Vec<&str> = cases
+                            .iter()
+                            .map(|(name, _, _)| module.name(*name))
+                            .collect();
+                        let probe_cases: Vec<(&str, Option<&noeta_ast::AttrValue>)> = names
+                            .iter()
+                            .zip(cases.iter())
+                            .map(|(name, (_, backing, _))| (*name, backing.as_ref()))
+                            .collect();
+                        let matched = noeta_ast::reflect::variant_for_wire(&probe_cases, &probe)
+                            .map(|i| &cases[i]);
                         let result = match matched {
-                            Some((_, shape_idx)) => {
+                            Some((_, _, shape_idx)) => {
                                 // Build the payload-free case; its single reference transfers onward.
                                 let shape = self.persist.shapes[*shape_idx as usize];
                                 let case = Value::enum_value(shape, Vec::new());
@@ -2343,10 +2354,11 @@ impl<'m> Vm<'m> {
                                 }
                             }
                             None if *panic => {
+                                let shown = value.display();
                                 return Err(self.error(
                                     DiagnosticCode::Panic,
                                     *span,
-                                    format!("panic: `{enum_name}` has no case `{key}`"),
+                                    format!("panic: `{enum_name}` has no case `{shown}`"),
                                 ));
                             }
                             None => {

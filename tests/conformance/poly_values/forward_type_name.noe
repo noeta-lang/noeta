@@ -2,7 +2,8 @@
 // that can already forward `T` into `json.try_parse::<T>` can now also ask what `T` is called: the
 // hidden type-argument slot that carries the decode recipe carries the instantiation's name in the
 // same entry, and this surface reads nothing but that name — so it forwards even for an
-// instantiation that has no recipe at all (the enum below).
+// instantiation that has no recipe at all (the CLASS below: a class is reference/identity, so it
+// never decodes, and its table entry carries a name and a `None` recipe).
 //
 // It also closes the loop the surface's own diagnostic pointed at. `field_specs_of::<T>()` stays
 // E0058 — the turbofish arm is a *compile-time* key, resolved like an annotation — but its
@@ -17,7 +18,7 @@
 // expect: stdout "Todo"
 // expect: stdout "2"
 // expect: stdout "Todo|Todo"
-// expect: stdout "Color"
+// expect: stdout "Session"
 // expect: stdout "decoded Todo Ok(Todo {id: 1, label: \"write\"})"
 // expect: exit 0
 use std.{json}
@@ -28,9 +29,8 @@ struct Todo {
     label: string
 }
 
-enum Color {
-    Red
-    Green
+class Session {
+    pub id: int
 }
 
 // The name alone, forwarded.
@@ -62,5 +62,5 @@ echo type_name::<Todo>()
 echo named::<Todo>()
 echo field_count::<Todo>()
 echo inner_and_lambda::<Todo>()
-echo named::<Color>()
+echo named::<Session>()
 echo decode::<Todo>("{\"id\": 1, \"label\": \"write\"}")

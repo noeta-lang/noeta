@@ -351,7 +351,7 @@ for a in attributes_of::<Doc>() {
 
 ### `construct::<T>(fields): Result<dyn, string>` / `construct(name, fields): Result<dyn, string>`
 
-Builds a struct or class value **at runtime** from field values, through the *same* construction path a `T { … }` literal takes — so field defaults and full-initialization are honored identically, and a type that appears in no literal anywhere in the program still constructs. Like `field_specs_of` it has a turbofish and a runtime-string surface (with the same qualified-identity resolution under a `namespace`); like `invoke` it is fallible by construction, returning a `Result` rather than aborting. Both surfaces are typed `Result<dyn, string>` — the turbofish only spells the type *name*, so narrow the `Ok` payload back with `.as<T>()` when you need the static type.
+Builds a struct, class, or **enum case** value **at runtime** from field values, through the *same* construction path a literal takes — so field defaults and full-initialization are honored identically, and a type that appears in no literal anywhere in the program still constructs. Like `field_specs_of` it has a turbofish and a runtime-string surface (with the same qualified-identity resolution under a `namespace`); like `invoke` it is fallible by construction, returning a `Result` rather than aborting. Both surfaces are typed `Result<dyn, string>` — the turbofish only spells the type *name*, so narrow the `Ok` payload back with `.as<T>()` when you need the static type.
 
 `fields` accepts either shape:
 
@@ -385,7 +385,9 @@ Every rejection is an `Err(string)` carrying a ready-to-surface message, never a
 | Situation | Message |
 |---|---|
 | the name is not a string | ``construct type name must be a string, found <kind>`` |
-| the name is not a declared struct/class (an enum, or unknown) | ``` `Foo` is not a constructible struct or class ``` |
+| the name is a bare enum | ``` `Sentiment` is an enum: name the variant to construct, as in `construct("Sentiment.Positive", […])` ``` |
+| the name is `Enum.Variant` but the enum has no such case | ``` `Sentiment` has no variant `Sideways` ``` |
+| the name is nothing the program declares | ``` `Foo` is not a constructible type ``` |
 | `fields` is neither a list nor a map | ``construct fields must be a list or a map, found <kind>`` |
 | more positional values than fields | ``` `Foo` has 2 field(s), but 3 value(s) were given ``` |
 | a named field the type does not have | ``` `Foo` has no field `nope` ``` |
@@ -393,6 +395,41 @@ Every rejection is an `Err(string)` carrying a ready-to-surface message, never a
 | a field that is neither supplied nor defaulted | ``` missing required field `port` of `Foo` ``` |
 
 Validation runs through one shared planner, so both backends accept, reject, and *word* every case identically.
+
+#### Constructing an enum case
+
+An enum case is spelled `construct("Enum.Variant", payload)` — the case goes where the type name goes, exactly as it is written in source, and `fields` is that variant's **payload**.
+
+```noeta
+enum Shape { Circle(r: int); Rect(w: int, h: int); Dot }
+
+echo match construct("Shape.Rect", [2, 5]) {
+    Ok(v) => "${v}",                    // Shape.Rect(2, 5)
+    Err(e) => e,
+}
+```
+
+The payload takes the same two shapes a struct's fields do, and means the same things: a positional `List<dyn>` in declaration order, or a `Map<string, dyn>` keyed by the payload's field names. Those names are the ones [`variants_of`](#variants_oft-listvariantspec--variants_ofname-listvariantspec) reports — a named payload's declared names, or the synthesized `_0`/`_1` of a positional one — so the query that tells you what a case needs and the call that builds it speak one vocabulary:
+
+```noeta
+enum Shape { Circle(r: int); Rect(w: int, h: int); Dot }
+
+for v in variants_of("Shape") {
+    mut names: List<string> = []
+    for f in v.payload { names = names ~ [f.name] }
+    echo "${v.name}(${names.join(", ")})"     // Circle(r) / Rect(w, h) / Dot()
+}
+echo match construct("Shape.Rect", {"w": 2, "h": 5}) {
+    Ok(v) => "${v}",                    // Shape.Rect(2, 5)
+    Err(e) => e,
+}
+```
+
+A payload is validated against that declared schema by the very planner a struct's fields go through, so a wrong scalar kind and a missing payload field are worded exactly like their struct counterparts (`field `r` of `Shape.Circle` expects int, got string`).
+
+A **bare enum name** is a rejection rather than a second spelling. The alternative — `construct("Shape", ["Circle", 3])`, with the case name smuggled in as the first value — would make the field list mean two different things depending on position, and leave no spelling at all for a fieldless case that reads like a payload-carrying one. The same goes for the turbofish: `construct::<Shape>(…)` spells only a type *name*, so it reports the same teaching error.
+
+To go the other way — a single **wire value** to a case, rather than a payload to a variant — use [`Enum.try_from`](Structs-Classes-and-Enums#enums), which matches a backed enum's backing.
 
 ### `attributes_of::<T>(): List<Attributed<T>>`
 

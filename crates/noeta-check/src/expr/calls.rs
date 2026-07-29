@@ -755,9 +755,13 @@ impl Checker {
                 Type::Unknown
             }
             Expr::Member { receiver, name, .. } => {
-                // `Enum.try_from(s)` → `?Enum` / `Enum.from(s)` → `Enum` — the built-in string→case
+                // `Enum.try_from(v)` → `?Enum` / `Enum.from(v)` → `Enum` — the built-in wire→case
                 // conversions (PHP `tryFrom`/`from`), reserved on every enum type. Checked before the
                 // variant constructor so the names cannot be captured by a same-named variant.
+                //
+                // The argument is the enum's **backing type** where it has one, plus `string` for the
+                // case-name spelling — so a `enum Code: int { Ok = 200 }` accepts `Code.try_from(200)`,
+                // the value its schema advertises and the value that comes off a wire.
                 //
                 // A **declared** method of that name wins. An `impl From<Source>` in an enum's body
                 // hoists a `from`, and the `?` conversion already resolves it there, so reserving the
@@ -772,7 +776,8 @@ impl Checker {
                         .methods
                         .contains_key(&(tn.to_string(), name.to_string()))
                 {
-                    self.check_args(&[Type::String], 1, args, arg_exprs, span, name);
+                    let probe = self.enum_probe_type(tn.as_str());
+                    self.check_args(&[probe], 1, args, arg_exprs, span, name);
                     let ty = Type::Named(tn.to_string(), Vec::new());
                     return if name == "from" {
                         ty

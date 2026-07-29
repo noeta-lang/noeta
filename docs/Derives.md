@@ -12,7 +12,7 @@
 | `Error` | `message()` returns `"${self}"` — the type's display story (a hand-written `impl Display`'s `to_string()`, or the structural rendering under `@derive(Display)`). Requires the type to have `Display` at all (E0050 otherwise); `@derive(Error, via: field)` instead forwards `message()` into the field's own `Error` implementation. See [Error Handling](Error-Handling#deriving-error). |
 | `Clone` | A structural clone — a marker like `Display` (value semantics already copy). |
 | `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). Encoding always writes **every** field — a default is a decode-side notion, so it never omits one. |
-| `Deserialize<Json>` | Registers the type's decode recipe, so JSON decodes into it: `json.parse::<T>` / `json.try_parse::<T>`, `Response.json::<T>()`, and the router-facing `json.decode_typed("T", text)` (which resolves the type by *name* at runtime, and needs this derive). Derivable for a non-generic value `struct` whose fields are all JSON-decodable — numbers, `bool`, `string`, `?T`, `List`, string-keyed `Map`, or another such struct; anything else is E0050. See [which fields may be omitted](#which-json-fields-may-be-omitted) below. |
+| `Deserialize<Json>` | Registers the type's decode recipe, so JSON decodes into it: `json.parse::<T>` / `json.try_parse::<T>`, `Response.json::<T>()`, and the router-facing `json.decode_typed("T", text)` (which resolves the type by *name* at runtime, and needs this derive). Derivable for a non-generic value `struct` whose fields are all JSON-decodable — numbers, `bool`, `string`, `?T`, `List`, string-keyed `Map`, a declared **enum**, or another such struct; anything else is E0050. See [which fields may be omitted](#which-json-fields-may-be-omitted) and [enum-typed fields](#enum-typed-fields) below. |
 
 ```noeta check
 @derive(Equatable, Comparable, Display, Clone)
@@ -57,6 +57,43 @@ echo "${pet.id}: ${pet.name}"      // 7: (unnamed)
 The literal cutoff is not arbitrary: a decode is a pure data walk with no access to the running program, so it can only fill a default it carries *as data*. Every in-process constructor — a `T { … }` literal, `construct(name, fields)` — runs the field's compiled default expression instead, which is why those accept a non-literal default where a decode cannot. `field_specs_of::<T>()` reports `optional = true` for any default at all; a decode narrows that to the literal ones and tells you when it did.
 
 The same rule governs request bodies: a web framework decodes a handler's body parameter with `json.decode_typed`, so a body struct with a literal default accepts documents that omit that field rather than rejecting them.
+
+## Enum-typed fields
+
+An enum-typed field decodes from the wire values the enum's own JSON Schema advertises — and only those, because describing a document with one vocabulary and decoding it with another is how a schema and a decoder come apart.
+
+| Enum | Its schema | What decodes |
+|---|---|---|
+| `enum Mood { Positive; Negative }` | `{"enum": ["Positive", "Negative"]}` | the **case names** |
+| `enum Plan: string { Free = "free"; Paid = "paid" }` | `{"enum": ["free", "paid"]}` | the **backings** — `"Free"` is refused |
+| `enum Code: int { Ok = 200 }` | `{"enum": [200]}` | the **backings**, as JSON numbers |
+
+```noeta
+use std.json
+use std.json.JsonError
+
+enum Plan: string { Free = "free"; Paid = "paid" }
+
+@derive(Deserialize<Json>)
+struct Account { tier: Plan }
+
+fn describe(r: Result<Account, JsonError>): string {
+    return match r {
+        Ok(a) => "${a.tier}",
+        Err(e) => "${e.kind()}: ${e.message()}",
+    }
+}
+
+echo describe(json.try_parse::<Account>("{\"tier\": \"paid\"}"))   // Plan.Paid
+echo describe(json.try_parse::<Account>("{\"tier\": \"gold\"}"))
+// unknown_variant: tier: "gold" is not a variant of `Plan`: expected one of "free", "paid"
+```
+
+What you get back is a **real enum value**: it `match`es exhaustively and compares equal to a case written in source, not a string standing in for one.
+
+A value that names no case is a path-carrying `JsonError` of kind `unknown_variant`, whose detail lists every accepted wire value — distinct from `mismatch`, which means the document has the wrong *shape* rather than an out-of-vocabulary value. Neither can panic, and neither can produce a silently-wrong value.
+
+An enum with a **payload-carrying** variant has no JSON decoding at all, so a struct with such a field is E0050: a data-carrying sum has no canonical JSON spelling, and decoding only its payload-free half would accept documents against a schema that cannot describe the type. Build those cases with [`construct("Enum.Variant", payload)`](Attributes-and-Reflection#constructt-fields-resultdyn-string--constructname-fields-resultdyn-string), or convert a single wire value with [`Enum.try_from`](Structs-Classes-and-Enums#enums).
 
 ## Deriving a user trait
 

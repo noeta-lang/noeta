@@ -327,6 +327,8 @@ impl Checker {
                             .iter()
                             .map(|f| stdlib::sig_to_type(self.reg(), f))
                             .collect(),
+                        // A native enum is never backed — the ABI declares cases, not wire values.
+                        backing: None,
                     })
                     .collect();
                 (qualified, variants)
@@ -643,6 +645,8 @@ impl Checker {
                         .iter()
                         .map(|f| prelude_field_type(decl.name, *f))
                         .collect(),
+                    // No prelude enum is backed — their cases are their wire values.
+                    backing: None,
                 })
                 .collect();
             self.symbols.types.insert(decl.name.to_string());

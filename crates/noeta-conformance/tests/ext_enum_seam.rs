@@ -187,6 +187,9 @@ fn variant(
         variant: variant.to_string(),
         variant_index,
         fields,
+        // A dispatch's own return value is not untrusted input crossing a decode door, so nothing
+        // re-enters to validate it (only `TypeRecipe::Enum` sets this).
+        has_validator: false,
     }
 }
 
