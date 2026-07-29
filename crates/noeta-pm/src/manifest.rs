@@ -49,7 +49,11 @@ use crate::error::PmError;
 use noeta_fmt::FmtConfig;
 
 /// The manifest file name, discovered at or above the entry file's directory.
-pub const MANIFEST_NAME: &str = "noeta.toml";
+///
+/// Defined once, in `noeta-loader`: the loader needs the *name* as the pruning predicate for the
+/// package walk (a subdirectory holding one is a different package), and two spellings of the file
+/// that decides what a package is could drift. Everything the manifest *means* is still here.
+pub use noeta_loader::MANIFEST_NAME;
 
 /// The built-in/stdlib tier provider — always available; every other provider must be a declared
 /// `[dependencies]` key.

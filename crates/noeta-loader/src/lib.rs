@@ -1,9 +1,10 @@
 //! Multi-file module loading and linking (M1.9).
 //!
-//! A program is rooted at an *entry* `.noe` file. Sibling `.noe` files in the entry's
-//! directory are candidate *modules*, each declaring its identity with `namespace App.Models;`.
-//! The entry's `use App.Models.{User}` declarations resolve against those modules' declared
-//! namespaces; each resolved name's real declaration is **merged into one [`Program`]** ahead of
+//! A program is rooted at an *entry* `.noe` file. The other `.noe` files of its **package** are
+//! candidate *modules*, and a module's identity is **derived from where its file sits** (see
+//! [`derive`]) — the package's import prefix plus the file's path inside the package.
+//! The entry's `use dirscan.deep.nested.{Scanner}` declarations resolve against those derived
+//! paths; each resolved name's real declaration is **merged into one [`Program`]** ahead of
 //! the entry's own statements, so both backends run the linked program unchanged and the
 //! differential oracle is preserved by construction.
 //!
@@ -18,6 +19,7 @@
 //! is tagged at parse time with its [`SourceId`], so the caller resolves it through the [`Linked`]
 //! [`SourceMap`] rather than against the entry (slice F4).
 
+pub mod derive;
 pub mod expand;
 mod qualify;
 
@@ -29,6 +31,9 @@ use noeta_ast::{Program, Stmt, UseName};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::{PackageOrigin, Source, SourceId, SourceMap, Span};
 
+pub use derive::{
+    MANIFEST_NAME, ModulePath, PackageRoot, derive_module_path, read_package_modules,
+};
 pub use expand::ExpandedSource;
 
 /// A loaded, linked program ready to type-check and run.
@@ -187,19 +192,42 @@ impl BrokenModule {
 pub fn load(
     entry_path: &Path,
     root_edition: noeta_lexer::Edition,
+    root: Option<&PackageRoot>,
 ) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
     let text = std::fs::read_to_string(entry_path)?;
     let name = entry_path.display().to_string();
-    let siblings = read_siblings(entry_path);
-    Ok(link(&name, &text, root_edition, &siblings))
+    let siblings = read_siblings(entry_path, root);
+    Ok(link(
+        &name,
+        &text,
+        root_edition,
+        &siblings,
+        entry_module_path(entry_path, root),
+    ))
 }
 
-/// One sibling module's identity (display name + source text), before parsing. Public so the
-/// linker can be driven from in-memory sources in tests.
+/// One sibling module's identity (display name + source text + the module path its location
+/// derives), before parsing. Public so the linker can be driven from in-memory sources in tests.
 #[derive(Debug)]
 pub struct RawModule {
     pub name: String,
     pub text: String,
+    /// The module path derived from where this file sits ([`derive`]). [`ModulePath::Declared`] —
+    /// the default, and what an in-memory caller with no package on disk gets — means nothing was
+    /// derived and the file's own `namespace` declaration stands.
+    pub path: ModulePath,
+}
+
+impl RawModule {
+    /// A module with **no** derived path: its `namespace` declaration is its identity. The
+    /// in-memory/no-package constructor (tests, a lone script's flat sibling scan).
+    pub fn declared(name: impl Into<String>, text: impl Into<String>) -> RawModule {
+        RawModule {
+            name: name.into(),
+            text: text.into(),
+            path: ModulePath::Declared,
+        }
+    }
 }
 
 /// Load and link the program rooted at `entry_path` **with its dependency packages** — the
@@ -211,8 +239,9 @@ pub fn load_with_deps(
     root_edition: noeta_lexer::Edition,
     deps: &[DepPackage],
     package_uses: &noeta_span::PackageUses,
+    root: Option<&PackageRoot>,
 ) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
-    load_with_deps_appending(entry_path, root_edition, deps, package_uses, &[])
+    load_with_deps_appending(entry_path, root_edition, deps, package_uses, root, &[])
 }
 
 /// As [`load_with_deps`], but appending `entry_tail` — statements a **driver** synthesizes onto the
@@ -242,11 +271,12 @@ pub fn load_with_deps_appending(
     root_edition: noeta_lexer::Edition,
     deps: &[DepPackage],
     package_uses: &noeta_span::PackageUses,
+    root: Option<&PackageRoot>,
     entry_tail: &[Stmt],
 ) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
     let text = std::fs::read_to_string(entry_path)?;
     let name = entry_path.display().to_string();
-    let siblings = read_siblings(entry_path);
+    let siblings = read_siblings(entry_path, root);
     Ok(link_with_deps_appending(
         &name,
         &text,
@@ -254,6 +284,7 @@ pub fn load_with_deps_appending(
         &siblings,
         deps,
         package_uses,
+        entry_module_path(entry_path, root),
         entry_tail,
     ))
 }
@@ -333,8 +364,17 @@ pub fn reroot_path(
 }
 
 /// Re-root a dependency module's `namespace` (its match key) and `use` paths (its import drivers).
-/// The `namespace` only ever leads with the package's own root, so it is rewritten `root` → `key`; a
-/// `use` may lead with the package root (an intra-package reference) or one of the package's local
+///
+/// **A module's path is now derived, not declared** ([`derive`]), so the `namespace` rewrite is no
+/// longer what gives a dependency its identity — the derivation already produces it under the
+/// consumer's key. What the rewrite still does is put a *declared* namespace into the consumer's
+/// naming space so [`apply_derived_paths`] can compare like with like: a package that declares
+/// `namespace greet.hello` and is keyed `hi` re-roots to `hi.hello`, which is exactly what
+/// `hello.noe` derives, so the declaration is a restatement rather than a contradiction. (It is a
+/// no-op once the declarations are gone.)
+///
+/// A declared `namespace` only ever leads with the package's own root, so it is rewritten
+/// `root` → `key`; a `use` may lead with the package root (an intra-package reference) or one of the package's local
 /// dependency keys (a transitive reference), both handled by [`reroot_path`]. Touches only those two
 /// statement kinds — both are consumed *during* linking (matching / import-driving) and never appear
 /// in the merged declaration output — so re-rooting cannot alter what a package contributes, only how
@@ -367,6 +407,11 @@ pub fn reroot_program(
 pub struct RawWorkspace {
     pub entry: Source,
     pub modules: Vec<Source>,
+    /// The module path each source's location derives, **index-aligned with the `SourceId`s**: the
+    /// entry at 0, the modules at `1..`. A [`Source`] carries a file name, not an identity, and the
+    /// salsa graph rebuilds programs from `Source`s alone — so the derivation has to travel beside
+    /// them or the query path would fall back to declared namespaces while the batch path derives.
+    pub paths: Vec<ModulePath>,
 }
 
 /// Read the entry file and its sibling `.noe` modules into labeled [`Source`]s, without lexing,
@@ -393,37 +438,90 @@ pub fn workspace_sources(workspace: &RawWorkspace, deps: &[DepPackage]) -> Vec<S
     sources
 }
 
-pub fn read_workspace(entry_path: &Path) -> io::Result<RawWorkspace> {
+pub fn read_workspace(entry_path: &Path, root: Option<&PackageRoot>) -> io::Result<RawWorkspace> {
     let text = std::fs::read_to_string(entry_path)?;
     let entry = Source::new(SourceId(0), entry_path.display().to_string(), text);
-    let modules = read_siblings(entry_path)
+    let mut paths = vec![entry_module_path(entry_path, root)];
+    let modules = read_siblings(entry_path, root)
         .into_iter()
         .enumerate()
-        .map(|(i, raw)| Source::new(SourceId((i + 1) as u32), raw.name, raw.text))
+        .map(|(i, raw)| {
+            paths.push(raw.path);
+            Source::new(SourceId((i + 1) as u32), raw.name, raw.text)
+        })
         .collect();
-    Ok(RawWorkspace { entry, modules })
+    Ok(RawWorkspace {
+        entry,
+        modules,
+        paths,
+    })
 }
 
-/// Gather the `.noe` files in the entry's directory other than the entry itself, in sorted
-/// order (so SourceId assignment and resolution are deterministic). A read failure yields no
-/// siblings — a lone file simply links to itself.
-fn read_siblings(entry_path: &Path) -> Vec<RawModule> {
-    let Some(dir) = entry_path.parent() else {
-        return Vec::new();
+/// The module path the **entry** file's own location derives — it is a file of the package like any
+/// other, and a sibling may legitimately `use` what it declares.
+fn entry_module_path(entry_path: &Path, root: Option<&PackageRoot>) -> ModulePath {
+    let Some(root) = root else {
+        return ModulePath::Declared;
     };
-    let entry_name = entry_path.file_name();
-    let mut modules = read_dir_modules(dir);
-    modules.retain(|m| Path::new(&m.name).file_name() != entry_name);
+    root.relative(entry_path)
+        .map_or(ModulePath::Declared, |relative| {
+            derive_module_path(&root.prefix, relative)
+        })
+}
+
+/// Gather the entry's **sibling modules**: every other `.noe` file of the package, in sorted order
+/// (so `SourceId` assignment and resolution are deterministic).
+///
+/// With a [`PackageRoot`] this is the package walk ([`read_package_modules`]) — recursive and
+/// pruned, exactly as a *dependency* package has always been walked, so `src/deep/nested.noe` is a
+/// module of the app just as a dependency's `inner/deep.noe` is a module of the dependency. Without
+/// one (a lone script in a directory that is not a package) it stays the flat scan of the entry's
+/// own directory: a bare `noeta run` must not recursively swallow whatever tree it happens to stand
+/// in, and with no package there is no prefix to derive under either.
+///
+/// A read failure yields no siblings — a lone file simply links to itself.
+fn read_siblings(entry_path: &Path, root: Option<&PackageRoot>) -> Vec<RawModule> {
+    let mut modules = match root {
+        Some(root) => read_package_modules(root),
+        None => {
+            let Some(dir) = entry_path.parent() else {
+                return Vec::new();
+            };
+            read_dir_modules(dir)
+        }
+    };
+    // The entry is not its own sibling. Compared by full path under a package walk (two files can
+    // share a name in different directories) and by file name otherwise (the flat scan's paths are
+    // spelled however the invocation spelled them).
+    match root {
+        Some(_) => modules.retain(|m| !same_file(Path::new(&m.name), entry_path)),
+        None => {
+            let entry_name = entry_path.file_name();
+            modules.retain(|m| Path::new(&m.name).file_name() != entry_name);
+        }
+    }
     modules
+}
+
+/// Whether two paths name the same file. The package walk spells its paths from the package root
+/// while the invocation spells the entry however it likes, so the cheap comparison is tried first
+/// and canonicalization only settles the cases it misses — the entry appearing in its own sibling
+/// pool would merge every one of its declarations twice.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
 }
 
 /// Read every `.noe` file directly in `dir` (flat — the sibling scan's scope) as a [`RawModule`],
 /// in sorted order. A directory that cannot be read yields no modules; unreadable files are skipped
 /// — both matching [`read_siblings`]'s tolerance (it is this scan minus the entry).
 ///
-/// A *dependency package* is a directory tree, not one flat directory, and deciding which of its
-/// files are its source needs to know what a package is (a `noeta.toml`) — knowledge this crate
-/// sits below. That walk therefore lives in the package manager, `noeta_pm::sources`.
+/// This is the **no-package** scan: nothing here derives a module path, so every module's
+/// `namespace` declaration stands. A directory that *is* a package is a tree, and its modules have
+/// derived paths — use [`read_package_modules`] with its [`PackageRoot`].
 pub fn read_dir_modules(dir: &Path) -> Vec<RawModule> {
     // A bare relative entry (`noeta test app.noe`) has parent `""` — the current directory —
     // but `read_dir("")` errors, which silently dropped every sibling: an E0019 from the very
@@ -452,10 +550,7 @@ pub fn read_dir_modules(dir: &Path) -> Vec<RawModule> {
         .into_iter()
         .filter_map(|p| {
             let text = std::fs::read_to_string(&p).ok()?;
-            Some(RawModule {
-                name: p.display().to_string(),
-                text,
-            })
+            Some(RawModule::declared(p.display().to_string(), text))
         })
         .collect()
 }
@@ -467,6 +562,7 @@ pub fn link(
     entry_text: &str,
     root_edition: noeta_lexer::Edition,
     siblings: &[RawModule],
+    entry_path: ModulePath,
 ) -> Result<Linked, Vec<LoadDiagnostic>> {
     // The entry is always SourceId 0; siblings follow. Each module keeps its own source so its
     // spans stay valid and its diagnostics render against it. The deps-free path: entry + siblings
@@ -496,7 +592,8 @@ pub fn link(
     // Entry + siblings parse under the root package's edition (deps-free: no dependency packages,
     // so no other editions are in play). `link_with_deps` is the twin that also links dependencies,
     // each under its own edition.
-    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
+    let mut entry_parsed =
+        noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
     let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
@@ -519,16 +616,45 @@ pub fn link(
     // parse error instead of the cascading "no module" (see [`BrokenModule`]). Every sibling's
     // `Source` is retained (whether or not it parsed) so the `SourceMap` indices line up with the
     // `SourceId`s the parser stamped onto spans.
-    let mut module_programs: Vec<Program> = Vec::new();
+    let mut module_programs: Vec<(usize, Program)> = Vec::new();
     let mut broken: Vec<BrokenModule> = Vec::new();
-    for (source, lexed) in sources.iter().zip(&lexeds).skip(1) {
-        match parse_module(source, lexed, root_edition, &text_tiers) {
-            Ok(program) => module_programs.push(program),
+    for (index, (source, lexed)) in sources.iter().zip(&lexeds).enumerate().skip(1) {
+        match parse_module(
+            source,
+            lexed,
+            root_edition,
+            &text_tiers,
+            &siblings[index - 1].path,
+        ) {
+            Ok(program) => module_programs.push((index, program)),
             Err(module) => broken.push(*module),
         }
     }
 
-    let refs: Vec<&Program> = module_programs.iter().collect();
+    // Derivation decides identity: each file's path becomes its `namespace` (see
+    // [`apply_derived_paths`]). Runs before linking, so a collision or a contradicted declaration is
+    // reported against the files themselves rather than as the "no module"/"has no export" cascade
+    // it used to become at whoever imported them.
+    let mut units = vec![DerivedUnit {
+        source: &entry,
+        path: &entry_path,
+        program: &mut entry_parsed.program,
+    }];
+    units.extend(
+        module_programs
+            .iter_mut()
+            .map(|(index, program)| DerivedUnit {
+                source: &sources[*index],
+                path: &siblings[*index - 1].path,
+                program,
+            }),
+    );
+    let path_diagnostics = apply_derived_paths(units);
+    if !path_diagnostics.is_empty() {
+        return Err(path_diagnostics);
+    }
+
+    let refs: Vec<&Program> = module_programs.iter().map(|(_, p)| p).collect();
     let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
     let Linkage {
         mut program,
@@ -667,6 +793,7 @@ pub fn link_with_deps(
     siblings: &[RawModule],
     deps: &[DepPackage],
     package_uses: &noeta_span::PackageUses,
+    entry_path: ModulePath,
 ) -> Result<Linked, Vec<LoadDiagnostic>> {
     link_with_deps_appending(
         entry_name,
@@ -675,6 +802,7 @@ pub fn link_with_deps(
         siblings,
         deps,
         package_uses,
+        entry_path,
         &[],
     )
 }
@@ -690,6 +818,7 @@ pub fn link_with_deps_appending(
     siblings: &[RawModule],
     deps: &[DepPackage],
     package_uses: &noeta_span::PackageUses,
+    entry_path: ModulePath,
     entry_tail: &[Stmt],
 ) -> Result<Linked, Vec<LoadDiagnostic>> {
     // Assemble every module's `Source` up front — entry = 0, siblings `1..=S`, dependency modules
@@ -736,6 +865,10 @@ pub fn link_with_deps_appending(
     // The entry parses under the root package's edition.
     let mut entry_parsed =
         noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
+    // The driver's tail joins the entry *before* anything reads the program — so it is one of the
+    // entry's own statements by the time derivation writes the entry's module path in and the
+    // linker resolves its imports, which is exactly what the tail's `use` and its qualified names
+    // need (see [`load_with_deps_appending`]).
     append_entry_tail(&mut entry_parsed.program, entry_tail);
     let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
@@ -755,18 +888,28 @@ pub fn link_with_deps_appending(
 
     // Parse the siblings (pure decl-sources) under the root edition. A broken sibling is kept for
     // attribution rather than dropped (see [`BrokenModule`]).
-    let mut sibling_programs: Vec<Program> = Vec::new();
+    let mut sibling_programs: Vec<(usize, Program)> = Vec::new();
     let mut broken: Vec<BrokenModule> = Vec::new();
-    for (source, lexed) in sources[1..sibling_end].iter().zip(&lexeds[1..sibling_end]) {
-        match parse_module(source, lexed, root_edition, &text_tiers) {
-            Ok(program) => sibling_programs.push(program),
+    for (index, (source, lexed)) in sources[1..sibling_end]
+        .iter()
+        .zip(&lexeds[1..sibling_end])
+        .enumerate()
+    {
+        match parse_module(
+            source,
+            lexed,
+            root_edition,
+            &text_tiers,
+            &siblings[index].path,
+        ) {
+            Ok(program) => sibling_programs.push((index + 1, program)),
             Err(module) => broken.push(*module),
         }
     }
 
     // Parse + re-root each dependency package's modules under *that package's* edition (the sources
     // continue past the siblings in the same package order they were assembled above).
-    let (dep_programs, broken_deps) =
+    let (mut dep_programs, broken_deps) =
         parse_dep_programs(&sources, &lexeds, sibling_end, deps, &text_tiers);
 
     // A dependency package that does not parse is a hard error, reported against the offending file
@@ -781,8 +924,37 @@ pub fn link_with_deps_appending(
             .collect());
     }
 
-    let sibling_refs: Vec<&Program> = sibling_programs.iter().collect();
-    let dep_refs: Vec<&Program> = dep_programs.iter().collect();
+    // The entry, its siblings, and every dependency module take the path their location derives —
+    // dependency modules **after** re-rooting, so a declared namespace is compared in the consumer's
+    // own naming space (see [`apply_derived_paths`]). One pass over all of them, because a collision
+    // is a program-wide fact: two files of one package deriving one path is the same error as a
+    // dependency module colliding with a sibling.
+    let mut units = vec![DerivedUnit {
+        source: &entry,
+        path: &entry_path,
+        program: &mut entry_parsed.program,
+    }];
+    units.extend(
+        sibling_programs
+            .iter_mut()
+            .map(|(index, program)| DerivedUnit {
+                source: &sources[*index],
+                path: &siblings[*index - 1].path,
+                program,
+            }),
+    );
+    units.extend(dep_programs.iter_mut().map(|(index, program)| DerivedUnit {
+        source: &sources[*index],
+        path: dep_module_path(deps, *index - sibling_end),
+        program,
+    }));
+    let path_diagnostics = apply_derived_paths(units);
+    if !path_diagnostics.is_empty() {
+        return Err(path_diagnostics);
+    }
+
+    let sibling_refs: Vec<&Program> = sibling_programs.iter().map(|(_, p)| p).collect();
+    let dep_refs: Vec<&Program> = dep_programs.iter().map(|(_, p)| p).collect();
     let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
     let native_roots = native_dep_roots(deps);
     let Linkage {
@@ -856,16 +1028,22 @@ fn parse_dep_programs(
     offset: usize,
     deps: &[DepPackage],
     text_tiers: &noeta_lexer::TextTiers,
-) -> (Vec<Program>, Vec<BrokenModule>) {
-    let mut dep_programs: Vec<Program> = Vec::new();
+) -> (Vec<(usize, Program)>, Vec<BrokenModule>) {
+    let mut dep_programs: Vec<(usize, Program)> = Vec::new();
     let mut broken: Vec<BrokenModule> = Vec::new();
     let mut dep_idx = offset;
     for dep in deps {
-        for _ in &dep.modules {
-            match parse_module(&sources[dep_idx], &lexeds[dep_idx], dep.edition, text_tiers) {
+        for raw in &dep.modules {
+            match parse_module(
+                &sources[dep_idx],
+                &lexeds[dep_idx],
+                dep.edition,
+                text_tiers,
+                &raw.path,
+            ) {
                 Ok(mut program) => {
                     reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
-                    dep_programs.push(program);
+                    dep_programs.push((dep_idx, program));
                 }
                 Err(module) => broken.push(*module),
             }
@@ -873,6 +1051,20 @@ fn parse_dep_programs(
         }
     }
     (dep_programs, broken)
+}
+
+/// The `flat`-th dependency module's derived path, across every package's modules in the order the
+/// sources were assembled (package order, each package's modules in scan order) — the same walk
+/// [`parse_dep_programs`] does, so the two agree by construction.
+fn dep_module_path(deps: &[DepPackage], flat: usize) -> &ModulePath {
+    let mut remaining = flat;
+    for dep in deps {
+        if remaining < dep.modules.len() {
+            return &dep.modules[remaining].path;
+        }
+        remaining -= dep.modules.len();
+    }
+    &ModulePath::Declared
 }
 
 /// A resolved dependency graph is complete knowledge: the always-legitimate non-std roots are the
@@ -910,12 +1102,17 @@ pub struct ParsedDir {
     /// dependency modules carry their package's global key.
     packages: noeta_span::PackageMap,
     modules: Vec<ModuleParse>,
-    dep_programs: Vec<Program>,
+    dep_programs: Vec<(usize, Program)>,
     /// Dependency-package modules that failed to lex/parse — a hard error for *every* entry in the
     /// directory (a dependency is shared by all of them), reported against the dependency's own
     /// file. `noeta check` dedups by (file, span, code), so one broken dependency file prints once
     /// however many entries the directory holds.
     broken_deps: Vec<BrokenModule>,
+    /// What the *derivation* found wrong with the directory's files — a name that cannot be a path
+    /// segment, two files deriving one path, a `namespace` contradicting the file's location. A
+    /// property of the file set, so it fails every entry in it ([`ParsedDir::link_entry`]), like a
+    /// broken dependency module.
+    path_diagnostics: Vec<LoadDiagnostic>,
     native_roots: Vec<String>,
     /// The union of text tiers declared anywhere in the directory (or its dependencies), from the
     /// one program-wide lex — kept because an expansion's generated source is lexed and parsed with
@@ -992,14 +1189,40 @@ pub fn parse_dir(
     // Parse every directory module once — [`parse_module`] parses even after lex errors (as the
     // entry role always did) and chains lex + parse diagnostics onto the partial program, which is
     // exactly what both the entry and the sibling role need here.
-    let parsed_modules: Vec<ModuleParse> = sources[..modules.len()]
+    let mut parsed_modules: Vec<ModuleParse> = sources[..modules.len()]
         .iter()
         .zip(&lexeds)
-        .map(|(source, lexed)| parse_module(source, lexed, root_edition, &text_tiers))
+        .zip(&modules)
+        .map(|((source, lexed), raw)| {
+            parse_module(source, lexed, root_edition, &text_tiers, &raw.path)
+        })
         .collect();
 
-    let (dep_programs, broken_deps) =
+    let (mut dep_programs, broken_deps) =
         parse_dep_programs(&sources, &lexeds, modules.len(), deps, &text_tiers);
+
+    // Derivation applies once for the whole directory, not per entry: a collision or a contradicted
+    // declaration is a fact about the *files*, identical whichever of them is being checked. The
+    // diagnostics ride on the `ParsedDir` and every entry's link reports them (the CLI dedups by
+    // file+span+code, exactly as it does for a broken dependency).
+    let mut units: Vec<DerivedUnit> = parsed_modules
+        .iter_mut()
+        .enumerate()
+        .filter_map(|(index, parse)| {
+            parse.as_mut().ok().map(|program| DerivedUnit {
+                source: &sources[index],
+                path: &modules[index].path,
+                program,
+            })
+        })
+        .collect();
+    units.extend(dep_programs.iter_mut().map(|(index, program)| DerivedUnit {
+        source: &sources[*index],
+        path: dep_module_path(deps, *index - modules.len()),
+        program,
+    }));
+    let path_diagnostics = apply_derived_paths(units);
+
     let native_roots = native_dep_roots(deps);
     ParsedDir {
         sources,
@@ -1008,6 +1231,7 @@ pub fn parse_dir(
         modules: parsed_modules,
         dep_programs,
         broken_deps,
+        path_diagnostics,
         native_roots,
         text_tiers,
         root_edition,
@@ -1019,7 +1243,15 @@ impl ParsedDir {
     /// `None` when the directory scan didn't yield it (an unreadable file, or a path spelled
     /// differently than the scan spells it — the caller falls back to a lone-file load).
     pub fn module_index(&self, name: &str) -> Option<usize> {
-        (0..self.modules.len()).find(|&i| self.sources[i].name() == name)
+        (0..self.modules.len())
+            .find(|&i| self.sources[i].name() == name)
+            // A package's modules are spelled from the package root while the invocation spells the
+            // entry however it likes; falling back to "is it the same file" keeps an entry linking
+            // against its own package instead of degrading to a lone-file check.
+            .or_else(|| {
+                (0..self.modules.len())
+                    .find(|&i| same_file(Path::new(self.sources[i].name()), Path::new(name)))
+            })
     }
 
     /// Every source (directory modules + dependency modules) under the shared id numbering —
@@ -1089,6 +1321,18 @@ impl ParsedDir {
                 .flat_map(BrokenModule::load_diagnostics)
                 .collect());
         }
+        // Same standing as a broken dependency: the file set is not linkable, and saying so beats
+        // the "no module"/"has no export" cascade the bad derivation would produce downstream.
+        if !self.path_diagnostics.is_empty() {
+            return Err(self
+                .path_diagnostics
+                .iter()
+                .map(|d| LoadDiagnostic {
+                    source: d.source.clone(),
+                    diagnostic: d.diagnostic.clone(),
+                })
+                .collect());
+        }
         let siblings: Vec<&Program> = self
             .modules
             .iter()
@@ -1105,7 +1349,7 @@ impl ParsedDir {
             .filter(|&(i, _)| i != index)
             .filter_map(|(_, m)| m.as_ref().err().map(Box::as_ref))
             .collect();
-        let dep_refs: Vec<&Program> = self.dep_programs.iter().collect();
+        let dep_refs: Vec<&Program> = self.dep_programs.iter().map(|(_, p)| p).collect();
         let Linkage {
             mut program,
             source_maps,
@@ -1314,6 +1558,7 @@ fn parse_module(
     lexed: &noeta_lexer::Lexed,
     edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
+    path: &ModulePath,
 ) -> Result<Program, Box<BrokenModule>> {
     // Parse under the owning package's edition — the entry/sibling's root edition or a
     // dependency's own — so a future edition-gated grammar applies per package.
@@ -1330,7 +1575,13 @@ fn parse_module(
     } else {
         Err(Box::new(BrokenModule {
             source: source.clone(),
-            namespace: namespace_from_tokens(source, &lexed.tokens),
+            // A *derived* path is known whether or not the file parses — it comes from the file's
+            // location, not its contents — so a broken module attributes a consumer's unresolved
+            // `use` even when the syntax error precedes (or replaces) any `namespace` line.
+            namespace: match path {
+                ModulePath::Derived(derived) => Some(derived.clone()),
+                _ => namespace_from_tokens(source, &lexed.tokens),
+            },
             diagnostics,
         }))
     }
@@ -1347,6 +1598,130 @@ fn retarget(mut diagnostic: Diagnostic, id: SourceId) -> Diagnostic {
         label.span.source = id;
     }
     diagnostic
+}
+
+/// One parsed file and the module path its **location** derives — the input to
+/// [`apply_derived_paths`]. Public so the salsa linker (`noeta-db`) applies derivation identically:
+/// the editor and the compiler must not disagree about which module a file is.
+#[derive(Debug)]
+pub struct DerivedUnit<'a> {
+    pub source: &'a Source,
+    pub path: &'a ModulePath,
+    pub program: &'a mut Program,
+}
+
+/// Make each file's **derived** path its module path, and report every way the filesystem says
+/// something the program cannot mean.
+///
+/// This is where derivation becomes the linker's truth: a derived path is written into the program
+/// as its `namespace`, so everything downstream (`module_namespace`, resolution, qualification)
+/// reads one identity with one origin. Three things are errors here rather than silence:
+///
+/// * a **`namespace` declaration that disagrees** with the derived path (E0072) — the declaration is
+///   still accepted while it is being removed from the ecosystem, but only as a *restatement*;
+/// * **two files deriving one path** (E0073), naming both files. This used to be silent: the second
+///   file's exports vanished and the failure surfaced at whoever imported them;
+/// * a **name that is not a legal path segment** (E0074), with the rename to make.
+///
+/// A file with no derived path ([`ModulePath::Declared`] — a lone script, an in-memory caller) is
+/// left exactly as it was, so nothing that never had a package changes behavior.
+///
+/// Called **after** dependency re-rooting ([`reroot_program`]), because that is what puts a declared
+/// namespace into the consumer's own naming space, which is the space the derivation is in.
+pub fn apply_derived_paths(units: Vec<DerivedUnit<'_>>) -> Vec<LoadDiagnostic> {
+    let mut diagnostics = Vec::new();
+    // Derived path → the file that claimed it first (both are named when a second one does).
+    let mut claimed: std::collections::HashMap<Vec<String>, String> =
+        std::collections::HashMap::new();
+    for unit in units {
+        let derived = match unit.path {
+            ModulePath::Declared => continue,
+            ModulePath::Illegal { segment, rename_to } => {
+                diagnostics.push(LoadDiagnostic {
+                    source: unit.source.clone(),
+                    diagnostic: Diagnostic::error(
+                        DiagnosticCode::IllegalModulePath,
+                        first_line(unit.source),
+                        format!(
+                            "`{segment}` cannot be part of a module path — a module's path is \
+                             derived from where its file sits, and every segment of it has to be \
+                             spellable in a `use`"
+                        ),
+                    )
+                    .with_help(format!("rename it to `{rename_to}`")),
+                });
+                continue;
+            }
+            ModulePath::Derived(derived) => derived,
+        };
+        if let Some(first) = claimed.get(derived) {
+            diagnostics.push(LoadDiagnostic {
+                source: unit.source.clone(),
+                diagnostic: Diagnostic::error(
+                    DiagnosticCode::ModulePathCollision,
+                    first_line(unit.source),
+                    format!(
+                        "two files derive the module path `{}`: `{first}` and `{}`",
+                        derived.join("."),
+                        unit.source.name()
+                    ),
+                )
+                .with_help(
+                    "one module path is one module — rename or move one of the files so their \
+                     paths differ",
+                ),
+            });
+            continue;
+        }
+        claimed.insert(derived.clone(), unit.source.name().to_string());
+
+        match unit.program.stmts.iter_mut().find_map(|stmt| match stmt {
+            Stmt::Namespace { path, span } => Some((path, span)),
+            _ => None,
+        }) {
+            Some((declared, span)) if declared != derived => {
+                let message = format!(
+                    "this module declares `namespace {}`, but its path derives as `{}`",
+                    declared.join("."),
+                    derived.join(".")
+                );
+                diagnostics.push(LoadDiagnostic {
+                    source: unit.source.clone(),
+                    diagnostic: Diagnostic::error(
+                        DiagnosticCode::ModulePathMismatch,
+                        *span,
+                        message,
+                    )
+                    .with_help(
+                        "a module's path is the package's import prefix plus the file's path \
+                         inside the package — delete the declaration, or move the file to where \
+                         it says it lives",
+                    ),
+                });
+            }
+            // A declaration that agrees is a restatement — leave it be (it is removed corpus-wide
+            // in a later slice, and the syntax with it).
+            Some(_) => {}
+            None => unit.program.stmts.insert(
+                0,
+                Stmt::Namespace {
+                    path: derived.clone(),
+                    span: first_line(unit.source),
+                },
+            ),
+        }
+    }
+    diagnostics
+}
+
+/// A span covering `source`'s first line — what a diagnostic about the *file* (not about anything
+/// written in it) points at.
+fn first_line(source: &Source) -> Span {
+    let end = source
+        .text()
+        .find('\n')
+        .unwrap_or_else(|| source.text().len());
+    Span::new_in(source.id(), 0, end as u32)
 }
 
 /// Resolve and merge an *already-parsed* entry against already-parsed candidate modules — the pure
@@ -3035,7 +3410,13 @@ mod tests {
         siblings: &[RawModule],
     ) -> Result<Linked, Vec<LoadDiagnostic>> {
         noeta_stdlib::registry::default_seeded();
-        super::link(entry_name, entry_text, root_edition, siblings)
+        super::link(
+            entry_name,
+            entry_text,
+            root_edition,
+            siblings,
+            ModulePath::Declared,
+        )
     }
 
     fn link_with_deps(
@@ -3053,14 +3434,12 @@ mod tests {
             siblings,
             deps,
             &noeta_span::PackageUses::new(),
+            ModulePath::Declared,
         )
     }
 
     fn module(name: &str, text: &str) -> RawModule {
-        RawModule {
-            name: name.to_string(),
-            text: text.to_string(),
-        }
+        RawModule::declared(name, text)
     }
 
     // --- cross-package linking (package-manager P2.1) -----------------------------------------
@@ -3995,6 +4374,9 @@ mod tests {
             &[],
             std::slice::from_ref(&dep),
             &noeta_span::PackageUses::new(),
+            // In-memory sources with no package on disk, so nothing derives and each module is
+            // identified by the `namespace` it declares.
+            ModulePath::Declared,
             &tail,
         )
         .expect("the tail's import resolves the package's own `.noe` submodule");
@@ -4059,6 +4441,9 @@ mod tests {
             &[],
             std::slice::from_ref(&dep),
             &noeta_span::PackageUses::new(),
+            // In-memory sources with no package on disk, so nothing derives and each module is
+            // identified by the `namespace` it declares.
+            ModulePath::Declared,
             &tail,
         )
         .expect("a duplicate import must be dropped, not reported");
@@ -4994,6 +5379,7 @@ mod tests {
             &[],
             &[],
             &uses,
+            ModulePath::Declared,
         )
         .expect("a renamed text tier captures verbatim and links");
 
@@ -5006,6 +5392,7 @@ mod tests {
             &[],
             &[],
             &noeta_span::PackageUses::new(),
+            ModulePath::Declared,
         )
         .expect_err("without the binding, the markdown body is lexed as code and fails");
         assert!(!errs.is_empty());

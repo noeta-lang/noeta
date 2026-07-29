@@ -1,0 +1,8 @@
+// Two files deriving **one** module path is an error naming both files (E0073). Before derivation
+// this was silent: the second file's exports simply vanished, and the failure surfaced far away as
+// `module X has no export y` at whoever imported them.
+// expect: error E0073 at 1:1
+// expect: exit 1
+use lib.sub.first;
+
+echo first()

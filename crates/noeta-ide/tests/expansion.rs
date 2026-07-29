@@ -160,7 +160,7 @@ fn link(text: &str) -> noeta_db::LinkedProgram {
     install();
     let db = noeta_db::LangDatabase::default();
     let entry = Source::new(SourceId(0), "/proj/main.noe", text);
-    let ws = noeta_db::workspace(&db, &entry, &[], noeta_lexer::Edition::DEFAULT);
+    let ws = noeta_db::workspace(&db, &entry, &[], noeta_lexer::Edition::DEFAULT, &[]);
     // Cloned out of the memo so the db can be dropped with it: the assertions are about the value,
     // and a test has no incrementality to preserve.
     noeta_db::linked_from(&db, ws, noeta_db::workspace_entry(&db, ws)).clone()
@@ -364,7 +364,7 @@ fn editing_a_field_re_runs_the_expansion() {
     let mut db = noeta_db::LangDatabase::default();
     let before = "@ix_shape\nstruct Api { base: string }\necho 1;\n";
     let entry = Source::new(SourceId(0), "/proj/main.noe", before);
-    let ws = noeta_db::workspace(&db, &entry, &[], noeta_lexer::Edition::DEFAULT);
+    let ws = noeta_db::workspace(&db, &entry, &[], noeta_lexer::Edition::DEFAULT, &[]);
     let src = noeta_db::workspace_entry(&db, ws);
 
     let linked = noeta_db::linked_from(&db, ws, src);

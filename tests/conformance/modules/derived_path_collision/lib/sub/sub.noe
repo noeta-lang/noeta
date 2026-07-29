@@ -1,0 +1,5 @@
+// Derives `lib.sub` too — `sub/sub.noe`'s stem repeats the directory it sits in, so it names that
+// module, which `sub.noe` beside it already does.
+pub fn second(): string {
+    return "second";
+}

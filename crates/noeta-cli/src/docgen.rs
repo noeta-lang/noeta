@@ -32,8 +32,9 @@ const SCHEMA: u32 = 1;
 
 /// Generate the documentation artifact for the package containing `entry` into `out`.
 pub fn generate(entry: &Path, out: &Path) -> Result<Generated, String> {
-    let workspace = noeta_loader::read_workspace(entry)
-        .map_err(|e| format!("cannot read {}: {e}", entry.display()))?;
+    let workspace =
+        noeta_loader::read_workspace(entry, noeta_pm::sources::package_root(entry).as_ref())
+            .map_err(|e| format!("cannot read {}: {e}", entry.display()))?;
     let package = package_meta(entry.parent().unwrap_or_else(|| Path::new(".")));
 
     // Parse each module independently: docs and signatures are per-file facts (adjacency never

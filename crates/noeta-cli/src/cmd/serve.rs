@@ -318,6 +318,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
             manifest::root_edition(file),
             &deps,
             &package_uses,
+            noeta_pm::sources::package_root(file).as_ref(),
             &tail,
         ) {
             Err(err) => {
@@ -410,6 +411,7 @@ pub(crate) fn serve_parallel_impl(
         manifest::root_edition(file),
         &deps,
         &package_uses,
+        noeta_pm::sources::package_root(file).as_ref(),
         &tail,
     ) {
         Err(err) => {

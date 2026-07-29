@@ -316,7 +316,13 @@ pub fn load_linked(
     file: &Path,
     facts: &FrontFacts,
 ) -> Result<noeta_loader::Linked, CompileFailure> {
-    match noeta_loader::load_with_deps(file, facts.edition, &facts.deps, &facts.package_uses) {
+    match noeta_loader::load_with_deps(
+        file,
+        facts.edition,
+        &facts.deps,
+        &facts.package_uses,
+        noeta_pm::sources::package_root(file).as_ref(),
+    ) {
         Err(err) => Err(CompileFailure::Unreadable(format!(
             "cannot read {}: {err}",
             file.display()
@@ -443,7 +449,8 @@ fn open_startup_cache(
     let binary = noeta_cache::binary_identity()?;
     // Read the entry + sibling sources (no lex/parse) — both the key material and, on a hit, the
     // SourceMap for rendering. SourceIds here match `noeta_loader::load_with_deps`'s assignment.
-    let workspace = noeta_loader::read_workspace(file).ok()?;
+    let workspace =
+        noeta_loader::read_workspace(file, noeta_pm::sources::package_root(file).as_ref()).ok()?;
     let mut key = noeta_cache::KeyBuilder::new();
     // Which file is the *entry* is part of the key, not just the source set: a directory of dir-flat
     // modules compiles to a different program per entry, so `noeta run a.noe` and `noeta run b.noe`
@@ -455,6 +462,17 @@ fn open_startup_cache(
     );
     for module in &workspace.modules {
         key.source(source_key_name(module), module.text().as_bytes());
+    }
+    // …and each source's **derived module path** ([`noeta_loader::derive`]). A source is keyed by its
+    // file *name* on purpose (so `./app.noe` and `app.noe` share an entry), but a module's identity
+    // now comes from its whole location: two files named `pieces.noe` in different directories are
+    // different modules with identical key material, and moving a file changes what it is without
+    // changing a byte of it. Fold the path in, or a move serves the pre-move program back.
+    for (index, path) in workspace.paths.iter().enumerate() {
+        key.source(
+            format!("<module-path {index}>"),
+            module_path_key(path).as_bytes(),
+        );
     }
     // Dependency packages are part of the compiled program: fold each dependency's identity, edition,
     // and sources into the key so any dependency change invalidates the cache.
@@ -497,6 +515,17 @@ fn source_key_name(source: &Source) -> &str {
         .unwrap_or_else(|| source.name())
 }
 
+/// A derived module path as cache-key material — the dotted path, or a distinct marker for the two
+/// non-derived outcomes (no package context; a name that cannot be a path segment), so they key
+/// differently from each other and from every real path.
+fn module_path_key(path: &noeta_loader::ModulePath) -> String {
+    match path {
+        noeta_loader::ModulePath::Declared => "<declared>".to_string(),
+        noeta_loader::ModulePath::Derived(segments) => segments.join("."),
+        noeta_loader::ModulePath::Illegal { segment, .. } => format!("<illegal {segment}>"),
+    }
+}
+
 /// Fold the dependency packages into the startup-cache key: each dependency's key→root binding
 /// (re-rooting changes the linked program even when the sources are byte-identical), its **edition**,
 /// its local dependency renames, and every module's source text.
@@ -517,6 +546,12 @@ fn key_deps(key: &mut noeta_cache::KeyBuilder, deps: &[noeta_loader::DepPackage]
         }
         for module in &dep.modules {
             key.source(&module.name, module.text.as_bytes());
+            // A dependency module's identity is its derived path too — a package that moves a file
+            // ships a different API under identical bytes.
+            key.source(
+                format!("<dep-path {}>", module.name),
+                module_path_key(&module.path).as_bytes(),
+            );
         }
     }
 }
@@ -530,6 +565,7 @@ mod tests {
             key: "lib".to_string(),
             root: "lib".to_string(),
             modules: vec![noeta_loader::RawModule {
+                path: noeta_loader::ModulePath::Declared,
                 name: "lib.noe".to_string(),
                 text: "namespace lib.api;\npub fn f(): int { return 1; }\n".to_string(),
             }],

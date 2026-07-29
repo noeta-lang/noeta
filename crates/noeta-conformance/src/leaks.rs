@@ -110,7 +110,7 @@ pub fn run_leak_check(root: &Path, only: Option<&Path>) -> LeakReport {
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry) {
+            match noeta_loader::read_workspace(&case.entry, None) {
                 Ok(raw) => measure_workspace(&name, &raw, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
@@ -177,7 +177,13 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
 /// Measure one multi-file fixture on both backends (the workspace analogue of [`measure_single`]).
 fn measure_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut LeakReport) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
+    let ws = noeta_db::workspace(
+        &db,
+        &raw.entry,
+        &raw.modules,
+        noeta_lexer::Edition::DEFAULT,
+        &raw.paths,
+    );
 
     let program = match &noeta_db::linked(&db, ws).program {
         Ok(program) => program,

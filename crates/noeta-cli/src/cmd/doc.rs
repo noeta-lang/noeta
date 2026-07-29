@@ -333,7 +333,7 @@ fn doc_sources(path: &std::path::Path) -> Vec<noeta_span::Source> {
             })
             .collect();
     }
-    match noeta_loader::read_workspace(path) {
+    match noeta_loader::read_workspace(path, noeta_pm::sources::package_root(path).as_ref()) {
         Ok(workspace) => std::iter::once(workspace.entry)
             .chain(workspace.modules)
             .collect(),

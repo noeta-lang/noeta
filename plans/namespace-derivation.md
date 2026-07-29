@@ -126,6 +126,53 @@ in this scope*. Both import forms fail; the same `use` at top level works; the s
 **std** work inside the block (std resolves through the registry, a package module must be in the
 unit graph).
 
+## Corrections after slices A and B landed (2026-07-29)
+
+Slice A implemented the rule and disproved parts of this ledger. **These override the text above.**
+
+- **"The migration is a no-op on the ecosystem" was wrong for the corpus.** Of the 79 declarations,
+  only the 12 in package subdirectories agree; the other ~67 disagree in name or case
+  (`App.Models` in `models.noe`, `app.storage` in `models.noe`, `di.container` in `main.noe`,
+  `Tmpl` in `tmpl.noe`). **Slice C is a rename-and-strip job, not a strip job.** They are invisible
+  today only because those directories are not packages.
+- **The collapse rule as stated contradicted its own examples.** Implemented: *drop the stem when it
+  repeats the last segment accumulated so far* — which reproduces every example here. The prose
+  version ("a stem equal to the package's root segment") would have given `para` and `mycli`.
+- **A leading `src/` is not a segment** — dropped, so `src/human.noe` → `dirscan.human`.
+- **Derivation needs a package.** With no `noeta.toml` above the entry there is no prefix, nothing
+  derives, and declared namespaces stand. This is what keeps the corpus working before slice C, and
+  it keeps a bare `noeta run` from swallowing whatever tree it stands in.
+- **A plain key derives one segment shallower than a scope array.** `para/api` under
+  `para = { package = "para/api" }` gives `para.middleware`, **not** `para.api.middleware`. For
+  `para/*` to keep its published addresses, a consumer manifest **must** use the scope-array form.
+- **`use mycli.cli.run` works only once the declaration is gone.** A package that still declares
+  `namespace para.cli` and is keyed `mycli` is now a loud E0072. The sibling `para/*` repos must be
+  stripped before non-conventional keying works there — **coordinator's job, not an agent's.**
+- **`reroot_path`'s assumption is not made true for `use` paths.** A dependency's *internal*
+  `use para.cli.run` still leads with the scope half and re-rooting will not touch it; intra-package
+  `use`s must lead with the package's own root segment (`use cli.run`). Unchanged by derivation.
+- **Behaviour change worth knowing:** an app entry inside a package now derives a module path, so its
+  declarations carry qualified identities — a tier target reads `app.main.add` where a
+  `namespace`-less entry previously gave the bare `add`. Two tests asserted the old bare spelling
+  and were migrated.
+- **Slice B's decision stands and shipped**: full linking, 40 lines in one function. The check-time
+  diagnostic fell out for free (E0019 inside a block). Its brief pointed at `UnitMap::tier_scopes`,
+  which was a **dead end** — that holds rewrite maps, not import paths — and "when the tier is
+  active" is not implementable in the loader, since activation is downstream and the linked program
+  is one memoized salsa value shared by `check`/`run`/`test`.
+
+### Process notes earned the hard way
+
+- **`cargo build --workspace` does not compile test targets.** Stale call sites survive a green
+  build; `clippy --workspace --all-targets` is what catches them. Run clippy before believing a merge.
+- **Do not run the fast gates and the workspace suite concurrently against one target dir** — cargo
+  holds an exclusive lock per target dir, so they queue rather than parallelise, and each queued run
+  re-runs the whole suite. Run gates in cost order, suite once at the end.
+- **Do not poll with `until pgrep …; do sleep; done`.** Run commands synchronously and read the
+  output. Stale poll loops outlived their suites here and generated a stream of phantom completions.
+- **`main` moved four times during slice A's review.** Slice C touches 79 files and will conflict
+  with almost anything — keep its review window short and merge the moment it is green.
+
 ## Gates
 
 Every slice, before reporting done:

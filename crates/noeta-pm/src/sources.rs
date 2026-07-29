@@ -1,95 +1,73 @@
-//! Which files constitute a **package's source** — the `.noe` modules a dependency contributes to
-//! the consumer's link.
+//! Which files constitute a **package's source** — the `.noe` modules a package contributes to the
+//! link, and the path prefix they derive under.
 //!
-//! This is package-manager knowledge, not linker knowledge: what makes a directory a package is a
-//! [`MANIFEST_NAME`], and this crate is what owns that fact. The loader is *handed* a package's
-//! modules ([`noeta_loader::DepPackage`]); it does not go looking for them.
-//!
-//! The walk lived in `noeta-loader` before, which sits *below* this crate in the crate DAG and so
-//! could not consult [`MANIFEST_NAME`] at all. Lacking the one predicate that matters, it had no
-//! exclusions whatsoever — "every `*.noe` anywhere under the package directory" — and swept a
-//! package's example apps, any VCS/agent copy of its tree, and its build output into the consumer's
-//! program. Moving the walk up to the layer that knows what a package *is* is what lets it prune.
+//! The *walk* itself lives in `noeta_loader::derive` (one implementation, so the app's own sibling
+//! scan and a dependency's are the same scan — the asymmetry that made `src/deep/nested.noe`
+//! invisible to `src/main.noe` while a dependency's `inner/deep.noe` resolved fine). What lives here
+//! is the package-manager half of the question: **what a package is** (a [`MANIFEST_NAME`]) and
+//! **what prefix its modules derive under**, which takes the manifest to answer — the loader is
+//! handed both.
 
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use noeta_loader::RawModule;
+use noeta_loader::{PackageRoot, RawModule};
 
-use crate::manifest::MANIFEST_NAME;
+use crate::manifest;
 
-/// The build-output directory (`cargo`'s, for a package shipping a native crate). Never source.
-const BUILD_DIR: &str = "target";
-
-/// Read every `.noe` file **belonging to the package rooted at `dir`**, in sorted order (so
-/// `SourceId` assignment stays deterministic). A package is a directory *tree*, not the single flat
-/// directory the entry's siblings live in, so this walks subdirectories — but only the ones that are
-/// still this package (see [`is_outside_package`]). Names are the files' display paths (for
-/// diagnostics). Unreadable files are skipped.
-pub fn read_package_sources(dir: &Path) -> io::Result<Vec<RawModule>> {
-    let mut paths = Vec::new();
-    collect_package_noe_files(dir, &mut paths)?;
-    paths.sort();
-    Ok(paths
-        .into_iter()
-        .filter_map(|path| {
-            let text = std::fs::read_to_string(&path).ok()?;
-            Some(RawModule {
-                name: path.display().to_string(),
-                text,
-            })
-        })
-        .collect())
+/// Read every `.noe` file **belonging to the package rooted at `dir`**, deriving each one's module
+/// path under `prefix`, in sorted order (so `SourceId` assignment stays deterministic).
+///
+/// Names are the files' display paths (for diagnostics). Unreadable files are skipped, and so is
+/// every subtree that is not this package's source (a nested package, a dot-directory, build
+/// output).
+pub fn read_package_sources(dir: &Path, prefix: &[String]) -> Vec<RawModule> {
+    noeta_loader::read_package_modules(&PackageRoot::new(dir, prefix.to_vec()))
 }
 
-/// Recursively gather `.noe` file paths under `dir` into `out`, pruning every subtree that is not
-/// this package's source. A subdirectory that can't be read is skipped (best-effort), matching the
-/// sibling scan's tolerance.
-fn collect_package_noe_files(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            if is_outside_package(&path) {
-                continue;
-            }
-            let _ = collect_package_noe_files(&path, out);
-        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "noe") {
-            out.push(path);
-        }
-    }
-    Ok(())
+/// The **root package** the file at `entry` belongs to: where it is rooted, and the prefix its
+/// modules derive under (its `[package] name`'s package half — `local/dirscan` → `dirscan.…`).
+///
+/// `None` when there is no manifest above the entry (a lone script), when the manifest cannot be
+/// read or parsed, or when it declares no `[package]`. Without a package there is no prefix, so
+/// nothing is derived and each module's own `namespace` declaration stands — which is exactly the
+/// pre-derivation behavior a bare script should keep. A corrupt manifest is not silently accepted
+/// overall: every invocation that reaches here also resolves dependencies through the same manifest,
+/// and *that* parse reports it (the same division as [`crate::manifest::root_edition`]).
+pub fn package_root(entry: &Path) -> Option<PackageRoot> {
+    package_root_of(entry.parent().unwrap_or_else(|| Path::new(".")))
 }
 
-/// Whether `dir` — a *sub*directory of the package being read — is outside that package's source.
-///
-/// Three ways it can be:
-///
-/// * **It is itself a package.** A directory holding its own [`MANIFEST_NAME`] is a different
-///   package with its own namespace and its own dependencies — a package's example app
-///   (`examples/<app>/noeta.toml`) is the standard case. Linking one into a consumer's program
-///   merges declarations nobody imported, and two example apps under one package collide outright.
-/// * **It is a dot-directory.** `.git` is metadata; an agent worktree under `.claude/worktrees/` is
-///   a *whole second checkout of the package*, every module in it duplicating the real one
-///   namespace for namespace.
-/// * **It is build output** (`target/`).
-///
-/// The package root itself is never asked — it is expected to hold a manifest, which is what made it
-/// the root.
-fn is_outside_package(dir: &Path) -> bool {
-    let name = dir.file_name().and_then(|n| n.to_str());
-    name.is_some_and(|n| n.starts_with('.') || n == BUILD_DIR) || dir.join(MANIFEST_NAME).is_file()
+/// [`package_root`] asked of a **directory** — the package that directory's files belong to. What
+/// the editor asks: its unit of work is an open document's directory, not a single entry.
+pub fn package_root_of(dir: &Path) -> Option<PackageRoot> {
+    let manifest_path = manifest::find(dir)?;
+    let text = std::fs::read_to_string(&manifest_path).ok()?;
+    let parsed = manifest::Manifest::parse(&text).ok()?;
+    let name = parsed.package()?.name.root().to_string();
+    // `find` returns the manifest file; the package is the directory holding it. An empty parent
+    // (the manifest is in the current directory, reached from a bare relative entry) stays empty:
+    // the walk scans `.` but keeps its paths bare, so module names stay byte-equal to how the
+    // invocation spells the entry.
+    let root = manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    Some(PackageRoot::new(root, vec![name]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::MANIFEST_NAME;
+    use noeta_loader::ModulePath;
+    use std::path::PathBuf;
 
     /// A fresh temp package root, matching this crate's existing test convention (`store`/`lock`).
     fn tmp_package(name: &str) -> crate::test_temp::TempDir {
         let dir = crate::test_temp::TempDir::new(name);
         write(
             &dir.join(MANIFEST_NAME),
-            "[package]\nname = \"local/pkg\"\n",
+            "[package]\nname = \"local/pkg\"\nversion = \"0.1.0\"\n",
         );
         dir
     }
@@ -102,8 +80,7 @@ mod tests {
     /// Module names, relative to the package root and slash-joined, so the assertions read the same
     /// on any platform.
     fn names(root: &Path) -> Vec<String> {
-        read_package_sources(root)
-            .expect("read the package")
+        read_package_sources(root, &["pkg".to_string()])
             .into_iter()
             .map(|m| {
                 Path::new(&m.name)
@@ -158,5 +135,50 @@ mod tests {
         write(&root.join("only.noe"), "namespace pkg;\n");
 
         assert_eq!(names(&root), vec!["only.noe"]);
+    }
+
+    #[test]
+    fn every_module_carries_the_path_its_location_derives() {
+        let root = tmp_package("derived_paths");
+        write(&root.join("pkg.noe"), "");
+        write(&root.join("api.noe"), "");
+        write(&root.join("src/deep/nested.noe"), "");
+
+        let derived: Vec<Option<Vec<String>>> = read_package_sources(&root, &["pkg".to_string()])
+            .into_iter()
+            .map(|m| m.path.derived().map(<[String]>::to_vec))
+            .collect();
+        assert_eq!(
+            derived,
+            vec![
+                Some(vec!["pkg".into(), "api".into()]),
+                // The package-named root file IS the module the prefix names.
+                Some(vec!["pkg".into()]),
+                // A subdirectory is path segments; `src/` is layout, not a segment.
+                Some(vec!["pkg".into(), "deep".into(), "nested".into()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_root_package_is_found_above_the_entry() {
+        let root = tmp_package("root_lookup");
+        write(&root.join("src/main.noe"), "");
+
+        let found = package_root(&root.join("src/main.noe")).expect("a root package");
+        assert_eq!(found.dir, root);
+        assert_eq!(found.prefix, vec!["pkg".to_string()]);
+    }
+
+    #[test]
+    fn an_illegal_stem_is_carried_as_illegal_not_silently_mapped() {
+        let root = tmp_package("illegal_stem");
+        write(&root.join("my-utils.noe"), "");
+
+        let modules = read_package_sources(&root, &["pkg".to_string()]);
+        assert!(matches!(
+            modules[0].path,
+            ModulePath::Illegal { ref segment, .. } if segment == "my-utils"
+        ));
     }
 }

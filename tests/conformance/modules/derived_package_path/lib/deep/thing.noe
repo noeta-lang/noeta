@@ -1,0 +1,4 @@
+// A module in a subdirectory of the package: `lib.deep.thing`.
+pub fn deep(): string {
+    return "deep";
+}
