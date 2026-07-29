@@ -329,7 +329,7 @@ fn run_real_isolate_worker_teardown_runs_leaked_cycle_destructors() {
     // destructor appends a marker to a file on real disk (the worker runs on `RealHost`); after the
     // structured join the parent reads it. Before the fix the cycle leaked untouched and the file
     // was empty; now 3 iterations × 2 nodes = 6 destructors fire.
-    let dir = std::env::temp_dir().join("noeta_cli_test_isolate_dtor_cycle");
+    let dir = temp_root().join("noeta_cli_test_isolate_dtor_cycle");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let marker = dir.join("markers.log");

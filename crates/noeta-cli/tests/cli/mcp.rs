@@ -16,7 +16,7 @@ use std::process::{Child, ChildStdout, Stdio};
 /// *unremarkable* code that overflowed — but deep and voluminous enough that the whole front end
 /// runs over it.
 fn realistic_workspace(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("noeta_cli_test_{name}"));
+    let dir = temp_root().join(format!("noeta_cli_test_{name}"));
     std::fs::create_dir_all(&dir).expect("create temp dir");
 
     let mut sibling = String::from("namespace app.calc;\n");
@@ -192,7 +192,7 @@ fn mcp_module_graph_covers_a_project_with_dependencies() {
     // plus every dependency package's modules — and indexed past the end, panicking on any project
     // with a `noeta.toml` dependency. A panic no longer kills the request either way (it comes back
     // as a JSON-RPC error), but it must not happen at all.
-    let root = std::env::temp_dir().join("noeta_cli_test_mcp_module_graph_deps");
+    let root = temp_root().join("noeta_cli_test_mcp_module_graph_deps");
     let _ = std::fs::remove_dir_all(&root);
     let dep = root.join("dep");
     let app = root.join("app");

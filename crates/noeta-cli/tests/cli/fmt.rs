@@ -6,7 +6,7 @@ use crate::support::*;
 
 /// A private temp directory for a formatter test (no `noeta.toml`, so defaults apply).
 fn fmt_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("noeta_fmt_test_{name}"));
+    let dir = temp_root().join(format!("noeta_fmt_test_{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir
