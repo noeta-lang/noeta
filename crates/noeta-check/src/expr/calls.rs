@@ -242,35 +242,11 @@ impl Checker {
                 hidden.push(noeta_ext_abi::HiddenArg::Forward(j as u32));
                 continue;
             }
-            let recipe = self.type_to_recipe(&sigma);
-            if slot.needs_recipe && recipe.is_none() {
-                // Report the precise unbuildable-type error (mirroring the call site) and keep
-                // resolving: the program is already rejected, and falling back to synthesis here
-                // would only stack the generic value-boundary E0058 on top.
-                self.error(
-                    DiagnosticCode::TypeMismatch,
-                    span,
-                    format!(
-                        "`{sigma}` cannot be built by the call-site-typed `::<{}>` position of \
-                         `{name}`",
-                        slot.template
-                    ),
-                );
-            }
-            // The name-keyed identity, as the call path interns it (`Display` renders the SHORT
-            // name, which no runtime registry is keyed under).
-            let info = noeta_ext_abi::TypeArgInfo {
-                name: sigma.head_name(),
-                recipe,
-            };
-            let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
-                Some(i) => i,
-                None => {
-                    self.sites.type_arg_table.push(info);
-                    self.sites.type_arg_table.len() - 1
-                }
-            };
-            hidden.push(noeta_ext_abi::HiddenArg::Table(idx as u32));
+            // The shared interning site derives every projection of the instantiation and reports
+            // an unbuildable one. Reporting there (rather than bailing here) is deliberate: the
+            // program is already rejected, and falling back to synthesis would only stack the
+            // generic value-boundary E0058 on top of the precise message.
+            hidden.push(self.intern_type_arg(&sigma, slot, name, span));
         }
         Some(hidden)
     }
