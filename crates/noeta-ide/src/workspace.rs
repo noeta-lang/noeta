@@ -599,7 +599,10 @@ fn derived_path_of_uri(uri: &str) -> noeta_loader::ModulePath {
     let Some(root) = noeta_pm::sources::package_root(&path) else {
         return noeta_loader::ModulePath::Declared;
     };
-    noeta_loader::derive_module_path(&root.prefix, path.strip_prefix(&root.dir).unwrap_or(&path))
+    root.relative(&path)
+        .map_or(noeta_loader::ModulePath::Declared, |relative| {
+            noeta_loader::derive_module_path(&root.prefix, relative)
+        })
 }
 
 pub(crate) fn uri_to_path(uri: &str) -> Option<PathBuf> {

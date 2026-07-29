@@ -429,8 +429,10 @@ fn entry_module_path(entry_path: &Path, root: Option<&PackageRoot>) -> ModulePat
     let Some(root) = root else {
         return ModulePath::Declared;
     };
-    let relative = entry_path.strip_prefix(&root.dir).unwrap_or(entry_path);
-    derive_module_path(&root.prefix, relative)
+    root.relative(entry_path)
+        .map_or(ModulePath::Declared, |relative| {
+            derive_module_path(&root.prefix, relative)
+        })
 }
 
 /// Gather the entry's **sibling modules**: every other `.noe` file of the package, in sorted order

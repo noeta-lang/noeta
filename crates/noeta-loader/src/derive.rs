@@ -67,6 +67,19 @@ impl PackageRoot {
             prefix,
         }
     }
+
+    /// `path` as seen from the package root, or `None` when it is not under this root at all.
+    ///
+    /// `None` rather than a fallback, because there is no honest path to derive for a file outside
+    /// the package: taking the whole (possibly absolute) path would invent segments out of the
+    /// machine's directory layout. The caller treats it as "no package context" — the file's own
+    /// `namespace` declaration stands.
+    pub fn relative<'a>(&self, path: &'a Path) -> Option<&'a Path> {
+        if self.dir.as_os_str().is_empty() {
+            return Some(path);
+        }
+        path.strip_prefix(&self.dir).ok()
+    }
 }
 
 /// A module's path, as far as the *filesystem* can say.
@@ -221,7 +234,7 @@ pub fn read_package_modules(root: &PackageRoot) -> Vec<super::RawModule> {
         .into_iter()
         .filter_map(|path| {
             let text = std::fs::read_to_string(&path).ok()?;
-            let relative = path.strip_prefix(&root.dir).unwrap_or(&path);
+            let relative = root.relative(&path)?;
             Some(super::RawModule {
                 path: derive_module_path(&root.prefix, relative),
                 name: path.display().to_string(),
