@@ -249,17 +249,31 @@ impl Checker {
     /// Resolve an extension `@name` **for the package that wrote it** (per-package naming arc): the
     /// span's package (via [`Self::package_at`]) → its `[directives]` binding for `name` → the
     /// provider's [`ExtDirective`](noeta_ext_abi::registry::ExtDirective), matched by the provider's
-    /// namespace root + exported name. `None` when the package binds no such name — or the span's
-    /// provenance is unknown (a single-file check has no manifest, so only built-in directives resolve).
+    /// namespace root + exported name. A *manifested* package that binds no such name yields `None`
+    /// (E0019 — the per-package enforcement). But a span with **no package context at all** — a bare
+    /// single file / editor scratch buffer with no manifest, so nothing to scope by — falls back to a
+    /// global lookup, the directive counterpart of the tier path's ambient fallback ([`Self::resolve_tier_at`]);
+    /// without it, an installed extension's `@name` would read as "unknown" in every manifest-less file.
     pub(crate) fn resolve_ext_directive_at(
         &self,
         span: Span,
         name: &str,
     ) -> Option<&'static noeta_ext_abi::registry::ExtDirective> {
-        let origin = self.package_at(span)?;
-        let use_ = self.config.package_uses.get(origin, name)?;
-        self.reg()
-            .find_ext_directive_scoped(&use_.provider_roots, &use_.exported)
+        // No binding regime in effect anywhere in the program — a bare file / editor scratch buffer /
+        // a package that declares no `[directives]` or `[tiers]` at all — leaves nothing to scope by,
+        // so resolve globally (the directive counterpart of the tier ambient fallback). The IDE hands
+        // even a manifest-less scratch a `Root` origin, so keying on the span alone is not enough; the
+        // empty binding table is the reliable "no per-package context" signal. A package that DOES use
+        // the binding regime still requires a binding for each `@name` it writes (per-package opt-in).
+        if let Some(origin) = self.package_at(span)
+            && !self.config.package_uses.is_empty()
+        {
+            let use_ = self.config.package_uses.get(origin, name)?;
+            return self
+                .reg()
+                .find_ext_directive_scoped(&use_.provider_roots, &use_.exported);
+        }
+        self.reg().find_ext_directive(name)
     }
 
     /// Resolve a `@name` **tier** block for the package that wrote it (per-package naming arc), the
