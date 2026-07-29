@@ -367,11 +367,13 @@ pub(crate) fn dep_sources(entry: &Path, next_id: u32) -> Vec<noeta_db::DepSource
                     source
                 })
                 .collect();
+            let paths = pkg.modules.iter().map(|m| m.path.clone()).collect();
             noeta_db::DepSources {
                 root: pkg.root,
                 key: pkg.key,
                 renames: Vec::new(),
                 modules,
+                paths,
                 edition: noeta_lexer::Edition::DEFAULT,
             }
         })

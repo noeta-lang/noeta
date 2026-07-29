@@ -76,6 +76,20 @@ pub struct SourceProgram {
     /// read it back with [`edition_of`]. Editing it invalidates exactly the queries that read it.
     #[returns(ref)]
     pub edition: noeta_lexer::Edition,
+    /// The module path this source's **location** derives — its identity, which the linker writes in
+    /// as its `namespace` (namespace-derivation arc). A [`Source`] carries a file name, not an
+    /// identity, so the derivation has to be an input beside it or the query graph would fall back
+    /// to declared namespaces while the batch loader derives, and the editor would disagree with the
+    /// compiler about which module a file is.
+    #[returns(ref)]
+    pub module_path: DerivedPath,
+}
+
+/// The derived path at `index`, or [`ModulePath::Declared`](noeta_loader::ModulePath::Declared)
+/// when the caller supplied none — so a workspace built without a package on disk behaves exactly
+/// as it did before derivation.
+fn path_at(paths: &[noeta_loader::ModulePath], index: usize) -> noeta_loader::ModulePath {
+    paths.get(index).cloned().unwrap_or_default()
 }
 
 /// Build (or rebuild) the [`SourceProgram`] input from a [`Source`] and the language edition its
@@ -85,12 +99,24 @@ pub fn source_program(
     source: &Source,
     edition: noeta_lexer::Edition,
 ) -> SourceProgram {
+    source_program_at(db, source, edition, noeta_loader::ModulePath::Declared)
+}
+
+/// [`source_program`] for a source whose module path its **location** derives — the workspace
+/// builders' constructor (`noeta_loader::read_workspace` hands the paths over beside the sources).
+pub fn source_program_at(
+    db: &LangDatabase,
+    source: &Source,
+    edition: noeta_lexer::Edition,
+    path: noeta_loader::ModulePath,
+) -> SourceProgram {
     SourceProgram::new(
         db,
         source.id().0,
         source.name().to_string(),
         source.text().to_string(),
         edition,
+        DerivedPath(path),
     )
 }
 
@@ -256,6 +282,19 @@ macro_rules! backdating_update {
 pub struct WorkspaceUses(pub noeta_span::PackageUses);
 
 backdating_update!(WorkspaceUses);
+
+/// The module path a source's **location** derives (`noeta_loader::derive`) as a [`SourceProgram`]
+/// input field. Newtype for the same [`salsa::Update`]/orphan reason as [`WorkspaceUses`];
+/// backdating, because a file's path changes only when the file moves — an edit to its text must not
+/// invalidate the link.
+///
+/// The default, [`ModulePath::Declared`](noeta_loader::ModulePath::Declared), means the source was
+/// reached with no package context, so its own `namespace` declaration stands — every single-file
+/// query and every lone script.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DerivedPath(pub noeta_loader::ModulePath);
+
+backdating_update!(DerivedPath);
 
 /// The local `@name`s each package binds to a **text** (verbatim-body) tier, keyed by the binding
 /// package's [`PackageOrigin`] — the per-package input to [`tokens_in`]'s lex, the salsa twin of the
@@ -495,6 +534,10 @@ pub struct DepSources {
     pub key: String,
     pub renames: Vec<(String, String)>,
     pub modules: Vec<Source>,
+    /// The module path each of `modules` derives, index-aligned with it. Empty for a caller that
+    /// builds dependency sources without a package on disk (then each module's own `namespace`
+    /// declaration stands, as before derivation).
+    pub paths: Vec<noeta_loader::ModulePath>,
     /// This package's language edition — its modules are parsed and checked under it, exactly as
     /// the CLI's `load_with_deps` does (editions arc). Typed: a value resolution never produced is
     /// unrepresentable, instead of a free string silently degrading to the default.
@@ -510,10 +553,14 @@ pub fn workspace(
     entry: &Source,
     modules: &[Source],
     root_edition: noeta_lexer::Edition,
+    paths: &[noeta_loader::ModulePath],
 ) -> Workspace {
     let members = std::iter::once(entry)
         .chain(modules)
-        .map(|s| source_program(db, s, root_edition))
+        .enumerate()
+        .map(|(i, s)| {
+            source_program_at(db, s, root_edition, path_at(paths, i))
+        })
         .collect();
     // No manifest on this deps-free path → no `[tiers]`/`[directives]` bindings, so no renamed text
     // tiers (a member's own `@tier(…, text)` is discovered by the per-file token scan regardless).
@@ -530,16 +577,20 @@ pub fn workspace_with_deps(
     modules: &[Source],
     deps: &[DepSources],
     root_edition: noeta_lexer::Edition,
+    paths: &[noeta_loader::ModulePath],
 ) -> Workspace {
     let members = std::iter::once(entry)
         .chain(modules)
-        .map(|s| source_program(db, s, root_edition))
+        .enumerate()
+        .map(|(i, s)| {
+            source_program_at(db, s, root_edition, path_at(paths, i))
+        })
         .collect();
     let mut dep_inputs = Vec::new();
     for dep in deps {
         let renames = flatten_renames(&dep.renames);
-        for src in &dep.modules {
-            let sp = source_program(db, src, dep.edition);
+        for (i, src) in dep.modules.iter().enumerate() {
+            let sp = source_program_at(db, src, dep.edition, path_at(&dep.paths, i));
             dep_inputs.push(DepModule::new(
                 db,
                 sp,
@@ -794,6 +845,18 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     // namespace. Broken siblings come from [`broken_modules`] — kept, not dropped, so a `use` of a
     // namespace one of them declares reports that file's parse error instead of the misleading
     // "no module" cascade (see `noeta_loader::BrokenModule`).
+    //
+    // A workspace whose sources carry **derived** module paths needs those written into the programs
+    // (the path becomes the module's `namespace`), and salsa's parsed ASTs are shared and immutable —
+    // so those programs are cloned. A workspace with no package derives nothing and clones nothing,
+    // which is every lone script and every conformance case.
+    let derives = ws
+        .members(db)
+        .iter()
+        .copied()
+        .chain(ws.dep_modules(db).iter().map(|dm| dm.src(db)))
+        .any(|m| m.module_path(db).0.derived().is_some());
+    let mut module_owned: Vec<(SourceProgram, Program)> = Vec::new();
     let mut module_programs: Vec<&Program> = Vec::new();
     for &m in ws.members(db) {
         if m == entry {
@@ -802,7 +865,11 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         let toks = tokens_in(db, ws, m);
         let parsed = ast_in(db, ws, m);
         if toks.0.diagnostics.is_empty() && parsed.0.diagnostics.is_empty() {
-            module_programs.push(&parsed.0.program);
+            if derives {
+                module_owned.push((m, parsed.0.program.clone()));
+            } else {
+                module_programs.push(&parsed.0.program);
+            }
         }
     }
 
@@ -811,6 +878,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     // of the CLI's `link_with_deps`. Depends on each dep module's `ast`, so editing a path-dependency
     // source re-links, but leaves sibling parses untouched.
     let mut dep_programs: Vec<Program> = Vec::new();
+    let mut dep_srcs: Vec<SourceProgram> = Vec::new();
     for &dm in ws.dep_modules(db) {
         let src = dm.src(db);
         let toks = tokens_in(db, ws, src);
@@ -831,6 +899,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
                 &reroot_map(dm.renames(db)),
             );
             dep_programs.push(program);
+            dep_srcs.push(src);
         }
     }
     // A dependency module that does not parse is a hard error, exactly as in the CLI's
@@ -856,10 +925,62 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         .iter()
         .filter(|m| m.source.id() != SourceId(entry.id(db)))
         .collect();
+    // Derivation decides identity, applied here exactly as the batch loader applies it — after
+    // re-rooting, over every unit at once (a collision is a program-wide fact). Nothing to do, and
+    // nothing cloned, when the workspace carries no derived paths.
+    let mut entry_owned = derives.then(|| entry_ast.0.program.clone());
+    // The files the units render diagnostics against, rebuilt from the inputs: modules first, then
+    // dependency modules, in the order the two lists were filled.
+    let unit_sources: Vec<Source> = if derives {
+        module_owned
+            .iter()
+            .map(|(src, _)| *src)
+            .chain(dep_srcs.iter().copied())
+            .map(|src| source_of(db, src))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if let Some(entry_program) = entry_owned.as_mut() {
+        let dep_offset = module_owned.len();
+        let mut units = vec![noeta_loader::DerivedUnit {
+            source: &entry_source,
+            path: &entry.module_path(db).0,
+            program: entry_program,
+        }];
+        units.extend(module_owned.iter_mut().enumerate().map(|(i, (src, program))| {
+            noeta_loader::DerivedUnit {
+                source: &unit_sources[i],
+                path: &src.module_path(db).0,
+                program,
+            }
+        }));
+        units.extend(
+            dep_programs
+                .iter_mut()
+                .zip(&dep_srcs)
+                .enumerate()
+                .map(|(i, (program, src))| noeta_loader::DerivedUnit {
+                    source: &unit_sources[dep_offset + i],
+                    path: &src.module_path(db).0,
+                    program,
+                }),
+        );
+        let path_diagnostics = noeta_loader::apply_derived_paths(units);
+        if !path_diagnostics.is_empty() {
+            return unlinked(
+                path_diagnostics.into_iter().map(|d| d.diagnostic).collect(),
+                Vec::new(),
+            );
+        }
+        module_programs = module_owned.iter().map(|(_, p)| p).collect();
+    }
+    let entry_program: &Program = entry_owned.as_ref().unwrap_or(&entry_ast.0.program);
+
     let result = if dep_programs.is_empty() {
         noeta_loader::link_parsed(
             &entry_source,
-            &entry_ast.0.program,
+            entry_program,
             &module_programs,
             &broken_refs,
         )
@@ -870,7 +991,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         // intra-project module, never an import it cannot fully see (module-namespaces).
         noeta_loader::link_parsed_with_deps(
             &entry_source,
-            &entry_ast.0.program,
+            entry_program,
             &module_programs,
             &dep_refs,
             &broken_refs,

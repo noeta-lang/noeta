@@ -1498,11 +1498,13 @@ fn retarget(mut diagnostic: Diagnostic, id: SourceId) -> Diagnostic {
 }
 
 /// One parsed file and the module path its **location** derives — the input to
-/// [`apply_derived_paths`].
-struct DerivedUnit<'a> {
-    source: &'a Source,
-    path: &'a ModulePath,
-    program: &'a mut Program,
+/// [`apply_derived_paths`]. Public so the salsa linker (`noeta-db`) applies derivation identically:
+/// the editor and the compiler must not disagree about which module a file is.
+#[derive(Debug)]
+pub struct DerivedUnit<'a> {
+    pub source: &'a Source,
+    pub path: &'a ModulePath,
+    pub program: &'a mut Program,
 }
 
 /// Make each file's **derived** path its module path, and report every way the filesystem says
@@ -1523,7 +1525,7 @@ struct DerivedUnit<'a> {
 ///
 /// Called **after** dependency re-rooting ([`reroot_program`]), because that is what puts a declared
 /// namespace into the consumer's own naming space, which is the space the derivation is in.
-fn apply_derived_paths(units: Vec<DerivedUnit<'_>>) -> Vec<LoadDiagnostic> {
+pub fn apply_derived_paths(units: Vec<DerivedUnit<'_>>) -> Vec<LoadDiagnostic> {
     let mut diagnostics = Vec::new();
     // Derived path → the file that claimed it first (both are named when a second one does).
     let mut claimed: std::collections::HashMap<Vec<String>, String> =

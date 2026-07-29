@@ -236,7 +236,13 @@ fn compare_backends_workspace(
     // pre-existing one) take the same deps-free workspace they always did.
     let deps = crate::dep_sources(entry, (raw.modules.len() + 1) as u32);
     let ws = if deps.is_empty() {
-        noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT)
+        noeta_db::workspace(
+        &db,
+        &raw.entry,
+        &raw.modules,
+        noeta_lexer::Edition::DEFAULT,
+        &raw.paths,
+    )
     } else {
         noeta_db::workspace_with_deps(
             &db,
@@ -244,6 +250,7 @@ fn compare_backends_workspace(
             &raw.modules,
             &deps,
             noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
         )
     };
 

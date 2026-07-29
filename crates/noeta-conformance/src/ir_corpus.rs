@@ -122,7 +122,13 @@ fn run_single(text: &str, report: &mut IrCorpusReport) {
 
 fn run_workspace(raw: &noeta_loader::RawWorkspace, report: &mut IrCorpusReport) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
+    let ws = noeta_db::workspace(
+        &db,
+        &raw.entry,
+        &raw.modules,
+        noeta_lexer::Edition::DEFAULT,
+        &raw.paths,
+    );
 
     let program = match &noeta_db::linked(&db, ws).program {
         Ok(program) => program,

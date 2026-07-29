@@ -1099,6 +1099,9 @@ pub(crate) struct ResolvedWorkspace {
     /// The root package's language edition — what the entry and its siblings are analyzed under
     /// (each dependency carries its own).
     pub edition: noeta_lexer::Edition,
+    /// The module path each **member** source's location derives, index-aligned with the members.
+    /// Empty for an inline source, which sits in no package and so derives nothing.
+    pub paths: Vec<noeta_loader::ModulePath>,
 }
 
 impl ResolvedWorkspace {
@@ -1118,7 +1121,7 @@ impl ResolvedWorkspace {
             .members()
             .split_first()
             .expect("resolve_workspace always yields at least the entry");
-        noeta_db::workspace_with_deps(db, entry, modules, &self.deps, self.edition)
+        noeta_db::workspace_with_deps(db, entry, modules, &self.deps, self.edition, &self.paths)
     }
 }
 
@@ -1148,6 +1151,7 @@ pub(crate) fn resolve_workspace(
             )],
             deps: Vec::new(),
             edition: noeta_lexer::Edition::default(),
+            paths: Vec::new(),
         }),
         (None, Some(path)) => {
             let path = Path::new(path);
@@ -1174,6 +1178,7 @@ pub(crate) fn resolve_workspace(
                             .map(|(local, global)| (local.clone(), global.clone()))
                             .collect(),
                         modules,
+                        paths: package.modules.iter().map(|m| m.path.clone()).collect(),
                         edition: package.edition,
                     }
                 })
@@ -1182,6 +1187,7 @@ pub(crate) fn resolve_workspace(
                 sources,
                 deps,
                 edition: noeta_pm::manifest::root_edition(path),
+                paths: raw.paths,
             })
         }
         (Some(_), Some(_)) => Err(ErrorData::invalid_params(

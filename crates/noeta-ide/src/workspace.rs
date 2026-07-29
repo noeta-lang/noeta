@@ -362,11 +362,20 @@ pub(crate) fn sync(
                     tomb.set_name(db).to(u.clone());
                     tomb.set_text(db).to(text.clone());
                     tomb.set_edition(db).to(edition_of_uri(u));
+                    // A repurposed tombstone points at a different file, so its derived module path
+                    // changes with it.
+                    tomb.set_module_path(db)
+                        .to(noeta_db::DerivedPath(derived_path_of_uri(u)));
                     tomb
                 }
-                None => {
-                    SourceProgram::new(db, id as u32, u.clone(), text.clone(), edition_of_uri(u))
-                }
+                None => SourceProgram::new(
+                    db,
+                    id as u32,
+                    u.clone(),
+                    text.clone(),
+                    edition_of_uri(u),
+                    noeta_db::DerivedPath(derived_path_of_uri(u)),
+                ),
             },
         })
         .collect();
@@ -508,6 +517,8 @@ fn resolve_dep_modules(
                     src.set_id(db).to(next_id);
                     src.set_text(db).to(module.text.clone());
                     src.set_edition(db).to(package.edition);
+                    src.set_module_path(db)
+                        .to(noeta_db::DerivedPath(module.path.clone()));
                     dep.set_root(db).to(package.root.clone());
                     dep.set_key(db).to(package.key.clone());
                     dep.set_renames(db).to(renames.clone());
@@ -521,6 +532,8 @@ fn resolve_dep_modules(
                         module.text.clone(),
                         // The dependency package's own edition (typed end to end).
                         package.edition,
+                        // …and the module path its location in that package derives.
+                        noeta_db::DerivedPath(module.path.clone()),
                     );
                     let dep = DepModule::new(
                         db,
@@ -565,6 +578,20 @@ pub(crate) fn disk_noe_uris(dir: &Path) -> Vec<String> {
 /// `untitled:`), which the caller treats as a lone, directory-less document. A minimal decoder: the
 /// path component after `file://`, with `%`-escapes not yet decoded (paths with escaped bytes are
 /// rare and degrade to a lone workspace, never a wrong file).
+/// The module path a member file's **location** derives — its package's prefix plus its path inside
+/// the package (namespace-derivation arc). `Declared` for a file in no package, and for a URI that is
+/// not a local path at all: with no package there is no prefix, so the file's own `namespace`
+/// declaration stands, exactly as before derivation.
+fn derived_path_of_uri(uri: &str) -> noeta_loader::ModulePath {
+    let Some(path) = uri_to_path(uri) else {
+        return noeta_loader::ModulePath::Declared;
+    };
+    let Some(root) = noeta_pm::sources::package_root(&path) else {
+        return noeta_loader::ModulePath::Declared;
+    };
+    noeta_loader::derive_module_path(&root.prefix, path.strip_prefix(&root.dir).unwrap_or(&path))
+}
+
 pub(crate) fn uri_to_path(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     // `file:///abs` → `/abs`; a leading host (`file://host/p`) is not expected for local files.

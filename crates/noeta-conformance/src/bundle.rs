@@ -198,7 +198,13 @@ fn roundtrip_single(name: &str, text: &str, report: &mut BundleReport) {
 /// The workspace analogue of [`roundtrip_single`] for a multi-file fixture.
 fn roundtrip_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut BundleReport) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
+    let ws = noeta_db::workspace(
+        &db,
+        &raw.entry,
+        &raw.modules,
+        noeta_lexer::Edition::DEFAULT,
+        &raw.paths,
+    );
 
     if noeta_db::linked(&db, ws).program.is_err() {
         report.not_run.link_failed += 1;
