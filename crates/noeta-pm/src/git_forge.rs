@@ -309,6 +309,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::test_temp::TempDir;
 
     fn git_available() -> bool {
         Command::new("git")
@@ -324,7 +325,8 @@ mod tests {
         let out = Command::new("git").args(&a).output().unwrap();
         assert!(
             out.status.success(),
-            "git {args:?}: {}",
+            "git {args:?} in {}: {}",
+            dir.display(),
             String::from_utf8_lossy(&out.stderr)
         );
     }
@@ -389,8 +391,7 @@ mod tests {
         if !git_available() {
             return;
         }
-        let tmp = std::env::temp_dir().join("noeta_git_forge_test");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = TempDir::new("forge-releases");
         let host = tmp.join("host");
         let cache = tmp.join("cache");
         make_repo(&host, "acme", "thing");
@@ -429,8 +430,7 @@ mod tests {
         if !git_available() {
             return;
         }
-        let tmp = std::env::temp_dir().join("noeta_git_forge_missing");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = TempDir::new("forge-missing");
         let idx = GitForgeIndex::new(
             tmp.join("host").join("acme").to_str().unwrap(),
             tmp.join("cache"),
@@ -444,7 +444,8 @@ mod tests {
 
     #[test]
     fn publish_is_unsupported() {
-        let idx = GitForgeIndex::new("https://github.com/acme", std::env::temp_dir());
+        let cache = TempDir::new("forge-publish");
+        let idx = GitForgeIndex::new("https://github.com/acme", cache.path().to_path_buf());
         let r = Release {
             version: Version::new(1, 0, 0),
             coords: GitCoords {
@@ -477,8 +478,7 @@ mod tests {
         if !git_available() {
             return;
         }
-        let tmp = std::env::temp_dir().join("noeta_git_forge_local_mat");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = TempDir::new("forge-local-mat");
         let host = tmp.join("host");
         make_repo(&host, "acme", "thing");
 
@@ -554,8 +554,7 @@ mod tests {
         if !git_available() {
             return;
         }
-        let tmp = std::env::temp_dir().join("noeta_git_forge_parse_fail_mixed");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = TempDir::new("forge-parse-fail-mixed");
         let host = tmp.join("host");
         make_repo_with_manifests(
             &host,
@@ -593,8 +592,7 @@ mod tests {
         if !git_available() {
             return;
         }
-        let tmp = std::env::temp_dir().join("noeta_git_forge_parse_fail_only");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = TempDir::new("forge-parse-fail-only");
         let host = tmp.join("host");
         make_repo_with_manifests(
             &host,
