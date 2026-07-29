@@ -4374,6 +4374,9 @@ mod tests {
             &[],
             std::slice::from_ref(&dep),
             &noeta_span::PackageUses::new(),
+            // In-memory sources with no package on disk, so nothing derives and each module is
+            // identified by the `namespace` it declares.
+            ModulePath::Declared,
             &tail,
         )
         .expect("the tail's import resolves the package's own `.noe` submodule");
@@ -4438,6 +4441,9 @@ mod tests {
             &[],
             std::slice::from_ref(&dep),
             &noeta_span::PackageUses::new(),
+            // In-memory sources with no package on disk, so nothing derives and each module is
+            // identified by the `namespace` it declares.
+            ModulePath::Declared,
             &tail,
         )
         .expect("a duplicate import must be dropped, not reported");
