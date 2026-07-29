@@ -1,0 +1,34 @@
+// A **native** (extension-declared) enum answers `variants_of` / `field_specs_of` too — the same
+// hole the prelude enums had, and for the same reason: `reflect::build` walks the program AST, and
+// a registry-declared type is not in it. `std.http.Framing` is the shipped one.
+//
+// Keyed by the **qualified** identity (`std.http.Framing`), which is what `type_of` stamps on one of
+// its values — so a framework that walks a `type_of` result and probes the name it finds gets the
+// cases, instead of the empty list that reads as "I know nothing about this name". Both spellings of
+// the query agree, and the pair rule holds: cases through `variants_of`, empty through
+// `field_specs_of`, because an enum declares no fields.
+//
+// Known gap, deliberately pinned here so it cannot regress silently: a **leaf**-imported short name
+// (`use std.http.{Framing}` then `variants_of::<Framing>()`) is not rewritten to the qualified
+// identity by the loader — non-attribute native types are resolved by the checker's `extern_types`
+// instead — so the short turbofish still answers empty. Use the qualified spelling, or the name that
+// `type_of` reports, which is the one a reflection-driven consumer actually has.
+// expect: stdout "framing (turbofish): Sse Ndjson Lines"
+// expect: stdout "framing (name): Sse Ndjson Lines"
+// expect: stdout "framing fields: 0"
+// expect: stdout "framing backing: none none none"
+// expect: stdout "type_of names it: std.http.Framing"
+// expect: stdout "walked from type_of: Sse Ndjson Lines"
+// expect: exit 0
+use std.http.{Framing}
+
+echo "framing (turbofish): ${variants_of::<std.http.Framing>().map(fn(v) => v.name).join(" ")}"
+echo "framing (name): ${variants_of("std.http.Framing").map(fn(v) => v.name).join(" ")}"
+echo "framing fields: ${field_specs_of("std.http.Framing").len()}"
+// Fieldless and unbacked: the variants are a choice, not a value with a wire representation.
+echo "framing backing: ${variants_of("std.http.Framing").map(fn(v) => "${v.backing}").join(" ")}"
+
+// The walk a schema-deriving framework actually performs: take the name off a reflected `Type` and
+// ask what its cases are. This is the pair that used to answer "unknown".
+echo "type_of names it: ${match type_of(Framing.Sse) { Type.Enum(name, args) => name, _ => "?" }}"
+echo "walked from type_of: ${variants_of(match type_of(Framing.Sse) { Type.Enum(name, args) => name, _ => "?" }).map(fn(v) => v.name).join(" ")}"
