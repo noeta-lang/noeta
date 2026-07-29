@@ -212,16 +212,49 @@ pub fn load_with_deps(
     deps: &[DepPackage],
     package_uses: &noeta_span::PackageUses,
 ) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
+    load_with_deps_appending(entry_path, root_edition, deps, package_uses, &[])
+}
+
+/// As [`load_with_deps`], but appending `entry_tail` — statements a **driver** synthesizes onto the
+/// entry (higher-order-abi H6) — to the entry program *before* it links.
+///
+/// An extension command runs a program with a synthesized trailing call: `noeta serve` appends
+/// `server.serve(port, fetch)`, `noeta migrate` appends `migrations.emit(path, up)`. Those
+/// statements must go through the linker like handwritten ones, because two things the linker does
+/// are exactly what such a call needs:
+///
+/// * **Its `use` resolves.** Resolving an import is what pulls the module it names into the program,
+///   so a `use` added to the *linked* program bound nothing the loader owns — a dependency package's
+///   `.noe` submodule (`para.db.migrations`) reached the checker as an unresolved member of its
+///   package root, `[E0019] module para.db has no member migrations`, while the byte-identical
+///   import written into the file by hand resolved. Only *extension* modules (`std.http.server`,
+///   `para.db`) ever bound late, and only because the checker's own tables cover those.
+/// * **Its names are qualified.** An entry that declares a `namespace` has its own declarations
+///   rewritten to qualified identities (`fn up` becomes `todo.main.up`), and a resolved module import
+///   is α-renamed to the merged declaration's canonical name. A call assembled afterwards names
+///   neither, so it resolved to nothing — "cannot find `up` in this scope" against a file whose
+///   `fn up` is right there.
+///
+/// A `use` in the tail whose local name the entry already binds is skipped: the program's own import
+/// wins, as it does for a handwritten duplicate.
+pub fn load_with_deps_appending(
+    entry_path: &Path,
+    root_edition: noeta_lexer::Edition,
+    deps: &[DepPackage],
+    package_uses: &noeta_span::PackageUses,
+    entry_tail: &[Stmt],
+) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
     let text = std::fs::read_to_string(entry_path)?;
     let name = entry_path.display().to_string();
     let siblings = read_siblings(entry_path);
-    Ok(link_with_deps(
+    Ok(link_with_deps_appending(
         &name,
         &text,
         root_edition,
         &siblings,
         deps,
         package_uses,
+        entry_tail,
     ))
 }
 
@@ -635,6 +668,30 @@ pub fn link_with_deps(
     deps: &[DepPackage],
     package_uses: &noeta_span::PackageUses,
 ) -> Result<Linked, Vec<LoadDiagnostic>> {
+    link_with_deps_appending(
+        entry_name,
+        entry_text,
+        root_edition,
+        siblings,
+        deps,
+        package_uses,
+        &[],
+    )
+}
+
+/// As [`link_with_deps`], but appending a driver's `entry_tail` to the entry before it links — the
+/// linking half of [`load_with_deps_appending`], where the reason those statements have to arrive
+/// *before* the link is spelled out.
+#[allow(clippy::too_many_arguments)]
+pub fn link_with_deps_appending(
+    entry_name: &str,
+    entry_text: &str,
+    root_edition: noeta_lexer::Edition,
+    siblings: &[RawModule],
+    deps: &[DepPackage],
+    package_uses: &noeta_span::PackageUses,
+    entry_tail: &[Stmt],
+) -> Result<Linked, Vec<LoadDiagnostic>> {
     // Assemble every module's `Source` up front — entry = 0, siblings `1..=S`, dependency modules
     // continuing the sequence — then lex them as one program (see [`lex_program`]: a text tier
     // declared in any file, a dependency package's included, captures verbatim bodies in every
@@ -677,7 +734,9 @@ pub fn link_with_deps(
     let (lexeds, text_tiers) = lex_program(&sources, &editions, &packages, package_uses);
 
     // The entry parses under the root package's edition.
-    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
+    let mut entry_parsed =
+        noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
+    append_entry_tail(&mut entry_parsed.program, entry_tail);
     let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
@@ -761,6 +820,29 @@ pub fn link_with_deps(
         package_uses: package_uses.clone(),
         reads,
     })
+}
+
+/// Append a driver's synthesized statements to the entry program, so they link as handwritten ones
+/// do (see [`load_with_deps_appending`] for what requires that and why they cannot arrive after).
+///
+/// A tail `use` whose local name the entry already binds is dropped rather than added twice: the
+/// program's own import wins, which is both what a handwritten duplicate gets and what keeps a file
+/// that already imports the module from colliding with an import it never asked for (E0020).
+fn append_entry_tail(program: &mut Program, tail: &[Stmt]) {
+    let bound = |program: &Program, local: &str| {
+        program.stmts.iter().any(|stmt| match stmt {
+            Stmt::Use { names, .. } => names.iter().any(|n| n.local() == local),
+            _ => false,
+        })
+    };
+    for stmt in tail {
+        if let Stmt::Use { names, .. } = stmt
+            && names.iter().any(|n| bound(program, n.local()))
+        {
+            continue;
+        }
+        program.stmts.push(stmt.clone());
+    }
 }
 
 /// Parse + re-root each dependency package's modules under *that package's* edition. The dependency
@@ -1338,6 +1420,7 @@ pub fn link_parsed_with_deps(
 /// This decides collisions only. Whether a resolved declaration is *merged* is a program-wide
 /// question with a program-wide answer (`merged_q`, keyed on the qualified identity): several files
 /// legitimately import one declaration, and it must land in the linked program exactly once.
+#[derive(Clone)]
 enum Origin {
     Local,
     Import(Vec<String>),
@@ -1715,6 +1798,45 @@ fn link_core(
                 }
             }
             other => {
+                // **A tier block's own `use`s drive linking too.** The block-scope overlay
+                // ([`qualify::UnitMap::tier_scopes`]) already qualifies the block's references to
+                // the module's identity — but qualifying a name is not linking it: a `.noe` module
+                // only reaches the merged program when some `use` *merges* its declarations, and
+                // the collection above walks the entry's **top-level** statements only. So
+                // `@test { use probe.lib.side.{Thing} … }` produced a perfectly qualified
+                // `probe.lib.side.Thing` that nothing declared — `noeta check` saw a qualified
+                // name it does not adjudicate and reported nothing, and `noeta test` failed every
+                // use site with "cannot find type … in this scope". A std import inside the same
+                // block worked throughout, because an extension module resolves through the
+                // registry and never needs the unit graph at all.
+                //
+                // Driven unconditionally, not per active tier: which tiers are live is the *build
+                // target*'s call, taken downstream in `noeta_check::tiers` (the loader has no
+                // active set, and the linked program is one memoized salsa value shared by
+                // `check`/`run`/`test`). Merging is safe regardless — every merged declaration
+                // lands under its **qualified** identity, so it binds no short name, collides with
+                // nothing, and is unreferenced (hence stripped with the block) in a build where
+                // the tier is inactive. This is also exactly what a top-level `use` that only the
+                // `@test` block references already does.
+                //
+                // The unresolved remainder is deliberately **dropped** rather than retained: the
+                // `use` statement itself stays *inside* the block (a rewrite table, not a hoisted
+                // import), so an inactive build drops it with the block and leaves nothing
+                // dangling. Activation inlines the block's items — the `use` among them — and the
+                // retained binding is created then.
+                if let Stmt::TierBlock { items, .. } = other {
+                    // Block-scoped name table: the unit's, plus the block's own declarations. A
+                    // `use` binds in one scope, so the E0020 question is answered per scope —
+                    // and a block importing the same declaration the file already imports is the
+                    // same import, not a clash.
+                    let mut block_origins = entry_origins.clone();
+                    block_origins.extend(unit_origins(items));
+                    for item in items {
+                        if let Stmt::Use { path, names, .. } = item {
+                            drive_use(path, names, &mut block_origins, &mut imported, &mut errors);
+                        }
+                    }
+                }
                 // The entry's own declarations and statements qualify against the entry's map (its
                 // own namespace + its resolved imports), with the whole tail's bindings in scope.
                 let mut stmt = other.clone();
@@ -3808,6 +3930,141 @@ mod tests {
         );
     }
 
+    /// A **native** package that also ships plain `.noe` modules (`para/db`: the native `para.db`
+    /// surface beside `para.db.schema` and `para.db.migrations`), and a driver's entry call naming
+    /// one of them — `noeta migrate` appends `migrations.emit(path, up)` to a migration that
+    /// imports only `para.db.schema`.
+    ///
+    /// The tail's `use` has to arrive *before* linking, because resolving an import is what pulls
+    /// the module it names into the program. Pushed onto the linked program instead, it bound
+    /// nothing: `migrations` reached the checker as an unresolved member of the package root
+    /// (`[E0019] module para.db has no member migrations`) while the byte-identical import written
+    /// into the file by hand resolved — the asymmetry that made `.noe` migrations unrunnable.
+    #[test]
+    fn a_drivers_entry_tail_imports_a_native_packages_noe_submodule() {
+        noeta_stdlib::registry::default_seeded();
+        let dep = DepPackage {
+            key: "para".to_string(),
+            root: "para".to_string(),
+            modules: vec![module(
+                "migrations.noe",
+                "namespace para.db.migrations;\npub fn emit(out: string): void { echo out; }\n",
+            )],
+            dep_renames: Default::default(),
+            native: true,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        // The entry names the module nowhere — the driver's tail is what brings it in.
+        let entry = "pub fn up(): string { return \"out.schema\"; }\n";
+        let sp = Span::empty_at(0);
+        let tail = vec![
+            Stmt::Use {
+                path: vec!["para".to_string(), "db".to_string()],
+                names: vec![UseName {
+                    name: "migrations".to_string(),
+                    alias: None,
+                    span: sp,
+                }],
+                span: sp,
+            },
+            Stmt::Expr {
+                expr: Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        receiver: Box::new(Expr::Ident {
+                            name: noeta_ast::Name::canonical("migrations"),
+                            span: sp,
+                        }),
+                        name: "emit".to_string(),
+                        name_span: sp,
+                        span: sp,
+                    }),
+                    args: vec![noeta_ast::CallArg::positional(Expr::Str {
+                        value: "out.schema".to_string(),
+                        span: sp,
+                    })],
+                    span: sp,
+                },
+                span: sp,
+            },
+        ];
+        let linked = link_with_deps_appending(
+            "0001_notes.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+            &noeta_span::PackageUses::new(),
+            &tail,
+        )
+        .expect("the tail's import resolves the package's own `.noe` submodule");
+        // The module was pulled in…
+        assert!(has_fn(&linked, "emit"), "{:?}", linked.program.stmts);
+        // …its `use` was consumed rather than retained as an unresolved native import…
+        assert!(
+            !linked.program.stmts.iter().any(|s| matches!(
+                s,
+                Stmt::Use { path, .. } if path == &["para".to_string(), "db".to_string()]
+            )),
+            "the tail's `use` resolved to a loaded module, so nothing should be retained"
+        );
+        // …and the call was qualified alongside the entry's own statements, so it names the merged
+        // declaration rather than a module member nothing binds.
+        let Some(Stmt::Expr {
+            expr: Expr::Call { callee, .. },
+            ..
+        }) = linked.program.stmts.last()
+        else {
+            panic!("the tail's call is the program's last statement");
+        };
+        assert!(
+            matches!(&**callee, Expr::Ident { name, .. } if name.as_str().ends_with("emit")),
+            "the call should have been qualified to the merged `emit`, got {callee:?}"
+        );
+    }
+
+    /// The entry's own import of the same local name wins: a migration that already writes
+    /// `use para.db.migrations` must not have a second one appended under it (E0020, one name one
+    /// meaning) — it is the same deference a handwritten duplicate gets.
+    #[test]
+    fn a_drivers_entry_use_defers_to_one_the_entry_already_wrote() {
+        noeta_stdlib::registry::default_seeded();
+        let dep = DepPackage {
+            key: "para".to_string(),
+            root: "para".to_string(),
+            modules: vec![module(
+                "migrations.noe",
+                "namespace para.db.migrations;\npub fn emit(out: string): void { echo out; }\n",
+            )],
+            dep_renames: Default::default(),
+            native: true,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let entry = "use para.db.migrations;\nmigrations.emit(\"out.schema\");\n";
+        let sp = Span::empty_at(0);
+        let tail = vec![Stmt::Use {
+            path: vec!["para".to_string(), "db".to_string()],
+            names: vec![UseName {
+                name: "migrations".to_string(),
+                alias: None,
+                span: sp,
+            }],
+            span: sp,
+        }];
+        let linked = link_with_deps_appending(
+            "0001_notes.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+            &noeta_span::PackageUses::new(),
+            &tail,
+        )
+        .expect("a duplicate import must be dropped, not reported");
+        assert!(has_fn(&linked, "emit"));
+    }
+
     #[test]
     fn a_dependency_std_import_is_retained_for_the_compiler() {
         // A package that `use`s `std.*` internally: the loader can't resolve std (not a module), so
@@ -4630,6 +4887,74 @@ mod tests {
             "@test {\n  use std.test.{Skip}\n  #[Skip(\"later\")]\n  fn f(text: string): string { return text; }\n}\necho 1;\n",
             noeta_lexer::Edition::default(),
             &[],
+        )
+        .expect("links");
+        assert!(
+            !linked
+                .program
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Use { .. })),
+            "no top-level `use` may appear: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// A sibling module exporting the type a tier block imports — the `.noe` half of the repro that
+    /// qualification alone could not fix (a std import inside a block always worked, because an
+    /// extension module resolves through the registry and never needs the unit graph).
+    fn side_module() -> RawModule {
+        module(
+            "side.noe",
+            "namespace probe.lib.side;\npub struct Thing { n: int }\npub fn make(): int { return 3 }\n",
+        )
+    }
+
+    #[test]
+    fn a_tier_blocks_use_links_a_loaded_module() {
+        // Qualifying a name is not linking it: the block-scope overlay rewrote `Thing` to
+        // `probe.lib.side.Thing`, but nothing merged the declaration, so `noeta check` reported
+        // nothing and `noeta test` failed with "cannot find type `probe.lib.side.Thing` in this
+        // scope". The block's `use` must drive the merge exactly as a top-level one does.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use probe.lib.side.{Thing}\n  fn t(): void { x = Thing { n: 3 } }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[side_module()],
+        )
+        .expect("links");
+        assert!(
+            has_struct(&linked, "Thing"),
+            "the block-imported declaration must be in the merged program: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    #[test]
+    fn a_tier_blocks_whole_module_use_links_the_module() {
+        // The second import form (`use probe.lib.side` + `side.Thing`) merges every `pub`
+        // declaration, and failed identically before the fix.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use probe.lib.side\n  fn t(): void { x = side.Thing { n: side.make() } }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[side_module()],
+        )
+        .expect("links");
+        assert!(has_struct(&linked, "Thing"), "the module's type merges");
+        assert!(has_fn(&linked, "make"), "the module's fn merges");
+    }
+
+    #[test]
+    fn a_tier_blocks_use_of_a_module_is_still_not_hoisted() {
+        // Linking the module must not hoist the import: the `use` stays inside the block, so an
+        // inactive build drops it with the block. The merged declaration is harmless there — it
+        // carries a qualified identity, so it binds no short name and nothing references it.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use probe.lib.side.{Thing}\n  fn t(): void { x = Thing { n: 3 } }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[side_module()],
         )
         .expect("links");
         assert!(
