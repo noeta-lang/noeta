@@ -1513,8 +1513,8 @@ impl Checker {
             Type::Map(k, v) if matches!(**k, Type::String) => {
                 TypeRecipe::Map(Box::new(self.type_to_recipe(v)?))
             }
-            // Only a non-generic value struct decodes (a class is reference/identity; an enum has no
-            // canonical JSON shape). The field set is the declared record fields, in order.
+            // A non-generic value struct (a class is reference/identity, so it never decodes; an
+            // enum has its own arm below). The field set is the declared record fields, in order.
             Type::Named(name, args)
                 if args.is_empty()
                     && self.symbols.type_kinds.get(name)

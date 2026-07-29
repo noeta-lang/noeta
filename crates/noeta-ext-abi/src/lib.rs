@@ -75,7 +75,18 @@
 /// host silently answer `other` for a missing binary, which is exactly the information these doors
 /// exist to deliver.
 ///
-/// **9** — the enum-construction arc: [`registry::TypeRecipe`] gained an `Enum` form (with
+/// **9** — `std.tracing` grew the **active-span annotators**: `tracing.set_attribute`,
+/// `tracing.add_event`, `tracing.add_event_with`, and `tracing.record_error`, ctx functions that
+/// apply the `Span` mutations to the span the caller is already *inside* rather than to a handle it
+/// holds. `Span` gained the matching `add_event_with(name, attrs)` (and with it `deep_marshal`, so
+/// the map argument arrives whole), closing the one place the `Tracing` capability could carry
+/// event attributes but no surface could produce them. Purely additive registration (no
+/// [`host::Host`] method changed, nothing written for ABI 8 stops compiling), counted anyway under
+/// the rule above because it widens the registry surface an extension and a backend can rely on.
+/// Deliberately not a `current_span() -> ?Span`: that would hand a caller `.end()` on a span it
+/// never opened — see the `std.tracing` module header.
+///
+/// **10** — the enum-construction arc: [`registry::TypeRecipe`] gained an `Enum` form (with
 /// [`registry::VariantRecipe`]/[`registry::VariantTag`]), so an enum-typed field decodes from the
 /// wire values its own JSON Schema advertises, and [`registry::NativeOut::Variant`] gained the
 /// required `has_validator` field that makes a decoded case honor the same `Validate` door contract a
@@ -84,7 +95,7 @@
 /// enum (add `has_validator: false` — a dispatch's own return value is not untrusted input crossing a
 /// door). Also `json.parse`/`try_parse`/`decode_typed` report a new
 /// [`crate::registry::TypeRecipe`]-driven failure kind, `unknown_variant`, distinct from `mismatch`.
-pub const ABI_VERSION: u32 = 9;
+pub const ABI_VERSION: u32 = 10;
 
 pub mod args;
 pub mod channel;

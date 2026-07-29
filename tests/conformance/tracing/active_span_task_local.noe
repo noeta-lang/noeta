@@ -1,0 +1,81 @@
+// std.tracing — the active-span annotators are TASK-LOCAL. The active-span stack lives in the
+// backend's per-strand context (T5a): each task carries its own, and a `spawn`ed task inherits a
+// *snapshot* of its spawner's taken at spawn time. So "the current span" an annotator reaches must
+// be the running task's own — never a sibling's, and never the spawner's *later, live* one.
+//
+// Three legs, all deterministic under the sandbox scheduler (so both backends agree exactly):
+//
+//   - `orphan_before` / `orphan_after`: a task spawned at TOP LEVEL has an empty snapshot, so it has
+//     nothing to annotate. It then parks at a `sleep` while a sibling task opens and holds a span.
+//     `orphan_after` is the sharp read — if an annotator reached a global stack, or the spawner's
+//     live one, the orphan would come back `true` after the resume. It must stay `false`.
+//   - `sibling`: the task that *is* inside its own `with_span` annotates successfully at the very
+//     moment the orphan cannot — one live span, reachable only from the strand that owns it.
+//   - `inherited`: a task spawned INSIDE a `with_span` body does inherit that span, so it annotates
+//     the request-shaped scope it was launched under.
+// expect: stdout "orphan_before=false"
+// expect: stdout "orphan_after=false"
+// expect: stdout "sibling=true"
+// expect: stdout "inherited=true"
+// expect: stdout "done"
+// expect: exit 0
+use std.{tracing}
+use std.task.{sleep}
+
+// Spawned at top level: an empty context snapshot, before and after a suspension.
+async fn orphan(): (bool, bool) {
+    before = tracing.add_event("orphan.before")
+    sleep(3).await
+    after = tracing.add_event("orphan.after")
+    return (before, after)
+}
+
+// Holds a span across the orphan's resume, so the two strands overlap in time.
+async fn holder_body(): bool {
+    sleep(5).await
+    return tracing.set_attribute("holder", true)
+}
+
+async fn holder(): bool {
+    return tracing.with_span("holder", holder_body).await
+}
+
+async fn race(): (bool, bool, bool) {
+    mut pair = (true, true)
+    mut held = false
+    concurrent {
+        ho = spawn orphan()
+        hh = spawn holder()
+        pair = ho.await
+        held = hh.await
+    }
+    (b, a) = pair
+    return (b, a, held)
+}
+
+// Spawned inside a span: the snapshot carries it, so the child annotates its spawner's scope.
+async fn child(): bool {
+    return tracing.add_event("child.step")
+}
+
+async fn parent_body(): bool {
+    mut r = false
+    concurrent {
+        hc = spawn child()
+        r = hc.await
+    }
+    return r
+}
+
+async fn inherit(): bool {
+    return tracing.with_span("parent", parent_body).await
+}
+
+(orphan_before, orphan_after, sibling) = race().await
+inherited = inherit().await
+
+echo "orphan_before=${orphan_before}"
+echo "orphan_after=${orphan_after}"
+echo "sibling=${sibling}"
+echo "inherited=${inherited}"
+echo "done"

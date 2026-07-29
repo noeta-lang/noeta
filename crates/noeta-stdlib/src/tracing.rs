@@ -24,13 +24,25 @@
 //!   malformed header parses to no-parent → a new root, the W3C forgiving-reader rule). This is what
 //!   crosses an isolate boundary — the `traceparent` is a plain string, so it rides a channel
 //!   message as-is; the receiving isolate calls `span_from` to continue the same trace.
+//! - `set_attribute(key, value)` / `add_event(name)` / `record_error(message) -> bool` annotate the
+//!   **active** span — the span the caller is already *inside*, which no handle names. Deliberately
+//!   free functions rather than a `current_span() -> ?Span`: the active span is an *ambient* value
+//!   (`std.log` already reads this very stack with no handle at all), and materializing it into a
+//!   `Span` would hand out `.end()` on a span the caller never opened — a `with_span` body could end
+//!   the span `with_span` is about to end, and a request handler could end the auto-instrumented
+//!   SERVER span out from under `http.serve`. A free function cannot express that hazard. The names
+//!   mirror the `Span` methods exactly, so one operation keeps one name and `tracing.add_event` is
+//!   where someone who knows `span.add_event` looks for it. The `bool` reports whether a **live**
+//!   active span received the annotation — the "no active span" answer, which has to be *visible*
+//!   for an API used to record errors, and which (being a value) the ordinary differential oracle
+//!   observes, unlike the write-only spans themselves.
 //! - `Span` methods `set_attribute`/`add_event`/`record_error`/`end` marshal to `host.tel_span_*`;
 //!   `Span.context() -> str` reads a *held* span's own `traceparent` (inject a specific span, not
 //!   just the active one).
 //!
-//! `span`/`with_span`/`current_context`/`span_from` reach the active stack and/or start spans, so
-//! they route through the `NativeCtx` seam; the `Span` methods only touch the host, so they stay
-//! plain dispatch.
+//! `span`/`with_span`/`current_context`/`span_from` and the three active-span annotators reach the
+//! active stack and/or start spans, so they route through the `NativeCtx` seam; the `Span` methods
+//! only touch the host, so they stay plain dispatch.
 
 use std::any::Any;
 use std::cmp::Ordering;
@@ -60,6 +72,11 @@ const VAR_A: SigType = SigType::Var(0);
 const ATTR_VALUE: SigType =
     SigType::Union(&[SigType::String, SigType::Int, SigType::Float, SigType::Bool]);
 
+/// An OTel attribute *map* — the `add_event_with(name, attrs)` parameter. Same shape `std.log`'s
+/// `*_with` forms and `std.metrics`' `add_with`/`record_with` take, so one attribute vocabulary
+/// spans all three signals.
+const ATTR_MAP: SigType = SigType::Map(&SigType::String, &ATTR_VALUE);
+
 /// `std.tracing`'s functions — all higher-order (they reach the active-span stack, and `with_span`
 /// calls a closure), so they live in the ctx table.
 pub const TRACING_CTX_FNS: &[ExtFn] = &[
@@ -87,6 +104,37 @@ pub const TRACING_CTX_FNS: &[ExtFn] = &[
         params: &[SigType::String, SigType::String],
         ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
     },
+    // The **active-span annotators**: the same three mutations `Span` offers, applied to the span
+    // the caller is already inside rather than to a handle it holds. Same names as the methods (one
+    // operation, one name); `bool` = "a live active span received it" (see the module header for
+    // why this is a free function and not `current_span() -> ?Span`).
+    ExtFn {
+        param_names: &["key", "value"],
+        name: "set_attribute",
+        params: &[SigType::String, ATTR_VALUE],
+        ret: RetTy::Concrete(SigType::Bool),
+    },
+    ExtFn {
+        param_names: &["name"],
+        name: "add_event",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Bool),
+    },
+    // An event carrying its own attributes. This is the form a *structured* fact wants: several
+    // facts recorded on one span each keep their own attribute set, where span-level
+    // `set_attribute` would have them overwrite each other by key.
+    ExtFn {
+        param_names: &["name", "attrs"],
+        name: "add_event_with",
+        params: &[SigType::String, ATTR_MAP],
+        ret: RetTy::Concrete(SigType::Bool),
+    },
+    ExtFn {
+        param_names: &["message"],
+        name: "record_error",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Bool),
+    },
 ];
 
 /// The `Span` instance methods (plain dispatch — they only reach the host). The mutators chain
@@ -103,6 +151,12 @@ pub const SPAN_METHODS: &[ExtFn] = &[
         param_names: &["name"],
         name: "add_event",
         params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
+    },
+    ExtFn {
+        param_names: &["name", "attrs"],
+        name: "add_event_with",
+        params: &[SigType::String, ATTR_MAP],
         ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
     },
     ExtFn {
@@ -231,8 +285,59 @@ pub fn tracing_ctx_dispatch<C: NativeCtx + ?Sized>(
             let id = ctx.host().tel_span_start(&name, SpanKind::Internal, parent);
             Ok(CtxOut::Out(NativeOut::Extern(ExternBox::new(Span { id }))))
         }
+        // ----- the active-span annotators -----
+        //
+        // Each reads its arguments FIRST and resolves the active span second, so a malformed
+        // argument is the same error whether or not a span happens to be active — the alternative
+        // makes a program's typing depend on its trace context.
+        "set_attribute" => {
+            ctx_arity(func, args, 2)?;
+            let key = slot_str(ctx, args[0])?;
+            let value = slot_attr(ctx, args[1])?;
+            Ok(annotated(match active_live_span(ctx) {
+                Some(id) => {
+                    ctx.host().tel_span_set_attr(id, &key, value);
+                    true
+                }
+                None => false,
+            }))
+        }
+        "add_event" | "add_event_with" => {
+            let attrs = if func == "add_event_with" {
+                ctx_arity(func, args, 2)?;
+                slot_attr_map(ctx, args[1])?
+            } else {
+                ctx_arity(func, args, 1)?;
+                Vec::new()
+            };
+            let name = slot_str(ctx, args[0])?;
+            Ok(annotated(match active_live_span(ctx) {
+                Some(id) => {
+                    ctx.host().tel_span_add_event(id, &name, attrs);
+                    true
+                }
+                None => false,
+            }))
+        }
+        "record_error" => {
+            ctx_arity(func, args, 1)?;
+            let message = slot_str(ctx, args[0])?;
+            Ok(annotated(match active_live_span(ctx) {
+                Some(id) => {
+                    ctx.host()
+                        .tel_span_set_status(id, SpanStatus::Error(message.into()));
+                    true
+                }
+                None => false,
+            }))
+        }
         _ => Err(no_function_error("tracing", func).into()),
     }
+}
+
+/// The annotators' answer: whether a live active span received the annotation.
+fn annotated(hit: bool) -> CtxOut {
+    CtxOut::Out(NativeOut::Scalar(Scalar::Bool(hit)))
 }
 
 /// `Span` method dispatch (plain — the mutators only reach the host).
@@ -259,6 +364,13 @@ pub fn span_method_dispatch(
             want_arity(method, args, 1)?;
             let name = want_str(method, args, 0)?;
             host.tel_span_add_event(id, name, Vec::new());
+            Ok(span_value(id))
+        }
+        "add_event_with" => {
+            want_arity(method, args, 2)?;
+            let attrs = want_attr_map(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            host.tel_span_add_event(id, name, attrs);
             Ok(span_value(id))
         }
         "context" => {
@@ -306,6 +418,21 @@ pub(crate) fn current_parent<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<Trace
     Some(ctx.host().tel_span_context(top))
 }
 
+/// The **live** active span: the top of this task's stack, when that top is a real local span.
+///
+/// The stack's top is not always one. Automatic propagation (T5d) seeds a receiving strand with a
+/// *remote-interned* pseudo-handle — a context that arrived on a channel message or across an
+/// isolate boundary, whose originating span lives in another host. It parents correctly (that is
+/// what it is for) but it is not live here, so every `tel_span_*` mutation no-ops on it. An
+/// annotator that treated it as the active span would report success while dropping the annotation
+/// on the floor, which is precisely the silent failure this surface exists to avoid — so a remote
+/// seed reads as "nothing to annotate" and the caller gets `false`. (`current_parent` above
+/// deliberately does *not* filter: a remote seed is a perfectly good implicit **parent**.)
+pub(crate) fn active_live_span<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<SpanId> {
+    let top = ctx.task_context().top()?;
+    (!ctx.host().tel_is_remote(top)).then_some(top)
+}
+
 fn slot_str<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> CtxResult<String> {
     match ctx.view(slot)? {
         NativeValue::Str(s) => Ok(s),
@@ -313,21 +440,67 @@ fn slot_str<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> CtxResult<String>
     }
 }
 
-fn span_value(id: SpanId) -> NativeOut {
-    NativeOut::Extern(ExternBox::new(Span { id }))
+/// Project an attribute-value **slot** into an [`AttrValue`] — the ctx twin of [`want_attr`], for
+/// the active-span annotators (which read arguments as slots, not marshalled `NativeValue`s).
+fn slot_attr<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> CtxResult<AttrValue> {
+    let value = ctx.view(slot)?;
+    Ok(attr_from_native("tracing", &value)?)
 }
 
-/// Project an attribute-value argument (str/int/float/bool) into an [`AttrValue`]. The checker
-/// constrains the param to that union, so a non-scalar can only arrive through a `dyn` launder.
-fn want_attr(method: &str, args: &[NativeValue], index: usize) -> Result<AttrValue, StdError> {
+/// Project a `Map<string, string|int|float|bool>` **slot** into event attributes (the ctx path's
+/// `add_event_with`). Ordering follows the map's own iteration order, which both backends share.
+fn slot_attr_map<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    slot: Slot,
+) -> CtxResult<Vec<(compact_str::CompactString, AttrValue)>> {
+    match ctx.view(slot)? {
+        NativeValue::Map(entries) => entries
+            .into_iter()
+            .map(|(k, v)| Ok((k.into(), attr_from_native("tracing", &v)?)))
+            .collect(),
+        _ => Err(type_error("tracing", "map").into()),
+    }
+}
+
+/// Project a marshalled `Map` **argument** into event attributes (the `Span` handle path's
+/// `add_event_with`). Requires `deep_marshal` on the `Span` extern type, so the map arrives whole
+/// rather than as an opaque projection — the same reason the metrics handles set it.
+fn want_attr_map(
+    method: &str,
+    args: &[NativeValue],
+    index: usize,
+) -> Result<Vec<(compact_str::CompactString, AttrValue)>, StdError> {
     match &args[index] {
+        NativeValue::Map(entries) => entries
+            .iter()
+            .map(|(k, v)| Ok((k.as_str().into(), attr_from_native(method, v)?)))
+            .collect(),
+        _ => Err(type_error(method, "map")),
+    }
+}
+
+/// Project one attribute value (str/int/float/bool) out of a marshalled value — the single
+/// projection every attribute position in this module funnels through (span attributes, event
+/// attributes, both dispatch paths). The checker constrains those positions to [`ATTR_VALUE`], so a
+/// non-scalar can only arrive through a `dyn` launder; `label` names the surface in that error.
+fn attr_from_native(label: &str, v: &NativeValue) -> Result<AttrValue, StdError> {
+    match v {
         NativeValue::Str(s) => Ok(AttrValue::Str(s.as_str().into())),
         NativeValue::Scalar(Scalar::Int(i)) => Ok(AttrValue::Int(*i)),
         NativeValue::Scalar(Scalar::Float(f)) => Ok(AttrValue::Float(*f)),
         NativeValue::Scalar(Scalar::F32(f)) => Ok(AttrValue::Float(*f as f64)),
         NativeValue::Scalar(Scalar::Bool(b)) => Ok(AttrValue::Bool(*b)),
-        _ => Err(type_error(method, "string, int, float, or bool")),
+        _ => Err(type_error(label, "string, int, float, or bool")),
     }
+}
+
+fn span_value(id: SpanId) -> NativeOut {
+    NativeOut::Extern(ExternBox::new(Span { id }))
+}
+
+/// Project an attribute-value argument (str/int/float/bool) into an [`AttrValue`].
+fn want_attr(method: &str, args: &[NativeValue], index: usize) -> Result<AttrValue, StdError> {
+    attr_from_native(method, &args[index])
 }
 
 #[cfg(test)]

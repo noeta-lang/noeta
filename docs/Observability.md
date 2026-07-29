@@ -107,15 +107,80 @@ metrics aggregate host-side and export on a periodic reader (plus a final flush 
 | `tracing.current_context` | `current_context() -> string` | The active span's W3C `traceparent` — the **inject** side of manual propagation. Empty when no span is active. |
 | `tracing.span_from` | `span_from(name: string, traceparent: string) -> Span` | The **extract** side: start a span continuing a *remote* trace parsed from an inbound `traceparent` (a malformed header → a fresh root). |
 
+### Annotating the span you are *in*
+
+The four functions above all *create* a span or read its context. These four annotate the span that is already **active** — the one you are inside, which no handle names:
+
+| Function | Signature | Notes |
+|---|---|---|
+| `tracing.set_attribute` | `set_attribute(key: string, value: string\|int\|float\|bool) -> bool` | Set an attribute on the active span. A non-scalar value is a **compile-time** type error. |
+| `tracing.add_event` | `add_event(name: string) -> bool` | A timestamped event on the active span. |
+| `tracing.add_event_with` | `add_event_with(name: string, attrs: Map<string, string\|int\|float\|bool>) -> bool` | An event carrying its own attributes. |
+| `tracing.record_error` | `record_error(message: string) -> bool` | Set the active span's status to error with `message`. |
+
+These are the same mutations the [`Span` handle](#the-span-handle) offers, under the same names, applied to a different receiver. Reach for them whenever something merely *happened* during the current unit of work:
+
+```noeta check
+use std.{tracing}
+
+fn run_guardrail(guard: string, reason: string): void {
+    tracing.with_span("run", fn(): void {
+        // … evaluate the policy …
+        tracing.set_attribute("guardrail.verdict", "deny")
+        tracing.add_event_with("guardrail.denied", {"guard": guard, "reason": reason})
+    })
+}
+```
+
+Without them, the only way to record that from inside a body was to open a **short child span** — a span per event where an annotation belongs, which inflates trace volume and buries the signal you were trying to record.
+
+**Event or attribute?** An attribute describes the *span* — one value per key, and setting it twice overwrites. An event describes a *moment* — events accumulate, each with its own attribute set. So a fact you may record several times in one span (a verdict per guard, a retry per attempt) belongs in `add_event_with`; a property of the whole operation (the route, the tenant, the final verdict) belongs in `set_attribute`.
+
+They reach the active span at every depth, including spans you did not open. Inside nested `with_span`s the annotation targets the **innermost** span, and the outer one becomes active again when the inner body returns. Inside a request handler it targets the **auto-instrumented SERVER span** — so a handler adds its own attributes to the request's own span, alongside `http.request.method` and `url.path`, with no handle and no child span:
+
+```noeta check
+use std.http.server
+use std.http.{Request, Response}
+use std.{tracing}
+
+fn fetch(req: Request): Response {
+    tracing.set_attribute("tenant.tier", "pro")   // rides THIS request's SERVER span
+    return server.response(200, "ok")
+}
+```
+
+**The `bool` is the "no active span" answer.** Each returns whether a live active span received the annotation. It is `false` at top level, and also `false` on a strand that has only been *seeded* by [automatic propagation](#automatic-instrumentation) — a channel message carries a parent context, but the span that context names lives elsewhere and cannot be mutated from here, so open a span over it first. The value exists so that case is visible rather than silent, which matters most for the call whose failure you can least afford to swallow:
+
+```noeta check
+use std.{log}
+use std.{tracing}
+
+fn report(message: string): void {
+    if !tracing.record_error(message) {
+        log.error(message)      // no span to carry it — do not lose the error
+    }
+}
+```
+
+> **Why free functions, and not `tracing.current_span(): ?Span`?**
+>
+> A `?Span` is the obvious spelling and composes with everything, but it hands the caller a handle carrying **`.end()`** for a span they did not open. A `with_span` body could then end the span `with_span` is itself about to end; a handler could end the SERVER span out from under `server.serve`, corrupting a trace the program never opted into and leaving later child spans parented on a span that already closed. A free function cannot express that hazard — there is no handle to misuse. A restricted handle type (a `Span` minus `end`) would also close the hole, but at the cost of a second span-shaped type that no helper taking a `Span` could accept.
+>
+> The deciding argument is that the active span is an **ambient** value, and `std.log` in this same subsystem already treats it as one: `log.info(...)` correlates to the active span with no handle whatsoever. An ambient value's whole point is that you never thread it — a helper three calls deep annotates the current span by calling `tracing.add_event` itself, exactly as it logs. Materializing it into a handle would re-introduce the threading *and* the ownership question. Holding a handle stays the right model for a span **you** opened, which is what `tracing.span(name)` is for.
+>
+> The names deliberately mirror the `Span` methods rather than inventing shorter ones (`annotate`, `event`), so one operation keeps one name and someone who knows `span.add_event` finds `tracing.add_event` where they go looking for it.
+
 ### The `Span` handle
 
 A `Span` is a mutable handle to one live span (like a file handle — no auto-close). Its mutators
-**chain**; `end` finalizes.
+**chain**; `end` finalizes. This is the surface for a span **you** opened — to annotate the span you
+are merely *inside*, use the [free functions above](#annotating-the-span-you-are-in) instead.
 
 | Method | Signature | |
 |---|---|---|
 | `set_attribute` | `set_attribute(key: string, value: string\|int\|float\|bool) -> Span` | A non-scalar value is a **compile-time** type error. |
 | `add_event` | `add_event(name: string) -> Span` | A timestamped event on the span. |
+| `add_event_with` | `add_event_with(name: string, attrs: Map<string, string\|int\|float\|bool>) -> Span` | An event carrying its own attributes. |
 | `record_error` | `record_error(message: string) -> Span` | Sets the span's status to error with `message`. |
 | `context` | `context() -> string` | This span's own `traceparent` — inject a *specific* held span (vs. `current_context`'s active one). |
 | `end` | `end() -> void` | Finalize; the span is exported. |
@@ -210,7 +275,11 @@ changes:
   `"{method} {route}"`, parented on the inbound `traceparent` (so it continues the caller's trace),
   carrying `http.request.method` / `url.path` / `http.response.status_code`, timed across the handler,
   and marked an error only on a `5xx`. Your handler's own spans (and logs) nest *under* it — one
-  connected trace per request. (See [Concurrency](Concurrency) for the server itself.)
+  connected trace per request. The handler can also annotate that span directly with
+  [`tracing.set_attribute` / `add_event` / `record_error`](#annotating-the-span-you-are-in), which is
+  usually what you want for a per-request fact: no handle exists for the SERVER span, and a child
+  span per fact is a span where an annotation belongs. The server still ends the span itself — a
+  handler cannot. (See [Concurrency](Concurrency) for the server itself.)
 - **Server metrics.** The same requests also record the `http.server.request.duration` histogram
   (seconds, keyed by method / route / status) and maintain an `http.server.active_requests` up/down
   counter — the metrics twin of the SERVER span, no code changes.
@@ -259,8 +328,13 @@ the reproduction to [Profiling](Profiling) instead.
 
 Telemetry is a **write-only side effect**: a span, a log, a metric never re-enters program output,
 so it can't change what a program computes. The active-span stack is **task-local** — each
-cooperative task and isolate carries its own, and a spawned task inherits a snapshot of its
-spawner's — so interleaved work can't cross-parent and logs correlate to the right span. Metric
+cooperative task and isolate carries its own, and a spawned task inherits a *snapshot* of its
+spawner's taken at spawn time — so interleaved work can't cross-parent and logs correlate to the
+right span. A snapshot, not a view: a task keeps reading the scope it was launched under even after
+its spawner has moved into a different span, and it can never reach a sibling's live one. Everything
+that reads "the current span" — `current_context`, `std.log`'s correlation, and the active-span
+annotators — reads that same per-strand stack, so they always agree about which span you are in.
+Metric
 aggregation is host-side, exported on a periodic reader plus a final flush. A program that never
 imports a telemetry module and never sets an endpoint pays nothing at runtime, and the exporter is
 a lean OTLP/HTTP-JSON writer behind a default-on `telemetry` build feature. Both backends are held
