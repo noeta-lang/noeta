@@ -171,8 +171,10 @@ pub struct Sites {
     pub type_arg_table: Vec<noeta_ext_abi::TypeArgInfo>,
     /// Call spans of **forwarding-generic** calls → the hidden type-argument slots the call must
     /// supply, in the callee's forwarding order (`Table(i)` = a concrete instantiation's table
-    /// index; `Forward(j)` = pass the enclosing fn's own hidden slot `j` through). Lowering
-    /// prepends the matching atoms to the call's arguments.
+    /// index; `Forward(j)` = pass the enclosing body's own hidden slot `j` through). Lowering
+    /// puts the matching atoms in the call node's `type_args` channel, beside its value
+    /// arguments — never inside them, so the callee's value parameter positions are exactly what
+    /// the source wrote.
     pub hidden_arg_sites: HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
     /// Spans whose turbofish is a **FORWARDED type parameter** of the enclosing top-level generic
     /// `fn` → the hidden slot index holding the instantiation's entry in [`Sites::type_arg_table`].
@@ -200,8 +202,10 @@ pub struct Sites {
     /// tag its construction site stamped, so lowering reads argument `i` off that tag instead of
     /// baking a constant string. A pure function of the program, like the other site maps.
     pub self_type_arg_sites: HashMap<Span, (String, u32)>,
-    /// Forwarding generic fns → their hidden-parameter count. Lowering prepends that many hidden
-    /// parameters (`$ty0`, `$ty1`, …) to the fn's IR parameter list.
+    /// Forwarding generic fns and methods → their hidden-slot count, keyed as the callable traces
+    /// (a bare `fn` name, or `Type.method`). Lowering gives the callable that many leading
+    /// type-argument parameters (`$ty0`, `$ty1`, …) and records the count on `Func::hidden`, which
+    /// is what tells every binder how many slots to lay down before the value arguments start.
     pub forwarding_fns: HashMap<String, u32>,
     /// **Forwarding-fn-as-value** sites (poly-deferrals D2c): `Expr::Ident` spans where a
     /// forwarding generic fn is used as a VALUE with its instantiation pinned by the expected

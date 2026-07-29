@@ -526,7 +526,20 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             args.iter().for_each(&mut *f);
             type_args.iter().for_each(&mut *f);
         }
-        Rvalue::Method { receiver, args, .. } | Rvalue::TraitMethod { receiver, args, .. } => {
+        // A forwarding METHOD call carries its type arguments in the same separate channel, and
+        // for the same reason a `Call`'s must be visited here (a nested fn reaches a pass-through
+        // slot as a capture). A `TraitMethod` route is baked and never forwards.
+        Rvalue::Method {
+            receiver,
+            args,
+            type_args,
+            ..
+        } => {
+            f(receiver);
+            args.iter().for_each(&mut *f);
+            type_args.iter().for_each(&mut *f);
+        }
+        Rvalue::TraitMethod { receiver, args, .. } => {
             f(receiver);
             args.iter().for_each(&mut *f);
         }

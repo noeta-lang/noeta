@@ -1192,11 +1192,16 @@ impl<'m> Vm<'m> {
                                 proto,
                                 Some(v),
                                 &[],
+                                // A protocol method is reached by its fixed name, so there is no
+                                // instantiation to carry; the guard aborts rather than misbind if
+                                // one is ever declared generic.
+                                &[],
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
                                 // A fixed-arity protocol call — no labels reach it.
                                 None,
+                                *span,
                             )?;
                             continue 'reload;
                         }
@@ -1319,11 +1324,13 @@ impl<'m> Vm<'m> {
                                     proto,
                                     Some(recv),
                                     &[],
+                                    &[],
                                     *dst,
                                     RetTransform::None,
                                     pc + 1,
                                     // A fixed-arity protocol call — no labels reach it.
                                     None,
+                                    *span,
                                 )?;
                                 continue 'reload;
                             }
@@ -1341,6 +1348,11 @@ impl<'m> Vm<'m> {
                         recv,
                         method,
                         args,
+                        // A forwarding generic METHOD's type arguments (Axis A) — empty for every
+                        // method call that forwards nothing, which is all but a handful. They are
+                        // read only on the user-method arms below: no built-in, native or protocol
+                        // receiver declares hidden slots.
+                        type_args,
                         span,
                         cache,
                         reuse,
@@ -1610,8 +1622,11 @@ impl<'m> Vm<'m> {
                             // The prototype takes the receiver in register 0 and the user arguments
                             // after it, so its declared arity is one more than the supplied args. A
                             // method may have trailing defaulted parameters, so the supplied count is a
-                            // range `[total - defaults, total]` (all less the receiver).
-                            let total = callee_chunk.num_params as usize - 1;
+                            // range `[total - defaults, total]` (all less the receiver). A forwarding
+                            // generic's hidden slots are not value parameters either — they are filled
+                            // from `type_args`, so they come off the count too.
+                            let total =
+                                callee_chunk.num_params as usize - 1 - callee_chunk.hidden as usize;
                             let required = total - callee_chunk.defaults.len();
                             if args.len() < required || args.len() > total {
                                 return Err(self.error(
@@ -1621,6 +1636,7 @@ impl<'m> Vm<'m> {
                                 ));
                             }
                             let arg_values = ArgBuf::collect(args, regs, fbase);
+                            let ty_values = ArgBuf::collect(type_args.regs(), regs, fbase);
                             self.push_callee_frame(
                                 frames,
                                 regs,
@@ -1628,10 +1644,12 @@ impl<'m> Vm<'m> {
                                 proto,
                                 Some(v),
                                 arg_values.as_slice(),
+                                ty_values.as_slice(),
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
                                 *supplied,
+                                *span,
                             )?;
                             continue 'reload;
                         }
@@ -1693,7 +1711,9 @@ impl<'m> Vm<'m> {
                             };
                             if let Some(proto) = proto {
                                 let callee_chunk = &module.protos[proto as usize];
-                                let total = callee_chunk.num_params as usize - 1;
+                                let total = callee_chunk.num_params as usize
+                                    - 1
+                                    - callee_chunk.hidden as usize;
                                 let required = total - callee_chunk.defaults.len();
                                 if args.len() < required || args.len() > total {
                                     return Err(self.error(
@@ -1703,6 +1723,7 @@ impl<'m> Vm<'m> {
                                     ));
                                 }
                                 let arg_values = ArgBuf::collect(args, regs, fbase);
+                                let ty_values = ArgBuf::collect(type_args.regs(), regs, fbase);
                                 self.push_callee_frame(
                                     frames,
                                     regs,
@@ -1710,10 +1731,12 @@ impl<'m> Vm<'m> {
                                     proto,
                                     Some(v),
                                     arg_values.as_slice(),
+                                    ty_values.as_slice(),
                                     *dst,
                                     RetTransform::None,
                                     pc + 1,
                                     *supplied,
+                                    *span,
                                 )?;
                                 continue 'reload;
                             }
@@ -1791,11 +1814,13 @@ impl<'m> Vm<'m> {
                                 proto,
                                 Some(v),
                                 &[idx],
+                                &[],
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
                                 // A fixed-arity protocol call — no labels reach it.
                                 None,
+                                *span,
                             )?;
                             continue 'reload;
                         }
@@ -3127,7 +3152,13 @@ impl<'m> Vm<'m> {
                             // call), so its declared arity is one more than the supplied args; trailing
                             // defaults widen the accepted range, exactly as `Op::CallMethod`.
                             let callee_chunk = &module.protos[proto as usize];
-                            let total = callee_chunk.num_params as usize - 1;
+                            // `invoke` reckons arity over the VALUE parameters — a forwarding
+                            // generic's hidden slots are not part of the surface signature the
+                            // reflection artifact describes. It supplies none, so the push itself
+                            // aborts; reporting an arity the source never wrote first would only
+                            // mislead.
+                            let total =
+                                callee_chunk.num_params as usize - 1 - callee_chunk.hidden as usize;
                             let (args, supplied) = match bind_invoke_args(
                                 &module.reflection,
                                 &format!("{type_name}.{method}"),
@@ -3191,6 +3222,10 @@ impl<'m> Vm<'m> {
                                     proto,
                                     recv,
                                     &arg_items,
+                                    // `invoke` is name-keyed with no static callee type, so it
+                                    // carries no instantiation: a forwarding generic reached this
+                                    // way aborts rather than bind a value argument into a type slot.
+                                    &[],
                                     *dst,
                                     RetTransform::WrapOk(ok),
                                     pc + 1,
@@ -3198,6 +3233,7 @@ impl<'m> Vm<'m> {
                                     // declared parameter's bit moves up by one — the same shift the
                                     // compiler applies to a statically-named method call.
                                     supplied.map(|m| (m << 1) | 1),
+                                    *span,
                                 )?;
                                 // Release the temporary boxed args list before transferring (its
                                 // elements were already retained into the call frame above); `take`
@@ -3374,11 +3410,13 @@ impl<'m> Vm<'m> {
                                 proto,
                                 Some(left),
                                 &[right],
+                                &[],
                                 *dst,
                                 transform,
                                 pc + 1,
                                 // An operator/protocol dispatch of fixed arity — no labels reach it.
                                 None,
+                                *span,
                             )?;
                             continue 'reload;
                         }
@@ -3588,11 +3626,13 @@ impl<'m> Vm<'m> {
                                 proto,
                                 Some(v),
                                 &[],
+                                &[],
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
                                 // An operator/protocol dispatch of fixed arity — no labels reach it.
                                 None,
+                                *span,
                             )?;
                             continue 'reload;
                         }
@@ -3780,30 +3820,51 @@ impl<'m> Vm<'m> {
         proto: u32,
         recv: Option<Value>,
         args: &[Value],
+        ty_args: &[Value],
         ret_dst: u16,
         ret_transform: RetTransform,
         resume_pc: usize,
         supplied: Option<u64>,
+        span: Span,
     ) -> Result<(), Abort> {
         let module = self.module;
         let callee_chunk = &module.protos[proto as usize];
+        // A forwarding generic METHOD (Axis A) declares hidden type-argument slots; only a call
+        // with a static receiver type can fill them. The name-keyed entry points that route
+        // through here without one — `invoke`, a method handle, a `dyn` receiver — pass none, and
+        // binding positionally anyway would lay a value argument into a type slot.
+        let hidden = callee_chunk.hidden as usize;
+        if ty_args.len() != hidden {
+            let name = callee_chunk.name.clone();
+            return Err(self.no_instantiation(name.as_deref(), hidden, ty_args.len(), span));
+        }
+        let hidden_base = callee_chunk.hidden_base as usize;
         let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
         if let Some(r) = recv {
             retain(r);
             regs[new_base] = r;
         }
-        // Register 0 holds the receiver, so an argument lands one past the parameter it fills.
+        // The hidden block sits immediately after the receiver.
+        for (j, &t) in ty_args.iter().enumerate() {
+            retain(t);
+            regs[new_base + hidden_base + j] = t;
+        }
+        // Register 0 holds the receiver, so an argument lands one past the parameter it fills —
+        // and one hidden block further on, at a forwarding callee.
         for (i, &a) in args.iter().enumerate() {
             retain(a);
-            regs[new_base + noeta_bytecode::param_of_arg(i + 1, supplied)] = a;
+            let p = noeta_bytecode::param_of_arg(i + 1, supplied);
+            regs[new_base + noeta_bytecode::reg_of_param(p, hidden, hidden_base)] = a;
         }
         // Fill every parameter the call left out from its default thunk — the trailing ones under
-        // the ordinary prefix rule, plus any the mask says was skipped.
+        // the ordinary prefix rule, plus any the mask says was skipped. A default's register is
+        // absolute, so shift it back out of the hidden block to index the mask (a hidden slot
+        // never carries a default, so the subtraction is always in range).
         if !callee_chunk.defaults.is_empty() {
             let defaults = callee_chunk.defaults.clone();
             let n_args = args.len() + 1;
             for (reg, dproto) in &defaults {
-                if !noeta_bytecode::is_param_filled(*reg as usize, n_args, supplied) {
+                if !noeta_bytecode::is_param_filled(*reg as usize - hidden, n_args, supplied) {
                     let value = self.run_thunk(*dproto, &[])?;
                     regs[new_base + *reg as usize] = value;
                 }

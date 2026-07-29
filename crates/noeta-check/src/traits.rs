@@ -1807,7 +1807,7 @@ impl Checker {
         arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         recv_args: &[Type],
-        hidden_site: Option<Span>,
+        hidden_site: Option<(Span, String)>,
         env: &mut Env,
     ) -> Type {
         // Seed with the receiver's type arguments (instance call); the call's own arguments then
@@ -1848,7 +1848,7 @@ impl Checker {
         arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         seed: HashMap<String, Type>,
-        hidden_site: Option<Span>,
+        hidden_site: Option<(Span, String)>,
         env: &mut Env,
     ) -> Type {
         let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
@@ -1927,13 +1927,15 @@ impl Checker {
         // TEMPLATE and resolve the result into a table entry (concrete — the whole composite is
         // interned statically, so the runtime never constructs a recipe) or a pass-through of the
         // enclosing fn's own matching slot (a template still mentioning the caller's parameters).
-        // `hidden_site` is the whole-call span lowering keys on; `None` for a method call
-        // (methods never forward).
-        if let Some(call_span) = hidden_site
-            && let Some(fwd) = self.symbols.forwarding.get(name).cloned()
+        // `hidden_site` is the whole-call span lowering keys on, paired with the KEY the callee's
+        // slot layout is recorded under — a bare `fn` name, or `Type.method` for a method (Axis A),
+        // which is why it is not simply `name`: two classes may declare `load`. `None` at a call
+        // that has no channel to supply them through.
+        if let Some((call_span, key)) = hidden_site
+            && let Some(fwd) = self.symbols.forwarding.get(key.as_str()).cloned()
             // A poisoned callee (diverging slot set, D2a) already carries the one clear error at
             // its declaration; resolving its partial slots here would only cascade noise.
-            && !self.symbols.forwarding_poisoned.contains(name)
+            && !self.symbols.forwarding_poisoned.contains(key.as_str())
         {
             let mut hidden = Vec::with_capacity(fwd.len());
             for slot in &fwd {

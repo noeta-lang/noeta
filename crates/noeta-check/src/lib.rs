@@ -2480,18 +2480,32 @@ impl Checker {
         // carries none of its own). Union with the current set so a method does not lose the
         // class's parameters; restored after the body. Bounds are validated AFTER the parameters
         // enter scope — a bound argument may name a sibling parameter (`<K, T: Keyed<K>>`).
-        // While checking a top-level forwarding generic's body (poly-values F2b), expose its
-        // hidden-argument layout so the body's dynamic sites and onward-forwarding calls can index
-        // it. Methods/nested contexts get an empty layout (forwarding is top-level-fn only).
+        // While checking a forwarding generic's body (poly-values F2b), expose its type-argument
+        // slot layout so the body's dynamic sites and onward-forwarding calls can index
+        // it. A METHOD gets its own layout too (Axis A), keyed `Type.method`; a nested context
+        // retains the enclosing one (D2b) and a closure/destructor gets none.
         // A slot set that failed the pre-pass fixpoint (polymorphic recursion through a
         // composite forward, D2a) is a clear error at the declaration — the static table cannot
         // enumerate its instantiations.
-        if self
-            .symbols
-            .forwarding_poisoned
-            .contains(decl.name.as_str())
-            && self.coloring.fn_depth == 0
-            && target == TargetKind::Function
+        // The key this declaration's own forwarding slots are recorded under — its bare name for a
+        // top-level `fn`, `Type.method` for a method. `None` for anything that carries no slots of
+        // its own: a nested `fn` (D2b — it reads the ENCLOSING fn's, through closure capture), a
+        // closure, a destructor.
+        let fwd_key = if self.coloring.fn_depth == 0 {
+            match target {
+                TargetKind::Function => Some(decl.name.to_string()),
+                TargetKind::Method => self
+                    .coloring
+                    .current_type
+                    .as_ref()
+                    .map(|ty| format!("{ty}.{}", decl.name)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(key) = &fwd_key
+            && self.symbols.forwarding_poisoned.contains(key.as_str())
         {
             self.error(
                 DiagnosticCode::InvalidTypeArguments,
@@ -2508,10 +2522,10 @@ impl Checker {
                  enumerate; restructure so the composite is built by the caller",
             );
         }
-        let next_forwarding = if target == TargetKind::Function && self.coloring.fn_depth == 0 {
+        let next_forwarding = if let Some(key) = &fwd_key {
             self.symbols
                 .forwarding
-                .get(decl.name.as_str())
+                .get(key.as_str())
                 .map(|f| f.iter().map(|s| s.template.clone()).collect())
                 .unwrap_or_default()
         } else if target == TargetKind::Function {
@@ -2539,7 +2553,7 @@ impl Checker {
         // same D2b shadow-masking as the layout above, but derived from the declaration rather
         // than from the sites, so a diagnostic can point at the composed route
         // (`field_specs_of(type_name::<T>())`) whether or not a `type_name::<T>()` already appears.
-        let next_forwardable = if target == TargetKind::Function && self.coloring.fn_depth == 0 {
+        let next_forwardable = if fwd_key.is_some() {
             decl.type_params.iter().map(|p| p.name.clone()).collect()
         } else if target == TargetKind::Function {
             let shadowed: Vec<&str> = decl.type_params.iter().map(|p| p.name.as_str()).collect();
@@ -2557,15 +2571,17 @@ impl Checker {
         let saved_forwarding =
             std::mem::replace(&mut self.coloring.current_forwarding, next_forwarding);
         self.coloring.fn_depth += 1;
-        // Record the hidden-parameter count for lowering — for EVERY forwarding fn, called or
-        // not, so the body's dynamic sites always have their slots. Top-level only: a nested fn
-        // retains the enclosing layout for its body's SITES (D2b) but carries no hidden
-        // parameters of its own (it captures the enclosing locals instead).
-        if self.coloring.fn_depth == 1 && !self.coloring.current_forwarding.is_empty() {
-            self.sites.forwarding_fns.insert(
-                decl.name.to_string(),
-                self.coloring.current_forwarding.len() as u32,
-            );
+        // Record the hidden-slot count for lowering — for EVERY forwarding fn or method, called
+        // or not, so the body's dynamic sites always have their slots. Keyed exactly as the slot
+        // layout is (`fwd_key`), which is why a nested fn is absent: it retains the enclosing
+        // layout for its body's SITES (D2b) but carries no slots of its own (it captures the
+        // enclosing `$ty` locals instead).
+        if let Some(key) = fwd_key
+            && !self.coloring.current_forwarding.is_empty()
+        {
+            self.sites
+                .forwarding_fns
+                .insert(key, self.coloring.current_forwarding.len() as u32);
         }
         // The enclosing generic type's parameters, for `type_name::<T>()` inside an INSTANCE method
         // (generic constructor reflection, Gap B): the instantiation is not in the body — one

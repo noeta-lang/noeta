@@ -1674,9 +1674,10 @@ pub fn missing_type_arg_message(type_name: &str, param: &str) -> String {
 /// So this aborts instead, exactly as `missing_type_arg_message` does on the receiver channel: the
 /// instantiation is unknowable at this call, and the fix belongs at the call site that lost it.
 pub fn no_instantiation_message(callee: &str, declared: usize, supplied: usize) -> String {
-    let short = crate::short_type_name(callee);
+    // The callee is named exactly as it traces — `Type.method` for a method — rather than
+    // shortened: which `load` this is, is the first thing you need to know.
     format!(
-        "`{short}` forwards {declared} type argument(s), but no instantiation reaches here \u{2014} this call supplies {supplied} (a `dyn` receiver, a handle, `invoke`, or a first-class value carries none); call it by name at a concrete instantiation, so the call site can record one"
+        "`{callee}` forwards {declared} type argument(s), but no instantiation reaches here \u{2014} this call supplies {supplied} (a `dyn` receiver, a handle, `invoke`, or a first-class value carries none); call it by name at a concrete instantiation, so the call site can record one"
     )
 }
 

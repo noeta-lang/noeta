@@ -308,7 +308,7 @@ impl Checker {
             args,
             callee_span,
             seed,
-            Some(call_span),
+            Some((call_span, name.to_string())),
             env,
         );
         // The deferred-argument safety net, mirroring `synth_call`.
@@ -493,7 +493,7 @@ impl Checker {
             arg_exprs,
             span,
             seed,
-            Some(span),
+            Some((span, name.to_string())),
             env,
         )
     }
@@ -656,7 +656,7 @@ impl Checker {
                             arg_exprs,
                             span,
                             &[],
-                            Some(call_span),
+                            Some((call_span, name.to_string())),
                             env,
                         );
                     }
@@ -879,6 +879,7 @@ impl Checker {
                     // Repo.new("todos")` binds `T = Todo` through the return-position seed).
                     let ret = self.call_user_method(
                         name,
+                        Some(tn.as_str()),
                         &sig,
                         args,
                         arg_exprs,
@@ -935,6 +936,7 @@ impl Checker {
                     }
                     return self.call_user_method(
                         name,
+                        Some(n.as_str()),
                         &sig,
                         args,
                         arg_exprs,
@@ -1156,9 +1158,17 @@ impl Checker {
             .get(&(n.clone(), "call".to_string()))
             .cloned()
         {
-            return Some(
-                self.call_user_method("call", &sig, args, arg_exprs, span, recv_args, None, env),
-            );
+            return Some(self.call_user_method(
+                "call",
+                Some(n.as_str()),
+                &sig,
+                args,
+                arg_exprs,
+                span,
+                recv_args,
+                None,
+                env,
+            ));
         }
         // An **extern** type participates in the protocol exactly as a user type does (http arc
         // H10): a registered `call` method makes its values invocable. Extern types already join
@@ -1242,10 +1252,14 @@ impl Checker {
         ty
     }
 
+    /// `type_name` is the method's owning type — `None` only where the receiver is not a resolvable
+    /// user type. It is what qualifies the forwarding key (`Type.method`), so two classes declaring
+    /// a `load` cannot share a slot layout.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn call_user_method(
         &mut self,
         name: &str,
+        type_name: Option<&str>,
         sig: &FnSig,
         args: &mut [Type],
         arg_exprs: &[CallArg],
@@ -1308,6 +1322,16 @@ impl Checker {
                 let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
                 bind_type_params(&generic.raw_ret, &expected, &tps, &mut seed);
             }
+            // A generic METHOD forwards its OWN type parameters through the call node's
+            // type-argument channel (Axis A), exactly as a top-level generic fn does — keyed
+            // `Type.method`, so the body's slots and this call site agree on the layout. It takes
+            // both a resolvable owning type and a call span to key on; a synthesized call (no
+            // span) or an unresolvable receiver supplies nothing, and the callee's body aborts at
+            // its forwarded site rather than reading a value argument as a type-table index.
+            let hidden_site = match (call_span, type_name) {
+                (Some(cs), Some(ty)) => Some((cs, format!("{ty}.{name}"))),
+                _ => None,
+            };
             return self.check_generic_call_seeded(
                 name,
                 generic,
@@ -1316,8 +1340,7 @@ impl Checker {
                 arg_exprs,
                 span,
                 seed,
-                // Methods never forward (the pinned D3 boundary), so no hidden site.
-                None,
+                hidden_site,
                 env,
             );
         }
@@ -1498,7 +1521,9 @@ impl Checker {
             arg_exprs,
             span,
             seed,
-            None,
+            // An EXPLICIT method turbofish forwards on the same channel as an inferred one — the
+            // turbofish only pins the instantiation the seed carries into the slot templates.
+            Some((span, format!("{type_name}.{name}"))),
             env,
         )
     }

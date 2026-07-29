@@ -378,11 +378,16 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.extend(args.iter().copied());
         }
         Op::CallMethod {
-            dst, recv, args, ..
+            dst,
+            recv,
+            args,
+            type_args,
+            ..
         } => {
             f.def = Some(*dst);
             f.uses.push(*recv);
             f.uses.extend(args.iter().copied());
+            f.uses.extend(type_args.regs().iter().copied());
         }
         Op::Index {
             dst, recv, index, ..
@@ -924,11 +929,18 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             }
         }
         Op::CallMethod {
-            dst, recv, args, ..
+            dst,
+            recv,
+            args,
+            type_args,
+            ..
         } => {
             m(dst);
             m(recv);
             for r in args.iter_mut() {
+                m(r);
+            }
+            for r in type_args.regs_mut().iter_mut() {
                 m(r);
             }
         }
@@ -1263,6 +1275,7 @@ mod tests {
             diagnostics: Vec::new(),
             num_params,
             hidden: 0,
+            hidden_base: 0,
             num_registers,
             defaults: Vec::new(),
             frame_locals: Vec::new(),

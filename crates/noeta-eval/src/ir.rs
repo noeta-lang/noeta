@@ -1290,9 +1290,13 @@ impl Interpreter {
                 args,
                 reuse,
                 reflect,
+                // A forwarding generic METHOD's type arguments (Axis A), in slot order — empty for
+                // the overwhelming majority of method calls. The reuse fast paths below are all
+                // built-in collection updates, which declare no slots, so they never carry any.
+                type_args,
                 span,
                 supplied,
-                ..
+                name_span: _,
             } => {
                 // In-place collection self-update (Phase 5.1c): a marked `m = m.set(k,v)` moves the
                 // receiver out of its (reassigned) binding so a uniquely-owned map can be mutated in
@@ -1333,6 +1337,7 @@ impl Interpreter {
                     return self.call_method(recv, name, values, *span);
                 }
                 let recv = self.eval_ir_atom(receiver, frame)?;
+                let tys = self.eval_ir_atoms(type_args, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
                 let result = if is_temp(receiver) {
                     // An owned temp receiver (`Resource.new().use()`): fire its destructor after the
@@ -1340,11 +1345,11 @@ impl Interpreter {
                     // and destroy the held copy — last-reference-gated, so a method that returns
                     // `self` (the result aliases it) correctly defers destruction.
                     let result =
-                        self.call_method_masked(recv.clone(), name, values, *span, &[], *supplied);
+                        self.call_method_masked(recv.clone(), name, values, *span, &tys, *supplied);
                     self.destroy_value(recv);
                     result
                 } else {
-                    self.call_method_masked(recv, name, values, *span, &[], *supplied)
+                    self.call_method_masked(recv, name, values, *span, &tys, *supplied)
                 };
                 // When this "method call" was a generic enum-variant construction, stamp the reflected
                 // type onto the freshly-built value (R2b.2) — the tree-walker twin of the VM's node tag.

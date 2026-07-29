@@ -546,7 +546,7 @@ fn compile_to_mc(
             fc.stmt(stmt)?;
         }
         fc.code.push(Op::Halt);
-        fc.into_chunk(0, 0, Vec::new(), Some("main".to_string()), Some(ir.span))
+        fc.into_chunk(0, 0, 0, Vec::new(), Some("main".to_string()), Some(ir.span))
     };
     module.protos[0] = main;
     // Intern each packed `map(...)` result layout (P-PACK 2.6 category B) and pair it with the call
@@ -767,7 +767,7 @@ impl SessionCompiler {
                 fc.stmt(stmt)?;
             }
             fc.code.push(Op::Halt);
-            fc.into_chunk(0, 0, Vec::new(), Some("main".to_string()), Some(ir.span))
+            fc.into_chunk(0, 0, 0, Vec::new(), Some("main".to_string()), Some(ir.span))
         };
         self.mc.protos[0] = main;
 
@@ -1649,7 +1649,9 @@ impl ModuleCompiler {
         }
         fc.code.push(Op::Halt);
         let num_params = params.len() as u16 + if is_method { 1 } else { 0 };
-        Ok(fc.into_chunk(num_params, hidden, default_pairs, name, def_span))
+        // A method's hidden block starts at register 1: register 0 is the receiver, which the
+        // binder must not shift past the block (see `noeta_bytecode::reg_of_param`).
+        Ok(fc.into_chunk(num_params, hidden, base, default_pairs, name, def_span))
     }
 
     /// Compile an IR [`Func`] into a fresh prototype and return its index. `name` is the name a
@@ -2018,6 +2020,7 @@ impl<'m> FnCompiler<'m> {
         self,
         num_params: u16,
         hidden: u16,
+        hidden_base: u16,
         defaults: Vec<(u16, u32)>,
         name: Option<String>,
         def_span: Option<Span>,
@@ -2055,6 +2058,7 @@ impl<'m> FnCompiler<'m> {
             diagnostics: self.diags,
             num_params,
             hidden,
+            hidden_base,
             num_registers: self.next_reg,
             defaults,
             frame_locals,
@@ -3443,16 +3447,19 @@ impl<'m> FnCompiler<'m> {
                 receiver,
                 name,
                 args,
+                type_args,
                 reuse,
                 reflect,
                 span,
                 supplied,
-                ..
+                name_span: _,
             } => {
                 // A generic enum-variant construction carries its reflected type (R2b.2); intern it so
                 // the `MakeEnum` op can stamp it. `None` for an ordinary method call.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
-                self.lower_method(receiver, name, args, *reuse, reflect, dst, *span, *supplied)
+                self.lower_method(
+                    receiver, name, args, type_args, *reuse, reflect, dst, *span, *supplied,
+                )
             }
             Rvalue::Field {
                 receiver,
@@ -4303,6 +4310,7 @@ impl<'m> FnCompiler<'m> {
         receiver: &Atom,
         name: &str,
         args: &[Atom],
+        type_args: &[Atom],
         reuse: bool,
         reflect: Option<u32>,
         dst: Reg,
@@ -4330,7 +4338,7 @@ impl<'m> FnCompiler<'m> {
                 // resolved at compile time when the name is a method, not a variant. Variant
                 // construction still wins for a variant name (uppercase by convention, so no clash).
                 if let Some(&proto) = fns.get(name) {
-                    return self.call_associated(proto, args, dst, span, supplied);
+                    return self.call_associated(proto, args, type_args, dst, span, supplied);
                 }
                 return self.make_enum(type_name, name, args, reflect, dst, span);
             }
@@ -4340,7 +4348,7 @@ impl<'m> FnCompiler<'m> {
                 self.module.types.get(type_name)
                 && let Some(&proto) = fns.get(name)
             {
-                self.call_associated(proto, args, dst, span, supplied)?;
+                self.call_associated(proto, args, type_args, dst, span, supplied)?;
                 // A **fresh constructor** of a generic type (`Repo.new("todos")` typed `Repo<Todo>`):
                 // the instantiation is known here and not inside `fn new`, where the object literal
                 // is written, so the call site stamps the result. The checker records the site only
@@ -4391,6 +4399,7 @@ impl<'m> FnCompiler<'m> {
             },
             _ => (self.atom_reg(receiver)?, false),
         };
+        let type_args = self.type_arg_regs(type_args)?;
         let cache = self.module.next_cache_slot();
         let method = self.module.intern_name(name);
         self.code.push(Op::CallMethod {
@@ -4398,6 +4407,7 @@ impl<'m> FnCompiler<'m> {
             recv,
             method,
             args: arg_regs,
+            type_args,
             span,
             cache,
             reuse: recv_reuse,
@@ -4864,14 +4874,17 @@ impl<'m> FnCompiler<'m> {
 
     /// Call an associated function `Type.f(args)`. The method prototype reserves register 0 for
     /// `self`; an associated call has no receiver, so unit is passed there.
+    #[allow(clippy::too_many_arguments)]
     fn call_associated(
         &mut self,
         proto: u32,
         args: &[Atom],
+        type_args: &[Atom],
         dst: Reg,
         span: Span,
         supplied: Option<u64>,
     ) -> Result<(), Unsupported> {
+        let type_args = self.type_arg_regs(type_args)?;
         let self_reg = self.alloc_reg();
         let k = self.add_const(Const::Unit);
         self.code.push(Op::LoadConst { dst: self_reg, k });
@@ -4890,10 +4903,7 @@ impl<'m> FnCompiler<'m> {
             dst,
             callee,
             args: arg_regs.into_boxed_slice(),
-            // An associated function is reached by name through its class, not through the
-            // forwarding-fn table, so it declares no type-argument slots (Axis A gives methods
-            // theirs through `Rvalue::Method`).
-            type_args: noeta_bytecode::TypeArgs::NONE,
+            type_args,
             span,
             // A unit receiver occupies register 0 above, so the declared parameters shift by one.
             supplied: supplied.map(|m| (m << 1) | 1),

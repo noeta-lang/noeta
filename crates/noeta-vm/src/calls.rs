@@ -909,6 +909,16 @@ impl<'m> Vm<'m> {
                 ));
             };
             let chunk = &self.module.protos[proto as usize];
+            // A method HANDLE is name-keyed with no static callee type, so it carries no
+            // instantiation: a forwarding generic reached this way aborts rather than bind a value
+            // argument into a type slot.
+            if chunk.hidden != 0 {
+                let (hidden, name) = (chunk.hidden as usize, chunk.name.clone());
+                for a in args {
+                    release(a);
+                }
+                return Err(self.no_instantiation(name.as_deref(), hidden, 0, span));
+            }
             // Register 0 is the (unit) receiver slot, so declared arity is one more than the args.
             let total = chunk.num_params as usize - 1;
             let required = total - chunk.defaults.len();
@@ -991,6 +1001,15 @@ impl<'m> Vm<'m> {
             return result;
         };
         let chunk = &self.module.protos[proto as usize];
+        // As above: this path is reached by name (a handle, a `dyn` receiver), never with an
+        // instantiation, so a forwarding generic aborts rather than misbind.
+        if chunk.hidden != 0 {
+            let (hidden, name) = (chunk.hidden as usize, chunk.name.clone());
+            for a in args {
+                release(a);
+            }
+            return Err(self.no_instantiation(name.as_deref(), hidden, 0, span));
+        }
         let num_params = chunk.num_params as usize; // includes register 0 = self (the receiver)
         let num_registers = chunk.num_registers as usize;
         let required = num_params - chunk.defaults.len();
@@ -1096,7 +1115,10 @@ impl<'m> Vm<'m> {
                     ));
                 }
                 // Arity is reckoned over the VALUE parameters alone — the hidden slots are filled
-                // from `ty_regs` above, never from `arg_regs`.
+                // from `ty_regs` above, never from `arg_regs`. (An ASSOCIATED call reaches here
+                // with a unit receiver in argument position 0 and a receiver-shifted mask, so its
+                // "value parameters" include that slot; `reg_of_param` is what keeps it out of the
+                // hidden block's way.)
                 let num_params = callee_chunk.num_params as usize - hidden;
                 let required = num_params - callee_chunk.defaults.len();
                 if arg_regs.len() < required || arg_regs.len() > num_params {
@@ -1106,17 +1128,19 @@ impl<'m> Vm<'m> {
                         arity_message("function", required, num_params, arg_regs.len()),
                     ));
                 }
+                let hidden_base = callee_chunk.hidden_base as usize;
                 let num_registers = callee_chunk.num_registers as usize;
                 let new_base = reserve_window(regs, num_registers);
                 for (j, &ty_reg) in ty_regs.iter().enumerate() {
                     let v = regs[caller_base + ty_reg as usize];
                     retain(v);
-                    regs[new_base + j] = v;
+                    regs[new_base + hidden_base + j] = v;
                 }
                 for (i, &arg_reg) in arg_regs.iter().enumerate() {
                     let v = regs[caller_base + arg_reg as usize];
                     retain(v);
-                    regs[new_base + hidden + noeta_bytecode::param_of_arg(i, supplied)] = v;
+                    let p = noeta_bytecode::param_of_arg(i, supplied);
+                    regs[new_base + noeta_bytecode::reg_of_param(p, hidden, hidden_base)] = v;
                 }
                 let count = callee_val.closure_upvalue_count();
                 // Fast path (B): a plain function — no defaults to fill and no upvalues to carry —

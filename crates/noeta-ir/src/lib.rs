@@ -267,6 +267,19 @@ pub enum Rvalue {
         /// type arguments after a `dyn` launder. `None` for an ordinary method call (the common case)
         /// and for a non-generic enum. Invisible to value semantics.
         reflect: Option<noeta_ast::reflect::TypeRepr>,
+        /// The [`Rvalue::Call::type_args`] twin (Axis A): the type arguments this call supplies to
+        /// a forwarding generic **method**'s leading [`Func::hidden`] slots, in slot order — empty
+        /// for the overwhelming majority of method calls.
+        ///
+        /// Only a call that resolved a static receiver type can fill this; the four name-keyed
+        /// entry points a method has — a `dyn` receiver, a bound handle (`v.m`), an unbound handle
+        /// (`T.m`), and `invoke(v, "m", args)` — carry no instantiation, which is exactly why the
+        /// slots may not be smuggled in as prepended arguments: those paths bind positionally and
+        /// would read a value argument as a type-table index. Reaching a forwarding method through
+        /// one of them aborts instead ("no instantiation reaches here"), on the same precedent
+        /// `class_type_param_unknown_instantiation` set for an unknowable instantiation on the
+        /// receiver channel.
+        type_args: Vec<Atom>,
         /// The [`Rvalue::Call::supplied`] twin. Indexed over the method's **declared** parameters,
         /// parallel to `args` — the receiver travels separately, so it takes no bit. A backend
         /// whose register layout places the receiver in parameter slot 0 (the VM's does) shifts

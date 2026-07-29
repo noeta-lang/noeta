@@ -208,8 +208,9 @@ pub struct LoweringSites<'a> {
     /// The program-wide type-argument table (poly-values F2b) — embedded into
     /// [`Program::type_args`] so both backends resolve a hidden slot's instantiation identically.
     pub type_arg_table: &'a Vec<noeta_ext_abi::TypeArgInfo>,
-    /// Forwarding-generic call spans → the hidden type-argument slots to PREPEND to the call's
-    /// arguments (`Table(i)` → an int const; `Forward(j)` → the enclosing fn's `$ty<j>` local).
+    /// Forwarding-generic call spans → the type-argument slots the call supplies, in slot order
+    /// (`Table(i)` → an int const; `Forward(j)` → the enclosing body's `$ty<j>` local). They land
+    /// in the call node's own `type_args` channel, beside the value arguments.
     pub hidden_arg_sites: &'a HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
     /// Spans whose turbofish is a FORWARDED type parameter of the enclosing top-level generic fn →
     /// the hidden slot index whose table entry names the instantiation. One map over three
@@ -223,7 +224,8 @@ pub struct LoweringSites<'a> {
     /// of its instance methods → `(enclosing type name, the parameter's declaration index)`. The
     /// name is read off argument `index` of the receiver's reflected type tag at run time.
     pub self_type_arg_sites: &'a HashMap<Span, (String, u32)>,
-    /// Forwarding generic fns → their hidden-parameter count (prepended as `$ty0`, `$ty1`, …).
+    /// Forwarding generic fns and methods → their hidden-slot count, keyed as the callable traces
+    /// (a bare `fn` name, or `Type.method`); lowered as the leading parameters `$ty0`, `$ty1`, … .
     pub forwarding_fns: &'a HashMap<String, u32>,
     /// Forwarding-fn-as-value sites (poly-deferrals D2c): `Expr::Ident` spans → `(fn name,
     /// adopted arity)`. The reference lowers to a synthesized closure calling the fn; the inner
@@ -1379,10 +1381,11 @@ impl Lowerer<'_> {
         // parameters (`$ty0`, `$ty1`, …) so the body can name them and register allocation places
         // them like any other — but they are filled from the call node's own `type_args` channel,
         // never from its value arguments, and `Func::hidden` is what tells every binder how many
-        // leading slots to lay down before the value arguments start. Keyed by the top-level fn
-        // name — only at depth 0: a NESTED fn (D2b) may share a top-level name but never carries
-        // slots of its own (it captures the enclosing `$ty` locals instead), and closures never
-        // appear in the map.
+        // leading slots to lay down before the value arguments start. Keyed by the name this
+        // callable traces under — a bare `fn` name, or `Type.method` for a forwarding generic
+        // method (Axis A) — and only at depth 0: a NESTED fn (D2b) may share a top-level name but
+        // never carries slots of its own (it captures the enclosing `$ty` locals instead), and
+        // closures never appear in the map.
         let hidden = if self.fn_depth == 0 {
             name.as_deref()
                 .and_then(|n| self.sites.forwarding_fns.get(n).copied())
@@ -1754,7 +1757,7 @@ impl Lowerer<'_> {
             // A FORWARDING generic fn used as a VALUE (poly-deferrals D2c): the checker resolved
             // the instantiation's hidden slots at this span — wrap the reference in a synthesized
             // closure `($fv0, …) => name($fv0, …)` whose inner call carries THIS span, so
-            // `prepend_hidden_args` binds the resolved atoms into the value (a partial
+            // `type_arg_atoms` binds the resolved atoms into the value (a partial
             // application over the type-argument slots; a `Forward` slot captures the enclosing
             // `$ty` local like any closure upvalue). The inner callee gets a zero-width span so
             // it cannot re-trigger this arm.
@@ -2198,6 +2201,11 @@ impl Lowerer<'_> {
                             *span,
                         ));
                     }
+                    // A call of a FORWARDING generic METHOD (Axis A) supplies its type arguments
+                    // through their own channel, exactly as a free function's call does — so
+                    // `supplied` still indexes the value parameters.
+                    let type_args = self.type_arg_atoms(span);
+                    let reflect = self.sites.construction_sites.get(span).cloned();
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -2208,7 +2216,8 @@ impl Lowerer<'_> {
                             reuse: false,
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
-                            reflect: self.sites.construction_sites.get(span).cloned(),
+                            reflect,
+                            type_args,
                             supplied,
                             span: *span,
                         },
@@ -2268,9 +2277,11 @@ impl Lowerer<'_> {
                 ))
             }
             // `recv.m::<U, ...>(args)` (generic methods, D3): the explicit instantiation is a
-            // checker-only fact — the method's own type parameters are erased, and a generic
-            // method never forwards (the pinned D3 boundary, so no hidden slot) — so this lowers
-            // EXACTLY as the plain `recv.m(args)` method call does. Rebuild the equivalent
+            // checker-only fact — the method's own type parameters are erased — so this lowers
+            // EXACTLY as the plain `recv.m(args)` method call does, and the desugared call keeps
+            // THIS span, so a forwarding method's resolved type-argument slots (keyed on that
+            // span) are picked up either way: an inferred instantiation and a spelled one produce
+            // the same node. Rebuild the equivalent
             // member-call `Expr` at the same span and reuse the one method-dispatch path (instance
             // → `Rvalue::Method`, `Type.assoc` → the associated-call lowering), so every
             // site-keyed dispatch decision is shared by construction.
@@ -3005,6 +3016,8 @@ impl Lowerer<'_> {
                         arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
                     let (arg_atoms, supplied) = self.permute_args(arg_atoms, *span);
+                    let type_args = self.type_arg_atoms(span);
+                    let reflect = self.sites.construction_sites.get(span).cloned();
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -3015,7 +3028,8 @@ impl Lowerer<'_> {
                             reuse: false,
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
-                            reflect: self.sites.construction_sites.get(span).cloned(),
+                            reflect,
+                            type_args,
                             supplied,
                             span: *span,
                         },
@@ -3050,6 +3064,8 @@ impl Lowerer<'_> {
                 span,
             } => {
                 let receiver = self.lower_expr(receiver, out)?;
+                let type_args = self.type_arg_atoms(span);
+                let reflect = self.sites.construction_sites.get(span).cloned();
                 Ok(self.emit(
                     out,
                     Rvalue::Method {
@@ -3058,7 +3074,8 @@ impl Lowerer<'_> {
                         name_span: *name_span,
                         args: vec![left_atom],
                         reuse: false,
-                        reflect: self.sites.construction_sites.get(span).cloned(),
+                        reflect,
+                        type_args,
                         // A bare callee takes the piped value and nothing else, so there is no
                         // argument list to rebind.
                         supplied: None,

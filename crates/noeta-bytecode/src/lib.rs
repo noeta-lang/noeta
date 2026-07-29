@@ -523,6 +523,11 @@ pub enum Op {
         recv: Reg,
         method: NameId,
         args: Box<[Reg]>,
+        /// The [`Op::Call::type_args`] twin for a method (Axis A): the registers filling a
+        /// forwarding generic method's hidden slots, which sit immediately after the receiver
+        /// ([`Chunk::hidden_base`]). Empty for every method call that forwards nothing, which is
+        /// nearly all of them.
+        type_args: TypeArgs,
         span: Span,
         /// Inline-cache slot (index into the VM's per-run cache array). Memoizes the last receiver
         /// shape → resolved method prototype, so a monomorphic site skips the `(type, method)`
@@ -1315,6 +1320,15 @@ pub struct Chunk {
     /// The eval twin is `Func::hidden`, read straight off the same lowered `Func`, so the two
     /// backends cannot disagree about the layout.
     pub hidden: u16,
+    /// The **first register of the hidden block**: `0` for a function, `1` for a method, whose
+    /// register 0 is the receiver and therefore sits *before* the block.
+    ///
+    /// It exists because a method's receiver reaches the binder as an ordinary argument on one of
+    /// the two call paths — an associated call passes unit in argument position 0 with a
+    /// receiver-shifted mask — so "shift every argument past the hidden slots" is wrong for
+    /// exactly that one argument. [`reg_of_param`] is the single statement of the rule; with
+    /// `hidden == 0` (every prototype but a forwarding generic's) it is the identity either way.
+    pub hidden_base: u16,
     pub num_registers: u16,
     /// The frame's source locals (params + body bindings) in **construction order**, by register —
     /// the order they come to life as the function runs. On a panic the VM walks this reversed and
@@ -1383,6 +1397,7 @@ impl Chunk {
             diagnostics: Vec::new(),
             num_params: 0,
             hidden: 0,
+            hidden_base: 0,
             num_registers: 0,
             defaults: Vec::new(),
             frame_locals: Vec::new(),
@@ -1760,6 +1775,19 @@ pub fn param_of_arg(i: usize, supplied: Option<u64>) -> usize {
     remaining.trailing_zeros() as usize
 }
 
+/// The callee register an argument binds to, given the callee's hidden block.
+///
+/// `p` is the parameter position the argument fills ([`param_of_arg`]), in the callee's register
+/// space. A method's receiver sits at register 0, *before* the block ([`Chunk::hidden_base`]), so
+/// it alone is not shifted; every value parameter sits after the block and shifts by its width.
+///
+/// The one statement of the rule, shared by both VM binders so a method call and an associated
+/// call cannot lay their arguments down differently.
+#[inline]
+pub fn reg_of_param(p: usize, hidden: usize, hidden_base: usize) -> usize {
+    if p < hidden_base { p } else { p + hidden }
+}
+
 /// Render a call's **type**-argument registers as a turbofish (`::<r3>`), so a forwarding call
 /// reads as one in the disassembly. Empty — and therefore invisible — for every other call.
 fn type_arg_regs(type_args: &TypeArgs) -> String {
@@ -1904,6 +1932,7 @@ fn op_repr(
             recv,
             method,
             args,
+            type_args,
             reuse,
             consume_key,
             ..
@@ -1916,8 +1945,9 @@ fn op_repr(
                 (false, false) => "",
             };
             format!(
-                "CallMethod  r{dst} <- r{recv}.{}({}){marker}",
+                "CallMethod  r{dst} <- r{recv}.{}{}({}){marker}",
                 n(method),
+                type_arg_regs(type_args),
                 args.join(", ")
             )
         }
