@@ -94,9 +94,11 @@ mod relevance;
 mod sites;
 mod stdlib;
 mod subst;
+pub mod setup;
 pub mod tiers;
 mod traits;
 
+pub use setup::{SetupDrop, SetupWarning, dropped_setup_warnings, is_tier_setup, setup_drop};
 pub use tiers::{
     Activated, DeclaredTier, DocTarget, ResolvedProvider, TextBlock, TierFn, activate_tiers,
     activate_tiers_with, dedent_doc, extend_reflection, resolve_docs, resolve_texts,
@@ -128,6 +130,25 @@ pub struct Checked {
     /// An IDE read-side index, not a compile input — which is why it lives beside [`Sites`], not
     /// inside it.
     pub expr_types: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// The spans of **statement-expressions that do not return** — every `Stmt::Expr` whose
+    /// expression's inferred type is [`noeta_types::Type::Never`] (`os.exit(1)`,
+    /// `server.serve(8080, fetch)`).
+    ///
+    /// This is what makes divergence a *question the language can answer* rather than one a tool
+    /// has to guess. The tier runners (`noeta test` / `noeta bench`, and the MCP execute path)
+    /// build each case as `<shared setup> + <call the test fn>`, and they must not put a statement
+    /// that exits the process or blocks forever into that setup. They used to decide by statement
+    /// **form** — dropping every `Stmt::Expr` — which also dropped `conn.migrate("…")` and handed
+    /// every test a live, empty database with no diagnostic anywhere. Now they ask this set.
+    ///
+    /// Recorded on **every** check, not just the IDE path: it is one insert on a statement that
+    /// diverges, and the whole point is that a runner can rely on it being there.
+    ///
+    /// Deliberately statement-level rather than expression-level. A diverging call nested inside a
+    /// larger expression (`x = pick(a, os.exit(1))`) is not recorded, because a *statement* is the
+    /// granularity the runners include or exclude — recording sub-expressions would invite a
+    /// consumer to conclude something about a statement it cannot conclude.
+    pub diverging_stmts: HashSet<Span>,
     /// The compile-input bundle both backends consume — see [`Sites`].
     pub sites: Sites,
     /// Method-bundle bindings by target type name (kernel-methods K4): each
@@ -370,6 +391,7 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
     let checked = Checked {
         diagnostics: std::mem::take(&mut checker.diags),
         expr_types: checker.sites.expr_types.clone(),
+        diverging_stmts: checker.sites.diverging_stmts.clone(),
         sites: {
             let mut sites = checker.sites.clone().into_sites(checker.relevance.clone());
             // Slice E2: seed the from-scratch producer's schema-availability channel (the
@@ -719,6 +741,7 @@ fn type_to_repr(
         Type::String => TypeRepr::Str,
         Type::Bytes => TypeRepr::Bytes,
         Type::Unit => TypeRepr::Unit,
+        Type::Never => TypeRepr::Never,
         Type::List(e) => TypeRepr::List(Box::new(rec(e))),
         Type::Set(e) => TypeRepr::Set(Box::new(rec(e))),
         Type::Option(e) => TypeRepr::Option(Box::new(rec(e))),
@@ -1520,11 +1543,13 @@ impl Checker {
         let relevance = self.relevance;
         let mut sites = self.sites;
         let expr_types = std::mem::take(&mut sites.expr_types);
+        let diverging_stmts = std::mem::take(&mut sites.diverging_stmts);
         let mut sites = sites.into_sites(relevance);
         sites.packed_type_layouts = packed_type_layouts;
         Checked {
             diagnostics: self.diags,
             expr_types,
+            diverging_stmts,
             sites,
             bundle_bindings,
             packed_layouts,
@@ -1980,21 +2005,28 @@ impl Checker {
                     bind(env, name, t);
                 }
             }
-            Stmt::Expr { expr, .. } => {
+            Stmt::Expr { expr, span } => {
                 // A `match` that is the whole of an expression statement has its value discarded, so
                 // block-bodied arms (aether F1) are legitimate here (side effects). Route it through
                 // `synth_match` with `value_used` false so it is not flagged E0055; any other
                 // expression is checked normally. `synth_match` also means **no expectation** reaches
                 // the arms, which is exactly right here: a discarded value has no expected type.
-                if let Expr::Match {
+                let ty = if let Expr::Match {
                     scrutinee,
                     arms,
                     span,
                 } = expr
                 {
-                    self.synth_match(scrutinee, arms, *span, env, false);
+                    self.synth_match(scrutinee, arms, *span, env, false)
                 } else {
-                    self.check(expr, &Type::Unknown, env);
+                    self.check(expr, &Type::Unknown, env)
+                };
+                // `never` here means the statement DOES NOT RETURN — `os.exit(1)`,
+                // `server.serve(…)`. Recorded so the tier runners can ask the question instead of
+                // guessing it from syntax; see [`Checked::diverging_stmts`]. This reads the type the
+                // check above already produced — it is not a second walk over the expression.
+                if ty == Type::Never {
+                    self.sites.diverging_stmts.insert(*span);
                 }
             }
             Stmt::Return { value, span } => {

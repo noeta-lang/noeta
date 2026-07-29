@@ -241,6 +241,15 @@ pub enum SigType {
     Unit,
     /// Accepts any value (numeric-polymorphic positions, `json.stringify`, …).
     Dyn,
+    /// **`never`** — the bottom type: this function **does not return**. `os.exit` terminates the
+    /// process; `server.serve` runs an accept loop until the process is killed.
+    ///
+    /// Meaningful in a *return* position only (a parameter of type `never` could never be supplied).
+    /// Declaring it is not decoration: it is the fact the tier runners read to decide whether a
+    /// top-level `f(…)` is setup they may run, which they previously had to guess from statement
+    /// syntax. See [`crate::registry::SigType::Unit`]'s neighbours — `Unit` says "returns nothing",
+    /// this says "does not return".
+    Never,
     List(&'static SigType),
     Option(&'static SigType),
     Map(&'static SigType, &'static SigType),
@@ -361,6 +370,7 @@ impl SigType {
             SigType::Bytes => "bytes".to_string(),
             SigType::Unit => "void".to_string(),
             SigType::Dyn => "dyn".to_string(),
+            SigType::Never => "never".to_string(),
             SigType::List(t) => format!("List<{}>", t.render()),
             SigType::Option(t) => format!("Option<{}>", t.render()),
             SigType::Map(k, v) => format!("Map<{}, {}>", k.render(), v.render()),

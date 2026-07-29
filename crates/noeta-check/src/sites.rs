@@ -224,6 +224,11 @@ pub(crate) struct SiteMaps {
     /// compile path leaves it empty and pays nothing. Concretely-typed sites only, like the other
     /// maps: a `dyn`/union/un-inferred result is omitted (hover simply shows nothing there).
     pub(crate) expr_types: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// See [`Checked::diverging_stmts`](crate::Checked::diverging_stmts) — the spans of
+    /// statement-expressions whose expression types as [`noeta_types::Type::Never`]. Always
+    /// populated (unlike `expr_types`): it is one `HashSet` insert on the rare statement that
+    /// diverges, and empty for every program that has none.
+    pub(crate) diverging_stmts: HashSet<Span>,
     pub(crate) construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// See [`Sites::inferred_object_types`].
     pub(crate) inferred_object_types: HashMap<Span, String>,

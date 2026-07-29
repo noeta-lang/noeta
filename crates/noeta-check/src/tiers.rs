@@ -490,6 +490,7 @@ fn sig_type_to_repr(sig: &noeta_ext_abi::registry::SigType) -> noeta_ast::reflec
         SigType::Bytes => TypeRepr::Bytes,
         SigType::Unit => TypeRepr::Unit,
         SigType::Dyn => TypeRepr::Dyn,
+        SigType::Never => TypeRepr::Never,
         SigType::List(t) => TypeRepr::List(boxed(t)),
         SigType::Option(t) => TypeRepr::Option(boxed(t)),
         SigType::Map(k, v) => TypeRepr::Map(boxed(k), boxed(v)),

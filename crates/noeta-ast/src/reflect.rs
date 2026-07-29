@@ -1388,6 +1388,18 @@ pub enum TypeRepr {
     Bytes,
     Unit,
     Dyn,
+    /// `never` — the **bottom type**, the declared return of a function that does not return.
+    ///
+    /// It appears only in *declared* positions a signature reflection reads back (`returns_of` on
+    /// `os.exit`), never as the tag of a value: no value has this type, which is the whole point.
+    /// It is reflected rather than folded into `Unit`/`Named("never")` for the reason
+    /// [`crate::BuiltinTy`]'s module docs give — a built-in the reflection decoder does not know
+    /// reappears as a nominal type of the same name, and then a *parameter* and a *value* of the
+    /// same type disagree.
+    ///
+    /// **Appended last** in [`type_adt_variants`] on purpose: the prelude `Type` enum's variant
+    /// ordinals are baked into compiled programs, so a new variant may only be added at the end.
+    Never,
     /// A **trait object** `dyn Trait` — the dynamic top *refined by a trait bound*, carrying the trait
     /// name. Distinct from bare `Dyn` so reflection (`params_of`) can recover which trait a parameter
     /// is bound to — what a framework needs to inject a service by its interface (`fn(store: dyn
@@ -1454,6 +1466,7 @@ impl TypeRepr {
             TypeRepr::Bytes => "bytes".to_string(),
             TypeRepr::Unit => "unit".to_string(),
             TypeRepr::Dyn => "dyn".to_string(),
+            TypeRepr::Never => "never".to_string(),
             TypeRepr::DynTrait(t) => t.clone(),
             TypeRepr::List(_) => "List".to_string(),
             TypeRepr::Set(_) => "Set".to_string(),
@@ -1500,7 +1513,10 @@ impl TypeRepr {
             | TypeRepr::Str
             | TypeRepr::Bytes
             | TypeRepr::Unit
-            | TypeRepr::Dyn => Vec::new(),
+            | TypeRepr::Dyn
+            // The bottom type has no arguments and never will: it is uninhabited, so there is
+            // nothing inside it for the R3 matcher to see into.
+            | TypeRepr::Never => Vec::new(),
             // A trait object's trait name is identity, not a type argument — `arg_matches`
             // compares it by name in its own arm.
             TypeRepr::DynTrait(_) => Vec::new(),
@@ -1539,6 +1555,7 @@ impl TypeRepr {
             TypeRepr::Bytes => "Bytes",
             TypeRepr::Unit => "Unit",
             TypeRepr::Dyn => "Dyn",
+            TypeRepr::Never => "Never",
             TypeRepr::DynTrait(_) => "DynTrait",
             TypeRepr::List(_) => "List",
             TypeRepr::Set(_) => "Set",
@@ -1567,7 +1584,8 @@ impl TypeRepr {
             | TypeRepr::Str
             | TypeRepr::Bytes
             | TypeRepr::Unit
-            | TypeRepr::Dyn => AdtFields::None,
+            | TypeRepr::Dyn
+            | TypeRepr::Never => AdtFields::None,
             // The fixed-width integer carries its `(bits, signed)` so a reflected `Type.IntN`
             // reports exactly which width it is (matched structurally by narrowing regardless).
             TypeRepr::IntN { .. } => AdtFields::IntWidth,
@@ -1659,6 +1677,9 @@ pub fn type_adt_variants() -> Vec<TypeRepr> {
         TypeRepr::Fn(Vec::new(), any()),
         TypeRepr::Union(Vec::new()),
         TypeRepr::DynTrait(name()),
+        // APPENDED LAST, and every future variant must be too: the prelude `Type` enum's variant
+        // ordinals come from this order and are baked into compiled programs.
+        TypeRepr::Never,
     ]
 }
 
@@ -1725,6 +1746,7 @@ impl TypeRepr {
             TypeRepr::Bytes => f.write_str("bytes"),
             TypeRepr::Unit => f.write_str("void"),
             TypeRepr::Dyn => f.write_str("dyn"),
+            TypeRepr::Never => f.write_str("never"),
             TypeRepr::DynTrait(t) => write!(f, "dyn {}", name(t)),
             TypeRepr::List(t) => {
                 f.write_str("List<")?;
@@ -1845,6 +1867,11 @@ fn builtin_repr(
         BuiltinTy::Str => TypeRepr::Str,
         BuiltinTy::Bytes => TypeRepr::Bytes,
         BuiltinTy::Unit => TypeRepr::Unit,
+        // The bottom type reflects as itself. It reaches here only from a *declared* position — a
+        // `never` return read back by `returns_of` — never from a value's tag, because no value has
+        // it. Folding it into `Unit` would report `os.exit` as returning `void`, which is exactly
+        // the lie this reflection exists to state precisely.
+        BuiltinTy::Never => TypeRepr::Never,
         BuiltinTy::Dyn => TypeRepr::Dyn,
         BuiltinTy::List => TypeRepr::List(arg(0)),
         BuiltinTy::Set => TypeRepr::Set(arg(0)),

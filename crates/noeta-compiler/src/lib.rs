@@ -5239,6 +5239,10 @@ fn narrow_head(name: &str) -> Option<NarrowTarget> {
         BuiltinTy::Bytes => NarrowTarget::Bytes,
         BuiltinTy::Unit => NarrowTarget::Unit,
         BuiltinTy::Dyn => NarrowTarget::Dyn,
+        // The bottom type is uninhabited, so `x is never` is false for every value. Spelled as
+        // the EMPTY `AnyOf` rather than a head of its own: "matches none of these" is exactly
+        // what an empty disjunction means, and it needs no new runtime case in either backend.
+        BuiltinTy::Never => NarrowTarget::AnyOf(Vec::new()),
         BuiltinTy::List => NarrowTarget::List,
         BuiltinTy::Map => NarrowTarget::Map,
         BuiltinTy::Set => NarrowTarget::Set,

@@ -48,6 +48,16 @@ pub enum BuiltinTy {
     Unit,
     /// `dyn` / `Any` — the dynamic top.
     Dyn,
+    /// `never` — the **bottom type**, inhabited by no value: the declared return of a function that
+    /// does not return (`os.exit`, `server.serve`). It is the exact dual of [`BuiltinTy::Dyn`]: every
+    /// type widens *into* `dyn`, and `never` widens into every type, so a call to a `never`-returning
+    /// function type-checks in any position and nothing after it can run.
+    ///
+    /// It is a **type name, not a keyword**: `never` in expression position is still an ordinary
+    /// identifier (`async fn never(): int` keeps parsing), exactly like `int` and `dyn`. Only a
+    /// *declared type* called `never` would now collide, and no such type exists in the corpus or in
+    /// any sibling package.
+    Never,
     /// `List<T>` (and the bare `list`).
     List,
     /// `Set<T>` (and the bare `set`).
@@ -111,6 +121,7 @@ impl BuiltinTy {
             "number" => (Number, Canonical),
             "void" | "unit" => (Unit, Canonical),
             "dyn" | "Any" => (Dyn, Canonical),
+            "never" => (Never, Canonical),
             "List" => (List, Canonical),
             "Set" => (Set, Canonical),
             "Map" => (Map, Canonical),
@@ -156,6 +167,7 @@ impl BuiltinTy {
             | Bytes
             | Unit
             | Dyn
+            | Never
             | KindEnum
             | KindStruct
             | KindClass
@@ -182,6 +194,7 @@ impl BuiltinTy {
             Number => &["number"],
             Unit => &["void", "unit"],
             Dyn => &["dyn", "Any"],
+            Never => &["never"],
             List => &["List", "list"],
             Set => &["Set", "set"],
             Map => &["Map", "map"],
@@ -209,8 +222,8 @@ impl BuiltinTy {
     pub fn all() -> Vec<BuiltinTy> {
         use BuiltinTy::*;
         let mut out = vec![
-            Int, Float, F32, F64, Bool, Str, Bytes, Unit, Dyn, List, Set, Map, Option, Result,
-            KindEnum, KindStruct, KindClass, Number,
+            Int, Float, F32, F64, Bool, Str, Bytes, Unit, Dyn, Never, List, Set, Map, Option,
+            Result, KindEnum, KindStruct, KindClass, Number,
         ];
         for signed in [true, false] {
             for bits in [8u8, 16, 32, 64] {

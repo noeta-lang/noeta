@@ -1670,7 +1670,10 @@ impl Checker {
             | Type::F64
             | Type::IntN { .. }
             | Type::Bool
-            | Type::String => true,
+            | Type::String
+            // Vacuous: no two values of the bottom type exist to compare, so nothing can
+            // observe a missing ordering. Permissive, like `dyn`.
+            | Type::Never => true,
             // A union's members order value-dependently (two ints do, an int and a string don't);
             // like `dyn`, that is the runtime's call, not a statically-impossible ordering.
             Type::Union(_) => true,

@@ -57,9 +57,13 @@ pub struct HlSpan {
 fn is_primitive_type_name(word: &str) -> bool {
     use noeta_ast::BuiltinTy::*;
     match noeta_ast::BuiltinTy::from_name_any(word) {
-        Some(Int | Float | F32 | F64 | IntN { .. } | Bool | Str | Bytes | Unit | Dyn | Number) => {
-            true
-        }
+        // `never` colors as a type name like the other scalars. It is not a keyword — an ordinary
+        // `fn never()` is still a function — but in the one position it appears (a return
+        // annotation) it reads as the type it is.
+        Some(
+            Int | Float | F32 | F64 | IntN { .. } | Bool | Str | Bytes | Unit | Dyn | Never
+            | Number,
+        ) => true,
         Some(List | Set | Map | Option | Result | KindEnum | KindStruct | KindClass) | None => {
             false
         }

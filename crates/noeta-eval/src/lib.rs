@@ -6010,6 +6010,7 @@ fn parse_packed_field(name: &str) -> Option<noeta_stdlib::PackedField> {
         | BuiltinTy::Bytes
         | BuiltinTy::Unit
         | BuiltinTy::Dyn
+        | BuiltinTy::Never
         | BuiltinTy::List
         | BuiltinTy::Set
         | BuiltinTy::Map
@@ -6134,7 +6135,10 @@ fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
         | TypeRepr::Str
         | TypeRepr::Bytes
         | TypeRepr::Unit
-        | TypeRepr::Dyn => Vec::new(),
+        | TypeRepr::Dyn
+        // Payloadless like the other scalars. Reachable only from a *declared* reflection
+        // (`returns_of` on `os.exit`) — never from a value, since none has this type.
+        | TypeRepr::Never => Vec::new(),
         // `Type.IntN(bits: int, signed: bool)` — the width descriptor.
         TypeRepr::IntN { signed, bits } => {
             vec![Value::Int(i64::from(*bits)), Value::Bool(*signed)]
@@ -6407,6 +6411,9 @@ fn runtime_matches(
                     BuiltinTy::Unit => matches!(value, Value::Unit),
                     // Narrowing to the open top is a no-op: every value is a `dyn`.
                     BuiltinTy::Dyn => true,
+                    // Its dual: the bottom is uninhabited, so no value narrows to it. (The VM
+                    // spells the same answer as an empty `NarrowTarget::AnyOf`.)
+                    BuiltinTy::Never => false,
                     BuiltinTy::List => matches!(value, Value::List(_)),
                     BuiltinTy::Map => matches!(value, Value::Map(..)),
                     BuiltinTy::Set => matches!(value, Value::Set(..)),

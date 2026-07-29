@@ -26,6 +26,11 @@
 //! So the checker reports an error wherever a type is concretely known and unambiguously wrong, and
 //! tolerates only the interior holes above — never a hole at a typed boundary.
 //!
+//! [`Type::Never`] closes the lattice at the other end: the **bottom**, the declared return of a
+//! function that does not return. It is the mirror of `dyn` (everything widens into the top;
+//! the bottom widens into everything) and, like [`Type::Union`], it is *declared and never
+//! inferred*.
+//!
 //! ## `TypeId` interning — deferred
 //!
 //! The architecture calls for interning types behind a `TypeId`. That is a throughput
@@ -74,6 +79,32 @@ pub enum Type {
     /// escape. Every type widens into it (`T <: dyn`); narrowing out (`dyn → T`) is explicit and
     /// checked. Operations on a `dyn` defer to the runtime dynamic dispatch path.
     Dyn,
+    /// The **bottom type** `never` — inhabited by no value, the declared return of a function that
+    /// **does not return** (`os.exit`, `server.serve`, a `panic`-like abort).
+    ///
+    /// It is the exact dual of [`Type::Dyn`], and the two are deliberately symmetric: every type
+    /// widens *into* `dyn` (`T <: dyn`), and `never` widens into *every* type (`never <: T`). So a
+    /// call to a `never`-returning function type-checks in any position — there is no value to
+    /// mis-use — and nothing after it can run.
+    ///
+    /// **Declared, never inferred** (the same rule [`Type::Union`] follows). Inference never
+    /// *produces* `never`: a function's return is `never` because its signature says so, and a call
+    /// expression is `never` because its callee's declared return is. That keeps the whole feature a
+    /// property of signatures — which is exactly what the tier runners need to ask about a top-level
+    /// statement ("does this call return?") without a reachability analysis.
+    ///
+    /// Consequences worth stating, because each one is a decision:
+    /// - **`dyn`**: `never <: dyn` holds by the bottom rule, and `dyn <: never` is false — narrowing
+    ///   out of the top is always explicit, and there is nothing to narrow *to* here anyway.
+    /// - **Unions**: `never` is the identity element, so [`Type::union`] drops it (`int | never` is
+    ///   `int`). It contributes no inhabitants, and leaving it in would make two spellings of the
+    ///   same set compare unequal.
+    /// - **Generics**: no special case. `never` substitutes into a type parameter like any other
+    ///   type, and `never <: T` makes a `never`-typed argument acceptable at every bound.
+    /// - **Reflection**: it gets its own [`noeta_ast::reflect::TypeRepr::Never`] rather than folding
+    ///   into `Unit` or a nominal `never` — see that variant for why the fold is the bug the
+    ///   `BuiltinTy` funnel exists to prevent.
+    Never,
     /// `void` / the empty tuple — the type of statements and `Ok()`-style unit payloads.
     Unit,
     Int,
@@ -296,6 +327,12 @@ impl Type {
         if matches!(sup, Dyn) {
             return true;
         }
+        // `never` is the bottom type: it widens into everything. Checked before the arms below so a
+        // diverging call is accepted in *every* position, container and function types included —
+        // there is no value to be wrong about.
+        if matches!(sub, Never) {
+            return true;
+        }
         let rec = |a: &Type, b: &Type| Type::subtype_with(a, b, nominal);
         match (sub, sup) {
             // Narrowing out of `dyn` is never implicit (only via a checked `.as<T>()`).
@@ -370,6 +407,9 @@ impl Type {
     /// stay simple:
     ///
     /// - **`dyn` absorbs**: a union that includes the open top *is* the open top (`int | dyn` = `dyn`).
+    /// - **`never` vanishes**: the bottom is the union's identity element (`int | never` = `int`) —
+    ///   it contributes no inhabitants, and keeping it would let two spellings of the same set
+    ///   compare unequal. A union of nothing but `never`s collapses to `never` by the singleton rule.
     /// - **singleton collapses**: one distinct member is just that member (`int | int` = `int`).
     ///
     /// This is the only constructor for a union; nothing builds the variant directly. An empty
@@ -377,13 +417,21 @@ impl Type {
     /// has members — but defined for totality).
     pub fn union(members: impl IntoIterator<Item = Type>) -> Type {
         let mut flat: Vec<Type> = Vec::new();
+        // A `never` member is dropped rather than pushed — the bottom adds no inhabitants. Tracked
+        // so an all-`never` input still answers `never` instead of degenerating to a hole.
+        let mut saw_never = false;
         for m in members {
             match m {
                 Type::Dyn => return Type::Dyn,
+                Type::Never => saw_never = true,
                 Type::Union(inner) => {
                     for t in inner {
                         if t == Type::Dyn {
                             return Type::Dyn;
+                        }
+                        if t == Type::Never {
+                            saw_never = true;
+                            continue;
                         }
                         if !flat.contains(&t) {
                             flat.push(t);
@@ -398,6 +446,7 @@ impl Type {
             }
         }
         match flat.len() {
+            0 if saw_never => Type::Never,
             0 => Type::Unknown,
             1 => flat.pop().unwrap(),
             _ => Type::Union(flat),
@@ -452,6 +501,7 @@ impl Type {
                     BuiltinTy::Bytes => Type::Bytes,
                     BuiltinTy::Unit => Type::Unit,
                     BuiltinTy::Dyn => Type::Dyn,
+                    BuiltinTy::Never => Type::Never,
                     BuiltinTy::List => Type::List(Box::new(arg(0))),
                     BuiltinTy::Set => Type::Set(Box::new(arg(0))),
                     BuiltinTy::Map => Type::Map(Box::new(arg(0)), Box::new(arg(1))),
@@ -481,6 +531,7 @@ impl std::fmt::Display for Type {
         match self {
             Type::Unknown => f.write_str("?"),
             Type::Dyn => f.write_str("dyn"),
+            Type::Never => f.write_str("never"),
             Type::Unit => f.write_str("void"),
             Type::Int => f.write_str("int"),
             Type::Float => f.write_str("float"),

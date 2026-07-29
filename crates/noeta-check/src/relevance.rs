@@ -23,7 +23,9 @@ pub(crate) fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
         | Type::IntN { .. }
         | Type::Bool
         | Type::String
-        | Type::Bytes => false,
+        | Type::Bytes
+        // Uninhabited: there is no value of this type to drop, so no destructor to run.
+        | Type::Never => false,
         // Missing information / the dynamic top / an abstract kind / a function value: assume relevant.
         Type::Unknown | Type::Dyn | Type::DynTrait(_) | Type::Kind(_) | Type::Fn { .. } => true,
         // Aggregates are relevant exactly when a part they own is.

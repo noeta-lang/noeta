@@ -116,6 +116,7 @@ pub(crate) fn sig_to_typeref(
         SigType::Bytes => named("bytes"),
         SigType::Unit => named("void"),
         SigType::Dyn => named("dyn"),
+        SigType::Never => named("never"),
         SigType::List(t) => named_args("List", vec![sig_to_typeref(reg, t)]),
         SigType::Option(t) => named_args("Option", vec![sig_to_typeref(reg, t)]),
         SigType::Map(k, v) => {
@@ -210,6 +211,7 @@ fn sig_to_type_bound(
         SigType::Bytes => Type::Bytes,
         SigType::Unit => Type::Unit,
         SigType::Dyn => Type::Dyn,
+        SigType::Never => Type::Never,
         SigType::List(t) => list(sig_to_type_bound(reg, t, bindings)),
         SigType::Option(t) => opt(sig_to_type_bound(reg, t, bindings)),
         SigType::Map(k, v) => Type::Map(

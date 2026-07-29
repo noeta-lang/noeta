@@ -492,7 +492,10 @@ pub(crate) fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
         | TypeRepr::Str
         | TypeRepr::Bytes
         | TypeRepr::Unit
-        | TypeRepr::Dyn => Vec::new(),
+        | TypeRepr::Dyn
+        // Payloadless like the other scalars. Reachable only from a *declared* reflection
+        // (`returns_of` on `os.exit`) — never from a value, since none has this type.
+        | TypeRepr::Never => Vec::new(),
         // `Type.IntN(bits: int, signed: bool)` — the width descriptor.
         TypeRepr::IntN { signed, bits } => {
             vec![Value::int(i64::from(*bits)), Value::bool(*signed)]

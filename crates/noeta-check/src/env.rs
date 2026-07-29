@@ -189,6 +189,8 @@ pub(crate) fn builtin_receiver_type(name: &str) -> Option<Type> {
         BuiltinTy::Bool
         | BuiltinTy::Unit
         | BuiltinTy::Dyn
+        // Uninhabited: no value is a `never`, so nothing can receive a method call on one.
+        | BuiltinTy::Never
         | BuiltinTy::Option
         | BuiltinTy::Result => return None,
         // `number` names a SET of scalars, not a receiver: no value *is* a `number` (each is an
