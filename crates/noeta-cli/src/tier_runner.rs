@@ -175,14 +175,10 @@ impl Extension for StdTierRunners {
 /// The singleton unit `run_cli` installs alongside the other first-party CLI extensions.
 pub(crate) static STD_TIER_RUNNERS_UNIT: StdTierRunners = StdTierRunners;
 
-/// Invoke a resolved native tier runner over `file`, adapting the seam's `u8` back to the CLI's
-/// `ExitCode`. std's native runners are file-driven, so the seam's roots ride empty; their `Code`
-/// vs `Text` shape still tracks the tier's declaration so a runner that reads them sees the right
-/// arm.
-fn invoke_tier_runner(runner: &ExtTierRunner, name: &str, file: &Path) -> ExitCode {
-    let is_text = noeta_stdlib::registry::single_registry_process()
-        .find_ext_tier(name)
-        .is_some_and(|t| t.text.is_some());
+/// Invoke a native tier runner over `file` with the seam's roots riding empty (std's native runners
+/// are file-driven — they re-collect their own roots), shaped `Text` vs `Code` per `is_text` so a
+/// runner that reads them sees the right arm. Adapts the seam's `u8` back to the CLI's `ExitCode`.
+fn run_native(runner: &ExtTierRunner, is_text: bool, file: &Path) -> ExitCode {
     let roots = if is_text {
         TierRoots::Text(&[])
     } else {
@@ -191,6 +187,15 @@ fn invoke_tier_runner(runner: &ExtTierRunner, name: &str, file: &Path) -> ExitCo
     let run = TierRun { file, roots };
     let mut ctx = crate::cmd::serve::CliCommandCtx;
     ExitCode::from((runner.run)(&mut ctx, &run))
+}
+
+/// Invoke a resolved native tier runner over `file`, resolving its `Code`/`Text` arm from the tier's
+/// bare-name declaration.
+fn invoke_tier_runner(runner: &ExtTierRunner, name: &str, file: &Path) -> ExitCode {
+    let is_text = noeta_stdlib::registry::single_registry_process()
+        .find_ext_tier(name)
+        .is_some_and(|t| t.text.is_some());
+    run_native(runner, is_text, file)
 }
 
 /// Dispatch a **std** dev-tier (`test`/`bench`/`doc`) through the registry seam: resolve std's
@@ -221,6 +226,28 @@ pub(crate) fn dispatch_generic_tier(name: &str, file: &Path) -> Option<ExitCode>
     noeta_stdlib::registry::single_registry_process()
         .find_tier_runner(name)
         .map(|runner| invoke_tier_runner(runner, name, file))
+}
+
+/// Dispatch a tier the root **renamed** in `[tiers]`, resolved by identity to a
+/// `(provider_root, exported)` pair — look up the native runner **scoped** to that provider (never
+/// the literal local name), so a renamed std tier (`mytest = "std:test"`) or a collision the root
+/// disambiguated (`crit = "depB:fuzz"`, where two dependencies each export a `fuzz` runner) reaches
+/// exactly the provider it named. `None` when that provider ships no native runner for the tier — an
+/// inline-only/expression extension tier, or a **program-declared** `@tier` runner (which the caller
+/// dispatches through `run_declared_tier` instead).
+pub(crate) fn dispatch_scoped_tier(
+    provider_root: &str,
+    exported: &str,
+    file: &Path,
+) -> Option<ExitCode> {
+    let reg = noeta_stdlib::registry::single_registry_process();
+    let root = [provider_root.to_string()];
+    reg.find_tier_runner_scoped(&root, exported).map(|runner| {
+        let is_text = reg
+            .find_ext_tier_scoped(&root, exported)
+            .is_some_and(|t| t.text.is_some());
+        run_native(runner, is_text, file)
+    })
 }
 
 #[cfg(test)]

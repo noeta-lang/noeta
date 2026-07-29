@@ -1355,6 +1355,18 @@ fn try_bare_file_run(err: &clap::Error) -> Option<ExitCode> {
     Some(cmd_run(&file, &[], &None, false, false, &prog_args))
 }
 
+/// How a tier the root **bound** in `[tiers]` resolves by identity, for the generic
+/// `noeta <localname> <file>` dispatch — owned so the borrow of `activated.registry` is released
+/// before `activated` is moved into `run_declared_tier`.
+enum BoundTier {
+    /// A native extension runner, scoped to `(provider_root, exported)`.
+    Ext(String, String),
+    /// A program-declared `@tier` (its runner, resolved by `run_declared_tier`).
+    Declared(noeta_check::DeclaredTier),
+    /// Bound to a provider that declares no such tier.
+    Unresolved,
+}
+
 fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     let name = err
         .get(clap::error::ContextKind::InvalidSubcommand)
@@ -1403,6 +1415,55 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
         packages: &linked.packages,
     };
     let activated = noeta_check::activate_tiers_with(&linked.program, &[&name], &ctx);
+    // A tier the ROOT renamed in `[tiers]` (`crit = "depB:fuzz"`, or a collision it disambiguated)
+    // must dispatch by **identity**, not by the literal local name: the runner is registered under
+    // what the provider exported (`fuzz` on `depB`), so `find_tier_runner(&"crit")` /
+    // `declared_by(&"crit", …)` — which key on the local name — miss it. Resolve the binding in the
+    // root's own context (the same `resolve_at` activation used, so the roots already collected under
+    // the resolved identity) and dispatch to that provider's runner. An **unbound** bare name has no
+    // `[tiers]` entry and falls through to the ambient path below — a std tier, a real-named
+    // third-party tier, or a program `@tier` of that bare name — so nothing that works today changes.
+    let bound = linked
+        .package_uses
+        .get(&noeta_span::PackageOrigin::Root, &name)
+        .is_some()
+        .then(|| {
+            match activated.registry.resolve_at(
+                &name,
+                Some(&noeta_span::PackageOrigin::Root),
+                &linked.package_uses,
+            ) {
+                // A native extension runner (`std:test`, a third-party tier that ships one).
+                Some(noeta_check::ResolvedTier::Ext(t, root)) => {
+                    BoundTier::Ext(root, t.name.to_string())
+                }
+                // A dependency's program-declared `@tier` — its roots collected under the exported
+                // name (`custom[exported]`), which `run_declared_tier` reads by the tier's own name.
+                Some(noeta_check::ResolvedTier::Declared(d)) => BoundTier::Declared(d.clone()),
+                // Bound to a provider that declares no such tier — a real misconfiguration.
+                None => BoundTier::Unresolved,
+            }
+        });
+    if let Some(bound) = bound {
+        return match bound {
+            // A native runner scoped to the provider; if the provider ships none (an inline-only or
+            // expression extension tier), fall through to the external-binary probe as the ambient
+            // `ResolvedProvider::Extension` arm does.
+            BoundTier::Ext(root, exported) => {
+                tier_runner::dispatch_scoped_tier(&root, &exported, &file)
+            }
+            BoundTier::Declared(tier) => Some(ExitCode::from(run_declared_tier(
+                &name, &linked, activated, tier,
+            ))),
+            BoundTier::Unresolved => {
+                eprintln!(
+                    "noeta: tier `{name}` is bound in `[tiers]` to a provider that declares no such \
+                     tier — is the dependency imported (`use <root>.…`)?"
+                );
+                Some(ExitCode::from(2))
+            }
+        };
+    }
     let tier = match activated.registry.resolve_provider(&name, &providers) {
         Ok(noeta_check::ResolvedProvider::Declared(d)) => d.clone(),
         // An extension tier resolved by identity: if it ships a native runner, invoke it through the
