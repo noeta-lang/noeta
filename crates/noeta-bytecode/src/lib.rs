@@ -672,8 +672,12 @@ pub enum Op {
     /// wire value in `arg`, matched by **backing first, then case name**
     /// ([`noeta_ast::reflect::variant_for_wire`] owns that rule, shared with the tree-walker).
     /// `cases` lists every payload-free case of the enum as `(name, backing, shape)`, in declaration
-    /// order — the backing is baked in because the VM has no reflection entry for a prelude or native
-    /// enum to read it back from. On a hit: `from` (`panic = true`) yields the case itself; `try_from`
+    /// order. The names and backings are now *also* recoverable at run time — a prelude and a native
+    /// enum each have a reflection entry since the artifact is seeded from the same tables this
+    /// lowering reads — so what keeps them baked is the third element, an **interned shape id**,
+    /// which only the compiler can mint. Reading the cases dynamically instead would additionally
+    /// need runtime shape interning, so this stays redundant as data and load-bearing as shapes.
+    /// On a hit: `from` (`panic = true`) yields the case itself; `try_from`
     /// (`panic = false`) wraps it as `Option.some` (`some_shape`). On a miss: `from` raises an `E0010`
     /// panic at `span`; `try_from` yields `Option.none` (`none_shape`). A non-scalar `arg` raises
     /// `E0007`.

@@ -652,11 +652,65 @@ fn sig_type_to_repr(sig: &noeta_ext_abi::registry::SigType) -> noeta_ast::reflec
     }
 }
 
-/// Embed the installed extensions' attribute shapes into a freshly built reflection artifact —
-/// idempotent (a name the program itself declares, or one already embedded by an earlier REPL
-/// entry, is left alone: the program's own declaration wins, matching prelude shadowing).
+/// Every installed extension's declared **enums** as reflection [`TypeInfo`]s — the native twin of
+/// [`extension_attribute_types`], and of `noeta_ast::reflect::prelude_type_infos`.
+///
+/// A native enum reaches a program under its qualified identity (`std.http.Framing`), which is what
+/// `type_of` stamps on one of its values and therefore the key a consumer probes with; so that is
+/// what this keys on, exactly as the attribute projection keys on the attribute's FQN. Payload slot
+/// names are synthesized positionally (`_0`, `_1`, …) — the same convention the compiler's
+/// `ext_enum_type_info` and a prelude variant use, and for the same reason: a native payload is
+/// positional, so only the slot *count* and the declared types are load-bearing. A **backed**
+/// native enum's per-variant constant rides through as the variant's `backing`, so `variants_of`
+/// reports the wire values a schema derived from it must emit.
+pub fn extension_enum_types() -> Vec<noeta_ast::reflect::TypeInfo> {
+    use noeta_ext_abi::registry as ext;
+    let Some(reg) = ext::default_registry() else {
+        return Vec::new();
+    };
+    reg.enums()
+        .map(|en| noeta_ast::reflect::TypeInfo {
+            name: en.qualified(),
+            kind: noeta_ast::reflect::TypeKind::Enum,
+            fields: Vec::new(),
+            field_types: Vec::new(),
+            field_optional: Vec::new(),
+            field_defaults: Vec::new(),
+            variants: en
+                .variants
+                .iter()
+                .map(|v| noeta_ast::reflect::VariantInfo {
+                    name: v.name.to_string(),
+                    fields: (0..v.fields.len()).map(|i| format!("_{i}")).collect(),
+                    field_types: v.fields.iter().map(sig_type_to_repr).collect(),
+                    backing: match v.value {
+                        ext::VariantValue::None => None,
+                        ext::VariantValue::Str(s) => Some(noeta_ast::AttrValue::Str(s.to_string())),
+                        ext::VariantValue::Int(n) => Some(noeta_ast::AttrValue::Int(n)),
+                    },
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Embed every type the **language and its installed extensions** declare into a freshly built
+/// reflection artifact: the prelude enums, the extensions' attribute shapes, and the extensions'
+/// enums. Idempotent (a name the program itself declares, or one already embedded by an earlier
+/// REPL entry, is left alone: the program's own declaration wins, matching prelude shadowing).
+///
+/// `noeta_ast::reflect::build` walks a *program*, so a type the program does not declare is absent
+/// from the artifact however real it is to the rest of the language — and both type-level queries
+/// answer the empty list for an absent name, which by their pair rule means "I know nothing about
+/// this name". That is why the prelude enums and the native enums are seeded here and not left to
+/// the AST walk: `Ordering` and `std.http.Framing` are as constructible, matchable and namable as
+/// any declared enum, and reflection was the one consumer still reporting them as unknown.
 pub fn extend_reflection(info: &mut noeta_ast::reflect::ReflectionInfo) {
-    for ty in extension_attribute_types() {
+    let seeded = noeta_ast::reflect::prelude_type_infos()
+        .into_iter()
+        .chain(extension_attribute_types())
+        .chain(extension_enum_types());
+    for ty in seeded {
         if info.type_named(&ty.name).is_none() {
             info.types.push(ty);
         }
