@@ -218,7 +218,9 @@ pub const SERVE_COMMAND: ExtCommand = ExtCommand {
         ctx.run_file(
             args.path("file"),
             Some(&EntryCall {
-                module: "server",
+                // Qualified: the entry call binds `server` itself, so a serve program need not
+                // import a module it never names (its handler signature uses `Request`/`Response`).
+                module: "std.http.server",
                 func: "serve",
                 args: vec![
                     EntryArg::Int(port),
