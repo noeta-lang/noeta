@@ -528,3 +528,82 @@ fn repeated_session_loads_intern_one_registry_per_unit_set() {
         "a different unit set is a different registry"
     );
 }
+
+// --- Two extension objects that share a `name()` (the intern-key hazard) -------------------------
+
+/// A *second* extension object also called `"plugin"`, exposing a different module (`swap.pong()`).
+/// A host legitimately produces this shape: a plugin surface linked at two versions, or a unit set
+/// assembled per feature flag. Nothing rejects it — `Registry`'s uniqueness sweep only rejects a
+/// duplicate name *within* one assembled set, and these two never meet in one set.
+struct PluginV2Extension;
+
+const SWAP_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
+    name: "pong",
+    params: &[],
+    ret: RetTy::Concrete(SigType::Int),
+}];
+
+fn swap_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    _args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "pong" => Ok(NativeOut::Scalar(Scalar::Int(99))),
+        _ => Err(StdError {
+            kind: ErrorKind::UnknownName,
+            message: format!("no function `{func}`"),
+        }),
+    }
+}
+
+impl Extension for PluginV2Extension {
+    fn name(&self) -> &'static str {
+        "plugin"
+    }
+    fn modules(&self) -> &'static [ExtModule] {
+        &[ExtModule {
+            name: "swap",
+            functions: SWAP_FNS,
+            dispatch: swap_dispatch,
+            ..ExtModule::DEFAULTS
+        }]
+    }
+}
+
+static PLUGIN_V2: PluginV2Extension = PluginV2Extension;
+
+/// Two sessions whose extension objects **share a name** must still get their own registries.
+///
+/// This is the intern table's failure mode, and it is silent: keyed by name, the second session's
+/// `interned_with_extras(&[&PLUGIN_V2])` hit the entry the first session stored under `["plugin"]`
+/// and was handed `std ∪ PLUGIN` — so `swap` resolved to nothing and the call panicked, in a session
+/// whose own extension declares it. Two embedders in one process corrupting each other, with no
+/// diagnostic pointing at the cause. Keyed by unit identity, each set assembles once, for itself.
+#[test]
+fn same_named_extension_objects_do_not_share_one_interned_registry() {
+    let v1 = noeta_stdlib::registry::interned_with_extras(&[&PLUGIN]).expect("assembles");
+    let v2 = noeta_stdlib::registry::interned_with_extras(&[&PLUGIN_V2]).expect("assembles");
+    assert!(
+        !std::ptr::eq(v1, v2),
+        "two distinct extension objects sharing a `name()` are two configurations"
+    );
+
+    // The payoff at dispatch, which is where a shared registry actually bites: each session runs
+    // only its own unit's module.
+    assert_eq!(
+        ask_with(
+            vec![&PLUGIN_V2],
+            "use plugin.{swap}\nfn ask(): int { return swap.pong(); }\n",
+        )
+        .unwrap(),
+        Value::Int(99),
+        "the v2 session must dispatch its own `plugin.swap.pong`"
+    );
+    assert_eq!(
+        ask_with(vec![&PLUGIN], ASK_PLUGIN).unwrap(),
+        Value::Int(42),
+        "the v1 session must still dispatch its own `plugin.demo.answer`"
+    );
+}
