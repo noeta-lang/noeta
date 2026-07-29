@@ -147,7 +147,14 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// every bump above: postcard writes the new sequence's length prefix where a version-11 reader
 /// expects the span, and the extra `u16` shifts every byte after it in each prototype header, so an
 /// older artifact decoded here would desynchronise mid-chunk rather than fail cleanly.
-pub const FORMAT_VERSION: u8 = 12;
+///
+/// Bumped to 13 by the same arc's Axis A and its cache-line budget: `Op::CallMethod` gained a
+/// `type_args` of its own (methods forward now), `Chunk` gained `hidden_base`, and the three call
+/// ops' `supplied` changed from `Option<u64>` to `Option<NonZeroU64>` to keep `Op` inside one cache
+/// line. The last is a wire break even though the *meaning* is identical: postcard writes an
+/// `Option`'s discriminant byte followed by the payload either way, but a niche-optimised `Option`
+/// is not guaranteed to encode as the plain one, and the two ops around it moved regardless.
+pub const FORMAT_VERSION: u8 = 13;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

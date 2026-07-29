@@ -4283,7 +4283,7 @@ impl<'m> FnCompiler<'m> {
                 args,
                 type_args,
                 span,
-                supplied,
+                supplied: noeta_bytecode::pack_supplied(supplied),
             });
             return Ok(());
         }
@@ -4296,7 +4296,7 @@ impl<'m> FnCompiler<'m> {
             args,
             type_args,
             span,
-            supplied,
+            supplied: noeta_bytecode::pack_supplied(supplied),
         });
         Ok(())
     }
@@ -4414,7 +4414,7 @@ impl<'m> FnCompiler<'m> {
             consume_key,
             // Into the callee's register space: the receiver lands in register 0 and is always
             // supplied, so every declared parameter's bit moves up by one.
-            supplied: supplied.map(|m| (m << 1) | 1),
+            supplied: noeta_bytecode::pack_supplied(supplied.map(|m| (m << 1) | 1)),
         });
         // A reuse-marked call consumes the receiver itself (the VM clears it on the in-place path); the
         // receiver is always a `Var` (never an owned `Temp`), so `drop_temp_receiver` is a no-op there.
@@ -4906,7 +4906,7 @@ impl<'m> FnCompiler<'m> {
             type_args,
             span,
             // A unit receiver occupies register 0 above, so the declared parameters shift by one.
-            supplied: supplied.map(|m| (m << 1) | 1),
+            supplied: noeta_bytecode::pack_supplied(supplied.map(|m| (m << 1) | 1)),
         });
         Ok(())
     }

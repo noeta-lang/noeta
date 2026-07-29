@@ -233,6 +233,37 @@ pub enum ReuseCheck {
     Static,
 }
 
+/// A call's **supplied-parameter mask** as an op stores it.
+///
+/// `Some` only at a call that skips a defaulted parameter (`f(1, c: 9)`) — and such a call supplies
+/// at least one parameter, so an all-zero mask is not a reachable state. That lets `NonZeroU64`'s
+/// niche give the `Option` discriminant a home instead of a second word: `Option<u64>` is 16 bytes,
+/// this is 8. `Op` is pinned to a single 64-byte cache line (P-VMT-OPSZ, `tests/op_size.rs`), and
+/// with three call ops each carrying a mask *and* a type-argument channel, that word is the
+/// difference between one cache line and two.
+///
+/// Convert with [`pack_supplied`] / [`supplied_of`]; everything downstream of the ops keeps the
+/// plain `Option<u64>`, whose meaning is unchanged.
+pub type SuppliedMask = Option<std::num::NonZeroU64>;
+
+/// Store a mask on an op. `Some(0)` cannot arise from a checked program; it is read as `None` —
+/// the conservative reading, the ordinary prefix rule — rather than misencoded, and asserted in
+/// debug builds so a producer that ever manages it is caught by the test suite.
+#[inline]
+pub fn pack_supplied(mask: Option<u64>) -> SuppliedMask {
+    debug_assert!(
+        mask != Some(0),
+        "a supplied mask names at least one parameter"
+    );
+    mask.and_then(std::num::NonZeroU64::new)
+}
+
+/// Read a stored mask back into the plain form every binder speaks.
+#[inline]
+pub fn supplied_of(mask: SuppliedMask) -> Option<u64> {
+    mask.map(std::num::NonZeroU64::get)
+}
+
 /// A call's **type-argument** registers — what fills a forwarding generic's leading
 /// [`Chunk::hidden`] slots (poly-values F2b), in slot order. See [`Op::Call::type_args`].
 ///
@@ -550,8 +581,9 @@ pub enum Op {
         /// The [`Op::Call::supplied`] twin for a method, in the callee's REGISTER space: the
         /// receiver occupies register 0, so bit 0 is always set and bit `p + 1` names the method's
         /// `p`-th declared parameter. (The IR's `Rvalue::Method::supplied` counts the declared
-        /// parameters only; the shift happens where the receiver becomes a register.)
-        supplied: Option<u64>,
+        /// parameters only; the shift happens where the receiver becomes a register.) Bit 0 being
+        /// always set is also why a method mask is never zero — see [`SuppliedMask`].
+        supplied: SuppliedMask,
     },
     /// `dst = recv[index]` — index access (the `Index` trait / list element access), mirroring
     /// the tree-walker's `eval_index`. On an object it dispatches to the `get` method (pushing a
@@ -1152,7 +1184,7 @@ pub enum Op {
         /// supplied, and the supplied bits, read low to high, correspond to `args` in order.
         /// `None` means the prefix rule applies, which is every call that omits only trailing
         /// parameters — so the common path carries no extra work.
-        supplied: Option<u64>,
+        supplied: SuppliedMask,
     },
     /// `dst = f(args)` where `f` is a statically-known top-level `fn` bound to global slot
     /// `global` (immutable, zero upvalues). Reads the callee closure straight from its slot —
@@ -1169,7 +1201,7 @@ pub enum Op {
         type_args: TypeArgs,
         span: Span,
         /// The [`Op::Call::supplied`] twin — same meaning, same `None` fast path.
-        supplied: Option<u64>,
+        supplied: SuppliedMask,
     },
     /// Return `src` from the current frame to the caller's destination register (or end the
     /// program if returning from the top-level frame).
@@ -2259,7 +2291,7 @@ fn op_repr(
             format!(
                 "Call        r{dst} <- r{callee}{}({})",
                 type_arg_regs(type_args),
-                call_args(args, *supplied)
+                call_args(args, supplied_of(*supplied))
             )
         }
         Op::CallGlobal {
@@ -2274,7 +2306,7 @@ fn op_repr(
                 "CallGlobal  r{dst} <- {:?}{}({})",
                 g(global),
                 type_arg_regs(type_args),
-                call_args(args, *supplied)
+                call_args(args, supplied_of(*supplied))
             )
         }
         Op::Return { src } => format!("Return      r{src}"),

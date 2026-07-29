@@ -287,7 +287,7 @@ extern "C" fn jit_call(
         type_args.regs(),
         span,
         pc as usize + 1,
-        supplied,
+        noeta_bytecode::supplied_of(supplied),
     ) {
         Ok(true) => noeta_jit_abi::OUTCOME_CALLED,
         Ok(false) => pc as i64 + 1,

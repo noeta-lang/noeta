@@ -1648,7 +1648,7 @@ impl<'m> Vm<'m> {
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
-                                *supplied,
+                                noeta_bytecode::supplied_of(*supplied),
                                 *span,
                             )?;
                             continue 'reload;
@@ -1735,7 +1735,7 @@ impl<'m> Vm<'m> {
                                     *dst,
                                     RetTransform::None,
                                     pc + 1,
-                                    *supplied,
+                                    noeta_bytecode::supplied_of(*supplied),
                                     *span,
                                 )?;
                                 continue 'reload;
@@ -3707,7 +3707,7 @@ impl<'m> Vm<'m> {
                             type_args.regs(),
                             *span,
                             pc + 1,
-                            *supplied,
+                            noeta_bytecode::supplied_of(*supplied),
                         )? {
                             continue 'reload;
                         }
@@ -3747,7 +3747,7 @@ impl<'m> Vm<'m> {
                             type_args.regs(),
                             *span,
                             pc + 1,
-                            *supplied,
+                            noeta_bytecode::supplied_of(*supplied),
                         )? {
                             continue 'reload;
                         }
