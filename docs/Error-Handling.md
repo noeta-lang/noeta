@@ -252,8 +252,22 @@ Some standard-library operations come in **pairs**: an aborting door named for t
 | `json.parse(text)` | `json.try_parse(text)` | a malformed document |
 | `os.spawn(cmd, args)` | `os.try_spawn(cmd, args)` | the program is not installed, or is not executable |
 | `p.write(text)` | `p.try_write(text)` | the child's stdin is gone — it exited, or you closed it |
+| `regex.compile(pattern)` | `regex.try_compile(pattern)` | the pattern is not a valid regular expression |
 
-The rule for choosing is **whose mistake is it**. A configuration file your own build produced is your program's shape, so `json.parse` aborting on it is the right report; a body off a wire carries the *remote party's* shape, so `json.try_parse` is. A tool your own installer placed is yours; a language server, an MCP server, or a formatter the user may or may not have installed is not — and a library whose contract is "a failing tool is a turn, not an outage" cannot call the aborting door at all.
+The rule for choosing is **whose mistake is it**. A configuration file your own build produced is your program's shape, so `json.parse` aborting on it is the right report; a body off a wire carries the *remote party's* shape, so `json.try_parse` is. A tool your own installer placed is yours; a language server, an MCP server, or a formatter the user may or may not have installed is not — and a library whose contract is "a failing tool is a turn, not an outage" cannot call the aborting door at all. A pattern you wrote into the source is yours, so `regex.compile` aborting on it is the right report too; a redaction or routing rule loaded from configuration is the operator's, and validating one before compiling it would mean shipping a second, worse regex engine.
+
+What rides the `Err` side is whatever carries the failure's information. `JsonError` and `OsError` are types because a caller must *branch* on which failure it was — `e.kind()` distinguishes `"not_found"` from `"permission_denied"`, and the two want different handling. `regex.try_compile` answers a plain `string`: a pattern has exactly one way to be invalid, so a `kind()` there would be a constant, and the engine's own caret-carrying diagnostic is the whole value.
+
+```noeta
+use std.{regex}
+
+rule = '(user-\d+'                  // as if read from configuration
+
+echo match regex.try_compile(rule) {
+    Ok(p) => "redacting ${p.source()}",
+    Err(e) => "ignoring an unusable rule",
+}
+```
 
 Both halves of a pair report the **identical message** — the aborting one is derived from the recoverable one — so moving between them never changes what the user sees, only who decides what happens next.
 

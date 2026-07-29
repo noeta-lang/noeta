@@ -1,0 +1,78 @@
+// The other half of `forward_compound_receiver.noe`: the route its `E0058` help names, measured
+// rather than asserted. Binding the receiver to a local first turns `self.inner.load::<T>(text)`
+// into `s.load::<T>(text)` — a call spelled on a **bare name**, which is exactly the spelling the
+// syntactic forwarding pre-pass registers a slot from — and the forward then works end to end:
+// `Cache.get<T>` passes its own slot through to `Store.load<T>`, which decodes per instantiation.
+//
+// Both spellings of a bare-name receiver are covered, since they are separate registrations: a
+// LOCAL binding (`s.load::<T>`) and `self` itself (`self.own::<T>`), the latter being a member call
+// whose receiver is a bare name too — so a method forwarding into a sibling method of its own class
+// needs no local at all.
+// expect: stdout "outer 7"
+// expect: stdout "sibling Ada"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+struct User {
+    name: string
+}
+
+class Store {
+    pub tag: string
+
+    fn new(): Store {
+        return Store { tag: "s" };
+    }
+
+    fn load<T>(text: string): Result<T, JsonError> {
+        if self.tag == "" {
+            return json.try_parse::<T>("{}");
+        }
+        return json.try_parse::<T>(text);
+    }
+}
+
+class Cache {
+    pub inner: Store
+
+    fn new(): Cache {
+        return Cache { inner: Store.new() };
+    }
+
+    // The local-binding route: `self.inner` is typed by checking, but `s` is a bare name.
+    fn get<T>(text: string): Result<T, JsonError> {
+        s = self.inner;
+        return s.load::<T>(text);
+    }
+
+    // A sibling method on `self` — already a bare-name receiver, so it forwards as written.
+    fn own<T>(text: string): Result<T, JsonError> {
+        if self.inner.tag == "" {
+            return json.try_parse::<T>("{}");
+        }
+        return json.try_parse::<T>(text);
+    }
+
+    fn viaOwn<T>(text: string): Result<T, JsonError> {
+        return self.own::<T>(text);
+    }
+}
+
+c = Cache.new();
+
+o = c.get::<Order>("{\"id\": 7}");
+echo match o {
+    Ok(v) => "outer ${v.id}",
+    Err(e) => "unreached",
+};
+
+u = c.viaOwn::<User>("{\"name\": \"Ada\"}");
+echo match u {
+    Ok(v) => "sibling ${v.name}",
+    Err(e) => "unreached",
+};

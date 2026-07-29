@@ -62,6 +62,31 @@ pub(crate) struct ForwardSlot {
 /// The per-function forwarding table: fn name → its forwarding slots, in first-appearance order.
 pub(crate) type ForwardingMap = HashMap<String, Vec<ForwardSlot>>;
 
+/// How a call that must supply a hidden slot was **spelled** — the one thing the E0058 raised
+/// when the enclosing body carries no matching slot needs in order to say something true.
+///
+/// This pass is syntactic, so what it could register a slot from is a property of the call's
+/// spelling, not of its resolved callee: a turbofish on a **bare name** (`json.try_parse::<T>`,
+/// `f::<T>(x)`, `s.load::<T>(x)`, `self.load::<T>(x)`) is one it sees; a turbofish through a
+/// **compound receiver** (`self.inner.load::<T>(x)`) is one it cannot, because naming the callee
+/// there means typing the receiver first. Both spellings arrive at the same checker seam, and the
+/// diagnostic must not confuse them — the advice for one is a dead end for the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForwardSpelling {
+    /// A call with **no** explicit turbofish (`f(x)`, `recv.m(x)`): the instantiation was inferred
+    /// from arguments or from an expected type. The pre-pass registers a transitive slot from an
+    /// explicit turbofish only, so spelling one is the genuine fix here.
+    Inferred,
+    /// An explicit turbofish on a bare name — a spelling the pre-pass does see. Reaching the
+    /// diagnostic anyway means the callee demands a slot template this body does not carry
+    /// (the callee's own slot is a composite the turbofish type does not name).
+    Turbofish,
+    /// A method reached through a **compound receiver** (`self.inner.m::<T>(x)`, `f().m::<T>(x)`),
+    /// whose owning type is a checking result. Binding the receiver to a local first turns it into
+    /// the bare-name spelling above.
+    CompoundReceiver,
+}
+
 /// The pre-pass result: the slot table, plus the functions whose slot set failed to converge
 /// (polymorphic recursion through a composite forward — the checker reports these).
 pub(crate) struct Forwarding {

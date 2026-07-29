@@ -60,15 +60,31 @@ impl Pattern {
     }
 }
 
-/// Compile a pattern, or report why it did not compile.
+/// Compile a pattern **recoverably** (`regex.try_compile`) — the `json.try_parse` twin of
+/// [`compile`], and the required primitive of the pair: [`compile`] is derived from it, so the two
+/// doors cannot report different things about the same pattern.
 ///
-/// The engine's own error text is preserved verbatim — it is genuinely good (it carries a caret
-/// and a span into the pattern), and paraphrasing it would only lose information. This is the one
-/// fallible entry point in the module; everything downstream operates on an already-valid pattern.
+/// The door exists because a pattern is not always program text. One written into the source is a
+/// bug you fix, and aborting is the right report; one read from configuration or handed over by a
+/// user carries *their* shape, and the caller can neither validate it first (that would mean a
+/// second, worse regex engine) nor report the failure through a door that aborts.
+///
+/// The error is the engine's own text, verbatim and unprefixed — it is genuinely good (a caret and
+/// a span into the pattern), and it is the whole value here: there is exactly one failure mode, an
+/// invalid pattern, so a classified error type would carry one kind and add nothing to read.
+pub fn try_compile(pattern: &str) -> Result<Pattern, String> {
+    Regex::new(pattern).map(Pattern).map_err(|e| e.to_string())
+}
+
+/// Compile a pattern, or **abort** with why it did not compile (`regex.compile`).
+///
+/// Derived from [`try_compile`] — the same discipline `json.parse` keeps over `json.try_parse`,
+/// down to the aborting door prefixing its own name onto the shared text — so the pair cannot
+/// drift. Everything downstream of either door operates on an already-valid pattern.
 pub fn compile(pattern: &str) -> Result<Pattern, StdError> {
-    Regex::new(pattern).map(Pattern).map_err(|e| StdError {
+    try_compile(pattern).map_err(|message| StdError {
         kind: ErrorKind::ArgType,
-        message: format!("`regex.compile`: {e}"),
+        message: format!("`regex.compile`: {message}"),
     })
 }
 
@@ -343,6 +359,11 @@ const MATCH_SIG: SigType = SigType::Named(MATCH_TYPE_NAME);
 const OPT_MATCH: SigType = SigType::Option(&MATCH_SIG);
 const OPT_STR: SigType = SigType::Option(&SigType::String);
 
+/// `try_compile`'s return: the engine's own diagnostic on the `Err` side, as a plain `string`.
+/// The `JsonError`/`OsError` shape earns its keep where a caller must *branch* on which failure it
+/// was; a pattern has exactly one way to be invalid, so a `kind()` here would be a constant.
+const PATTERN_RESULT_SIG: SigType = SigType::Result(&PATTERN_SIG, &SigType::String);
+
 const REGEX_FNS: &[ExtFn] = &[
     // The module's only fallible function, and the only way to get a `Pattern`: compiling is
     // explicit precisely so it cannot happen accidentally inside a loop.
@@ -351,6 +372,15 @@ const REGEX_FNS: &[ExtFn] = &[
         name: "compile",
         params: &[SigType::String],
         ret: Concrete(PATTERN_SIG),
+    },
+    // Its recoverable twin (`json.parse`/`json.try_parse` is the model). A pattern out of program
+    // text is a bug and aborts; a pattern out of configuration or off a user is an ordinary
+    // condition the caller must be able to report.
+    ExtFn {
+        param_names: &["pattern"],
+        name: "try_compile",
+        params: &[SigType::String],
+        ret: Concrete(PATTERN_RESULT_SIG),
     },
     ExtFn {
         param_names: &["text"],
@@ -464,6 +494,16 @@ fn regex_dispatch(
             Ok(NativeOut::Extern(crate::ExternBox::new(compile(
                 want_str(func, args, 0)?,
             )?)))
+        }
+        // The recoverable door never uses the `Err(StdError)` channel — that channel *is* the
+        // abort. It returns the whole `Result` inside the `NativeOut`, exactly as
+        // `json.try_parse` does, so both backends materialize one tree and stay identical.
+        "try_compile" => {
+            want_arity(func, args, 1)?;
+            Ok(match try_compile(want_str(func, args, 0)?) {
+                Ok(p) => NativeOut::Ok(Box::new(NativeOut::Extern(crate::ExternBox::new(p)))),
+                Err(message) => NativeOut::Err(Box::new(NativeOut::Str(message))),
+            })
         }
         "escape" => {
             want_arity(func, args, 1)?;
@@ -587,6 +627,13 @@ const REGEX_DOCS: &[(&str, &str)] = &[
          support in exchange for its linear-time matching guarantee.",
     ),
     (
+        "try_compile",
+        "Compile `pattern` recoverably — `Ok(pattern)`, or `Err(message)` carrying the engine's own \
+         diagnostic. The `regex.compile` twin for a pattern that came from configuration or from a \
+         user, where an invalid one is an ordinary condition to report rather than a bug to abort \
+         on.",
+    ),
+    (
         "escape",
         "Escape every metacharacter in `text`, so the result matches `text` literally.",
     ),
@@ -707,6 +754,36 @@ mod tests {
         assert!(err.message.starts_with("`regex.compile`:"));
         // The engine's own span-carrying text survives.
         assert!(err.message.contains("unclosed group"), "{}", err.message);
+    }
+
+    /// The recoverable door answers where the aborting one aborts, and the pair cannot drift: the
+    /// abort message is the recoverable message under the aborting door's own name prefix — the
+    /// same relationship `json.parse` keeps with `json.try_parse`.
+    #[test]
+    fn try_compile_reports_what_compile_aborts_with() {
+        let message = try_compile("a(b").unwrap_err();
+        assert!(message.contains("unclosed group"), "{message}");
+        assert_eq!(
+            compile("a(b").unwrap_err().message,
+            format!("`regex.compile`: {message}")
+        );
+        // Lookaround and backreferences reach the recoverable door as ordinary failures too —
+        // they are compile errors of this engine, not a separate category.
+        assert!(try_compile(r"(?=foo)").is_err());
+        assert!(try_compile(r"(\w)\1").is_err());
+    }
+
+    /// A valid pattern comes back through the recoverable door indistinguishable from the aborting
+    /// one — same compiled source, same matching behavior.
+    #[test]
+    fn try_compile_returns_a_usable_pattern_on_a_valid_one() {
+        let p = try_compile(r"(?<year>\d{4})").unwrap();
+        assert_eq!(p.source(), compile(r"(?<year>\d{4})").unwrap().source());
+        assert!(is_match(&p, "born 1984"));
+        assert_eq!(
+            find(&p, "born 1984").and_then(|m| m.named("year")),
+            Some("1984".to_string())
+        );
     }
 
     /// Lookaround and backreferences are the documented cost of the linear-time engine — they must

@@ -311,7 +311,9 @@ impl Checker {
             // A seeded position hands the arguments through as written; the caller has not
             // compacted them, so argument `i` is parameter `i`.
             &[],
-            Some((call_span, name.to_string())),
+            // Spelled without a turbofish — the instantiation came from the checked position's
+            // expectation, which the syntactic pre-pass cannot see.
+            Some((call_span, name.to_string(), ForwardSpelling::Inferred)),
             env,
         );
         // The deferred-argument safety net, mirroring `synth_call`.
@@ -525,7 +527,9 @@ impl Checker {
             span,
             seed,
             &supplied_at,
-            Some((span, name.to_string())),
+            // `f::<T, ...>(args)`: an explicit turbofish on a bare name — the spelling the
+            // pre-pass propagates transitive slots through.
+            Some((span, name.to_string(), ForwardSpelling::Turbofish)),
             env,
         )
     }
@@ -693,7 +697,9 @@ impl Checker {
                             span,
                             &[],
                             &supplied_at,
-                            Some((call_span, name.to_string())),
+                            // `f(args)` — no turbofish, so the instantiation is inferred and the
+                            // pre-pass registered nothing for it.
+                            Some((call_span, name.to_string(), ForwardSpelling::Inferred)),
                             env,
                         );
                     }
@@ -1367,8 +1373,12 @@ impl Checker {
             // both a resolvable owning type and a call span to key on; a synthesized call (no
             // span) or an unresolvable receiver supplies nothing, and the callee's body aborts at
             // its forwarded site rather than reading a value argument as a type-table index.
+            // Spelled without a turbofish (`recv.m(args)`) — this path is `call_user_method`, the
+            // inferred one; the explicit spelling lands in `synth_typed_method_call`.
             let hidden_site = match (call_span, type_name) {
-                (Some(cs), Some(ty)) => Some((cs, format!("{ty}.{name}"))),
+                (Some(cs), Some(ty)) => {
+                    Some((cs, format!("{ty}.{name}"), ForwardSpelling::Inferred))
+                }
                 _ => None,
             };
             return self.check_generic_call_seeded(
@@ -1590,7 +1600,19 @@ impl Checker {
             &supplied_at,
             // An EXPLICIT method turbofish forwards on the same channel as an inferred one — the
             // turbofish only pins the instantiation the seed carries into the slot templates.
-            Some((span, format!("{type_name}.{name}"))),
+            // Its SPELLING, though, is what decides whether the syntactic pre-pass could have
+            // registered a slot for it: a bare-name receiver (`s.load::<T>`, `self.load::<T>`,
+            // `Store.load::<T>`) parses as the module-call atom the pre-pass marks; anything
+            // compound (`self.inner.load::<T>`, `f().load::<T>`) names its callee only here.
+            Some((
+                span,
+                format!("{type_name}.{name}"),
+                if matches!(recv, Expr::Ident { .. }) {
+                    ForwardSpelling::Turbofish
+                } else {
+                    ForwardSpelling::CompoundReceiver
+                },
+            )),
             env,
         )
     }
