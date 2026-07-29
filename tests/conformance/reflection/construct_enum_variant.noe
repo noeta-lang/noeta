@@ -1,0 +1,59 @@
+// `construct` builds an ENUM value, spelled `construct("Enum.Variant", payload)` — the case is named
+// where the type name goes (exactly as it is written in source, and as the attribute manifest already
+// keys a variant target), and `fields` is that variant's PAYLOAD.
+//
+// The convention falls out of the surrounding surface rather than being invented: `variants_of(name)`
+// reports a payload as `List<FieldSpec>` — the same element type `field_specs_of` gives a struct's
+// fields — so a caller reads the schema from one query and hands the matching values to the other, in
+// either of `construct`'s two shapes (a positional `List<dyn>`, or a `Map<string, dyn>` keyed by the
+// payload names). Both go through the same shared planners a struct's fields do, so a payload
+// mismatch is worded exactly like a field mismatch.
+//
+// A constructed case is the real thing: it `match`es and compares equal to a literal one.
+// expect: stdout "ok: Sentiment.Positive"
+// expect: stdout "ok: Plan.Paid"
+// expect: stdout "ok: Shape.Circle(3)"
+// expect: stdout "ok: Shape.Rect(2, 5)"
+// expect: stdout "ok: Shape.Dot"
+// expect: stdout "rect 2x5"
+// expect: stdout "equal: true"
+// expect: stdout "payload schema: r"
+// expect: exit 0
+enum Sentiment { Positive; Negative }
+enum Plan: string { Free = "free"; Paid = "paid" }
+enum Shape { Circle(r: int); Rect(w: int, h: int); Dot }
+
+fn say(r: Result<dyn, string>): string {
+    return match r {
+        Ok(v) => "ok: ${v}",
+        Err(e) => "err: ${e}",
+    }
+}
+
+// A fieldless case of a plain enum, of a backed enum, a positional payload, a named payload supplied
+// by name, and a fieldless case of an enum that also has payload-carrying ones.
+echo say(construct("Sentiment.Positive", []))
+echo say(construct("Plan.Paid", []))
+echo say(construct("Shape.Circle", [3]))
+echo say(construct("Shape.Rect", {"w": 2, "h": 5}))
+echo say(construct("Shape.Dot", []))
+
+built = match construct("Shape.Rect", [2, 5]) {
+    Ok(v) => v.as<Shape>() ?? Shape.Dot,
+    Err(e) => Shape.Dot,
+}
+echo match built {
+    Shape.Circle(r) => "circle ${r}",
+    Shape.Rect(w, h) => "rect ${w}x${h}",
+    Shape.Dot => "dot",
+}
+echo "equal: ${built == Shape.Rect(w: 2, h: 5)}"
+
+// The schema a caller reads to build the payload is the one `construct` validates against.
+for v in variants_of("Shape") {
+    if v.name == "Circle" {
+        for f in v.payload {
+            echo "payload schema: ${f.name}"
+        }
+    }
+}

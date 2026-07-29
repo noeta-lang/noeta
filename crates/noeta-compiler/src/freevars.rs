@@ -513,11 +513,33 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(receiver);
             args.iter().for_each(&mut *f);
         }
-        Rvalue::Call { callee, args, .. } => {
+        // A forwarding call's `type_args` are operands like any other — a pass-through slot reads
+        // the enclosing fn's `$ty` local, and a NESTED fn (D2b) reaches it as a *capture*, so
+        // skipping them here would leave that capture unrecorded.
+        Rvalue::Call {
+            callee,
+            args,
+            type_args,
+            ..
+        } => {
             f(callee);
             args.iter().for_each(&mut *f);
+            type_args.iter().for_each(&mut *f);
         }
-        Rvalue::Method { receiver, args, .. } | Rvalue::TraitMethod { receiver, args, .. } => {
+        // A forwarding METHOD call carries its type arguments in the same separate channel, and
+        // for the same reason a `Call`'s must be visited here (a nested fn reaches a pass-through
+        // slot as a capture). A `TraitMethod` route is baked and never forwards.
+        Rvalue::Method {
+            receiver,
+            args,
+            type_args,
+            ..
+        } => {
+            f(receiver);
+            args.iter().for_each(&mut *f);
+            type_args.iter().for_each(&mut *f);
+        }
+        Rvalue::TraitMethod { receiver, args, .. } => {
             f(receiver);
             args.iter().for_each(&mut *f);
         }
@@ -577,8 +599,10 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::As { operand, .. }
         | Rvalue::TypeTest { operand, .. }
         | Rvalue::TypeOf { operand, .. }
+        | Rvalue::TypeArgName { operand, .. }
         | Rvalue::FieldsOf { operand, .. }
         | Rvalue::TraitsOf { operand, .. } => f(operand),
+        Rvalue::TypeSlotName { slot, .. } => f(slot),
         Rvalue::ParamsOf { target, .. } | Rvalue::ReturnsOf { target, .. } => f(target),
         Rvalue::FieldSpecsOf { name, .. } | Rvalue::VariantsOf { name, .. } => f(name),
         Rvalue::Construct { name, fields, .. } => {

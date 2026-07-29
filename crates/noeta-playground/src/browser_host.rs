@@ -349,10 +349,16 @@ impl Os for BrowserHost {
     // subprocesses, so the whole family is the same honest error as `os_exec` — and since
     // `os_spawn` never succeeds, no handle can exist for the query leaves. ---
 
-    fn os_spawn(&mut self, command: &str, _args: &[String]) -> Result<u64, StdError> {
-        Err(io_error(format!(
-            "os.spawn: cannot run `{command}`: a browser tab has no subprocesses"
-        )))
+    fn os_try_spawn(
+        &mut self,
+        command: &str,
+        _args: &[String],
+    ) -> Result<u64, noeta_stdlib::os::OsError> {
+        Err(noeta_stdlib::os::OsError::new(
+            "os.spawn",
+            noeta_stdlib::os::OsErrorKind::NotFound,
+            format!("cannot run `{command}`: a browser tab has no subprocesses"),
+        ))
     }
 
     fn os_proc_pid(&self, _handle: u64) -> Option<i64> {
@@ -405,9 +411,15 @@ impl Os for BrowserHost {
         ))
     }
 
-    fn os_proc_write_stdin(&mut self, _handle: u64, _data: &str) -> Result<(), StdError> {
-        Err(io_error(
-            "no child process exists: a browser tab has no subprocesses".to_string(),
+    fn os_proc_try_write_stdin(
+        &mut self,
+        _handle: u64,
+        _data: &str,
+    ) -> Result<(), noeta_stdlib::os::OsError> {
+        Err(noeta_stdlib::os::OsError::new(
+            "write",
+            noeta_stdlib::os::OsErrorKind::Other,
+            "no child process exists: a browser tab has no subprocesses",
         ))
     }
 

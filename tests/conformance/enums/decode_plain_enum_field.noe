@@ -1,0 +1,50 @@
+// A **plain** enum is decodable from JSON, so a struct with an enum-typed field can derive
+// `Deserialize<Json>` at all — the door that used to be E0050 at check time, blocking the type from
+// even being declared. A plain enum's JSON Schema enumerates its CASE NAMES, so those are exactly
+// what a decode accepts, and the value it builds is a real enum: it `match`es exhaustively and
+// compares equal to a source-written case, rather than a string standing in for one.
+// expect: stdout "ok: nice / Sentiment.Positive"
+// expect: stdout "matched: negative"
+// expect: stdout "equal: true"
+// expect: stdout "router door: ok: Review {text: \"nice\", mood: Sentiment.Negative}"
+// expect: stdout "router door: unknown_variant: mood: \"Sideways\" is not a variant of `Sentiment`: expected one of \"Positive\", \"Negative\""
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+enum Sentiment { Positive; Negative }
+
+@derive(Deserialize<Json>)
+struct Review { text: string  mood: Sentiment }
+
+fn describe(r: Result<Review, JsonError>): string {
+    return match r {
+        Ok(v) => "ok: ${v.text} / ${v.mood}",
+        Err(e) => "err[${e.kind()}] ${e.message()}",
+    }
+}
+
+echo describe(json.try_parse::<Review>("{\"text\": \"nice\", \"mood\": \"Positive\"}"))
+
+// The decoded case is a genuine enum value, not a tagged string.
+decoded = match json.try_parse::<Review>("{\"text\": \"x\", \"mood\": \"Negative\"}") {
+    Ok(v) => v.mood,
+    Err(e) => Sentiment.Positive,
+}
+echo "matched: " ~ match decoded {
+    Sentiment.Positive => "positive",
+    Sentiment.Negative => "negative",
+}
+echo "equal: ${decoded == Sentiment.Negative}"
+
+// The **router-facing** door decodes the same recipe by runtime type name, so a web framework
+// binding a handler's body parameter reaches an enum-typed field on the same terms — including the
+// same path-carrying rejection.
+fn routed(r: Result<dyn, JsonError>): string {
+    return match r {
+        Ok(v) => "ok: ${v}",
+        Err(e) => "${e.kind()}: ${e.message()}",
+    }
+}
+echo "router door: " ~ routed(json.decode_typed("Review", "{\"text\": \"nice\", \"mood\": \"Negative\"}"))
+echo "router door: " ~ routed(json.decode_typed("Review", "{\"text\": \"nice\", \"mood\": \"Sideways\"}"))

@@ -1190,6 +1190,16 @@ fn real_exec(
 struct StreamBuf {
     data: Vec<u8>,
     eof: bool,
+    /// The streaming read cursor into `data`.
+    ///
+    /// It lives **here**, under the same lock as the bytes, rather than in the owning
+    /// [`ChildProc`], because a `read_line_async` body runs on the blocking pool with no access to
+    /// the host's process registry (subprocess-async arc). A cursor kept beside the handle would
+    /// have to be copied out before the read and written back after it, and an async read has
+    /// nowhere to write it back to — so a sync read and an async read on the same child would each
+    /// re-read from the other's position. Under the buffer's own lock, every reader of this stream
+    /// advances one cursor by construction, whichever thread it runs on.
+    cursor: usize,
 }
 
 #[derive(Debug, Default)]
@@ -1199,22 +1209,23 @@ struct SharedStream {
 }
 
 impl SharedStream {
-    /// The next line (without its trailing newline), from `cursor`, blocking until a full line is
-    /// buffered or the stream ends. `None` at end of output; a final unterminated line is returned
-    /// once (like `str::lines`). `cursor` advances past the line (and its newline).
-    fn read_line(&self, cursor: &mut usize) -> Option<String> {
+    /// The next line (without its trailing newline), from the shared cursor, blocking until a full
+    /// line is buffered or the stream ends. `None` at end of output; a final unterminated line is
+    /// returned once (like `str::lines`). The cursor advances past the line (and its newline).
+    fn read_line(&self) -> Option<String> {
         let mut buf = self.buf.lock().unwrap();
         loop {
-            if let Some(rel) = buf.data[*cursor..].iter().position(|&b| b == b'\n') {
-                let end = *cursor + rel;
-                let line = String::from_utf8_lossy(&buf.data[*cursor..end]).into_owned();
-                *cursor = end + 1;
+            let at = buf.cursor;
+            if let Some(rel) = buf.data[at..].iter().position(|&b| b == b'\n') {
+                let end = at + rel;
+                let line = String::from_utf8_lossy(&buf.data[at..end]).into_owned();
+                buf.cursor = end + 1;
                 return Some(line);
             }
             if buf.eof {
-                if *cursor < buf.data.len() {
-                    let line = String::from_utf8_lossy(&buf.data[*cursor..]).into_owned();
-                    *cursor = buf.data.len();
+                if at < buf.data.len() {
+                    let line = String::from_utf8_lossy(&buf.data[at..]).into_owned();
+                    buf.cursor = buf.data.len();
                     return Some(line);
                 }
                 return None;
@@ -1223,18 +1234,19 @@ impl SharedStream {
         }
     }
 
-    /// Up to `count` characters from `cursor`, blocking only until at least one character is
-    /// available, then returning up to `count` of them (POSIX `read` shape); `None` at end of
+    /// Up to `count` characters from the shared cursor, blocking only until at least one character
+    /// is available, then returning up to `count` of them (POSIX `read` shape); `None` at end of
     /// output. Decodes the valid-UTF-8 prefix from the cursor — a multi-byte character split across
     /// a drain chunk waits for its continuation. `count <= 0` yields the empty string.
-    fn read(&self, cursor: &mut usize, count: usize) -> Option<String> {
+    fn read(&self, count: usize) -> Option<String> {
         let mut buf = self.buf.lock().unwrap();
         loop {
+            let at = buf.cursor;
             // Exhausted (nothing left and the stream ended) → end of output.
-            if *cursor >= buf.data.len() && buf.eof {
+            if at >= buf.data.len() && buf.eof {
                 return None;
             }
-            let rest = &buf.data[*cursor..];
+            let rest = &buf.data[at..];
             // The complete-character prefix (a trailing partial UTF-8 sequence is excluded until
             // its bytes arrive).
             let valid = match std::str::from_utf8(rest) {
@@ -1243,7 +1255,7 @@ impl SharedStream {
             };
             if !valid.is_empty() || count == 0 {
                 let chunk: String = valid.chars().take(count).collect();
-                *cursor += chunk.len();
+                buf.cursor = at + chunk.len();
                 return Some(chunk);
             }
             if buf.eof {
@@ -1307,10 +1319,6 @@ struct ChildProc {
     /// The stdout/stderr drain threads, joined when the child is reaped.
     stdout_join: Option<std::thread::JoinHandle<()>>,
     stderr_join: Option<std::thread::JoinHandle<()>>,
-    /// `read_line`/`read`'s cursor into the stdout buffer — independent of the whole-output `wait`.
-    stdout_cursor: usize,
-    /// `read_err_line`'s cursor into the stderr buffer.
-    stderr_cursor: usize,
     /// The child's stdin pipe; `None` once closed. Dropping it signals EOF to the child.
     stdin: Option<std::process::ChildStdin>,
     /// The reaped outcome, cached so a second `wait`/`try_wait` returns it without re-waiting.
@@ -1447,6 +1455,66 @@ impl ExternIo for RealProcWaitIo {
     }
 }
 
+/// The real host's awaitable-streaming-read descriptor (subprocess-async arc): the twin of
+/// [`RealProcWaitIo`] for `read_line_async` / `read_err_line_async` / `read_async(n)`.
+///
+/// It owns nothing but a clone of the target stream's `Arc`, because the read cursor lives inside
+/// the stream — so the blocking body reads and advances under the buffer's own lock, and a
+/// synchronous read afterwards continues from where the async one stopped. This is what makes a
+/// bounded child read expressible at all: `race([p.read_line_async(), task.tick(ms)])`, with the
+/// isolate's other tasks running throughout.
+struct RealProcReadIo {
+    handle: u64,
+    read: noeta_stdlib::os::ProcRead,
+    /// `None` for a handle the host does not know — reported when the descriptor is driven, since
+    /// the builder that made it cannot fail.
+    stream: Option<Arc<SharedStream>>,
+}
+
+impl std::fmt::Debug for RealProcReadIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealProcReadIo")
+            .field("handle", &self.handle)
+            .field("read", &self.read)
+            .finish()
+    }
+}
+
+impl RealProcReadIo {
+    /// Perform the read against `stream`, wrapping the outcome as the `?string` the surface returns.
+    fn perform(stream: &SharedStream, read: noeta_stdlib::os::ProcRead) -> NativeOut {
+        use noeta_stdlib::os::ProcRead;
+        let out = match read {
+            ProcRead::StdoutLine | ProcRead::StderrLine => stream.read_line(),
+            ProcRead::Stdout(count) => stream.read(count.max(0) as usize),
+        };
+        match out {
+            Some(s) => NativeOut::Some(Box::new(NativeOut::Str(s))),
+            None => NativeOut::None,
+        }
+    }
+}
+
+impl ExternIo for RealProcReadIo {
+    fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
+        let stream = self
+            .stream
+            .take()
+            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(self.handle))?;
+        Ok(RealProcReadIo::perform(&stream, self.read))
+    }
+
+    fn run_real(&mut self) -> Option<RealBody> {
+        let stream = self.stream.take();
+        let read = self.read;
+        let handle = self.handle;
+        Some(RealBody::Blocking(Box::new(move || {
+            let stream = stream.ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+            Ok(RealProcReadIo::perform(&stream, read))
+        })))
+    }
+}
+
 /// A `wait_async` descriptor for a child a *previous* `wait_async` already detached: it owns no
 /// child, only a clone of the shared [`WaitSlot`], and blocks on it — so a second (or racing)
 /// `wait_async` resolves to the same outcome the first waiter publishes.
@@ -1564,33 +1632,30 @@ impl ExternIo for RealExecIo {
 }
 
 impl RealHost {
-    /// Shared body of the streaming reads: clone the target stream's `Arc` and cursor out under a
-    /// short `procs` borrow, run `read` **without** holding it (the read may block on the condvar,
-    /// and the drain thread must stay free to append), then write the advanced cursor back.
+    /// The target stream's `Arc`, cloned out under a short `procs` borrow so the read itself runs
+    /// **without** holding it — the read may block on the condvar, and the drain thread must stay
+    /// free to append. Shared by the blocking reads and by the `*_async` descriptors, which need
+    /// exactly this handle and nothing else (the cursor rides inside the stream).
+    fn stream_of(&self, handle: u64, which: Stream) -> Result<Arc<SharedStream>, StdError> {
+        let proc = self
+            .procs
+            .get(&handle)
+            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+        Ok(match which {
+            Stream::Stdout => Arc::clone(&proc.stdout),
+            Stream::Stderr => Arc::clone(&proc.stderr),
+        })
+    }
+
+    /// Shared body of the blocking streaming reads.
     fn stream_read(
         &mut self,
         handle: u64,
         which: Stream,
-        read: impl FnOnce(&SharedStream, &mut usize) -> Option<String>,
+        read: impl FnOnce(&SharedStream) -> Option<String>,
     ) -> Result<Option<String>, StdError> {
-        let (stream, mut cursor) = {
-            let proc = self
-                .procs
-                .get(&handle)
-                .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
-            match which {
-                Stream::Stdout => (Arc::clone(&proc.stdout), proc.stdout_cursor),
-                Stream::Stderr => (Arc::clone(&proc.stderr), proc.stderr_cursor),
-            }
-        };
-        let out = read(&stream, &mut cursor);
-        if let Some(proc) = self.procs.get_mut(&handle) {
-            match which {
-                Stream::Stdout => proc.stdout_cursor = cursor,
-                Stream::Stderr => proc.stderr_cursor = cursor,
-            }
-        }
-        Ok(out)
+        let stream = self.stream_of(handle, which)?;
+        Ok(read(&stream))
     }
 }
 
@@ -1633,7 +1698,11 @@ impl Os for RealHost {
         })
     }
 
-    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError> {
+    fn os_try_spawn(
+        &mut self,
+        command: &str,
+        args: &[String],
+    ) -> Result<u64, noeta_stdlib::os::OsError> {
         use std::process::Stdio;
         let mut child = std::process::Command::new(command)
             .args(args)
@@ -1642,7 +1711,10 @@ impl Os for RealHost {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| io_error(format!("spawn: cannot start `{command}`: {e}")))?;
+            // Classified at the source, from the real `io::Error` — which is the whole reason the
+            // recoverable door is the primitive: "not on PATH" and "not executable" are different
+            // conditions to a caller, and a message string cannot be branched on.
+            .map_err(|e| noeta_stdlib::os::OsError::spawn_failed(command, &e))?;
         let pid = i64::from(child.id());
         // Drain both pipes on background threads into shared buffers, so a chatty child never
         // blocks on a full pipe while the program supervises it, and `read_line` can stream stdout.
@@ -1668,8 +1740,6 @@ impl Os for RealHost {
                 stderr,
                 stdout_join,
                 stderr_join,
-                stdout_cursor: 0,
-                stderr_cursor: 0,
                 stdin,
                 result: None,
                 awaiting: None,
@@ -1807,32 +1877,68 @@ impl Os for RealHost {
     }
 
     fn os_proc_read_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {
-        self.stream_read(handle, Stream::Stdout, |s, c| s.read_line(c))
+        self.stream_read(handle, Stream::Stdout, SharedStream::read_line)
     }
 
     fn os_proc_read(&mut self, handle: u64, count: i64) -> Result<Option<String>, StdError> {
         let want = count.max(0) as usize;
-        self.stream_read(handle, Stream::Stdout, move |s, c| s.read(c, want))
+        self.stream_read(handle, Stream::Stdout, move |s| s.read(want))
+    }
+
+    /// The awaitable streaming reads, on the blocking pool over the child's shared stream buffer —
+    /// so the isolate's other tasks keep running while the child has not spoken yet, which the
+    /// synchronous reads cannot offer at all (they park the whole scheduler on the condvar).
+    ///
+    /// The descriptor needs only the stream `Arc`: the read cursor lives *inside* it, so an async
+    /// read and a later synchronous read on the same child continue from one position. A handle the
+    /// host does not know yields a descriptor that reports it when driven, since this builder
+    /// cannot fail.
+    fn os_proc_read_spawn(
+        &mut self,
+        handle: u64,
+        read: noeta_stdlib::os::ProcRead,
+    ) -> Box<dyn ExternIo> {
+        use noeta_stdlib::os::ProcRead;
+        let which = match read {
+            ProcRead::StderrLine => Stream::Stderr,
+            ProcRead::StdoutLine | ProcRead::Stdout(_) => Stream::Stdout,
+        };
+        Box::new(RealProcReadIo {
+            handle,
+            read,
+            stream: self.stream_of(handle, which).ok(),
+        })
     }
 
     fn os_proc_read_stderr_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {
-        self.stream_read(handle, Stream::Stderr, |s, c| s.read_line(c))
+        self.stream_read(handle, Stream::Stderr, SharedStream::read_line)
     }
 
-    fn os_proc_write_stdin(&mut self, handle: u64, data: &str) -> Result<(), StdError> {
+    fn os_proc_try_write_stdin(
+        &mut self,
+        handle: u64,
+        data: &str,
+    ) -> Result<(), noeta_stdlib::os::OsError> {
+        use noeta_stdlib::os::{OsError, OsErrorKind};
         use std::io::Write;
         let proc = self
             .procs
             .get_mut(&handle)
-            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
-        let stdin = proc
-            .stdin
-            .as_mut()
-            .ok_or_else(|| io_error("write: the child's stdin is closed".to_string()))?;
+            .ok_or_else(|| OsError::unknown_process("write", handle))?;
+        let stdin = proc.stdin.as_mut().ok_or_else(|| {
+            OsError::new(
+                "write",
+                OsErrorKind::StdinClosed,
+                "the child's stdin is closed",
+            )
+        })?;
         stdin
             .write_all(data.as_bytes())
             .and_then(|()| stdin.flush())
-            .map_err(|e| io_error(format!("write: {e}")))
+            // A child that exited between the program's last check and this write gives
+            // `BrokenPipe` here — the race a liveness poll cannot close, classified so the caller
+            // can tell it apart from having closed the pipe itself.
+            .map_err(|e| OsError::write_failed(&e))
     }
 
     fn os_proc_close_stdin(&mut self, handle: u64) -> Result<(), StdError> {

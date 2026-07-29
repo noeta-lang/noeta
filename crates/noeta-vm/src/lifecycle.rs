@@ -14,6 +14,73 @@ use crate::scheduler::SchedState;
 /// form; `None` for the map form), and the shared planner's validation outcome.
 type ConstructResolve = (Vec<(String, Value)>, Option<Value>, Result<(), String>);
 
+/// Validate a `construct("Enum.Variant", fields)` payload against the variant's declared schema and
+/// order it into the positional slots an enum value carries, each **retained** for its new home.
+///
+/// The mirror of the tree-walker's function of the same name (`plans/backend-mirror.md`): only the
+/// value extraction and the refcount protocol are backend-local, and every accept/reject decision
+/// runs through the same shared planners a struct's fields go through — so a payload mismatch is
+/// worded exactly like a field mismatch, in both backends.
+fn plan_variant_payload(
+    case_name: &str,
+    payload: &[noeta_ast::reflect::FieldSpecData<'_>],
+    fields_val: &Value,
+) -> Result<Vec<Value>, String> {
+    if fields_val.is_list() {
+        // `realize_list` hands back values sharing the container's references (not retained), so each
+        // value kept for the built case is retained and the realized list released afterward — the
+        // `Op::Invoke` protocol the fielded path uses.
+        let realized = fields_val.realize_list();
+        let values = realized.list_items().expect("checked is_list");
+        let reprs: Vec<noeta_ast::reflect::TypeRepr> = values.iter().map(vm_type_repr).collect();
+        let plan = noeta_ast::reflect::plan_construct(case_name, payload, &reprs);
+        let out = match plan {
+            Err(msg) => {
+                realized.release();
+                return Err(msg);
+            }
+            Ok(_) => {
+                values.iter().for_each(|v| retain(*v));
+                values
+            }
+        };
+        realized.release();
+        Ok(out)
+    } else if fields_val.is_map() {
+        let keys = fields_val.map_keys().expect("checked is_map");
+        let vals = fields_val.map_values().expect("checked is_map");
+        let provided: Vec<(String, Value)> = keys
+            .iter()
+            .zip(vals)
+            .filter_map(|(k, v)| match k {
+                noeta_stdlib::MapKey::Str(s) => Some((s.as_str().to_owned(), v)),
+                _ => None,
+            })
+            .collect();
+        let reprs: Vec<(String, noeta_ast::reflect::TypeRepr)> = provided
+            .iter()
+            .map(|(n, v)| (n.clone(), vm_type_repr(v)))
+            .collect();
+        noeta_ast::reflect::plan_construct_named(case_name, payload, &reprs)?;
+        let names: Vec<String> = provided.iter().map(|(n, _)| n.clone()).collect();
+        Ok(
+            noeta_ast::reflect::plan_variant_payload_order(payload, &names)
+                .into_iter()
+                .map(|i| {
+                    let value = provided[i].1;
+                    retain(value);
+                    value
+                })
+                .collect(),
+        )
+    } else {
+        Err(format!(
+            "construct fields must be a list or a map, found {}",
+            fields_val.type_name()
+        ))
+    }
+}
+
 /// Builds a fresh host + async executor for a worker isolate (isolates I.4b). Injected by the CLI (its
 /// `RealHost` + `RealExecutor`), so `noeta-vm` stays free of `noeta-host-real`/tokio. `Send + Sync` so the
 /// worker closure can carry a clone across the thread boundary.
@@ -1206,21 +1273,45 @@ impl<'m> Vm<'m> {
                 ),
             ));
         };
-        // Only a declared struct/class is constructible; check before field validation so an unknown
-        // type reports as such rather than "no field X".
-        match self
-            .module
-            .reflection
-            .type_named(&type_name)
-            .map(|t| t.kind)
-        {
-            Some(noeta_ast::reflect::TypeKind::Struct | noeta_ast::reflect::TypeKind::Class) => {}
-            _ => {
-                return Ok(err_of(
-                    self,
-                    format!("`{type_name}` is not a constructible struct or class"),
-                ));
+        // What the name refers to, decided by the shared resolver the tree-walker also runs — before
+        // any field validation, so an unconstructible name reports as such rather than "no field X".
+        // An `Enum.Variant` spelling builds the case directly (its payload IS the value: no defaults,
+        // no slot table), which is why it can be answered here without touching the shape tables.
+        let variant_plan =
+            match noeta_ast::reflect::resolve_construct_target(&self.module.reflection, &type_name)
+            {
+                noeta_ast::reflect::ConstructTarget::Rejected(msg) => Err(msg),
+                noeta_ast::reflect::ConstructTarget::Variant {
+                    enum_name,
+                    variant,
+                    index,
+                    payload,
+                } => Ok(Some((
+                    noeta_object::intern_shape(
+                        Shape::enum_variant(
+                            enum_name,
+                            variant,
+                            payload.iter().map(|s| s.name.to_string()).collect(),
+                            false,
+                        )
+                        .with_variant_index(index),
+                    ),
+                    plan_variant_payload(&type_name, &payload, &fields_val),
+                ))),
+                noeta_ast::reflect::ConstructTarget::Fielded => Ok(None),
+            };
+        match variant_plan {
+            Err(msg) => return Ok(err_of(self, msg)),
+            Ok(Some((shape, payload))) => {
+                return Ok(match payload {
+                    Err(msg) => err_of(self, msg),
+                    Ok(data) => {
+                        let ok = self.persist.shapes[ok_shape as usize];
+                        Value::enum_value(ok, vec![Value::enum_value(shape, data)])
+                    }
+                });
             }
+            Ok(None) => {}
         }
         // The `fields` argument is a `List<dyn>` (positional, declaration order) or a
         // `Map<string, dyn>` (named — the sparse, any-order form a framework binding `--field` flags
@@ -1350,6 +1441,27 @@ impl<'m> Vm<'m> {
             .diagnostics
             .push(Diagnostic::error(code, span, message));
         Abort
+    }
+
+    /// The abort a call takes when it reaches a **forwarding generic** without supplying the type
+    /// arguments its prototype declares. The entry points with no static callee type behind them —
+    /// a `dyn` receiver, a handle, `invoke`, a first-class value — carry none, and binding
+    /// positionally anyway would lay a value argument into a type-argument slot and read it as an
+    /// index into the type table. Shares one message with the tree-walker, so the two backends
+    /// cannot word it differently.
+    pub(crate) fn no_instantiation(
+        &mut self,
+        callee: Option<&str>,
+        declared: usize,
+        supplied: usize,
+        span: Span,
+    ) -> Abort {
+        let message = noeta_ast::reflect::no_instantiation_message(
+            callee.unwrap_or("<anonymous>"),
+            declared,
+            supplied,
+        );
+        self.error(DiagnosticCode::InvalidTypeArguments, span, message)
     }
 
     /// Convert a native-dispatch [`noeta_stdlib::StdError`] into the unwind token. The

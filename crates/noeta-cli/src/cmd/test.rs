@@ -12,7 +12,7 @@ use noeta_span::Span;
 
 use crate::cmd::run::execute_real_host;
 use crate::context::{Prologue, check_under, tier_prologue};
-use crate::output::plural;
+use crate::output::{emit_diagnostics_mapped, plural};
 
 /// The outcome of running one `@test` fn: whether it passed, the failure message (the first
 /// diagnostic, typically the assertion/panic), and anything it wrote to stdout (shown on failure).
@@ -223,15 +223,18 @@ fn run_file_tests(file: &std::path::Path, opts: &TestOptions, label: Option<&str
         };
     }
 
-    // The setup every test shares: the program's declarations (and top-level bindings/globals),
-    // with its own "main" effect statements removed. Each test then runs as `setup + <call the test
-    // fn>` in a fresh isolate, so the program's `echo`s don't run and one test cannot observe
-    // another's state.
+    // The setup every test shares: the program's declarations, its top-level bindings/globals, and
+    // every top-level effect that *finishes*. Each test then runs as `setup + <call the test fn>` in
+    // a fresh isolate, so one test cannot observe another's state.
+    //
+    // What is left out is decided by `noeta_check::setup`, which asks whether a statement returns
+    // rather than what shape it has — so `conn.migrate("migrations")` runs and
+    // `server.serve(8080, fetch)` does not. See that module for the policy and its residual holes.
     let setup: Vec<Stmt> = activated
         .program
         .stmts
         .iter()
-        .filter(|s| is_tier_setup(s))
+        .filter(|s| noeta_check::is_tier_setup(s, &run.diverging))
         .cloned()
         .collect();
 
@@ -255,6 +258,24 @@ fn run_file_tests(file: &std::path::Path, opts: &TestOptions, label: Option<&str
     };
     if selected.is_empty() {
         return FileTests::None { any_declared: true };
+    }
+
+    // Anything the setup left out that a selected test *captures* is reported. The failure this
+    // replaces was not the drop itself — it was that a dropped `conn.migrate(…)` and a test
+    // asserting on the migrated schema produced a bare assertion failure with nothing pointing at
+    // the line that had not run.
+    {
+        let names: Vec<&str> = selected.iter().map(|t| t.name.as_str()).collect();
+        let warnings =
+            noeta_check::dropped_setup_warnings(&activated.program, &run.diverging, &names);
+        emit_diagnostics_mapped(
+            &run.sources,
+            warnings
+                .iter()
+                .map(|w| w.diagnostic())
+                .collect::<Vec<_>>()
+                .iter(),
+        );
     }
 
     // Partition into skipped (`#[Skip]`) and runnable. A skipped test is reported but never run, and
@@ -460,23 +481,6 @@ pub(crate) fn string_attr(test: &TierFn, name: &str) -> Option<String> {
         AttrValue::Str(s) => Some(s.clone()),
         _ => None,
     })
-}
-
-/// Whether a top-level statement is tier-runner *setup* — a declaration or a global binding the
-/// tests/benches may depend on — as opposed to the program's own "main" effects (which the
-/// `noeta test`/`noeta bench` runners do not run; they run the tier fns, not the file).
-pub(crate) fn is_tier_setup(stmt: &Stmt) -> bool {
-    !matches!(
-        stmt,
-        Stmt::Echo { .. }
-            | Stmt::Return { .. }
-            | Stmt::If { .. }
-            | Stmt::For { .. }
-            | Stmt::While { .. }
-            | Stmt::Break { .. }
-            | Stmt::Continue { .. }
-            | Stmt::Expr { .. }
-    )
 }
 
 /// A statement that calls fn `name` with `args`: `name(args…);`. `name` may be a **qualified**

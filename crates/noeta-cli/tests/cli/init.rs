@@ -151,10 +151,12 @@ fn init_creates_a_git_repository_unless_nested() {
     if !git_available() {
         return;
     }
-    // Fresh directory → a repo. Must live *outside* the workspace checkout —
-    // `CARGO_TARGET_TMPDIR` is inside this repo's own worktree, where init would
-    // (correctly) decline to nest a repository.
-    let dir = std::env::temp_dir().join("noeta_cli_test_init_git");
+    // Fresh directory → a repo. The one fixture that must live *outside* the workspace checkout,
+    // so it cannot hang off `temp_root()` like every other: `CARGO_TARGET_TMPDIR` is inside this
+    // repo's own worktree, where `init` would (correctly) decline to nest a repository. Keyed by
+    // pid instead, since a fixed name under the shared system temp dir collides across the
+    // concurrent worktrees this repository is routinely worked in.
+    let dir = std::env::temp_dir().join(format!("noeta_cli_test_init_git_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     lang()

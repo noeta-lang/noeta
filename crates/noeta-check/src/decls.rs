@@ -561,8 +561,11 @@ impl Checker {
                 // comparison exists; a `MapKey` form does not — an explicit deferral), and a
                 // container/abstract-kind head in key position is a malformed type the arity
                 // check (E0058) already reports on its own span.
-                Bytes | Unit | Dyn | List | Set | Map | Option | Result | KindEnum | KindStruct
-                | KindClass => None,
+                // `never` is uninhabited, so `Map<never, _>` has no key to be capable of. Left
+                // undecided with the other malformed heads rather than answered false: the
+                // arity/type check reports the real problem on its own span.
+                Bytes | Unit | Dyn | Never | List | Set | Map | Option | Result | KindEnum
+                | KindStruct | KindClass => None,
             };
         }
         if let Some(ext) = self.imported_extern(key_name) {
@@ -621,6 +624,7 @@ fn keyed_container_role(name: &str) -> Option<(&'static str, bool)> {
         | BuiltinTy::Bytes
         | BuiltinTy::Unit
         | BuiltinTy::Dyn
+        | BuiltinTy::Never
         | BuiltinTy::KindEnum
         | BuiltinTy::KindStruct
         | BuiltinTy::KindClass

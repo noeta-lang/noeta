@@ -1,7 +1,9 @@
-// `Enum.try_from(s)` → `?Enum` and `Enum.from(s)` → `Enum` — the PHP `tryFrom`/`from` pair, matched
-// by case name. `try_from` yields `some(case)` on a hit and `none` on a miss; `from` yields the case
-// (the `none`-coalesced fallback exercises the `?`/`??` plumbing). A payload-carrying variant is not
-// name-constructible, so it never matches. Both backends agree.
+// `Enum.try_from(v)` → `?Enum` and `Enum.from(v)` → `Enum` — the recoverable/aborting pair, matched
+// by backing value first and then by case name. A **plain** enum has no backings, so the case name is
+// what selects here (`enums/from_backing` covers the backed half). `try_from` yields `some(case)` on
+// a hit and `none` on a miss; `from` yields the case (the `none`-coalesced fallback exercises the
+// `?`/`??` plumbing). A payload-carrying variant is never selected — there is no payload to supply.
+// Both backends agree.
 // expect: stdout "some(Status.Paid)"
 // expect: stdout "true"
 // expect: stdout "Status.Pending"

@@ -562,6 +562,7 @@ fn rewrite_func(func: &Func, od: &HashSet<String>) -> Func {
         name: func.name.clone(),
         captures: func.captures.clone(),
         params: func.params.clone(),
+        hidden: func.hidden,
         defaults: func.defaults.clone(),
         body: rewrite_block(&func.body, od, &params),
         temp_count: func.temp_count,

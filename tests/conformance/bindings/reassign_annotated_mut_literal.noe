@@ -1,0 +1,36 @@
+// A reassignment takes its expectation from the binding it reassigns. `acc` is annotated
+// `List<int>` at its declaration, so the bare `acc = []` on the next line is checked against
+// `List<int>` — the empty literal absorbs it exactly as it would at an annotated binding site.
+// The name is resolved BEFORE the value is checked; resolving it afterwards used to let the
+// un-inferable-literal gate (E0023) fire first, with a help suggesting the annotation the code
+// already carried. Every context-free polymorphic literal is covered: `[]`, `{}`, `none`,
+// `Ok(_)`/`Err(_)`, and a target-typed `.{ … }`. The checker is shared, so both backends agree.
+// expect: stdout "[]"
+// expect: stdout "Ok(3)"
+// expect: stdout "{}"
+// expect: stdout "none"
+// expect: stdout "7"
+// expect: exit 0
+struct Point { x: int y: int }
+
+mut acc: List<int> = [1, 2];
+acc = [];
+echo acc;
+
+mut answer: Result<int, string> = Err("x");
+answer = Ok(3);
+echo answer;
+
+mut lookup: Map<string, int> = {"a": 1};
+lookup = {};
+echo lookup;
+
+mut maybe: ?int = some(1);
+maybe = none;
+echo maybe;
+
+// The target-typed `.{ … }` is the same shape: the reassignment supplies the type NAME the
+// literal elides, so it needs no repeat of `Point`.
+mut p: Point = Point { x: 1, y: 2 };
+p = .{ x: 7, y: 4 };
+echo p.x;

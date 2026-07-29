@@ -208,15 +208,24 @@ pub struct LoweringSites<'a> {
     /// The program-wide type-argument table (poly-values F2b) — embedded into
     /// [`Program::type_args`] so both backends resolve a hidden slot's instantiation identically.
     pub type_arg_table: &'a Vec<noeta_ext_abi::TypeArgInfo>,
-    /// Forwarding-generic call spans → the hidden type-argument slots to PREPEND to the call's
-    /// arguments (`Table(i)` → an int const; `Forward(j)` → the enclosing fn's `$ty<j>` local).
+    /// Forwarding-generic call spans → the type-argument slots the call supplies, in slot order
+    /// (`Table(i)` → an int const; `Forward(j)` → the enclosing body's `$ty<j>` local). They land
+    /// in the call node's own `type_args` channel, beside the value arguments.
     pub hidden_arg_sites: &'a HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
-    /// `TypedModuleCall` spans whose recipe is per-instantiation → the hidden slot index; lowered
-    /// with a dynamic table-index operand instead of a baked recipe.
-    pub dynamic_recipe_sites: &'a HashMap<Span, u32>,
-    /// `attributes_of::<T>` spans whose type is per-instantiation → the hidden slot index.
-    pub dynamic_attr_sites: &'a HashMap<Span, u32>,
-    /// Forwarding generic fns → their hidden-parameter count (prepended as `$ty0`, `$ty1`, …).
+    /// Spans whose turbofish is a FORWARDED type parameter of the enclosing top-level generic fn →
+    /// the hidden slot index whose table entry names the instantiation. One map over three
+    /// surfaces, each consulted from its own expression arm: a `TypedModuleCall` lowers with a
+    /// dynamic table-index operand instead of a baked recipe, an `attributes_of::<T>` resolves the
+    /// type name through the table at run time, and a `type_name::<T>()` becomes an
+    /// [`Rvalue::TypeSlotName`]. Same slot, same entry — which is why a forwarded name and a
+    /// forwarded manifest cannot disagree about what `T` is.
+    pub forwarded_slot_sites: &'a HashMap<Span, u32>,
+    /// `type_name::<T>()` spans where `T` is a parameter of the ENCLOSING generic type, inside one
+    /// of its instance methods → `(enclosing type name, the parameter's declaration index)`. The
+    /// name is read off argument `index` of the receiver's reflected type tag at run time.
+    pub self_type_arg_sites: &'a HashMap<Span, (String, u32)>,
+    /// Forwarding generic fns and methods → their hidden-slot count, keyed as the callable traces
+    /// (a bare `fn` name, or `Type.method`); lowered as the leading parameters `$ty0`, `$ty1`, … .
     pub forwarding_fns: &'a HashMap<String, u32>,
     /// Forwarding-fn-as-value sites (poly-deferrals D2c): `Expr::Ident` spans → `(fn name,
     /// adopted arity)`. The reference lowers to a synthesized closure calling the fn; the inner
@@ -241,6 +250,7 @@ impl LoweringSites<'static> {
         static TYPE_ARGS: OnceLock<Vec<noeta_ext_abi::TypeArgInfo>> = OnceLock::new();
         static HIDDEN: OnceLock<HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>> = OnceLock::new();
         static SLOTS: OnceLock<HashMap<Span, u32>> = OnceLock::new();
+        static SELF_TY: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
         static COUNTS: OnceLock<HashMap<String, u32>> = OnceLock::new();
         static FN_VALUES: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
         static ORDERS: OnceLock<HashMap<Span, Vec<Option<usize>>>> = OnceLock::new();
@@ -267,8 +277,8 @@ impl LoweringSites<'static> {
             try_conversion_sites: NAMES.get_or_init(HashMap::new),
             type_arg_table: TYPE_ARGS.get_or_init(Vec::new),
             hidden_arg_sites: HIDDEN.get_or_init(HashMap::new),
-            dynamic_recipe_sites: SLOTS.get_or_init(HashMap::new),
-            dynamic_attr_sites: SLOTS.get_or_init(HashMap::new),
+            forwarded_slot_sites: SLOTS.get_or_init(HashMap::new),
+            self_type_arg_sites: SELF_TY.get_or_init(HashMap::new),
             forwarding_fns: COUNTS.get_or_init(HashMap::new),
             fn_value_sites: FN_VALUES.get_or_init(HashMap::new),
         }
@@ -309,8 +319,8 @@ macro_rules! lowering_sites {
             try_conversion_sites: &$s.try_conversion_sites,
             type_arg_table: &$s.type_arg_table,
             hidden_arg_sites: &$s.hidden_arg_sites,
-            dynamic_recipe_sites: &$s.dynamic_recipe_sites,
-            dynamic_attr_sites: &$s.dynamic_attr_sites,
+            forwarded_slot_sites: &$s.forwarded_slot_sites,
+            self_type_arg_sites: &$s.self_type_arg_sites,
             forwarding_fns: &$s.forwarding_fns,
             fn_value_sites: &$s.fn_value_sites,
         }
@@ -1330,21 +1340,27 @@ impl Lowerer<'_> {
     /// enclosing frame's temporary counter is saved and restored, so a nested function (a
     /// closure inside a function body) is numbered independently and the outer numbering
     /// continues afterward.
-    /// Prepend a forwarding-generic call's hidden type-argument atoms (poly-values F2b), when the
-    /// checker recorded slots for this call span: a concrete instantiation passes its table index
-    /// as an int const; a pass-through reads the enclosing fn's own hidden slot local.
-    fn prepend_hidden_args(&mut self, args: &mut Vec<Atom>, span: &Span) {
+    /// A forwarding-generic call's **type arguments** (poly-values F2b), in slot order, when the
+    /// checker recorded slots for this call span: a concrete instantiation passes its interned
+    /// table index as an int const; a pass-through reads the enclosing fn's own `$ty` slot.
+    ///
+    /// These travel in the call node's own `type_args` channel rather than prepended onto the
+    /// value arguments, so a forwarding call's parameter positions — and therefore its `supplied`
+    /// binding map — are exactly those of the same call without forwarding.
+    fn type_arg_atoms(&mut self, span: &Span) -> Vec<Atom> {
         let Some(slots) = self.sites.hidden_arg_sites.get(span) else {
-            return;
+            return Vec::new();
         };
-        let hidden = slots.iter().map(|slot| match slot {
-            noeta_ext_abi::HiddenArg::Table(i) => Atom::Const(Const::Int(*i as i64)),
-            noeta_ext_abi::HiddenArg::Forward(j) => Atom::Var {
-                name: hidden_param_name(*j),
-                span: *span,
-            },
-        });
-        args.splice(0..0, hidden);
+        slots
+            .iter()
+            .map(|slot| match slot {
+                noeta_ext_abi::HiddenArg::Table(i) => Atom::Const(Const::Int(*i as i64)),
+                noeta_ext_abi::HiddenArg::Forward(j) => Atom::Var {
+                    name: hidden_param_name(*j),
+                    span: *span,
+                },
+            })
+            .collect()
     }
 
     // The lowering inputs for one function/closure body — a bundle, not a signature worth a struct.
@@ -1361,13 +1377,15 @@ impl Lowerer<'_> {
     ) -> Result<Func, Unsupported> {
         let outer = self.temps;
         self.temps = 0;
-        // A FORWARDING generic fn (poly-values F2b) carries its hidden type-argument slots as
-        // PREPENDED parameters (`$ty0`, `$ty1`, …): prepending — not appending — keeps the
-        // declaration's trailing defaults trailing, so omitted-argument filling is untouched.
-        // Every call site prepends the matching hidden atoms (`hidden_arg_sites`). Keyed by the
-        // top-level fn name — only at depth 0: a NESTED fn (D2b) may share a top-level name but
-        // never carries hidden parameters (it captures the enclosing `$ty` locals instead), and
-        // methods/closures never appear in the map.
+        // A FORWARDING generic fn (poly-values F2b) carries its type-argument slots as LEADING
+        // parameters (`$ty0`, `$ty1`, …) so the body can name them and register allocation places
+        // them like any other — but they are filled from the call node's own `type_args` channel,
+        // never from its value arguments, and `Func::hidden` is what tells every binder how many
+        // leading slots to lay down before the value arguments start. Keyed by the name this
+        // callable traces under — a bare `fn` name, or `Type.method` for a forwarding generic
+        // method (Axis A) — and only at depth 0: a NESTED fn (D2b) may share a top-level name but
+        // never carries slots of its own (it captures the enclosing `$ty` locals instead), and
+        // closures never appear in the map.
         let hidden = if self.fn_depth == 0 {
             name.as_deref()
                 .and_then(|n| self.sites.forwarding_fns.get(n).copied())
@@ -1423,6 +1441,7 @@ impl Lowerer<'_> {
             name,
             captures,
             params: param_names,
+            hidden,
             defaults,
             body,
             temp_count,
@@ -1672,6 +1691,45 @@ impl Lowerer<'_> {
             // qualified identity (`app.storage.Todo`) and there is nothing left to look up. Resolved
             // through the same `TypeRef::head_name` the name-keyed reflection queries use, which is
             // what makes the two agree by construction rather than by convention.
+            // …unless the checker recognized `T` as a parameter of the ENCLOSING generic type inside
+            // one of its instance methods (generic constructor reflection, Gap B): one compiled body
+            // serves every instantiation, so there is no constant to fold — the instantiation rides
+            // on the receiver's reflected type tag, and the name is read off argument `index` of it.
+            Expr::TypeName { ty, span } if self.sites.self_type_arg_sites.contains_key(span) => {
+                let (owner, index) = self.sites.self_type_arg_sites[span].clone();
+                Ok(self.emit(
+                    out,
+                    Rvalue::TypeArgName {
+                        operand: Atom::Var {
+                            name: "self".to_string(),
+                            span: *span,
+                        },
+                        index,
+                        type_name: owner,
+                        param: ty.head_name(),
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            // …or as a FORWARDED parameter of the enclosing top-level generic fn (poly-values
+            // F2b): the same "one body serves every instantiation" reason, the other channel — the
+            // hidden `$ty<i>` slot that already carries the decode recipe also names the
+            // instantiation, and this surface wants nothing but that name.
+            Expr::TypeName { span, .. } if self.sites.forwarded_slot_sites.contains_key(span) => {
+                let slot = self.sites.forwarded_slot_sites[span];
+                Ok(self.emit(
+                    out,
+                    Rvalue::TypeSlotName {
+                        slot: Atom::Var {
+                            name: hidden_param_name(slot),
+                            span: *span,
+                        },
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::TypeName { ty, .. } => Ok(Atom::Const(Const::Str(ty.head_name()))),
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
@@ -1699,7 +1757,7 @@ impl Lowerer<'_> {
             // A FORWARDING generic fn used as a VALUE (poly-deferrals D2c): the checker resolved
             // the instantiation's hidden slots at this span — wrap the reference in a synthesized
             // closure `($fv0, …) => name($fv0, …)` whose inner call carries THIS span, so
-            // `prepend_hidden_args` binds the resolved atoms into the value (a partial
+            // `type_arg_atoms` binds the resolved atoms into the value (a partial
             // application over the type-argument slots; a `Forward` slot captures the enclosing
             // `$ty` local like any closure upvalue). The inner callee gets a zero-width span so
             // it cannot re-trigger this arm.
@@ -2076,11 +2134,13 @@ impl Lowerer<'_> {
                             *span,
                         );
                         let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
+                        let type_args = self.type_arg_atoms(span);
                         return Ok(self.emit(
                             out,
                             Rvalue::Call {
                                 callee,
                                 args: arg_atoms,
+                                type_args,
                                 supplied,
                                 span: *span,
                             },
@@ -2141,6 +2201,11 @@ impl Lowerer<'_> {
                             *span,
                         ));
                     }
+                    // A call of a FORWARDING generic METHOD (Axis A) supplies its type arguments
+                    // through their own channel, exactly as a free function's call does — so
+                    // `supplied` still indexes the value parameters.
+                    let type_args = self.type_arg_atoms(span);
+                    let reflect = self.sites.construction_sites.get(span).cloned();
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -2151,7 +2216,8 @@ impl Lowerer<'_> {
                             reuse: false,
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
-                            reflect: self.sites.construction_sites.get(span).cloned(),
+                            reflect,
+                            type_args,
                             supplied,
                             span: *span,
                         },
@@ -2159,15 +2225,16 @@ impl Lowerer<'_> {
                     ))
                 } else {
                     let callee = self.lower_expr(callee, out)?;
-                    let (mut arg_atoms, supplied) = self.lower_args(args, *span, out)?;
-                    // A call of a FORWARDING generic (F2b): prepend its hidden type-argument
-                    // atoms, mirroring the callee's prepended hidden parameters.
-                    self.prepend_hidden_args(&mut arg_atoms, span);
+                    let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
+                    // A call of a FORWARDING generic (F2b) supplies its type arguments through
+                    // their own channel, so the value arguments — and `supplied` — are untouched.
+                    let type_args = self.type_arg_atoms(span);
                     Ok(self.emit(
                         out,
                         Rvalue::Call {
                             callee,
                             args: arg_atoms,
+                            type_args,
                             supplied,
                             span: *span,
                         },
@@ -2190,30 +2257,31 @@ impl Lowerer<'_> {
                     name: name.to_string(),
                     span: *name_span,
                 };
-                let (mut arg_atoms, supplied) = self.lower_args(args, *span, out)?;
-                // A call of a FORWARDING generic (F2b): prepend its hidden type-argument atoms.
-                self.prepend_hidden_args(&mut arg_atoms, span);
+                let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
+                // A call of a FORWARDING generic (F2b) supplies its type arguments through their
+                // own channel. `supplied` therefore survives verbatim: it indexes the VALUE
+                // parameters, and those no longer shift. While the type arguments rode in the
+                // argument list this had to be thrown away at every forwarding call site, so a
+                // forwarding call could not use a named argument that skipped a default.
+                let type_args = self.type_arg_atoms(span);
                 Ok(self.emit(
                     out,
                     Rvalue::Call {
                         callee,
                         args: arg_atoms,
-                        // Hidden type-argument atoms are prepended above, shifting every parameter
-                        // position, so a binding recorded for the surface call does not apply.
-                        supplied: if self.sites.hidden_arg_sites.contains_key(span) {
-                            None
-                        } else {
-                            supplied
-                        },
+                        type_args,
+                        supplied,
                         span: *span,
                     },
                     *span,
                 ))
             }
             // `recv.m::<U, ...>(args)` (generic methods, D3): the explicit instantiation is a
-            // checker-only fact — the method's own type parameters are erased, and a generic
-            // method never forwards (the pinned D3 boundary, so no hidden slot) — so this lowers
-            // EXACTLY as the plain `recv.m(args)` method call does. Rebuild the equivalent
+            // checker-only fact — the method's own type parameters are erased — so this lowers
+            // EXACTLY as the plain `recv.m(args)` method call does, and the desugared call keeps
+            // THIS span, so a forwarding method's resolved type-argument slots (keyed on that
+            // span) are picked up either way: an inferred instantiation and a spelled one produce
+            // the same node. Rebuild the equivalent
             // member-call `Expr` at the same span and reuse the one method-dispatch path (instance
             // → `Rvalue::Method`, `Type.assoc` → the associated-call lowering), so every
             // site-keyed dispatch decision is shared by construction.
@@ -2689,7 +2757,7 @@ impl Lowerer<'_> {
                 let recipe = self.sites.typed_module_call_sites.get(span).cloned();
                 let dynamic = self
                     .sites
-                    .dynamic_recipe_sites
+                    .forwarded_slot_sites
                     .get(span)
                     .map(|&i| Atom::Var {
                         name: hidden_param_name(i),
@@ -2723,10 +2791,14 @@ impl Lowerer<'_> {
             Expr::AttributesOf { ty, span } => {
                 // A forwarded type parameter (F2b) resolves its concrete NAME at runtime through
                 // the hidden slot; a concrete `T` stays a compile-time name as before.
-                let dynamic = self.sites.dynamic_attr_sites.get(span).map(|&i| Atom::Var {
-                    name: hidden_param_name(i),
-                    span: *span,
-                });
+                let dynamic = self
+                    .sites
+                    .forwarded_slot_sites
+                    .get(span)
+                    .map(|&i| Atom::Var {
+                        name: hidden_param_name(i),
+                        span: *span,
+                    });
                 Ok(self.emit(
                     out,
                     Rvalue::AttributesOf {
@@ -2944,6 +3016,8 @@ impl Lowerer<'_> {
                         arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
                     let (arg_atoms, supplied) = self.permute_args(arg_atoms, *span);
+                    let type_args = self.type_arg_atoms(span);
+                    let reflect = self.sites.construction_sites.get(span).cloned();
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -2954,7 +3028,8 @@ impl Lowerer<'_> {
                             reuse: false,
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
-                            reflect: self.sites.construction_sites.get(span).cloned(),
+                            reflect,
+                            type_args,
                             supplied,
                             span: *span,
                         },
@@ -2967,11 +3042,13 @@ impl Lowerer<'_> {
                         arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
                     let (arg_atoms, supplied) = self.permute_args(arg_atoms, *span);
+                    let type_args = self.type_arg_atoms(span);
                     Ok(self.emit(
                         out,
                         Rvalue::Call {
                             callee,
                             args: arg_atoms,
+                            type_args,
                             supplied,
                             span: *span,
                         },
@@ -2987,6 +3064,8 @@ impl Lowerer<'_> {
                 span,
             } => {
                 let receiver = self.lower_expr(receiver, out)?;
+                let type_args = self.type_arg_atoms(span);
+                let reflect = self.sites.construction_sites.get(span).cloned();
                 Ok(self.emit(
                     out,
                     Rvalue::Method {
@@ -2995,7 +3074,8 @@ impl Lowerer<'_> {
                         name_span: *name_span,
                         args: vec![left_atom],
                         reuse: false,
-                        reflect: self.sites.construction_sites.get(span).cloned(),
+                        reflect,
+                        type_args,
                         // A bare callee takes the piped value and nothing else, so there is no
                         // argument list to rebind.
                         supplied: None,
@@ -3007,11 +3087,13 @@ impl Lowerer<'_> {
             // `x |> f` ⟶ `f(x)`.
             _ => {
                 let callee = self.lower_expr(right, out)?;
+                let type_args = self.type_arg_atoms(&span);
                 Ok(self.emit(
                     out,
                     Rvalue::Call {
                         callee,
                         args: vec![left_atom],
+                        type_args,
                         supplied: None,
                         span,
                     },
@@ -3127,7 +3209,7 @@ impl Lowerer<'_> {
         let recipe = self.sites.typed_method_call_sites.get(&span).cloned();
         let dynamic = self
             .sites
-            .dynamic_recipe_sites
+            .forwarded_slot_sites
             .get(&span)
             .map(|&i| Atom::Var {
                 name: hidden_param_name(i),

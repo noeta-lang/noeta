@@ -60,6 +60,12 @@ Enforcement is **bottom-up**: a type's fields are decoded and validated before t
 points at the innermost value. A JSON failure is a path-carrying [`JsonError`](std-json)
 reading `field[i]: <message>`.
 
+The rule is about *types*, not only structs: an [enum-typed field](Derives#enum-typed-fields)
+decodes through the same door, so an enum implementing `Validate` has its `validate()` run on the
+freshly selected case exactly as a struct does. A wire value that names no case at all never reaches
+a validator — it is refused by the decode itself, as a path-carrying `unknown_variant` error listing
+every accepted value.
+
 ```noeta ignore
 use std.json
 use std.json.JsonError

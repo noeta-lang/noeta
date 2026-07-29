@@ -26,6 +26,11 @@
 //! So the checker reports an error wherever a type is concretely known and unambiguously wrong, and
 //! tolerates only the interior holes above — never a hole at a typed boundary.
 //!
+//! [`Type::Never`] closes the lattice at the other end: the **bottom**, the declared return of a
+//! function that does not return. It is the mirror of `dyn` (everything widens into the top;
+//! the bottom widens into everything) and, like [`Type::Union`], it is *declared and never
+//! inferred*.
+//!
 //! ## `TypeId` interning — deferred
 //!
 //! The architecture calls for interning types behind a `TypeId`. That is a throughput
@@ -74,6 +79,32 @@ pub enum Type {
     /// escape. Every type widens into it (`T <: dyn`); narrowing out (`dyn → T`) is explicit and
     /// checked. Operations on a `dyn` defer to the runtime dynamic dispatch path.
     Dyn,
+    /// The **bottom type** `never` — inhabited by no value, the declared return of a function that
+    /// **does not return** (`os.exit`, `server.serve`, a `panic`-like abort).
+    ///
+    /// It is the exact dual of [`Type::Dyn`], and the two are deliberately symmetric: every type
+    /// widens *into* `dyn` (`T <: dyn`), and `never` widens into *every* type (`never <: T`). So a
+    /// call to a `never`-returning function type-checks in any position — there is no value to
+    /// mis-use — and nothing after it can run.
+    ///
+    /// **Declared, never inferred** (the same rule [`Type::Union`] follows). Inference never
+    /// *produces* `never`: a function's return is `never` because its signature says so, and a call
+    /// expression is `never` because its callee's declared return is. That keeps the whole feature a
+    /// property of signatures — which is exactly what the tier runners need to ask about a top-level
+    /// statement ("does this call return?") without a reachability analysis.
+    ///
+    /// Consequences worth stating, because each one is a decision:
+    /// - **`dyn`**: `never <: dyn` holds by the bottom rule, and `dyn <: never` is false — narrowing
+    ///   out of the top is always explicit, and there is nothing to narrow *to* here anyway.
+    /// - **Unions**: `never` is the identity element, so [`Type::union`] drops it (`int | never` is
+    ///   `int`). It contributes no inhabitants, and leaving it in would make two spellings of the
+    ///   same set compare unequal.
+    /// - **Generics**: no special case. `never` substitutes into a type parameter like any other
+    ///   type, and `never <: T` makes a `never`-typed argument acceptable at every bound.
+    /// - **Reflection**: it gets its own [`noeta_ast::reflect::TypeRepr::Never`] rather than folding
+    ///   into `Unit` or a nominal `never` — see that variant for why the fold is the bug the
+    ///   `BuiltinTy` funnel exists to prevent.
+    Never,
     /// `void` / the empty tuple — the type of statements and `Ok()`-style unit payloads.
     Unit,
     Int,
@@ -156,6 +187,52 @@ pub enum Type {
 pub use noeta_ast::{BuiltinTy, Spelling, parse_int_width};
 
 impl Type {
+    /// The type's **name-keyed identity** — the qualified head name every name-keyed runtime
+    /// registry is stored under (`attributes_of`'s manifest, `field_specs_of`, `variants_of`,
+    /// `construct`, `invoke`), and the string `type_name::<T>()` answers with.
+    ///
+    /// The lattice twin of [`noeta_ast::TypeRef::head_name`], and deliberately head-only for the
+    /// same reason: a registry is keyed on the constructor, never on the instantiation, so
+    /// `List<int>` keys under `List` exactly as the surface `type_name::<List<int>>()` folds to
+    /// `"List"`. Keeping the two in lock-step is what lets a *forwarded* type parameter answer
+    /// identically to the concrete turbofish it was instantiated from — the property
+    /// [`Display`](std::fmt::Display) cannot serve, since it renders the **short** name
+    /// (`Todo`, not `app.storage.Todo`) and spells the arguments out.
+    ///
+    /// Empty for the forms that have no name-keyed head at the surface either — a function type, a
+    /// union, a tuple, an inference hole — matching `TypeRef::head_name`'s own empty answer.
+    pub fn head_name(&self) -> String {
+        match self {
+            Type::Named(name, _) => name.clone(),
+            Type::DynTrait(name) => name.clone(),
+            Type::List(_) => "List".to_string(),
+            Type::Set(_) => "Set".to_string(),
+            Type::Map(..) => "Map".to_string(),
+            Type::Option(_) => "Option".to_string(),
+            Type::Result(..) => "Result".to_string(),
+            Type::Unit
+            | Type::Int
+            | Type::Float
+            | Type::F32
+            | Type::F64
+            | Type::IntN { .. }
+            | Type::Bool
+            | Type::String
+            // The bottom type is spelled `never` at the surface (`BuiltinTy::Never`), so its
+            // name-key is that same word — what `Display` already writes, and what
+            // `TypeRef::head_name` folds for the surface spelling. No instantiation can be
+            // `never`, so this arm is unreachable through the forwarding table; it is here
+            // because the match is exhaustive on purpose, which is what turned the semantic
+            // merge conflict that produced it into a compile error rather than a silent wrong
+            // answer.
+            | Type::Never
+            | Type::Bytes
+            | Type::Dyn
+            | Type::Kind(_) => self.to_string(),
+            Type::Unknown | Type::Fn { .. } | Type::Union(_) | Type::Tuple(_) => String::new(),
+        }
+    }
+
     /// Whether this is one of the two numeric types arithmetic (`+ - * / %`) accepts. (The
     /// checker separately lets an interior hole / `dyn` operand through via
     /// [`Self::defers_to_runtime`], so this is the strict concrete test only.)
@@ -296,6 +373,12 @@ impl Type {
         if matches!(sup, Dyn) {
             return true;
         }
+        // `never` is the bottom type: it widens into everything. Checked before the arms below so a
+        // diverging call is accepted in *every* position, container and function types included —
+        // there is no value to be wrong about.
+        if matches!(sub, Never) {
+            return true;
+        }
         let rec = |a: &Type, b: &Type| Type::subtype_with(a, b, nominal);
         match (sub, sup) {
             // Narrowing out of `dyn` is never implicit (only via a checked `.as<T>()`).
@@ -370,6 +453,9 @@ impl Type {
     /// stay simple:
     ///
     /// - **`dyn` absorbs**: a union that includes the open top *is* the open top (`int | dyn` = `dyn`).
+    /// - **`never` vanishes**: the bottom is the union's identity element (`int | never` = `int`) —
+    ///   it contributes no inhabitants, and keeping it would let two spellings of the same set
+    ///   compare unequal. A union of nothing but `never`s collapses to `never` by the singleton rule.
     /// - **singleton collapses**: one distinct member is just that member (`int | int` = `int`).
     ///
     /// This is the only constructor for a union; nothing builds the variant directly. An empty
@@ -377,13 +463,21 @@ impl Type {
     /// has members — but defined for totality).
     pub fn union(members: impl IntoIterator<Item = Type>) -> Type {
         let mut flat: Vec<Type> = Vec::new();
+        // A `never` member is dropped rather than pushed — the bottom adds no inhabitants. Tracked
+        // so an all-`never` input still answers `never` instead of degenerating to a hole.
+        let mut saw_never = false;
         for m in members {
             match m {
                 Type::Dyn => return Type::Dyn,
+                Type::Never => saw_never = true,
                 Type::Union(inner) => {
                     for t in inner {
                         if t == Type::Dyn {
                             return Type::Dyn;
+                        }
+                        if t == Type::Never {
+                            saw_never = true;
+                            continue;
                         }
                         if !flat.contains(&t) {
                             flat.push(t);
@@ -398,6 +492,7 @@ impl Type {
             }
         }
         match flat.len() {
+            0 if saw_never => Type::Never,
             0 => Type::Unknown,
             1 => flat.pop().unwrap(),
             _ => Type::Union(flat),
@@ -452,6 +547,7 @@ impl Type {
                     BuiltinTy::Bytes => Type::Bytes,
                     BuiltinTy::Unit => Type::Unit,
                     BuiltinTy::Dyn => Type::Dyn,
+                    BuiltinTy::Never => Type::Never,
                     BuiltinTy::List => Type::List(Box::new(arg(0))),
                     BuiltinTy::Set => Type::Set(Box::new(arg(0))),
                     BuiltinTy::Map => Type::Map(Box::new(arg(0)), Box::new(arg(1))),
@@ -481,6 +577,7 @@ impl std::fmt::Display for Type {
         match self {
             Type::Unknown => f.write_str("?"),
             Type::Dyn => f.write_str("dyn"),
+            Type::Never => f.write_str("never"),
             Type::Unit => f.write_str("void"),
             Type::Int => f.write_str("int"),
             Type::Float => f.write_str("float"),
@@ -575,6 +672,7 @@ mod tests {
         let mut census = vec![
             Type::Unknown,
             Type::Dyn,
+            Type::Never,
             Type::Unit,
             Type::Int,
             Type::Float,
@@ -627,7 +725,7 @@ mod tests {
                 .map(std::mem::discriminant)
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            22,
+            23,
             "a `Type` variant was added or removed — add a sample to `every_variant` and update this \
              count, so the numeric-set check below keeps covering the whole lattice"
         );
@@ -840,5 +938,73 @@ mod tests {
         };
         assert!(Type::subtype(&sub, &sup));
         assert!(!Type::subtype(&sup, &sub));
+    }
+    /// `never` is the **bottom**: it widens into every type, and nothing widens into it. The exact
+    /// mirror of the [`Type::Dyn`] tests above, which is the whole design — a lattice with a top and
+    /// no bottom cannot say "this call does not return".
+    #[test]
+    fn subtype_never_widens_into_everything_but_nothing_into_it() {
+        for sup in [
+            Type::Int,
+            Type::String,
+            Type::Unit,
+            Type::Dyn,
+            Type::List(Box::new(Type::Int)),
+            Type::Named("Order".into(), vec![]),
+            Type::union([Type::Int, Type::String]),
+            Type::Fn {
+                params: vec![Type::Int],
+                ret: Box::new(Type::Int),
+            },
+            Type::Never,
+        ] {
+            assert!(Type::subtype(&Type::Never, &sup), "never <: {sup}");
+        }
+        // Nothing narrows INTO the bottom — there is no value to narrow. (`Unknown` is exempt: an
+        // inference hole is bidirectionally compatible with everything, by design.)
+        for sub in [
+            Type::Int,
+            Type::String,
+            Type::Unit,
+            Type::Dyn,
+            Type::Named("Order".into(), vec![]),
+        ] {
+            assert!(!Type::subtype(&sub, &Type::Never), "{sub} </: never");
+        }
+    }
+
+    /// `never` is the union's **identity element**, the dual of `dyn`'s absorption: `dyn` swallows a
+    /// union because it contributes every value, `never` disappears from one because it contributes
+    /// none. Without this, `int | never` and `int` would be two spellings of one set that compare
+    /// unequal.
+    #[test]
+    fn union_drops_never_members() {
+        assert_eq!(Type::union([Type::Int, Type::Never]), Type::Int);
+        assert_eq!(
+            Type::union([Type::Int, Type::Never, Type::String]),
+            Type::Union(vec![Type::Int, Type::String])
+        );
+        assert_eq!(
+            Type::union([Type::union([Type::Int, Type::Never]), Type::String]),
+            Type::Union(vec![Type::Int, Type::String])
+        );
+        // A union of nothing but bottoms is the bottom — NOT the inference hole an empty input
+        // gives, which would quietly turn "no values" into "no information".
+        assert_eq!(Type::union([Type::Never, Type::Never]), Type::Never);
+        assert_ne!(Type::union([Type::Never]), Type::Unknown);
+    }
+
+    /// The bottom is a **concrete declared type**, not an inference hole and not the dynamic escape:
+    /// it must not inherit either one's leniency. A hole suppresses diagnostics because information
+    /// is missing; `never` carries complete information — that there is nothing here.
+    #[test]
+    fn never_is_neither_a_hole_nor_dyn() {
+        assert!(!Type::Never.is_gradual());
+        assert!(!Type::Never.defers_to_runtime());
+        assert!(!Type::Never.contains_unknown());
+        assert!(!Type::Never.is_arith_numeric());
+        assert_eq!(Type::Never.to_string(), "never");
+        // The surface name round-trips, like every other built-in spelling.
+        assert_eq!(Type::from_ref(&named("never", vec![])), Type::Never);
     }
 }

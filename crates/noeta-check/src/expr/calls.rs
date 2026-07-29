@@ -242,33 +242,11 @@ impl Checker {
                 hidden.push(noeta_ext_abi::HiddenArg::Forward(j as u32));
                 continue;
             }
-            let recipe = self.type_to_recipe(&sigma);
-            if slot.needs_recipe && recipe.is_none() {
-                // Report the precise unbuildable-type error (mirroring the call site) and keep
-                // resolving: the program is already rejected, and falling back to synthesis here
-                // would only stack the generic value-boundary E0058 on top.
-                self.error(
-                    DiagnosticCode::TypeMismatch,
-                    span,
-                    format!(
-                        "`{sigma}` cannot be built by the call-site-typed `::<{}>` position of \
-                         `{name}`",
-                        slot.template
-                    ),
-                );
-            }
-            let info = noeta_ext_abi::TypeArgInfo {
-                name: sigma.to_string(),
-                recipe,
-            };
-            let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
-                Some(i) => i,
-                None => {
-                    self.sites.type_arg_table.push(info);
-                    self.sites.type_arg_table.len() - 1
-                }
-            };
-            hidden.push(noeta_ext_abi::HiddenArg::Table(idx as u32));
+            // The shared interning site derives every projection of the instantiation and reports
+            // an unbuildable one. Reporting there (rather than bailing here) is deliberate: the
+            // program is already rejected, and falling back to synthesis would only stack the
+            // generic value-boundary E0058 on top of the precise message.
+            hidden.push(self.intern_type_arg(&sigma, slot, name, span));
         }
         Some(hidden)
     }
@@ -330,7 +308,10 @@ impl Checker {
             args,
             callee_span,
             seed,
-            Some(call_span),
+            // A seeded position hands the arguments through as written; the caller has not
+            // compacted them, so argument `i` is parameter `i`.
+            &[],
+            Some((call_span, name.to_string())),
             env,
         );
         // The deferred-argument safety net, mirroring `synth_call`.
@@ -507,6 +488,34 @@ impl Checker {
             .map(|(n, _)| n.clone())
             .zip(resolved)
             .collect();
+        // Named arguments, normalized into parameter order exactly as the non-turbofish call does
+        // (`synth_call`) — spelling the instantiation must not change what a label means. Without
+        // this, `f::<T>(1, c: 9)` checked its arguments in written order against the declared
+        // parameters and reported a type error naming the parameter it skipped.
+        let permuted;
+        let mut supplied_at: Vec<usize> = Vec::new();
+        let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
+            let (names, types) = (sig.param_names.clone(), sig.params.clone());
+            match self.order_arguments(
+                arg_exprs,
+                &names,
+                &types,
+                sig.required,
+                name,
+                args,
+                span,
+                span,
+            ) {
+                Some((a, _, at)) => {
+                    permuted = a;
+                    supplied_at = at;
+                    &permuted[..]
+                }
+                None => return sig.ret.clone(),
+            }
+        } else {
+            arg_exprs
+        };
         self.check_generic_call_seeded(
             name,
             &generic,
@@ -515,7 +524,8 @@ impl Checker {
             arg_exprs,
             span,
             seed,
-            Some(span),
+            &supplied_at,
+            Some((span, name.to_string())),
             env,
         )
     }
@@ -642,6 +652,9 @@ impl Checker {
                     // instantiation, closure finalization, arity and assignability) then sees a
                     // plain positional call and needs no notion of labels at all.
                     let (permuted, supplied_params);
+                    // Which raw parameter each argument landed on, for the generic path below —
+                    // empty for the dense-prefix call, where argument `i` is parameter `i`.
+                    let mut supplied_at: Vec<usize> = Vec::new();
                     let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
                         let (names, types) = (sig.param_names.clone(), sig.params.clone());
                         match self.order_arguments(
@@ -654,9 +667,10 @@ impl Checker {
                             span,
                             call_span,
                         ) {
-                            Some((a, p)) => {
+                            Some((a, p, at)) => {
                                 permuted = a;
                                 supplied_params = Some(p);
+                                supplied_at = at;
                                 &permuted[..]
                             }
                             None => return self.symbols.functions[name.as_str()].ret.clone(),
@@ -678,7 +692,8 @@ impl Checker {
                             arg_exprs,
                             span,
                             &[],
-                            Some(call_span),
+                            &supplied_at,
+                            Some((call_span, name.to_string())),
                             env,
                         );
                     }
@@ -753,9 +768,13 @@ impl Checker {
                 Type::Unknown
             }
             Expr::Member { receiver, name, .. } => {
-                // `Enum.try_from(s)` → `?Enum` / `Enum.from(s)` → `Enum` — the built-in string→case
+                // `Enum.try_from(v)` → `?Enum` / `Enum.from(v)` → `Enum` — the built-in wire→case
                 // conversions (PHP `tryFrom`/`from`), reserved on every enum type. Checked before the
                 // variant constructor so the names cannot be captured by a same-named variant.
+                //
+                // The argument is the enum's **backing type** where it has one, plus `string` for the
+                // case-name spelling — so a `enum Code: int { Ok = 200 }` accepts `Code.try_from(200)`,
+                // the value its schema advertises and the value that comes off a wire.
                 //
                 // A **declared** method of that name wins. An `impl From<Source>` in an enum's body
                 // hoists a `from`, and the `?` conversion already resolves it there, so reserving the
@@ -770,7 +789,8 @@ impl Checker {
                         .methods
                         .contains_key(&(tn.to_string(), name.to_string()))
                 {
-                    self.check_args(&[Type::String], 1, args, arg_exprs, span, name);
+                    let probe = self.enum_probe_type(tn.as_str());
+                    self.check_args(&[probe], 1, args, arg_exprs, span, name);
                     let ty = Type::Named(tn.to_string(), Vec::new());
                     return if name == "from" {
                         ty
@@ -891,9 +911,12 @@ impl Checker {
                         return sig.ret.clone();
                     }
                     // A static call: the type arguments are not known from a bare type name, so the
-                    // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`).
-                    return self.call_user_method(
+                    // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`)
+                    // — and, in a checked position, the expected type does (`r: Repo<Todo> =
+                    // Repo.new("todos")` binds `T = Todo` through the return-position seed).
+                    let ret = self.call_user_method(
                         name,
+                        Some(tn.as_str()),
                         &sig,
                         args,
                         arg_exprs,
@@ -902,6 +925,11 @@ impl Checker {
                         Some(call_span),
                         env,
                     );
+                    // A **fresh constructor** of a generic type: the instantiation resolved here is
+                    // the one the constructor body could not see, so record the call as the
+                    // construction site and let the backends stamp the returned object with it.
+                    self.note_constructor_call(tn.as_str(), name, &ret, call_span);
+                    return ret;
                 }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
@@ -945,6 +973,7 @@ impl Checker {
                     }
                     return self.call_user_method(
                         name,
+                        Some(n.as_str()),
                         &sig,
                         args,
                         arg_exprs,
@@ -1166,9 +1195,17 @@ impl Checker {
             .get(&(n.clone(), "call".to_string()))
             .cloned()
         {
-            return Some(
-                self.call_user_method("call", &sig, args, arg_exprs, span, recv_args, None, env),
-            );
+            return Some(self.call_user_method(
+                "call",
+                Some(n.as_str()),
+                &sig,
+                args,
+                arg_exprs,
+                span,
+                recv_args,
+                None,
+                env,
+            ));
         }
         // An **extern** type participates in the protocol exactly as a user type does (http arc
         // H10): a registered `call` method makes its values invocable. Extern types already join
@@ -1252,10 +1289,14 @@ impl Checker {
         ty
     }
 
+    /// `type_name` is the method's owning type — `None` only where the receiver is not a resolvable
+    /// user type. It is what qualifies the forwarding key (`Type.method`), so two classes declaring
+    /// a `load` cannot share a slot layout.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn call_user_method(
         &mut self,
         name: &str,
+        type_name: Option<&str>,
         sig: &FnSig,
         args: &mut [Type],
         arg_exprs: &[CallArg],
@@ -1270,6 +1311,7 @@ impl Checker {
         // the call span, so a call with no span to key (a synthesized or forwarded one) keeps its
         // written order and its labels are refused rather than silently ignored.
         let permuted;
+        let mut supplied_at: Vec<usize> = Vec::new();
         let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
             let Some(call_span) = call_span else {
                 self.error(
@@ -1290,8 +1332,9 @@ impl Checker {
                 span,
                 call_span,
             ) {
-                Some((a, _)) => {
+                Some((a, _, at)) => {
                     permuted = a;
+                    supplied_at = at;
                     &permuted[..]
                 }
                 None => return sig.ret.clone(),
@@ -1318,6 +1361,16 @@ impl Checker {
                 let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
                 bind_type_params(&generic.raw_ret, &expected, &tps, &mut seed);
             }
+            // A generic METHOD forwards its OWN type parameters through the call node's
+            // type-argument channel (Axis A), exactly as a top-level generic fn does — keyed
+            // `Type.method`, so the body's slots and this call site agree on the layout. It takes
+            // both a resolvable owning type and a call span to key on; a synthesized call (no
+            // span) or an unresolvable receiver supplies nothing, and the callee's body aborts at
+            // its forwarded site rather than reading a value argument as a type-table index.
+            let hidden_site = match (call_span, type_name) {
+                (Some(cs), Some(ty)) => Some((cs, format!("{ty}.{name}"))),
+                _ => None,
+            };
             return self.check_generic_call_seeded(
                 name,
                 generic,
@@ -1326,8 +1379,8 @@ impl Checker {
                 arg_exprs,
                 span,
                 seed,
-                // Methods never forward (the pinned D3 boundary), so no hidden site.
-                None,
+                &supplied_at,
+                hidden_site,
                 env,
             );
         }
@@ -1500,6 +1553,32 @@ impl Checker {
         for ((n, _), t) in own.iter().zip(resolved) {
             seed.entry(n.clone()).or_insert(t);
         }
+        // Named arguments, normalized into parameter order exactly as the non-turbofish method
+        // call does (`call_user_method`) — see the free-function twin above.
+        let permuted;
+        let mut supplied_at: Vec<usize> = Vec::new();
+        let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
+            let (names, types) = (sig.param_names.clone(), sig.params.clone());
+            match self.order_arguments(
+                arg_exprs,
+                &names,
+                &types,
+                sig.required,
+                name,
+                args,
+                span,
+                span,
+            ) {
+                Some((a, _, at)) => {
+                    permuted = a;
+                    supplied_at = at;
+                    &permuted[..]
+                }
+                None => return sig.ret.clone(),
+            }
+        } else {
+            arg_exprs
+        };
         self.check_generic_call_seeded(
             name,
             &generic,
@@ -1508,7 +1587,10 @@ impl Checker {
             arg_exprs,
             span,
             seed,
-            None,
+            &supplied_at,
+            // An EXPLICIT method turbofish forwards on the same channel as an inferred one — the
+            // turbofish only pins the instantiation the seed carries into the slot templates.
+            Some((span, format!("{type_name}.{name}"))),
             env,
         )
     }

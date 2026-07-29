@@ -1,14 +1,15 @@
 //! **Type-param forwarding pre-pass** (poly-values F2b, extended by poly-deferrals D2a): which
-//! top-level generic functions forward a type parameter into a **call-site-typed position** — a
+//! generic functions and methods forward a type parameter into a **call-site-typed position** — a
 //! native turbofish (`json.try_parse::<T>`), a reflection manifest query (`attributes_of::<T>`),
-//! or (transitively) another forwarding generic (`load::<T>(p)`).
+//! the type's own name (`type_name::<T>()`), or (transitively) another forwarding generic
+//! (`load::<T>(p)`).
 //!
 //! Generics are erased at runtime, so one compiled body serves every instantiation; a forwarded
 //! site therefore needs its per-instantiation data (`TypeRecipe` / type name) delivered
-//! **dynamically** — as a hidden call argument indexing the program's `TypeArgInfo` table. This
-//! pass computes, purely syntactically and BEFORE body checking, each function's ordered list of
-//! forwarding **slots**, so both the body-side sites (which read the hidden slot) and the call
-//! sites (which supply it) agree on the layout.
+//! **dynamically** — through the call node's own type-argument channel, indexing the program's
+//! `TypeArgInfo` table. This pass computes, purely syntactically and BEFORE body checking, each
+//! function's ordered list of forwarding **slots**, so both the body-side sites (which read the
+//! slot) and the call sites (which supply it) agree on the layout.
 //!
 //! A slot is identified by its **type template** over the enclosing fn's type parameters — the
 //! bare parameter (`T`) or a composite mentioning it (`List<T>`, `Map<string, T>`, `?T`,
@@ -25,13 +26,20 @@
 //! with a static table cannot serve. The fixpoint caps template depth and reports the offending
 //! function (`poisoned`) instead of looping — the checker turns that into a clear E0058.
 //!
-//! Scope: **top-level `fn` declarations only.** Methods carry their class's parameters (a
-//! different instantiation channel); a forwarded site there is a checker error, not silently
-//! wrong. A nested `fn` forwards the ENCLOSING top-level fn's parameters (D2b): its body is
-//! walked with the enclosing scope minus any names its own declaration shadows, and the slot it
-//! reads is the enclosing fn's (captured like any local by closure conversion). Transitive
-//! forwarding is recognized through an EXPLICIT turbofish only (`g::<T>(x)`) — forwarding via
-//! argument inference alone is rejected at the call site with a "spell the turbofish" help.
+//! Scope: **top-level `fn` declarations and methods.** A method is keyed `Type.method` and walked
+//! over its OWN type parameters only — its class's parameters travel on a different channel (the
+//! receiver's reflected type tag, which records an instantiation's name but no build recipe), so a
+//! site naming one of those is a checker error rather than a slot. A method's slots reach it
+//! through the call node's type-argument operand, never through prepended arguments: a method has
+//! four name-keyed entry points with no static receiver type (a `dyn` receiver, either handle
+//! form, `invoke`), all of which bind positionally, and a call through one of those supplies
+//! nothing and aborts.
+//!
+//! A nested `fn` forwards the ENCLOSING body's parameters (D2b): it is walked with the enclosing
+//! scope minus any names its own declaration shadows, and the slot it reads is the enclosing
+//! function's (captured like any local by closure conversion). Transitive forwarding is recognized
+//! through an EXPLICIT turbofish only (`g::<T>(x)`) — forwarding via argument inference alone is
+//! rejected at the call site with a "spell the turbofish" help.
 
 use crate::subst::{apply_subst, bind_type_params, from_ref_q, mentions_param};
 use noeta_ast::{ClosureBody, Expr, FnDecl, Program, Stmt, StrPart, TypeRef};
@@ -97,6 +105,30 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
             _ => None,
         })
         .collect();
+    // Every candidate the fixpoint walks: the top-level generic `fn`s above, keyed by their bare
+    // name, plus every generic METHOD, keyed `Type.method` — the same string `symbols.methods` and
+    // the call site build, so a body's slots and its call sites agree on the layout.
+    //
+    // A method is walked over its **own** type parameters only. Its class's parameters reach a
+    // reflected site through a different channel — the receiver's type tag, which the construction
+    // site stamped — so a site naming one of those is not this pass's business and must not take a
+    // hidden slot; a method parameter shadowing a class one is therefore correctly walked as the
+    // method's.
+    let mut candidates: Vec<Candidate<'_>> = fns
+        .iter()
+        .map(|f| Candidate {
+            key: f.name.to_string(),
+            decl: f,
+            own: f.type_params.iter().map(|p| p.name.as_str()).collect(),
+        })
+        .collect();
+    for (ty, method) in generic_methods(program) {
+        candidates.push(Candidate {
+            key: format!("{ty}.{}", method.name),
+            decl: method,
+            own: method.type_params.iter().map(|p| p.name.as_str()).collect(),
+        });
+    }
     // The declaration-order type parameters of every candidate, for aligning turbofish arguments.
     let decl_params: HashMap<&str, Vec<&str>> = fns
         .iter()
@@ -135,7 +167,8 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
     let mut poisoned: HashSet<String> = HashSet::new();
     loop {
         let mut changed = false;
-        for f in &fns {
+        for c in &candidates {
+            let f = c.decl;
             // Collect this pass's marks in first-appearance order.
             let mut marks: Vec<ForwardSlot> = Vec::new();
             {
@@ -154,9 +187,8 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
                     }
                 };
                 let mark: &mut dyn FnMut(Type, bool) = &mut mark_fn;
-                let params: Vec<&str> = f.type_params.iter().map(|p| p.name.as_str()).collect();
                 let cx = WalkCx {
-                    params: &params,
+                    params: &c.own,
                     map: &map,
                     decl_params: &decl_params,
                     sigs: &sigs,
@@ -166,14 +198,14 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
                     walk_stmt(stmt, &cx, mark);
                 }
                 if overflow {
-                    poisoned.insert(f.name.to_string());
+                    poisoned.insert(c.key.clone());
                 }
             }
             if marks.is_empty() {
                 continue;
             }
-            if map.get(f.name.as_str()) != Some(&marks) {
-                map.insert(f.name.to_string(), marks);
+            if map.get(c.key.as_str()) != Some(&marks) {
+                map.insert(c.key.clone(), marks);
                 changed = true;
             }
         }
@@ -181,6 +213,36 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
             return Forwarding { map, poisoned };
         }
     }
+}
+
+/// One function the fixpoint walks: the key its slots are recorded under (a bare `fn` name, or
+/// `Type.method`), the declaration whose body is walked, and the type parameters that body may
+/// forward — its own, never an enclosing type's.
+struct Candidate<'a> {
+    key: String,
+    decl: &'a FnDecl,
+    own: Vec<&'a str>,
+}
+
+/// Every generic method in the program, as `(owning type name, declaration)`. Classes, structs and
+/// enums alike — all three flatten their `impl` blocks into `methods`, which is also what the
+/// `(type, method)` dispatch machinery reads, so this sees exactly the methods a call can reach.
+fn generic_methods(program: &Program) -> Vec<(&str, &FnDecl)> {
+    let mut out: Vec<(&str, &FnDecl)> = Vec::new();
+    for stmt in &program.stmts {
+        let (name, methods) = match stmt {
+            Stmt::Class(d) => (d.name.as_str(), &d.methods),
+            Stmt::Struct(d) => (d.name.as_str(), &d.methods),
+            Stmt::Enum(d) => (d.name.as_str(), &d.methods),
+            _ => continue,
+        };
+        for m in methods {
+            if !m.type_params.is_empty() {
+                out.push((name, m));
+            }
+        }
+    }
+    out
 }
 
 /// The walk's read-only context: the enclosing fn's type parameters, the fixpoint state, every
@@ -359,6 +421,19 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 }
             }
         }
+        // `type_name::<T>()` — the other **name-only** consumer, and the cheapest of them: it wants
+        // the slot's `TypeArgInfo.name` and nothing else, no build recipe, so it forwards wherever
+        // `attributes_of` does and additionally for instantiations that have no recipe at all.
+        // Bare parameters only, matching the surface's own head-keyed identity —
+        // `type_name::<List<T>>()` heads at `List`, a name no instantiation changes, and stays the
+        // compile-time constant it always was.
+        Expr::TypeName { ty, .. } => {
+            for p in cx.params {
+                if is_bare_param(ty, p) {
+                    mark(Type::Named(p.to_string(), Vec::new()), false);
+                }
+            }
+        }
         // Transitive forwarding: an explicit turbofish call of another forwarding function. Each
         // of the callee's slot templates, with the call's type arguments substituted in, that
         // still mentions one of OUR parameters becomes our slot (`g::<T>` against g's `List<U>`
@@ -389,9 +464,11 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 rec!(a);
             }
         }
-        // A generic METHOD's own type parameters never forward (the pinned D3 boundary — method
-        // dispatch has no hidden-slot channel), so a member-call turbofish contributes nothing;
-        // its receiver/arguments recurse like any call's.
+        // A generic method's own parameters DO forward now (Axis A), but transitive forwarding
+        // through a member call is not recognized here: this pass is purely syntactic, and the
+        // receiver's type — which is what would name the callee's slot layout — is a checking
+        // result, not a syntactic one. A site that needs it is refused at the call rather than
+        // resolved wrongly. Receiver and arguments recurse like any call's.
         Expr::TypedMethodCall { recv, args, .. } => {
             rec!(recv);
             for a in noeta_ast::CallArg::values(args) {
@@ -528,11 +605,8 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 rec!(h);
             }
         }
-        // Leaves. `type_name::<T>()` is one on purpose: it is NOT a forwarding consumer, because a
-        // type parameter there is rejected outright (E0058) rather than resolved through a hidden
-        // slot — the string it yields is a compile-time constant, with no runtime node to feed.
-        Expr::TypeName { .. }
-        | Expr::Str { .. }
+        // Leaves.
+        Expr::Str { .. }
         | Expr::Int { .. }
         | Expr::IntN { .. }
         | Expr::Float { .. }

@@ -1,0 +1,94 @@
+// A generic METHOD forwards its OWN type parameter into a call-site-typed position — the recipe
+// consumer `json.try_parse::<T>` and the name consumer `type_name::<T>()` — on the same channel a
+// top-level generic fn uses (poly-values F2b): the call node's `type_args` operand, which fills the
+// callee's leading hidden slots.
+//
+// This was a pinned `E0058` until those type arguments got a channel of their own. They could not
+// ride the value-argument list, because a method has five runtime entry points and four are
+// name-keyed with no static receiver type — a `dyn` receiver, a bound handle, an unbound handle,
+// `invoke` — all of which bind arguments positionally, so a prepended slot would have corrupted
+// arity on every one of them. A separate operand leaves those four supplying nothing, and reaching
+// a forwarding method through one of them aborts (`method_forwarding_unreachable.noe`) instead of
+// reading a value argument as an index into the type table.
+//
+// Both call shapes are covered, because they bind arguments through different machinery: an
+// INSTANCE call (the receiver is a value, register 0) and an ASSOCIATED call (unit receiver in
+// argument position 0). And `describe` reads both channels at once — its own `T` through the hidden
+// slot, the class's `K` off the receiver's reflected type tag — which is what pins that the two
+// never trade places.
+// expect: stdout "order 7 costs 9.5"
+// expect: stdout "user Ada"
+// expect: stdout "bad-shape"
+// expect: stdout "assoc 3"
+// expect: stdout "todos:User:int"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+    total: float
+}
+
+struct User {
+    name: string
+}
+
+struct Count {
+    n: int
+}
+
+class Repo<K> {
+    pub label: string
+
+    fn new(label: string): Repo<K> {
+        return Repo { label: label };
+    }
+
+    // An INSTANCE method (it reads `self`), so the call goes through method dispatch.
+    fn load<T>(text: string): Result<T, JsonError> {
+        if self.label == "" {
+            return json.try_parse::<T>("{}");
+        }
+        return json.try_parse::<T>(text);
+    }
+
+    // An ASSOCIATED function (no `self`), reached on the type name.
+    fn parse<T>(text: string): Result<T, JsonError> {
+        return json.try_parse::<T>(text);
+    }
+
+    // The method's own `T` and the class's `K` in one body: `T` resolves through the hidden slot
+    // this call supplied, `K` off the receiver's reflected type tag.
+    fn describe<T>(): string {
+        return "${self.label}:${type_name::<T>()}:${type_name::<K>()}";
+    }
+}
+
+r: Repo<int> = Repo.new("todos");
+
+o = r.load::<Order>("{\"id\": 7, \"total\": 9.5}");
+echo match o {
+    Ok(v) => "order ${v.id} costs ${v.total}",
+    Err(e) => "unreached",
+}
+
+u = r.load::<User>("{\"name\": \"Ada\"}");
+echo match u {
+    Ok(v) => "user ${v.name}",
+    Err(e) => "unreached",
+}
+
+bad = r.load::<User>("{\"id\": 1}");
+echo match bad {
+    Ok(v) => "unreached",
+    Err(e) => "bad-shape",
+}
+
+c = Repo.parse::<Count>("{\"n\": 3}");
+echo match c {
+    Ok(v) => "assoc ${v.n}",
+    Err(e) => "unreached",
+}
+
+echo r.describe::<User>();

@@ -10,7 +10,7 @@ use noeta_check::TierFn;
 use noeta_runner::compile_real;
 use noeta_vm::VmBackend;
 
-use crate::cmd::test::{call_root_stmt_awaited, is_tier_setup};
+use crate::cmd::test::call_root_stmt_awaited;
 use crate::context::{Prologue, check_under, tier_prologue};
 use crate::output::plural;
 
@@ -190,11 +190,14 @@ fn run_file_benches(
         };
     }
 
+    // The same shared-setup policy `noeta test` uses, from the same place: a top-level effect runs
+    // unless it does not return. A bench that measures against a fixture the file sets up gets that
+    // fixture; a file whose top level calls `server.serve(…)` still never enters the accept loop.
     let setup: Vec<Stmt> = activated
         .program
         .stmts
         .iter()
-        .filter(|s| is_tier_setup(s))
+        .filter(|s| noeta_check::is_tier_setup(s, &run.diverging))
         .cloned()
         .collect();
 

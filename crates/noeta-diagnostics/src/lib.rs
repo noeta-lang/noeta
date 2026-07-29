@@ -264,8 +264,8 @@ pub enum DiagnosticCode {
     /// function (or not a function at all), or the count does not match the declared type parameters
     /// —; a **built-in type constructor** applied at the wrong arity in a type reference
     /// (`List<int, string>`, `Map<int>`); and a **name-keyed reflection turbofish**
-    /// (`field_specs_of::<T>()`, `construct::<T>(…)`, `type_name::<T>()`) whose argument is an erased
-    /// **type parameter**. In the first two cases type arguments bind to the constructor's parameters
+    /// (`field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)`) whose argument is a type
+    /// **parameter**. In the first two cases type arguments bind to the constructor's parameters
     /// in order; supply exactly one per parameter, or omit `<…>` entirely and let them infer.
     ///
     /// The reflection case is the same shape — a turbofish that cannot apply — for a reason peculiar
@@ -273,7 +273,14 @@ pub enum DiagnosticCode {
     /// instantiation, so inside `fn f<T>()` the argument `T` is only ever the literal characters `T`.
     /// Nothing is registered under that key, and before this the query answered with the empty schema
     /// (or an `Err`) and no diagnostic at all — a wrong answer indistinguishable from a real type with
-    /// no fields. Reflect where the type is concrete and pass the result in.
+    /// no fields.
+    ///
+    /// The fix is to hand the query a *name* rather than a type, and the name is now reachable from
+    /// inside a generic body: `type_name::<T>()` resolves a forwarded parameter through the same
+    /// hidden type-argument slot that carries a forwarded decode recipe, so
+    /// `field_specs_of(type_name::<T>())` answers the real per-instantiation schema. `type_name`
+    /// itself is E0058 only where neither instantiation channel reaches — a generic **method's own**
+    /// `<U>`, or a self-less member of a generic type, whose parameter rides the receiver.
     InvalidTypeArguments,
     /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
     /// that already means something in scope — an enclosing binding, a top-level function or type,
@@ -387,6 +394,21 @@ pub enum DiagnosticCode {
     /// unaffected — the boundary is the package, not the file. The escape hatch is the newtype: wrap
     /// the foreign type in a local one and `@derive(Trait, via: field)`.
     OrphanImpl,
+    /// **Warning.** A tier runner (`noeta test`/`noeta bench`) left a top-level statement out of the
+    /// shared setup, and a selected tier fn `use (…)`-captures a binding that statement writes to.
+    ///
+    /// Every case runs as `<shared setup> + <call the tier fn>`, and the setup is the file's
+    /// declarations, bindings, and top-level effects that *finish* — so the runner never exits or
+    /// blocks on the program's own `os.exit(…)` / `server.serve(…)` / `while true { … }`. What made
+    /// that policy dangerous was not the drop, it was the **silence**: a kept
+    /// `conn = db.connect(…)` beside a dropped `conn.migrate(…)` handed every test a live, working,
+    /// **empty** database, and the only signal was the database's own `no such table: users`.
+    ///
+    /// This is that missing signal. It fires only where the coupling is real — the statement writes
+    /// a name the selected test captures — and names both sides, so the fix (move the work into a
+    /// binding, or into a helper the test calls) is obvious from the message. Advisory: the tests
+    /// still run.
+    DroppedTierSetup,
 }
 
 impl DiagnosticCode {
@@ -462,6 +484,7 @@ impl DiagnosticCode {
         DiagnosticCode::InternalCompilerError,
         DiagnosticCode::UnhandledError,
         DiagnosticCode::OrphanImpl,
+        DiagnosticCode::DroppedTierSetup,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -538,6 +561,7 @@ impl DiagnosticCode {
             DiagnosticCode::InternalCompilerError => "E0068",
             DiagnosticCode::UnhandledError => "E0069",
             DiagnosticCode::OrphanImpl => "E0070",
+            DiagnosticCode::DroppedTierSetup => "E0071",
         }
     }
 

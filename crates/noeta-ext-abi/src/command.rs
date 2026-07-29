@@ -165,6 +165,12 @@ pub enum EntryArg {
 /// registered function a program can call directly.
 #[derive(Debug, Clone)]
 pub struct EntryCall {
+    /// The module the call names. Spell it **qualified** (`std.http.server`, `para.db`): the driver
+    /// calls its last segment (`server.serve(…)`) and binds that segment with a synthetic `use` of
+    /// the rest, so the entry call resolves whatever the program itself imports. A bare, single
+    /// segment binds nothing and resolves through the program's own imports — which means a program
+    /// that does not import the module gets "cannot find `server` in this scope" pointing at a line
+    /// it never wrote, since a qualified reference requires a `use`.
     pub module: &'static str,
     pub func: &'static str,
     pub args: Vec<EntryArg>,
@@ -199,7 +205,7 @@ pub trait CommandCtx {
         self.run_file(
             file,
             Some(&EntryCall {
-                module: "server",
+                module: "std.http.server",
                 func: "serve",
                 args: vec![
                     EntryArg::Int(port),

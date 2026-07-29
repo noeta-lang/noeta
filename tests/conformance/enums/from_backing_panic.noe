@@ -1,0 +1,10 @@
+// The **aborting** half of the pair is kept: `Enum.from(v)` panics on a value that names no case, so
+// a program that wants a bad wire value to stop the run still gets that. The recoverable twin
+// (`Enum.try_from`, see `enums/from_backing`) is the one for untrusted input.
+//
+// The panic names the value it was handed, so a backing miss reads as clearly as a case-name miss.
+// expect: error E0010 at 10:6
+// expect: exit 1
+enum Plan: string { Free = "free"; Paid = "paid" }
+
+echo Plan.from("gold")

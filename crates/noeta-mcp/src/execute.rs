@@ -400,13 +400,15 @@ pub fn test(p: &Prepared, filter: Option<&str>, real: bool, limits: &RunLimits) 
         return empty(map_diagnostics(&source_map, &checked.diagnostics));
     }
 
-    // Setup shared by every case: the program's declarations and top-level bindings, minus its own
-    // "main" effect statements (so the file's `echo`s don't run and cases can't observe each other).
+    // Setup shared by every case, decided by the one shared policy in `noeta_check::setup` rather
+    // than by a third verbatim copy of a statement-shape denylist: declarations, top-level
+    // bindings, and every top-level effect that *finishes*. A `conn.migrate(…)` runs; an
+    // `os.exit(…)` or `server.serve(…)` does not, so this tool cannot exit or block the MCP server.
     let setup: Vec<Stmt> = activated
         .program
         .stmts
         .iter()
-        .filter(|s| is_tier_setup(s))
+        .filter(|s| noeta_check::is_tier_setup(s, &checked.diverging_stmts))
         .cloned()
         .collect();
 
@@ -654,22 +656,6 @@ fn call_stmt(name: &str, args: Vec<Expr>, span: noeta_span::Span) -> Stmt {
         },
         span,
     }
-}
-
-/// Whether a top-level statement is tier-runner *setup* (a declaration or global binding the tests
-/// depend on) as opposed to the program's own "main" effects (which `noeta test` does not run).
-fn is_tier_setup(stmt: &Stmt) -> bool {
-    !matches!(
-        stmt,
-        Stmt::Echo { .. }
-            | Stmt::Return { .. }
-            | Stmt::If { .. }
-            | Stmt::For { .. }
-            | Stmt::While { .. }
-            | Stmt::Break { .. }
-            | Stmt::Continue { .. }
-            | Stmt::Expr { .. }
-    )
 }
 
 /// A host + async-executor pair — what an execution runs against.

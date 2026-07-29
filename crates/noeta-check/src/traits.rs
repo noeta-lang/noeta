@@ -1670,7 +1670,10 @@ impl Checker {
             | Type::F64
             | Type::IntN { .. }
             | Type::Bool
-            | Type::String => true,
+            | Type::String
+            // Vacuous: no two values of the bottom type exist to compare, so nothing can
+            // observe a missing ordering. Permissive, like `dyn`.
+            | Type::Never => true,
             // A union's members order value-dependently (two ints do, an int and a string don't);
             // like `dyn`, that is the runtime's call, not a statically-impossible ordering.
             Type::Union(_) => true,
@@ -1804,7 +1807,8 @@ impl Checker {
         arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         recv_args: &[Type],
-        hidden_site: Option<Span>,
+        supplied_at: &[usize],
+        hidden_site: Option<(Span, String)>,
         env: &mut Env,
     ) -> Type {
         // Seed with the receiver's type arguments (instance call); the call's own arguments then
@@ -1824,6 +1828,7 @@ impl Checker {
             arg_exprs,
             span,
             seed,
+            supplied_at,
             hidden_site,
             env,
         )
@@ -1845,7 +1850,8 @@ impl Checker {
         arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         seed: HashMap<String, Type>,
-        hidden_site: Option<Span>,
+        supplied_at: &[usize],
+        hidden_site: Option<(Span, String)>,
         env: &mut Env,
     ) -> Type {
         let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
@@ -1866,11 +1872,25 @@ impl Checker {
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
         let mut subst: HashMap<String, Type> = seed;
-        for (i, raw) in generic.raw_params.iter().enumerate() {
+        // Which parameter each argument fills. A named-argument call that SKIPS a defaulted
+        // parameter (`f(1, c: 9)`) has already been compacted into parameter order, so argument
+        // `i` is the `i`-th SUPPLIED parameter — not `raw_params[i]`. Checking it against
+        // `raw_params[i]` bound the wrong type parameter and reported the skipped parameter's type
+        // in the mismatch, which is what made a named argument over a defaulted one unusable on
+        // any generic callable. Empty means the ordinary dense prefix, where the two coincide.
+        let positions: Vec<usize> = if supplied_at.is_empty() {
+            (0..generic.raw_params.len()).collect()
+        } else {
+            supplied_at.to_vec()
+        };
+        for (i, &p) in positions.iter().enumerate() {
             if i >= args.len() {
                 // Omitted trailing defaults — already checked at the declaration.
                 break;
             }
+            let Some(raw) = generic.raw_params.get(p) else {
+                break;
+            };
             // A deferred closure argument finalizes against the raw parameter with everything
             // bound SO FAR substituted in — `fn each<T>(xs: List<T>, f: (T) -> unit)` has `T`
             // pinned by `xs` before `f` is looked at — and its now-known type (the inferred
@@ -1924,13 +1944,15 @@ impl Checker {
         // TEMPLATE and resolve the result into a table entry (concrete — the whole composite is
         // interned statically, so the runtime never constructs a recipe) or a pass-through of the
         // enclosing fn's own matching slot (a template still mentioning the caller's parameters).
-        // `hidden_site` is the whole-call span lowering keys on; `None` for a method call
-        // (methods never forward).
-        if let Some(call_span) = hidden_site
-            && let Some(fwd) = self.symbols.forwarding.get(name).cloned()
+        // `hidden_site` is the whole-call span lowering keys on, paired with the KEY the callee's
+        // slot layout is recorded under — a bare `fn` name, or `Type.method` for a method (Axis A),
+        // which is why it is not simply `name`: two classes may declare `load`. `None` at a call
+        // that has no channel to supply them through.
+        if let Some((call_span, key)) = hidden_site
+            && let Some(fwd) = self.symbols.forwarding.get(key.as_str()).cloned()
             // A poisoned callee (diverging slot set, D2a) already carries the one clear error at
             // its declaration; resolving its partial slots here would only cascade noise.
-            && !self.symbols.forwarding_poisoned.contains(name)
+            && !self.symbols.forwarding_poisoned.contains(key.as_str())
         {
             let mut hidden = Vec::with_capacity(fwd.len());
             for slot in &fwd {
@@ -1985,30 +2007,7 @@ impl Checker {
                     }
                     continue;
                 }
-                let recipe = self.type_to_recipe(&sigma);
-                if slot.needs_recipe && recipe.is_none() {
-                    self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`{sigma}` cannot be built by the call-site-typed `::<{}>` \
-                             position of `{name}`",
-                            slot.template
-                        ),
-                    );
-                }
-                let info = noeta_ext_abi::TypeArgInfo {
-                    name: sigma.to_string(),
-                    recipe,
-                };
-                let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
-                    Some(i) => i,
-                    None => {
-                        self.sites.type_arg_table.push(info);
-                        self.sites.type_arg_table.len() - 1
-                    }
-                };
-                hidden.push(noeta_ext_abi::HiddenArg::Table(idx as u32));
+                hidden.push(self.intern_type_arg(&sigma, slot, name, span));
             }
             self.sites.hidden_arg_sites.insert(call_span, hidden);
         }

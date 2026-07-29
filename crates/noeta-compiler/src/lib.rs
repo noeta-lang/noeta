@@ -163,6 +163,8 @@ fn ext_enum_type_info(en: &noeta_ext_abi::registry::ExtEnum) -> TypeInfo {
                 VariantSlots {
                     index: i as u32,
                     fields: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
+                    // A native enum declares cases, not wire values.
+                    backing: None,
                 },
             )
         })
@@ -544,7 +546,7 @@ fn compile_to_mc(
             fc.stmt(stmt)?;
         }
         fc.code.push(Op::Halt);
-        fc.into_chunk(0, Vec::new(), Some("main".to_string()), Some(ir.span))
+        fc.into_chunk(0, 0, 0, Vec::new(), Some("main".to_string()), Some(ir.span))
     };
     module.protos[0] = main;
     // Intern each packed `map(...)` result layout (P-PACK 2.6 category B) and pair it with the call
@@ -765,7 +767,7 @@ impl SessionCompiler {
                 fc.stmt(stmt)?;
             }
             fc.code.push(Op::Halt);
-            fc.into_chunk(0, Vec::new(), Some("main".to_string()), Some(ir.span))
+            fc.into_chunk(0, 0, 0, Vec::new(), Some("main".to_string()), Some(ir.span))
         };
         self.mc.protos[0] = main;
 
@@ -923,6 +925,11 @@ enum TypeInfo {
 struct VariantSlots {
     index: u32,
     fields: Vec<String>,
+    /// The variant's **backing value** in a backed enum, folded through the shared
+    /// `fold_const_expr`; `None` for a plain enum's case, a native or prelude enum (neither is
+    /// backed), and a backing that is not a literal. Baked into `Op::EnumFromStr` so a wire→case
+    /// conversion can match the backing — the value the enum's schema advertises.
+    backing: Option<noeta_ast::AttrValue>,
 }
 
 /// Accumulates the prototype table, the shape/method side tables, and the top-level type
@@ -1116,6 +1123,8 @@ impl ModuleCompiler {
                                 VariantSlots {
                                     index: i as u32,
                                     fields: v.field_names(),
+                                    // No prelude enum is backed.
+                                    backing: None,
                                 },
                             )
                         })
@@ -1233,6 +1242,10 @@ impl ModuleCompiler {
                                 VariantSlots {
                                     index: i as u32,
                                     fields: v.fields.iter().map(|f| f.name.clone()).collect(),
+                                    backing: v
+                                        .backed_value
+                                        .as_ref()
+                                        .and_then(noeta_ast::reflect::fold_const_expr),
                                 },
                             )
                         })
@@ -1507,6 +1520,7 @@ impl ModuleCompiler {
     ) -> Result<Chunk, Unsupported> {
         self.compile_chunk(
             &func.params,
+            func.hidden as u16,
             &func.defaults,
             &func.body,
             func.temp_count,
@@ -1527,10 +1541,14 @@ impl ModuleCompiler {
     /// functions' capturable local names (outermost first), so the function can lower its own
     /// nested closures. A body [`Block`] with a `tail` atom (a closure/arrow or a default thunk)
     /// returns that atom; a block body without one falls off the end as an implicit unit return.
+    /// `hidden` is how many leading `params` are type-argument slots rather than value parameters
+    /// (poly-values F2b) — carried straight through to [`Chunk::hidden`], and zero for everything
+    /// but a forwarding generic.
     #[allow(clippy::too_many_arguments)]
     fn compile_chunk(
         &mut self,
         params: &[String],
+        hidden: u16,
         defaults: &[Option<Thunk>],
         body: &Block,
         temp_count: u32,
@@ -1631,7 +1649,9 @@ impl ModuleCompiler {
         }
         fc.code.push(Op::Halt);
         let num_params = params.len() as u16 + if is_method { 1 } else { 0 };
-        Ok(fc.into_chunk(num_params, default_pairs, name, def_span))
+        // A method's hidden block starts at register 1: register 0 is the receiver, which the
+        // binder must not shift past the block (see `noeta_bytecode::reg_of_param`).
+        Ok(fc.into_chunk(num_params, hidden, base, default_pairs, name, def_span))
     }
 
     /// Compile an IR [`Func`] into a fresh prototype and return its index. `name` is the name a
@@ -1659,6 +1679,7 @@ impl ModuleCompiler {
     ) -> Result<u32, Unsupported> {
         let chunk = self.compile_chunk(
             &[],
+            0,
             &[],
             &thunk.body,
             thunk.temp_count,
@@ -1993,9 +2014,13 @@ impl<'m> FnCompiler<'m> {
         chain
     }
 
+    /// `hidden` is how many of the leading `num_params` registers are type-argument slots rather
+    /// than value parameters (poly-values F2b) — see [`Chunk::hidden`].
     fn into_chunk(
         self,
         num_params: u16,
+        hidden: u16,
+        hidden_base: u16,
         defaults: Vec<(u16, u32)>,
         name: Option<String>,
         def_span: Option<Span>,
@@ -2032,6 +2057,8 @@ impl<'m> FnCompiler<'m> {
             consts: self.consts,
             diagnostics: self.diags,
             num_params,
+            hidden,
+            hidden_base,
             num_registers: self.next_reg,
             defaults,
             frame_locals,
@@ -3118,6 +3145,16 @@ impl<'m> FnCompiler<'m> {
     }
 
     /// Materialize each atom in `atoms` into a register, in order.
+    /// Materialize a call's TYPE-argument atoms into its [`noeta_bytecode::TypeArgs`] channel.
+    /// Empty in, empty (allocation-free) out — the shape of every call that forwards nothing.
+    fn type_arg_regs(&mut self, atoms: &[Atom]) -> Result<noeta_bytecode::TypeArgs, Unsupported> {
+        let mut regs = Vec::with_capacity(atoms.len());
+        for a in atoms {
+            regs.push(self.atom_reg(a)?);
+        }
+        Ok(noeta_bytecode::TypeArgs::new(regs))
+    }
+
     fn atom_regs(&mut self, atoms: &[Atom]) -> Result<Box<[Reg]>, Unsupported> {
         let mut regs = Vec::with_capacity(atoms.len());
         for a in atoms {
@@ -3402,24 +3439,27 @@ impl<'m> FnCompiler<'m> {
             Rvalue::Call {
                 callee,
                 args,
+                type_args,
                 span,
                 supplied,
-                ..
-            } => self.lower_call(callee, args, dst, *span, *supplied),
+            } => self.lower_call(callee, args, type_args, dst, *span, *supplied),
             Rvalue::Method {
                 receiver,
                 name,
                 args,
+                type_args,
                 reuse,
                 reflect,
                 span,
                 supplied,
-                ..
+                name_span: _,
             } => {
                 // A generic enum-variant construction carries its reflected type (R2b.2); intern it so
                 // the `MakeEnum` op can stamp it. `None` for an ordinary method call.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
-                self.lower_method(receiver, name, args, *reuse, reflect, dst, *span, *supplied)
+                self.lower_method(
+                    receiver, name, args, type_args, *reuse, reflect, dst, *span, *supplied,
+                )
             }
             Rvalue::Field {
                 receiver,
@@ -3850,6 +3890,37 @@ impl<'m> FnCompiler<'m> {
                 }
                 Ok(())
             }
+            // `type_name::<T>()` over the enclosing generic type's parameter: the name is read off
+            // the receiver's reflected type tag at run time — one compiled body serves every
+            // instantiation, so there is no constant to bake.
+            Rvalue::TypeArgName {
+                operand,
+                index,
+                type_name,
+                param,
+                span,
+            } => {
+                let src = self.atom_reg(operand)?;
+                self.code.push(Op::TypeArgName {
+                    dst,
+                    src,
+                    index: *index,
+                    names: Box::new((type_name.clone(), param.clone())),
+                    span: *span,
+                });
+                Ok(())
+            }
+            // The fn-side twin: `type_name::<T>()` over a FORWARDED parameter reads the hidden
+            // type-argument slot's table entry instead of the receiver's tag.
+            Rvalue::TypeSlotName { slot, span } => {
+                let src = self.atom_reg(slot)?;
+                self.code.push(Op::TypeSlotName {
+                    dst,
+                    src,
+                    span: *span,
+                });
+                Ok(())
+            }
             Rvalue::TypeOf { operand, span } => {
                 // Evaluate the operand for its side effects in both fidelities. When the checker
                 // resolved a concrete static type for this site, bake the precise `Type` constant
@@ -4116,10 +4187,16 @@ impl<'m> FnCompiler<'m> {
 
     /// Lower an ordinary call `callee(args)` (a method call is [`Rvalue::Method`], lowered
     /// separately). A prelude function called directly by name routes to its dedicated op.
+    ///
+    /// `type_args` is the call's type-argument channel (poly-values F2b) — the atoms filling a
+    /// forwarding generic's leading hidden slots, empty for every other call. A prelude/builtin
+    /// callee declares no hidden slots, so a non-empty channel there is refused for the same
+    /// reason a `supplied` mask is.
     fn lower_call(
         &mut self,
         callee: &Atom,
         args: &[Atom],
+        type_args: &[Atom],
         dst: Reg,
         span: Span,
         supplied: Option<u64>,
@@ -4137,6 +4214,15 @@ impl<'m> FnCompiler<'m> {
                     format!(
                         "`{name}` is a prelude function, and prelude functions have no defaulted \
                          parameters for a named argument to skip"
+                    ),
+                    span,
+                );
+            }
+            if !type_args.is_empty() {
+                return unsupported(
+                    format!(
+                        "`{name}` is a prelude function, and prelude functions declare no \
+                         type-argument slots for a generic to forward into"
                     ),
                     span,
                 );
@@ -4185,24 +4271,32 @@ impl<'m> FnCompiler<'m> {
             && matches!(self.resolve(name), Resolved::Global)
         {
             let global = self.module.intern_global(name);
+            // The type arguments are evaluated BEFORE the value arguments, matching the order the
+            // tree-walker evaluates the two channels — they are ordinary operands, and a
+            // pass-through slot is a plain local read, so the order is observable only through
+            // register pressure, but the two backends agree on it anyway.
+            let type_args = self.type_arg_regs(type_args)?;
             let args = self.atom_regs(args)?;
             self.code.push(Op::CallGlobal {
                 dst,
                 global,
                 args,
+                type_args,
                 span,
-                supplied,
+                supplied: noeta_bytecode::pack_supplied(supplied),
             });
             return Ok(());
         }
         let callee_reg = self.atom_reg(callee)?;
+        let type_args = self.type_arg_regs(type_args)?;
         let args = self.atom_regs(args)?;
         self.code.push(Op::Call {
             dst,
             callee: callee_reg,
             args,
+            type_args,
             span,
-            supplied,
+            supplied: noeta_bytecode::pack_supplied(supplied),
         });
         Ok(())
     }
@@ -4216,6 +4310,7 @@ impl<'m> FnCompiler<'m> {
         receiver: &Atom,
         name: &str,
         args: &[Atom],
+        type_args: &[Atom],
         reuse: bool,
         reflect: Option<u32>,
         dst: Reg,
@@ -4243,7 +4338,7 @@ impl<'m> FnCompiler<'m> {
                 // resolved at compile time when the name is a method, not a variant. Variant
                 // construction still wins for a variant name (uppercase by convention, so no clash).
                 if let Some(&proto) = fns.get(name) {
-                    return self.call_associated(proto, args, dst, span, supplied);
+                    return self.call_associated(proto, args, type_args, dst, span, supplied);
                 }
                 return self.make_enum(type_name, name, args, reflect, dst, span);
             }
@@ -4253,7 +4348,16 @@ impl<'m> FnCompiler<'m> {
                 self.module.types.get(type_name)
                 && let Some(&proto) = fns.get(name)
             {
-                return self.call_associated(proto, args, dst, span, supplied);
+                self.call_associated(proto, args, type_args, dst, span, supplied)?;
+                // A **fresh constructor** of a generic type (`Repo.new("todos")` typed `Repo<Todo>`):
+                // the instantiation is known here and not inside `fn new`, where the object literal
+                // is written, so the call site stamps the result. The checker records the site only
+                // when every `return` of the callee hands back a freshly-built literal of the type,
+                // which is what makes the in-place tag unobservable.
+                if let Some(k) = reflect {
+                    self.code.push(Op::Retag { reg: dst, repr: k });
+                }
+                return Ok(());
             }
         }
         // Otherwise the receiver is a value: a runtime-dispatched method call (a user instance
@@ -4295,6 +4399,7 @@ impl<'m> FnCompiler<'m> {
             },
             _ => (self.atom_reg(receiver)?, false),
         };
+        let type_args = self.type_arg_regs(type_args)?;
         let cache = self.module.next_cache_slot();
         let method = self.module.intern_name(name);
         self.code.push(Op::CallMethod {
@@ -4302,13 +4407,14 @@ impl<'m> FnCompiler<'m> {
             recv,
             method,
             args: arg_regs,
+            type_args,
             span,
             cache,
             reuse: recv_reuse,
             consume_key,
             // Into the callee's register space: the receiver lands in register 0 and is always
             // supplied, so every declared parameter's bit moves up by one.
-            supplied: supplied.map(|m| (m << 1) | 1),
+            supplied: noeta_bytecode::pack_supplied(supplied.map(|m| (m << 1) | 1)),
         });
         // A reuse-marked call consumes the receiver itself (the VM clears it on the in-place path); the
         // receiver is always a `Var` (never an owned `Temp`), so `drop_temp_receiver` is a no-op there.
@@ -4706,10 +4812,12 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// `Enum.try_from(s)` / `Enum.from(s)` (`panic` = the `from` form) — lower the string→case
-    /// conversion. Interns the shape of every **payload-free** variant (the name-constructible ones)
-    /// plus the `Option` wrappers, and emits `Op::EnumFromStr`; the VM matches the runtime string
-    /// against the case names. The checker guarantees a single string argument.
+    /// `Enum.try_from(v)` / `Enum.from(v)` (`panic` = the `from` form) — lower the wire→case
+    /// conversion. Interns the shape of every **payload-free** variant (the only constructible ones
+    /// here) plus the `Option` wrappers, and emits `Op::EnumFromStr` carrying each case's name AND
+    /// its backing; the VM matches the runtime value through the shared
+    /// [`noeta_ast::reflect::variant_for_wire`]. The backing is baked in because the VM has no
+    /// reflection entry for a prelude or native enum to read one back from.
     fn lower_enum_from_str(
         &mut self,
         type_name: &str,
@@ -4723,23 +4831,27 @@ impl<'m> FnCompiler<'m> {
             _ => unreachable!("lower_enum_from_str is only reached for enum types"),
         };
         let runtime_name = self.module.runtime_type_name(type_name);
-        let mut cases: Vec<(String, u32)> = variants
+        let mut cases: Vec<(u32, String, Option<noeta_ast::AttrValue>)> = variants
             .into_iter()
             .filter(|(_, slots)| slots.fields.is_empty())
-            .map(|(vname, slots)| {
+            .map(|(vname, slots)| (slots.index, vname, slots.backing))
+            .collect();
+        // Ordered by **declaration index**, not by name. The source table is a `HashMap`, so some
+        // deterministic order is needed either way — and declaration order is the one the shared
+        // matcher documents and the tree-walker walks, so ordering by it is what keeps the two
+        // backends resolving an ambiguous probe (a backing that is also another case's name) to the
+        // same case, rather than each to merely *a* stable one.
+        cases.sort_by_key(|(index, _, _)| *index);
+        // Interned after sorting, since shape/name ids follow emission order, not lexical order.
+        let cases: Vec<(NameId, Option<noeta_ast::AttrValue>, u32)> = cases
+            .into_iter()
+            .map(|(index, vname, backing)| {
                 let shape = self.module.intern_shape(
                     Shape::enum_variant(runtime_name.clone(), vname.clone(), Vec::new(), false)
-                        .with_variant_index(slots.index),
+                        .with_variant_index(index),
                 );
-                (vname, shape)
+                (self.module.intern_name(&vname), backing, shape)
             })
-            .collect();
-        // Stable order keeps the case list deterministic (the source `HashMap` is not ordered).
-        // Sort by name *before* interning, since ids follow emission order, not lexical order.
-        cases.sort_by(|a, b| a.0.cmp(&b.0));
-        let cases: Vec<(NameId, u32)> = cases
-            .into_iter()
-            .map(|(vname, shape)| (self.module.intern_name(&vname), shape))
             .collect();
         let some_shape = self.module.builtin_enum_shape("Option", "some");
         let none_shape = self.module.builtin_enum_shape("Option", "none");
@@ -4762,14 +4874,17 @@ impl<'m> FnCompiler<'m> {
 
     /// Call an associated function `Type.f(args)`. The method prototype reserves register 0 for
     /// `self`; an associated call has no receiver, so unit is passed there.
+    #[allow(clippy::too_many_arguments)]
     fn call_associated(
         &mut self,
         proto: u32,
         args: &[Atom],
+        type_args: &[Atom],
         dst: Reg,
         span: Span,
         supplied: Option<u64>,
     ) -> Result<(), Unsupported> {
+        let type_args = self.type_arg_regs(type_args)?;
         let self_reg = self.alloc_reg();
         let k = self.add_const(Const::Unit);
         self.code.push(Op::LoadConst { dst: self_reg, k });
@@ -4788,9 +4903,10 @@ impl<'m> FnCompiler<'m> {
             dst,
             callee,
             args: arg_regs.into_boxed_slice(),
+            type_args,
             span,
             // A unit receiver occupies register 0 above, so the declared parameters shift by one.
-            supplied: supplied.map(|m| (m << 1) | 1),
+            supplied: noeta_bytecode::pack_supplied(supplied.map(|m| (m << 1) | 1)),
         });
         Ok(())
     }
@@ -5210,6 +5326,10 @@ fn narrow_head(name: &str) -> Option<NarrowTarget> {
         BuiltinTy::Bytes => NarrowTarget::Bytes,
         BuiltinTy::Unit => NarrowTarget::Unit,
         BuiltinTy::Dyn => NarrowTarget::Dyn,
+        // The bottom type is uninhabited, so `x is never` is false for every value. Spelled as
+        // the EMPTY `AnyOf` rather than a head of its own: "matches none of these" is exactly
+        // what an empty disjunction means, and it needs no new runtime case in either backend.
+        BuiltinTy::Never => NarrowTarget::AnyOf(Vec::new()),
         BuiltinTy::List => NarrowTarget::List,
         BuiltinTy::Map => NarrowTarget::Map,
         BuiltinTy::Set => NarrowTarget::Set,

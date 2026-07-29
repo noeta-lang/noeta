@@ -1001,8 +1001,8 @@ fn key_capable_primitive(name: &str) -> bool {
         // `number` is a union, not a storage class — a `@packed` field must have ONE width to lay
         // out, so it can never be a packed field at all, let alone a key.
         Some(
-            Float | F32 | F64 | Str | Bytes | Unit | Dyn | List | Set | Map | Option | Result
-            | KindEnum | KindStruct | KindClass | Number,
+            Float | F32 | F64 | Str | Bytes | Unit | Dyn | Never | List | Set | Map | Option
+            | Result | KindEnum | KindStruct | KindClass | Number,
         )
         | None => false,
     }

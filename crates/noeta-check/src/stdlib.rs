@@ -116,6 +116,7 @@ pub(crate) fn sig_to_typeref(
         SigType::Bytes => named("bytes"),
         SigType::Unit => named("void"),
         SigType::Dyn => named("dyn"),
+        SigType::Never => named("never"),
         SigType::List(t) => named_args("List", vec![sig_to_typeref(reg, t)]),
         SigType::Option(t) => named_args("Option", vec![sig_to_typeref(reg, t)]),
         SigType::Map(k, v) => {
@@ -210,6 +211,7 @@ fn sig_to_type_bound(
         SigType::Bytes => Type::Bytes,
         SigType::Unit => Type::Unit,
         SigType::Dyn => Type::Dyn,
+        SigType::Never => Type::Never,
         SigType::List(t) => list(sig_to_type_bound(reg, t, bindings)),
         SigType::Option(t) => opt(sig_to_type_bound(reg, t, bindings)),
         SigType::Map(k, v) => Type::Map(
@@ -1002,8 +1004,13 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
             Box::new(args.first().cloned().unwrap_or(Type::Unknown)),
         ),
         "some" => opt(args.first().cloned().unwrap_or(Type::Unknown)),
-        // `panic` diverges (raises `E0010`); no value flows out of it.
-        "panic" => Type::Unknown,
+        // `panic` diverges (raises `E0010`): no value flows out of it, which is exactly what the
+        // bottom type says. It was `Unknown` — the *inference hole* — before `never` existed, which
+        // said "we do not know what this returns" about the one call we know best. `Never <: T`
+        // keeps every position that accepted the hole accepting this, and it additionally lets the
+        // tier runners see a top-level `panic(…)` for what it is: a statement that does not finish,
+        // so it must not join the shared setup and abort every test.
+        "panic" => Type::Never,
         // `assert(cond)` / `assert(cond, msg)` — checked for effect, yields nothing.
         "assert" => Type::Unit,
         // `signal`/`computed`/`effect` left the prelude (P2a) for `use std.reactive`, and

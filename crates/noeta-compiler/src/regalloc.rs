@@ -287,6 +287,10 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*reg);
             f.def = Some(*reg);
         }
+        // Writes the value's reflected type tag beside the payload — the register keeps holding the
+        // very same value, so this is a pure USE (no `def`): the object must still be live here, and
+        // it stays live for whoever consumes it afterwards.
+        Op::Retag { reg, .. } => f.uses.push(*reg),
         Op::ConcatInPlace { dst, lhs, rhs, .. } => {
             f.def = Some(*dst);
             f.uses.push(*lhs);
@@ -374,11 +378,16 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.extend(args.iter().copied());
         }
         Op::CallMethod {
-            dst, recv, args, ..
+            dst,
+            recv,
+            args,
+            type_args,
+            ..
         } => {
             f.def = Some(*dst);
             f.uses.push(*recv);
             f.uses.extend(args.iter().copied());
+            f.uses.extend(type_args.regs().iter().copied());
         }
         Op::Index {
             dst, recv, index, ..
@@ -504,7 +513,9 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
-        Op::FromBytes { dst, src, .. } => {
+        Op::FromBytes { dst, src, .. }
+        | Op::TypeArgName { dst, src, .. }
+        | Op::TypeSlotName { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
@@ -560,16 +571,30 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*src);
             f.fallthrough = false; // aborts the program
         }
+        // A forwarding call's `type_args` are operand registers exactly like `args` — read at the
+        // call, live until it. Omitting them here would let a type-argument register be coloured
+        // over a live value and the callee would read a type-table index that is no longer there.
         Op::Call {
-            dst, callee, args, ..
+            dst,
+            callee,
+            args,
+            type_args,
+            ..
         } => {
             f.def = Some(*dst);
             f.uses.push(*callee);
             f.uses.extend(args.iter().copied());
+            f.uses.extend(type_args.regs().iter().copied());
         }
-        Op::CallGlobal { dst, args, .. } => {
+        Op::CallGlobal {
+            dst,
+            args,
+            type_args,
+            ..
+        } => {
             f.def = Some(*dst);
             f.uses.extend(args.iter().copied());
+            f.uses.extend(type_args.regs().iter().copied());
         }
         Op::SpawnIsolate {
             dst, callee, args, ..
@@ -811,6 +836,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::StoreGlobal { src, .. } => m(src),
         Op::TakeGlobal { dst, .. } => m(dst),
         Op::Drop { reg, .. } => m(reg),
+        Op::Retag { reg, .. } => m(reg),
         Op::ConcatInPlace { dst, lhs, rhs, .. } => {
             m(dst);
             m(lhs);
@@ -903,11 +929,18 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             }
         }
         Op::CallMethod {
-            dst, recv, args, ..
+            dst,
+            recv,
+            args,
+            type_args,
+            ..
         } => {
             m(dst);
             m(recv);
             for r in args.iter_mut() {
+                m(r);
+            }
+            for r in type_args.regs_mut().iter_mut() {
                 m(r);
             }
         }
@@ -1030,7 +1063,9 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(src);
         }
-        Op::FromBytes { dst, src, .. } => {
+        Op::FromBytes { dst, src, .. }
+        | Op::TypeArgName { dst, src, .. }
+        | Op::TypeSlotName { dst, src, .. } => {
             m(dst);
             m(src);
         }
@@ -1068,17 +1103,32 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         }
         Op::MatchFail { src, .. } => m(src),
         Op::Call {
-            dst, callee, args, ..
+            dst,
+            callee,
+            args,
+            type_args,
+            ..
         } => {
             m(dst);
             m(callee);
             for r in args.iter_mut() {
                 m(r);
             }
+            for r in type_args.regs_mut().iter_mut() {
+                m(r);
+            }
         }
-        Op::CallGlobal { dst, args, .. } => {
+        Op::CallGlobal {
+            dst,
+            args,
+            type_args,
+            ..
+        } => {
             m(dst);
             for r in args.iter_mut() {
+                m(r);
+            }
+            for r in type_args.regs_mut().iter_mut() {
                 m(r);
             }
         }
@@ -1224,6 +1274,8 @@ mod tests {
             consts: Vec::new(),
             diagnostics: Vec::new(),
             num_params,
+            hidden: 0,
+            hidden_base: 0,
             num_registers,
             defaults: Vec::new(),
             frame_locals: Vec::new(),

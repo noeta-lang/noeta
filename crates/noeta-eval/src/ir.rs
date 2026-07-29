@@ -71,12 +71,20 @@ fn is_temp(atom: &noeta_ir::Atom) -> bool {
     matches!(atom, noeta_ir::Atom::Temp(_))
 }
 
-/// Stamp a generic enum-variant construction's reflected type onto the freshly-built value (runtime
-/// type-argument reflection, R2b.2), so `type_of` recovers the enum's type arguments after a `dyn`
-/// launder. `reflect` is `Some` only for a generic enum construction; a non-enum result or an
-/// ordinary call is returned unchanged. The value was just built and is uniquely owned, so its parts
-/// move into a re-tagged `EnumValue` with no clone; an unexpectedly-shared value is left untagged.
-fn tag_enum_reflect(value: Value, reflect: &Option<noeta_ast::reflect::TypeRepr>) -> Value {
+/// Stamp a construction's reflected type onto the freshly-built value at a **method-call** site, so
+/// `type_of` recovers its type arguments after a `dyn` launder. Two producers, one field:
+///
+/// * a generic **enum-variant construction** (`Tree.Leaf(5)`, R2b.2) — the value was just built and
+///   is uniquely owned, so its parts move into a re-tagged `EnumValue` with no clone; an
+///   unexpectedly-shared value is left untagged;
+/// * a generic **constructor call** (`Repo.new("todos")` at `Repo<Todo>`, generic constructor
+///   reflection) — the instantiation is known at the CALL, not inside `fn new` where the literal is
+///   written, so the caller stamps it. The checker only records the site when it proved every
+///   `return` of the callee hands back a fresh literal of the type, so nothing else can hold this
+///   object; the tag is written in place because a `class`'s `Rc` is its identity.
+///
+/// `reflect` is `None` for an ordinary method call, which is returned unchanged.
+fn tag_call_reflect(value: Value, reflect: &Option<noeta_ast::reflect::TypeRepr>) -> Value {
     match (reflect, value) {
         (Some(repr), Value::Enum(rc)) => match Rc::try_unwrap(rc) {
             Ok(ev) => Value::Enum(Rc::new(crate::EnumValue {
@@ -85,6 +93,10 @@ fn tag_enum_reflect(value: Value, reflect: &Option<noeta_ast::reflect::TypeRepr>
             })),
             Err(rc) => Value::Enum(rc),
         },
+        (Some(repr), Value::Object(rc)) => {
+            rc.set_reflect(Rc::new(repr.clone()));
+            Value::Object(rc)
+        }
         (_, value) => value,
     }
 }
@@ -689,6 +701,12 @@ impl Interpreter {
             .map(|v| VariantInfo {
                 name: v.name.clone(),
                 field_names: v.fields.iter().map(|f| f.name.clone()).collect(),
+                // The backing a wire→case conversion matches on, through the one `fold_const_expr`
+                // the reflection manifest and the checker's decode recipes also fold with.
+                backing: v
+                    .backed_value
+                    .as_ref()
+                    .and_then(noeta_ast::reflect::fold_const_expr),
             })
             .collect();
         let methods = en
@@ -1252,14 +1270,19 @@ impl Interpreter {
             noeta_ir::Rvalue::Call {
                 callee,
                 args,
+                // A forwarding generic's type arguments (poly-values F2b), in slot order — empty
+                // for every call that forwards nothing. Their own channel, which is why `supplied`
+                // below still indexes the VALUE parameters alone.
+                type_args,
                 // `None` for a pure reordering — lowering already permuted `args`, so there is
                 // nothing left to say. `Some` only when the call skips a defaulted parameter.
                 supplied,
                 span,
             } => {
                 let callee = self.eval_ir_atom(callee, frame)?;
+                let tys = self.eval_ir_atoms(type_args, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
-                self.call_masked(callee, values, *span, *supplied)
+                self.call_masked(callee, values, *span, &tys, *supplied)
             }
             noeta_ir::Rvalue::Method {
                 receiver,
@@ -1267,9 +1290,13 @@ impl Interpreter {
                 args,
                 reuse,
                 reflect,
+                // A forwarding generic METHOD's type arguments (Axis A), in slot order — empty for
+                // the overwhelming majority of method calls. The reuse fast paths below are all
+                // built-in collection updates, which declare no slots, so they never carry any.
+                type_args,
                 span,
                 supplied,
-                ..
+                name_span: _,
             } => {
                 // In-place collection self-update (Phase 5.1c): a marked `m = m.set(k,v)` moves the
                 // receiver out of its (reassigned) binding so a uniquely-owned map can be mutated in
@@ -1283,6 +1310,7 @@ impl Interpreter {
                         name: recv_name, ..
                     } = receiver
                 {
+                    let tys = self.eval_ir_atoms(type_args, frame)?;
                     let values = self.eval_ir_atoms(args, frame)?;
                     let recv = match self.scope.take_mut(recv_name) {
                         Some(v) => v,
@@ -1307,9 +1335,15 @@ impl Interpreter {
                             return self.set_remove_in_place(recv, values, *span);
                         }
                     }
-                    return self.call_method(recv, name, values, *span);
+                    // The non-collection fall-through — a user method that happens to be named
+                    // `set`/`add`/`remove` — is an ordinary consuming call, so it must carry both
+                    // channels: the VM's reuse arm gates on the runtime receiver KIND and reaches
+                    // its ordinary dispatch with them intact, and reuse is supposed to be
+                    // observationally invisible.
+                    return self.call_method_masked(recv, name, values, *span, &tys, *supplied);
                 }
                 let recv = self.eval_ir_atom(receiver, frame)?;
+                let tys = self.eval_ir_atoms(type_args, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
                 let result = if is_temp(receiver) {
                     // An owned temp receiver (`Resource.new().use()`): fire its destructor after the
@@ -1317,15 +1351,15 @@ impl Interpreter {
                     // and destroy the held copy — last-reference-gated, so a method that returns
                     // `self` (the result aliases it) correctly defers destruction.
                     let result =
-                        self.call_method_masked(recv.clone(), name, values, *span, *supplied);
+                        self.call_method_masked(recv.clone(), name, values, *span, &tys, *supplied);
                     self.destroy_value(recv);
                     result
                 } else {
-                    self.call_method_masked(recv, name, values, *span, *supplied)
+                    self.call_method_masked(recv, name, values, *span, &tys, *supplied)
                 };
                 // When this "method call" was a generic enum-variant construction, stamp the reflected
                 // type onto the freshly-built value (R2b.2) — the tree-walker twin of the VM's node tag.
-                result.map(|v| tag_enum_reflect(v, reflect))
+                result.map(|v| tag_call_reflect(v, reflect))
             }
             // A trait method call (native default body, slice 2; or a kernel-trait method since the
             // ExtBundle→ExtTrait fold-in, slice 4): the route was baked at the call site — straight to
@@ -1466,6 +1500,46 @@ impl Interpreter {
                     Some(repr) => Ok(crate::build_type_value(repr)),
                     None => Ok(crate::build_type_value(&crate::eval_type_repr(&v))),
                 }
+            }
+            // `type_name::<T>()` where `T` is a parameter of the enclosing generic type: read
+            // argument `index` off the receiver's reflected type tag. A receiver with no such
+            // argument aborts — a plausible-looking wrong name would travel silently.
+            noeta_ir::Rvalue::TypeArgName {
+                operand,
+                index,
+                type_name,
+                param,
+                span,
+            } => {
+                let v = self.eval_ir_atom(operand, frame)?;
+                match crate::eval_type_repr(&v).type_arg_name(*index as usize) {
+                    Some(name) => Ok(Value::Str(name)),
+                    None => Err(self.runtime_error(
+                        DiagnosticCode::InvalidTypeArguments,
+                        *span,
+                        noeta_ast::reflect::missing_type_arg_message(type_name, param),
+                    )),
+                }
+            }
+            // `type_name::<T>()` where `T` is a FORWARDED parameter of the enclosing generic fn:
+            // the instantiation's qualified name, read off the hidden slot's table entry. The same
+            // slot, entry and field the dynamic `attributes_of` arm above reads, so a forwarded
+            // name and a forwarded manifest can never disagree about what `T` is.
+            noeta_ir::Rvalue::TypeSlotName { slot, span } => {
+                let idx = self.eval_ir_atom(slot, frame)?;
+                let Value::Int(i) = idx else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        "corrupt hidden type-argument slot".to_string(),
+                    ));
+                };
+                Ok(Value::Str(
+                    self.type_args
+                        .get(i as usize)
+                        .map(|e| e.name.clone())
+                        .unwrap_or_default(),
+                ))
             }
             noeta_ir::Rvalue::FieldsOf { operand, .. } => {
                 let v = self.eval_ir_atom(operand, frame)?;
@@ -2101,9 +2175,22 @@ impl Interpreter {
             // `Result.Err(JsonError)`) carries a path-rich extern; a recipe decode of `T` itself
             // never yields one, only a wrapper's `Err` does.
             NativeOut::Extern(e) => MatOut::Value(Value::Extern(Rc::new(RefCell::new(e)))),
-            // A native enum value (native-extensibility S1) — a call-site-typed door does not
-            // decode one from a JSON recipe, but a native `Result`/`Option` wrapper may carry one,
-            // so materialize it through the ordinary (non-recipe) path.
+            // An enum value: decoded from a `TypeRecipe::Enum` (enum-construction arc), or carried by
+            // a native `Result`/`Option` wrapper (native-extensibility S1). Both build through the
+            // ordinary `materialize_native` path, so a decoded case is indistinguishable from a
+            // source-written one. Only a recipe door sets `has_validator`, and it re-enters exactly
+            // as a struct's does — the case is built first, then `validate()` runs, so a rejection
+            // short-circuits before this node becomes a `Value`.
+            out @ NativeOut::Variant {
+                has_validator: true,
+                ..
+            } => {
+                let value = crate::materialize_native(out);
+                if let Some(rejection) = self.run_validator(value.clone(), path, span)? {
+                    return Ok(MatOut::Rejected(rejection));
+                }
+                MatOut::Value(value)
+            }
             out @ NativeOut::Variant { .. } => MatOut::Value(crate::materialize_native(out)),
             // A native class instance (native-extensibility S2) — like a `Variant`, never decoded
             // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one.

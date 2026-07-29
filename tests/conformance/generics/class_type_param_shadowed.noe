@@ -1,0 +1,28 @@
+// A method's OWN type parameter that shadows one of the enclosing type's is a different `K`, and
+// it resolves through a different channel: the receiver's reflected tag records the CLASS's
+// arguments, the call node's `type_args` operand carries the METHOD's. Both reach the one compiled
+// body, so the shadowing name answers with the method's instantiation — here `A`, inferred from
+// the argument — and the class's `Pair<A, int>` is simply not what `type_name::<K>()` asks about.
+//
+// This was a refusal (E0058) while a method had no forwarding channel at all: the two `K`s were
+// indistinguishable at run time, so answering either would have been a guess. Shadowing is now an
+// ordinary scoping question with an ordinary answer, and the sibling case that still refuses —
+// a parameter no call can infer — is `reflection/type_name_diagnostics.noe`.
+// expect: stdout "1A"
+// expect: exit 0
+struct A {
+    x: int
+}
+class Pair<K, V> {
+    pub n: int
+
+    fn new(n: int): Pair<K, V> {
+        return Pair { n: n };
+    }
+
+    fn shadowed<K>(x: K): string {
+        return "${self.n}" ~ type_name::<K>();
+    }
+}
+p: Pair<A, int> = Pair.new(1);
+echo p.shadowed(A { x: 2 });

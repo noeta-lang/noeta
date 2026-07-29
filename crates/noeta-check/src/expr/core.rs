@@ -25,13 +25,41 @@ impl Checker {
     /// index — check-position expressions (an absorbed closure, an annotation-driven literal)
     /// previously never recorded, so hover and inlay hints missed them.
     pub(crate) fn check(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
+        // A NAMED object literal in a position that HAS an expectation publishes it, so the
+        // construction can adopt type arguments its field values leave unconstrained (`r:
+        // Repo<Todo> = Repo { tbl: "todos" }` — no field mentions `T`, so inference alone yields
+        // `Repo` with no arguments, and the instance would record nothing to reflect). Keyed by the
+        // literal's own span so a nested literal cannot pick up an outer expectation.
+        let saved_expected_object = match expr {
+            Expr::Object(lit) if lit.type_name.is_some() => Some(
+                self.coloring
+                    .expected_object
+                    .replace((lit.span, expected.clone())),
+            ),
+            _ => None,
+        };
         let ty = self.check_inner(expr, expected, env);
+        if let Some(saved) = saved_expected_object {
+            self.coloring.expected_object = saved;
+        }
+        self.note_if_never(expr, &ty);
         if self.config.record_expr_types
             && let Some(repr) = type_to_repr_top(&ty, &self.symbols.type_kinds)
         {
             self.sites.expr_types.insert(expr.span(), repr);
         }
         ty
+    }
+
+    /// Record an expression that types as the **bottom** — a call to something that does not
+    /// return. Unconditional (unlike the `expr_types` index beside it): it is one insert on the rare
+    /// expression that diverges, and both consumers — E0048's must-diverge analysis and the tier
+    /// runners' shared-setup filter — need it on the ordinary compile path, not only under the IDE
+    /// flag. See [`crate::sites::SiteMaps::never_exprs`].
+    fn note_if_never(&mut self, expr: &Expr, ty: &Type) {
+        if *ty == Type::Never {
+            self.sites.never_exprs.insert(expr.span());
+        }
     }
 
     pub(crate) fn check_inner(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
@@ -529,6 +557,51 @@ impl Checker {
         self.assignable(arg, param) || arg.defers_to_runtime() || param.defers_to_runtime()
     }
 
+    /// Whether `expr` is a **literal form that would absorb** `expected` — whether one of
+    /// [`Self::check_inner`]'s absorbing arms fires for this exact pair.
+    ///
+    /// Checking mode is only worth entering when the expectation actually reaches the literal. For
+    /// a *reassignment* (`Stmt::Binding`'s un-annotated arm) that distinction is what keeps the
+    /// tailored `E0007` — the one that names the binding and offers the union — as the single
+    /// report on a mismatch: an expectation the value cannot absorb would be enforced anonymously
+    /// by [`Self::subsume`] first, and then reported a second time by the reassignment's own check.
+    ///
+    /// Deliberately literal-only. A call, a `?`, and a `??` also have absorbing arms above, but
+    /// each ends in its own `subsume`, so routing a reassignment through them buys precision the
+    /// reassignment check already provides, at the cost of that double report. A literal arm
+    /// returns the expectation unchanged and reports only about its *elements*, which is strictly
+    /// more precise than one message about the whole value.
+    ///
+    /// Kept adjacent to the arms it mirrors: a new absorbing literal arm needs a line here.
+    pub(crate) fn absorbs_expectation(&self, expr: &Expr, expected: &Type) -> bool {
+        match expr {
+            Expr::List { .. } => matches!(expected, Type::List(_)),
+            Expr::Map { .. } => matches!(expected, Type::Map(..)),
+            Expr::Ident { name, .. } => name == "none" && matches!(expected, Type::Option(_)),
+            Expr::Closure { .. } => matches!(expected, Type::Fn { .. }),
+            // A target-typed `.{ … }` absorbs the expected type's *name*, and only a concrete
+            // named record type supplies one.
+            Expr::Object(lit) => {
+                lit.type_name.is_none()
+                    && matches!(expected, Type::Named(n, _) if self.symbols.records.contains_key(n))
+            }
+            Expr::Call { callee, args, .. } => match callee.as_ref() {
+                Expr::Ident { name, .. } if name == "some" => {
+                    args.len() == 1 && matches!(expected, Type::Option(_))
+                }
+                // `Ok()` is the unit-payload form, so zero or one argument.
+                Expr::Ident { name, .. } if name == "Ok" => {
+                    args.len() <= 1 && matches!(expected, Type::Result(..))
+                }
+                Expr::Ident { name, .. } if name == "Err" => {
+                    args.len() == 1 && matches!(expected, Type::Result(..))
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     pub(crate) fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {
         if !self.assignable(actual, expected) {
             self.error(
@@ -547,6 +620,7 @@ impl Checker {
     /// through this one choke point, so the index covers the whole tree with a single insertion site.
     pub(crate) fn synth(&mut self, expr: &Expr, env: &mut Env) -> Type {
         let ty = self.synth_inner(expr, env);
+        self.note_if_never(expr, &ty);
         if self.config.record_expr_types
             && let Some(repr) = type_to_repr_top(&ty, &self.symbols.type_kinds)
         {
@@ -573,6 +647,14 @@ impl Checker {
     /// Only the **head** is rejected, matching [`TypeRef::head_name`] — what the query actually keys
     /// on. `field_specs_of::<List<T>>()` heads at `List`, a real type with no field schema, and keeps
     /// its honest empty answer.
+    ///
+    /// The turbofish arm stays a **compile-time** key: it resolves like an annotation, follows a
+    /// `namespace`/`use … as`/rename, and folds to a constant. What changed is that inside a
+    /// top-level generic fn the erased parameter now *has* a runtime name — `type_name::<T>()`
+    /// reads it off the same hidden slot that carries a forwarded decode recipe — so these
+    /// queries' own **runtime-string** arm reaches it: `field_specs_of(type_name::<T>())`. The help
+    /// says so where that route is actually open ([`Checker::forwardable_params`]), rather than
+    /// sending the author to restructure a signature that no longer needs it.
     fn reject_erased_type_param(&mut self, ty: &TypeRef, surface: &str) -> bool {
         let TypeRef::Named { name, args, span } = ty else {
             return false;
@@ -580,6 +662,75 @@ impl Checker {
         if !args.is_empty() || !self.coloring.type_params.contains_key(name.as_str()) {
             return false;
         }
+        // A parameter of the ENCLOSING generic type that this site cannot reach. The instantiation
+        // DOES exist at run time — it is on the receiver's reflected type tag — so the blanket
+        // "generics are erased" would send the author looking for a fix that is not the one. Two
+        // distinct reasons, each with its own fix, so each says which it is:
+        //
+        //   * this member has no receiver to read the tag from (an associated function, or a
+        //     method whose body never touches `self` — which is what makes it associated);
+        //   * the name is shadowed by the METHOD's own type parameter, which is a different `T`
+        //     entirely and has no per-call channel of its own.
+        //
+        // `self_type_params` is non-empty exactly inside an instance method of a generic type, and
+        // holds a blank in the slot of any parameter the method's own `<…>` shadows — so "in scope
+        // on the type, but not reachable here" splits cleanly on it.
+        if let Some(owner) = self.coloring.current_type.clone()
+            && self
+                .symbols
+                .generic_types
+                .get(&owner)
+                .is_some_and(|ps| ps.iter().any(|p| p == name.as_str()))
+        {
+            let shadowed = !self.coloring.self_type_params.is_empty();
+            let msg = if shadowed {
+                format!(
+                    "`{surface}` cannot reflect over `{name}` here: this method declares its own \
+                     `{name}`, which shadows `{owner}`'s and is erased"
+                )
+            } else {
+                format!(
+                    "`{surface}` cannot reflect over `{name}` here: this member of `{owner}` has \
+                     no receiver, and `{name}` is carried by the instance"
+                )
+            };
+            let help = if shadowed {
+                format!(
+                    "rename the method's parameter if you meant `{owner}`'s `{name}` (an \
+                     instance's own type arguments are recorded at construction and reachable \
+                     from `self`); a method's own type parameter has no such channel"
+                )
+            } else {
+                format!(
+                    "an instance of a generic type records its type arguments at construction, so \
+                     `{surface}::<{name}>()` resolves in a method that takes `self` — read a field \
+                     of `self` (or take the value as a parameter and reflect at the call site)"
+                )
+            };
+            self.error(DiagnosticCode::InvalidTypeArguments, *span, msg)
+                .help(help);
+            return true;
+        }
+        // Inside a top-level generic fn the parameter DOES have a runtime name — the hidden
+        // type-argument slot carries it — so the fix is the surface's own runtime-string arm, not
+        // a signature change. Point at it; the turbofish arm stays the compile-time key.
+        // `type_name` itself is excluded: it IS the route, so pointing it at itself says nothing.
+        // (Reaching here from that surface means the slot did not resolve — a session-incremental
+        // entry whose forwarding table is still growing — where the general advice still applies.)
+        let help = if surface != "type_name"
+            && self.coloring.forwardable_params.iter().any(|p| p == name)
+        {
+            format!(
+                "pass the name instead of the type: `{surface}(type_name::<{name}>())` — \
+                 `type_name` resolves a forwarded parameter per instantiation, which the \
+                 compile-time `{surface}::<...>` key cannot"
+            )
+        } else {
+            format!(
+                "reflect where the type is concrete and pass the result in — give this function a \
+                 parameter for it and let the caller supply `{surface}::<TheRealType>`"
+            )
+        };
         self.error(
             DiagnosticCode::InvalidTypeArguments,
             *span,
@@ -588,10 +739,7 @@ impl Checker {
                  erased, so `{name}` names no type at run time"
             ),
         )
-        .help(format!(
-            "reflect where the type is concrete and pass the result in — give this function a \
-             parameter for it and let the caller supply `{surface}::<TheRealType>`"
-        ));
+        .help(help);
         true
     }
 
@@ -1345,12 +1493,52 @@ impl Checker {
                 Type::Bool
             }
             // `type_name::<T>()` — a type's qualified runtime identity as a `string`. The type is
-            // resolved like any annotation (an unresolvable `T` is E0013), and an erased type
-            // *parameter* is the same E0058 the name-keyed queries report: a parameter has no name
-            // at run time, so a `type_name::<T>()` inside `fn f<T>()` could only ever yield the
-            // literal `"T"`, which names nothing. Unlike `attributes_of`, there is no forwarding
-            // escape: this lowers to a compile-time constant, with no runtime node to feed a slot.
-            Expr::TypeName { ty, .. } => {
+            // resolved like any annotation (an unresolvable `T` is E0013). A type *parameter* is
+            // answerable exactly when the instantiation reaches the body through one of the two
+            // channels the language already has, and E0058 when neither does:
+            //
+            //   * a parameter of the enclosing generic TYPE, in an instance method — it rides the
+            //     receiver's reflected type tag (`self_type_arg_sites`, below);
+            //   * a parameter of the enclosing top-level generic FN — it rides the hidden
+            //     type-argument slot that already carries `json.try_parse::<T>`'s decode recipe,
+            //     and this surface needs only the slot's NAME, no recipe at all.
+            Expr::TypeName { ty, span } => {
+                // Inside a generic type's INSTANCE method, a bare parameter of the enclosing type
+                // is not erased after all: the receiver carries the instantiation as a reflected
+                // type tag stamped at its construction site, so `type_name::<T>()` reads argument
+                // `i` off `self` at run time (generic constructor reflection, Gap B). Recorded as a
+                // site rather than folded to a constant — one compiled body serves every
+                // instantiation, so there is no constant to fold to.
+                if let TypeRef::Named { name, args, .. } = ty
+                    && args.is_empty()
+                    && let Some(i) = self
+                        .coloring
+                        .self_type_params
+                        .iter()
+                        .position(|p| p == name.as_str())
+                {
+                    let owner = self.coloring.current_type.clone().unwrap_or_default();
+                    self.sites
+                        .self_type_arg_sites
+                        .insert(*span, (owner, i as u32));
+                    return Type::String;
+                }
+                // A FORWARDED parameter of the enclosing top-level generic fn (poly-values F2b):
+                // the instantiation's name arrives per-call through the hidden slot, exactly as
+                // `attributes_of::<T>()`'s does. Checked only for a *bare* parameter — the head is
+                // what this surface answers with, and `type_name::<List<T>>()` heads at `List`
+                // whatever `T` is, so it stays the folded constant.
+                if let TypeRef::Named { name, args, .. } = ty
+                    && args.is_empty()
+                    && self.coloring.type_params.contains_key(name.as_str())
+                    && let Some(idx) =
+                        self.coloring.current_forwarding.iter().position(
+                            |t| matches!(t, Type::Named(p, a) if p == name && a.is_empty()),
+                        )
+                {
+                    self.sites.forwarded_slot_sites.insert(*span, idx as u32);
+                    return Type::String;
+                }
                 if !self.reject_erased_type_param(ty, "type_name") {
                     self.check_type_ref(ty);
                 }
@@ -1378,16 +1566,23 @@ impl Checker {
                         .position(|t| t == &target)
                     {
                         Some(idx) => {
-                            self.sites.dynamic_attr_sites.insert(*span, idx as u32);
+                            self.sites.forwarded_slot_sites.insert(*span, idx as u32);
                         }
                         None => {
                             self.error(
                                 DiagnosticCode::InvalidTypeArguments,
                                 *span,
                                 format!(
-                                    "cannot forward `{p}` here: call-site-typed forwarding is \
-                                     supported in top-level generic functions only"
+                                    "cannot forward `{p}` here: call-site-typed forwarding \
+                                     carries a generic `fn`'s or method's OWN type parameters, \
+                                     and `{p}` is not one of this body's"
                                 ),
+                            )
+                            .help(
+                                "an enclosing generic TYPE's parameter reaches a method through \
+                                 the receiver, which records the instantiation's name but no \
+                                 build recipe — take the type as the method's own parameter \
+                                 instead",
                             );
                         }
                     }
@@ -1709,16 +1904,23 @@ impl Checker {
                         .position(|s| s == &t)
                     {
                         Some(idx) => {
-                            self.sites.dynamic_recipe_sites.insert(*span, idx as u32);
+                            self.sites.forwarded_slot_sites.insert(*span, idx as u32);
                         }
                         None => {
                             self.error(
                                 DiagnosticCode::InvalidTypeArguments,
                                 *span,
                                 format!(
-                                    "cannot forward `{t}` here: call-site-typed forwarding is \
-                                     supported in top-level generic functions only"
+                                    "cannot forward `{t}` here: call-site-typed forwarding \
+                                     carries a generic `fn`'s or method's OWN type parameters, \
+                                     and `{t}` is not one of this body's"
                                 ),
+                            )
+                            .help(
+                                "an enclosing generic TYPE's parameter reaches a method through \
+                                 the receiver, which records the instantiation's name but no \
+                                 build recipe — take the type as the method's own parameter \
+                                 instead",
                             );
                         }
                     }
@@ -2015,6 +2217,26 @@ impl Checker {
                             f.name
                         ),
                     );
+                }
+            }
+        }
+        // Fill any parameter the field values left unconstrained from the CHECKED position's
+        // expectation. Purely additive — an argument the fields DID pin stays as inferred, so the
+        // established "fields determine the instantiation" rule is untouched; this only decides
+        // what an otherwise-unconstrained parameter is, where the alternative is nothing at all.
+        // Only a fully concrete expectation contributes: a `dyn`/open argument makes no claim.
+        if !params.is_empty()
+            && let Some((expected_span, Type::Named(n, expected_args))) =
+                self.coloring.expected_object.clone()
+            && expected_span == lit.span
+            && n == type_name
+        {
+            for (i, p) in params.iter().enumerate() {
+                if !subst.contains_key(p)
+                    && let Some(t) = expected_args.get(i)
+                    && self.fully_concrete(t)
+                {
+                    subst.insert(p.clone(), t.clone());
                 }
             }
         }

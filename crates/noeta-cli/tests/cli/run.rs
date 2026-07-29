@@ -482,7 +482,7 @@ fn run_os_spawn_streams_stderr_and_reads_by_chars() {
 #[test]
 fn run_does_real_disk_io() {
     // `fs.write`/`fs.read` hit the REAL disk (RealHost), relative to the working directory.
-    let dir = std::env::temp_dir().join("noeta_cli_realfs_dir");
+    let dir = temp_root().join("noeta_cli_realfs_dir");
     std::fs::create_dir_all(&dir).expect("create work dir");
     let _ = std::fs::remove_file(dir.join("e2e.txt"));
     let file = temp_program(
@@ -510,7 +510,7 @@ fn run_reads_files_asynchronously_on_the_real_executor() {
     // CLI's real executor the reads hit the REAL disk and run concurrently on tokio; here two files
     // are read in a `concurrent` block and awaited for their contents. (Conformance covers the
     // deterministic sandbox path; this proves the real-disk, real-executor path.)
-    let dir = std::env::temp_dir().join("noeta_cli_async_read_dir");
+    let dir = temp_root().join("noeta_cli_async_read_dir");
     std::fs::create_dir_all(&dir).expect("create work dir");
     std::fs::write(dir.join("a.txt"), "alpha").expect("write a");
     std::fs::write(dir.join("b.txt"), "beta").expect("write b");
@@ -542,7 +542,7 @@ fn run_async_metadata_twins_on_the_real_executor() {
     // Extern-types X6: `fs.exists_async`/`remove_async`/`list_async` have NO real body — the
     // real executor's None fallback runs their sync body against the RealHost at spawn. This
     // exercises that degradation path end-to-end on real disk.
-    let dir = std::env::temp_dir().join("noeta_cli_async_meta_dir");
+    let dir = temp_root().join("noeta_cli_async_meta_dir");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create work dir");
     std::fs::write(dir.join("keep.txt"), "k").expect("write keep");
@@ -612,7 +612,7 @@ fn run_bcrypt_round_trips_on_real_entropy() {
 fn run_writes_files_asynchronously_on_the_real_executor() {
     // Track A.10: `fs.write_async`/`append_async` hit the REAL disk via the real executor's tokio
     // runtime, awaited like any future. A write/append/read round-trip lands on disk.
-    let dir = std::env::temp_dir().join("noeta_cli_async_write_dir");
+    let dir = temp_root().join("noeta_cli_async_write_dir");
     std::fs::create_dir_all(&dir).expect("create work dir");
     let _ = std::fs::remove_file(dir.join("w.txt"));
     let src = "use std.{fs}\n\

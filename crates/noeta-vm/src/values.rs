@@ -235,6 +235,9 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             variant,
             variant_index,
             fields,
+            // Already honored by `materialize_recipe` (the only producer that ever sets it), which
+            // runs the validator on the value this call builds.
+            has_validator: _,
         } => {
             let shape = noeta_object::intern_shape(
                 Shape::enum_variant(enum_name, variant, Vec::new(), false)
@@ -279,6 +282,23 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             unreachable!("recipe/spawn results never reach materialize_native")
         }
     }
+}
+
+/// The neutral [`noeta_ast::reflect::WireProbe`] for a value handed to `Enum.from` / `Enum.try_from`,
+/// or `None` when it is not a scalar an enum can be backed by. The tree-walker's twin classifies its
+/// own `Value` the same way, so the shared matcher sees identical probes on both sides.
+pub(crate) fn wire_probe(value: Value) -> Option<noeta_ast::reflect::WireProbe> {
+    use noeta_ast::reflect::WireProbe;
+    if let Some(s) = value.as_string() {
+        return Some(WireProbe::Str(s.to_string()));
+    }
+    if let Some(n) = value.as_int() {
+        return Some(WireProbe::Int(n));
+    }
+    if let Some(f) = value.as_float() {
+        return Some(WireProbe::Float(f));
+    }
+    value.as_bool().map(WireProbe::Bool)
 }
 
 /// Lift a shared stdlib [`noeta_stdlib::Output`] into a freshly-owned VM `Value` (refcount 1,
@@ -492,7 +512,10 @@ pub(crate) fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
         | TypeRepr::Str
         | TypeRepr::Bytes
         | TypeRepr::Unit
-        | TypeRepr::Dyn => Vec::new(),
+        | TypeRepr::Dyn
+        // Payloadless like the other scalars. Reachable only from a *declared* reflection
+        // (`returns_of` on `os.exit`) — never from a value, since none has this type.
+        | TypeRepr::Never => Vec::new(),
         // `Type.IntN(bits: int, signed: bool)` — the width descriptor.
         TypeRepr::IntN { signed, bits } => {
             vec![Value::int(i64::from(*bits)), Value::bool(*signed)]
@@ -901,9 +924,22 @@ impl Vm<'_> {
             // `Result.Err(JsonError)`) carries a path-rich extern. A recipe decode of `T` itself
             // never yields one; it reaches here only inside a wrapper's `Err`.
             NativeOut::Extern(e) => MatOut::Value(Value::extern_value(e)),
-            // A native enum value (native-extensibility S1) — not decoded from a JSON recipe, but a
-            // native `Result`/`Option` wrapper may carry one, so materialize it through the
-            // ordinary (non-recipe) path.
+            // An enum value: decoded from a `TypeRecipe::Enum` (enum-construction arc), or carried by
+            // a native `Result`/`Option` wrapper (native-extensibility S1). Both build through the
+            // ordinary `materialize_native` path — the same interned shape a `MakeEnum` builds — so a
+            // decoded case is indistinguishable from a source-written one. Only a recipe door sets
+            // `has_validator`, and it re-enters exactly as a struct's does.
+            out @ NativeOut::Variant {
+                has_validator: true,
+                ..
+            } => {
+                let value = materialize_native(out);
+                if let Some(rejection) = self.run_validator(value, path, span)? {
+                    release(value);
+                    return Ok(MatOut::Rejected(rejection));
+                }
+                MatOut::Value(value)
+            }
             out @ NativeOut::Variant { .. } => MatOut::Value(materialize_native(out)),
             // A native class instance (native-extensibility S2) — like a `Variant`, never decoded
             // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one; materialize

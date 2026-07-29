@@ -139,7 +139,22 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// desynchronise the manifest. `Op` (in `Module::code`) also gained a `VariantsOf` variant, declared
 /// beside `FieldSpecsOf` rather than at the end, which shifts every discriminant after it — a wire
 /// break on its own by the same rule.
-pub const FORMAT_VERSION: u8 = 11;
+///
+/// Bumped to 12 by the generic-forwarding arc: `Op::Call` and `Op::CallGlobal` (in `Module::code`)
+/// each gained a `type_args: Box<[Reg]>` between `args` and `span`, and `Chunk` gained a `hidden:
+/// u16` after `num_params` — the type-argument channel that replaced prepending a forwarding
+/// generic's hidden slots onto the value-argument list. Same non-self-describing-encoding rule as
+/// every bump above: postcard writes the new sequence's length prefix where a version-11 reader
+/// expects the span, and the extra `u16` shifts every byte after it in each prototype header, so an
+/// older artifact decoded here would desynchronise mid-chunk rather than fail cleanly.
+///
+/// Bumped to 13 by the same arc's Axis A and its cache-line budget: `Op::CallMethod` gained a
+/// `type_args` of its own (methods forward now), `Chunk` gained `hidden_base`, and the three call
+/// ops' `supplied` changed from `Option<u64>` to `Option<NonZeroU64>` to keep `Op` inside one cache
+/// line. The last is a wire break even though the *meaning* is identical: postcard writes an
+/// `Option`'s discriminant byte followed by the payload either way, but a niche-optimised `Option`
+/// is not guaranteed to encode as the plain one, and the two ops around it moved regardless.
+pub const FORMAT_VERSION: u8 = 13;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

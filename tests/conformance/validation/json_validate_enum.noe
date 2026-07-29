@@ -1,0 +1,43 @@
+// The decode-door `Validate` contract is about **types**, not only structs: an enum implementing
+// `Validate` has its `validate()` run on the freshly decoded case, reported at the failing value's
+// path exactly as a struct's is. That is what lets a backed enum retire a case at the boundary —
+// the backing still exists in old documents, and the invariant is what refuses it.
+//
+// The two rejections stay distinct, and the ordering matters: a value that names no case at all is
+// refused by the **decode** (`unknown_variant`) and never reaches a validator, so a validator only
+// ever sees a case its own enum declares.
+// expect: stdout "ok: Plan.Paid"
+// expect: stdout "validation: tier: the legacy plan is no longer accepted"
+// expect: stdout "unknown_variant: tier: \"gold\" is not a variant of `Plan`: expected one of \"free\", \"legacy\", \"paid\""
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+enum Plan: string {
+    Free = "free"
+    Legacy = "legacy"
+    Paid = "paid"
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if self == Plan.Legacy {
+                return Err("the legacy plan is no longer accepted")
+            }
+            return Ok()
+        }
+    }
+}
+
+@derive(Deserialize<Json>)
+struct Account { tier: Plan }
+
+fn say(r: Result<Account, JsonError>): string {
+    return match r {
+        Ok(a) => "ok: ${a.tier}",
+        Err(e) => "${e.kind()}: ${e.message()}",
+    }
+}
+
+echo say(json.try_parse::<Account>("{\"tier\": \"paid\"}"))
+echo say(json.try_parse::<Account>("{\"tier\": \"legacy\"}"))
+echo say(json.try_parse::<Account>("{\"tier\": \"gold\"}"))

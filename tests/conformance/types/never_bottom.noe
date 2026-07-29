@@ -1,0 +1,53 @@
+// `never` — the bottom type, the declared return of a function that does not return. The exact
+// mirror of `dyn`: every type widens INTO the top, and the bottom widens into every type. So a call
+// to a `never` function is well-typed in ANY position — there is no value to be wrong about — and
+// nothing written after it can run.
+//
+// This is what lets a signature state divergence as a fact rather than a comment. `os.exit`,
+// `server.serve` and `panic` all declare it, and `noeta test` reads it to decide which top-level
+// statements may join the setup every test shares.
+// expect: stdout "guarded"
+// expect: stdout "int position ok"
+// expect: stdout "string position ok"
+// expect: stdout "list position ok"
+// expect: stdout "never is uninhabited"
+// expect: error E0010 at 21:5
+// expect: exit 1
+
+use std.os
+
+// A user-declared diverging function. The body ends in a `panic`, itself `never`.
+fn die(reason: string): never {
+    panic(reason);
+}
+
+// `never <: T` for every T, so the SAME call is accepted where an `int`, a `string` and a
+// `List<int>` are expected. Each `else` arm is dead at run time and live at check time — the point
+// is that none of them is a type error.
+fn width(kind: string): int {
+    if kind == "known" { return 4 }
+    die("no width for ${kind}");
+}
+
+fn label(kind: string): string {
+    if kind == "known" { return "ok" }
+    die("no label for ${kind}");
+}
+
+fn digits(kind: string): List<int> {
+    if kind == "known" { return [1, 2] }
+    die("no digits for ${kind}");
+}
+
+echo "guarded";
+if width("known") == 4 { echo "int position ok" }
+if label("known") == "ok" { echo "string position ok" }
+if digits("known").len() == 2 { echo "list position ok" }
+
+// Uninhabited, so a type test against it is always false — the dual of `x is dyn` always being true.
+d: dyn = 42;
+if !(d is never) { echo "never is uninhabited" }
+
+// And the divergence is real: this aborts, and the line after it never runs.
+die("the end");
+echo "unreached";

@@ -171,18 +171,41 @@ pub struct Sites {
     pub type_arg_table: Vec<noeta_ext_abi::TypeArgInfo>,
     /// Call spans of **forwarding-generic** calls → the hidden type-argument slots the call must
     /// supply, in the callee's forwarding order (`Table(i)` = a concrete instantiation's table
-    /// index; `Forward(j)` = pass the enclosing fn's own hidden slot `j` through). Lowering
-    /// prepends the matching atoms to the call's arguments.
+    /// index; `Forward(j)` = pass the enclosing body's own hidden slot `j` through). Lowering
+    /// puts the matching atoms in the call node's `type_args` channel, beside its value
+    /// arguments — never inside them, so the callee's value parameter positions are exactly what
+    /// the source wrote.
     pub hidden_arg_sites: HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
-    /// `Expr::TypedModuleCall` spans whose turbofish is a FORWARDED type parameter → the enclosing
-    /// fn's hidden slot index holding the instantiation's table entry. Lowering emits a dynamic
-    /// recipe operand instead of a baked `TypeRecipe`.
-    pub dynamic_recipe_sites: HashMap<Span, u32>,
-    /// `Expr::AttributesOf` spans whose turbofish is a FORWARDED type parameter → the hidden slot
-    /// index; the manifest query resolves the type NAME through the table at runtime.
-    pub dynamic_attr_sites: HashMap<Span, u32>,
-    /// Forwarding generic fns → their hidden-parameter count. Lowering prepends that many hidden
-    /// parameters (`$ty0`, `$ty1`, …) to the fn's IR parameter list.
+    /// Spans whose turbofish is a **FORWARDED type parameter** of the enclosing top-level generic
+    /// `fn` → the hidden slot index holding the instantiation's entry in [`Sites::type_arg_table`].
+    ///
+    /// One map over three surfaces, because there is one fact: `Expr::TypedModuleCall`
+    /// (`json.try_parse::<T>` — lowering emits a dynamic recipe operand instead of a baked
+    /// `TypeRecipe`), `Expr::AttributesOf` (`attributes_of::<T>` — the manifest query resolves the
+    /// type NAME through the table at runtime), and `Expr::TypeName` (`type_name::<T>()` — lowering
+    /// emits an [`Rvalue::TypeSlotName`](noeta_ir::Rvalue) instead of folding a constant string).
+    /// A span belongs to exactly one `Expr`, and each consumer consults this from its own variant's
+    /// arm, so the variant the span came from is already known where the slot is read; three
+    /// parallel `HashMap<Span, u32>`s only spread one lookup across three places to keep in step.
+    ///
+    /// The type-side twin is [`Sites::self_type_arg_sites`], which reads a generic *type*'s
+    /// argument off the receiver's reflected tag; there is no receiver here, so the name and the
+    /// decode recipe both come from the same hidden slot — which is why a forwarded name and a
+    /// forwarded manifest can never disagree about what `T` is.
+    ///
+    /// A pure function of the program, like the other site maps.
+    pub forwarded_slot_sites: HashMap<Span, u32>,
+    /// `type_name::<T>()` spans inside a **generic type's instance method**, where `T` is one of
+    /// the enclosing type's own parameters → that parameter's index in the type's declaration order
+    /// (generic constructor reflection, Gap B). The instantiation is not in the compiled body — one
+    /// body serves every `Repo<…>` — but it *is* on the receiver: `self` carries the reflected type
+    /// tag its construction site stamped, so lowering reads argument `i` off that tag instead of
+    /// baking a constant string. A pure function of the program, like the other site maps.
+    pub self_type_arg_sites: HashMap<Span, (String, u32)>,
+    /// Forwarding generic fns and methods → their hidden-slot count, keyed as the callable traces
+    /// (a bare `fn` name, or `Type.method`). Lowering gives the callable that many leading
+    /// type-argument parameters (`$ty0`, `$ty1`, …) and records the count on `Func::hidden`, which
+    /// is what tells every binder how many slots to lay down before the value arguments start.
     pub forwarding_fns: HashMap<String, u32>,
     /// **Forwarding-fn-as-value** sites (poly-deferrals D2c): `Expr::Ident` spans where a
     /// forwarding generic fn is used as a VALUE with its instantiation pinned by the expected
@@ -217,6 +240,21 @@ pub(crate) struct SiteMaps {
     /// compile path leaves it empty and pays nothing. Concretely-typed sites only, like the other
     /// maps: a `dyn`/union/un-inferred result is omitted (hover simply shows nothing there).
     pub(crate) expr_types: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// See [`Checked::diverging_stmts`](crate::Checked::diverging_stmts) — the spans of
+    /// statement-expressions whose expression types as [`noeta_types::Type::Never`]. Always
+    /// populated (unlike `expr_types`): it is one `HashSet` insert on the rare statement that
+    /// diverges, and empty for every program that has none.
+    pub(crate) diverging_stmts: HashSet<Span>,
+    /// Every **expression** whose inferred type is [`noeta_types::Type::Never`] — the raw fact
+    /// `diverging_stmts` is the statement-level projection of.
+    ///
+    /// Checker-internal, and read by exactly one consumer: [`crate::subst::expr_diverges`], the
+    /// must-diverge analysis behind E0048 ("this function can reach the end of its body"). That
+    /// analysis used to hard-code the single name `panic`, so a user-written
+    /// `fn die(msg: string): never` was not recognised and every caller that ended in `die(…)` was
+    /// rejected — the feature would have been decorative. Carried across by span exactly as
+    /// [`crate::Checker::exhaustive_matches`] is, and read only after the body is typed.
+    pub(crate) never_exprs: HashSet<Span>,
     pub(crate) construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// See [`Sites::inferred_object_types`].
     pub(crate) inferred_object_types: HashMap<Span, String>,
@@ -314,10 +352,10 @@ pub(crate) struct SiteMaps {
     pub(crate) type_arg_table: Vec<noeta_ext_abi::TypeArgInfo>,
     /// Forwarding-call hidden-argument slots — see [`Sites::hidden_arg_sites`].
     pub(crate) hidden_arg_sites: HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
-    /// Dynamic-recipe turbofish sites — see [`Sites::dynamic_recipe_sites`].
-    pub(crate) dynamic_recipe_sites: HashMap<Span, u32>,
-    /// Dynamic manifest-query sites — see [`Sites::dynamic_attr_sites`].
-    pub(crate) dynamic_attr_sites: HashMap<Span, u32>,
+    /// Forwarded-type-parameter turbofish sites — see [`Sites::forwarded_slot_sites`].
+    pub(crate) forwarded_slot_sites: HashMap<Span, u32>,
+    /// Enclosing-type type-argument reflection sites — see [`Sites::self_type_arg_sites`].
+    pub(crate) self_type_arg_sites: HashMap<Span, (String, u32)>,
     /// Forwarding fns' hidden-parameter counts — see [`Sites::forwarding_fns`].
     pub(crate) forwarding_fns: HashMap<String, u32>,
     /// Forwarding-fn-as-value wrap sites — see [`Sites::fn_value_sites`].
@@ -361,8 +399,8 @@ impl SiteMaps {
             try_conversion_sites: self.try_conversion_sites,
             type_arg_table: self.type_arg_table,
             hidden_arg_sites: self.hidden_arg_sites,
-            dynamic_recipe_sites: self.dynamic_recipe_sites,
-            dynamic_attr_sites: self.dynamic_attr_sites,
+            forwarded_slot_sites: self.forwarded_slot_sites,
+            self_type_arg_sites: self.self_type_arg_sites,
             forwarding_fns: self.forwarding_fns,
             fn_value_sites: self.fn_value_sites,
             destructor_relevance,

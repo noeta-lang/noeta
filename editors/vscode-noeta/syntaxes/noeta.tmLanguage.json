@@ -363,7 +363,7 @@
       "patterns": [
         {
           "name": "support.type.primitive.noeta",
-          "match": "\\b(int|float|f32|f64|number|bool|string|bytes|void|unit|dyn|i8|i16|i32|i64|u8|u16|u32|u64)\\b"
+          "match": "\\b(int|float|f32|f64|number|bool|string|bytes|void|unit|dyn|never|i8|i16|i32|i64|u8|u16|u32|u64)\\b"
         },
         {
           "name": "support.type.builtin.noeta",

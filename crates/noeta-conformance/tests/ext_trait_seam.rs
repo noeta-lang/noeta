@@ -380,6 +380,7 @@ fn kit_dispatch(
                 variant: "Dark".to_string(),
                 variant_index: 0,
                 fields: vec![],
+                has_validator: false,
             })
         }
         "badge" => {

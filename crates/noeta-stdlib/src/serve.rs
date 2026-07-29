@@ -89,7 +89,17 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
             SigType::Fn(&[REQUEST_SIG], &SigType::Dyn),
             SigType::Optional(&SigType::String),
         ],
-        ret: RetTy::Concrete(SigType::Unit),
+        // `never`, not `void`. The accept loop ends only on a SIGINT graceful drain — an external
+        // signal the *program* cannot cause — so no code a caller writes after this can ever be
+        // reached by the program's own control flow. `never` states exactly that: you do not get
+        // control back here. The nuance is worth naming, because it is the one declaration in the
+        // stdlib where the Rust dispatch does have a `return` path; what makes it honest is that
+        // the path is the process shutting down, which is the same reason `os.exit` is `never`.
+        //
+        // Nothing downstream treats `never` as license to eliminate code — the type drives checking
+        // and the tier runners' setup filter, not lowering — so this changes what a signature *says*
+        // without changing what a program *does*.
+        ret: RetTy::Concrete(SigType::Never),
     },
     // `websocket(handler) -> Response` (server-hmr L0) — the connection-hijack response: returned
     // from a `fetch` handler, it upgrades the request's connection to a websocket and runs
@@ -218,7 +228,9 @@ pub const SERVE_COMMAND: ExtCommand = ExtCommand {
         ctx.run_file(
             args.path("file"),
             Some(&EntryCall {
-                module: "server",
+                // Qualified: the entry call binds `server` itself, so a serve program need not
+                // import a module it never names (its handler signature uses `Request`/`Response`).
+                module: "std.http.server",
                 func: "serve",
                 args: vec![
                     EntryArg::Int(port),

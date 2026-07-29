@@ -428,6 +428,11 @@ impl EnumDef {
 struct VariantInfo {
     name: String,
     field_names: Vec<String>,
+    /// The variant's **backing value** in a backed enum (`enum Plan: string { Free = "free" }`),
+    /// folded through the shared `fold_const_expr`; `None` for a plain enum's case, a native or
+    /// prelude enum (neither is backed), and a backing that is not a literal. What `Enum.from` /
+    /// `Enum.try_from` match on first — the wire value the enum's schema advertises.
+    backing: Option<noeta_ast::AttrValue>,
 }
 
 /// A constructed enum value.
@@ -590,7 +595,13 @@ pub struct ObjectValue {
     /// shape) and every non-literal-constructed instance. Invisible to value semantics — `PartialEq`
     /// compares only `def`/`slots` — the tree-walker twin of the VM's node tag. An object's type is
     /// invariant under field mutation, so (unlike the collection tags) it is never cleared.
-    reflect: Option<Rc<TypeRepr>>,
+    ///
+    /// A [`RefCell`] because a **constructor call site** stamps it after the fact (generic
+    /// constructor reflection): the instantiation `Repo<Todo>` is known at the call, not inside
+    /// `fn new` where the literal is written. Rebuilding the value to re-tag it is not an option —
+    /// a `class` is a reference type whose `Rc` *is* its identity — so the tag is written in place.
+    /// Still invisible to value semantics: `PartialEq` compares only `def`/`slots`.
+    reflect: RefCell<Option<Rc<TypeRepr>>>,
 }
 
 thread_local! {
@@ -629,8 +640,21 @@ impl ObjectValue {
             def,
             slots: RefCell::new(slots),
             seq,
-            reflect,
+            reflect: RefCell::new(reflect),
         }
+    }
+
+    /// This instance's reflected type tag, if it carries one.
+    fn reflect(&self) -> Option<Rc<TypeRepr>> {
+        self.reflect.borrow().clone()
+    }
+
+    /// Stamp the reflected type tag **in place** (generic constructor reflection): the caller of a
+    /// generic type's fresh constructor knows the instantiation the constructor body could not.
+    /// Only ever called on a value the checker proved was freshly built by the very call being
+    /// stamped, so no other reference can observe the change.
+    fn set_reflect(&self, tag: Rc<TypeRepr>) {
+        *self.reflect.borrow_mut() = Some(tag);
     }
 
     /// The slot index of `name` in this object's shape, or `None` if it has no such field. A linear
@@ -755,6 +779,14 @@ impl Closure {
             captured,
             name,
         }
+    }
+
+    /// How many leading [`Self::params`] are **type-argument slots** rather than value parameters
+    /// (poly-values F2b) — the eval twin of the VM's `Chunk::hidden`, read straight off the lowered
+    /// `Func` so the two backends cannot disagree about the layout. Zero for every ordinary
+    /// callable.
+    fn hidden(&self) -> usize {
+        self.body.hidden as usize
     }
 }
 
@@ -1405,6 +1437,7 @@ impl Interpreter {
                         .map(|v| VariantInfo {
                             name: v.name.clone(),
                             field_names: v.field_names(),
+                            backing: None,
                         })
                         .collect(),
                     derives_comparable: false,
@@ -2159,14 +2192,18 @@ impl Interpreter {
         Value::list(items)
     }
 
-    /// `construct(name, fields)` — build a struct/class value of the type named by `name_val` from the
-    /// field values `fields_val` (declaration order), reusing the SAME construction path as a
-    /// `T { … }` literal so defaults and full-initialization are honored identically. Returns a
-    /// `Result<dyn, string>`: an unknown type, a non-list `fields`, an arity/scalar-type mismatch, or a
-    /// missing non-defaulted field is a recoverable `Err(message)`; success is `Ok(value)`. Validation
-    /// runs through the shared `plan_construct` (so the VM agrees on every accept/reject and every
-    /// message), then the accepted values feed `construct_object`, which fills the remaining
-    /// defaulted fields — so the two never both report a missing field.
+    /// `construct(name, fields)` — build a value of the type named by `name_val` from the field values
+    /// `fields_val` (declaration order), reusing the SAME construction path as a literal so defaults
+    /// and full-initialization are honored identically. Returns a `Result<dyn, string>`: an unknown
+    /// type, a non-list `fields`, an arity/scalar-type mismatch, or a missing non-defaulted field is a
+    /// recoverable `Err(message)`; success is `Ok(value)`. Validation runs through the shared
+    /// `plan_construct` (so the VM agrees on every accept/reject and every message), then the accepted
+    /// values feed `construct_object`, which fills the remaining defaulted fields — so the two never
+    /// both report a missing field.
+    ///
+    /// `name` spells a struct/class (`"ServerOpts"`) or an **enum case** (`"Shape.Circle"`), whose
+    /// `fields` are that variant's payload; `resolve_construct_target` decides which, so both backends
+    /// read the same spelling identically.
     fn construct_dynamic(&mut self, name_val: Value, fields_val: Value, span: Span) -> Eval<Value> {
         let Value::Str(type_name) = &name_val else {
             return Ok(invoke_err(format!(
@@ -2175,15 +2212,38 @@ impl Interpreter {
             )));
         };
         let type_name = type_name.clone();
-        // Only a declared struct/class is constructible; an enum or an unknown name is a clean `Err`
-        // (checked before field validation, so an unknown type reports as such, not "no field X").
-        match self.reflection.type_named(&type_name).map(|t| t.kind) {
-            Some(noeta_ast::reflect::TypeKind::Struct | noeta_ast::reflect::TypeKind::Class) => {}
-            _ => {
-                return Ok(invoke_err(format!(
-                    "`{type_name}` is not a constructible struct or class"
-                )));
+        // What the name refers to, decided once and shared with the VM. Resolved before any field
+        // validation, so an unconstructible name reports as such rather than as "no field X".
+        match noeta_ast::reflect::resolve_construct_target(&self.reflection, &type_name) {
+            noeta_ast::reflect::ConstructTarget::Rejected(msg) => return Ok(invoke_err(msg)),
+            noeta_ast::reflect::ConstructTarget::Variant {
+                enum_name,
+                variant,
+                index,
+                payload,
+            } => {
+                // An enum case is built directly rather than through `construct_object`: a variant has
+                // no defaults, no slot table and no methods of its own to inherit, so the payload
+                // values ARE the value. Pure, so it needs no `&mut self` and the reflection borrow
+                // above stays live through it.
+                return Ok(
+                    match plan_variant_payload(&type_name, &payload, &fields_val) {
+                        Err(msg) => invoke_err(msg),
+                        Ok(data) => builtin_enum(
+                            "Result",
+                            "Ok",
+                            vec![Value::Enum(Rc::new(EnumValue {
+                                enum_name: enum_name.to_string(),
+                                variant: variant.to_string(),
+                                data,
+                                variant_index: index as usize,
+                                reflect: None,
+                            }))],
+                        ),
+                    },
+                );
             }
+            noeta_ast::reflect::ConstructTarget::Fielded => {}
         }
         // The `fields` argument is either a `List<dyn>` (positional, declaration order) or a
         // `Map<string, dyn>` (named — the sparse, any-order form a framework binding `--field` flags
@@ -2601,10 +2661,14 @@ impl Interpreter {
         })))
     }
 
-    /// `MyEnum.try_from(s)` → `?MyEnum` (`some(case)` if `s` names a payload-free case, else `none`)
-    /// and `MyEnum.from(s)` → `MyEnum` (the case, or a panic if `s` names none) — the PHP `tryFrom`/
-    /// `from` pair, matched by case **name**. A payload-carrying variant is not name-constructible
-    /// (no payload to supply), so it never matches. The VM's `Op::EnumFromStr` mirrors this exactly.
+    /// `MyEnum.try_from(v)` → `?MyEnum` (`some(case)` if `v` names a payload-free case, else `none`)
+    /// and `MyEnum.from(v)` → `MyEnum` (the case, or a panic if `v` names none) — the aborting /
+    /// recoverable pair, matched by **backing value first, then case name**
+    /// ([`noeta_ast::reflect::variant_for_wire`] owns that rule, so the VM's `Op::EnumFromStr` cannot
+    /// disagree). A payload-carrying variant is never selected: there is no payload to supply.
+    ///
+    /// `try_from` is the door for untrusted input — an enum value off a wire — which is why the
+    /// backing is what it reads: a backed enum's backing is exactly what its JSON Schema advertises.
     fn enum_from_string(
         &mut self,
         def: &Rc<EnumDef>,
@@ -2616,44 +2680,53 @@ impl Interpreter {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                format!("`{}.{method}` takes one string argument", def.name()),
+                format!("`{}.{method}` takes one argument", def.name()),
             ));
         }
-        let Value::Str(key) = &args[0] else {
+        let Some(probe) = wire_probe(&args[0]) else {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!(
-                    "`{}.{method}` expects a string, found {}",
+                    "`{}.{method}` expects a string or a backing value, found {}",
                     def.name(),
                     args[0].type_name()
                 ),
             ));
         };
-        let key = key.clone();
-        // Match only a payload-free case of this name (a payload variant cannot be built from a name).
-        let matched = def.variant(&key).is_some_and(|v| v.field_names.is_empty());
-        if matched {
-            let value = Value::Enum(Rc::new(EnumValue {
-                enum_name: def.name().to_string(),
-                variant_index: def.variant_index(&key),
-                variant: key,
-                data: vec![],
-                reflect: None,
-            }));
-            if method == "from" {
-                Ok(value)
-            } else {
-                Ok(builtin_enum("Option", "some", vec![value]))
+        // Only payload-free cases are candidates — a payload variant has nothing to supply its data.
+        let cases: Vec<(&str, Option<&noeta_ast::AttrValue>)> = def
+            .variants
+            .iter()
+            .filter(|v| v.field_names.is_empty())
+            .map(|v| (v.name.as_str(), v.backing.as_ref()))
+            .collect();
+        match noeta_ast::reflect::variant_for_wire(&cases, &probe) {
+            Some(i) => {
+                let name = cases[i].0.to_string();
+                let value = Value::Enum(Rc::new(EnumValue {
+                    enum_name: def.name().to_string(),
+                    variant_index: def.variant_index(&name),
+                    variant: name,
+                    data: vec![],
+                    reflect: None,
+                }));
+                if method == "from" {
+                    Ok(value)
+                } else {
+                    Ok(builtin_enum("Option", "some", vec![value]))
+                }
             }
-        } else if method == "from" {
-            Err(self.runtime_error(
+            None if method == "from" => Err(self.runtime_error(
                 DiagnosticCode::Panic,
                 span,
-                format!("panic: `{}` has no case `{key}`", def.name()),
-            ))
-        } else {
-            Ok(builtin_enum("Option", "none", vec![]))
+                format!(
+                    "panic: `{}` has no case `{}`",
+                    def.name(),
+                    args[0].display()
+                ),
+            )),
+            None => Ok(builtin_enum("Option", "none", vec![])),
         }
     }
 
@@ -2777,38 +2850,60 @@ impl Interpreter {
     /// Call a method whose arguments may skip a defaulted parameter, per the mask lowering carried
     /// on the call. Only a user method or associated function can be masked; the built-in and
     /// native paths declare no defaults, so a mask never reaches them.
+    ///
+    /// `type_args` is the method's own type-argument channel (poly-values F2b / Axis A) — the
+    /// atoms filling a forwarding generic method's leading hidden slots, empty for every other
+    /// call. A call carrying either channel must reach the user-method path, because only that
+    /// path can honour them; the built-in and native receivers below neither declare hidden slots
+    /// nor defaults, so `&[]`/`None` is what they see.
+    #[allow(clippy::too_many_arguments)]
     fn call_method_masked(
         &mut self,
         receiver: Value,
         name: &str,
         args: Vec<Value>,
         span: Span,
+        type_args: &[Value],
         supplied: Option<u64>,
     ) -> Eval<Value> {
-        if supplied.is_some() {
+        if supplied.is_some() || !type_args.is_empty() {
             if let Value::Object(object) = &receiver
                 && let Some(method) = object.def.methods.get(name)
             {
                 let (object, method) = (Rc::clone(object), Rc::clone(method));
-                return self.call_method_on_masked(&object, &method, args, span, supplied);
+                return self
+                    .call_method_on_masked(&object, &method, args, span, type_args, supplied);
             }
             if let Value::Type(def) = &receiver
                 && let Some(method) = def.methods.get(name)
             {
-                return self.call_closure_masked(&Rc::clone(method), args, span, supplied);
+                return self.call_closure_masked(
+                    &Rc::clone(method),
+                    args,
+                    span,
+                    type_args,
+                    supplied,
+                );
             }
             if let Value::EnumType(def) = &receiver
                 && def.variant(name).is_none()
                 && let Some(method) = def.method(name)
             {
-                return self.call_closure_masked(&Rc::clone(method), args, span, supplied);
+                return self.call_closure_masked(
+                    &Rc::clone(method),
+                    args,
+                    span,
+                    type_args,
+                    supplied,
+                );
             }
             if let Value::Enum(e) = &receiver
                 && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
                 && let Some(method) = def.method(name)
             {
                 let method = Rc::clone(method);
-                return self.call_enum_method_masked(receiver, &method, args, span, supplied);
+                return self
+                    .call_enum_method_masked(receiver, &method, args, span, type_args, supplied);
             }
         }
         self.call_method(receiver, name, args, span)
@@ -3289,15 +3384,16 @@ impl Interpreter {
         positional: Vec<Value>,
         named: Option<Vec<(String, Value)>>,
     ) -> Result<(Vec<Value>, Option<u64>), String> {
+        // Arity is reckoned over the callee's VALUE parameters — a forwarding generic's leading
+        // hidden slots are not part of the surface signature the reflection artifact describes, so
+        // counting them here would report an arity the source never wrote. `invoke` supplies no
+        // type argument at all; that is the call's own business, and it aborts (see
+        // [`Self::check_type_arity`]) rather than misbinding.
+        let total = closure.params.len() - closure.hidden();
         let Some(named) = named else {
-            let required = required_count(&closure.defaults);
-            if positional.len() < required || positional.len() > closure.params.len() {
-                return Err(arity_message(
-                    kind,
-                    required,
-                    closure.params.len(),
-                    positional.len(),
-                ));
+            let required = required_count(&closure.defaults) - closure.hidden();
+            if positional.len() < required || positional.len() > total {
+                return Err(arity_message(kind, required, total, positional.len()));
             }
             return Ok((positional, None));
         };
@@ -3305,7 +3401,7 @@ impl Interpreter {
         let plan = noeta_ast::reflect::plan_invoke_named(
             target,
             self.reflection.params_for(target),
-            closure.params.len(),
+            total,
             &names,
         )?;
         let args = plan.order.iter().map(|&i| named[i].1.clone()).collect();
@@ -3374,7 +3470,7 @@ impl Interpreter {
                     Ok(bound) => bound,
                     Err(message) => return Ok(invoke_err(message)),
                 };
-            let result = self.call_closure_masked(&closure, args, span, supplied)?;
+            let result = self.call_closure_masked(&closure, args, span, &[], supplied)?;
             return Ok(builtin_enum("Result", "Ok", vec![result]));
         };
         // A reflection `Type` value (e.g. a stored attribute type-ref) dispatches like the type
@@ -3411,7 +3507,7 @@ impl Interpreter {
                     Ok(bound) => bound,
                     Err(message) => return Ok(invoke_err(message)),
                 };
-                let result = self.call_closure_masked(&closure, args, span, supplied)?;
+                let result = self.call_closure_masked(&closure, args, span, &[], supplied)?;
                 Ok(builtin_enum("Result", "Ok", vec![result]))
             }
             // A value → an instance method (the instance's fields are in scope).
@@ -3430,8 +3526,14 @@ impl Interpreter {
                         Ok(bound) => bound,
                         Err(message) => return Ok(invoke_err(message)),
                     };
-                let result =
-                    self.call_method_on_masked(&object, &method_closure, args, span, supplied)?;
+                let result = self.call_method_on_masked(
+                    &object,
+                    &method_closure,
+                    args,
+                    span,
+                    &[],
+                    supplied,
+                )?;
                 Ok(builtin_enum("Result", "Ok", vec![result]))
             }
             _ => Ok(invoke_err(format!(
@@ -4368,17 +4470,20 @@ impl Interpreter {
     /// supplied-mask the checker recorded and lowering carried. Only a user closure can be masked
     /// — nothing else has defaulted parameters — so every other callee ignores it, and a mask
     /// reaching one is a lowering bug rather than a user error.
+    /// `type_args` is the call's own type-argument channel — the atoms filling a forwarding
+    /// generic's leading hidden slots (poly-values F2b), empty for every other call.
     fn call_masked(
         &mut self,
         callee: Value,
         args: Vec<Value>,
         span: Span,
+        type_args: &[Value],
         supplied: Option<u64>,
     ) -> Eval<Value> {
-        match (&callee, supplied) {
-            (Value::Function(closure), Some(_)) => {
+        match &callee {
+            Value::Function(closure) if supplied.is_some() || !type_args.is_empty() => {
                 let closure = Rc::clone(closure);
-                self.call_closure_masked(&closure, args, span, supplied)
+                self.call_closure_masked(&closure, args, span, type_args, supplied)
             }
             _ => self.call(callee, args, span),
         }
@@ -4463,22 +4568,32 @@ impl Interpreter {
     /// parameter it was bound to at check time (its own position without a mask, the `i`-th
     /// supplied parameter with one), and every parameter the call did not fill takes its default,
     /// evaluated in the callee's captured (definition/global) scope — never seeing the call's other
-    /// arguments. `supplied` is indexed over the callee's DECLARED parameters; a receiver, where
-    /// there is one, binds as `self` and takes no parameter slot.
+    /// arguments. `supplied` is indexed over the callee's declared VALUE parameters; a receiver,
+    /// where there is one, binds as `self` and takes no parameter slot.
+    ///
+    /// A forwarding generic's leading type-argument slots are laid down first, from `type_args`,
+    /// and every position after them shifts by that count — which is exactly why `supplied` is
+    /// unaffected by forwarding: it indexes the value parameters, and those keep their positions
+    /// relative to each other. [`Self::check_type_arity`] has already established the count.
     fn bind_call_scope(
         &mut self,
         callee: &Rc<Closure>,
         args: Vec<Value>,
+        type_args: &[Value],
         supplied: Option<u64>,
         call_scope: &Scope,
     ) -> Eval<()> {
+        let hidden = callee.hidden();
+        for (i, ty) in type_args.iter().enumerate() {
+            call_scope.declare(callee.params[i].clone(), ty.clone(), false);
+        }
         let n_args = args.len();
         for (i, arg) in args.into_iter().enumerate() {
-            let p = noeta_bytecode::param_of_arg(i, supplied);
+            let p = hidden + noeta_bytecode::param_of_arg(i, supplied);
             call_scope.declare(callee.params[p].clone(), arg, false);
         }
-        for i in 0..callee.params.len() {
-            if noeta_bytecode::is_param_filled(i, n_args, supplied) {
+        for i in hidden..callee.params.len() {
+            if noeta_bytecode::is_param_filled(i - hidden, n_args, supplied) {
                 continue;
             }
             let value = self.eval_default(callee, i)?;
@@ -4487,8 +4602,29 @@ impl Interpreter {
         Ok(())
     }
 
+    /// The guard on the type-argument channel: a call must supply exactly the leading hidden slots
+    /// its callee declares. A checked call by name always does; the entry points that cannot —
+    /// a `dyn` receiver, a handle, `invoke`, a first-class value — supply none, and binding
+    /// positionally anyway would lay a *value* argument into a type-argument slot and read it as an
+    /// index into the type table. So this aborts instead, naming the callee.
+    fn check_type_arity(&mut self, callee: &Closure, supplied: usize, span: Span) -> Eval<()> {
+        let hidden = callee.hidden();
+        if supplied == hidden {
+            return Ok(());
+        }
+        Err(self.runtime_error(
+            DiagnosticCode::InvalidTypeArguments,
+            span,
+            noeta_ast::reflect::no_instantiation_message(
+                callee.name.as_deref().unwrap_or("<anonymous>"),
+                hidden,
+                supplied,
+            ),
+        ))
+    }
+
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
-        self.call_closure_masked(closure, args, span, None)
+        self.call_closure_masked(closure, args, span, &[], None)
     }
 
     fn call_closure_masked(
@@ -4496,14 +4632,18 @@ impl Interpreter {
         closure: &Rc<Closure>,
         args: Vec<Value>,
         span: Span,
+        type_args: &[Value],
         supplied: Option<u64>,
     ) -> Eval<Value> {
-        let required = required_count(&closure.defaults);
-        if args.len() < required || args.len() > closure.params.len() {
+        self.check_type_arity(closure, type_args.len(), span)?;
+        let hidden = closure.hidden();
+        let total = closure.params.len() - hidden;
+        let required = required_count(&closure.defaults) - hidden;
+        if args.len() < required || args.len() > total {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                arity_message("function", required, closure.params.len(), args.len()),
+                arity_message("function", required, total, args.len()),
             ));
         }
         // Safepoint-GC poll at the call boundary (memory-management 6.x) — with the loop
@@ -4513,7 +4653,7 @@ impl Interpreter {
             Some(allow) => Scope::sealed_child(&closure.captured, allow),
             None => Scope::child(&closure.captured),
         };
-        self.bind_call_scope(closure, args, supplied, &call_scope)?;
+        self.bind_call_scope(closure, args, type_args, supplied, &call_scope)?;
         // Shadow the call for the abort traceback: (callee name, call-site span). Popped on every
         // exit — an abort's trace is snapshotted deeper, at the diagnostic (see `record_abort_trace`).
         self.call_sites.push((closure.name.clone(), span));
@@ -4533,23 +4673,28 @@ impl Interpreter {
         args: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
-        self.call_method_on_masked(object, method, args, span, None)
+        self.call_method_on_masked(object, method, args, span, &[], None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn call_method_on_masked(
         &mut self,
         object: &Rc<ObjectValue>,
         method: &Rc<Closure>,
         args: Vec<Value>,
         span: Span,
+        type_args: &[Value],
         supplied: Option<u64>,
     ) -> Eval<Value> {
-        let required = required_count(&method.defaults);
-        if args.len() < required || args.len() > method.params.len() {
+        self.check_type_arity(method, type_args.len(), span)?;
+        let hidden = method.hidden();
+        let total = method.params.len() - hidden;
+        let required = required_count(&method.defaults) - hidden;
+        if args.len() < required || args.len() > total {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                arity_message("method", required, method.params.len(), args.len()),
+                arity_message("method", required, total, args.len()),
             ));
         }
         // Safepoint-GC poll at the call boundary — see `call_closure`.
@@ -4564,7 +4709,7 @@ impl Interpreter {
         // — is observed by a later bare read. A bare *write* `n = v` therefore declares a local (the
         // name is not in scope); mutating a field is the explicit `self.f = v`.
         call_scope.declare("self".to_string(), Value::Object(Rc::clone(object)), false);
-        self.bind_call_scope(method, args, supplied, &call_scope)?;
+        self.bind_call_scope(method, args, type_args, supplied, &call_scope)?;
         // Shadowed for the abort traceback, exactly as `call_closure` (popped on every exit).
         self.call_sites.push((method.name.clone(), span));
         let saved = std::mem::replace(&mut self.scope, call_scope);
@@ -4585,23 +4730,28 @@ impl Interpreter {
         args: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
-        self.call_enum_method_masked(receiver, method, args, span, None)
+        self.call_enum_method_masked(receiver, method, args, span, &[], None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn call_enum_method_masked(
         &mut self,
         receiver: Value,
         method: &Rc<Closure>,
         args: Vec<Value>,
         span: Span,
+        type_args: &[Value],
         supplied: Option<u64>,
     ) -> Eval<Value> {
-        let required = required_count(&method.defaults);
-        if args.len() < required || args.len() > method.params.len() {
+        self.check_type_arity(method, type_args.len(), span)?;
+        let hidden = method.hidden();
+        let total = method.params.len() - hidden;
+        let required = required_count(&method.defaults) - hidden;
+        if args.len() < required || args.len() > total {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                arity_message("method", required, method.params.len(), args.len()),
+                arity_message("method", required, total, args.len()),
             ));
         }
         let call_scope = match &method.body.captures {
@@ -4609,7 +4759,7 @@ impl Interpreter {
             None => Scope::child(&method.captured),
         };
         call_scope.declare("self".to_string(), receiver, false);
-        self.bind_call_scope(method, args, supplied, &call_scope)?;
+        self.bind_call_scope(method, args, type_args, supplied, &call_scope)?;
         // Shadowed for the abort traceback, exactly as `call_closure` (popped on every exit).
         self.call_sites.push((method.name.clone(), span));
         let saved = std::mem::replace(&mut self.scope, call_scope);
@@ -5948,6 +6098,21 @@ impl Interpreter {
     }
 }
 
+/// The neutral [`noeta_ast::reflect::WireProbe`] for a runtime value handed to `Enum.from` /
+/// `Enum.try_from`, or `None` when the value is not a scalar an enum can be backed by. The VM's twin
+/// classifies its own `Value` the same way, so the shared matcher sees identical probes.
+fn wire_probe(value: &Value) -> Option<noeta_ast::reflect::WireProbe> {
+    use noeta_ast::reflect::WireProbe;
+    Some(match value {
+        Value::Str(s) => WireProbe::Str(s.clone()),
+        Value::Int(n) => WireProbe::Int(*n),
+        Value::Float(f) => WireProbe::Float(*f),
+        Value::F32(f) => WireProbe::Float(*f as f64),
+        Value::Bool(b) => WireProbe::Bool(*b),
+        _ => return None,
+    })
+}
+
 /// The `Result.Err(msg)` returned when a by-name `invoke` cannot resolve (unknown name, wrong
 /// arity, non-string name, non-list args, or a non-invokable receiver). The VM builds the same
 /// value from `Op::Invoke`'s baked `err_shape`.
@@ -5959,6 +6124,56 @@ fn invoke_err(message: String) -> Value {
 /// name-keyed field values `construct_object` consumes, paired with the shared planner's validation
 /// outcome (deferred so the type-kind check and the plan error surface as one `Result.Err`).
 type ConstructResolve = (Vec<(String, Span, Value)>, Result<(), String>);
+
+/// Validate a `construct("Enum.Variant", fields)` payload against the variant's declared schema and
+/// order it into the positional `data` an enum value carries.
+///
+/// The two accepted `fields` shapes are the same two a struct takes and mean the same things — a
+/// `List<dyn>` in declaration order, a `Map<string, dyn>` keyed by the payload names `variants_of`
+/// reports (`_0`/`_1` for a positional payload) — and both go through the *same* shared planners a
+/// struct's fields do, so a payload mismatch is worded exactly like a field mismatch. Only the value
+/// extraction is backend-local; every accept/reject decision is shared, and the VM's twin is a
+/// mirror of this function (`plans/backend-mirror.md`).
+fn plan_variant_payload(
+    case_name: &str,
+    payload: &[noeta_ast::reflect::FieldSpecData<'_>],
+    fields_val: &Value,
+) -> Result<Vec<Value>, String> {
+    match fields_val {
+        Value::List(items) => {
+            let values: Vec<Value> = (*items.to_rc_vec()).clone();
+            let reprs: Vec<noeta_ast::reflect::TypeRepr> =
+                values.iter().map(eval_type_repr).collect();
+            noeta_ast::reflect::plan_construct(case_name, payload, &reprs)?;
+            Ok(values)
+        }
+        Value::Map(entries, _) => {
+            let provided: Vec<(String, Value)> = entries
+                .iter()
+                .filter_map(|(k, v)| match k {
+                    noeta_stdlib::MapKey::Str(s) => Some((s.as_str().to_owned(), v.clone())),
+                    _ => None,
+                })
+                .collect();
+            let reprs: Vec<(String, noeta_ast::reflect::TypeRepr)> = provided
+                .iter()
+                .map(|(n, v)| (n.clone(), eval_type_repr(v)))
+                .collect();
+            noeta_ast::reflect::plan_construct_named(case_name, payload, &reprs)?;
+            let names: Vec<String> = provided.iter().map(|(n, _)| n.clone()).collect();
+            Ok(
+                noeta_ast::reflect::plan_variant_payload_order(payload, &names)
+                    .into_iter()
+                    .map(|i| provided[i].1.clone())
+                    .collect(),
+            )
+        }
+        other => Err(format!(
+            "construct fields must be a list or a map, found {}",
+            other.type_name()
+        )),
+    }
+}
 
 /// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).
 /// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.
@@ -5991,6 +6206,7 @@ fn parse_packed_field(name: &str) -> Option<noeta_stdlib::PackedField> {
         | BuiltinTy::Bytes
         | BuiltinTy::Unit
         | BuiltinTy::Dyn
+        | BuiltinTy::Never
         | BuiltinTy::List
         | BuiltinTy::Set
         | BuiltinTy::Map
@@ -6073,14 +6289,12 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         // (with type arguments); a non-generic/untagged instance falls back to the head-only shape name
         // with empty args. Mirrors `vm_type_repr`'s node-tag consultation.
         Value::Object(o) if o.def.is_struct => o
-            .reflect
-            .as_ref()
-            .map(|r| (**r).clone())
+            .reflect()
+            .map(|r| (*r).clone())
             .unwrap_or_else(|| TypeRepr::Struct(o.def.name().to_string(), Vec::new())),
         Value::Object(o) => o
-            .reflect
-            .as_ref()
-            .map(|r| (**r).clone())
+            .reflect()
+            .map(|r| (*r).clone())
             .unwrap_or_else(|| TypeRepr::Class(o.def.name().to_string(), Vec::new())),
         // An extern-type value reflects as its registered nominal type under its qualified
         // identity (`std.id.Uuid`), mirroring the checker's `Type::Named` for it.
@@ -6117,7 +6331,10 @@ fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
         | TypeRepr::Str
         | TypeRepr::Bytes
         | TypeRepr::Unit
-        | TypeRepr::Dyn => Vec::new(),
+        | TypeRepr::Dyn
+        // Payloadless like the other scalars. Reachable only from a *declared* reflection
+        // (`returns_of` on `os.exit`) — never from a value, since none has this type.
+        | TypeRepr::Never => Vec::new(),
         // `Type.IntN(bits: int, signed: bool)` — the width descriptor.
         TypeRepr::IntN { signed, bits } => {
             vec![Value::Int(i64::from(*bits)), Value::Bool(*signed)]
@@ -6171,6 +6388,7 @@ fn native_type_value(
                 .map(|v| VariantInfo {
                     name: v.name.to_string(),
                     field_names: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
+                    backing: None,
                 })
                 .collect(),
             derives_comparable: false,
@@ -6390,6 +6608,9 @@ fn runtime_matches(
                     BuiltinTy::Unit => matches!(value, Value::Unit),
                     // Narrowing to the open top is a no-op: every value is a `dyn`.
                     BuiltinTy::Dyn => true,
+                    // Its dual: the bottom is uninhabited, so no value narrows to it. (The VM
+                    // spells the same answer as an empty `NarrowTarget::AnyOf`.)
+                    BuiltinTy::Never => false,
                     BuiltinTy::List => matches!(value, Value::List(_)),
                     BuiltinTy::Map => matches!(value, Value::Map(..)),
                     BuiltinTy::Set => matches!(value, Value::Set(..)),
@@ -6760,6 +6981,10 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             variant,
             variant_index,
             fields,
+            // The `Validate` re-entry is a decode-door concern: `materialize_recipe` intercepts a
+            // flagged variant and runs the validator before calling in here, so by this point the
+            // flag has already been honored (and an ordinary dispatch's variant never sets it).
+            has_validator: _,
         } => Value::Enum(Rc::new(EnumValue {
             enum_name,
             variant,

@@ -13,6 +13,16 @@ use super::*;
 pub(crate) struct VariantInfo {
     pub(crate) name: String,
     pub(crate) fields: Vec<Type>,
+    /// The variant's **backing value** in a backed enum (`enum Tier: string { Free = "free" }`),
+    /// folded through the shared [`noeta_ast::reflect::fold_const_expr`]; `None` for a plain enum's
+    /// variant, for a native/prelude enum (neither is backed), and for a backed variant whose value
+    /// is not a literal.
+    ///
+    /// Carried here rather than read back off the reflection manifest because the checker builds
+    /// decode recipes (`type_to_recipe`) and has no manifest — and because the backing belongs with
+    /// the variant's other declared facts, next to the payload types, so one lookup answers
+    /// everything an enum's construction surfaces need to know about a case.
+    pub(crate) backing: Option<noeta_ast::AttrValue>,
 }
 
 /// How a user method may be **reached** — the receiver discipline behind E0047 (prelude-redesign
@@ -189,6 +199,8 @@ pub(crate) fn builtin_receiver_type(name: &str) -> Option<Type> {
         BuiltinTy::Bool
         | BuiltinTy::Unit
         | BuiltinTy::Dyn
+        // Uninhabited: no value is a `never`, so nothing can receive a method call on one.
+        | BuiltinTy::Never
         | BuiltinTy::Option
         | BuiltinTy::Result => return None,
         // `number` names a SET of scalars, not a receiver: no value *is* a `number` (each is an

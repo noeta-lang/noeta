@@ -539,12 +539,32 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(receiver);
             args.iter().for_each(&mut *f);
         }
-        Rvalue::Call { callee, args, .. } => {
+        // A forwarding call's `type_args` are operands like any other — a pass-through slot reads
+        // the enclosing fn's `$ty` local, so skipping them here would let that local look dead and
+        // be dropped out from under the call.
+        Rvalue::Call {
+            callee,
+            args,
+            type_args,
+            ..
+        } => {
             f(callee);
             args.iter().for_each(&mut *f);
+            type_args.iter().for_each(&mut *f);
         }
-        Rvalue::Method { receiver, args, .. }
-        | Rvalue::TraitMethod { receiver, args, .. } => {
+        // A forwarding METHOD call's type arguments are operands too — same reason as `Call`'s
+        // above. A `TraitMethod` route is baked and never forwards.
+        Rvalue::Method {
+            receiver,
+            args,
+            type_args,
+            ..
+        } => {
+            f(receiver);
+            args.iter().for_each(&mut *f);
+            type_args.iter().for_each(&mut *f);
+        }
+        Rvalue::TraitMethod { receiver, args, .. } => {
             f(receiver);
             args.iter().for_each(&mut *f);
         }
@@ -604,9 +624,12 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::As { operand, .. }
         | Rvalue::TypeTest { operand, .. }
         | Rvalue::TypeOf { operand, .. }
+        | Rvalue::TypeArgName { operand, .. }
         | Rvalue::FieldsOf { operand, .. }
         | Rvalue::TraitsOf { operand, .. }
         | Rvalue::MaskWidth { operand, .. } => f(operand),
+        // The forwarded `type_name::<T>()` reads the enclosing fn's hidden type-argument slot.
+        Rvalue::TypeSlotName { slot, .. } => f(slot),
         // `params_of(target)` / `returns_of(target)` read their runtime target-string operand.
         Rvalue::ParamsOf { target, .. } | Rvalue::ReturnsOf { target, .. } => f(target),
         // `field_specs_of(name)` / `variants_of(name)` read their runtime type-name operand.

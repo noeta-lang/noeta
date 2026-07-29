@@ -1,0 +1,51 @@
+// `type_name::<T>()` over a generic type's own parameter yields the **qualified** identity under a
+// `namespace`, matching what the ordinary `type_name::<Todo>()` produces at the same site.
+//
+// The name is not folded at compile time — one body serves every instantiation, so it is read at
+// run time off the receiver's reflected type tag. That tag is built from the type the CHECKER
+// resolved at the construction site, and the checker runs on the already-qualified program, so the
+// qualification comes for free — but only if the tag really carries the linked identity, which is
+// exactly what could rot silently. The last line is the oracle: the two spellings must agree.
+//
+// A `main.noe` on purpose: the harness runs a *single-file* case straight from source text, with no
+// loader and therefore no namespace qualification at all, so a bare `.noe` here could not observe
+// the property it claims to pin.
+// expect: stdout "todos:demo.storage.Todo"
+// expect: stdout "users:demo.storage.User"
+// expect: stdout "demo.storage.Todo"
+// expect: stdout "true"
+// expect: exit 0
+namespace demo.storage
+
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+
+    // Reads `self`, so it is an INSTANCE method: the receiver is what carries `T`, and a
+    // self-less member of a generic type has nothing to read the instantiation from (E0058).
+    fn model_name(): string {
+        if self.tbl == "" {
+            return "?";
+        }
+        return type_name::<T>();
+    }
+}
+rt: Repo<Todo> = Repo.new("todos");
+ru: Repo<User> = Repo.new("users");
+echo rt.model();
+echo ru.model();
+echo type_name::<Todo>();
+echo rt.model_name() == type_name::<Todo>();

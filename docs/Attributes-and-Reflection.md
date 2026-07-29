@@ -135,23 +135,35 @@ echo field_specs_of(type_name::<Todo>()).len()  // 1
 
 Turbofish only — a `type_name(s)` taking a runtime string would be the identity function on `s`. The value of the surface is that the **compiler** resolves the type: the name follows a `namespace`, a `use … as` alias, and a rename, none of which a string literal does. A name-keyed repository (`Repository.new(type_name::<Todo>(), "todos", "id")`) is the motivating case — before this it had to be handed `"app.storage.Todo"` spelled out by hand, and nothing checked it.
 
-An unresolvable type is `E0013`, exactly as in any other annotation. A generic **type parameter** is `E0058` — see below.
+An unresolvable type is `E0013`, exactly as in any other annotation. A **type parameter** resolves wherever the instantiation actually reaches the site — a top-level generic function's parameter and a generic type's parameter in an instance method both do — and is `E0058` where neither channel does; see below.
 
 ### Reflection over a type parameter
 
-`field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)` and `type_name::<T>()` are keyed on a type **name**, and generics are erased: one compiled body serves every instantiation, so inside `fn f<T>()` the argument `T` is only ever the literal character `T`, which names nothing. That is `E0058`.
+`field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` are keyed on a type **name**, and their turbofish arm is a *compile-time* key — resolved like an annotation, folded to a constant. One compiled body serves every instantiation, so inside `fn f<T>()` there is no constant to fold to. That is `E0058`.
 
 ```noeta error
 fn count_of<T>(): int {
-    return field_specs_of::<T>().len()   // E0058 — `T` names no type at run time
+    return field_specs_of::<T>().len()   // E0058 — the turbofish arm is a compile-time key
 }
 
 echo count_of::<int>()
 ```
 
-Reflect where the type is concrete and pass the result in — take a `List<FieldSpec>` (or a `string` from `type_name::<Todo>()`) as a parameter, and let the caller supply it. The runtime-string surfaces stay open for exactly this: `field_specs_of(name)` inside a generic body is fine, because its operand is a value the caller can hand in.
+The fix is to hand the query a **name** instead of a type, through the runtime-string arm each of them already has — and inside a generic function that name is available, because `type_name::<T>()` [forwards](Generics-and-Traits#asking-what-t-is-called):
 
-(`attributes_of::<T>()` is the one reflection turbofish that *does* accept a forwarded type parameter: it rides the hidden type-argument slot a generic call already carries. The name-keyed queries have no such slot.)
+```noeta check
+struct Todo { id: int }
+
+fn count_of<T>(): int {
+    return field_specs_of(type_name::<T>()).len()
+}
+
+echo count_of::<Todo>()      // 1 — the real schema, per instantiation
+```
+
+The `E0058` help says exactly this wherever that route is open. Where it is not — a generic **type**'s parameter inside a method, which reaches the body as a name but not as a recipe — the older advice stands: reflect where the type is concrete and pass the result in, taking a `List<FieldSpec>` (or a `string`) as a parameter and letting the caller supply it. A generic **method's own** `<U>` forwards like a function's, so it needs none of that.
+
+Two reflection turbofishes take a forwarded type parameter directly, both riding the hidden type-argument slot a generic call already carries: `attributes_of::<T>()`, which reads the slot's name to key the manifest, and `type_name::<T>()`, which *is* that name. The rest key on a compile-time constant by design.
 
 ### The prelude enums are ordinary enums
 
@@ -339,7 +351,7 @@ for a in attributes_of::<Doc>() {
 
 ### `construct::<T>(fields): Result<dyn, string>` / `construct(name, fields): Result<dyn, string>`
 
-Builds a struct or class value **at runtime** from field values, through the *same* construction path a `T { … }` literal takes — so field defaults and full-initialization are honored identically, and a type that appears in no literal anywhere in the program still constructs. Like `field_specs_of` it has a turbofish and a runtime-string surface (with the same qualified-identity resolution under a `namespace`); like `invoke` it is fallible by construction, returning a `Result` rather than aborting. Both surfaces are typed `Result<dyn, string>` — the turbofish only spells the type *name*, so narrow the `Ok` payload back with `.as<T>()` when you need the static type.
+Builds a struct, class, or **enum case** value **at runtime** from field values, through the *same* construction path a literal takes — so field defaults and full-initialization are honored identically, and a type that appears in no literal anywhere in the program still constructs. Like `field_specs_of` it has a turbofish and a runtime-string surface (with the same qualified-identity resolution under a `namespace`); like `invoke` it is fallible by construction, returning a `Result` rather than aborting. Both surfaces are typed `Result<dyn, string>` — the turbofish only spells the type *name*, so narrow the `Ok` payload back with `.as<T>()` when you need the static type.
 
 `fields` accepts either shape:
 
@@ -373,7 +385,9 @@ Every rejection is an `Err(string)` carrying a ready-to-surface message, never a
 | Situation | Message |
 |---|---|
 | the name is not a string | ``construct type name must be a string, found <kind>`` |
-| the name is not a declared struct/class (an enum, or unknown) | ``` `Foo` is not a constructible struct or class ``` |
+| the name is a bare enum | ``` `Sentiment` is an enum: name the variant to construct, as in `construct("Sentiment.Positive", […])` ``` |
+| the name is `Enum.Variant` but the enum has no such case | ``` `Sentiment` has no variant `Sideways` ``` |
+| the name is nothing the program declares | ``` `Foo` is not a constructible type ``` |
 | `fields` is neither a list nor a map | ``construct fields must be a list or a map, found <kind>`` |
 | more positional values than fields | ``` `Foo` has 2 field(s), but 3 value(s) were given ``` |
 | a named field the type does not have | ``` `Foo` has no field `nope` ``` |
@@ -381,6 +395,41 @@ Every rejection is an `Err(string)` carrying a ready-to-surface message, never a
 | a field that is neither supplied nor defaulted | ``` missing required field `port` of `Foo` ``` |
 
 Validation runs through one shared planner, so both backends accept, reject, and *word* every case identically.
+
+#### Constructing an enum case
+
+An enum case is spelled `construct("Enum.Variant", payload)` — the case goes where the type name goes, exactly as it is written in source, and `fields` is that variant's **payload**.
+
+```noeta
+enum Shape { Circle(r: int); Rect(w: int, h: int); Dot }
+
+echo match construct("Shape.Rect", [2, 5]) {
+    Ok(v) => "${v}",                    // Shape.Rect(2, 5)
+    Err(e) => e,
+}
+```
+
+The payload takes the same two shapes a struct's fields do, and means the same things: a positional `List<dyn>` in declaration order, or a `Map<string, dyn>` keyed by the payload's field names. Those names are the ones [`variants_of`](#variants_oft-listvariantspec--variants_ofname-listvariantspec) reports — a named payload's declared names, or the synthesized `_0`/`_1` of a positional one — so the query that tells you what a case needs and the call that builds it speak one vocabulary:
+
+```noeta
+enum Shape { Circle(r: int); Rect(w: int, h: int); Dot }
+
+for v in variants_of("Shape") {
+    mut names: List<string> = []
+    for f in v.payload { names = names ~ [f.name] }
+    echo "${v.name}(${names.join(", ")})"     // Circle(r) / Rect(w, h) / Dot()
+}
+echo match construct("Shape.Rect", {"w": 2, "h": 5}) {
+    Ok(v) => "${v}",                    // Shape.Rect(2, 5)
+    Err(e) => e,
+}
+```
+
+A payload is validated against that declared schema by the very planner a struct's fields go through, so a wrong scalar kind and a missing payload field are worded exactly like their struct counterparts (`field `r` of `Shape.Circle` expects int, got string`).
+
+A **bare enum name** is a rejection rather than a second spelling. The alternative — `construct("Shape", ["Circle", 3])`, with the case name smuggled in as the first value — would make the field list mean two different things depending on position, and leave no spelling at all for a fieldless case that reads like a payload-carrying one. The same goes for the turbofish: `construct::<Shape>(…)` spells only a type *name*, so it reports the same teaching error.
+
+To go the other way — a single **wire value** to a case, rather than a payload to a variant — use [`Enum.try_from`](Structs-Classes-and-Enums#enums), which matches a backed enum's backing.
 
 ### `attributes_of::<T>(): List<Attributed<T>>`
 

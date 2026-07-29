@@ -125,7 +125,7 @@ pub fn run_jit_differential(root: &Path, only: Option<&Path>) -> JitDiffReport {
             .into_owned();
         if case.multi {
             match noeta_loader::read_workspace(&case.entry) {
-                Ok(raw) => compare_tiers_workspace(&name, &raw, &mut report),
+                Ok(raw) => compare_tiers_workspace(&name, &raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
         } else {
@@ -183,10 +183,27 @@ fn compare_tiers(name: &str, text: &str, report: &mut JitDiffReport) {
 fn compare_tiers_workspace(
     name: &str,
     raw: &noeta_loader::RawWorkspace,
+    entry: &std::path::Path,
     report: &mut JitDiffReport,
 ) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
+    // A case with package subdirectories is a *dependency graph*, so it becomes a workspace WITH
+    // deps — the same construction the eval differential makes, and for the same reason: without
+    // them its `use <pkg>.…` resolves to nothing and the case is rejected by the checker, covering
+    // neither tier while looking like an ordinary "not run". Package-less cases take the deps-free
+    // workspace they always did.
+    let deps = crate::dep_sources(entry, (raw.modules.len() + 1) as u32);
+    let ws = if deps.is_empty() {
+        noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT)
+    } else {
+        noeta_db::workspace_with_deps(
+            &db,
+            &raw.entry,
+            &raw.modules,
+            &deps,
+            noeta_lexer::Edition::DEFAULT,
+        )
+    };
 
     if noeta_db::linked(&db, ws).program.is_err() {
         report.not_run.link_failed += 1;

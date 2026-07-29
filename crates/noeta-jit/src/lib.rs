@@ -3456,6 +3456,7 @@ mod tests {
                     dst: 1,
                     callee: 2,
                     args: Box::new([]),
+                    type_args: noeta_bytecode::TypeArgs::NONE,
                     span: sp,
                     supplied: None,
                 },
