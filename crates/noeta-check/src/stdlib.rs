@@ -479,8 +479,10 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
         // over every case, which is the point — a consumer hand-rolling
         // `match type_of(v) { Type.Class(n, _) => n, Type.Struct(n, _) => n, _ => "" }` answers the
         // empty string for every shape its match forgot, and that name then travels into a table or
-        // a route. Keyed on the enum name like the `value()` arm below, so a program that declares
-        // its own `enum Type` (shadowing the prelude one) shares the accessor.
+        // a route. Keyed on the enum name like the `value()` arm below. A program that declares its
+        // own `enum Type` (shadowing the prelude one) keeps its own `name` method, in the checker and
+        // in both backends: a declared type's method resolves before this table, and each backend
+        // reaches its accessor only after the receiver's own method table missed.
         Type::Named(n, _)
             if n == noeta_ast::reflect::TYPE_ENUM
                 && name == noeta_ast::reflect::TYPE_NAME_METHOD =>
