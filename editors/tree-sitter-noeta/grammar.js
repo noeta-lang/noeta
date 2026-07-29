@@ -667,6 +667,10 @@ module.exports = grammar({
     )),
     primitive_type: _ => choice(
       'int', 'float', 'f32', 'f64', 'number', 'bool', 'string', 'bytes', 'void', 'unit', 'dyn',
+      // The bottom type. A type NAME, not a keyword — it is listed here (like 'unit' and
+      // 'number') so it highlights as a primitive in type position; an ordinary identifier
+      // spelled 'never' elsewhere still parses as one, since $.identifier is also a $._type.
+      'never',
       'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64',
     ),
     generic_type: $ => prec(3, seq(

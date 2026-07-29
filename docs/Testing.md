@@ -100,7 +100,7 @@ The runner knows which calls those are because the language says so. A function 
 declares its return type as [`never`](Type-System#never--the-bottom) — the bottom type — and `os.exit`, `server.serve`
 and `panic` all do. Nothing is inferred from a name or a statement shape:
 
-```noeta
+```noeta check
 conn = db.connect("sqlite::memory:")   // a binding — every test gets a live connection
 conn.migrate("migrations")             // returns, so it RUNS — every test gets the schema too
 

@@ -114,7 +114,7 @@ echo d is string       // false
 type; where `dyn` is inhabited by every value, `never` is inhabited by none. It is the return type of
 a function that **does not return**:
 
-```noeta
+```noeta check
 use std.os
 use std.http.server
 
@@ -128,8 +128,14 @@ there is no value to be wrong about — and nothing written after it can run.
 
 You write it on your own functions the same way:
 
-```noeta
+```noeta check
 fn die(msg: string): never { panic(msg) }
+
+// `never <: T`, so the same call satisfies an `int` return with nothing after it.
+fn width(kind: string): int {
+    if kind == "known" { return 4 }
+    die("no width for ${kind}")
+}
 ```
 
 It is **declared, never inferred**. A function returns `never` because its signature says so, not

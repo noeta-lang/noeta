@@ -376,9 +376,12 @@ fn collect_mutated(stmt: &Stmt, out: &mut Vec<String>) {
 }
 
 /// The bare-identifier root of a method call's receiver — `box` in `box.set(41)`, `log` in
-/// `log.entries.push(x)` — looking through the `await`/`?` wrappers a call can wear. `None` for a
-/// module-qualified call (`os.exit(1)`, `server.serve(…)`), whose root is a module rather than a
-/// binding: it resolves to no top-level binding name and so intersects with nothing.
+/// `log.entries.push(x)` — looking through the `await`/`?` wrappers a call can wear.
+///
+/// A module-qualified call (`os.exit(1)`, `server.serve(…)`) yields its module name, which this
+/// cannot tell from a binding. It does not need to: the name is only ever *intersected* with a tier
+/// fn's `use (…)` captures, and a capture must name a real binding (capturing a module is E0005), so
+/// a module name matches nothing and drops out on its own.
 fn call_receiver_root(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Await { expr, .. } | Expr::Try { expr, .. } => call_receiver_root(expr),
