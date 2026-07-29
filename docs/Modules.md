@@ -61,6 +61,22 @@ The walk stops at three kinds of directory, none of which are your package's sou
 
 **A plain key derives one segment shallower than a scope array.** `para = { package = "para/api" }` makes `middleware.noe` into `para.middleware`; the array form `para = [{ package = "para/api" }]` makes it `para.api.middleware`, because the array form adds the package's own root segment. When several packages of one scope must sit side by side under one root — which is exactly how the first-party `para/*` packages are published — use the array form. See [the Manifest](Manifest#dependencies--what-the-package-builds-against).
 
+### Importing your own package's modules
+
+Inside a package, **write the import the way your own package derives it — lead with the `package` half of your `[package] name`.** For `para/db` that is `db`, whatever a consumer keys the package as:
+
+```noeta ignore
+// para-db/query.noe — inside the package `para/db`
+use db.open              // ✅ resolves standalone AND as a dependency
+use para.db.open         // ❌ only ever resolved when a consumer keyed it `para`
+```
+
+That one spelling works in both builds because it is what the compiler derives for your files when the package is built **on its own** — running your tests, `noeta check .`, an example app — and because a consumer's build rewrites that leading segment to whatever prefix your modules derive under there. Standalone the prefix *is* that segment, so nothing changes; under `para = [{ package = "para/db" }, …]` your `use db.open` becomes `para.db.open`; under `mydb = { package = "para/db" }` it becomes `mydb.open`. You never write the consumer's key, and you never write your own scope.
+
+The rewrite touches the **leading segment only**, so everything after it is yours to spell: `use db.query.run` from a file three directories deep still names the module `query.noe` derives.
+
+Two segments are *not* rewritten, which is what you want in both cases: a `use std.…`, and a native extension's own namespace root (`para/db`'s Rust extension registers the module `para.db`, so its `.noe` modules import `use para.db.Connection` by that literal name and the loader leaves it alone).
+
 ### Naming a file
 
 **Convention:** a lowercase, single-word stem — `models.noe`, `query.noe`, `middleware.noe` — which is what every module in the standard library and the first-party packages uses. The compiler does not enforce it, and neither does a lint; it is what makes an import path read like the rest of the language.
