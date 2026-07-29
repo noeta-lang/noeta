@@ -69,7 +69,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create the package root");
         write(
             &dir.join(MANIFEST_NAME),
-            "[package]\nname = \"local/pkg\"\n",
+            "[package]\nname = \"local/pkg\"\nversion = \"0.1.0\"\n",
         );
         dir
     }
