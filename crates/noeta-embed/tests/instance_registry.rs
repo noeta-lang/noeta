@@ -578,9 +578,15 @@ static PLUGIN_V2: PluginV2Extension = PluginV2Extension;
 ///
 /// This is the intern table's failure mode, and it is silent: keyed by name, the second session's
 /// `interned_with_extras(&[&PLUGIN_V2])` hit the entry the first session stored under `["plugin"]`
-/// and was handed `std ∪ PLUGIN` — so `swap` resolved to nothing and the call panicked, in a session
-/// whose own extension declares it. Two embedders in one process corrupting each other, with no
-/// diagnostic pointing at the cause. Keyed by unit identity, each set assembles once, for itself.
+/// and was handed `std ∪ PLUGIN`.
+///
+/// The consequence is **measured, not predicted** — ablated against the name-keyed table, the v2
+/// session never reaches dispatch: `load` is rejected at *check* time with `` `swap` is not a
+/// module, namespace, or type in `plugin` `` and ``cannot find `swap` in this scope``, naming a
+/// module the session's own extension object declares. So two embedders in one process corrupt each
+/// other, and the diagnostic accuses the consumer's source instead of the collision — which is why
+/// the first assertion below is on registry *identity*: it is the only observable that says what
+/// actually went wrong. Keyed by unit identity, each set assembles once, for itself.
 #[test]
 fn same_named_extension_objects_do_not_share_one_interned_registry() {
     let v1 = noeta_stdlib::registry::interned_with_extras(&[&PLUGIN]).expect("assembles");
