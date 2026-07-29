@@ -18,6 +18,8 @@
 //
 // A directory case on purpose: the harness runs a single-file case straight from source text with no
 // loader, so namespace qualification never runs for one — a bare `.noe` here could observe nothing.
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
 // expect: stdout "method by bare name: 7"
 // expect: stdout "fn by bare name: miss"
 // expect: stdout "fn by qualified name: hi ada"

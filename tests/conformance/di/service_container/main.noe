@@ -13,6 +13,8 @@
 //      NOT a panic, and NOT the wrong service silently injected.
 // Both backends run the identical reflect -> resolve -> invoke loop, so the differential oracle holds
 // the two evaluators to the same resolution.
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
 // expect: stdout "raw: di.main.Clock"
 // expect: stdout "Clock -> TICK"
 // expect: stdout "Ledger -> NOTE"

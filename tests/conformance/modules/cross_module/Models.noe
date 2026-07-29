@@ -1,5 +1,6 @@
-// A library module: declares its namespace and exports a class. It has no executable top-level
-// statements — it is only `use`d by the entry (main.lang).
+// A library module exporting a class. Its path is not declared: the case is package `App` and the
+// file is `Models.noe`, so the module IS `App.Models`. It has no executable top-level statements —
+// it is only `use`d by the entry (main.noe).
 
 pub class User {
     pub name: string

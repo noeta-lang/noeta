@@ -10,6 +10,8 @@
 // A `main.noe` on purpose: the harness runs a *single-file* case straight from source text, with no
 // loader and therefore no namespace qualification at all, so a bare `.noe` here could not observe
 // the property it claims to pin.
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
 // expect: stdout "todos:demo.main.Todo"
 // expect: stdout "users:demo.main.User"
 // expect: stdout "demo.main.Todo"

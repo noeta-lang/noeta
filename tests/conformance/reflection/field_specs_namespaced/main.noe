@@ -15,6 +15,8 @@
 // A `main.noe` on purpose: the harness runs a *single-file* case straight from source text, with no
 // loader and therefore no namespace qualification at all, so a bare `.noe` here could not observe the
 // bug it pins. Only a directory case goes through `noeta_loader::load` and the linker.
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
 // expect: stdout "qualified identity: Type.Struct(app.main.Todo, [])"
 // expect: stdout "turbofish: 2"
 // expect: stdout "by qualified string: 2"

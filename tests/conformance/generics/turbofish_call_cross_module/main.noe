@@ -1,6 +1,6 @@
 // A generic function imported from a sibling module, called with an explicit turbofish — under its
-// own name and under a `use … as` alias. The entry has no namespace of its own, so nothing but the
-// linker's import map can supply the callee's qualified identity; before the fix the callee name of
+// own name and under a `use … as` alias. The entry is its own module (`app.main`), so nothing but
+// the linker's import map can supply the callee's qualified identity; before the fix the callee name of
 // `Expr::TypedCall` was never visited by that rewrite and both calls were an E0005.
 // expect: stdout "imported: 5"
 // expect: stdout "aliased: 6"
