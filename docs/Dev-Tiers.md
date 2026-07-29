@@ -87,27 +87,38 @@ A tier directive can take arguments — `@bench(iterations: 1000)` (or positiona
 
 ---
 
-## Build targets — `noeta.toml`
+## Naming tiers and build targets — `noeta.toml`
 
-A `noeta.toml` at (or above) your entry file's directory defines named build targets. Each maps tier names to the package that provides them:
+Two separate axes. **Which provider declares each tier your source uses** is the `[tiers]` table — a local `@name` → `"provider[:exported]"`, the tier counterpart of `[directives]`. There are no ambient built-in tiers: `test`/`bench`/`doc`/`debug` are ordinary `std` tiers you name here like any other provider's, and `:exported` renames one (to dodge a collision between two providers' same-named tiers):
+
+```toml
+[tiers]
+test  = "std"
+bench = "std"
+debug = "std"
+crit  = "criterion:bench"   # a dependency's `bench` tier, named `@crit` locally so it does not
+                            # collide with std's `@bench`
+```
+
+**Which of those tiers are *live* in a build** is a named target's `[targets.<t>.tiers]` — an activation live-set of your local tier names (`name = true`, or `name = false` to turn an inherited one off). It no longer names a provider (that moved to `[tiers]`); a tier's provider is package-level, the same in every build:
 
 ```toml
 [targets.dev.tiers]
-test  = "std"
-bench = { package = "std", samples = 100 }
-debug = "std"
+test  = true
+debug = true
 
 [targets.ci]
 extends = "dev"
 [targets.ci.tiers]
-doc = "std"
+bench = true          # add bench…
+debug = false         # …and drop the inherited debug
 ```
 
-- A target's **active tiers** are the tier names in its (inheritance-merged) map.
-- `extends = "<base>"` inherits another target's tiers; the child's own entries override the base's. Cycles are detected and rejected.
+- A target's **active tiers** are the local names its (inheritance-merged) live-set marks `true`.
+- `extends = "<base>"` inherits another target's live-set; a nearer entry overrides the base's (a `false` turns an inherited tier off). Cycles are detected and rejected.
 - `--target <NAME>` on `noeta run` activates those tiers (unioned with `--tier`). On `noeta test`/`bench`/`doc`, `--target` acts as a **gate** — the tool no-ops if the target does not make its tier live.
 
-`noeta init` scaffolds exactly this shape: a `development` target wiring all four std tiers in (`[targets.development.tiers]` with `test`/`bench`/`doc`/`debug = "std"`) beside an explicit `[targets.production]` with no tiers — a stable label for CI and release builds.
+`noeta init` scaffolds exactly this shape: a `[tiers]` table naming the four std tiers, a `development` target switching them on beside an explicit `[targets.production]` with no tiers live — a stable label for CI and release builds.
 
 ### Target-scoped dependencies
 

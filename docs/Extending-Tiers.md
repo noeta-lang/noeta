@@ -1,6 +1,6 @@
 # Extending Tiers
 
-The built-in [dev tiers](Dev-Tiers) — `@test`, `@bench`, `@doc`, `@debug` — are not special-cased in the compiler: std declares them through the same `ExtTier` surface a third-party extension uses (only the runners are native), and the tier name-space is **open**. This page covers the extension points: declaring a tier of your own, re-pointing a built-in tier at a different provider, and **expression tiers** — embedded languages as typed values. For the tier model itself (activation, stripping, `noeta.toml` build targets), see [Dev Tiers](Dev-Tiers).
+The built-in [dev tiers](Dev-Tiers) — `@test`, `@bench`, `@doc`, `@debug` — are not special-cased in the compiler: std declares them through the same `ExtTier` surface a third-party extension uses (only the runners are native), and the tier name-space is **open**. This page covers the extension points: declaring a tier of your own, binding a tier to a dependency's provider (and renaming to avoid collisions), and **expression tiers** — embedded languages as typed values. For the tier model itself (activation, stripping, `noeta.toml` build targets), see [Dev Tiers](Dev-Tiers).
 
 ## Declaring your own tier
 
@@ -25,18 +25,21 @@ pub fn run_fuzz(roots: List<TierRoot>): void {
 - `@tier(name[, config: Type])` names the tier consumers write as `@<name> { … }`; the optional `config:` names an `@attribute` struct whose fields are the tier's knobs — exactly the `Bench { iterations }` model, so `@fuzz(cases: 500) { … }` stamps `#[Fuzz(cases: 500)]` onto each contained fn and the ordinary construction gate validates it.
 - The decorated fn is the **runner**: it must be `fn(roots: List<TierRoot>): void`, where each `TierRoot { name: string, run: () -> void }` is an activated root fn as a first-class handle. Anything else about the declaration — a name colliding with a built-in, a duplicate, a non-attribute config, a wrong signature — is **E0051** at the declaration.
 - A consumer opts in with one import (`use fuzzkit.tiers.run_fuzz` — the config struct links along with the runner), writes `@fuzz { … }` blocks, and runs **`noeta fuzz <file>`**: the unknown subcommand resolves against the file's declared tiers and dispatches to the runner in-process, after the compose and before the `noeta-<cmd>` external-binary probes. Roots keep white-box access and strip from a normal build, exactly like the built-in tiers.
-- In `noeta.toml`, any identifier is a valid tier name in a target's `tiers` map — whether it resolves is checked where the tier is used.
+- In `noeta.toml`, any identifier is a valid local tier name in a target's `tiers` live-set — whether it resolves (against your `[tiers]` bindings) is checked where the tier is used.
 
-### Overriding a tier's provider
+### Choosing a tier's provider
 
-A target's `tiers` map is a **provider selection**, and it can re-point a built-in: with
+A tier's provider is bound **per package** in the `[tiers]` table, not per target — the same in every build. To use a dependency's tier, name it there:
 
 ```toml
-[targets.custom.tiers]
-bench = "fuzzkit"
+[dependencies]
+fuzzkit = { version = "^1.0", package = "acme/fuzzkit" }
+
+[tiers]
+bench = "fuzzkit"           # this package's `@bench` is fuzzkit's `@tier(bench, config: …)`
 ```
 
-`noeta bench app.noe --target custom` activates the `bench` tier against **fuzzkit's** `@tier(bench, config: …)` declaration — its config attribute is what `@bench(…)` blocks stamp, and its runner receives the roots — while a plain `noeta bench app.noe` keeps the native runner and std's `Bench { iterations }`. Declaring a tier under a built-in name is legal for exactly this reason: the declaration is dormant until a target selects its package (`E0051` now only rejects two declarations of one tier *within one package*). A provider that declares no such tier is an error naming both sides. `test`/`doc` override the same way — a `doc = "docgen"` provider is the documentation-site seam: activation stamps every attached block as `#[Doc]`, and the runner walks `attributes_of::<Doc>()`. The provider selection is part of the compile (and the startup-cache key), and `noeta <tier> <file> --target <name>` steers custom-tier dispatch the same way.
+`noeta bench app.noe` runs **fuzzkit's** tier — its config attribute is what `@bench(…)` blocks stamp, and its runner receives the roots — whether or not a target is passed (a target only selects which tiers are *live*, never which provider a tier resolves to). A tier a **dependency** declares is reachable only through such a binding — an unbound name is not ambient. To keep std's `bench` *and* fuzzkit's side by side, rename one (`crit = "fuzzkit:bench"`, written `@crit`). Two providers may export the same tier name precisely because the binding disambiguates; `E0051` rejects only two declarations of one tier *within one package*. A provider that declares no such tier is an error naming both sides. `doc` binds the same way — a `doc = "docgen"` provider is the documentation-site seam: activation stamps every attached block as `#[Doc]`, and the runner walks `attributes_of::<Doc>()`. The `[tiers]` bindings are part of the compile (and the startup-cache key), and `noeta <tier> <file>` dispatches through them.
 
 ---
 

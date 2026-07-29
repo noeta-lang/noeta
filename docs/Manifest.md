@@ -213,30 +213,50 @@ imported  = "warn"     # imported feeds are broader — warn, don't fail
 A bare string under `[trust]` — `advisories = "fail"` — sets every tier at once. A key that is not
 one of the three tiers, or an action that is not `"fail"`/`"warn"`/`"off"`, is a manifest error.
 
+## `[tiers]` — tier providers
+
+The `[tiers]` table names which provider declares each dev-tier your source writes as `@name { … }` —
+a local `@name` → `"provider[:exported]"`, the tier counterpart of `[directives]`. The provider is the
+built-in `"std"` or a dependency declared in `[dependencies]` (or under a `[targets.<name>.dependencies]`,
+for a dev-only tier). There are no ambient built-in tiers — `test`/`bench`/`doc`/`debug` are ordinary
+`std` tiers you name here — and `:exported` renames one to dodge a collision between two providers'
+same-named tiers:
+
+```toml
+[tiers]
+test  = "std"
+bench = "std"
+crit  = "criterion:bench"   # a dependency's `bench` tier, written `@crit` locally
+```
+
+A provider is bound per package and is the same in every build; a target only selects which of these
+tiers are *live* (below). A local name may not appear in both `[tiers]` and `[directives]` — a `@name`
+is one namespace.
+
 ## `[targets]` — build recipes
 
-A target is a named build recipe: it maps a *tier* to the package that *provides* it, and can carry
-its own dependencies (dev-dependencies) and inherit from another target. A tier's provider must be
-the built-in `"std"` or a dependency declared in `[dependencies]` or the target's own
-`[targets.<name>.dependencies]`.
+A target is a named build recipe: an **activation live-set** of the local tier names (from `[tiers]`)
+that are live in the build, plus its own dependencies (dev-dependencies) and an optional base to
+inherit from. The live-set no longer names a provider (that is `[tiers]`'s job) — each entry is
+`name = true` (live) or `name = false` (turn an inherited tier off).
 
 ```toml
 [targets.test]
 # dev-only dependencies, overlaid on the globals for this target:
 dependencies = { check = { version = "^1.0", package = "acme/check" } }
-# tier → provider (a bare string, or a { package = "…" } table with target-level options):
-tiers = { test = "check" }
+# activation live-set — which local tier names are live:
+tiers = { test = true }
 
 [targets.bench]
-extends = "test"                     # inherit test's tiers and dependencies
-tiers = { bench = { package = "std", samples = 100 } }
+extends = "test"                     # inherit test's live-set and dependencies
+tiers = { bench = true }
 ```
 
-- **`extends`** names a base target to inherit tiers and dependencies from; inheritance cycles are an
-  error.
+- **`extends`** names a base target to inherit the live-set and dependencies from; a nearer entry
+  overrides the base's (a `false` turns an inherited tier off). Inheritance cycles are an error.
 - **`dependencies`** follows the same rules as the global `[dependencies]` table.
-- **`tiers`** maps a tier name to a provider — either a bare string (`test = "std"`) or a
-  `{ package = "…" }` table (extra keys in the table are reserved for future options and ignored).
+- **`tiers`** is a live-set of local tier names → `true`/`false`; the provider each resolves to lives
+  in the top-level `[tiers]` table.
 
 The target to build is chosen at the command line (`--target`), not in the manifest.
 
@@ -251,11 +271,17 @@ no `--target` already builds that shape):
 name = "acme/app"
 version = "0.1.0"
 
-[targets.development.tiers]
+[tiers]
 test = "std"
 bench = "std"
 doc = "std"
 debug = "std"
+
+[targets.development.tiers]
+test = true
+bench = true
+doc = true
+debug = true
 
 [targets.production]
 ```
