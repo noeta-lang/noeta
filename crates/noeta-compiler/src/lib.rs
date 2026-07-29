@@ -3870,6 +3870,17 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            // The fn-side twin: `type_name::<T>()` over a FORWARDED parameter reads the hidden
+            // type-argument slot's table entry instead of the receiver's tag.
+            Rvalue::TypeSlotName { slot, span } => {
+                let src = self.atom_reg(slot)?;
+                self.code.push(Op::TypeSlotName {
+                    dst,
+                    src,
+                    span: *span,
+                });
+                Ok(())
+            }
             Rvalue::TypeOf { operand, span } => {
                 // Evaluate the operand for its side effects in both fidelities. When the checker
                 // resolved a concrete static type for this site, bake the precise `Type` constant

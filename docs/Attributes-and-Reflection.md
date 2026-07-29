@@ -135,23 +135,35 @@ echo field_specs_of(type_name::<Todo>()).len()  // 1
 
 Turbofish only — a `type_name(s)` taking a runtime string would be the identity function on `s`. The value of the surface is that the **compiler** resolves the type: the name follows a `namespace`, a `use … as` alias, and a rename, none of which a string literal does. A name-keyed repository (`Repository.new(type_name::<Todo>(), "todos", "id")`) is the motivating case — before this it had to be handed `"app.storage.Todo"` spelled out by hand, and nothing checked it.
 
-An unresolvable type is `E0013`, exactly as in any other annotation. A generic **type parameter** is `E0058` — see below.
+An unresolvable type is `E0013`, exactly as in any other annotation. A **type parameter** resolves wherever the instantiation actually reaches the site — a top-level generic function's parameter and a generic type's parameter in an instance method both do — and is `E0058` where neither channel does; see below.
 
 ### Reflection over a type parameter
 
-`field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)` and `type_name::<T>()` are keyed on a type **name**, and generics are erased: one compiled body serves every instantiation, so inside `fn f<T>()` the argument `T` is only ever the literal character `T`, which names nothing. That is `E0058`.
+`field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` are keyed on a type **name**, and their turbofish arm is a *compile-time* key — resolved like an annotation, folded to a constant. One compiled body serves every instantiation, so inside `fn f<T>()` there is no constant to fold to. That is `E0058`.
 
 ```noeta error
 fn count_of<T>(): int {
-    return field_specs_of::<T>().len()   // E0058 — `T` names no type at run time
+    return field_specs_of::<T>().len()   // E0058 — the turbofish arm is a compile-time key
 }
 
 echo count_of::<int>()
 ```
 
-Reflect where the type is concrete and pass the result in — take a `List<FieldSpec>` (or a `string` from `type_name::<Todo>()`) as a parameter, and let the caller supply it. The runtime-string surfaces stay open for exactly this: `field_specs_of(name)` inside a generic body is fine, because its operand is a value the caller can hand in.
+The fix is to hand the query a **name** instead of a type, through the runtime-string arm each of them already has — and inside a generic function that name is available, because `type_name::<T>()` [forwards](Generics-and-Traits#asking-what-t-is-called):
 
-(`attributes_of::<T>()` is the one reflection turbofish that *does* accept a forwarded type parameter: it rides the hidden type-argument slot a generic call already carries. The name-keyed queries have no such slot.)
+```noeta check
+struct Todo { id: int }
+
+fn count_of<T>(): int {
+    return field_specs_of(type_name::<T>()).len()
+}
+
+echo count_of::<Todo>()      // 1 — the real schema, per instantiation
+```
+
+The `E0058` help says exactly this wherever that route is open. Where it is not — a generic **method's own** `<U>`, which no channel reaches — the older advice stands: reflect where the type is concrete and pass the result in, taking a `List<FieldSpec>` (or a `string`) as a parameter and letting the caller supply it.
+
+Two reflection turbofishes take a forwarded type parameter directly, both riding the hidden type-argument slot a generic call already carries: `attributes_of::<T>()`, which reads the slot's name to key the manifest, and `type_name::<T>()`, which *is* that name. The rest key on a compile-time constant by design.
 
 ### The prelude enums are ordinary enums
 

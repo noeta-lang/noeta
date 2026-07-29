@@ -56,7 +56,7 @@ Two boundaries hold statically. A generic method's own parameter does **not** fo
 
 ## Forwarding `T`
 
-Inside a generic function's body, `T` is legal wherever a type goes — including as a turbofish argument to another generic, to a call-site-typed native function (`json.try_parse::<T>`), to `attributes_of::<T>()`, and to `channel::<T>(cap)`:
+Inside a generic function's body, `T` is legal wherever a type goes — including as a turbofish argument to another generic, to a call-site-typed native function (`json.try_parse::<T>`), to `attributes_of::<T>()`, to `type_name::<T>()`, and to `channel::<T>(cap)`:
 
 ```noeta check
 use std.{json}
@@ -75,7 +75,41 @@ user  = load::<User>("{\"name\": \"Ada\"}")   // same body, per-instantiation de
 
 Forwarding works from a **top-level generic function** and from a **nested `fn`** inside one, and a **composite** parameter forwards too (`List<T>`, `Box<T>` in a `::<...>` position), not just the bare `T`. The boundaries, all reported statically: a **generic method's** own parameter does not forward into a call-site-typed position (E0058); an instantiation the call site cannot pin must be spelled with a turbofish (E0023); and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure.
 
-The **name-keyed** reflection turbofishes are the exception, and take no `T` at all: `field_specs_of::<T>()`, `construct::<T>(…)` and `type_name::<T>()` are keyed on a type *name*, which an erased parameter does not have, so a parameter there is E0058 rather than a silent empty answer. Reflect where the type is concrete and pass the result in — see [Reflection over a type parameter](Attributes-and-Reflection#reflection-over-a-type-parameter).
+### Asking what `T` is called
+
+`type_name::<T>()` forwards too, and it is the cheapest forward there is: it wants the instantiation's **name** and nothing else, so it rides the same hidden slot with no recipe involved — which means it also serves an instantiation that *has* no recipe, an enum for instance.
+
+```noeta check
+use std.{json}
+use std.json.JsonError
+
+struct Order { id: int }
+
+fn decode<T>(text: string): Result<T, JsonError> {
+    echo "decoding ${type_name::<T>()}"
+    return json.try_parse::<T>(text)
+}
+
+echo decode::<Order>("{\"id\": 1}")
+```
+
+The answer is the **qualified** identity, byte-identical to what the concrete `type_name::<Order>()` yields at the same site — `namespace`, `use … as` alias and rename all followed. That agreement is the whole contract: the string exists to key a name-keyed registry, so a forwarded parameter answering the short name would silently miss every namespaced type.
+
+It is also what opens the *other* name-keyed queries to a generic body. Their **turbofish** arm stays a compile-time key, so `field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` over a parameter remain E0058 — but each has a **runtime-string** arm, and `type_name::<T>()` now supplies it:
+
+```noeta check
+struct Order { id: int }
+
+fn field_count<T>(): int {
+    return field_specs_of(type_name::<T>()).len()   // the real schema, per instantiation
+}
+
+echo field_count::<Order>()
+```
+
+The E0058 diagnostic points at exactly this route wherever it is open. See [Reflection over a type parameter](Attributes-and-Reflection#reflection-over-a-type-parameter).
+
+`type_name::<T>()` stays E0058 where **neither** instantiation channel reaches the site: a generic **method's own** `<U>` — the receiver's type tag carries the class's arguments, never the method's, and method dispatch has no hidden slot — and a self-less member of a generic type, whose parameter rides a receiver it does not have. A *composite* turbofish is unaffected either way: `type_name::<List<T>>()` heads at `List` whatever `T` is, so it stays the compile-time constant it always was.
 
 ## Generic functions as values
 

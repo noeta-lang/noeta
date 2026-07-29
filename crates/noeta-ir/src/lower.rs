@@ -220,6 +220,9 @@ pub struct LoweringSites<'a> {
     /// of its instance methods → `(enclosing type name, the parameter's declaration index)`. The
     /// name is read off argument `index` of the receiver's reflected type tag at run time.
     pub self_type_arg_sites: &'a HashMap<Span, (String, u32)>,
+    /// `type_name::<T>()` spans where `T` is a FORWARDED parameter of the enclosing top-level
+    /// generic fn → the hidden slot index whose table entry names the instantiation.
+    pub dynamic_type_name_sites: &'a HashMap<Span, u32>,
     /// Forwarding generic fns → their hidden-parameter count (prepended as `$ty0`, `$ty1`, …).
     pub forwarding_fns: &'a HashMap<String, u32>,
     /// Forwarding-fn-as-value sites (poly-deferrals D2c): `Expr::Ident` spans → `(fn name,
@@ -274,6 +277,7 @@ impl LoweringSites<'static> {
             hidden_arg_sites: HIDDEN.get_or_init(HashMap::new),
             dynamic_recipe_sites: SLOTS.get_or_init(HashMap::new),
             dynamic_attr_sites: SLOTS.get_or_init(HashMap::new),
+            dynamic_type_name_sites: SLOTS.get_or_init(HashMap::new),
             self_type_arg_sites: SELF_TY.get_or_init(HashMap::new),
             forwarding_fns: COUNTS.get_or_init(HashMap::new),
             fn_value_sites: FN_VALUES.get_or_init(HashMap::new),
@@ -317,6 +321,7 @@ macro_rules! lowering_sites {
             hidden_arg_sites: &$s.hidden_arg_sites,
             dynamic_recipe_sites: &$s.dynamic_recipe_sites,
             dynamic_attr_sites: &$s.dynamic_attr_sites,
+            dynamic_type_name_sites: &$s.dynamic_type_name_sites,
             self_type_arg_sites: &$s.self_type_arg_sites,
             forwarding_fns: &$s.forwarding_fns,
             fn_value_sites: &$s.fn_value_sites,
@@ -1695,6 +1700,26 @@ impl Lowerer<'_> {
                         index,
                         type_name: owner,
                         param: ty.head_name(),
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            // …or as a FORWARDED parameter of the enclosing top-level generic fn (poly-values
+            // F2b): the same "one body serves every instantiation" reason, the other channel — the
+            // hidden `$ty<i>` slot that already carries the decode recipe also names the
+            // instantiation, and this surface wants nothing but that name.
+            Expr::TypeName { span, .. }
+                if self.sites.dynamic_type_name_sites.contains_key(span) =>
+            {
+                let slot = self.sites.dynamic_type_name_sites[span];
+                Ok(self.emit(
+                    out,
+                    Rvalue::TypeSlotName {
+                        slot: Atom::Var {
+                            name: hidden_param_name(slot),
+                            span: *span,
+                        },
                         span: *span,
                     },
                     *span,

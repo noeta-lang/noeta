@@ -264,8 +264,8 @@ pub enum DiagnosticCode {
     /// function (or not a function at all), or the count does not match the declared type parameters
     /// —; a **built-in type constructor** applied at the wrong arity in a type reference
     /// (`List<int, string>`, `Map<int>`); and a **name-keyed reflection turbofish**
-    /// (`field_specs_of::<T>()`, `construct::<T>(…)`, `type_name::<T>()`) whose argument is an erased
-    /// **type parameter**. In the first two cases type arguments bind to the constructor's parameters
+    /// (`field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)`) whose argument is a type
+    /// **parameter**. In the first two cases type arguments bind to the constructor's parameters
     /// in order; supply exactly one per parameter, or omit `<…>` entirely and let them infer.
     ///
     /// The reflection case is the same shape — a turbofish that cannot apply — for a reason peculiar
@@ -273,7 +273,14 @@ pub enum DiagnosticCode {
     /// instantiation, so inside `fn f<T>()` the argument `T` is only ever the literal characters `T`.
     /// Nothing is registered under that key, and before this the query answered with the empty schema
     /// (or an `Err`) and no diagnostic at all — a wrong answer indistinguishable from a real type with
-    /// no fields. Reflect where the type is concrete and pass the result in.
+    /// no fields.
+    ///
+    /// The fix is to hand the query a *name* rather than a type, and the name is now reachable from
+    /// inside a generic body: `type_name::<T>()` resolves a forwarded parameter through the same
+    /// hidden type-argument slot that carries a forwarded decode recipe, so
+    /// `field_specs_of(type_name::<T>())` answers the real per-instantiation schema. `type_name`
+    /// itself is E0058 only where neither instantiation channel reaches — a generic **method's own**
+    /// `<U>`, or a self-less member of a generic type, whose parameter rides the receiver.
     InvalidTypeArguments,
     /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
     /// that already means something in scope — an enclosing binding, a top-level function or type,
