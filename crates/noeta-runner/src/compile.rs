@@ -316,7 +316,13 @@ pub fn load_linked(
     file: &Path,
     facts: &FrontFacts,
 ) -> Result<noeta_loader::Linked, CompileFailure> {
-    match noeta_loader::load_with_deps(file, facts.edition, &facts.deps, &facts.package_uses) {
+    match noeta_loader::load_with_deps(
+        file,
+        facts.edition,
+        &facts.deps,
+        &facts.package_uses,
+        noeta_pm::sources::package_root(file).as_ref(),
+    ) {
         Err(err) => Err(CompileFailure::Unreadable(format!(
             "cannot read {}: {err}",
             file.display()
@@ -443,7 +449,8 @@ fn open_startup_cache(
     let binary = noeta_cache::binary_identity()?;
     // Read the entry + sibling sources (no lex/parse) — both the key material and, on a hit, the
     // SourceMap for rendering. SourceIds here match `noeta_loader::load_with_deps`'s assignment.
-    let workspace = noeta_loader::read_workspace(file).ok()?;
+    let workspace =
+        noeta_loader::read_workspace(file, noeta_pm::sources::package_root(file).as_ref()).ok()?;
     let mut key = noeta_cache::KeyBuilder::new();
     // Which file is the *entry* is part of the key, not just the source set: a directory of dir-flat
     // modules compiles to a different program per entry, so `noeta run a.noe` and `noeta run b.noe`
@@ -530,6 +537,7 @@ mod tests {
             key: "lib".to_string(),
             root: "lib".to_string(),
             modules: vec![noeta_loader::RawModule {
+                path: noeta_loader::ModulePath::Declared,
                 name: "lib.noe".to_string(),
                 text: "namespace lib.api;\npub fn f(): int { return 1; }\n".to_string(),
             }],

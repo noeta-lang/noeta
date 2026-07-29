@@ -76,17 +76,15 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
         std::collections::BTreeMap::new();
     let mut unreadable = false;
 
-    // Group by directory, as `check` does: an entry's workspace is its directory's `.noe` files, so
-    // each directory is read, resolved, lexed, and parsed once and every entry links against that
-    // shared pool.
-    let mut by_dir: std::collections::BTreeMap<PathBuf, Vec<&PathBuf>> =
-        std::collections::BTreeMap::new();
+    // Group by module pool, as `check` does (see `check::entry_pool`): each pool is read, resolved,
+    // lexed, and parsed once and every entry in it links against that shared set.
+    let mut by_dir: std::collections::BTreeMap<
+        PathBuf,
+        (Option<noeta_loader::PackageRoot>, Vec<&PathBuf>),
+    > = std::collections::BTreeMap::new();
     for entry in &entries {
-        let dir = entry
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(""))
-            .to_path_buf();
-        by_dir.entry(dir).or_default().push(entry);
+        let (dir, root) = super::check::entry_pool(entry);
+        by_dir.entry(dir).or_insert((root, Vec::new())).1.push(entry);
     }
     // The directory the compose probe's graph belongs to — only that group may reuse it, since
     // another directory could resolve a different (nested) manifest.
@@ -98,7 +96,7 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
             .to_path_buf()
     };
 
-    for (dir, dir_entries) in &by_dir {
+    for (dir, (package_root, dir_entries)) in &by_dir {
         let reusable = if *dir == probe_dir {
             resolved.take()
         } else {
@@ -118,7 +116,7 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
             },
         };
         let parsed = noeta_loader::parse_dir(
-            noeta_loader::read_dir_modules(dir),
+            super::check::pool_modules(dir, package_root.as_ref()),
             manifest::root_edition(dir_entries[0]),
             &deps,
             &package_uses,
@@ -171,7 +169,7 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
                     }
                     Ok(text) => {
                         let lone = noeta_loader::parse_dir(
-                            vec![noeta_loader::RawModule { name, text }],
+                            vec![noeta_loader::RawModule::declared(name, text)],
                             manifest::root_edition(entry),
                             &deps,
                             &package_uses,

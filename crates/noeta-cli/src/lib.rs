@@ -1395,7 +1395,13 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     let resolved = graph::resolve_graph(&file).ok()?;
     let (deps, package_uses) = (resolved.packages, resolved.package_uses);
     let linked =
-        noeta_loader::load_with_deps(&file, manifest::root_edition(&file), &deps, &package_uses)
+        noeta_loader::load_with_deps(
+            &file,
+            manifest::root_edition(&file),
+            &deps,
+            &package_uses,
+            noeta_pm::sources::package_root(&file).as_ref(),
+        )
             .ok()?
             .ok()?;
     let ctx = noeta_check::TierContext {

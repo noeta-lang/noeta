@@ -1408,10 +1408,7 @@ mod tests {
         seed_std();
         let entry_text = "namespace App.Main;\nuse App.A.Foo;\nf = Foo { x: 1 };\necho f.x;\n";
         let a_text = "namespace App.A;\npub class Foo { x: int }\n";
-        let raw = noeta_loader::RawModule {
-            name: "a.noe".into(),
-            text: a_text.into(),
-        };
+        let raw = noeta_loader::RawModule::declared("a.noe", a_text);
         let loader = noeta_loader::link(
             "main.noe",
             entry_text,

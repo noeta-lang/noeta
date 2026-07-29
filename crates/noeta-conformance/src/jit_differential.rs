@@ -124,7 +124,7 @@ pub fn run_jit_differential(root: &Path, only: Option<&Path>) -> JitDiffReport {
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry) {
+            match noeta_loader::read_workspace(&case.entry, None) {
                 Ok(raw) => compare_tiers_workspace(&name, &raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }

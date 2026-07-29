@@ -88,10 +88,7 @@ fn check_then_run(entry: &str, siblings: &[(&str, &str)]) -> String {
     ensure_installed();
     let siblings: Vec<RawModule> = siblings
         .iter()
-        .map(|(name, text)| RawModule {
-            name: (*name).to_string(),
-            text: (*text).to_string(),
-        })
+        .map(|(name, text)| RawModule::declared(*name, *text))
         .collect();
     let linked = noeta_loader::link("main.noe", entry, noeta_lexer::Edition::DEFAULT, &siblings)
         .unwrap_or_else(|errors| {

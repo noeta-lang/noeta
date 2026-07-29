@@ -217,6 +217,16 @@ struct Instance {
     version: Version,
     edition: crate::edition::Edition,
     root_segment: String,
+    /// The package half of the identity (`db` for `para/db`) — always, unlike [`Self::root_segment`],
+    /// which is the *scope* for a scope member. This is what a scope member contributes to its
+    /// modules' derived path prefix (`para` + `db` → `para.db.…`).
+    package_segment: String,
+    /// Whether this package was reached as a member of a **scope** dependency (`key = [ … ]`). It
+    /// decides the prefix its modules derive under: a plain entry's is the key alone, a scope
+    /// member's is `{key}.{package segment}`. The two are otherwise indistinguishable from the
+    /// outside (both have a key and a root segment), which is why it is recorded here rather than
+    /// re-derived.
+    scoped: bool,
     dir: PathBuf,
     content_hash: String,
     source: ResolvedSource,
@@ -758,6 +768,8 @@ impl Walker<'_> {
             ScopeRoot::Package => pkg.name.root().to_string(),
             ScopeRoot::Scope => pkg.name.company.clone(),
         };
+        let package_segment = pkg.name.root().to_string();
+        let scoped = matches!(root, ScopeRoot::Scope);
 
         if let Some(existing) = self.instances.get(&identity) {
             if existing.version != pkg.version {
@@ -829,6 +841,8 @@ impl Walker<'_> {
                 version: pkg.version.clone(),
                 edition: pkg.edition(),
                 root_segment,
+                package_segment,
+                scoped,
                 dir: dir.clone(),
                 content_hash,
                 source,
@@ -1950,7 +1964,15 @@ fn assemble(
             .iter()
             .map(|(local_key, children)| (local_key.clone(), global[&children[0]].clone()))
             .collect();
-        let modules = crate::sources::read_package_sources(&inst.dir).unwrap_or_default();
+        // The prefix the package's modules derive under — the consumer's key, plus the package
+        // segment for a scope member (`para = [ { package = "para/db" }, … ]` → `para.db.…`). This
+        // is what makes the key *real*: keying `para/cli` as `mycli` gives `mycli.cli`, where
+        // re-rooting a declared `namespace para.cli` silently did nothing.
+        let mut prefix = vec![key.clone()];
+        if inst.scoped {
+            prefix.push(inst.package_segment.clone());
+        }
+        let modules = crate::sources::read_package_sources(&inst.dir, &prefix);
         // Resolve this dependency's own `[directives]` and `[tiers]` against ITS edges — a `@name` in
         // this package's source resolves in this package's dependency context, not the root's — and
         // merge them into one per-package `@name` map (the manifest forbids a local name naming both).

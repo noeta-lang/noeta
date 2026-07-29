@@ -320,7 +320,13 @@ fn dep_packages(dir: &Path) -> Vec<noeta_loader::DepPackage> {
             let modules: Vec<noeta_loader::RawModule> = paths
                 .iter()
                 .filter_map(|p| {
+                    // A case's package subdirectory IS the package root, so its modules derive
+                    // under the directory name — the same prefix the key/root give them.
                     Some(noeta_loader::RawModule {
+                        path: noeta_loader::derive_module_path(
+                            std::slice::from_ref(&name),
+                            p.strip_prefix(&package_dir).unwrap_or(p),
+                        ),
                         name: p.display().to_string(),
                         text: std::fs::read_to_string(p).ok()?,
                     })
@@ -379,7 +385,9 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     // carry real package provenance; one without keeps the deps-free path byte-for-byte.
     let deps = entry.parent().map(dep_packages).unwrap_or_default();
     let load = if deps.is_empty() {
-        noeta_loader::load(entry, noeta_lexer::Edition::DEFAULT)
+        // The corpus carries no manifests, so there is no package root and nothing derives: each
+        // case's modules are identified by the `namespace` they declare, exactly as before.
+        noeta_loader::load(entry, noeta_lexer::Edition::DEFAULT, None)
     } else {
         // Conformance cases carry no manifest `[tiers]`/`[directives]`, so an empty `PackageUses`
         // suffices — a dependency's own `@tier(…, text)` still captures via the global scan.
@@ -388,6 +396,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
             noeta_lexer::Edition::DEFAULT,
             &deps,
             &noeta_span::PackageUses::new(),
+            None,
         )
     };
     let linked = match load {

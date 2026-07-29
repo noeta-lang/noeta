@@ -88,10 +88,7 @@ fn dir(modules: &[(&str, &str)]) -> ParsedDir {
     parse_dir(
         modules
             .iter()
-            .map(|(name, text)| RawModule {
-                name: (*name).to_string(),
-                text: (*text).to_string(),
-            })
+            .map(|(name, text)| RawModule::declared(*name, *text))
             .collect(),
         noeta_lexer::Edition::default(),
         &[] as &[DepPackage],

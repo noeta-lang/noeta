@@ -1139,7 +1139,16 @@ impl ParsedDir {
     /// `None` when the directory scan didn't yield it (an unreadable file, or a path spelled
     /// differently than the scan spells it — the caller falls back to a lone-file load).
     pub fn module_index(&self, name: &str) -> Option<usize> {
-        (0..self.modules.len()).find(|&i| self.sources[i].name() == name)
+        (0..self.modules.len())
+            .find(|&i| self.sources[i].name() == name)
+            // A package's modules are spelled from the package root while the invocation spells the
+            // entry however it likes; falling back to "is it the same file" keeps an entry linking
+            // against its own package instead of degrading to a lone-file check.
+            .or_else(|| {
+                (0..self.modules.len()).find(|&i| {
+                    same_file(Path::new(self.sources[i].name()), Path::new(name))
+                })
+            })
     }
 
     /// Every source (directory modules + dependency modules) under the shared id numbering —
