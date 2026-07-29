@@ -108,7 +108,7 @@ With that settled, the question you have picks the surface:
 | What does this callable take, and return? | [`params_of`](#params_ofname-listparaminfo) / [`returns_of`](#returns_ofname-type) | Declared types — there is no value to test. |
 | Which declarations carry `#[Route]`? | [`attributes_of::<Route>()`](#attributes_oft-listattributedt) | Whole-program, `use`-independent. |
 | Which declarations carry an architectural role? | [`roles_of()`](#roles_of-listrolebinding--roles_ofroleenum-listrolebinding) | The compile-time `(declaration, role)` index. |
-| Build a value of a type I hold only as a name | [`construct`](#constructt-fields-resultdyn-string--constructname-fields-resultdyn-string) | The reflective **struct literal** — [it is not `new`](#construct-is-the-reflective-literal-not-your-constructor). |
+| Build a value of a type I hold only as a name | [`construct`](#constructtfields-resultdyn-string--constructname-fields-resultdyn-string) | The reflective **struct literal** — [it is not `new`](#construct-is-the-reflective-literal-not-your-constructor). |
 | Call something whose name arrived as *data* | [`invoke`](#invokerecv-name-args-resultdyn-dyn--invokename-args-resultdyn-dyn) | The one consumer of the names the rest produce. |
 | Rebuild a `List<T>` of a `@packed` type from a `bytes` blob | [`from_bytes::<T>(blob)`](Fixed-Width-Integers#bytes--serialize-a-packed-list) | A typed decode, not a query. Documented with packed types. |
 
@@ -719,7 +719,7 @@ echo match invoke(name, "new", [2, 3]) {
 }
 ```
 
-So there is no route from a *discovered* type name to that type's associated functions — only from one you wrote. That is the gap [`construct`](#constructt-fields-resultdyn-string--constructname-fields-resultdyn-string) exists to fill: it takes a runtime type name, at the price of [not being the constructor](#construct-is-the-reflective-literal-not-your-constructor).
+So there is no route from a *discovered* type name to that type's associated functions — only from one you wrote. That is the gap [`construct`](#constructtfields-resultdyn-string--constructname-fields-resultdyn-string) exists to fill: it takes a runtime type name, at the price of [not being the constructor](#construct-is-the-reflective-literal-not-your-constructor).
 
 With two, `name` is a **top-level function** — the same string `params_of` takes for a free fn, so reflecting a signature and then calling it round-trips on one name:
 

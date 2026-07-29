@@ -93,7 +93,7 @@ What you get back is a **real enum value**: it `match`es exhaustively and compar
 
 A value that names no case is a path-carrying `JsonError` of kind `unknown_variant`, whose detail lists every accepted wire value — distinct from `mismatch`, which means the document has the wrong *shape* rather than an out-of-vocabulary value. Neither can panic, and neither can produce a silently-wrong value.
 
-An enum with a **payload-carrying** variant has no JSON decoding at all, so a struct with such a field is E0050: a data-carrying sum has no canonical JSON spelling, and decoding only its payload-free half would accept documents against a schema that cannot describe the type. Build those cases with [`construct("Enum.Variant", payload)`](Attributes-and-Reflection#constructt-fields-resultdyn-string--constructname-fields-resultdyn-string), or convert a single wire value with [`Enum.try_from`](Structs-Classes-and-Enums#enums).
+An enum with a **payload-carrying** variant has no JSON decoding at all, so a struct with such a field is E0050: a data-carrying sum has no canonical JSON spelling, and decoding only its payload-free half would accept documents against a schema that cannot describe the type. Build those cases with [`construct("Enum.Variant", payload)`](Attributes-and-Reflection#constructtfields-resultdyn-string--constructname-fields-resultdyn-string), or convert a single wire value with [`Enum.try_from`](Structs-Classes-and-Enums#enums).
 
 ## Deriving a user trait
 
