@@ -6,7 +6,6 @@
 // expect: stdout "Color.Red"
 // expect: stdout "true"
 // expect: exit 0
-namespace App.Main;
 use App.Shapes.Point;
 use App.Shapes.Color;
 

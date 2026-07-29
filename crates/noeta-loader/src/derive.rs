@@ -58,14 +58,36 @@ pub struct PackageRoot {
     pub dir: PathBuf,
     /// The dotted prefix every module of this package derives under.
     pub prefix: Vec<String>,
+    /// Directories, relative to [`dir`](Self::dir), that hold **programs rather than modules** —
+    /// the manifest's `[db] migrations`/`seeds` (defaulting to `migrations/` and `seeds/`).
+    ///
+    /// A migration is a `.noe` program the driver runs, not something any module imports, and it is
+    /// named for *when* it runs: `20260719000002_more_users.noe`. Deriving a module path from that
+    /// stem yields a segment no `use` can spell, so before this every project wired for
+    /// `noeta migrate` failed to check with E0074 — on files whose names are exactly right for what
+    /// they are.
+    pub data_dirs: Vec<String>,
 }
+
+/// The directories a package holds programs rather than modules in, when its manifest declares
+/// none. Mirrors `DbConfig`'s documented defaults so an undeclared project behaves like a declared
+/// one.
+pub const DEFAULT_DATA_DIRS: &[&str] = &["migrations", "seeds"];
 
 impl PackageRoot {
     pub fn new(dir: impl Into<PathBuf>, prefix: Vec<String>) -> PackageRoot {
         PackageRoot {
             dir: dir.into(),
             prefix,
+            data_dirs: DEFAULT_DATA_DIRS.iter().map(|d| (*d).to_string()).collect(),
         }
+    }
+
+    /// The same root with its program directories taken from the manifest rather than defaulted.
+    #[must_use]
+    pub fn with_data_dirs(mut self, dirs: Vec<String>) -> PackageRoot {
+        self.data_dirs = dirs;
+        self
     }
 
     /// `path` as seen from the package root, or `None` when it is not under this root at all.
@@ -228,7 +250,8 @@ fn legalize(segment: &str) -> String {
 /// invisible while a *dependency's* `inner/deep.noe` resolved fine.
 pub fn read_package_modules(root: &PackageRoot) -> Vec<super::RawModule> {
     let mut paths = Vec::new();
-    collect_noe_files(&root.dir, &mut paths);
+    let data: Vec<PathBuf> = root.data_dirs.iter().map(|d| root.dir.join(d)).collect();
+    collect_noe_files(&root.dir, &data, &mut paths);
     paths.sort();
     paths
         .into_iter()
@@ -246,7 +269,7 @@ pub fn read_package_modules(root: &PackageRoot) -> Vec<super::RawModule> {
 
 /// Recursively gather `.noe` file paths under `dir`, pruning every subtree that is not this
 /// package's source.
-fn collect_noe_files(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_noe_files(dir: &Path, data: &[PathBuf], out: &mut Vec<PathBuf>) {
     // A bare relative root (`noeta test app.noe` → parent `""`) is the current directory, which
     // `read_dir("")` refuses; scan `.` but keep the produced paths rooted at the original (empty)
     // prefix, so a module's name stays byte-equal to how the invocation addresses it.
@@ -262,8 +285,8 @@ fn collect_noe_files(dir: &Path, out: &mut Vec<PathBuf>) {
             entry.path()
         };
         if path.is_dir() {
-            if !is_outside_package(&path) {
-                collect_noe_files(&path, out);
+            if !is_outside_package(&path) && !data.contains(&path) {
+                collect_noe_files(&path, data, out);
             }
         } else if path.is_file() && path.extension().is_some_and(|ext| ext == "noe") {
             out.push(path);

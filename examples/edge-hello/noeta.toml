@@ -1,0 +1,5 @@
+# Its own package: a self-contained Spin/WASM app, not a module of the examples tree — and
+# `edge-hello` could never be a module path segment anyway (a `-` is not an identifier).
+[package]
+name = "local/edge_hello"
+version = "0.1.0"

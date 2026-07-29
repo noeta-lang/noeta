@@ -17,7 +17,6 @@
 // expect: stdout "7"
 // expect: stdout "done"
 // expect: exit 0
-namespace App.Main;
 
 fn double(n: int): int {
     return n * 2

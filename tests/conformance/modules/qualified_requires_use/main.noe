@@ -3,7 +3,7 @@
 // so a file's dependency set stays fully readable from its `use` block.
 // expect: error E0019 at 8:5
 // expect: exit 1
-namespace App.Main;
+// (No `namespace`: the entry of package `geometry` derives `geometry.main` from its file name.)
 
 a = geometry.vec.Vec2 { x: 1, y: 2 };
 echo a.x;

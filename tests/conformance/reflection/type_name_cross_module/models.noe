@@ -1,8 +1,0 @@
-// The declaring module. `Todo`'s runtime identity is `app.storage.Todo` — whatever local name an
-// importer binds it under.
-namespace app.storage
-
-pub struct Todo {
-    pub id: int
-    pub title: string
-}

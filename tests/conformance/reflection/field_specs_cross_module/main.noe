@@ -3,7 +3,7 @@
 // declaring module's qualified identity (`app.storage.Todo`) — the key the reflection registry
 // actually holds.
 //
-// The sibling-module case is the sharper one: the entry has no namespace of its own to blame, so
+// The sibling-module case is the sharper one: the entry is a different module (`app.main`), so
 // nothing but the linker's import map can supply the qualification. The parser used to flatten the
 // turbofish to the string `"Todo"` before that map was ever consulted, which made both queries
 // silently answer as if the type had no fields.

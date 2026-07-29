@@ -5,7 +5,6 @@
 // expect: stdout "50"
 // expect: stdout "105"
 // expect: exit 0
-namespace App.Main;
 use App.Metric.scale as mscale;
 use App.Audio.scale as ascale;
 
