@@ -113,6 +113,85 @@ fn runner_root(qualified: &str) -> String {
     }
 }
 
+/// The **canonical identity** of a tier: the provider's namespace root and the name that provider
+/// exported (a std tier is `("std", "test")`; a dependency `fuzzkit`'s is `("fuzzkit", "fuzz")`). Two
+/// `@name` occurrences — possibly under *different local names in different packages* — denote the
+/// same tier iff their identities are equal. This is what activation membership and every built-in
+/// tier's special behavior key on, so a renamed tier (`@crit` bound to `criterion:bench`) is judged
+/// by what it *is*, not the local spelling — the de-hardcoding of `active.contains("test")`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TierId {
+    pub root: String,
+    pub exported: String,
+}
+
+impl TierId {
+    /// A std tier's identity — `("std", name)`. The provider the built-in four resolve to.
+    pub fn std(name: &str) -> TierId {
+        TierId {
+            root: BUILTIN_PROVIDER.to_string(),
+            exported: name.to_string(),
+        }
+    }
+}
+
+/// The built-in tier provider root (`"std"`), mirroring `noeta_pm`'s `BUILTIN_PROVIDER` — the syntax
+/// crates sit beneath the package manager, so the string is pinned here and a test keeps the two equal.
+pub(crate) const BUILTIN_PROVIDER: &str = "std";
+
+/// A `@name` resolved to a concrete declaration — an extension tier (carrying its provider root) or a
+/// program `@tier`. The property accessors ([`Self::config`], [`Self::sites`], …) read from whichever
+/// half, so every consumer resolves once and then asks the resolved tier, rather than re-resolving a
+/// bare name against the global name-space at each query.
+#[derive(Debug, Clone)]
+pub enum ResolvedTier<'a> {
+    /// An extension-declared tier and the namespace root of the unit that declares it.
+    Ext(&'a noeta_ext_abi::registry::ExtTier, String),
+    /// A program `@tier(…)` declaration.
+    Declared(&'a DeclaredTier),
+}
+
+impl ResolvedTier<'_> {
+    /// The canonical identity — `(provider root, exported name)`.
+    pub fn id(&self) -> TierId {
+        match self {
+            ResolvedTier::Ext(t, root) => TierId {
+                root: root.clone(),
+                exported: t.name.to_string(),
+            },
+            ResolvedTier::Declared(d) => TierId {
+                root: d.root.clone(),
+                exported: d.name.clone(),
+            },
+        }
+    }
+
+    /// The config knob-attribute name, if the tier carries one.
+    pub fn config(&self) -> Option<&str> {
+        match self {
+            ResolvedTier::Ext(t, _) => t.config,
+            ResolvedTier::Declared(d) => d.config.as_deref(),
+        }
+    }
+
+    /// The declaration sites the tier permits (an extension tier's registered `sites`; a program
+    /// `@tier` attaches to any declaration).
+    pub fn sites(&self) -> &'static [noeta_ext_abi::registry::TierSite] {
+        match self {
+            ResolvedTier::Ext(t, _) => t.sites,
+            ResolvedTier::Declared(_) => ANY_DECLARATION,
+        }
+    }
+
+    /// Whether the tier is an **expression tier** (its `@name { … }` block is a value).
+    pub fn is_expr(&self) -> bool {
+        match self {
+            ResolvedTier::Ext(t, _) => t.expr.is_some(),
+            ResolvedTier::Declared(d) => d.expr.is_some(),
+        }
+    }
+}
+
 impl TierRegistry {
     /// Collect every `@tier` declaration from `program`'s top-level fns, in source order per tier
     /// name (the checker reports same-provider duplicates as E0051; collection keeps everything so
@@ -223,6 +302,57 @@ impl TierRegistry {
     /// target's explicit provider selection uses.
     pub fn declared_by(&self, tier: &str, root: &str) -> Option<&DeclaredTier> {
         self.declared.get(tier)?.iter().find(|d| d.root == root)
+    }
+
+    /// Resolve a `@local` written by the package at `origin` to a concrete [`ResolvedTier`] — the heart
+    /// of per-package tier resolution (per-package naming arc). **A `[tiers]` binding wins**: the
+    /// package's own local `@name` → the provider it named + the tier that provider exported (so a
+    /// rename or a third-party provider resolves to exactly what the manifest declared). **Otherwise the
+    /// name resolves ambiently** — a std extension tier or a program `@tier` of that bare name — which
+    /// is what a bare script (no manifest) and any unbound built-in use rely on. A name bound to a
+    /// provider that declares no such tier is unresolved (`None`; the caller raises the diagnostic).
+    ///
+    /// `origin` is the span's package (`packages.at(span)`); `None` (unknown provenance, e.g. a
+    /// single-file check with no manifest) skips the binding step and resolves ambiently.
+    pub fn resolve_at<'a>(
+        &'a self,
+        local: &str,
+        origin: Option<&noeta_span::PackageOrigin>,
+        uses: &noeta_span::PackageUses,
+    ) -> Option<ResolvedTier<'a>> {
+        if let Some(o) = origin
+            && let Some(u) = uses.get(o, local)
+        {
+            // Bound: the provider_root(s) the local name maps to. Find the one that actually declares
+            // the exported tier (a scope dependency's key covers several roots; the common case is one).
+            for root in &u.provider_roots {
+                let one = std::slice::from_ref(root);
+                if let Some(t) = self.reg().find_ext_tier_scoped(one, &u.exported) {
+                    return Some(ResolvedTier::Ext(t, root.clone()));
+                }
+                if let Some(d) = self.declared_by(&u.exported, root) {
+                    return Some(ResolvedTier::Declared(d));
+                }
+            }
+            return None;
+        }
+        // Ambient: only a **std** extension tier (a third-party extension tier is reachable solely
+        // through a binding — never ambient) or a program `@tier` of that bare name.
+        let std_root = [BUILTIN_PROVIDER.to_string()];
+        if let Some(t) = self.reg().find_ext_tier_scoped(&std_root, local) {
+            return Some(ResolvedTier::Ext(t, BUILTIN_PROVIDER.to_string()));
+        }
+        self.declared(local).map(ResolvedTier::Declared)
+    }
+
+    /// The canonical [`TierId`] a `@local` at `origin` resolves to (see [`Self::resolve_at`]).
+    pub fn resolve_id(
+        &self,
+        local: &str,
+        origin: Option<&noeta_span::PackageOrigin>,
+        uses: &noeta_span::PackageUses,
+    ) -> Option<TierId> {
+        self.resolve_at(local, origin, uses).map(|r| r.id())
     }
 
     /// Resolve who provides `tier` under `providers` (a target's tier → provider map; empty ⇒ no
@@ -817,53 +947,87 @@ pub struct Activated {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Resolve `program`'s `@<tier> { … }` blocks against `active` (the set of live tier names),
-/// **everywhere they appear** — top-level (a `@test` block of declarations) and nested in statement
-/// position (a `@debug { … }` block inside a fn/method body or a control-flow branch). Active blocks
-/// are inlined in place; inactive blocks are dropped; every block's name is validated. The `@test`
-/// fns among the activated *top-level* blocks are collected as roots the runner invokes.
-pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
-    activate_tiers_with(program, active, &std::collections::BTreeMap::new())
+/// The per-package resolution context activation needs to judge each `@name` occurrence *by identity*
+/// rather than by its local spelling (per-package naming arc): the whole program's `[tiers]`/
+/// `[directives]` bindings and the span→package map that says which package wrote each block. Both are
+/// empty for a single-program preview (the IDE/MCP `activate_tiers` path), which then resolves every
+/// `@name` ambiently — the behaviour that predates per-package naming.
+#[derive(Clone, Copy, Debug)]
+pub struct TierContext<'a> {
+    pub uses: &'a noeta_span::PackageUses,
+    pub packages: &'a noeta_span::PackageMap,
 }
 
-/// [`activate_tiers`] under a target's tier → **provider** map (tier-providers provider
-/// dispatch): the provider selection decides which declaration's config attribute a
-/// `@<tier>(args)` block stamps — `bench = "criterion"` stamps criterion's config, not std's
-/// `Bench`. An empty map is default resolution (extension first, then first declaration).
-pub fn activate_tiers_with(
-    program: &Program,
-    active: &[&str],
-    providers: &std::collections::BTreeMap<String, String>,
-) -> Activated {
+/// Resolve `program`'s `@<tier> { … }` blocks against `active` (the set of live tier *local names* from
+/// the root's target), **everywhere they appear** — top-level (a `@test` block of declarations) and
+/// nested in statement position (a `@debug { … }` block inside a fn/method body or a control-flow
+/// branch). Active blocks are inlined in place; inactive blocks are dropped; every block's name is
+/// validated. The `@test` fns among the activated *top-level* blocks are collected as roots the runner
+/// invokes. This is the single-program form — every `@name` resolves ambiently (no per-package bindings).
+pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
+    let uses = noeta_span::PackageUses::new();
+    let packages = noeta_span::PackageMap::default();
+    activate_tiers_with(
+        program,
+        active,
+        &TierContext {
+            uses: &uses,
+            packages: &packages,
+        },
+    )
+}
+
+/// [`activate_tiers`] resolving each `@name` **per the package that wrote it** ([`TierContext`]): the
+/// active set and every block are judged by their canonical [`TierId`], so a renamed tier (`@crit`
+/// bound to `criterion:bench`) activates and stamps exactly the provider it names — the identity-based
+/// replacement for the old `active.contains("test")` / provider-map dispatch.
+pub fn activate_tiers_with(program: &Program, active: &[&str], ctx: &TierContext) -> Activated {
     let mut roots = Roots::default();
     let mut diagnostics = Vec::new();
     // The tier name-space: built-ins ∪ the program's own `@tier` declarations (imported packages'
     // included — the linked program carries their decls). Unknown-name validation, config-attr
     // stamping, and root collection all resolve against it.
     let registry = TierRegistry::collect(program);
+    // The active set as canonical identities: each live *local* name from the root's target resolved
+    // in the root's own context. A block anywhere in the program is live iff its identity is in here —
+    // so a dependency's `@test` and the root's `@test` (both `(std, test)`) share one activation switch,
+    // and a rename is judged by what it is. Names that resolve to nothing (an activated tier no package
+    // provides) simply contribute no identity.
+    let active_ids: std::collections::HashSet<TierId> = active
+        .iter()
+        .filter_map(|n| registry.resolve_id(n, Some(&noeta_span::PackageOrigin::Root), ctx.uses))
+        .collect();
     // With the `doc` tier live, a declaration-attached `@doc` block (adjacency-resolved on the
     // *input* program, before its blocks are gone) stamps `#[Doc("…")]` onto its declaration —
     // the text tier's counterpart of `@bench`'s knob stamping, giving runtime docstrings via
     // `attributes_of`. Keyed by the declaration's name-span, which survives inlining.
-    let doc_stamps: std::collections::HashMap<Span, String> = if active.contains(&"doc") {
-        resolve_docs(program)
-            .into_iter()
-            .filter_map(|d| match d.target {
-                DocTarget::Decl { name_span, .. } => Some((name_span, d.text)),
-                _ => None,
-            })
-            .collect()
-    } else {
-        std::collections::HashMap::new()
-    };
-    // The text roots of active *declared* text tiers (text-tiers arc), resolved on the input
-    // program like the doc stamps — the blocks themselves strip below, exactly like `@doc`.
+    let doc_stamps: std::collections::HashMap<Span, String> =
+        if active_ids.contains(&TierId::std("doc")) {
+            resolve_docs(program)
+                .into_iter()
+                .filter_map(|d| match d.target {
+                    DocTarget::Decl { name_span, .. } => Some((name_span, d.text)),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
+    // The text roots of active *declared* text tiers (text-tiers arc), resolved on the input program
+    // like the doc stamps — the blocks themselves strip below, exactly like `@doc`. Keyed by the
+    // block's local tier name (its `texts` bucket), but *gated* on its resolved identity: an active
+    // program-declared text tier that is not the std `doc` tier (which the doc stamps own).
     let mut texts: std::collections::BTreeMap<String, Vec<TextBlock>> =
         std::collections::BTreeMap::new();
     for block in resolve_texts(program) {
-        if block.tier != "doc"
-            && active.contains(&block.tier.as_str())
-            && registry.declared(&block.tier).is_some()
+        let Some(resolved) =
+            registry.resolve_at(&block.tier, ctx.packages.at(block.span), ctx.uses)
+        else {
+            continue;
+        };
+        if matches!(resolved, ResolvedTier::Declared(_))
+            && resolved.id() != TierId::std("doc")
+            && active_ids.contains(&resolved.id())
         {
             texts.entry(block.tier.clone()).or_default().push(block);
         }
@@ -872,9 +1036,9 @@ pub fn activate_tiers_with(
     // only here — a tier block nested in a fn body holds inline code, not roots).
     let mut stmts = resolve_block(
         &program.stmts,
-        active,
+        &active_ids,
         &registry,
-        providers,
+        ctx,
         &mut diagnostics,
         &mut roots,
         true,
@@ -929,10 +1093,21 @@ pub fn activate_tiers_with(
             let mut make_test = false;
             let mut make_bench = false;
             for dir in &method.directives {
-                match dir.name.as_str() {
-                    "test" if active.contains(&"test") => make_test = true,
-                    "bench" if active.contains(&"bench") => make_bench = true,
-                    _ => {}
+                // Resolve the method's `@name` in the package that wrote it, then judge by identity:
+                // the std `test`/`bench` tiers become runnable roots when live, whatever local name a
+                // rename gave them. Any other tier at a method site collects no root (as before).
+                let Some(id) =
+                    registry.resolve_id(&dir.name, ctx.packages.at(dir.name_span), ctx.uses)
+                else {
+                    continue;
+                };
+                if !active_ids.contains(&id) {
+                    continue;
+                }
+                if id == TierId::std("test") {
+                    make_test = true;
+                } else if id == TierId::std("bench") {
+                    make_bench = true;
                 }
             }
             if !make_test && !make_bench {
@@ -1041,9 +1216,9 @@ struct Roots {
 /// top-level `@test` block's fns become runnable roots.
 fn resolve_block(
     stmts: &[Stmt],
-    active: &[&str],
+    active_ids: &std::collections::HashSet<TierId>,
     registry: &TierRegistry,
-    providers: &std::collections::BTreeMap<String, String>,
+    ctx: &TierContext,
     diagnostics: &mut Vec<Diagnostic>,
     roots: &mut Roots,
     collect_roots: bool,
@@ -1060,28 +1235,39 @@ fn resolve_block(
         else {
             out.push(resolve_children(
                 stmt,
-                active,
+                active_ids,
                 registry,
-                providers,
+                ctx,
                 diagnostics,
             ));
             continue;
         };
 
-        let config = registry.config_attribute_for(tier, providers);
-        if !registry.is_known(tier) {
-            diagnostics.push(unknown_tier_diagnostic(registry.reg(), tier, *tier_span));
-        } else if registry.is_expr_tier(tier) {
-            // An expression tier's block in statement position (E0052) — never activates.
-            diagnostics.push(expr_tier_statement_diagnostic(tier, *tier_span));
-        } else if config.is_none()
-            && let Some(d) = knobless_args_diagnostic_for(tier, args)
-        {
-            // Directive args on a knob-less tier (`@test(x)`) — E0037. A knob-carrying tier's args
-            // are validated as the stamped attribute's construction, by the checker, below.
-            diagnostics.push(d);
+        // Resolve the block's `@name` in the package that wrote it (its `tier_span`'s origin), then
+        // judge everything below by the resolved tier's identity — not the local spelling.
+        let resolved = registry.resolve_at(tier, ctx.packages.at(*tier_span), ctx.uses);
+        let config: Option<String> = resolved
+            .as_ref()
+            .and_then(|r| r.config().map(str::to_string));
+        match &resolved {
+            None => diagnostics.push(unknown_tier_diagnostic(registry.reg(), tier, *tier_span)),
+            Some(r) if r.is_expr() => {
+                // An expression tier's block in statement position (E0052) — never activates.
+                diagnostics.push(expr_tier_statement_diagnostic(tier, *tier_span));
+            }
+            Some(_) if config.is_none() => {
+                if let Some(d) = knobless_args_diagnostic_for(tier, args) {
+                    // Directive args on a knob-less tier (`@test(x)`) — E0037. A knob-carrying tier's
+                    // args are validated as the stamped attribute's construction, by the checker, below.
+                    diagnostics.push(d);
+                }
+            }
+            _ => {}
         }
-        if !active.contains(&tier.as_str()) {
+        let is_active = resolved
+            .as_ref()
+            .is_some_and(|r| active_ids.contains(&r.id()));
+        if !is_active {
             // Inactive (including an unknown tier): stripped, never reaches the checker or the IR.
             continue;
         }
@@ -1096,16 +1282,18 @@ fn resolve_block(
         // attribute construction gate, and the runner reads it off the fn's `attrs`; a top-level
         // `@test`/`@bench` block's fns are also recorded as roots.
         let config_attr = config.filter(|_| !args.is_empty());
-        let resolved = resolve_block(
+        let resolved_items = resolve_block(
             items,
-            active,
+            active_ids,
             registry,
-            providers,
+            ctx,
             diagnostics,
             roots,
             collect_roots,
         );
-        for mut item in resolved {
+        // `is_active` implies `resolved` is `Some` (a `None` never contributes an active identity).
+        let id = resolved.as_ref().map(ResolvedTier::id);
+        for mut item in resolved_items {
             if let Stmt::Fn(decl) = &mut item {
                 decl.is_dev_tier = true;
                 if let Some(attr_name) = config_attr.as_deref()
@@ -1115,14 +1303,17 @@ fn resolve_block(
                         .push(synthesized_config_attr(attr_name, args, *tier_span));
                 }
                 if collect_roots {
-                    let sink = match tier.as_str() {
-                        "test" => Some(&mut roots.tests),
-                        "bench" => Some(&mut roots.benches),
-                        // A declared tier's fns are roots for its runner's dispatch.
-                        name if registry.declared(name).is_some() => {
-                            Some(roots.custom.entry(name.to_string()).or_default())
-                        }
-                        _ => None,
+                    // Roots keyed by identity: the std `test`/`bench` tiers feed the native runners
+                    // whatever local name a rename gave them; any other **program-declared** tier's fns
+                    // are roots for its own `@tier` runner, keyed by the tier's exported name.
+                    let sink = if id.as_ref() == Some(&TierId::std("test")) {
+                        Some(&mut roots.tests)
+                    } else if id.as_ref() == Some(&TierId::std("bench")) {
+                        Some(&mut roots.benches)
+                    } else if let Some(ResolvedTier::Declared(d)) = &resolved {
+                        Some(roots.custom.entry(d.name.clone()).or_default())
+                    } else {
+                        None
                     };
                     if let Some(sink) = sink {
                         sink.push(TierFn {
@@ -1147,9 +1338,9 @@ fn resolve_block(
 /// expressions (closures and `match`/`if` *expressions* are expression-bodied).
 fn resolve_children(
     stmt: &Stmt,
-    active: &[&str],
+    active_ids: &std::collections::HashSet<TierId>,
     registry: &TierRegistry,
-    providers: &std::collections::BTreeMap<String, String>,
+    ctx: &TierContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Stmt {
     let mut stmt = stmt.clone();
@@ -1157,7 +1348,7 @@ fn resolve_children(
         // Nested statement lists never produce runnable roots (`collect_roots = false`); the sink is
         // a throwaway.
         let mut sink = Roots::default();
-        resolve_block(stmts, active, registry, providers, diags, &mut sink, false)
+        resolve_block(stmts, active_ids, registry, ctx, diags, &mut sink, false)
     };
     match &mut stmt {
         Stmt::If {

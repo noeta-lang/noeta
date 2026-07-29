@@ -7,7 +7,6 @@ use std::process::ExitCode;
 
 use noeta_diagnostics::{Diagnostic, render_mapped};
 use noeta_pm::{graph, manifest};
-use noeta_runner::resolve_providers;
 use noeta_span::SourceMap;
 
 use crate::{OutputFormat, compose};
@@ -74,15 +73,6 @@ pub(crate) fn cmd_check(
             active.push(tier.clone());
         }
     }
-    // The target's tier → provider map steers which declaration's config attribute activation
-    // stamps (provider dispatch); empty without a target.
-    let providers = match resolve_providers(path, target) {
-        Ok(map) => map,
-        Err(err) => {
-            eprintln!("noeta: {err}");
-            return ExitCode::from(1);
-        }
-    };
     let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
 
     // The set of entry files to check: the file itself, or every `.noe` file under the directory.
@@ -189,57 +179,60 @@ pub(crate) fn cmd_check(
         // structurally (audit-3 F8).
         // Entry lex/parse errors' spans live in the entry, and the shared map renders them
         // against it — the same (file, span, code) dedup key as the per-entry load produced.
-        let mut check_entry = |parsed: &noeta_loader::ParsedDir,
-                               shared: &std::rc::Rc<SourceMap>,
-                               index: usize| {
-            match parsed.link_entry(index) {
-                Err(load_diagnostics) => {
-                    for ld in &load_diagnostics {
-                        fold(shared, &ld.diagnostic);
+        let mut check_entry =
+            |parsed: &noeta_loader::ParsedDir, shared: &std::rc::Rc<SourceMap>, index: usize| {
+                match parsed.link_entry(index) {
+                    Err(load_diagnostics) => {
+                        for ld in &load_diagnostics {
+                            fold(shared, &ld.diagnostic);
+                        }
+                    }
+                    Ok(linked) => {
+                        // An entry whose directive expanded at compile time has sources of its own —
+                        // the generated declarations — that the directory's shared map does not hold,
+                        // so it renders against its own extended map and edition map. That is the rare
+                        // path: with no expanding directive (nearly every program) `expansions` is
+                        // empty and the shared `Rc<SourceMap>` is reused untouched, so this loop —
+                        // once per file in the directory — still clones nothing.
+                        let (sources, editions);
+                        if linked.expansions.is_empty() {
+                            sources = std::rc::Rc::clone(shared);
+                            editions = None;
+                        } else {
+                            sources = std::rc::Rc::new(parsed.source_map_with(&linked.expansions));
+                            editions = Some(parsed.editions_with(&linked.expansions));
+                        }
+                        // Package provenance needs no expansion twin: generated sources are
+                        // deliberately unattributed, so the directory's map covers every source the
+                        // orphan rule may judge (see `ParsedDir::packages`).
+                        let opts = noeta_check::CheckOptions {
+                            editions: editions.unwrap_or_else(|| parsed.editions().clone()),
+                            packages: parsed.packages().clone(),
+                            package_uses: package_uses.clone(),
+                            ..noeta_check::CheckOptions::default()
+                        };
+                        let program = linked.program;
+                        let program_diags = if active_refs.is_empty() {
+                            crate::context::check_under(&program, &opts).diagnostics
+                        } else {
+                            let ctx = noeta_check::TierContext {
+                                uses: &opts.package_uses,
+                                packages: &opts.packages,
+                            };
+                            let activated =
+                                noeta_check::activate_tiers_with(&program, &active_refs, &ctx);
+                            let mut ds = activated.diagnostics;
+                            ds.extend(
+                                crate::context::check_under(&activated.program, &opts).diagnostics,
+                            );
+                            ds
+                        };
+                        for d in &program_diags {
+                            fold(&sources, d);
+                        }
                     }
                 }
-                Ok(linked) => {
-                    // An entry whose directive expanded at compile time has sources of its own —
-                    // the generated declarations — that the directory's shared map does not hold,
-                    // so it renders against its own extended map and edition map. That is the rare
-                    // path: with no expanding directive (nearly every program) `expansions` is
-                    // empty and the shared `Rc<SourceMap>` is reused untouched, so this loop —
-                    // once per file in the directory — still clones nothing.
-                    let (sources, editions);
-                    if linked.expansions.is_empty() {
-                        sources = std::rc::Rc::clone(shared);
-                        editions = None;
-                    } else {
-                        sources = std::rc::Rc::new(parsed.source_map_with(&linked.expansions));
-                        editions = Some(parsed.editions_with(&linked.expansions));
-                    }
-                    // Package provenance needs no expansion twin: generated sources are
-                    // deliberately unattributed, so the directory's map covers every source the
-                    // orphan rule may judge (see `ParsedDir::packages`).
-                    let opts = noeta_check::CheckOptions {
-                        editions: editions.unwrap_or_else(|| parsed.editions().clone()),
-                        packages: parsed.packages().clone(),
-                        package_uses: package_uses.clone(),
-                        ..noeta_check::CheckOptions::default()
-                    };
-                    let program = linked.program;
-                    let program_diags = if active_refs.is_empty() {
-                        crate::context::check_under(&program, &opts).diagnostics
-                    } else {
-                        let activated =
-                            noeta_check::activate_tiers_with(&program, &active_refs, &providers);
-                        let mut ds = activated.diagnostics;
-                        ds.extend(
-                            crate::context::check_under(&activated.program, &opts).diagnostics,
-                        );
-                        ds
-                    };
-                    for d in &program_diags {
-                        fold(&sources, d);
-                    }
-                }
-            }
-        };
+            };
         for entry in dir_entries {
             let name = entry.display().to_string();
             match parsed.module_index(&name) {

@@ -2788,6 +2788,18 @@ impl Registry {
         self.ext_tiers().find(|t| t.name == name)
     }
 
+    /// The **provider namespace root** of the first installed tier named `name` — the [`Extension::root`]
+    /// of the unit that declares it (`"std"` for the built-in four). This is how an *ambient* `@name`
+    /// (one a package uses without a `[tiers]` binding — always a std tier on the default registry, since
+    /// a third-party tier is reachable only through a binding) recovers its canonical identity without
+    /// hardcoding `"std"`. `None` if no installed unit declares the name.
+    pub fn ext_tier_root(&self, name: &str) -> Option<&'static str> {
+        self.units
+            .iter()
+            .find(|u| u.tiers().iter().any(|t| t.name == name))
+            .map(|u| u.root())
+    }
+
     /// Resolve an extension tier **scoped to a set of provider namespace roots** (per-package naming
     /// arc, the tier counterpart of [`Registry::find_ext_directive_scoped`]): the `exported` tier
     /// declared by a unit whose [`Extension::root`] is one of `provider_roots`. This is how a

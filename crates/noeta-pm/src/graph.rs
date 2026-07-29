@@ -60,6 +60,7 @@ fn resolve_package_uses(
     bindings: &BTreeMap<String, crate::manifest::UseBinding>,
     edges: &BTreeMap<String, Vec<String>>,
     instances: &BTreeMap<String, Instance>,
+    global: &BTreeMap<String, String>,
 ) -> std::collections::HashMap<String, noeta_span::PackageUse> {
     bindings
         .iter()
@@ -67,11 +68,25 @@ fn resolve_package_uses(
             let provider_roots = if b.provider_key == crate::manifest::BUILTIN_PROVIDER {
                 vec![crate::manifest::BUILTIN_PROVIDER.to_string()]
             } else {
+                // A provider is addressed under two roots in the linked program, and a `@name` may
+                // resolve to either: a **native** package keeps its own namespace root (`root_segment`
+                // — what a native `ExtTier`/`ExtDirective` unit's `root()` reports), while a **program**
+                // (`.noe`) package's modules are re-rooted under the consumer's link segment (`global` —
+                // what a `@tier` runner's qualified name carries). Carry both so an ext-scoped lookup
+                // and a program-declared-tier lookup each land, whichever kind the provider is.
                 edges
                     .get(&b.provider_key)
                     .into_iter()
                     .flatten()
-                    .filter_map(|id| instances.get(id).map(|i| i.root_segment.clone()))
+                    .flat_map(|id| {
+                        instances
+                            .get(id)
+                            .map(|i| i.root_segment.clone())
+                            .into_iter()
+                            .chain(global.get(id).cloned())
+                    })
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
                     .collect()
             };
             (
@@ -1939,8 +1954,14 @@ fn assemble(
         // Resolve this dependency's own `[directives]` and `[tiers]` against ITS edges — a `@name` in
         // this package's source resolves in this package's dependency context, not the root's — and
         // merge them into one per-package `@name` map (the manifest forbids a local name naming both).
-        let mut directives = resolve_package_uses(&inst.directives, &inst.edges, &instances);
-        directives.extend(resolve_package_uses(&inst.tiers, &inst.edges, &instances));
+        let mut directives =
+            resolve_package_uses(&inst.directives, &inst.edges, &instances, &global);
+        directives.extend(resolve_package_uses(
+            &inst.tiers,
+            &inst.edges,
+            &instances,
+            &global,
+        ));
         packages.push(noeta_loader::DepPackage {
             key,
             root: inst.root_segment.clone(),
@@ -2007,7 +2028,7 @@ fn assemble(
     // The root's merged `@name` bindings resolve against the root's edges (the same context its
     // source uses). Named `root_directives` on the graph for historical continuity; it is the root's
     // whole `@name` table (directives and tiers alike).
-    let root_directives = resolve_package_uses(root_uses, root_edges, &instances);
+    let root_directives = resolve_package_uses(root_uses, root_edges, &instances, &global);
     // The whole-program per-package table: the root under `Root`, each dependency under its link
     // segment (`dep.key`), keyed exactly as the loader's `PackageMap` records each source's origin.
     let mut package_uses = noeta_span::PackageUses::new();
@@ -3110,11 +3131,14 @@ mod tests {
         let g = resolve_graph(&app.join("main.noe")).expect("resolves");
         // The provider `fx` (dep-key) → the dependency `acme/imgfx`, whose namespace root is `imgfx`.
         let blur = g.root_directives.get("blur").expect("bound");
-        assert_eq!(blur.provider_roots, vec!["imgfx".to_string()]);
+        // The provider is reachable under its namespace root (`imgfx`, what a native unit's `root()`
+        // reports) and its link segment (the dep key `fx`); a `@name` may resolve to either, so both
+        // are carried.
+        assert!(blur.provider_roots.contains(&"imgfx".to_string()));
         assert_eq!(blur.exported, "blur");
         // Rename: `sharpen` locally, `crispen` as the provider exports it.
         let sharpen = g.root_directives.get("sharpen").expect("bound");
-        assert_eq!(sharpen.provider_roots, vec!["imgfx".to_string()]);
+        assert!(sharpen.provider_roots.contains(&"imgfx".to_string()));
         assert_eq!(sharpen.exported, "crispen");
         // And the whole-program table keys the root's bindings under `PackageOrigin::Root`.
         let via_uses = g
@@ -3161,7 +3185,7 @@ mod tests {
         assert_eq!(test.exported, "test");
         // A dependency provider `fx` → `acme/fuzzkit`, namespace root `fuzzkit`.
         let fuzz = g.root_directives.get("fuzz").expect("bound");
-        assert_eq!(fuzz.provider_roots, vec!["fuzzkit".to_string()]);
+        assert!(fuzz.provider_roots.contains(&"fuzzkit".to_string()));
         assert_eq!(fuzz.exported, "fuzz");
         // Rename: `soak` locally, `endurance` as the provider declares it.
         let soak = g.root_directives.get("soak").expect("bound");
@@ -3171,7 +3195,7 @@ mod tests {
             .package_uses
             .get(&noeta_span::PackageOrigin::Root, "fuzz")
             .expect("root binds fuzz");
-        assert_eq!(via_uses.provider_roots, vec!["fuzzkit".to_string()]);
+        assert!(via_uses.provider_roots.contains(&"fuzzkit".to_string()));
     }
 
     #[test]

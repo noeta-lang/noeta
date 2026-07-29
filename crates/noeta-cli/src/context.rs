@@ -199,7 +199,12 @@ pub(crate) fn tier_prologue(
     };
     // Activate the tier: inline its `@<tier>` blocks as ordinary top-level declarations and
     // collect the tier fns. An unknown-tier block is an E0036 (a typo must not silently vanish).
-    let activated = noeta_check::activate_tiers_with(&linked.program, &[tier], &providers);
+    // Each `@name` resolves per the package that wrote it (per-package naming arc).
+    let ctx = noeta_check::TierContext {
+        uses: &linked.package_uses,
+        packages: &linked.packages,
+    };
+    let activated = noeta_check::activate_tiers_with(&linked.program, &[tier], &ctx);
     let mut activated = match provider_escape(tier, &linked, activated, &providers) {
         Ok(activated) => activated,
         Err(code) => return Prologue::Ran(code),

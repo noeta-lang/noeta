@@ -854,6 +854,22 @@ pub fn resolve_active_tier_providers(
     manifest.active_tier_providers(target)
 }
 
+/// The root package's `[tiers]` provider map for the `noeta.toml` discovered at or above `entry`
+/// ([`Manifest::tier_provider_map`]) — who provides each tier the root names, target-independent. A
+/// bare script with no manifest has no `[tiers]`, so this yields an empty map (its tiers resolve
+/// ambiently). This is what the tier-execution layer dispatches on and the compile cache key folds in.
+pub fn resolve_tier_providers(entry: &Path) -> Result<BTreeMap<String, String>, PmError> {
+    let dir = entry.parent().unwrap_or_else(|| Path::new("."));
+    let Some(path) = find(dir) else {
+        return Ok(BTreeMap::new());
+    };
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", path.display())))?;
+    let manifest = Manifest::parse(&text)
+        .map_err(|err| err.map_msg(|m| format!("invalid `{}`: {m}", path.display())))?;
+    Ok(manifest.tier_provider_map())
+}
+
 /// Gather the entry's **dependency packages** as loader [`DepPackage`]s (package-manager P2.1/P2.4):
 /// resolve the full transitive dependency graph and hand back the re-rooted packages the loader links.
 /// No manifest, or no `[dependencies]`, yields an empty list (a bare script has no deps). The graph
@@ -1204,6 +1220,17 @@ impl Manifest {
     /// exported name. Separate from `[targets.*.tiers]`, which selects which of these are *live*.
     pub fn tiers(&self) -> &BTreeMap<String, UseBinding> {
         &self.tiers
+    }
+
+    /// The root's `[tiers]` as a plain local-name → provider-key map — who provides each tier this
+    /// package names, **independent of any build target** (a tier's provider is package-level; the
+    /// target only selects which are live). This is what the tier-execution layer dispatches on and
+    /// what the compile cache key folds in.
+    pub fn tier_provider_map(&self) -> BTreeMap<String, String> {
+        self.tiers
+            .iter()
+            .map(|(local, b)| (local.clone(), b.provider_key.clone()))
+            .collect()
     }
 
     /// The `[patch]` overrides (dev-time path override): package identity → the local tree that

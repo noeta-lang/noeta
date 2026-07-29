@@ -95,16 +95,16 @@ impl CompileFailure {
     }
 }
 
-/// Resolve a target's tier → provider map (provider dispatch), or an empty map when no target is
-/// selected. Shared by the compile pipeline and (via re-export) the CLI's other commands.
+/// Resolve the root package's tier → provider map (provider dispatch) from its `[tiers]` table — who
+/// provides each tier the root names, **independent of the build target** (a tier's provider is
+/// package-level; the target only selects which are live). A bare script with no manifest yields an
+/// empty map (its tiers resolve ambiently). The `target` is accepted for call-site symmetry but no
+/// longer selects providers. Shared by the compile pipeline and (via re-export) the CLI's commands.
 pub fn resolve_providers(
     entry: &Path,
-    target: &Option<String>,
+    _target: &Option<String>,
 ) -> Result<BTreeMap<String, String>, String> {
-    match target {
-        None => Ok(BTreeMap::new()),
-        Some(name) => Ok(manifest::resolve_active_tier_providers(entry, name)?),
-    }
+    manifest::resolve_tier_providers(entry).map_err(|err| err.to_string())
 }
 
 /// Compile an already-typechecked program straight to a bytecode [`Module`] for the real (VM)
@@ -285,8 +285,13 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
         linked.program
     } else {
         let active_refs: Vec<&str> = facts.active.iter().map(String::as_str).collect();
-        let activated =
-            noeta_check::activate_tiers_with(&linked.program, &active_refs, &facts.providers);
+        // Activation resolves each `@name` per the package that wrote it (per-package naming arc):
+        // the whole-program `[tiers]`/`[directives]` bindings and the span→package map.
+        let ctx = noeta_check::TierContext {
+            uses: &facts.package_uses,
+            packages: &packages,
+        };
+        let activated = noeta_check::activate_tiers_with(&linked.program, &active_refs, &ctx);
         if !activated.diagnostics.is_empty() {
             return Err(CompileFailure::Diagnostics {
                 sources,

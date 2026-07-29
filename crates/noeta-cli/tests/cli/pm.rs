@@ -218,8 +218,9 @@ fn tier_dep_project(name: &str) -> PathBuf {
     app.join("main.noe")
 }
 
-/// The provider-override e2e: `fuzzkit` also declares `@tier(bench, config: Fuzz)`; the app's
-/// `custom` target maps `bench = "fuzzkit"`. Extends [`tier_dep_project`]'s fixture.
+/// The package-provider e2e: `fuzzkit` also declares `@tier(bench, config: Fuzz)`; the app's `[tiers]`
+/// binds `bench = "fuzzkit"`, so its `@bench` is fuzzkit's tier — package-level, not target-selected.
+/// Extends [`tier_dep_project`]'s fixture.
 fn tier_override_project(name: &str) -> PathBuf {
     let entry = tier_dep_project(name);
     let app_dir = entry.parent().unwrap().to_path_buf();
@@ -251,11 +252,11 @@ fn tier_override_project(name: &str) -> PathBuf {
 }
 
 #[test]
-fn a_target_overrides_a_builtin_tier_provider() {
-    // `bench = "fuzzkit"` in the target's tiers map: `--target custom` stamps fuzzkit's config
-    // (`cases:` is a `Fuzz` knob, not std's `Bench`) and dispatches to fuzzkit's runner; without
-    // the target the native bench runs and the same knob is correctly rejected against std's
-    // `Bench { iterations }`.
+fn a_tiers_binding_routes_a_tier_to_its_package_provider() {
+    // `[tiers] bench = "fuzzkit"` binds the app's `@bench` to fuzzkit's `@tier(bench)` — package-level,
+    // so its config is fuzzkit's `Fuzz` (`cases:` is valid, not std's `Bench { iterations }`) and it
+    // dispatches to fuzzkit's runner. The provider is the same whether or not a target is passed (a
+    // target only selects which tiers are *live*, never which provider a tier resolves to).
     let entry = tier_override_project("tier_override_bench");
     lang()
         .arg("bench")
@@ -268,12 +269,11 @@ fn a_target_overrides_a_builtin_tier_provider() {
             predicate::str::contains("ALT BENCH: 1 roots")
                 .and(predicate::str::contains("  measures ran")),
         );
-    lang()
-        .arg("bench")
-        .arg(&entry)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("has no field `cases`"));
+    // Same provider without a target — the binding is package-level, not a target override.
+    lang().arg("bench").arg(&entry).assert().success().stdout(
+        predicate::str::contains("ALT BENCH: 1 roots")
+            .and(predicate::str::contains("  measures ran")),
+    );
 }
 
 #[test]

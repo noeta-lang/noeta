@@ -97,8 +97,9 @@ pub mod tiers;
 mod traits;
 
 pub use tiers::{
-    Activated, DeclaredTier, DocTarget, ResolvedProvider, TextBlock, TierFn, activate_tiers,
-    activate_tiers_with, dedent_doc, extend_reflection, resolve_docs, resolve_texts,
+    Activated, DeclaredTier, DocTarget, ResolvedProvider, ResolvedTier, TextBlock, TierContext,
+    TierFn, TierId, activate_tiers, activate_tiers_with, dedent_doc, extend_reflection,
+    resolve_docs, resolve_texts,
 };
 
 use effects::*;

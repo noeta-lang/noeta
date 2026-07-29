@@ -1367,7 +1367,11 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     let linked = noeta_loader::load_with_deps(&file, manifest::root_edition(&file), &deps)
         .ok()?
         .ok()?;
-    let activated = noeta_check::activate_tiers_with(&linked.program, &[&name], &providers);
+    let ctx = noeta_check::TierContext {
+        uses: &linked.package_uses,
+        packages: &linked.packages,
+    };
+    let activated = noeta_check::activate_tiers_with(&linked.program, &[&name], &ctx);
     let tier = match activated.registry.resolve_provider(&name, &providers) {
         Ok(noeta_check::ResolvedProvider::Declared(d)) => d.clone(),
         // A built-in name or an unknown one — not this fallback's command; clap's error (or the
@@ -1408,14 +1412,16 @@ pub(crate) fn run_declared_tier(
         );
         return ExitCode::from(2);
     }
-    // The activated code roots for this tier — a built-in name's roots land in the dedicated sinks
-    // (an overridden `bench = "criterion"` still collects under `benches`), a custom tier's in
-    // `custom`. A text tier has no code roots (its bodies come from `activated.texts`).
-    let roots = match name {
-        "test" => activated.tests.clone(),
-        "bench" => activated.benches.clone(),
-        _ => activated.custom.get(name).cloned().unwrap_or_default(),
-    };
+    // The activated code roots for this tier. This dispatch is reached only for a **program-declared**
+    // provider (`provider_escape` sends a std/extension tier down the native path instead), so its
+    // roots always collect under `custom`, keyed by the tier's own exported name — identity-based
+    // activation routes a declared `@tier(bench)`'s fns there, not into the std `benches` sink. A text
+    // tier has no code roots (its bodies come from `activated.texts`).
+    let roots = activated
+        .custom
+        .get(&tier.name)
+        .cloned()
+        .unwrap_or_default();
 
     // The runner call — `<runner>([TierRoot { name: "<fn>", run: <fn> }, …])`, or for a text
     // tier `<runner>([TierText { target: "<decl>", text: "<body>" }, …])` — is built as AST
