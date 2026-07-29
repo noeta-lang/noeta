@@ -175,6 +175,8 @@ echo kind(5)            // int
 
 An `is` test also **flow-narrows**: inside `if x is T { … }` the checker sees `x` as `T`.
 
+**These two are the answer whenever you can name the candidates**, and they beat reflection at it — they are checked at compile time and they narrow, which `type_of` does neither of. Reach for `type_of` and the `Type` ADT only when there *is* no candidate set to enumerate. See [Choosing a reflection surface](Attributes-and-Reflection#choosing-a-surface).
+
 ### Trait-object tests are precise membership
 
 **`x is dyn Trait`** (and `.as<dyn Trait>()`) is a *precise membership test*: it is `true` iff the value's runtime nominal type has a **registered implementation** of the trait — a standalone `impl Trait for T`, an in-body `impl Trait { … }` block, a `@derive(Trait)`, or a native type's ABI-declared impl. The test is driven by the same registration data trait-method dispatch resolves through, so `x is dyn Trait` being `true` and "calling a `Trait` method on `x` works" can never disagree. Inside the `true` branch, `x` flow-narrows to `dyn Trait` and its trait methods dispatch — typed from the trait's declaration, `async` included (see [Trait objects](Generics-and-Traits#trait-objects)), so a narrowed receiver and a `dyn Trait` parameter type a call identically.
@@ -229,5 +231,5 @@ Two rules keep a binding's static type **trustworthy**: a `mut` binding's type i
 
 - [Error Handling](Error-Handling) — `Option`, `Result`, `?`, `??`.
 - [Generics & Traits](Generics-and-Traits) — type parameters and bounds.
-- [Attributes & Reflection](Attributes-and-Reflection) — `type_of` and the runtime `Type` value.
+- [Attributes & Reflection](Attributes-and-Reflection) — `type_of`, the runtime `Type` value, and [when to use it instead of `is`](Attributes-and-Reflection#choosing-a-surface).
 - [The Type Checker](Type-Checker-Internals) — the bidirectional engine behind all of this.

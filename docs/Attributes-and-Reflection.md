@@ -69,7 +69,95 @@ Two more directive families use the `@` sigil but are not decorators in this fou
 
 ## The reflection surface
 
-A handful of prelude functions expose type and metadata at runtime — no import needed.
+A handful of prelude keywords expose type and metadata at runtime — no import needed. The rest of this page documents each one; read this section first, because most of them answer a question you may not actually have.
+
+### Choosing a surface
+
+**Reach for a type test before you reach for reflection.** If you hold a *value* and you know the candidate types, `is` is the whole answer: it is checked at compile time, it **narrows** the scrutinee inside the arm, and a `match` over a union is exhaustive without a `_`. Reflection buys you nothing here and costs you the checker.
+
+```noeta
+struct Todo { id: int }
+
+fn label(x: dyn): string {
+    return match x {
+        is Todo      => "todo #${x.id}",     // narrowed — `.id` is legal in this arm
+        is List<int> => "${x.len()} ints",    // element-precise, not just "a list"
+        _            => "${type_of(x)}",      // reflection is the fallback, not the default
+    }
+}
+
+echo label(Todo { id: 7 })     // todo #7
+echo label([1, 2, 3])          // 3 ints
+echo label(4.5)                // Type.Float
+```
+
+`type_of` earns its place in that last arm and nowhere else in that function: it is for the case where there **is no candidate set** — you must describe whatever arrives, and you cannot enumerate it in source. See [Type tests and narrowing](Type-System#type-tests-and-narrowing) for `is` and `.as<T>()` in full, and [Open vs. closed matching](Control-Flow-and-Pattern-Matching#open-vs-closed-matching) for why a union needs no `_` and `dyn` does.
+
+With that settled, the question you have picks the surface:
+
+| The question | The surface | Notes |
+|---|---|---|
+| Is this value a `Todo`? (you can name the candidates) | `x is Todo` / `x.as<Todo>()` | Not reflection. Checked, and it narrows. |
+| Does this value's type implement `Store`? | `x is dyn Store` | Same — one known trait, checked. |
+| What type is this value, whatever it turns out to be? | [`type_of(x)`](#type_ofvalue-type) | The `Type` ADT, for a walk with no candidate set. |
+| What is this type *called*, as a `string`? | [`type_name::<T>()`](#type_namet-string) | The key every name-keyed query below is stored under. |
+| Which traits does this value's type implement — all of them? | [`traits_of(x)`](#traits_ofvalue-liststring--trait-membership-reflection) | A list of names, for a report. `is dyn Trait` for a decision. |
+| What fields does this *value* carry, with their values? | [`fields_of(x)`](#fields_ofvalue--value-level-field-reflection) | Runtime-erased types — it sees values. |
+| What fields does this *type* declare, with their types and defaults? | [`field_specs_of`](#field_specs_oft-listfieldspec--field_specs_ofname-listfieldspec) | Declared types, precise. Ask with `variants_of`. |
+| What cases does this enum declare? | [`variants_of`](#variants_oft-listvariantspec--variants_ofname-listvariantspec) | The enum half of the same query. |
+| What does this callable take, and return? | [`params_of`](#params_ofname-listparaminfo) / [`returns_of`](#returns_ofname-type) | Declared types — there is no value to test. |
+| Which declarations carry `#[Route]`? | [`attributes_of::<Route>()`](#attributes_oft-listattributedt) | Whole-program, `use`-independent. |
+| Which declarations carry an architectural role? | [`roles_of()`](#roles_of-listrolebinding--roles_ofroleenum-listrolebinding) | The compile-time `(declaration, role)` index. |
+| Build a value of a type I hold only as a name | [`construct`](#constructt-fields-resultdyn-string--constructname-fields-resultdyn-string) | The reflective **struct literal** — [it is not `new`](#construct-is-the-reflective-literal-not-your-constructor). |
+| Call something whose name arrived as *data* | [`invoke`](#invokerecv-name-args-resultdyn-dyn--invokename-args-resultdyn-dyn) | The one consumer of the names the rest produce. |
+| Rebuild a `List<T>` of a `@packed` type from a `bytes` blob | [`from_bytes::<T>(blob)`](Fixed-Width-Integers#bytes--serialize-a-packed-list) | A typed decode, not a query. Documented with packed types. |
+
+#### The operand tells you which axis you are on
+
+Every surface takes a **value**, a **type** (turbofish), or a runtime **string** — and which ones it accepts is a design statement, not an accident:
+
+| Operand | Surfaces | Why that shape |
+|---|---|---|
+| a **value** | `type_of`, `fields_of`, `traits_of` | You have the thing; the answer is about what it *is*. |
+| a **type**, turbofish only | `type_name::<T>()`, `attributes_of::<T>()`, `roles_of::<E>()`, `from_bytes::<T>(b)` | The compiler must resolve `T`. A string operand would be the identity function (`type_name`) or an open-world query the closed-world index cannot answer. |
+| **either** | `field_specs_of`, `variants_of`, `construct` | One name-keyed query, two ways to spell the key: a compile-time constant, or a name you are holding. |
+| a runtime **string** only | `params_of`, `returns_of`, `invoke` | No turbofish arm exists, deliberately — the target's name *arrives as data*. |
+
+That last row is the axis worth internalizing. `params_of`, `returns_of` and `invoke` have no static arm at all, because nothing about them is static: the target is a `#[Tool]` manifest entry's `.target`, a router action, an argv subcommand. **The other surfaces produce names; these three consume them.** Adding a turbofish to `invoke` would be adding a slower way to write a call you could already write directly.
+
+Passing a bare `Foo` where a string is wanted is `E0003` (`found `::` expected `(`` on the turbofish-less three; `found `(` expected `::`` on the turbofish-only ones) — the parser refuses the wrong axis before typing ever runs.
+
+### When the `Type` ADT earns its keep
+
+Its dominant channel is **not** `type_of`. Across the `para/*` packages that consume reflection for real, `params_of`/`returns_of` outnumber `type_of` by better than five to one — and that is the shape of the work: they reflect *declared* types, where there is no value to `is`-test because the value has not been built yet. A schema generator reads a signature and emits the JSON a caller must send; a DI container reads a signature and decides what to inject. Both are asking about a declaration.
+
+```noeta
+fn render(t: Type): string {
+    return match t {
+        Type.Option(inner) => "${render(inner)} (optional)",
+        Type.List(inner)   => "array of ${render(inner)}",
+        Type.Int           => "integer",
+        Type.String        => "string",
+        _                  => "unsupported: ${t}",
+    }
+}
+
+fn create(id: int, tags: ?List<string>): void { return }
+
+for p in params_of("create") {
+    echo "${p.name}: ${render(p.type)}"
+}
+// id: integer
+// tags: array of string (optional)
+```
+
+Three properties make the ADT irreplaceable by a name string, and the walk above uses all three:
+
+1. **Many types have no name.** `Type.Union(members)`, `Type.Fn(params, ret)`, `Type.Option(inner)`, `Type.IntN(bits, signed)` — there is nothing to look up. A names-as-strings design has to either invent a spelling and re-parse it or drop the type on the floor.
+2. **The walk recurses, so `inner` must be a *value*.** `?List<string>` is two constructors deep before it reaches something a schema can name; `render` gets `inner` handed to it and calls itself. A head name would have to be re-resolved at every level.
+3. **Exhaustiveness is the totality proof.** `Type` is an ordinary enum, so a `match` over it with no `_` is checked (E0011). That is how a schema-deriving walk *knows* it is total: every shape it cannot represent gets a deliberate error message rather than falling into a catch-all and emitting a silently-wrong empty schema. `para/ai`'s tool-schema walk is written exactly this way — all 23 arms, no `_`, and the unrepresentable ones return `Err` carrying a sentence about what to declare instead ("`bytes` has no tool-argument encoding — take a `string` and decode it in the tool").
+
+So if you write such a walk, write it without a `_` and let the checker list what you missed. The list is longer than it looks: 23 cases, and `Type.Never` is one of them.
 
 ### `fields_of(value)` — value-level field reflection
 
@@ -104,7 +192,7 @@ echo traits_of(42)               // []
 
 ### `type_of(value): Type`
 
-Returns the value's runtime head-constructor as the prelude `Type` ADT, which you can `match`:
+Returns the value's runtime head-constructor as the prelude `Type` ADT, which you can `match`. Reach for it when you cannot name the candidates — when you *can*, [`x is T`](#choosing-a-surface) is shorter, checked, and narrows:
 
 ```noeta
 echo match type_of(5) {
@@ -116,7 +204,15 @@ echo match type_of(5) {
 
 The payload-free cases are spelled **bare** here: the scrutinee is a `Type`, so `Int` and `String` resolve to that enum's own cases rather than binding the whole value (see [pattern matching](Control-Flow-and-Pattern-Matching#a-bare-identifier-is-a-variant-when-the-scrutinees-enum-has-one)). `Type.Int` still works and means the same; reach for it when the short name would read ambiguously. The payload-carrying cases are call-shaped and never needed the qualifier: `List(inner)`, `IntN(bits, signed)`, `Struct(name, args)`.
 
-`Type` variants include the scalars `Type.Int`, `Type.Float`, `Type.F32`, `Type.F64`, `Type.IntN(bits, signed)`, `Type.Bool`, `Type.String`, `Type.Bytes`, `Type.Unit`, `Type.Dyn`; the containers `Type.List(inner)`, `Type.Set(inner)`, `Type.Map(k, v)`, `Type.Option(inner)`, `Type.Result(ok, err)`; `Type.Fn(params, ret)` and `Type.Union(members)`; the trait object `Type.DynTrait(name)`; and the nominals `Type.Struct(name, args)`, `Type.Enum(name, args)`, `Type.Class(name, args)`, `Type.Named(name, args)`. Collection literals carry their resolved element type as a runtime tag that survives a `dyn` launder (a content-changing op like `.set` drops the tag to head-only).
+`Type` has exactly **23** variants, and the whole list matters if you write a `_`-free walk over it: the scalars `Type.Int`, `Type.Float`, `Type.F32`, `Type.F64`, `Type.IntN(bits, signed)`, `Type.Bool`, `Type.String`, `Type.Bytes`, `Type.Unit`, `Type.Dyn`, `Type.Never`; the containers `Type.List(inner)`, `Type.Set(inner)`, `Type.Map(k, v)`, `Type.Option(inner)`, `Type.Result(ok, err)`; `Type.Fn(params, ret)` and `Type.Union(members)`; the trait object `Type.DynTrait(name)`; and the nominals `Type.Struct(name, args)`, `Type.Enum(name, args)`, `Type.Class(name, args)`, `Type.Named(name, args)`. Collection literals carry their resolved element type as a runtime tag that survives a `dyn` launder (a content-changing op like `.set` drops the tag to head-only).
+
+`Type.Never` is the one variant `type_of` can never produce — no value has type `never`. It reaches you through the *declaration* channel instead, which is the clearest illustration of why that channel is the ADT's main one:
+
+```noeta
+fn boom(): never { panic("unreachable") }
+
+echo returns_of("boom")      // some(Type.Never)
+```
 
 ### `type_name::<T>(): string`
 
@@ -417,6 +513,82 @@ Every rejection is an `Err(string)` carrying a ready-to-surface message, never a
 
 Validation runs through one shared planner, so both backends accept, reject, and *word* every case identically.
 
+#### `construct` is the reflective literal, not your constructor
+
+Noeta has no constructor *declaration*. What people call one is a convention: a self-less method that returns its own type, spelled `new` because everyone spells it `new`. Nothing in the language privileges it, and `construct` does not know it exists.
+
+So what `construct` is the reflective form *of* is the **`T { … }` literal**. It honors what the literal honors — field defaults, full-initialization, the declared field types — and it **bypasses everything `new` does**: normalization, invariants, derived fields, validation you wrote by hand.
+
+```noeta
+struct Slug {
+    text: string
+    normalized: bool = false
+
+    // A constructor by convention only. `construct` has no idea this is here.
+    fn new(text: string): Slug {
+        return Slug { text: text.trim().lower(), normalized: true }
+    }
+}
+
+s = Slug.new("  Hello World  ")
+echo "new:       '${s.text}' normalized=${s.normalized}"
+// new:       'hello world' normalized=true
+
+mut raw: Map<string, dyn> = {}
+raw["text"] = "  Hello World  "
+echo match construct::<Slug>(raw) {
+    // Untrimmed, unlowered, and `normalized` fell back to the FIELD's default —
+    // not the `true` that `new` would have set.
+    Ok(v)  => "construct: '${v.as<Slug>()?.text}' normalized=${v.as<Slug>()?.normalized}",
+    Err(e) => e,
+}
+// construct: '  Hello World  ' normalized=false
+```
+
+This is the sharp edge in anything that builds user structs from **untrusted input** — CLI tokens, a model's JSON tool arguments, a request body. `construct` hands you a well-typed value that never passed through your invariants.
+
+It does not run [`impl Validate`](Validation) either. The JSON and `from_bytes` decode doors do; `construct` is not a decode door, it is a literal, and a literal has never validated. Nor can `@validated` catch it: that directive is **purely static** — it rejects a *source* literal (E0060), and `construct`'s whole point is that there is no source literal to reject. So a `@validated` type really does construct reflectively without validating.
+
+Two ways to keep the invariant:
+
+- **Validate on the way out.** One line on the `Ok` payload, and the check is back:
+
+```noeta
+struct Email {
+    addr: string
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if !self.addr.contains("@") { return Err("missing @: ${self.addr}") }
+            return Ok()
+        }
+    }
+}
+
+fn build(fields: Map<string, dyn>): Result<Email, string> {
+    v = construct::<Email>(fields)?
+    match v.as<Email>() {
+        some(e) => {
+            e.validate()?              // `construct` did not do this for you
+            return Ok(e)
+        },
+        none => { return Err("not an Email") },
+    }
+}
+
+mut bad: Map<string, dyn> = {}
+bad["addr"] = "nope"
+echo match build(bad) { Ok(e) => "ok ${e.addr}", Err(m) => "rejected: ${m}" }
+// rejected: missing @: nope
+
+mut good: Map<string, dyn> = {}
+good["addr"] = "a@b.com"
+echo match build(good) { Ok(e) => "ok ${e.addr}", Err(m) => "rejected: ${m}" }
+// ok a@b.com
+```
+
+- **Call the constructor by name instead.** If the type is statically known, `invoke(Slug, "new", args)` really does run `new`'s body — see [the receiver rules](#invokerecv-name-args-resultdyn-dyn--invokename-args-resultdyn-dyn). What you cannot do is get there from a *runtime string* name, which is exactly the gap `construct` fills and exactly why the gap has this shape.
+
 #### Constructing an enum case
 
 An enum case is spelled `construct("Enum.Variant", payload)` — the case goes where the type name goes, exactly as it is written in source, and `fields` is that variant's **payload**.
@@ -493,7 +665,9 @@ It reads the same manifest `attributes_of` does, so it has the same reach: every
 
 ### `invoke(recv, name, args): Result<dyn, dyn>` / `invoke(name, args): Result<dyn, dyn>`
 
-Fallible dispatch by name. With three operands, `recv` is a value (→ an instance method) or a bare type name (→ an associated function):
+Fallible dispatch by name — and the one surface on this page that **consumes** a name rather than producing one. Reach for it when the callable's name arrives as *data*: a `#[Tool]` entry's `.target` off `attributes_of`, a router action, an argv subcommand. If you can write the call, write the call; `invoke` is not a faster way to do that, and there is deliberately no `invoke::<T>` turbofish arm to suggest otherwise.
+
+With three operands, `recv` is a value (→ an instance method) or a bare type name (→ an associated function):
 
 ```noeta
 struct Rect {
@@ -507,7 +681,32 @@ echo match invoke(Rect.new(2, 3), "area", []) {
     Ok(v)  => "area = ${v}",             // area = 6
     Err(e) => "no such method",
 }
+
+// A bare TYPE in receiver position reaches a self-less associated function — and
+// really runs its body, normalization and all.
+echo match invoke(Rect, "new", [2, 3]) {
+    Ok(v)  => "made ${v.as<Rect>()?.w}x${v.as<Rect>()?.h}",   // made 2x3
+    Err(e) => "${e}",
+}
 ```
+
+**The receiver is not a name — it is a value or a written type.** Both operands after it are runtime data, so it is easy to assume `recv` is too. It is not: handing it a `string` is a rejection, whatever that string spells.
+
+```noeta
+struct Rect {
+    w: int
+    h: int
+    fn new(w: int, h: int): Rect { return Rect { w: w, h: h } }
+}
+
+name = "Rect"
+echo match invoke(name, "new", [2, 3]) {
+    Ok(v)  => "unreachable",
+    Err(e) => "${e}",                    // cannot invoke on a value of type `string`
+}
+```
+
+So there is no route from a *discovered* type name to that type's associated functions — only from one you wrote. That is the gap [`construct`](#constructt-fields-resultdyn-string--constructname-fields-resultdyn-string) exists to fill: it takes a runtime type name, at the price of [not being the constructor](#construct-is-the-reflective-literal-not-your-constructor).
 
 With two, `name` is a **top-level function** — the same string `params_of` takes for a free fn, so reflecting a signature and then calling it round-trips on one name:
 

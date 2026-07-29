@@ -102,6 +102,8 @@ Each door decides how a rejection surfaces — the same choice it already makes 
 
 A type with no validator pays nothing: the decode walk never re-enters for it.
 
+**`construct` is not a door.** [`construct(name, fields)`](Attributes-and-Reflection#construct-is-the-reflective-literal-not-your-constructor) is the reflective form of a `T { … }` literal, and a literal has never validated — so it runs no `validate()`, and a `@validated` type constructs through it without a check (that directive is purely static; see below). If a reflective path builds values from untrusted input, call `validate()` on the `Ok` payload yourself.
+
 ## `@validated` — channeling construction
 
 Automatic decode-time validation guards the data boundary. To also guarantee that *code* cannot build
@@ -165,4 +167,9 @@ echo e.addr
 composes with [field privacy](Structs-Classes-and-Enums): both checks can fire on the same literal.
 And it does **not** restrict the recipe doors: a `@validated` type decoded from JSON or `from_bytes`
 is built directly and its `validate()` runs automatically — that is exactly the guarantee `@validated`
-completes, so the boundary and the constructor are the only two ways in, and both validate.
+completes, so a decode and a constructor both validate.
+
+Because it is purely static, `@validated` has nothing to say about a path with no source literal to
+reject: `construct::<T>(fields)` builds a `@validated` type and runs no `validate()`. Reflective
+construction is the one way in this directive does not cover — see the note under the door table
+above.
