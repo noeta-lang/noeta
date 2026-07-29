@@ -317,6 +317,7 @@ The awaitable twin makes a bounded read ordinary. `race` returns the first resul
 
 ```noeta
 use std.{os, task}
+use std.os.Process
 
 async fn deadline(ms: int): ?string {
     task.sleep(ms).await
