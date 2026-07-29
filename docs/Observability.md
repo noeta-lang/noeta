@@ -115,21 +115,24 @@ The four functions above all *create* a span or read its context. These three an
 |---|---|---|
 | `tracing.set_attribute` | `set_attribute(key: string, value: string\|int\|float\|bool) -> bool` | Set an attribute on the active span. A non-scalar value is a **compile-time** type error. |
 | `tracing.add_event` | `add_event(name: string) -> bool` | A timestamped event on the active span. |
+| `tracing.add_event_with` | `add_event_with(name: string, attrs: Map<string, string\|int\|float\|bool>) -> bool` | An event carrying its own attributes. |
 | `tracing.record_error` | `record_error(message: string) -> bool` | Set the active span's status to error with `message`. |
 
-These are the same three mutations the [`Span` handle](#the-span-handle) offers, under the same names, applied to a different receiver. Reach for them whenever something merely *happened* during the current unit of work:
+These are the same mutations the [`Span` handle](#the-span-handle) offers, under the same names, applied to a different receiver. Reach for them whenever something merely *happened* during the current unit of work:
 
 ```noeta check
 use std.{tracing}
 
-fn run_guardrail(): void {
+fn run_guardrail(guard: string, reason: string): void {
     tracing.with_span("run", fn(): void {
         // … evaluate the policy …
-        tracing.set_attribute("guardrail.verdict", "allow")
-        tracing.add_event("guardrail.checked")
+        tracing.set_attribute("guardrail.verdict", "deny")
+        tracing.add_event_with("guardrail.denied", {"guard": guard, "reason": reason})
     })
 }
 ```
+
+**Event or attribute?** An attribute describes the *span* — one value per key, and setting it twice overwrites. An event describes a *moment* — events accumulate, each with its own attribute set. So a fact you may record several times in one span (a verdict per guard, a retry per attempt) belongs in `add_event_with`; a property of the whole operation (the route, the tenant, the final verdict) belongs in `set_attribute`.
 
 Without them, the only way to record that from inside a body was to open a **short child span** — a span per event where an annotation belongs, which inflates trace volume and buries the signal you were trying to record.
 
@@ -177,6 +180,7 @@ are merely *inside*, use the [free functions above](#annotating-the-span-you-are
 |---|---|---|
 | `set_attribute` | `set_attribute(key: string, value: string\|int\|float\|bool) -> Span` | A non-scalar value is a **compile-time** type error. |
 | `add_event` | `add_event(name: string) -> Span` | A timestamped event on the span. |
+| `add_event_with` | `add_event_with(name: string, attrs: Map<string, string\|int\|float\|bool>) -> Span` | An event carrying its own attributes. |
 | `record_error` | `record_error(message: string) -> Span` | Sets the span's status to error with `message`. |
 | `context` | `context() -> string` | This span's own `traceparent` — inject a *specific* held span (vs. `current_context`'s active one). |
 | `end` | `end() -> void` | Finalize; the span is exported. |

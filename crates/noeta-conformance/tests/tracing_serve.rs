@@ -592,6 +592,75 @@ fn active_annotations_land_on_the_enclosing_span() {
     );
 }
 
+/// `add_event_with` carries the event's OWN attributes, so several structured facts recorded on one
+/// span each keep their own set — where span-level `set_attribute` would have them overwrite each
+/// other by key. This is the shape a per-verdict / per-retry record actually needs, and it is why
+/// consumers reached for a short child span instead: a bare `add_event(name)` could not carry the
+/// reason, and a span attribute could only hold the last one.
+#[test]
+fn active_events_carry_their_own_attributes() {
+    let spans = emitted_spans(
+        "use std.{tracing}\n\
+         body = fn(): void {\n\
+         \x20   tracing.add_event_with(\"guard.denied\", {\"guard\": \"pii\", \"reason\": \"email\"})\n\
+         \x20   tracing.add_event_with(\"guard.denied\", {\"guard\": \"secrets\", \"reason\": \"key\"})\n\
+         }\n\
+         tracing.with_span(\"run\", body)\n",
+    );
+
+    let run = span_named(&spans, "run");
+    assert_eq!(names_of(&spans), vec!["run"], "no child spans minted");
+    let denied: Vec<_> = run
+        .events
+        .iter()
+        .filter(|e| e.name == "guard.denied")
+        .collect();
+    assert_eq!(denied.len(), 2, "events accumulate; attributes would not");
+    let guards: Vec<&AttrValue> = denied
+        .iter()
+        .filter_map(|e| e.attributes.iter().find(|(k, _)| k == "guard"))
+        .map(|(_, v)| v)
+        .collect();
+    assert_eq!(
+        guards,
+        vec![
+            &AttrValue::Str("pii".into()),
+            &AttrValue::Str("secrets".into())
+        ],
+        "each event kept its own attribute set"
+    );
+    assert!(
+        run.attributes.is_empty(),
+        "an event's attributes do not leak onto the span"
+    );
+}
+
+/// The `Span` handle gained the same structured event, so the two receivers stay symmetric — a span
+/// you hold can record exactly what the active-span surface can.
+#[test]
+fn held_span_events_carry_their_own_attributes() {
+    let spans = emitted_spans(
+        "use std.{tracing}\n\
+         s = tracing.span(\"db.lookup\")\n\
+         s.add_event_with(\"retry\", {\"attempt\": 2, \"backoff.ms\": 50.5, \"final\": true}).end()\n",
+    );
+    let span = span_named(&spans, "db.lookup");
+    let retry = span
+        .events
+        .iter()
+        .find(|e| e.name == "retry")
+        .expect("retry event recorded");
+    // The whole scalar union round-trips through the deep-marshalled map argument.
+    assert_eq!(
+        retry.attributes,
+        vec![
+            ("attempt".into(), AttrValue::Int(2)),
+            ("backoff.ms".into(), AttrValue::Float(50.5)),
+            ("final".into(), AttrValue::Bool(true)),
+        ]
+    );
+}
+
 /// Nesting: the active span is always the INNERMOST one, and the outer span becomes active again
 /// after the inner body returns (the pop restores it) — so a later annotation lands on the outer
 /// span and not on the already-ended inner one.

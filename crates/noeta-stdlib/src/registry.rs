@@ -466,12 +466,16 @@ const SSE_SINK_DOCS: &[(&str, &str)] = &[
 const CORE_TYPES: &[ExtType] = &[
     // `Span` (native OTEL T1) — a mutable, effectful, host-coupled handle (like `FileHandle`): its
     // methods reach the `Tracing` capability by id. NOT key-capable (identifies a host resource).
+    // `deep_marshal` so `add_event_with`'s `Map<string, …>` argument arrives as a full
+    // `NativeValue::Map` (the shallow projection collapses containers to opaque) — the same reason
+    // the metrics handles set it for their `*_with(_, attrs)` forms.
     ExtType {
         name: crate::tracing::SPAN_TYPE_NAME,
         namespace: "std.tracing",
         methods: crate::tracing::SPAN_METHODS,
         dispatch: crate::tracing::span_method_dispatch,
         key_capable: false,
+        deep_marshal: true,
         docs: SPAN_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
@@ -5481,6 +5485,13 @@ const TRACING_DOCS: &[(&str, &str)] = &[
          signal. Returns whether a live active span received it (`false` at top level).",
     ),
     (
+        "add_event_with",
+        "Add a timestamped event carrying its own attributes to the **active** span. Prefer this \
+         over `set_attribute` for a *structured fact*: several facts recorded on one span each keep \
+         their own attribute set, where span-level attributes would overwrite each other by key. \
+         Returns whether a live active span received it.",
+    ),
+    (
         "record_error",
         "Set the **active** span's status to error with `message` — mark the span you are inside \
          as failed without holding its handle. Returns whether a live active span received it; \
@@ -5929,10 +5940,35 @@ const VIEW_METHOD_DOCS: &[(&str, &str)] = &[
 ];
 
 const SPAN_METHOD_DOCS: &[(&str, &str)] = &[
-    ("set_attribute", "Attach a key→value attribute to the span."),
-    ("add_event", "Record a timestamped event on the span."),
-    ("record_error", "Record an error on the span."),
-    ("end", "End the span, fixing its duration."),
+    (
+        "set_attribute",
+        "Attach a key→value attribute to the span. This is for a span you hold; to annotate the \
+         span you are merely *inside* (a `with_span` body, a handler under the SERVER span), call \
+         `tracing.set_attribute` — no handle needed.",
+    ),
+    (
+        "add_event",
+        "Record a timestamped event on the span. `tracing.add_event` does the same to the *active* \
+         span, which is what you want instead of opening a short child span for something that \
+         merely happened.",
+    ),
+    (
+        "add_event_with",
+        "Record a timestamped event carrying its own attributes. Prefer it over `set_attribute` for \
+         a structured fact you may record more than once on one span — events accumulate, span \
+         attributes overwrite by key.",
+    ),
+    (
+        "record_error",
+        "Record an error on the span (sets its status). `tracing.record_error` does the same to \
+         the *active* span.",
+    ),
+    (
+        "end",
+        "End the span, fixing its duration. Deliberately absent from the active-span surface: \
+         ending a span you did not open would close a `with_span`'s span early, or the \
+         auto-instrumented SERVER span out from under `http.serve`.",
+    ),
     (
         "context",
         "The span's trace context, serialized for propagation across a boundary.",

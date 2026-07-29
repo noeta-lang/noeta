@@ -72,6 +72,11 @@ const VAR_A: SigType = SigType::Var(0);
 const ATTR_VALUE: SigType =
     SigType::Union(&[SigType::String, SigType::Int, SigType::Float, SigType::Bool]);
 
+/// An OTel attribute *map* — the `add_event_with(name, attrs)` parameter. Same shape `std.log`'s
+/// `*_with` forms and `std.metrics`' `add_with`/`record_with` take, so one attribute vocabulary
+/// spans all three signals.
+const ATTR_MAP: SigType = SigType::Map(&SigType::String, &ATTR_VALUE);
+
 /// `std.tracing`'s functions — all higher-order (they reach the active-span stack, and `with_span`
 /// calls a closure), so they live in the ctx table.
 pub const TRACING_CTX_FNS: &[ExtFn] = &[
@@ -115,6 +120,15 @@ pub const TRACING_CTX_FNS: &[ExtFn] = &[
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Bool),
     },
+    // An event carrying its own attributes. This is the form a *structured* fact wants: several
+    // facts recorded on one span each keep their own attribute set, where span-level
+    // `set_attribute` would have them overwrite each other by key.
+    ExtFn {
+        param_names: &["name", "attrs"],
+        name: "add_event_with",
+        params: &[SigType::String, ATTR_MAP],
+        ret: RetTy::Concrete(SigType::Bool),
+    },
     ExtFn {
         param_names: &["message"],
         name: "record_error",
@@ -137,6 +151,12 @@ pub const SPAN_METHODS: &[ExtFn] = &[
         param_names: &["name"],
         name: "add_event",
         params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
+    },
+    ExtFn {
+        param_names: &["name", "attrs"],
+        name: "add_event_with",
+        params: &[SigType::String, ATTR_MAP],
         ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
     },
     ExtFn {
@@ -282,12 +302,18 @@ pub fn tracing_ctx_dispatch<C: NativeCtx + ?Sized>(
                 None => false,
             }))
         }
-        "add_event" => {
-            ctx_arity(func, args, 1)?;
+        "add_event" | "add_event_with" => {
+            let attrs = if func == "add_event_with" {
+                ctx_arity(func, args, 2)?;
+                slot_attr_map(ctx, args[1])?
+            } else {
+                ctx_arity(func, args, 1)?;
+                Vec::new()
+            };
             let name = slot_str(ctx, args[0])?;
             Ok(annotated(match active_live_span(ctx) {
                 Some(id) => {
-                    ctx.host().tel_span_add_event(id, &name, Vec::new());
+                    ctx.host().tel_span_add_event(id, &name, attrs);
                     true
                 }
                 None => false,
@@ -338,6 +364,13 @@ pub fn span_method_dispatch(
             want_arity(method, args, 1)?;
             let name = want_str(method, args, 0)?;
             host.tel_span_add_event(id, name, Vec::new());
+            Ok(span_value(id))
+        }
+        "add_event_with" => {
+            want_arity(method, args, 2)?;
+            let attrs = want_attr_map(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            host.tel_span_add_event(id, name, attrs);
             Ok(span_value(id))
         }
         "context" => {
@@ -408,17 +441,56 @@ fn slot_str<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> CtxResult<String>
 }
 
 /// Project an attribute-value **slot** into an [`AttrValue`] — the ctx twin of [`want_attr`], for
-/// the active-span annotators (which read arguments as slots, not marshalled `NativeValue`s). The
-/// checker constrains the parameter to [`ATTR_VALUE`], so a non-scalar can only arrive through a
-/// `dyn` launder.
+/// the active-span annotators (which read arguments as slots, not marshalled `NativeValue`s).
 fn slot_attr<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> CtxResult<AttrValue> {
+    let value = ctx.view(slot)?;
+    Ok(attr_from_native("tracing", &value)?)
+}
+
+/// Project a `Map<string, string|int|float|bool>` **slot** into event attributes (the ctx path's
+/// `add_event_with`). Ordering follows the map's own iteration order, which both backends share.
+fn slot_attr_map<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    slot: Slot,
+) -> CtxResult<Vec<(compact_str::CompactString, AttrValue)>> {
     match ctx.view(slot)? {
+        NativeValue::Map(entries) => entries
+            .into_iter()
+            .map(|(k, v)| Ok((k.into(), attr_from_native("tracing", &v)?)))
+            .collect(),
+        _ => Err(type_error("tracing", "map").into()),
+    }
+}
+
+/// Project a marshalled `Map` **argument** into event attributes (the `Span` handle path's
+/// `add_event_with`). Requires `deep_marshal` on the `Span` extern type, so the map arrives whole
+/// rather than as an opaque projection — the same reason the metrics handles set it.
+fn want_attr_map(
+    method: &str,
+    args: &[NativeValue],
+    index: usize,
+) -> Result<Vec<(compact_str::CompactString, AttrValue)>, StdError> {
+    match &args[index] {
+        NativeValue::Map(entries) => entries
+            .iter()
+            .map(|(k, v)| Ok((k.as_str().into(), attr_from_native(method, v)?)))
+            .collect(),
+        _ => Err(type_error(method, "map")),
+    }
+}
+
+/// Project one attribute value (str/int/float/bool) out of a marshalled value — the single
+/// projection every attribute position in this module funnels through (span attributes, event
+/// attributes, both dispatch paths). The checker constrains those positions to [`ATTR_VALUE`], so a
+/// non-scalar can only arrive through a `dyn` launder; `label` names the surface in that error.
+fn attr_from_native(label: &str, v: &NativeValue) -> Result<AttrValue, StdError> {
+    match v {
         NativeValue::Str(s) => Ok(AttrValue::Str(s.as_str().into())),
-        NativeValue::Scalar(Scalar::Int(i)) => Ok(AttrValue::Int(i)),
-        NativeValue::Scalar(Scalar::Float(f)) => Ok(AttrValue::Float(f)),
-        NativeValue::Scalar(Scalar::F32(f)) => Ok(AttrValue::Float(f as f64)),
-        NativeValue::Scalar(Scalar::Bool(b)) => Ok(AttrValue::Bool(b)),
-        _ => Err(type_error("tracing", "string, int, float, or bool").into()),
+        NativeValue::Scalar(Scalar::Int(i)) => Ok(AttrValue::Int(*i)),
+        NativeValue::Scalar(Scalar::Float(f)) => Ok(AttrValue::Float(*f)),
+        NativeValue::Scalar(Scalar::F32(f)) => Ok(AttrValue::Float(*f as f64)),
+        NativeValue::Scalar(Scalar::Bool(b)) => Ok(AttrValue::Bool(*b)),
+        _ => Err(type_error(label, "string, int, float, or bool")),
     }
 }
 
@@ -426,17 +498,9 @@ fn span_value(id: SpanId) -> NativeOut {
     NativeOut::Extern(ExternBox::new(Span { id }))
 }
 
-/// Project an attribute-value argument (str/int/float/bool) into an [`AttrValue`]. The checker
-/// constrains the param to that union, so a non-scalar can only arrive through a `dyn` launder.
+/// Project an attribute-value argument (str/int/float/bool) into an [`AttrValue`].
 fn want_attr(method: &str, args: &[NativeValue], index: usize) -> Result<AttrValue, StdError> {
-    match &args[index] {
-        NativeValue::Str(s) => Ok(AttrValue::Str(s.as_str().into())),
-        NativeValue::Scalar(Scalar::Int(i)) => Ok(AttrValue::Int(*i)),
-        NativeValue::Scalar(Scalar::Float(f)) => Ok(AttrValue::Float(*f)),
-        NativeValue::Scalar(Scalar::F32(f)) => Ok(AttrValue::Float(*f as f64)),
-        NativeValue::Scalar(Scalar::Bool(b)) => Ok(AttrValue::Bool(*b)),
-        _ => Err(type_error(method, "string, int, float, or bool")),
-    }
+    attr_from_native(method, &args[index])
 }
 
 #[cfg(test)]

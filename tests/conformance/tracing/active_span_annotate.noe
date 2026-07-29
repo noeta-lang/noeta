@@ -18,9 +18,11 @@
 // exactly the call whose failure must not be swallowed.
 // expect: stdout "top_attr=false"
 // expect: stdout "top_event=false"
+// expect: stdout "top_event_with=false"
 // expect: stdout "top_error=false"
 // expect: stdout "in_attr=true"
 // expect: stdout "in_event=true"
+// expect: stdout "in_event_with=true"
 // expect: stdout "in_error=true"
 // expect: stdout "held_still_works=true"
 // expect: stdout "done"
@@ -30,26 +32,33 @@ use std.{tracing}
 // No span is active at top level — nothing to annotate, and each call says so.
 top_attr = tracing.set_attribute("verdict", "allow")
 top_event = tracing.add_event("guardrail.checked")
+top_event_with = tracing.add_event_with("guardrail.denied", {"guard": "pii"})
 top_error = tracing.record_error("nothing to attach to")
 echo "top_attr=${top_attr}"
 echo "top_event=${top_event}"
+echo "top_event_with=${top_event_with}"
 echo "top_error=${top_error}"
 
 // Inside a `with_span` body the annotations land on that span — the case the surface exists for.
 body = fn(): void {
-    a = tracing.set_attribute("verdict", "allow")
+    a = tracing.set_attribute("verdict", "deny")
     e = tracing.add_event("guardrail.checked")
+    // An event carrying its own attributes: the structured form, so two verdicts recorded on one
+    // span each keep their own reason instead of overwriting a span-level key.
+    ew = tracing.add_event_with("guardrail.denied", {"guard": "pii", "reason": "email in prompt"})
     r = tracing.record_error("policy violation")
     echo "in_attr=${a}"
     echo "in_event=${e}"
+    echo "in_event_with=${ew}"
     echo "in_error=${r}"
 }
 tracing.with_span("run", body)
 
-// The handle form is untouched: a span you opened yourself is still annotated through the handle,
-// and the two surfaces are the same operations under two names for two receivers.
+// The handle form is untouched, and gained the same structured event: a span you opened yourself is
+// still annotated through the handle, and the two surfaces are the same operations under two names
+// for two receivers.
 held = tracing.span("db.lookup").set_attribute("db.system", "postgres").add_event("cache.miss")
-held.end()
+held.add_event_with("retry", {"attempt": 2}).end()
 echo "held_still_works=true"
 
 echo "done"
