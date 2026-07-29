@@ -1,0 +1,7 @@
+// A deeper intra-package import: only the LEADING segment is re-rooted, so everything the author
+// wrote after `db` survives — `db.query` addresses this file's sibling one directory up.
+use db.query.run;
+
+pub fn all(): string {
+    return "[${run()}]";
+}

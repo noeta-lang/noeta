@@ -1738,6 +1738,59 @@ mod tests {
     }
 
     #[test]
+    fn workspace_with_deps_reroots_a_scope_members_intra_package_use() {
+        // The salsa twin of the loader's scope-array case: `para/db` reached through
+        // `para = [{ package = "para/db" }, … ]` derives under the TWO-segment prefix `para.db`, and
+        // its own modules import each other by the segment they derive under standalone (`db`). The
+        // query path must splice in the whole prefix, exactly as the batch loader does — a single
+        // segment would have made `use db.open` address `para.open`, which is nothing.
+        seed_std();
+        let db = LangDatabase::default();
+        let entry = Source::new(
+            SourceId(0),
+            "main.noe",
+            "use para.db.query.run;\necho run();\n",
+        );
+        let derived = |segments: &[&str]| {
+            noeta_loader::ModulePath::Derived(segments.iter().map(|s| (*s).to_string()).collect())
+        };
+        let dep = DepSources {
+            root: "db".to_string(),
+            prefix: vec!["para".to_string(), "db".to_string()],
+            renames: Vec::new(),
+            modules: vec![
+                Source::new(
+                    SourceId(1),
+                    "db.noe",
+                    "pub fn open(): string { return \"conn\"; }\n",
+                ),
+                Source::new(
+                    SourceId(2),
+                    "query.noe",
+                    "use db.open;\npub fn run(): string { return open(); }\n",
+                ),
+            ],
+            paths: vec![derived(&["para", "db"]), derived(&["para", "db", "query"])],
+            edition: noeta_lexer::Edition::DEFAULT,
+        };
+        let ws = workspace_with_deps(
+            &db,
+            &entry,
+            &[],
+            std::slice::from_ref(&dep),
+            &noeta_span::PackageUses::new(),
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+        );
+        let linked = linked(&db, ws);
+        assert!(
+            linked.program.is_ok(),
+            "a scope member's intra-package `use db.open` must re-root to `para.db.open`: {:?}",
+            linked.program
+        );
+    }
+
+    #[test]
     fn workspace_with_deps_lexes_a_renamed_text_tier_verbatim() {
         // Per-package tier-naming arc (3g), harness seam: the `workspace_with_deps` path (used by
         // `noeta-mcp` and `noeta-conformance`) now carries the whole program's `@name` tables, so a

@@ -2883,7 +2883,8 @@ mod tests {
         assert!(ids.contains(&"para/aether".to_string()));
         assert!(ids.contains(&"para/db".to_string()));
         // Both members share the scope key `para` as their global segment, and each re-roots from its
-        // company (`para`) — an identity re-root here — so its literal `para.<pkg>.…` lands in the pool.
+        // own **package** segment (`aether`/`db` — what it derives under standalone) to the scope
+        // prefix, so one intra-package `use db.query` resolves in both builds.
         for pkg in ["aether", "db"] {
             let p = graph
                 .packages
@@ -2900,8 +2901,15 @@ mod tests {
                 "scope member para/{pkg} must key on the scope"
             );
             assert_eq!(
-                p.root, "para",
-                "scope member para/{pkg} re-roots from its scope"
+                p.root, pkg,
+                "scope member para/{pkg} re-roots FROM its own package segment — never the scope \
+                 half, which none of its modules ever derive under, so its intra-package `use`s \
+                 were silently left unrewritten"
+            );
+            assert_eq!(
+                p.prefix,
+                vec!["para".to_string(), pkg.to_string()],
+                "scope member para/{pkg} re-roots TO the two-segment prefix its modules derive under"
             );
             // …and its modules derive under `{key}.{package segment}` — the scope-array prefix, so
             // `m.noe` is `para.<pkg>.m`, exactly what it declares. (A *plain* key would give the
@@ -2913,6 +2921,45 @@ mod tests {
                 "scope member para/{pkg} derives under the scope prefix"
             );
         }
+    }
+
+    #[test]
+    fn a_plain_key_reroots_from_the_package_segment_to_the_key_alone() {
+        // The plain-entry twin of the scope-array case above: `mycli = { path = … }` on `acme/cli`
+        // derives the ONE-segment prefix `mycli`, and re-roots from the package's own segment `cli`.
+        // So the package's internal `use cli.args` becomes `use mycli.args` — which is what makes
+        // the import key real, and what a non-conventional key had no way to express before.
+        let base = crate::test_temp::TempDir::new("plain-key-dep");
+        let app = base.join("app");
+        let lib = base.join("acme-cli");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(
+            lib.join("noeta.toml"),
+            "[package]\nname = \"acme/cli\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(lib.join("args.noe"), "pub fn one(): int { return 1; }\n").unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nmycli = { path = \"../acme-cli\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+
+        let graph = resolve_graph(&app.join("main.noe")).expect("resolves");
+        let p = &graph.packages[0];
+        assert_eq!(p.key(), "mycli");
+        assert_eq!(p.prefix, vec!["mycli".to_string()]);
+        assert_eq!(
+            p.root, "cli",
+            "re-roots from the package half of the identity"
+        );
+        assert_eq!(
+            p.modules[0].path.derived(),
+            Some(["mycli".to_string(), "args".to_string()].as_slice()),
+        );
     }
 
     #[test]

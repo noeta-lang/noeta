@@ -1,0 +1,18 @@
+// A package writes ONE intra-package `use` that resolves in every build.
+//
+// The subdirectory `para.db/` is the package `para/db` reached through a **scope array**
+// (`para = [{ package = "para/db" }, … ]`), so its modules derive under the two-segment prefix
+// `para.db` while the package's own root segment is `db`. Its files import each other as
+// `use db.…` — the spelling they derive under when the package is built standalone — and the loader
+// re-roots that leading segment to the whole prefix, so the same source resolves here too.
+//
+// Before that rule the leading segment was rewritten only when it equalled the *scope* half, so
+// `use db.query` matched nothing and was left alone (E0019 `no module db in this project`), while
+// the spelling that did resolve here — `use para.db.query` — matched nothing standalone. A package
+// author had to choose which build to break.
+// expect: stdout "[conn:rows] conn:rows"
+// expect: exit 0
+use para.db.nested.repo.all;
+use para.db.query.run;
+
+echo "${all()} ${run()}"

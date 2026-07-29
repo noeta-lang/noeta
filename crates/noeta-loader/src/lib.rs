@@ -3625,6 +3625,145 @@ mod tests {
         );
     }
 
+    /// A dependency module whose path is **derived** (as `noeta-pm` hands them over) rather than
+    /// declared — the shape every intra-package re-rooting assertion below needs, because the whole
+    /// point is that the derived path and the re-rooted `use` must meet.
+    fn derived(name: &str, path: &[&str], text: &str) -> RawModule {
+        RawModule {
+            name: name.to_string(),
+            text: text.to_string(),
+            path: ModulePath::Derived(path.iter().map(|s| (*s).to_string()).collect()),
+        }
+    }
+
+    #[test]
+    fn a_scope_members_intra_package_use_reroots_to_its_derived_prefix() {
+        // `para/db` reached through a scope array (`para = [{ package = "para/db" }, … ]`): its
+        // modules derive under the TWO-segment prefix `para.db`, while the package's own root
+        // segment stays `db` — what it derives under standalone, and therefore the one spelling its
+        // internal imports can use in both builds. Rewriting a single segment to the *key* could not
+        // express this: the key is the scope half, so `use db.query` matched nothing and was left
+        // alone, while `use para.db.query` matched nothing standalone.
+        let dep = DepPackage {
+            prefix: vec!["para".to_string(), "db".to_string()],
+            root: "db".to_string(),
+            modules: vec![
+                derived(
+                    "db.noe",
+                    &["para", "db"],
+                    "pub fn open(): string { return \"conn\"; }\n",
+                ),
+                derived(
+                    "query.noe",
+                    &["para", "db", "query"],
+                    "use db.open;\npub fn run(): string { return open(); }\n",
+                ),
+            ],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let entry = "use para.db.query.run;\nx = run();\n";
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .expect("the intra-package `use db.open` must re-root to `para.db.open`");
+        assert!(has_fn(&linked, "run"));
+        assert!(has_fn(&linked, "open"));
+    }
+
+    #[test]
+    fn a_plain_keys_intra_package_use_reroots_to_the_key() {
+        // The one-segment prefix: `acme/cli` keyed `mycli`. The package's own segment is `cli`, so
+        // its internal `use cli.args` becomes `use mycli.args` — the key made real.
+        let dep = DepPackage {
+            prefix: vec!["mycli".to_string()],
+            root: "cli".to_string(),
+            modules: vec![
+                derived(
+                    "args.noe",
+                    &["mycli", "args"],
+                    "pub fn count(): int { return 2; }\n",
+                ),
+                derived(
+                    "cli.noe",
+                    &["mycli", "cli"],
+                    "use cli.args.count;\npub fn run(): int { return count(); }\n",
+                ),
+            ],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let entry = "use mycli.cli.run;\nx = run();\n";
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .expect("the intra-package `use cli.args` must re-root to `mycli.args`");
+        assert!(has_fn(&linked, "run"));
+        assert!(has_fn(&linked, "count"));
+    }
+
+    #[test]
+    fn reroot_path_replaces_the_package_segment_with_the_whole_prefix() {
+        let no_renames = std::collections::BTreeMap::new();
+        let reroot = |path: &[&str], root: &str, prefix: &[&str]| {
+            let mut path: Vec<String> = path.iter().map(|s| (*s).to_string()).collect();
+            let prefix: Vec<String> = prefix.iter().map(|s| (*s).to_string()).collect();
+            reroot_path(&mut path, root, &prefix, &no_renames);
+            path
+        };
+        // A scope member: one segment in, two out — and everything after it survives.
+        assert_eq!(
+            reroot(&["db", "query", "run"], "db", &["para", "db"]),
+            ["para", "db", "query", "run"]
+        );
+        // Standalone the prefix IS the root segment, so the very same source is a no-op.
+        assert_eq!(reroot(&["db", "query"], "db", &["db"]), ["db", "query"]);
+        // A plain key: one segment in, one out, but a different one.
+        assert_eq!(
+            reroot(&["cli", "args"], "cli", &["mycli"]),
+            ["mycli", "args"]
+        );
+        // Anything that is not the package itself is untouched — `std`, and (the case that made
+        // rewriting from the *scope* half actively harmful) a native extension's own namespace root,
+        // which a package's own modules import by its literal name.
+        assert_eq!(reroot(&["std", "fs"], "db", &["para", "db"]), ["std", "fs"]);
+        assert_eq!(
+            reroot(&["para", "db", "Connection"], "db", &["mydb", "db"]),
+            ["para", "db", "Connection"]
+        );
+    }
+
+    #[test]
+    fn reroot_path_replaces_a_local_dependency_key_with_one_segment() {
+        // The `renames` branch maps the package's OWN dependency key to that dependency's global
+        // segment — one segment, because the author already spelled whatever follows it (a scope
+        // array's package half included).
+        let renames: std::collections::BTreeMap<String, String> =
+            [("para".to_string(), "para_1".to_string())]
+                .into_iter()
+                .collect();
+        let mut path = vec!["para".to_string(), "db".to_string(), "query".to_string()];
+        reroot_path(
+            &mut path,
+            "api",
+            &["para".to_string(), "api".to_string()],
+            &renames,
+        );
+        assert_eq!(path, ["para_1", "db", "query"]);
+    }
+
     #[test]
     fn a_typoed_dependency_module_is_an_error() {
         // The dependency provides `webclient.client`, so `webclient` is one of the linked project's
