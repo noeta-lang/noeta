@@ -1,0 +1,36 @@
+// `os.try_spawn` (subprocess-doors arc) — the **recoverable** twin of `os.spawn`, the shape
+// `json.parse`/`json.try_parse` already sets. A program that starts a tool it does not control (a
+// language server, an MCP server, a formatter) meets "not installed" as an ordinary answer, not as
+// a reason to be taken down: the failure arrives as `Err(OsError)`, and the program keeps running.
+//
+// The sandbox scripts the same fixed command set `os.exec` does, so a name it does not know fails
+// deterministically and both backends agree. The aborting `os.spawn` is unchanged and still there
+// (see os_spawn_not_found.noe).
+// expect: stdout "started"
+// expect: stdout "spawned output"
+// expect: stdout "not_found"
+// expect: stdout "spawn: command not found: no-such-command"
+// expect: stdout "still running"
+// expect: exit 0
+use std.{os}
+
+// The success arm carries an ordinary `Process` — everything `os.spawn` returns.
+echo match os.try_spawn("echo", ["spawned output"]) {
+    Ok(p) => "started",
+    Err(e) => "failed: ${e.message()}",
+}
+echo match os.try_spawn("echo", ["spawned output"]) {
+    Ok(p) => p.wait().stdout().trim(),
+    Err(e) => "failed: ${e.message()}",
+}
+
+// The failure arm carries an `OsError`: branch on `kind()`, not on the message.
+echo match os.try_spawn("no-such-command", []) {
+    Ok(child) => "unexpectedly started ${child.pid()}",
+    Err(e) => e.kind(),
+}
+echo match os.try_spawn("no-such-command", []) {
+    Ok(child) => "unexpectedly started ${child.pid()}",
+    Err(e) => e.message(),
+}
+echo "still running";
