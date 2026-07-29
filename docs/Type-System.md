@@ -27,6 +27,7 @@ sq = fn(n) => n * n                             // inferred (int) -> int
 | `(A, B)` | Tuple. |
 | `A \| B` | Union (a *closed* dynamic). |
 | `dyn` | The open top — any value. |
+| `never` | The bottom — no value at all (see below). |
 | `Struct` `Class` `Enum` | Abstract kind-types (see below). |
 
 ## `number` — any numeric scalar
@@ -106,6 +107,41 @@ d: dyn = 42
 echo d is int          // true
 echo d is string       // false
 ```
+
+## `never` — the bottom
+
+`never` is `dyn`'s exact opposite. Where every type widens *into* `dyn`, `never` widens into *every*
+type; where `dyn` is inhabited by every value, `never` is inhabited by none. It is the return type of
+a function that **does not return**:
+
+```noeta
+use std.os
+use std.http.server
+
+os.exit(1)                 // `os.exit(code?): never`
+server.serve(8080, fetch)  // `server.serve(port, handler, host?): never` — the accept loop
+panic("unreachable")       // `panic(msg): never`
+```
+
+Because `never` is a subtype of everything, a call to one of these type-checks in any position —
+there is no value to be wrong about — and nothing written after it can run.
+
+You write it on your own functions the same way:
+
+```noeta
+fn die(msg: string): never { panic(msg) }
+```
+
+It is **declared, never inferred**. A function returns `never` because its signature says so, not
+because the checker proved its body loops forever — so divergence is a fact you can read off a
+signature, at the call site, without interprocedural analysis. That is what makes it useful to
+tooling: `noeta test` reads it to decide which top-level statements belong in the setup every test
+shares, which is why a top-level `server.serve(…)` never blocks a test run
+(see [Testing](Testing#what-runs-and-what-does-not)).
+
+Two consequences follow from being uninhabited. `x is never` is always `false` — no value has the
+type. And `never` vanishes from a union: `int | never` *is* `int`, because the second arm contributes
+no values.
 
 ## Type tests and narrowing
 

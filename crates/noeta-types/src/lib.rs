@@ -626,6 +626,7 @@ mod tests {
         let mut census = vec![
             Type::Unknown,
             Type::Dyn,
+            Type::Never,
             Type::Unit,
             Type::Int,
             Type::Float,
@@ -678,7 +679,7 @@ mod tests {
                 .map(std::mem::discriminant)
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            22,
+            23,
             "a `Type` variant was added or removed — add a sample to `every_variant` and update this \
              count, so the numeric-set check below keeps covering the whole lattice"
         );
@@ -891,5 +892,73 @@ mod tests {
         };
         assert!(Type::subtype(&sub, &sup));
         assert!(!Type::subtype(&sup, &sub));
+    }
+    /// `never` is the **bottom**: it widens into every type, and nothing widens into it. The exact
+    /// mirror of the [`Type::Dyn`] tests above, which is the whole design — a lattice with a top and
+    /// no bottom cannot say "this call does not return".
+    #[test]
+    fn subtype_never_widens_into_everything_but_nothing_into_it() {
+        for sup in [
+            Type::Int,
+            Type::String,
+            Type::Unit,
+            Type::Dyn,
+            Type::List(Box::new(Type::Int)),
+            Type::Named("Order".into(), vec![]),
+            Type::union([Type::Int, Type::String]),
+            Type::Fn {
+                params: vec![Type::Int],
+                ret: Box::new(Type::Int),
+            },
+            Type::Never,
+        ] {
+            assert!(Type::subtype(&Type::Never, &sup), "never <: {sup}");
+        }
+        // Nothing narrows INTO the bottom — there is no value to narrow. (`Unknown` is exempt: an
+        // inference hole is bidirectionally compatible with everything, by design.)
+        for sub in [
+            Type::Int,
+            Type::String,
+            Type::Unit,
+            Type::Dyn,
+            Type::Named("Order".into(), vec![]),
+        ] {
+            assert!(!Type::subtype(&sub, &Type::Never), "{sub} </: never");
+        }
+    }
+
+    /// `never` is the union's **identity element**, the dual of `dyn`'s absorption: `dyn` swallows a
+    /// union because it contributes every value, `never` disappears from one because it contributes
+    /// none. Without this, `int | never` and `int` would be two spellings of one set that compare
+    /// unequal.
+    #[test]
+    fn union_drops_never_members() {
+        assert_eq!(Type::union([Type::Int, Type::Never]), Type::Int);
+        assert_eq!(
+            Type::union([Type::Int, Type::Never, Type::String]),
+            Type::Union(vec![Type::Int, Type::String])
+        );
+        assert_eq!(
+            Type::union([Type::union([Type::Int, Type::Never]), Type::String]),
+            Type::Union(vec![Type::Int, Type::String])
+        );
+        // A union of nothing but bottoms is the bottom — NOT the inference hole an empty input
+        // gives, which would quietly turn "no values" into "no information".
+        assert_eq!(Type::union([Type::Never, Type::Never]), Type::Never);
+        assert_ne!(Type::union([Type::Never]), Type::Unknown);
+    }
+
+    /// The bottom is a **concrete declared type**, not an inference hole and not the dynamic escape:
+    /// it must not inherit either one's leniency. A hole suppresses diagnostics because information
+    /// is missing; `never` carries complete information — that there is nothing here.
+    #[test]
+    fn never_is_neither_a_hole_nor_dyn() {
+        assert!(!Type::Never.is_gradual());
+        assert!(!Type::Never.defers_to_runtime());
+        assert!(!Type::Never.contains_unknown());
+        assert!(!Type::Never.is_arith_numeric());
+        assert_eq!(Type::Never.to_string(), "never");
+        // The surface name round-trips, like every other built-in spelling.
+        assert_eq!(Type::from_ref(&named("never", vec![])), Type::Never);
     }
 }

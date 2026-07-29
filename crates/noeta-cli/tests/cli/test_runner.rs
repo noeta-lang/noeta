@@ -560,25 +560,24 @@ fn test_runs_async_tests_rather_than_dropping_their_futures() {
         );
 }
 
-/// The shared setup drops **statement-expressions**, not just `echo` — so a top-level statement
-/// that mutates a top-level binding does not run, and the tests see that binding in its
-/// *unmutated* state.
+/// The shared setup runs a top-level statement-expression that **returns**, so a mutation applied
+/// to a top-level binding is visible to every test.
 ///
-/// This is the documented "main effects do not run" rule (`is_tier_setup`), and it is the right
-/// rule: a CLI entry's top-level `os.exit(run())` and a server's `server.serve()` are both
-/// statement-expressions that must never run under `noeta test`. But the rule is sharp, because
-/// the *binding* survives while the mutation applied to it does not, and nothing says so — the
-/// only signal is whatever the half-initialized value does at runtime. A top-level
-/// `conn = db.connect(…)` followed by a bare `conn.migrate(…)` hands every test a live, working,
-/// **empty** database, which reports `no such table: users` rather than a language diagnostic.
+/// This pins the fix for a real silent-wrong-answer bug. The filter used to decide by statement
+/// FORM — keep `Stmt::Binding`, drop every `Stmt::Expr` — so a kept `conn = db.connect(…)` sat
+/// beside a dropped `conn.migrate(…)` and every test got a live, working, **empty** database,
+/// failing with the database's own `no such table: users` and no language diagnostic anywhere.
+/// The plain-binding control passing in the same run is what made it a trap.
 ///
-/// `std.cell` is the smallest native resource with per-instance state, so it shows the shape with
-/// no database in the picture. The plain-binding case is the control: `Stmt::Binding` is kept, so
-/// reassignment *is* visible, which is what makes the native case surprising.
+/// The drop policy was not wrong, it was inexpressible: a CLI entry's `os.exit(run())` and a
+/// server's `server.serve(…)` are `Stmt::Expr` too and must never run here. The filter now asks
+/// whether the call **returns** (`noeta_check::setup`, over the `never` type) instead of what shape
+/// it has. `std.cell` is the smallest native resource with per-instance state, so it shows the
+/// shape with no database in the picture.
 #[test]
-fn test_setup_drops_statement_expressions_that_mutate_a_captured_binding() {
+fn test_setup_runs_statement_expressions_that_mutate_a_captured_binding() {
     let file = temp_program(
-        "test_setup_drops_stmt_expr",
+        "test_setup_runs_stmt_expr",
         "use std.cell\n\
          box = cell.new(0);\n\
          box.set(41);\n\
@@ -593,33 +592,25 @@ fn test_setup_drops_statement_expressions_that_mutate_a_captured_binding() {
              }\n\
          }\n",
     );
-    lang()
-        .arg("test")
-        .arg(&file)
-        .assert()
-        .failure()
-        .code(1)
-        .stdout(
-            // The dropped `box.set(41)` leaves the cell at its constructed value, and the failure
-            // is a bare assertion — no diagnostic names the dropped statement.
-            predicate::str::contains("FAIL  native_sees_top_level_mutation")
-                .and(predicate::str::contains("cell holds 0, expected 41"))
-                // The control: a kept `Stmt::Binding` reassignment IS visible.
-                .and(predicate::str::contains(
-                    "ok    plain_binding_sees_top_level_mutation",
-                ))
-                .and(predicate::str::contains("1 passed, 1 failed, 2 total")),
-        );
+    lang().arg("test").arg(&file).assert().success().stdout(
+        predicate::str::contains("ok    native_sees_top_level_mutation")
+            // The control, unchanged: a kept `Stmt::Binding` reassignment is still visible.
+            .and(predicate::str::contains(
+                "ok    plain_binding_sees_top_level_mutation",
+            ))
+            .and(predicate::str::contains("2 passed, 0 failed, 2 total")),
+    );
 }
 
-/// The same drop applies to whole `for` / `if` / `while` statements, so a binding *seeded by a
-/// loop* is kept but empty. Pinned separately because the loop forms are not mentioned in the
-/// docs' "main effects" wording at all, and seeding a fixture with a loop is the obvious thing to
-/// reach for.
+/// A fixture seeded by a top-level `for` / `if` is shared setup and runs.
+///
+/// Both terminate structurally — a conditional takes one branch once, a `for` walks an iterable —
+/// so there was never a reason beyond the old syntactic denylist to drop them. Seeding a fixture
+/// with a loop is the obvious thing to reach for, and it used to leave the binding kept but empty.
 #[test]
-fn test_setup_drops_top_level_loops_and_conditionals() {
+fn test_setup_runs_top_level_loops_and_conditionals() {
     let file = temp_program(
-        "test_setup_drops_loops",
+        "test_setup_runs_loops",
         "use std.cell\n\
          log = cell.new([]);\n\
          for name in [\"ada\", \"grace\"] { log.set(log.get() ~ [name]); }\n\
@@ -633,10 +624,78 @@ fn test_setup_drops_top_level_loops_and_conditionals() {
         .arg("test")
         .arg(&file)
         .assert()
+        .success()
+        .stdout(predicate::str::contains("ok    seeded_by_a_loop"));
+}
+
+/// The reason the filter drops anything at all: a top-level `os.exit(…)` must not exit the runner,
+/// and a top-level `server.serve(…)` must not park it in an accept loop forever.
+///
+/// Both are `Stmt::Expr` — the category the two tests above just moved into "runs" — so this is the
+/// regression that would make the whole change untenable. It is pinned on the observable outcome
+/// (the run finishes, the test reports) rather than on the filter's internals: a hang here has no
+/// error message and no exit code, only a timeout.
+#[test]
+fn test_setup_never_runs_a_call_that_does_not_return() {
+    for (label, source) in [
+        (
+            "exit",
+            "use std.os\n\
+             fn run(): int { return 3; }\n\
+             os.exit(run());\n\
+             @test\n\
+             fn the_runner_reaches_this(): void { assert(1 == 1); }\n",
+        ),
+        (
+            "serve",
+            "use std.http.server\n\
+             use std.http.{Request, Response}\n\
+             fn handle(req: Request): Response { return server.response(200, \"hi\\n\"); }\n\
+             server.serve(8099, handle);\n\
+             @test\n\
+             fn the_runner_reaches_this(): void { assert(1 == 1); }\n",
+        ),
+    ] {
+        let file = temp_program(&format!("test_setup_diverging_{label}"), source);
+        lang()
+            .arg("test")
+            .arg(&file)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("ok    the_runner_reaches_this"));
+    }
+}
+
+/// What is still dropped is **reported**, not silent — the point of the whole exercise.
+///
+/// `while true { … }` with no `break` provably never exits, so the runner cannot enter it; the
+/// binding it writes therefore reaches the tests unwritten. That is exactly the shape of the
+/// original bug, and it now arrives as `E0071` naming the statement, the binding it writes, and the
+/// test that captures it, instead of a bare assertion failure the reader has to reverse-engineer.
+#[test]
+fn test_setup_warns_when_a_dropped_statement_writes_a_captured_binding() {
+    let file = temp_program(
+        "test_setup_warns_dropped",
+        "use std.cell\n\
+         tick = cell.new(0);\n\
+         while true { tick.set(tick.get() + 1); }\n\
+         @test\n\
+         fn sees_the_loop() use (tick): void {\n\
+             assert(tick.get() > 0, \"tick is ${tick.get()}\");\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
         .failure()
         .code(1)
-        .stdout(
-            predicate::str::contains("FAIL  seeded_by_a_loop")
-                .and(predicate::str::contains("log has 0 entries, expected 3")),
+        .stderr(
+            predicate::str::contains("E0071")
+                .and(predicate::str::contains(
+                    "`while true` with no `break` never exits",
+                ))
+                .and(predicate::str::contains("`tick`"))
+                .and(predicate::str::contains("`sees_the_loop`")),
         );
 }

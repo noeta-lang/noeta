@@ -42,12 +42,24 @@ impl Checker {
         if let Some(saved) = saved_expected_object {
             self.coloring.expected_object = saved;
         }
+        self.note_if_never(expr, &ty);
         if self.config.record_expr_types
             && let Some(repr) = type_to_repr_top(&ty, &self.symbols.type_kinds)
         {
             self.sites.expr_types.insert(expr.span(), repr);
         }
         ty
+    }
+
+    /// Record an expression that types as the **bottom** — a call to something that does not
+    /// return. Unconditional (unlike the `expr_types` index beside it): it is one insert on the rare
+    /// expression that diverges, and both consumers — E0048's must-diverge analysis and the tier
+    /// runners' shared-setup filter — need it on the ordinary compile path, not only under the IDE
+    /// flag. See [`crate::sites::SiteMaps::never_exprs`].
+    fn note_if_never(&mut self, expr: &Expr, ty: &Type) {
+        if *ty == Type::Never {
+            self.sites.never_exprs.insert(expr.span());
+        }
     }
 
     pub(crate) fn check_inner(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
@@ -563,6 +575,7 @@ impl Checker {
     /// through this one choke point, so the index covers the whole tree with a single insertion site.
     pub(crate) fn synth(&mut self, expr: &Expr, env: &mut Env) -> Type {
         let ty = self.synth_inner(expr, env);
+        self.note_if_never(expr, &ty);
         if self.config.record_expr_types
             && let Some(repr) = type_to_repr_top(&ty, &self.symbols.type_kinds)
         {

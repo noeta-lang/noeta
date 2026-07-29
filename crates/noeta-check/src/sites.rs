@@ -229,6 +229,16 @@ pub(crate) struct SiteMaps {
     /// populated (unlike `expr_types`): it is one `HashSet` insert on the rare statement that
     /// diverges, and empty for every program that has none.
     pub(crate) diverging_stmts: HashSet<Span>,
+    /// Every **expression** whose inferred type is [`noeta_types::Type::Never`] — the raw fact
+    /// `diverging_stmts` is the statement-level projection of.
+    ///
+    /// Checker-internal, and read by exactly one consumer: [`crate::subst::expr_diverges`], the
+    /// must-diverge analysis behind E0048 ("this function can reach the end of its body"). That
+    /// analysis used to hard-code the single name `panic`, so a user-written
+    /// `fn die(msg: string): never` was not recognised and every caller that ended in `die(…)` was
+    /// rejected — the feature would have been decorative. Carried across by span exactly as
+    /// [`crate::Checker::exhaustive_matches`] is, and read only after the body is typed.
+    pub(crate) never_exprs: HashSet<Span>,
     pub(crate) construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// See [`Sites::inferred_object_types`].
     pub(crate) inferred_object_types: HashMap<Span, String>,

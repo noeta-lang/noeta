@@ -2660,7 +2660,16 @@ impl Checker {
         // against the declared type above; this is the complementary "did every path return" check.)
         // Runs *after* the body is typed, so `exhaustive_matches` already holds this body's
         // `match` verdicts — an exhaustive `match` whose arms all return counts as returning.
-        if must_return_value && !block_diverges(&decl.body, &self.exhaustive_matches) {
+        // Reads `never_exprs` alongside `exhaustive_matches`, and for the same reason: both are
+        // typing facts this body just established, so a call to a `never` function counts as a
+        // path that returned.
+        if must_return_value
+            && !block_diverges(
+                &decl.body,
+                &self.exhaustive_matches,
+                &self.sites.never_exprs,
+            )
+        {
             self.error(
                 DiagnosticCode::MissingReturn,
                 decl.name_span,

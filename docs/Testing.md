@@ -42,7 +42,7 @@ A test's return type is optional; both `fn adds()` and `fn adds(): void` work.
 ## Isolation and concurrency
 
 - The activated program is type-checked **once**, so a broken test is one compile error, not one per run.
-- Each test runs as `<shared setup> + <call the test fn>` in a **fresh real-host isolate**, so one test can never observe another's state. The shared setup is the file's declarations and globals with its top-level "main" effects removed — see [Shared setup](#shared-setup) below.
+- Each test runs as `<shared setup> + <call the test fn>` in a **fresh real-host isolate**, so one test can never observe another's state. The shared setup is the file's declarations, globals, and every top-level effect that *finishes* — see [Shared setup](#shared-setup) below.
 - Tests run **in parallel** across worker threads (default: the machine's parallelism, capped at the test count). Results are gathered by declaration index and reported in **declaration order**, deterministically, regardless of finish order.
 - By default all tests run even after a failure. `--fail-fast` stops after the first failure and drains the workers.
 
@@ -76,49 +76,58 @@ running 2 tests on 2 threads
 2 passed, 0 failed, 2 total
 ```
 
-Only the file's *main effects* are removed from the shared setup — the top-level `echo` above
-prints nothing under `noeta test` — while the declarations and bindings around them stay live.
+The top-level `echo` above prints nothing under `noeta test`; everything that declares, binds, or
+does work that finishes stays live.
 
-### What counts as a main effect
+### What runs, and what does not
 
-The split is by **statement form**, not by what the statement does. A top-level statement is shared
-setup if it *binds* something, and a main effect otherwise:
+A top-level statement is shared setup if it declares something, binds something, or performs an
+effect that **finishes**. The split is by what the statement *does*, not by its shape:
 
-| Kept — shared setup | Dropped — main effect |
+| Kept — shared setup | Dropped |
 |---|---|
 | `use` imports, `namespace` | `echo …` |
-| every declaration (`fn`, `class`, `struct`, `enum`, `trait`, `impl`, `@attribute`) | a bare statement-expression: `f(x)`, `obj.method(…)` |
-| a binding or destructure: `x = …`, `mut x = …`, `(a, b) = …` | `if` / `for` / `while` statements |
-| `concurrent { … }` | `return` / `break` / `continue` |
+| every declaration (`fn`, `class`, `struct`, `enum`, `trait`, `impl`, `@attribute`) | a call that **does not return**: `os.exit(…)`, `server.serve(…)`, `panic(…)` |
+| a binding or destructure: `x = …`, `mut x = …`, `(a, b) = …` | `while true { … }` with no `break` |
+| a statement-expression that returns: `conn.migrate(…)`, `log.push(…)` | `return` / `break` / `continue` |
+| `if` / `for` / `while`, and `concurrent { … }` | any of the above nested in an `if`/`for`/`while` body |
 
-Dropping them is what makes a file with a `main` runnable as a test suite at all: a CLI entry's
-top-level `os.exit(run())` and a server's `server.serve()` are both statement-expressions, and
-running either under `noeta test` would exit the runner or block it forever.
+Dropping the second column is what makes a file with a `main` runnable as a test suite at all: a CLI
+entry's top-level `os.exit(run())` and a server's `server.serve(…)` would otherwise exit the runner
+or block it forever.
 
-> **The sharp edge.** A binding is kept, but a *statement* that mutates what it holds is not — so
-> the tests see that value in its **unmutated** state, with no diagnostic. This bites hardest on a
-> native resource with per-instance state, where the object is real and working but empty:
+The runner knows which calls those are because the language says so. A function that does not return
+declares its return type as [`never`](Type-System#never--the-bottom) — the bottom type — and `os.exit`, `server.serve`
+and `panic` all do. Nothing is inferred from a name or a statement shape:
+
+```noeta
+conn = db.connect("sqlite::memory:")   // a binding — every test gets a live connection
+conn.migrate("migrations")             // returns, so it RUNS — every test gets the schema too
+
+server.serve(8080, fetch)              // declared `never` — dropped, or the runner would block
+```
+
+> **When something is dropped that a test needs.** The runner does not stay quiet about it. If a
+> dropped statement writes to a top-level binding that a selected test `use (…)`-captures, the run
+> reports `E0071` naming the statement, the binding, and the test:
 >
-> ```noeta ignore
-> conn = db.connect("sqlite::memory:")   // kept — every test gets a live connection
-> conn.migrate("migrations")             // DROPPED — a bare statement-expression
->
-> @test
-> fn counts_users() use (conn): void {
->     // Fails with the database's own `no such table: users`, not a language error:
->     // the connection is fine, the schema was never created.
->     assert(conn.query("SELECT * FROM users", []).len() == 2)
-> }
+> ```console
+> [E0071] Warning: this statement is not part of the shared setup (`while true` with no `break`
+> never exits), but it writes to `tick`, which `sees_the_loop` captures — so that test will see it
+> unwritten
 > ```
 >
-> The same applies to a fixture seeded by a top-level `for` loop — the whole loop is dropped, so
-> the binding it seeds is kept but empty.
->
-> Do setup work that tests depend on **inside a binding** (`applied = conn.migrate("migrations")`),
-> or in a helper the tests call themselves. Note that a binding runs once **per test**, not once
-> per file, so it must be idempotent against any state that outlives the isolate (a file, a
-> file-backed database) — that is also why `sqlite::memory:` is the well-behaved choice here: each
-> test gets its own connection and therefore its own empty database to migrate.
+> The fix is to do the work **inside a binding** (`applied = conn.migrate("migrations")`) or in a
+> helper the tests call themselves. Note that a binding runs once **per test**, not once per file,
+> so it must be idempotent against any state that outlives the isolate (a file, a file-backed
+> database) — that is also why `sqlite::memory:` is the well-behaved choice here: each test gets its
+> own connection and therefore its own empty database to migrate.
+
+**What the runner still cannot see.** Divergence is *declared*, not inferred, so a call that reaches
+a non-returning function indirectly is not recognised — `fn boot(): void { os.exit(0) }` with a
+top-level `boot()` joins the setup and ends the run. Declare `fn boot(): never` and it is dropped
+like any other. Likewise a `for` over an endless generator, or a `while` whose condition never
+becomes false, are kept and would not finish.
 
 ## Metadata attributes
 
