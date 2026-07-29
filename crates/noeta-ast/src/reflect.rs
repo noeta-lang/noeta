@@ -2437,6 +2437,31 @@ impl PreludeVariant {
     pub fn field_names(&self) -> Vec<String> {
         (0..self.fields.len()).map(|i| format!("_{i}")).collect()
     }
+
+    /// The variant's payload as reflection [`TypeRepr`]s, parallel to [`Self::field_names`] —
+    /// `enum_name` is the enum the variant belongs to, so the two recursive arms resolve to it.
+    /// The reflection twin of the checker's `prelude_field_type`, and the reason
+    /// [`prelude_type_infos`] can report a prelude variant's payload as precisely as a `.noe`
+    /// enum's.
+    pub fn field_reprs(&self, enum_name: &str) -> Vec<TypeRepr> {
+        self.fields.iter().map(|f| f.repr(enum_name)).collect()
+    }
+}
+
+impl PreludeFieldTy {
+    /// This payload field's declared type as a reflection [`TypeRepr`], given the enum it belongs
+    /// to. The recursive arms name that enum (`Type.List(inner: Type)` → `Type.Enum("Type", [])`),
+    /// exactly as the checker's lattice projection does — one vocabulary, two lattices.
+    pub fn repr(self, enum_name: &str) -> TypeRepr {
+        let this = || TypeRepr::Enum(enum_name.to_string(), Vec::new());
+        match self {
+            PreludeFieldTy::SelfEnum => this(),
+            PreludeFieldTy::ListOfSelf => TypeRepr::List(Box::new(this())),
+            PreludeFieldTy::Str => TypeRepr::Str,
+            PreludeFieldTy::Int => TypeRepr::Int,
+            PreludeFieldTy::Bool => TypeRepr::Bool,
+        }
+    }
 }
 
 /// A **prelude enum**: one of the enums the language itself declares, which a program can name,
@@ -2528,6 +2553,53 @@ pub fn prelude_enums() -> Vec<PreludeEnum> {
             semantic: false,
         },
     ]
+}
+
+/// Every prelude enum as a **reflectable [`TypeInfo`]** — the projection of [`prelude_enums`] that
+/// makes the language's own enums answer the type-level reflection queries (`variants_of`,
+/// `field_specs_of`) the way every other enum does.
+///
+/// [`build`] walks a *program*, and these five are declared by the language, not by the program —
+/// so before this projection existed they were absent from the artifact entirely, and
+/// `variants_of("Ordering")` / `field_specs_of("Ordering")` were **both** empty. By the pair rule
+/// those two queries are documented under (see [`ReflectionInfo::variant_specs`]), both-empty is
+/// the one honest "I know nothing about this name" — so reflection reported a type the language
+/// itself declares, and `Ordering.try_from("Less")` accepts, as unknown. A framework walking a
+/// `type_of` result saw `Type.Enum("Ordering", [])` and then got no cases for it, which is the same
+/// silently-wrong outcome `variants_of` was introduced to remove, one level up.
+///
+/// Derived from the one shared table rather than re-listed, for the reason the table exists: the
+/// checker, both backends, and the compiler already read it, and reflection was the last consumer
+/// that did not. Seeded into the artifact by `noeta_check::extend_reflection`, which skips any name
+/// the program itself declares — so a user's own `enum Ordering` shadows the prelude one here
+/// exactly as it does everywhere else.
+pub fn prelude_type_infos() -> Vec<TypeInfo> {
+    prelude_enums()
+        .into_iter()
+        .map(|decl| TypeInfo {
+            name: decl.name.to_string(),
+            kind: TypeKind::Enum,
+            // An enum declares no fields; `field_specs_of` on one reports the empty list, and it is
+            // `variants_of` that carries the schema. The pair is what distinguishes it from a
+            // field-less struct.
+            fields: Vec::new(),
+            field_types: Vec::new(),
+            field_optional: Vec::new(),
+            field_defaults: Vec::new(),
+            variants: decl
+                .variants
+                .iter()
+                .map(|v| VariantInfo {
+                    name: v.name.clone(),
+                    fields: v.field_names(),
+                    field_types: v.field_reprs(decl.name),
+                    // No prelude enum is backed — their cases are their wire values, the same
+                    // statement `register_prelude_enums` makes on the checker side.
+                    backing: None,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// The `Attributed<T>` prelude struct's name — `{ target: string, value: T }`, the element type of
