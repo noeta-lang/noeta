@@ -5466,6 +5466,27 @@ const TRACING_DOCS: &[(&str, &str)] = &[
         "Run `f` inside a new span named `name`, closing the span when it returns; returns `f`'s \
          result.",
     ),
+    (
+        "set_attribute",
+        "Set an attribute on the **active** span — the span you are already inside (a `with_span` \
+         body, or a request handler under the auto-instrumented SERVER span), which no handle \
+         names. Returns whether a live active span received it: `false` at top level, so the \
+         no-span case is visible rather than silent. Use `Span.set_attribute` for a span you hold.",
+    ),
+    (
+        "add_event",
+        "Add a timestamped event to the **active** span. This is the annotation to reach for \
+         instead of opening a short child span for something that merely *happened* during the \
+         current unit of work — a child span per event inflates trace volume and buries the \
+         signal. Returns whether a live active span received it (`false` at top level).",
+    ),
+    (
+        "record_error",
+        "Set the **active** span's status to error with `message` — mark the span you are inside \
+         as failed without holding its handle. Returns whether a live active span received it; \
+         check it on a path that must not lose an error (`if !tracing.record_error(msg) { \
+         log.error(msg) }`), since at top level there is no span to carry it.",
+    ),
 ];
 
 const QUAT_DOCS: &[(&str, &str)] = &[

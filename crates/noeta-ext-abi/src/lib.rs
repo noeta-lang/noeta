@@ -74,7 +74,15 @@
 /// that classifies by sniffing the aborting door's message string) would make every third-party
 /// host silently answer `other` for a missing binary, which is exactly the information these doors
 /// exist to deliver.
-pub const ABI_VERSION: u32 = 8;
+///
+/// **9** — `std.tracing` grew the **active-span annotators**: `tracing.set_attribute`,
+/// `tracing.add_event`, and `tracing.record_error`, three ctx functions that apply the `Span`
+/// mutations to the span the caller is already *inside* rather than to a handle it holds. Purely
+/// additive registration (no [`host::Host`] method changed, nothing written for ABI 8 stops
+/// compiling), counted anyway under the rule above because it widens the registry surface an
+/// extension and a backend can rely on. Deliberately not a `current_span() -> ?Span`: that would
+/// hand a caller `.end()` on a span it never opened — see the `std.tracing` module header.
+pub const ABI_VERSION: u32 = 9;
 
 pub mod args;
 pub mod channel;
