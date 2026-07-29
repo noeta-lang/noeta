@@ -1,0 +1,72 @@
+// std.tracing — the active-span annotators vs. a REMOTE propagation seed (T5d). Automatic
+// propagation seeds a receiving strand's task-local context with a *remote-interned* pseudo-handle:
+// the context that rode a channel message, whose originating span lives on another host. It is a
+// perfectly good implicit PARENT — `current_context()` reports it and a new span nests under it —
+// but it is not a live span here, so every host-side mutation on it is a no-op.
+//
+// An annotator that treated the seed as "the active span" would therefore answer `true` while
+// dropping the attribute on the floor: exactly the silent failure this surface exists to remove. So
+// a remote seed reads as "nothing to annotate" and the caller gets `false`, and the fix is visible
+// from the program — open a span (`with_span`, or `span_from` on the propagated traceparent) and
+// annotate that.
+// expect: stdout "seeded=true"
+// expect: stdout "annotated_seed=false"
+// expect: stdout "annotated_own_span=true"
+// expect: stdout "own_span_continues_trace=true"
+// expect: stdout "done"
+// expect: exit 0
+use std.{tracing}
+
+(tx, rx) = channel::<int>(1)
+
+async fn producer() use (tx): string {
+    tx.send(1).await
+    tx.close()
+    return tracing.current_context()
+}
+
+async fn consumer() use (rx): (string, bool, bool, string) {
+    rx.recv().await
+    // Seeded by the message: a parent context is present…
+    seed = tracing.current_context()
+    // …but it is not a live span, so there is nothing here to annotate.
+    on_seed = tracing.add_event("consumed")
+
+    // Opening a span over the seed gives the consumer something real to annotate, and it still
+    // continues the producer's trace — the seed did its job as a parent.
+    body = fn(): (bool, string) {
+        hit = tracing.add_event("consumed")
+        return (hit, tracing.current_context())
+    }
+    (on_own, own_ctx) = tracing.with_span("consume", body)
+    return (seed, on_seed, on_own, own_ctx)
+}
+
+async fn run(): (string, string, bool, bool, string) {
+    // The producer sends from inside its own span, so the message carries that span's context.
+    // The consumer is spawned OUTSIDE any span, so its context can only come from the message.
+    mut got = ("", false, false, "")
+    mut sent = ""
+    concurrent {
+        hp = spawn tracing.with_span("produce", producer)
+        hc = spawn consumer()
+        sent = hp.await
+        got = hc.await
+    }
+    (seed, on_seed, on_own, own_ctx) = got
+    return (sent, seed, on_seed, on_own, own_ctx)
+}
+
+(sent, seed, annotated_seed, annotated_own, own_ctx) = run().await
+
+seeded = seed != "" && seed == sent
+echo "seeded=${seeded}"
+echo "annotated_seed=${annotated_seed}"
+echo "annotated_own_span=${annotated_own}"
+
+sp = seed.split("-")
+op = own_ctx.split("-")
+continues = op[1] == sp[1] && op[2] != sp[2]
+echo "own_span_continues_trace=${continues}"
+
+echo "done"

@@ -1,0 +1,53 @@
+// std.tracing — the active-span annotators under NESTED spans. `with_span` pushes onto the
+// task-local active-span stack, so "the active span" is always the innermost one; an annotation
+// inside an inner body must reach the inner span, and after the inner body returns the outer span
+// is active again (the pop restores it).
+//
+// From the language, what is observable is that a live span is present at every depth and that the
+// active *context* changes across the boundary — the traceparent's span-id field names the span an
+// annotation would reach. Which span actually received each attribute is asserted against the
+// sandbox recorder in `crates/noeta-conformance/tests/tracing_serve.rs`; here the differential
+// oracle pins the stack discipline itself on both backends.
+// expect: stdout "outer_hit=true"
+// expect: stdout "inner_hit=true"
+// expect: stdout "inner_is_not_outer=true"
+// expect: stdout "same_trace=true"
+// expect: stdout "restored_hit=true"
+// expect: stdout "restored_is_outer=true"
+// expect: stdout "done"
+// expect: exit 0
+use std.{tracing}
+
+outer_body = fn(): void {
+    // The outer span is active: its traceparent names it, and an annotation reaches it.
+    outer_ctx = tracing.current_context()
+    outer_hit = tracing.set_attribute("depth", 1)
+    echo "outer_hit=${outer_hit}"
+
+    inner_body = fn(): string {
+        inner_hit = tracing.add_event("inner.step")
+        echo "inner_hit=${inner_hit}"
+        return tracing.current_context()
+    }
+    inner_ctx = tracing.with_span("inner", inner_body)
+
+    op = outer_ctx.split("-")
+    ip = inner_ctx.split("-")
+    // Distinct spans (different span ids) in one trace — the annotation inside the inner body
+    // targeted the inner span, not the outer one it is nested in.
+    distinct = op[2] != ip[2]
+    same_trace = op[1] == ip[1]
+    echo "inner_is_not_outer=${distinct}"
+    echo "same_trace=${same_trace}"
+
+    // Back outside the inner body the outer span is active again — the pop restored it, so a
+    // later annotation lands on the outer span rather than on an ended inner one.
+    restored_hit = tracing.record_error("outer failed")
+    echo "restored_hit=${restored_hit}"
+    restored_ctx = tracing.current_context()
+    restored_is_outer = restored_ctx == outer_ctx
+    echo "restored_is_outer=${restored_is_outer}"
+}
+tracing.with_span("outer", outer_body)
+
+echo "done"
