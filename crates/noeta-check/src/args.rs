@@ -289,7 +289,7 @@ impl Checker {
         // arguments" on top — which is both redundant and false, since this signature does. Return
         // the arguments label-free so the recovery path stays quiet about labels.
         Some(match bound {
-            Some((ordered, _)) => ordered,
+            Some((ordered, _, _)) => ordered,
             None => strip_labels(args),
         })
     }
@@ -314,7 +314,7 @@ impl Checker {
         arg_types: &mut [crate::Type],
         span: Span,
         call_span: Span,
-    ) -> Option<(Vec<CallArg>, Vec<crate::Type>)> {
+    ) -> Option<(Vec<CallArg>, Vec<crate::Type>, Vec<usize>)> {
         // A pipeline's desugared call is marked at its span by `synth_piped`, which is what tells
         // binding that argument zero is the piped value and has no written position of its own.
         let piped = self.sites.piped_calls.contains(&call_span);
@@ -378,6 +378,16 @@ impl Checker {
             .enumerate()
             .filter_map(|(p, b)| b.map(|_| param_types[p].clone()))
             .collect();
+        // The same compaction as a *parameter index* list: argument `i` of the returned list fills
+        // parameter `supplied_at[i]`. The concrete `supplied_params` above is what a monomorphic
+        // call needs; a GENERIC call cannot use it, because it must check each argument against the
+        // callee's RAW (unsubstituted) parameter type to bind the type parameters — so it needs to
+        // know which raw parameter each argument landed on.
+        let supplied_at: Vec<usize> = binding
+            .iter()
+            .enumerate()
+            .filter_map(|(p, b)| b.map(|_| p))
+            .collect();
         let types: Vec<crate::Type> = order
             .iter()
             .map(|&i| arg_types.get(i).cloned().unwrap_or(crate::Type::Unknown))
@@ -403,6 +413,6 @@ impl Checker {
                 ..args[i].clone()
             })
             .collect();
-        Some((ordered, supplied_params))
+        Some((ordered, supplied_params, supplied_at))
     }
 }

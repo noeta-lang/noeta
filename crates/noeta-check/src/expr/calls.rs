@@ -308,6 +308,9 @@ impl Checker {
             args,
             callee_span,
             seed,
+            // A seeded position hands the arguments through as written; the caller has not
+            // compacted them, so argument `i` is parameter `i`.
+            &[],
             Some((call_span, name.to_string())),
             env,
         );
@@ -485,6 +488,34 @@ impl Checker {
             .map(|(n, _)| n.clone())
             .zip(resolved)
             .collect();
+        // Named arguments, normalized into parameter order exactly as the non-turbofish call does
+        // (`synth_call`) — spelling the instantiation must not change what a label means. Without
+        // this, `f::<T>(1, c: 9)` checked its arguments in written order against the declared
+        // parameters and reported a type error naming the parameter it skipped.
+        let permuted;
+        let mut supplied_at: Vec<usize> = Vec::new();
+        let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
+            let (names, types) = (sig.param_names.clone(), sig.params.clone());
+            match self.order_arguments(
+                arg_exprs,
+                &names,
+                &types,
+                sig.required,
+                name,
+                args,
+                span,
+                span,
+            ) {
+                Some((a, _, at)) => {
+                    permuted = a;
+                    supplied_at = at;
+                    &permuted[..]
+                }
+                None => return sig.ret.clone(),
+            }
+        } else {
+            arg_exprs
+        };
         self.check_generic_call_seeded(
             name,
             &generic,
@@ -493,6 +524,7 @@ impl Checker {
             arg_exprs,
             span,
             seed,
+            &supplied_at,
             Some((span, name.to_string())),
             env,
         )
@@ -620,6 +652,9 @@ impl Checker {
                     // instantiation, closure finalization, arity and assignability) then sees a
                     // plain positional call and needs no notion of labels at all.
                     let (permuted, supplied_params);
+                    // Which raw parameter each argument landed on, for the generic path below —
+                    // empty for the dense-prefix call, where argument `i` is parameter `i`.
+                    let mut supplied_at: Vec<usize> = Vec::new();
                     let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
                         let (names, types) = (sig.param_names.clone(), sig.params.clone());
                         match self.order_arguments(
@@ -632,9 +667,10 @@ impl Checker {
                             span,
                             call_span,
                         ) {
-                            Some((a, p)) => {
+                            Some((a, p, at)) => {
                                 permuted = a;
                                 supplied_params = Some(p);
+                                supplied_at = at;
                                 &permuted[..]
                             }
                             None => return self.symbols.functions[name.as_str()].ret.clone(),
@@ -656,6 +692,7 @@ impl Checker {
                             arg_exprs,
                             span,
                             &[],
+                            &supplied_at,
                             Some((call_span, name.to_string())),
                             env,
                         );
@@ -1274,6 +1311,7 @@ impl Checker {
         // the call span, so a call with no span to key (a synthesized or forwarded one) keeps its
         // written order and its labels are refused rather than silently ignored.
         let permuted;
+        let mut supplied_at: Vec<usize> = Vec::new();
         let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
             let Some(call_span) = call_span else {
                 self.error(
@@ -1294,8 +1332,9 @@ impl Checker {
                 span,
                 call_span,
             ) {
-                Some((a, _)) => {
+                Some((a, _, at)) => {
                     permuted = a;
+                    supplied_at = at;
                     &permuted[..]
                 }
                 None => return sig.ret.clone(),
@@ -1340,6 +1379,7 @@ impl Checker {
                 arg_exprs,
                 span,
                 seed,
+                &supplied_at,
                 hidden_site,
                 env,
             );
@@ -1513,6 +1553,32 @@ impl Checker {
         for ((n, _), t) in own.iter().zip(resolved) {
             seed.entry(n.clone()).or_insert(t);
         }
+        // Named arguments, normalized into parameter order exactly as the non-turbofish method
+        // call does (`call_user_method`) — see the free-function twin above.
+        let permuted;
+        let mut supplied_at: Vec<usize> = Vec::new();
+        let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
+            let (names, types) = (sig.param_names.clone(), sig.params.clone());
+            match self.order_arguments(
+                arg_exprs,
+                &names,
+                &types,
+                sig.required,
+                name,
+                args,
+                span,
+                span,
+            ) {
+                Some((a, _, at)) => {
+                    permuted = a;
+                    supplied_at = at;
+                    &permuted[..]
+                }
+                None => return sig.ret.clone(),
+            }
+        } else {
+            arg_exprs
+        };
         self.check_generic_call_seeded(
             name,
             &generic,
@@ -1521,6 +1587,7 @@ impl Checker {
             arg_exprs,
             span,
             seed,
+            &supplied_at,
             // An EXPLICIT method turbofish forwards on the same channel as an inferred one — the
             // turbofish only pins the instantiation the seed carries into the slot templates.
             Some((span, format!("{type_name}.{name}"))),

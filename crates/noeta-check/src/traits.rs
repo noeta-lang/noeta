@@ -1807,6 +1807,7 @@ impl Checker {
         arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         recv_args: &[Type],
+        supplied_at: &[usize],
         hidden_site: Option<(Span, String)>,
         env: &mut Env,
     ) -> Type {
@@ -1827,6 +1828,7 @@ impl Checker {
             arg_exprs,
             span,
             seed,
+            supplied_at,
             hidden_site,
             env,
         )
@@ -1848,6 +1850,7 @@ impl Checker {
         arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         seed: HashMap<String, Type>,
+        supplied_at: &[usize],
         hidden_site: Option<(Span, String)>,
         env: &mut Env,
     ) -> Type {
@@ -1869,11 +1872,25 @@ impl Checker {
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
         let mut subst: HashMap<String, Type> = seed;
-        for (i, raw) in generic.raw_params.iter().enumerate() {
+        // Which parameter each argument fills. A named-argument call that SKIPS a defaulted
+        // parameter (`f(1, c: 9)`) has already been compacted into parameter order, so argument
+        // `i` is the `i`-th SUPPLIED parameter — not `raw_params[i]`. Checking it against
+        // `raw_params[i]` bound the wrong type parameter and reported the skipped parameter's type
+        // in the mismatch, which is what made a named argument over a defaulted one unusable on
+        // any generic callable. Empty means the ordinary dense prefix, where the two coincide.
+        let positions: Vec<usize> = if supplied_at.is_empty() {
+            (0..generic.raw_params.len()).collect()
+        } else {
+            supplied_at.to_vec()
+        };
+        for (i, &p) in positions.iter().enumerate() {
             if i >= args.len() {
                 // Omitted trailing defaults — already checked at the declaration.
                 break;
             }
+            let Some(raw) = generic.raw_params.get(p) else {
+                break;
+            };
             // A deferred closure argument finalizes against the raw parameter with everything
             // bound SO FAR substituted in — `fn each<T>(xs: List<T>, f: (T) -> unit)` has `T`
             // pinned by `xs` before `f` is looked at — and its now-known type (the inferred

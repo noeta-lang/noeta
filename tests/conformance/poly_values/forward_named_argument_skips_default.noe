@@ -1,0 +1,69 @@
+// The point of giving type arguments a channel of their own, stated as a program.
+//
+// While a forwarding call's type arguments rode in its VALUE-argument list, every parameter
+// position shifted, so the checker's argument→parameter binding could not be applied and lowering
+// discarded it (`supplied: None`). That silently defeated the one thing the binding exists for: a
+// named argument that SKIPS a defaulted parameter (`tag:` here, over `trim`). The type arguments
+// now travel beside the value arguments, positions no longer move, and the mask survives verbatim.
+//
+// Exercised on all four shapes that reach the generic-call path by different machinery — a free fn
+// and a method, each with the instantiation spelled and inferred — because each normalizes its
+// labels in its own place, and three of the four did not normalize them at all before this. In
+// every case `trim` must come back `false` (its default, evaluated by the CALLEE, not by the call)
+// and `tag` must carry the value its label named, while `T` still resolves per instantiation
+// through the hidden slot.
+// expect: stdout "Order/false/z"
+// expect: stdout "User/false/y"
+// expect: stdout "4:Order/false/m"
+// expect: stdout "4:User/false/n"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+struct User {
+    name: string
+}
+
+// Forwards into a RECIPE position, instantiation spelled at the call.
+fn decode<T>(text: string, trim: bool = false, tag: string = "none"): string {
+    r = json.try_parse::<T>(text)
+    ok = match r {
+        Ok(v) => "",
+        Err(e) => "!",
+    }
+    return "${type_name::<T>()}/${trim}/${tag}${ok}"
+}
+
+// Forwards into a NAME position, instantiation inferred from the first argument.
+fn label<T>(v: T, trim: bool = false, tag: string = "none"): string {
+    return "${type_name::<T>()}/${trim}/${tag}"
+}
+
+class Repo {
+    pub n: int
+
+    fn new(n: int): Repo {
+        return Repo { n: n }
+    }
+
+    fn decode<T>(text: string, trim: bool = false, tag: string = "none"): string {
+        return "${self.n}:" ~ decode::<T>(text, trim, tag)
+    }
+
+    fn label<T>(v: T, trim: bool = false, tag: string = "none"): string {
+        return "${self.n}:${type_name::<T>()}/${trim}/${tag}"
+    }
+}
+
+u = User { name: "Ada" }
+
+echo decode::<Order>("{\"id\": 1}", tag: "z")
+echo label(u, tag: "y")
+
+r = Repo.new(4)
+echo r.decode::<Order>("{\"id\": 1}", tag: "m")
+echo r.label(u, tag: "n")
