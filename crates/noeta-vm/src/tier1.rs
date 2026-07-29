@@ -284,7 +284,7 @@ extern "C" fn jit_call(
         dst,
         callee_val,
         args,
-        type_args,
+        type_args.regs(),
         span,
         pc as usize + 1,
         supplied,
@@ -1199,7 +1199,10 @@ mod tests {
             .filter(|l| {
                 let t = l.trim();
                 !t.starts_with("//")
-                    && (t.ends_with("..") || t.contains(".. }") || t.contains(".. =>") || t == "..,")
+                    && (t.ends_with("..")
+                        || t.contains(".. }")
+                        || t.contains(".. =>")
+                        || t == "..,")
             })
             .collect();
         assert!(

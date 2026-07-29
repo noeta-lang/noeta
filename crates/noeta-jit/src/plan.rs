@@ -179,7 +179,7 @@ fn live_effect(op: &Op) -> LiveEffect<'_> {
             reads: ReadSet {
                 inline: [Some(*callee), None],
                 list: args,
-                list2: type_args,
+                list2: type_args.regs(),
             },
             def: Some(*dst),
         },
@@ -192,7 +192,7 @@ fn live_effect(op: &Op) -> LiveEffect<'_> {
             reads: ReadSet {
                 inline: [None; 2],
                 list: args,
-                list2: type_args,
+                list2: type_args.regs(),
             },
             def: Some(*dst),
         },
@@ -540,6 +540,7 @@ mod tests {
                 dst: 1,
                 callee: 2,
                 args: Box::new([]),
+                type_args: noeta_bytecode::TypeArgs::NONE,
                 span: sp(),
                 supplied: None,
             },

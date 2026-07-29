@@ -233,6 +233,57 @@ pub enum ReuseCheck {
     Static,
 }
 
+/// A call's **type-argument** registers — what fills a forwarding generic's leading
+/// [`Chunk::hidden`] slots (poly-values F2b), in slot order. See [`Op::Call::type_args`].
+///
+/// Held out of line behind a **thin** pointer, and empty (one null word) for the overwhelming
+/// majority of calls, which forward nothing. `Op` is streamed through the dispatch loop and pinned
+/// to a single 64-byte cache line (P-VMT-OPSZ, `tests/op_size.rs`); an inline `Box<[Reg]>` is a
+/// *fat* pointer, and spending two words on a channel almost every call leaves empty is exactly
+/// what pushed `Op` over that line. The rare forwarding call pays one extra indirection, on a path
+/// that is already doing a frame push.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct TypeArgs(Option<Box<TypeArgSlots>>);
+
+/// The out-of-line payload of a non-empty [`TypeArgs`]. A named struct rather than a boxed slice
+/// so the outer `Option<Box<_>>` is a *thin* pointer — a `Box<[Reg]>` would put the length back
+/// inline and cost the second word this indirection exists to save.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct TypeArgSlots(Box<[Reg]>);
+
+impl TypeArgs {
+    /// The empty channel — every call that forwards nothing.
+    pub const NONE: TypeArgs = TypeArgs(None);
+
+    /// The channel holding `regs`, in slot order. An empty list is [`TypeArgs::NONE`], so "no type
+    /// arguments" has one representation and costs no allocation.
+    pub fn new(regs: Vec<Reg>) -> TypeArgs {
+        if regs.is_empty() {
+            TypeArgs::NONE
+        } else {
+            TypeArgs(Some(Box::new(TypeArgSlots(regs.into_boxed_slice()))))
+        }
+    }
+
+    /// The registers, in slot order — empty for a non-forwarding call.
+    pub fn regs(&self) -> &[Reg] {
+        self.0.as_deref().map_or(&[], |s| &s.0)
+    }
+
+    /// The registers for in-place rewriting (register allocation renumbers them like any operand).
+    pub fn regs_mut(&mut self) -> &mut [Reg] {
+        self.0.as_deref_mut().map_or(&mut [], |s| &mut s.0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    pub fn len(&self) -> usize {
+        self.regs().len()
+    }
+}
+
 /// One register-machine instruction.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Op {
@@ -1088,7 +1139,7 @@ pub enum Op {
         /// parameter positions are exactly those of the same call without forwarding. A callee
         /// declaring a different `hidden` count than this supplies cannot arise from a checked
         /// program; the VM aborts rather than binding a value argument into a type slot.
-        type_args: Box<[Reg]>,
+        type_args: TypeArgs,
         span: Span,
         /// Which VALUE parameters `args` fills, when the call cannot be described by the ordinary
         /// "args fill parameters 0..n in order" prefix rule — i.e. a named-argument call that
@@ -1110,7 +1161,7 @@ pub enum Op {
         /// The [`Op::Call::type_args`] twin — same meaning, same empty common case. This is the
         /// op a forwarding generic is actually reached through, since a forwarding call is by
         /// definition a call of a statically-known top-level `fn`.
-        type_args: Box<[Reg]>,
+        type_args: TypeArgs,
         span: Span,
         /// The [`Op::Call::supplied`] twin — same meaning, same `None` fast path.
         supplied: Option<u64>,
@@ -1711,11 +1762,11 @@ pub fn param_of_arg(i: usize, supplied: Option<u64>) -> usize {
 
 /// Render a call's **type**-argument registers as a turbofish (`::<r3>`), so a forwarding call
 /// reads as one in the disassembly. Empty — and therefore invisible — for every other call.
-fn type_arg_regs(type_args: &[Reg]) -> String {
+fn type_arg_regs(type_args: &TypeArgs) -> String {
     if type_args.is_empty() {
         return String::new();
     }
-    let regs: Vec<String> = type_args.iter().map(|r| format!("r{r}")).collect();
+    let regs: Vec<String> = type_args.regs().iter().map(|r| format!("r{r}")).collect();
     format!("::<{}>", regs.join(", "))
 }
 

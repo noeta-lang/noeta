@@ -3141,6 +3141,16 @@ impl<'m> FnCompiler<'m> {
     }
 
     /// Materialize each atom in `atoms` into a register, in order.
+    /// Materialize a call's TYPE-argument atoms into its [`noeta_bytecode::TypeArgs`] channel.
+    /// Empty in, empty (allocation-free) out — the shape of every call that forwards nothing.
+    fn type_arg_regs(&mut self, atoms: &[Atom]) -> Result<noeta_bytecode::TypeArgs, Unsupported> {
+        let mut regs = Vec::with_capacity(atoms.len());
+        for a in atoms {
+            regs.push(self.atom_reg(a)?);
+        }
+        Ok(noeta_bytecode::TypeArgs::new(regs))
+    }
+
     fn atom_regs(&mut self, atoms: &[Atom]) -> Result<Box<[Reg]>, Unsupported> {
         let mut regs = Vec::with_capacity(atoms.len());
         for a in atoms {
@@ -4258,7 +4268,7 @@ impl<'m> FnCompiler<'m> {
             // tree-walker evaluates the two channels — they are ordinary operands, and a
             // pass-through slot is a plain local read, so the order is observable only through
             // register pressure, but the two backends agree on it anyway.
-            let type_args = self.atom_regs(type_args)?;
+            let type_args = self.type_arg_regs(type_args)?;
             let args = self.atom_regs(args)?;
             self.code.push(Op::CallGlobal {
                 dst,
@@ -4271,7 +4281,7 @@ impl<'m> FnCompiler<'m> {
             return Ok(());
         }
         let callee_reg = self.atom_reg(callee)?;
-        let type_args = self.atom_regs(type_args)?;
+        let type_args = self.type_arg_regs(type_args)?;
         let args = self.atom_regs(args)?;
         self.code.push(Op::Call {
             dst,
@@ -4883,7 +4893,7 @@ impl<'m> FnCompiler<'m> {
             // An associated function is reached by name through its class, not through the
             // forwarding-fn table, so it declares no type-argument slots (Axis A gives methods
             // theirs through `Rvalue::Method`).
-            type_args: Box::new([]),
+            type_args: noeta_bytecode::TypeArgs::NONE,
             span,
             // A unit receiver occupies register 0 above, so the declared parameters shift by one.
             supplied: supplied.map(|m| (m << 1) | 1),

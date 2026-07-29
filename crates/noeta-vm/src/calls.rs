@@ -1088,7 +1088,12 @@ impl<'m> Vm<'m> {
                 let hidden = callee_chunk.hidden as usize;
                 if ty_regs.len() != hidden {
                     let name = callee_chunk.name.clone();
-                    return Err(self.no_instantiation(name.as_deref(), hidden, ty_regs.len(), span));
+                    return Err(self.no_instantiation(
+                        name.as_deref(),
+                        hidden,
+                        ty_regs.len(),
+                        span,
+                    ));
                 }
                 // Arity is reckoned over the VALUE parameters alone — the hidden slots are filled
                 // from `ty_regs` above, never from `arg_regs`.

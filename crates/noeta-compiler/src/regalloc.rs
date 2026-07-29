@@ -579,7 +579,7 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*callee);
             f.uses.extend(args.iter().copied());
-            f.uses.extend(type_args.iter().copied());
+            f.uses.extend(type_args.regs().iter().copied());
         }
         Op::CallGlobal {
             dst,
@@ -589,7 +589,7 @@ fn op_facts(op: &Op) -> OpFacts {
         } => {
             f.def = Some(*dst);
             f.uses.extend(args.iter().copied());
-            f.uses.extend(type_args.iter().copied());
+            f.uses.extend(type_args.regs().iter().copied());
         }
         Op::SpawnIsolate {
             dst, callee, args, ..
@@ -1102,7 +1102,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             for r in args.iter_mut() {
                 m(r);
             }
-            for r in type_args.iter_mut() {
+            for r in type_args.regs_mut().iter_mut() {
                 m(r);
             }
         }
@@ -1116,7 +1116,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             for r in args.iter_mut() {
                 m(r);
             }
-            for r in type_args.iter_mut() {
+            for r in type_args.regs_mut().iter_mut() {
                 m(r);
             }
         }
@@ -1262,6 +1262,7 @@ mod tests {
             consts: Vec::new(),
             diagnostics: Vec::new(),
             num_params,
+            hidden: 0,
             num_registers,
             defaults: Vec::new(),
             frame_locals: Vec::new(),

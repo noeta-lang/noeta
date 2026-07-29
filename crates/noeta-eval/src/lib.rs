@@ -2877,13 +2877,25 @@ impl Interpreter {
             if let Value::Type(def) = &receiver
                 && let Some(method) = def.methods.get(name)
             {
-                return self.call_closure_masked(&Rc::clone(method), args, span, type_args, supplied);
+                return self.call_closure_masked(
+                    &Rc::clone(method),
+                    args,
+                    span,
+                    type_args,
+                    supplied,
+                );
             }
             if let Value::EnumType(def) = &receiver
                 && def.variant(name).is_none()
                 && let Some(method) = def.method(name)
             {
-                return self.call_closure_masked(&Rc::clone(method), args, span, type_args, supplied);
+                return self.call_closure_masked(
+                    &Rc::clone(method),
+                    args,
+                    span,
+                    type_args,
+                    supplied,
+                );
             }
             if let Value::Enum(e) = &receiver
                 && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
@@ -3514,8 +3526,14 @@ impl Interpreter {
                         Ok(bound) => bound,
                         Err(message) => return Ok(invoke_err(message)),
                     };
-                let result =
-                    self.call_method_on_masked(&object, &method_closure, args, span, &[], supplied)?;
+                let result = self.call_method_on_masked(
+                    &object,
+                    &method_closure,
+                    args,
+                    span,
+                    &[],
+                    supplied,
+                )?;
                 Ok(builtin_enum("Result", "Ok", vec![result]))
             }
             _ => Ok(invoke_err(format!(
