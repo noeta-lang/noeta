@@ -1079,10 +1079,20 @@ pub enum Op {
         dst: Reg,
         callee: Reg,
         args: Box<[Reg]>,
+        /// The registers holding this call's **type arguments** — what fills a forwarding
+        /// generic's leading [`Chunk::hidden`] slots (poly-values F2b), in slot order. Empty for
+        /// the overwhelming majority of calls, which forward nothing.
+        ///
+        /// A channel of its own, beside `args` rather than prepended onto it: that is what keeps
+        /// `supplied` below indexed over the callee's **value** parameters, so a forwarding call's
+        /// parameter positions are exactly those of the same call without forwarding. A callee
+        /// declaring a different `hidden` count than this supplies cannot arise from a checked
+        /// program; the VM aborts rather than binding a value argument into a type slot.
+        type_args: Box<[Reg]>,
         span: Span,
-        /// Which parameters `args` fills, when the call cannot be described by the ordinary
+        /// Which VALUE parameters `args` fills, when the call cannot be described by the ordinary
         /// "args fill parameters 0..n in order" prefix rule — i.e. a named-argument call that
-        /// *skips* a defaulted parameter (`f(1, c: 9)`). Bit `p` set means parameter `p` is
+        /// *skips* a defaulted parameter (`f(1, c: 9)`). Bit `p` set means value parameter `p` is
         /// supplied, and the supplied bits, read low to high, correspond to `args` in order.
         /// `None` means the prefix rule applies, which is every call that omits only trailing
         /// parameters — so the common path carries no extra work.
@@ -1097,6 +1107,10 @@ pub enum Op {
         dst: Reg,
         global: GlobalId,
         args: Box<[Reg]>,
+        /// The [`Op::Call::type_args`] twin — same meaning, same empty common case. This is the
+        /// op a forwarding generic is actually reached through, since a forwarding call is by
+        /// definition a call of a statically-known top-level `fn`.
+        type_args: Box<[Reg]>,
         span: Span,
         /// The [`Op::Call::supplied`] twin — same meaning, same `None` fast path.
         supplied: Option<u64>,
@@ -1237,6 +1251,19 @@ pub struct Chunk {
     pub diagnostics: Vec<Diagnostic>,
     /// Parameters occupy registers `0..num_params` on entry.
     pub num_params: u16,
+    /// How many of those leading registers are **type-argument slots** rather than value
+    /// parameters (poly-values F2b): a forwarding generic's `$ty0`, `$ty1`, … . They are ordinary
+    /// registers — the body reads them, register allocation places them — but they are filled from
+    /// the call's own [`Op::Call::type_args`] channel, never from its value arguments.
+    ///
+    /// So a call binds type argument `j` into register `j` and value argument `i` into register
+    /// `hidden + param_of_arg(i, supplied)`, and arity, defaults and the supplied mask are all
+    /// reckoned over the `num_params - hidden` value parameters alone. Zero for every prototype
+    /// that forwards nothing, which is every prototype but a forwarding generic's.
+    ///
+    /// The eval twin is `Func::hidden`, read straight off the same lowered `Func`, so the two
+    /// backends cannot disagree about the layout.
+    pub hidden: u16,
     pub num_registers: u16,
     /// The frame's source locals (params + body bindings) in **construction order**, by register —
     /// the order they come to life as the function runs. On a panic the VM walks this reversed and
@@ -1304,6 +1331,7 @@ impl Chunk {
             consts: Vec::new(),
             diagnostics: Vec::new(),
             num_params: 0,
+            hidden: 0,
             num_registers: 0,
             defaults: Vec::new(),
             frame_locals: Vec::new(),
@@ -1679,6 +1707,16 @@ pub fn param_of_arg(i: usize, supplied: Option<u64>) -> usize {
         remaining &= remaining - 1; // clear the lowest set bit
     }
     remaining.trailing_zeros() as usize
+}
+
+/// Render a call's **type**-argument registers as a turbofish (`::<r3>`), so a forwarding call
+/// reads as one in the disassembly. Empty — and therefore invisible — for every other call.
+fn type_arg_regs(type_args: &[Reg]) -> String {
+    if type_args.is_empty() {
+        return String::new();
+    }
+    let regs: Vec<String> = type_args.iter().map(|r| format!("r{r}")).collect();
+    format!("::<{}>", regs.join(", "))
 }
 
 /// Render a call's argument registers, showing a skipped parameter as `_` so a masked call reads
@@ -2133,11 +2171,13 @@ fn op_repr(
             dst,
             callee,
             args,
+            type_args,
             supplied,
             ..
         } => {
             format!(
-                "Call        r{dst} <- r{callee}({})",
+                "Call        r{dst} <- r{callee}{}({})",
+                type_arg_regs(type_args),
                 call_args(args, *supplied)
             )
         }
@@ -2145,12 +2185,14 @@ fn op_repr(
             dst,
             global,
             args,
+            type_args,
             supplied,
             ..
         } => {
             format!(
-                "CallGlobal  r{dst} <- {:?}({})",
+                "CallGlobal  r{dst} <- {:?}{}({})",
                 g(global),
+                type_arg_regs(type_args),
                 call_args(args, *supplied)
             )
         }

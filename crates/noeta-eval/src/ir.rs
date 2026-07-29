@@ -1270,14 +1270,19 @@ impl Interpreter {
             noeta_ir::Rvalue::Call {
                 callee,
                 args,
+                // A forwarding generic's type arguments (poly-values F2b), in slot order — empty
+                // for every call that forwards nothing. Their own channel, which is why `supplied`
+                // below still indexes the VALUE parameters alone.
+                type_args,
                 // `None` for a pure reordering — lowering already permuted `args`, so there is
                 // nothing left to say. `Some` only when the call skips a defaulted parameter.
                 supplied,
                 span,
             } => {
                 let callee = self.eval_ir_atom(callee, frame)?;
+                let tys = self.eval_ir_atoms(type_args, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
-                self.call_masked(callee, values, *span, *supplied)
+                self.call_masked(callee, values, *span, &tys, *supplied)
             }
             noeta_ir::Rvalue::Method {
                 receiver,
@@ -1335,11 +1340,11 @@ impl Interpreter {
                     // and destroy the held copy — last-reference-gated, so a method that returns
                     // `self` (the result aliases it) correctly defers destruction.
                     let result =
-                        self.call_method_masked(recv.clone(), name, values, *span, *supplied);
+                        self.call_method_masked(recv.clone(), name, values, *span, &[], *supplied);
                     self.destroy_value(recv);
                     result
                 } else {
-                    self.call_method_masked(recv, name, values, *span, *supplied)
+                    self.call_method_masked(recv, name, values, *span, &[], *supplied)
                 };
                 // When this "method call" was a generic enum-variant construction, stamp the reflected
                 // type onto the freshly-built value (R2b.2) — the tree-walker twin of the VM's node tag.

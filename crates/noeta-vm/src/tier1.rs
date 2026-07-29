@@ -235,19 +235,28 @@ extern "C" fn jit_call(
     // `emit_call` emits this helper for `Op::Call` *and* `Op::CallGlobal`; source the callee from a
     // register (Call) or straight from its global slot (CallGlobal — a known top-level `fn`, read
     // without a retain, exactly like the interpreter arm).
-    let (dst, callee_val, args, span, supplied) =
+    let (dst, callee_val, args, type_args, span, supplied) =
         match &module.protos[proto as usize].code[pc as usize] {
             Op::Call {
                 dst,
                 callee,
                 args,
+                type_args,
                 span,
                 supplied,
-            } => (*dst, regs[base + *callee as usize], args, *span, *supplied),
+            } => (
+                *dst,
+                regs[base + *callee as usize],
+                args,
+                type_args,
+                *span,
+                *supplied,
+            ),
             Op::CallGlobal {
                 dst,
                 global,
                 args,
+                type_args,
                 span,
                 supplied,
             } => {
@@ -260,7 +269,7 @@ extern "C" fn jit_call(
                     let _ = vm.error(DiagnosticCode::UnknownName, *span, msg);
                     return noeta_jit_abi::OUTCOME_ABORTED;
                 }
-                (*dst, cv, args, *span, *supplied)
+                (*dst, cv, args, type_args, *span, *supplied)
             }
             // `emit_call` only emits this helper for a call op, so this is unreachable; treat a
             // mismatch defensively as an abort rather than misbehave.
@@ -275,6 +284,7 @@ extern "C" fn jit_call(
         dst,
         callee_val,
         args,
+        type_args,
         span,
         pc as usize + 1,
         supplied,
@@ -366,15 +376,23 @@ extern "C" fn jit_prepare_call(
     // exact-arity check below already excludes such a call (a hole leaves a parameter unfilled);
     // this is the explicit statement of that, so relaxing the arity check cannot silently
     // reintroduce a misplaced-argument bug.
+    //
+    // A non-empty `type_args` is refused for exactly the same reason, and this is why every field
+    // below is bound by name rather than swept under a `..`: this path copies `args` into the
+    // callee window POSITIONALLY, so a type-argument channel it never read would not crash — it
+    // would put the first value argument into `$ty0` and hand the body a wrong answer. `jit_call`
+    // above already named its fields and so would have refused to compile; these two would not
+    // have, which is the asymmetry `the_tier1_helpers_bind_every_field` exists to close.
     let (dst, callee_val, args) = match &module.protos[proto as usize].code[pc as usize] {
         Op::Call {
             dst,
             callee,
             args,
+            type_args,
+            span: _,
             supplied,
-            ..
         } => {
-            if supplied.is_some() {
+            if supplied.is_some() || !type_args.is_empty() {
                 return FALLBACK;
             }
             (*dst, regs[base + *callee as usize], args)
@@ -383,10 +401,11 @@ extern "C" fn jit_prepare_call(
             dst,
             global,
             args,
+            type_args,
+            span: _,
             supplied,
-            ..
         } => {
-            if supplied.is_some() {
+            if supplied.is_some() || !type_args.is_empty() {
                 return FALLBACK;
             }
             let cv = vm.persist.globals[global.0 as usize];
@@ -555,7 +574,7 @@ extern "C" fn jit_run_leaf_op(
             start,
             end,
             inclusive,
-            ..
+            span: _,
         } => {
             let lo = regs[base + *start as usize];
             let hi = regs[base + *end as usize];
@@ -565,7 +584,7 @@ extern "C" fn jit_run_leaf_op(
             set_reg(regs, base, *dst, list);
             noeta_jit_abi::OUTCOME_CONTINUE
         }
-        Op::IterSnapshot { dst, src, .. } => {
+        Op::IterSnapshot { dst, src, span: _ } => {
             let v = regs[base + *src as usize];
             if v.is_object() {
                 return bail; // `Iterable::iter` dispatch → interpreter
@@ -578,7 +597,7 @@ extern "C" fn jit_run_leaf_op(
                 None => bail, // not iterable → interpreter raises the error
             }
         }
-        Op::ListLen { dst, src, .. } => match regs[base + *src as usize].list_len() {
+        Op::ListLen { dst, src, span: _ } => match regs[base + *src as usize].list_len() {
             Some(n) => {
                 set_reg(regs, base, *dst, Value::int(n as i64));
                 noeta_jit_abi::OUTCOME_CONTINUE
@@ -595,7 +614,13 @@ extern "C" fn jit_run_leaf_op(
             }
         }
         Op::LoadField {
-            dst, obj, field, ..
+            dst,
+            obj,
+            field,
+            span: _,
+            // The interpreter's per-site inline cache is loop-local and deliberately unused here
+            // (see the note below); the miss path this helper always takes is the same read.
+            cache: _,
         } => {
             // The interpreter's inline-cache lookup (`caches` is loop-local) is skipped here; the
             // cache-miss resolution — `slot_of` then `slot_at` — is the same read and is bailed on
@@ -625,7 +650,7 @@ extern "C" fn jit_run_leaf_op(
             field,
             value,
             reuse,
-            ..
+            span: _,
         } => {
             let field = module.name(*field);
             if vm.set_field_fast(regs, base, *dst, *obj, field, *value, *reuse) {
@@ -635,7 +660,10 @@ extern "C" fn jit_run_leaf_op(
             }
         }
         Op::Index {
-            dst, recv, index, ..
+            dst,
+            recv,
+            index,
+            span: _,
         } => {
             let v = regs[base + *recv as usize];
             let idx = regs[base + *index as usize];
@@ -682,7 +710,7 @@ extern "C" fn jit_run_leaf_op(
             dst,
             receiver,
             index,
-            ..
+            span: _,
         } => {
             // Positional projection `receiver.N`, retaining the element into `dst` — the companion to
             // the native `ListGet` for `for (i, x) in xs.enumerate()` loops. Out of range bails so the
@@ -1141,5 +1169,45 @@ impl<'m> Vm<'m> {
             }
             Err(_) => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The `..` ban in this file's op patterns, checked on the source rather than trusted.
+    ///
+    /// The tier-1 helpers each read an `Op` back out of the module and act on its fields. Two of
+    /// them — `jit_prepare_call`'s `Op::Call` and `Op::CallGlobal` arms — copy a call's arguments
+    /// into the callee window **positionally**. When those arms wrote `..`, adding the
+    /// `type_args` channel to the call ops did not break them: they compiled, ran, and silently
+    /// dropped the type arguments, laying the first *value* argument into the callee's `$ty0`
+    /// slot, where it would be read as an index into the program's type table. A wrong answer,
+    /// not a crash — the failure mode a compile error would have caught for free.
+    ///
+    /// `jit_call`, three lines away, already named every field, so the same change *did* break it.
+    /// That asymmetry is the whole point: a field-exhaustive pattern turns "a new operand needs
+    /// handling here" into a compile error, and a `..` gives that up for every field that will
+    /// ever be added. Deliberately-unused fields bind as `field: _` and say so.
+    #[test]
+    fn the_tier1_helpers_bind_every_field() {
+        let src = include_str!("tier1.rs");
+        // The helpers end where this test module begins; the doc comment above legitimately talks
+        // about `..` and is not a pattern.
+        let helpers = src.split("mod tests {").next().expect("a source body");
+        let offenders: Vec<&str> = helpers
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                !t.starts_with("//")
+                    && (t.ends_with("..") || t.contains(".. }") || t.contains(".. =>") || t == "..,")
+            })
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "`..` is banned in this file's op patterns — bind every field, deliberately-unused \
+             ones as `field: _`, so that adding an operand to a bytecode op is a compile error \
+             here rather than a silently dropped operand:\n  {}",
+            offenders.join("\n  ")
+        );
     }
 }

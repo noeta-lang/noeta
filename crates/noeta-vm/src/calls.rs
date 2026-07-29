@@ -147,6 +147,16 @@ impl<'m> Vm<'m> {
         match callee.as_closure() {
             Some(proto) => {
                 let chunk = &self.module.protos[proto as usize];
+                // A closure reached as a first-class VALUE carries no type-argument channel, so a
+                // callee declaring hidden slots cannot be served here: binding positionally would
+                // put the first value argument into `$ty0` and read it as a type-table index.
+                if chunk.hidden != 0 {
+                    let (hidden, name) = (chunk.hidden as usize, chunk.name.clone());
+                    for a in args {
+                        release(a);
+                    }
+                    return Err(self.no_instantiation(name.as_deref(), hidden, 0, span));
+                }
                 let num_params = chunk.num_params as usize;
                 let num_registers = chunk.num_registers as usize;
                 let required = num_params - chunk.defaults.len();
@@ -1052,6 +1062,11 @@ impl<'m> Vm<'m> {
     /// its window — `continue 'reload`), or `Ok(false)` when the call completed synchronously (a
     /// first-class builtin, result already in `regs[caller_base + dst]`; the caller advances to
     /// `resume_pc`).
+    ///
+    /// `ty_regs` is the call's **type-argument** channel: the registers filling the callee's
+    /// leading `Chunk::hidden` slots (poly-values F2b), empty for every call that forwards
+    /// nothing. They lay into the callee window ahead of the value arguments, which is why
+    /// `supplied` — indexed over the value parameters — is unaffected by forwarding.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn setup_closure_call(
         &mut self,
@@ -1062,6 +1077,7 @@ impl<'m> Vm<'m> {
         dst: u16,
         callee_val: Value,
         arg_regs: &[u16],
+        ty_regs: &[u16],
         span: Span,
         resume_pc: usize,
         supplied: Option<u64>,
@@ -1069,7 +1085,14 @@ impl<'m> Vm<'m> {
         match callee_val.as_closure() {
             Some(proto_idx) => {
                 let callee_chunk = &self.module.protos[proto_idx as usize];
-                let num_params = callee_chunk.num_params as usize;
+                let hidden = callee_chunk.hidden as usize;
+                if ty_regs.len() != hidden {
+                    let name = callee_chunk.name.clone();
+                    return Err(self.no_instantiation(name.as_deref(), hidden, ty_regs.len(), span));
+                }
+                // Arity is reckoned over the VALUE parameters alone — the hidden slots are filled
+                // from `ty_regs` above, never from `arg_regs`.
+                let num_params = callee_chunk.num_params as usize - hidden;
                 let required = num_params - callee_chunk.defaults.len();
                 if arg_regs.len() < required || arg_regs.len() > num_params {
                     return Err(self.error(
@@ -1080,10 +1103,15 @@ impl<'m> Vm<'m> {
                 }
                 let num_registers = callee_chunk.num_registers as usize;
                 let new_base = reserve_window(regs, num_registers);
+                for (j, &ty_reg) in ty_regs.iter().enumerate() {
+                    let v = regs[caller_base + ty_reg as usize];
+                    retain(v);
+                    regs[new_base + j] = v;
+                }
                 for (i, &arg_reg) in arg_regs.iter().enumerate() {
                     let v = regs[caller_base + arg_reg as usize];
                     retain(v);
-                    regs[new_base + noeta_bytecode::param_of_arg(i, supplied)] = v;
+                    regs[new_base + hidden + noeta_bytecode::param_of_arg(i, supplied)] = v;
                 }
                 let count = callee_val.closure_upvalue_count();
                 // Fast path (B): a plain function — no defaults to fill and no upvalues to carry —
@@ -1097,7 +1125,13 @@ impl<'m> Vm<'m> {
                         (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
                     let n_args = arg_regs.len();
                     for (reg, proto) in &defaults {
-                        if !noeta_bytecode::is_param_filled(*reg as usize, n_args, supplied) {
+                        // `reg` is an absolute callee register; the mask indexes value parameters,
+                        // so shift past the hidden slots (which never carry a default).
+                        if !noeta_bytecode::is_param_filled(
+                            *reg as usize - hidden,
+                            n_args,
+                            supplied,
+                        ) {
                             let value = self.run_thunk(*proto, &cells)?;
                             regs[new_base + *reg as usize] = value;
                         }

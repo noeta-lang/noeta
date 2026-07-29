@@ -1577,6 +1577,11 @@ impl<'m> Vm<'m> {
                                                 *dst,
                                                 callee_val,
                                                 args,
+                                                // A field holding a callable is a first-class
+                                                // value, so there is no type-argument channel to
+                                                // carry; a forwarding callee reached this way
+                                                // aborts in the setup rather than misbinding.
+                                                &[],
                                                 *span,
                                                 pc + 1,
                                                 // A member call carries no mask yet — named
@@ -3643,6 +3648,7 @@ impl<'m> Vm<'m> {
                         dst,
                         callee,
                         args,
+                        type_args,
                         span,
                         supplied,
                     } => {
@@ -3658,6 +3664,7 @@ impl<'m> Vm<'m> {
                             *dst,
                             callee_val,
                             args,
+                            type_args,
                             *span,
                             pc + 1,
                             *supplied,
@@ -3670,6 +3677,7 @@ impl<'m> Vm<'m> {
                         dst,
                         global,
                         args,
+                        type_args,
                         span,
                         supplied,
                     } => {
@@ -3696,6 +3704,7 @@ impl<'m> Vm<'m> {
                             *dst,
                             callee_val,
                             args,
+                            type_args,
                             *span,
                             pc + 1,
                             *supplied,

@@ -1443,6 +1443,27 @@ impl<'m> Vm<'m> {
         Abort
     }
 
+    /// The abort a call takes when it reaches a **forwarding generic** without supplying the type
+    /// arguments its prototype declares. The entry points with no static callee type behind them —
+    /// a `dyn` receiver, a handle, `invoke`, a first-class value — carry none, and binding
+    /// positionally anyway would lay a value argument into a type-argument slot and read it as an
+    /// index into the type table. Shares one message with the tree-walker, so the two backends
+    /// cannot word it differently.
+    pub(crate) fn no_instantiation(
+        &mut self,
+        callee: Option<&str>,
+        declared: usize,
+        supplied: usize,
+        span: Span,
+    ) -> Abort {
+        let message = noeta_ast::reflect::no_instantiation_message(
+            callee.unwrap_or("<anonymous>"),
+            declared,
+            supplied,
+        );
+        self.error(DiagnosticCode::InvalidTypeArguments, span, message)
+    }
+
     /// Convert a native-dispatch [`noeta_stdlib::StdError`] into the unwind token. The
     /// distinguished `Exit` kind (`os.exit(code)`, stdlib-gaps) is NOT a diagnostic: it records
     /// the requested code and aborts cleanly — nothing is reported, stdout is kept. Mirrors the
