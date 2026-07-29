@@ -235,6 +235,9 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             variant,
             variant_index,
             fields,
+            // Already honored by `materialize_recipe` (the only producer that ever sets it), which
+            // runs the validator on the value this call builds.
+            has_validator: _,
         } => {
             let shape = noeta_object::intern_shape(
                 Shape::enum_variant(enum_name, variant, Vec::new(), false)
@@ -901,9 +904,22 @@ impl Vm<'_> {
             // `Result.Err(JsonError)`) carries a path-rich extern. A recipe decode of `T` itself
             // never yields one; it reaches here only inside a wrapper's `Err`.
             NativeOut::Extern(e) => MatOut::Value(Value::extern_value(e)),
-            // A native enum value (native-extensibility S1) — not decoded from a JSON recipe, but a
-            // native `Result`/`Option` wrapper may carry one, so materialize it through the
-            // ordinary (non-recipe) path.
+            // An enum value: decoded from a `TypeRecipe::Enum` (enum-construction arc), or carried by
+            // a native `Result`/`Option` wrapper (native-extensibility S1). Both build through the
+            // ordinary `materialize_native` path — the same interned shape a `MakeEnum` builds — so a
+            // decoded case is indistinguishable from a source-written one. Only a recipe door sets
+            // `has_validator`, and it re-enters exactly as a struct's does.
+            out @ NativeOut::Variant {
+                has_validator: true,
+                ..
+            } => {
+                let value = materialize_native(out);
+                if let Some(rejection) = self.run_validator(value, path, span)? {
+                    release(value);
+                    return Ok(MatOut::Rejected(rejection));
+                }
+                MatOut::Value(value)
+            }
             out @ NativeOut::Variant { .. } => MatOut::Value(materialize_native(out)),
             // A native class instance (native-extensibility S2) — like a `Variant`, never decoded
             // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one; materialize

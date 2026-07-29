@@ -6777,6 +6777,10 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             variant,
             variant_index,
             fields,
+            // The `Validate` re-entry is a decode-door concern: `materialize_recipe` intercepts a
+            // flagged variant and runs the validator before calling in here, so by this point the
+            // flag has already been honored (and an ordinary dispatch's variant never sets it).
+            has_validator: _,
         } => Value::Enum(Rc::new(EnumValue {
             enum_name,
             variant,

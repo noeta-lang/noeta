@@ -57,6 +57,24 @@ fn default_out(recipe: &TypeRecipe) -> NativeOut {
                 .collect(),
             has_validator: *has_validator,
         },
+        // An enum's "default" is its FIRST declared variant — the only choice a producer building a
+        // value from nothing can make without inventing one, and the same case `variants_of` lists
+        // first. A recipe enum always has at least one variant (the checker declines an empty one),
+        // so the fallback is unreachable for a checker-built recipe.
+        TypeRecipe::Enum {
+            name,
+            variants,
+            has_validator,
+        } => match variants.first() {
+            Some(v) => NativeOut::Variant {
+                enum_name: name.clone(),
+                variant: v.name.clone(),
+                variant_index: v.index,
+                fields: Vec::new(),
+                has_validator: *has_validator,
+            },
+            None => NativeOut::Unit,
+        },
     }
 }
 
