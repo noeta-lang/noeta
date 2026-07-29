@@ -396,9 +396,13 @@ fn a_dependency_declared_text_tier_captures_cross_package() {
     // `@spec { … }` XML body (quotes and all — invalid as Noeta tokens) still captures verbatim,
     // targets the adjacent fn, and dispatches to the dependency's runner.
     let entry = text_tier_dep_project("text_tier_dep");
+    // The target is the fn's **qualified** identity: the entry is a file of the `acme/app` package,
+    // so its path derives (`app.main`) exactly as any other module's does, and its declarations are
+    // qualified under it. (Before derivation an entry that declared no `namespace` had none, and the
+    // target read as the bare `add`.)
     lang().arg("spec").arg(&entry).assert().success().stdout(
         predicate::str::contains("speckit: 1 bodies")
-            .and(predicate::str::contains("-- add"))
+            .and(predicate::str::contains("-- app.main.add"))
             .and(predicate::str::contains(
                 "<case name=\"adds\" expect=\"3\"/>",
             )),
@@ -1285,7 +1289,7 @@ fn provenance_signs_verifies_and_pins_the_scope_key() {
     )
     .unwrap();
     std::fs::write(
-        repo.join("m.noe"),
+        repo.join("core.noe"),
         "namespace greet.core;\npub fn v(): int { return 1; }\n",
     )
     .unwrap();
@@ -1388,7 +1392,7 @@ fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
     )
     .unwrap();
     std::fs::write(
-        repo.join("m.noe"),
+        repo.join("core.noe"),
         "namespace greet.core;\npub fn v(): int { return 1; }\n",
     )
     .unwrap();
@@ -1519,7 +1523,7 @@ fn interactive_oob_publish_signs_keyless_end_to_end() {
     )
     .unwrap();
     std::fs::write(
-        repo.join("m.noe"),
+        repo.join("core.noe"),
         "namespace greet.core;\npub fn v(): int { return 1; }\n",
     )
     .unwrap();
@@ -1685,7 +1689,7 @@ fn keyless_publish_verifies_pins_and_defends_end_to_end() {
     )
     .unwrap();
     std::fs::write(
-        repo.join("m.noe"),
+        repo.join("core.noe"),
         "namespace greet.core;\npub fn v(): int { return 1; }\n",
     )
     .unwrap();
@@ -1995,7 +1999,7 @@ fn noeta_add_edits_the_manifest_and_resolves() {
     )
     .unwrap();
     std::fs::write(
-        lib.join("m.noe"),
+        lib.join("core.noe"),
         "namespace lib.core;\npub fn v(): int { return 42; }\n",
     )
     .unwrap();
@@ -2045,7 +2049,7 @@ fn noeta_update_rewrites_the_lock() {
     )
     .unwrap();
     std::fs::write(
-        dep_repo.join("m.noe"),
+        dep_repo.join("core.noe"),
         "namespace up.core;\npub fn v(): int { return 7; }\n",
     )
     .unwrap();
@@ -2091,7 +2095,7 @@ fn a_git_dependency_is_pinned_and_reproduces_offline() {
     )
     .unwrap();
     std::fs::write(
-        dep_repo.join("m.noe"),
+        dep_repo.join("core.noe"),
         "namespace pinned.core;\npub fn val(): string { return \"pinned offline value\"; }\n",
     )
     .unwrap();
