@@ -257,8 +257,10 @@ impl Checker {
                     ),
                 );
             }
+            // The name-keyed identity, as the call path interns it (`Display` renders the SHORT
+            // name, which no runtime registry is keyed under).
             let info = noeta_ext_abi::TypeArgInfo {
-                name: sigma.to_string(),
+                name: sigma.head_name(),
                 recipe,
             };
             let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {

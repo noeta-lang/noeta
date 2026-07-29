@@ -1,0 +1,41 @@
+// A forwarded `attributes_of::<T>()` under a `namespace` must answer exactly what the concrete
+// turbofish answers. It did not: the hidden slot's `TypeArgInfo.name` was the instantiation's
+// DISPLAY form, which renders the SHORT name (`Route`), while the manifest — like every name-keyed
+// runtime registry — is keyed on the name the linker qualified (`app.storage.Route`). The lookup
+// missed and the forwarded call returned the EMPTY list, silently, which is the precise failure
+// mode the whole erased-parameter rule exists to prevent, reproduced inside the escape hatch built
+// to avoid it.
+//
+// The table now interns `Type::head_name` — the lattice twin of `TypeRef::head_name`, which is what
+// the static turbofish folds to — so the two agree by construction rather than by convention.
+// expect: stdout "1"
+// expect: stdout "1"
+// expect: stdout "GET"
+// expect: exit 0
+namespace app.storage
+
+@attribute
+struct Route {
+    method: string
+}
+
+#[Route("GET")]
+fn handler(): string {
+    return "ok"
+}
+
+fn count<T>(): int {
+    return attributes_of::<T>().len()
+}
+
+fn method_of<T>(render: (T) -> string): string {
+    mut out = "none"
+    for a in attributes_of::<T>() {
+        out = render(a.value)
+    }
+    return out
+}
+
+echo attributes_of::<Route>().len()
+echo count::<Route>()
+echo method_of::<Route>(fn(r) => r.method)

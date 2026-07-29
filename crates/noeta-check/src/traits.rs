@@ -1997,8 +1997,10 @@ impl Checker {
                         ),
                     );
                 }
+                // The name-keyed identity, not a display rendering: the runtime registries are
+                // keyed on the linker's qualified name, which `Display` renders SHORT.
                 let info = noeta_ext_abi::TypeArgInfo {
-                    name: sigma.to_string(),
+                    name: sigma.head_name(),
                     recipe,
                 };
                 let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
