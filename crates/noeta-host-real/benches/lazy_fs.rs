@@ -10,11 +10,15 @@ use noeta_host_real::RealHost;
 use noeta_stdlib::{FileHandle, FileReader, FileSystem, ReadSource};
 use std::hint::black_box;
 
-/// Write a ~8 MB, 200k-line fixture once and return its path.
-fn write_fixture() -> String {
-    let mut path = std::env::temp_dir();
-    path.push("noeta_host_real_lazy_fs_bench.txt");
-    let path = path.to_string_lossy().into_owned();
+/// Write a ~8 MB, 200k-line fixture once and return its directory guard and its path.
+///
+/// The guard is handed back rather than dropped here: the path used to be one fixed name under the
+/// system temp dir, so two concurrent bench runs (two checkouts, or a bench beside the test suite)
+/// wrote and read the same 8 MB file, and a timing measured against a file another process was
+/// rewriting is not a measurement. The caller holds the guard for the length of the bench.
+fn write_fixture() -> (noeta_test_temp::TempDir, String) {
+    let dir = noeta_test_temp::TempDir::new("host-lazy-fs-bench");
+    let path = dir.join("lazy_fs.txt").to_string_lossy().into_owned();
     let mut content = String::with_capacity(8 * 1024 * 1024);
     for i in 0..200_000 {
         content.push_str(&format!(
@@ -22,11 +26,13 @@ fn write_fixture() -> String {
         ));
     }
     std::fs::write(&path, &content).unwrap();
-    path
+    (dir, path)
 }
 
 fn bench_first_line(c: &mut Criterion) {
-    let path = write_fixture();
+    // `_fixture` is named (not `_`), so the fixture outlives the benchmarks rather than being
+    // deleted on the spot.
+    let (_fixture, path) = write_fixture();
     let mut group = c.benchmark_group("fs_open_first_line");
 
     // The pre-P-LAZY behavior: snapshot the whole file, then take the first line.
@@ -50,7 +56,7 @@ fn bench_first_line(c: &mut Criterion) {
     });
 
     group.finish();
-    std::fs::remove_file(&path).ok();
+    // The fixture goes with `_fixture`'s guard.
 }
 
 criterion_group!(benches, bench_first_line);

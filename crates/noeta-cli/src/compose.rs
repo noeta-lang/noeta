@@ -1728,8 +1728,7 @@ mod tests {
     /// copied out — a 1.4G tail beside a 51M binary, retained forever by a cache nothing evicts.
     #[test]
     fn build_scratch_is_dropped_when_it_is_the_compose_dirs_own() {
-        let dir = std::env::temp_dir().join("noeta_compose_scratch_own");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = noeta_test_temp::TempDir::new("compose-scratch-own");
         let target = dir.join("target");
         std::fs::create_dir_all(target.join("release")).expect("create scratch");
         std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("write manifest");
@@ -1744,19 +1743,14 @@ mod tests {
             dir.join("Cargo.toml").is_file(),
             "only the target dir goes — the compose entry itself stays, so the cache still hits"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The dangerous half. Under `NOETA_COMPOSE_TARGET_DIR` the target dir belongs to the caller —
     /// the e2e tests point it at the workspace's own build directory — so it must never be removed.
     #[test]
     fn build_scratch_outside_the_compose_dir_is_left_alone() {
-        let dir = std::env::temp_dir().join("noeta_compose_scratch_external");
-        let external = std::env::temp_dir().join("noeta_compose_scratch_external_target");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&external);
-        std::fs::create_dir_all(&dir).expect("create compose dir");
-        std::fs::create_dir_all(&external).expect("create external target");
+        let dir = noeta_test_temp::TempDir::new("compose-scratch-external");
+        let external = noeta_test_temp::TempDir::new("compose-scratch-external-target");
 
         discard_build_scratch(&dir, &external);
 
@@ -1765,7 +1759,5 @@ mod tests {
             "a caller-supplied target dir must survive — deleting it would destroy work this \
              function never created"
         );
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&external);
     }
 }

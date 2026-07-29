@@ -35,7 +35,7 @@ fn a_hot_swap_preserves_signal_state_across_a_handler_edit() {
              use std.http.{{Request, Response}}\n\
              use std.reactive.{{signal}}\n\n\
              count = signal(0)\n\n\
-             fn fetch(req: Request): Response {{\n\
+             fn fetch(req: Request) use (count): Response {{\n\
              \x20   count.set(count.get() + 1)\n\
              \x20   return server.response(200, \"{tag} hits=${{count.get()}}\")\n\
              }}\n"
@@ -43,7 +43,10 @@ fn a_hot_swap_preserves_signal_state_across_a_handler_edit() {
     };
     std::fs::write(&app, v("v1")).unwrap();
 
-    let port = 8459;
+    // A kernel-assigned port, not a fixed one: a fixed port is shared with every other
+    // checkout and every concurrent run of this test on the machine, and the server that loses the
+    // bind dies where the client sees only a reset connection.
+    let port = noeta_test_temp::free_port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
         .args([
             "serve",

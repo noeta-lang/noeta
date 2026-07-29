@@ -731,11 +731,9 @@ mod tests {
         assert_eq!(sqrt["public"], true);
 
         // The whole artifact round-trips through the registry-render path (schema-only).
-        let out = std::env::temp_dir().join("noeta_docgen_api_test");
-        let _ = std::fs::remove_dir_all(&out);
+        let out = noeta_test_temp::TempDir::new("docgen-api");
         render_json_to(&out, &text).expect("renders from schema alone");
         assert!(out.join("std-math.md").exists());
-        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]

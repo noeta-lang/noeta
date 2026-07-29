@@ -47,6 +47,9 @@ include_dir = { workspace = true }
 # `tests/expansion.rs` installs a fixture extension whose directive expands, to prove the editor's
 # link runs compile-time expansion exactly as the compiler's does.
 noeta-ext-abi = { workspace = true }
+# The multi-file workspace fixtures (sibling discovery and path dependencies read a real directory)
+# get a per-process temp root, so two test processes never share — and delete — one project.
+noeta-test-temp = { workspace = true }
 
 [lints]
 workspace = true

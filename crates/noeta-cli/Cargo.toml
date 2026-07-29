@@ -79,6 +79,10 @@ jit = ["noeta-vm/jit", "noeta-runner/jit", "noeta-prof/jit"]
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+# Per-process fixture directories for the unit tests and for the test targets that do not use
+# `tests/cli/support.rs` (which has its own `CARGO_TARGET_TMPDIR` root) — so two test processes or
+# two checkouts never share, and delete, one fixture path.
+noeta-test-temp = { workspace = true }
 # The hermetic Sigstore (test CA/CT/Rekor) the keyless publish e2e mints against (Phase 5, K4).
 noeta-pm = { workspace = true, features = ["keyless-test-fixtures"] }
 # The advisory-feed e2e signs a mock feed the client verifies (namespace-protection #1).
