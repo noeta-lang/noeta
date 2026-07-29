@@ -671,11 +671,12 @@ mod tests {
     // ------------------------------------------------------------ the whole-project engine
 
     /// A throwaway project directory (fresh per test — the loader treats every sibling `.noe`
-    /// as a module, so tests must not share directories).
-    fn project(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("noeta_impact_test_{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create test project dir");
+    /// as a module, so tests must not share directories) — and fresh per *process* too, which
+    /// `/tmp/noeta_impact_test_<name>` was not: every checkout and every concurrent test binary
+    /// shared it, and each opened by `remove_dir_all`ing it. The guard comes back with the
+    /// directory; dropping it removes the tree.
+    fn project(name: &str, files: &[(&str, &str)]) -> noeta_test_temp::TempDir {
+        let dir = noeta_test_temp::TempDir::new(&format!("impact-{name}"));
         for (file, text) in files {
             std::fs::write(dir.join(file), text).expect("write test module");
         }

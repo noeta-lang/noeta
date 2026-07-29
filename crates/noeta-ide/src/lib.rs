@@ -4397,10 +4397,12 @@ mod tests {
 
     /// Create a fresh temp directory with the given `(filename, content)` files on disk, for the
     /// multi-file workspace tests (sibling discovery reads the real directory).
-    fn temp_workspace(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("noeta_lsp_{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    ///
+    /// The guard comes back with it: hold it for as long as the workspace is queried, since dropping
+    /// it removes the tree. The path used to be `/tmp/noeta_lsp_<name>`, shared by every checkout and
+    /// every concurrent test process, each of which opened by deleting it.
+    fn temp_workspace(name: &str, files: &[(&str, &str)]) -> noeta_test_temp::TempDir {
+        let dir = noeta_test_temp::TempDir::new(&format!("lsp-{name}"));
         for (filename, content) in files {
             std::fs::write(dir.join(filename), content).unwrap();
         }
@@ -5124,8 +5126,7 @@ mod tests {
         // package-manager P2.1c: with dependency resolution wired into the salsa workspace, a
         // cross-package `use hi.hello.greeting` resolves in-editor — goto-definition on the call
         // jumps into the dependency package's own source file.
-        let base = std::env::temp_dir().join("noeta_lsp_crosspkg");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = noeta_test_temp::TempDir::new("lsp-crosspkg");
         let app = base.join("app");
         let lib = base.join("greetlib");
         std::fs::create_dir_all(&app).unwrap();
@@ -5172,7 +5173,7 @@ mod tests {
     }
 
     /// A workspace whose sibling `models.noe` declares `App.Models` but does not parse.
-    fn broken_sibling_workspace(name: &str) -> PathBuf {
+    fn broken_sibling_workspace(name: &str) -> noeta_test_temp::TempDir {
         temp_workspace(
             name,
             &[(
@@ -5236,8 +5237,7 @@ mod tests {
         // one the editor checks in its own right and nothing else would ever mention it. The
         // module is named by the CONSUMER's dependency key (`hi.hello`, not the package's own
         // `greet.hello`), which is how the `use` spells it.
-        let base = std::env::temp_dir().join("noeta_lsp_broken_dep");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = noeta_test_temp::TempDir::new("lsp-broken-dep");
         let app = base.join("app");
         let lib = base.join("greetlib");
         std::fs::create_dir_all(&app).unwrap();
@@ -5339,8 +5339,7 @@ mod tests {
         // audit-5 #7: a broken manifest (or a trust refusal / version conflict) used to degrade
         // silently to "no dependencies", leaving the user with inexplicable unknown-import
         // errors. The typed pm error now reaches diagnostics with the real cause.
-        let base = std::env::temp_dir().join("noeta_lsp_dep_error");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = noeta_test_temp::TempDir::new("lsp-dep-error");
         let app = base.join("app");
         std::fs::create_dir_all(&app).unwrap();
         // `dep = 5` is not a valid dependency source — a Manifest-kind resolution failure.
