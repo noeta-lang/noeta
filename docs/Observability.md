@@ -109,7 +109,7 @@ metrics aggregate host-side and export on a periodic reader (plus a final flush 
 
 ### Annotating the span you are *in*
 
-The four functions above all *create* a span or read its context. These three annotate the span that is already **active** — the one you are inside, which no handle names:
+The four functions above all *create* a span or read its context. These four annotate the span that is already **active** — the one you are inside, which no handle names:
 
 | Function | Signature | Notes |
 |---|---|---|
@@ -132,9 +132,9 @@ fn run_guardrail(guard: string, reason: string): void {
 }
 ```
 
-**Event or attribute?** An attribute describes the *span* — one value per key, and setting it twice overwrites. An event describes a *moment* — events accumulate, each with its own attribute set. So a fact you may record several times in one span (a verdict per guard, a retry per attempt) belongs in `add_event_with`; a property of the whole operation (the route, the tenant, the final verdict) belongs in `set_attribute`.
-
 Without them, the only way to record that from inside a body was to open a **short child span** — a span per event where an annotation belongs, which inflates trace volume and buries the signal you were trying to record.
+
+**Event or attribute?** An attribute describes the *span* — one value per key, and setting it twice overwrites. An event describes a *moment* — events accumulate, each with its own attribute set. So a fact you may record several times in one span (a verdict per guard, a retry per attempt) belongs in `add_event_with`; a property of the whole operation (the route, the tenant, the final verdict) belongs in `set_attribute`.
 
 They reach the active span at every depth, including spans you did not open. Inside nested `with_span`s the annotation targets the **innermost** span, and the outer one becomes active again when the inner body returns. Inside a request handler it targets the **auto-instrumented SERVER span** — so a handler adds its own attributes to the request's own span, alongside `http.request.method` and `url.path`, with no handle and no child span:
 
