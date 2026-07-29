@@ -1415,7 +1415,68 @@ pub enum TypeRepr {
     Union(Vec<TypeRepr>),
 }
 
+/// The runtime abort message for a `type_name::<T>()` whose receiver carries no recorded type
+/// argument for `T` — shared by both backends so the two cannot word it differently.
+///
+/// This is deliberately an abort and not an empty/`"dyn"` answer. The whole point of the surface is
+/// to hand a *name* to something that keys on it (a table, a route, a decoder); a plausible-looking
+/// wrong name would travel silently, which is exactly the failure the reflected type tag exists to
+/// prevent. The instantiation is missing because the value was built where the checker could not
+/// determine it, and the fix is at that construction site.
+pub fn missing_type_arg_message(type_name: &str, param: &str) -> String {
+    let short = crate::short_type_name(type_name);
+    format!(
+        "`type_name::<{param}>()`: this `{short}` records no type argument for `{param}` \u{2014} build it at a concrete instantiation (`x: {short}<Something> = {short}.new(\u{2026})`), so the construction site can record one"
+    )
+}
+
 impl TypeRepr {
+    /// This type's **head name**, the string `type_name::<T>()` yields — the counterpart of
+    /// [`crate::TypeRef::head_name`] on the runtime side, so a name read off a value's reflected tag
+    /// and one folded from a written type reference agree.
+    ///
+    /// A nominal reports its (qualified) declared name; a built-in reports its surface spelling.
+    /// A container reports its constructor (`List<int>` → `"List"`), matching how `TypeRef::head_name`
+    /// answers the written `List<int>`. The forms a bare name cannot spell — an optional, a union, a
+    /// function type — have no written head to agree with; they report their constructor name too,
+    /// which is more use to a caller than the empty string `TypeRef::head_name` gives them.
+    pub fn head_name(&self) -> String {
+        match self {
+            TypeRepr::Int => "int".to_string(),
+            TypeRepr::Float => "float".to_string(),
+            TypeRepr::F32 => "f32".to_string(),
+            TypeRepr::F64 => "f64".to_string(),
+            TypeRepr::IntN { signed, bits } => {
+                format!("{}{bits}", if *signed { "i" } else { "u" })
+            }
+            TypeRepr::Bool => "bool".to_string(),
+            TypeRepr::Str => "string".to_string(),
+            TypeRepr::Bytes => "bytes".to_string(),
+            TypeRepr::Unit => "unit".to_string(),
+            TypeRepr::Dyn => "dyn".to_string(),
+            TypeRepr::DynTrait(t) => t.clone(),
+            TypeRepr::List(_) => "List".to_string(),
+            TypeRepr::Set(_) => "Set".to_string(),
+            TypeRepr::Option(_) => "Option".to_string(),
+            TypeRepr::Map(..) => "Map".to_string(),
+            TypeRepr::Result(..) => "Result".to_string(),
+            TypeRepr::Enum(n, _)
+            | TypeRepr::Struct(n, _)
+            | TypeRepr::Class(n, _)
+            | TypeRepr::Named(n, _) => n.clone(),
+            TypeRepr::Fn(..) => "Fn".to_string(),
+            TypeRepr::Union(_) => "Union".to_string(),
+        }
+    }
+
+    /// The **head name of type argument `index`**, or `None` when this type carries no such
+    /// argument — the read `type_name::<T>()` performs against a receiver's reflected tag. `None` is
+    /// the honest "this value does not record that" and the callers turn it into an abort; it is
+    /// never folded into a placeholder name.
+    pub fn type_arg_name(&self, index: usize) -> Option<String> {
+        self.type_args().get(index).map(|t| t.head_name())
+    }
+
     /// This type's **type arguments** (runtime type-argument reflection, R3), in order: a container's
     /// element/key/value types, a generic nominal type's arguments. Empty for a scalar or a
     /// non-generic nominal. Used to compare a narrow target's arguments against a value's reflected tag.

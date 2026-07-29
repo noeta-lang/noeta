@@ -57,7 +57,35 @@
 /// and measured but never taken apart, which made every in-language decoder inexpressible. Purely
 /// additive: nothing written for ABI 6 stops compiling. Counted anyway, per the rule above, because
 /// it widens what the ABI crate promises an extension (and a backend) can rely on.
-pub const ABI_VERSION: u32 = 7;
+///
+/// **8** — the subprocess doors got their recoverable and awaitable twins, and the [`host::Os`]
+/// capability was **re-rooted on them**. [`host::Os::os_try_spawn`] and
+/// [`host::Os::os_proc_try_write_stdin`] are the new required primitives (returning a classified
+/// [`os::OsError`]); the aborting `os_spawn`/`os_proc_write_stdin` became *defaults* derived from
+/// them, so the two doors of each pair cannot drift. [`host::Os::os_proc_read_spawn`] is additive
+/// (a default over the blocking reads). Plus the registrations: `os.try_spawn`,
+/// `Process.try_write`, `Process.read_line_async`/`read_err_line_async`/`read_async`, the
+/// [`os::OsError`] extern type, and the [`os::ProcRead`]/[`os::ProcReadIo`] seam types.
+///
+/// This one is a genuine break rather than a counted-anyway addition: a host that implemented
+/// `os_spawn` and `os_proc_write_stdin` still compiles those methods, but now satisfies neither
+/// required primitive, so the composed build reports an ABI mismatch naming the package rather than
+/// a bare trait error. That is the intended failure — the alternative (a defaulted `os_try_spawn`
+/// that classifies by sniffing the aborting door's message string) would make every third-party
+/// host silently answer `other` for a missing binary, which is exactly the information these doors
+/// exist to deliver.
+///
+/// **9** — `std.tracing` grew the **active-span annotators**: `tracing.set_attribute`,
+/// `tracing.add_event`, `tracing.add_event_with`, and `tracing.record_error`, ctx functions that
+/// apply the `Span` mutations to the span the caller is already *inside* rather than to a handle it
+/// holds. `Span` gained the matching `add_event_with(name, attrs)` (and with it `deep_marshal`, so
+/// the map argument arrives whole), closing the one place the `Tracing` capability could carry
+/// event attributes but no surface could produce them. Purely additive registration (no
+/// [`host::Host`] method changed, nothing written for ABI 8 stops compiling), counted anyway under
+/// the rule above because it widens the registry surface an extension and a backend can rely on.
+/// Deliberately not a `current_span() -> ?Span`: that would hand a caller `.end()` on a span it
+/// never opened — see the `std.tracing` module header.
+pub const ABI_VERSION: u32 = 9;
 
 pub mod args;
 pub mod channel;

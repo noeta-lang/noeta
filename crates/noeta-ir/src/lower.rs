@@ -216,6 +216,10 @@ pub struct LoweringSites<'a> {
     pub dynamic_recipe_sites: &'a HashMap<Span, u32>,
     /// `attributes_of::<T>` spans whose type is per-instantiation → the hidden slot index.
     pub dynamic_attr_sites: &'a HashMap<Span, u32>,
+    /// `type_name::<T>()` spans where `T` is a parameter of the ENCLOSING generic type, inside one
+    /// of its instance methods → `(enclosing type name, the parameter's declaration index)`. The
+    /// name is read off argument `index` of the receiver's reflected type tag at run time.
+    pub self_type_arg_sites: &'a HashMap<Span, (String, u32)>,
     /// Forwarding generic fns → their hidden-parameter count (prepended as `$ty0`, `$ty1`, …).
     pub forwarding_fns: &'a HashMap<String, u32>,
     /// Forwarding-fn-as-value sites (poly-deferrals D2c): `Expr::Ident` spans → `(fn name,
@@ -241,6 +245,7 @@ impl LoweringSites<'static> {
         static TYPE_ARGS: OnceLock<Vec<noeta_ext_abi::TypeArgInfo>> = OnceLock::new();
         static HIDDEN: OnceLock<HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>> = OnceLock::new();
         static SLOTS: OnceLock<HashMap<Span, u32>> = OnceLock::new();
+        static SELF_TY: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
         static COUNTS: OnceLock<HashMap<String, u32>> = OnceLock::new();
         static FN_VALUES: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
         static ORDERS: OnceLock<HashMap<Span, Vec<Option<usize>>>> = OnceLock::new();
@@ -269,6 +274,7 @@ impl LoweringSites<'static> {
             hidden_arg_sites: HIDDEN.get_or_init(HashMap::new),
             dynamic_recipe_sites: SLOTS.get_or_init(HashMap::new),
             dynamic_attr_sites: SLOTS.get_or_init(HashMap::new),
+            self_type_arg_sites: SELF_TY.get_or_init(HashMap::new),
             forwarding_fns: COUNTS.get_or_init(HashMap::new),
             fn_value_sites: FN_VALUES.get_or_init(HashMap::new),
         }
@@ -311,6 +317,7 @@ macro_rules! lowering_sites {
             hidden_arg_sites: &$s.hidden_arg_sites,
             dynamic_recipe_sites: &$s.dynamic_recipe_sites,
             dynamic_attr_sites: &$s.dynamic_attr_sites,
+            self_type_arg_sites: &$s.self_type_arg_sites,
             forwarding_fns: &$s.forwarding_fns,
             fn_value_sites: &$s.fn_value_sites,
         }
@@ -1672,6 +1679,27 @@ impl Lowerer<'_> {
             // qualified identity (`app.storage.Todo`) and there is nothing left to look up. Resolved
             // through the same `TypeRef::head_name` the name-keyed reflection queries use, which is
             // what makes the two agree by construction rather than by convention.
+            // …unless the checker recognized `T` as a parameter of the ENCLOSING generic type inside
+            // one of its instance methods (generic constructor reflection, Gap B): one compiled body
+            // serves every instantiation, so there is no constant to fold — the instantiation rides
+            // on the receiver's reflected type tag, and the name is read off argument `index` of it.
+            Expr::TypeName { ty, span } if self.sites.self_type_arg_sites.contains_key(span) => {
+                let (owner, index) = self.sites.self_type_arg_sites[span].clone();
+                Ok(self.emit(
+                    out,
+                    Rvalue::TypeArgName {
+                        operand: Atom::Var {
+                            name: "self".to_string(),
+                            span: *span,
+                        },
+                        index,
+                        type_name: owner,
+                        param: ty.head_name(),
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::TypeName { ty, .. } => Ok(Atom::Const(Const::Str(ty.head_name()))),
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the

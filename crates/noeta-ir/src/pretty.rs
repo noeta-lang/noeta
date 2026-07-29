@@ -387,6 +387,12 @@ impl Printer<'_> {
             Rvalue::TypeTest { operand, ty, .. } => {
                 format!("{} is {}", atom(operand), type_ref(ty))
             }
+            Rvalue::TypeArgName {
+                operand,
+                index,
+                param,
+                ..
+            } => format!("type_name::<{param}>({}[{index}])", atom(operand)),
             Rvalue::TypeOf { operand, .. } => format!("type_of({})", atom(operand)),
             Rvalue::FieldsOf { operand, .. } => format!("fields_of({})", atom(operand)),
             Rvalue::TraitsOf { operand, .. } => format!("traits_of({})", atom(operand)),

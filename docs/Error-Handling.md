@@ -243,6 +243,37 @@ present ??= compute()            // ??= is  present = present ?? compute()
 echo present                     // 5  (compute() was never called)
 ```
 
+## Aborting and recoverable doors
+
+Some standard-library operations come in **pairs**: an aborting door named for the operation, and a recoverable twin prefixed `try_` that returns a `Result` instead. The pair exists wherever the same call is a *bug* in one program and an *ordinary condition* in another, and the language refuses to guess which:
+
+| Aborting | Recoverable | The condition |
+|---|---|---|
+| `json.parse(text)` | `json.try_parse(text)` | a malformed document |
+| `os.spawn(cmd, args)` | `os.try_spawn(cmd, args)` | the program is not installed, or is not executable |
+| `p.write(text)` | `p.try_write(text)` | the child's stdin is gone — it exited, or you closed it |
+
+The rule for choosing is **whose mistake is it**. A configuration file your own build produced is your program's shape, so `json.parse` aborting on it is the right report; a body off a wire carries the *remote party's* shape, so `json.try_parse` is. A tool your own installer placed is yours; a language server, an MCP server, or a formatter the user may or may not have installed is not — and a library whose contract is "a failing tool is a turn, not an outage" cannot call the aborting door at all.
+
+Both halves of a pair report the **identical message** — the aborting one is derived from the recoverable one — so moving between them never changes what the user sees, only who decides what happens next.
+
+```noeta
+use std.{os}
+
+echo match os.try_spawn("mcp-server-filesystem", ["/tmp"]) {
+    Ok(p)  => "started pid ${p.pid()}",
+    Err(e) => match e.kind() {
+        "not_found" => "install mcp-server-filesystem to use this tool",
+        _           => "could not start it: ${e.message()}",
+    },
+}
+```
+
+> [!IMPORTANT]
+> **A liveness check is not a substitute for the recoverable door.** Polling a child with `try_wait()` before writing to it looks like it makes `p.write(…)` safe, and it does not: the child can exit in the gap between the poll and the write. That race cannot be closed from inside the language, which is exactly why `try_write` exists. Branch on `e.kind()` — `"broken_pipe"` means the child is gone (restart it), `"stdin_closed"` means you closed the pipe yourself (a bug in your own code).
+
+The aborting door is never *removed* when a recoverable twin is added. "Fatal by default, recoverable when you ask" is the shape, and a script that legitimately wants a missing program to stop the run should not have to write a `match` to get it.
+
 ## `panic` and `assert`
 
 For genuinely unrecoverable states:
@@ -265,6 +296,7 @@ assert(balance >= 0, "balance went negative")
 | Thread a failure up several call frames | `?` (the frames in between declare `Result<T, E>`) |
 | Let a failure stop a script, loudly | `?` at the top level (aborts with the error's message, non-zero exit) |
 | Supply a default for a missing value | `??` |
+| A failure that is a bug in one caller and routine in another | an [aborting/recoverable door pair](#aborting-and-recoverable-doors) (`parse` / `try_parse`) |
 | A bug / impossible state | `panic` / `assert` |
 
 ## See also

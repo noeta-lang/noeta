@@ -1,0 +1,26 @@
+// A method's OWN type parameter that shadows one of the enclosing type's is a different `T`, and it
+// has no per-call channel: the receiver's tag records the CLASS's arguments, not the method's. So
+// reflecting over it is refused — and refused with its own wording, because the fix is a rename, not
+// "read `self`" (this method does read `self`; the sibling case
+// `class_type_param_no_receiver.noe` is the one that does not).
+//
+// Two near-identical refusals that pointed at each other's fix would be worse than one vague
+// message, which is why the two are pinned together.
+// expect: error E0058 at 22:42
+// expect: exit 1
+struct A {
+    x: int
+}
+class Pair<K, V> {
+    pub n: int
+
+    fn new(n: int): Pair<K, V> {
+        return Pair { n: n };
+    }
+
+    fn shadowed<K>(x: K): string {
+        return "${self.n}" ~ type_name::<K>();
+    }
+}
+p: Pair<A, int> = Pair.new(1);
+echo p.shadowed(A { x: 2 });

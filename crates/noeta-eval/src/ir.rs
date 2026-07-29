@@ -71,12 +71,20 @@ fn is_temp(atom: &noeta_ir::Atom) -> bool {
     matches!(atom, noeta_ir::Atom::Temp(_))
 }
 
-/// Stamp a generic enum-variant construction's reflected type onto the freshly-built value (runtime
-/// type-argument reflection, R2b.2), so `type_of` recovers the enum's type arguments after a `dyn`
-/// launder. `reflect` is `Some` only for a generic enum construction; a non-enum result or an
-/// ordinary call is returned unchanged. The value was just built and is uniquely owned, so its parts
-/// move into a re-tagged `EnumValue` with no clone; an unexpectedly-shared value is left untagged.
-fn tag_enum_reflect(value: Value, reflect: &Option<noeta_ast::reflect::TypeRepr>) -> Value {
+/// Stamp a construction's reflected type onto the freshly-built value at a **method-call** site, so
+/// `type_of` recovers its type arguments after a `dyn` launder. Two producers, one field:
+///
+/// * a generic **enum-variant construction** (`Tree.Leaf(5)`, R2b.2) — the value was just built and
+///   is uniquely owned, so its parts move into a re-tagged `EnumValue` with no clone; an
+///   unexpectedly-shared value is left untagged;
+/// * a generic **constructor call** (`Repo.new("todos")` at `Repo<Todo>`, generic constructor
+///   reflection) — the instantiation is known at the CALL, not inside `fn new` where the literal is
+///   written, so the caller stamps it. The checker only records the site when it proved every
+///   `return` of the callee hands back a fresh literal of the type, so nothing else can hold this
+///   object; the tag is written in place because a `class`'s `Rc` is its identity.
+///
+/// `reflect` is `None` for an ordinary method call, which is returned unchanged.
+fn tag_call_reflect(value: Value, reflect: &Option<noeta_ast::reflect::TypeRepr>) -> Value {
     match (reflect, value) {
         (Some(repr), Value::Enum(rc)) => match Rc::try_unwrap(rc) {
             Ok(ev) => Value::Enum(Rc::new(crate::EnumValue {
@@ -85,6 +93,10 @@ fn tag_enum_reflect(value: Value, reflect: &Option<noeta_ast::reflect::TypeRepr>
             })),
             Err(rc) => Value::Enum(rc),
         },
+        (Some(repr), Value::Object(rc)) => {
+            rc.set_reflect(Rc::new(repr.clone()));
+            Value::Object(rc)
+        }
         (_, value) => value,
     }
 }
@@ -1325,7 +1337,7 @@ impl Interpreter {
                 };
                 // When this "method call" was a generic enum-variant construction, stamp the reflected
                 // type onto the freshly-built value (R2b.2) — the tree-walker twin of the VM's node tag.
-                result.map(|v| tag_enum_reflect(v, reflect))
+                result.map(|v| tag_call_reflect(v, reflect))
             }
             // A trait method call (native default body, slice 2; or a kernel-trait method since the
             // ExtBundle→ExtTrait fold-in, slice 4): the route was baked at the call site — straight to
@@ -1465,6 +1477,26 @@ impl Interpreter {
                 match self.type_of_sites.get(span) {
                     Some(repr) => Ok(crate::build_type_value(repr)),
                     None => Ok(crate::build_type_value(&crate::eval_type_repr(&v))),
+                }
+            }
+            // `type_name::<T>()` where `T` is a parameter of the enclosing generic type: read
+            // argument `index` off the receiver's reflected type tag. A receiver with no such
+            // argument aborts — a plausible-looking wrong name would travel silently.
+            noeta_ir::Rvalue::TypeArgName {
+                operand,
+                index,
+                type_name,
+                param,
+                span,
+            } => {
+                let v = self.eval_ir_atom(operand, frame)?;
+                match crate::eval_type_repr(&v).type_arg_name(*index as usize) {
+                    Some(name) => Ok(Value::Str(name)),
+                    None => Err(self.runtime_error(
+                        DiagnosticCode::InvalidTypeArguments,
+                        *span,
+                        noeta_ast::reflect::missing_type_arg_message(type_name, param),
+                    )),
                 }
             }
             noeta_ir::Rvalue::FieldsOf { operand, .. } => {

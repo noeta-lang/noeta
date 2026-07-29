@@ -1,0 +1,34 @@
+// A generic **constructor** hands its instantiation to the object it builds. Inside `fn new` the
+// literal's type is `Repo<T>` with `T` still a parameter, so the object used to be built with
+// nothing recorded: `type_of` after a `dyn` launder reported `Repo` with no arguments, and two
+// differently-instantiated repositories compared equal. The instantiation is known one frame up —
+// `rt: Repo<Todo> = Repo.new("todos")` resolves `T = Todo` at the CALL — so the call site stamps it
+// onto the returned object, which the checker proved is freshly built by that very call.
+//
+// The last two lines are the point: erasure used to make these two values indistinguishable.
+// expect: stdout "Type.Class(Repo, [Type.Struct(Todo, [])])"
+// expect: stdout "Type.Class(Repo, [Type.Struct(User, [])])"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+}
+rt: Repo<Todo> = Repo.new("todos");
+ru: Repo<User> = Repo.new("users");
+dt: dyn = rt;
+du: dyn = ru;
+echo type_of(dt);
+echo type_of(du);
+echo type_of(dt) == type_of(du);
+echo dt is Repo<Todo>;

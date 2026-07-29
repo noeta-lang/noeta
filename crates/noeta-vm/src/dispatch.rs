@@ -2911,6 +2911,27 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
+                    // `type_name::<T>()` over the enclosing generic type's parameter: read
+                    // argument `index` off the receiver's reflected type tag.
+                    Op::TypeArgName {
+                        dst,
+                        src,
+                        index,
+                        names,
+                        span,
+                    } => {
+                        let repr = vm_type_repr(&regs[fbase + *src as usize]);
+                        let Some(name) = repr.type_arg_name(*index as usize) else {
+                            return Err(self.error(
+                                DiagnosticCode::InvalidTypeArguments,
+                                *span,
+                                noeta_ast::reflect::missing_type_arg_message(&names.0, &names.1),
+                            ));
+                        };
+                        let result = Value::string(&name);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
                     Op::FieldsOf { dst, src } => {
                         let result = self.materialize_fields(regs[fbase + *src as usize]);
                         set_reg(regs, fbase, *dst, result);
@@ -2919,6 +2940,15 @@ impl<'m> Vm<'m> {
                     Op::TraitsOf { dst, src } => {
                         let result = self.materialize_traits(regs[fbase + *src as usize]);
                         set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    // Stamp a fresh constructor's instantiation onto its result (generic
+                    // constructor reflection). The value was just returned by a call the checker
+                    // proved builds it fresh, so writing the tag in place is unobservable to any
+                    // other reference — there is none.
+                    Op::Retag { reg, repr } => {
+                        regs[fbase + *reg as usize]
+                            .set_reflect(Some(Rc::clone(&self.persist.type_reprs[*repr as usize])));
                         pc += 1;
                     }
                     Op::TypeOfStatic { dst, repr } => {

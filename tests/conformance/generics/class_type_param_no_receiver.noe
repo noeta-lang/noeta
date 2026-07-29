@@ -1,0 +1,28 @@
+// A generic type's parameter is carried by the **instance**, so a self-less member of that type has
+// nothing to read it from. That is a compile error, and deliberately a *different* one from the
+// blanket "generics are erased": the instantiation does exist at run time here — it is on the
+// receiver's reflected type tag — this member simply has no receiver. The old wording sent the
+// author looking for a fix (pass the name in as a parameter) that is not the one (read `self`).
+//
+// Reported rather than answered, because the alternative is a silent wrong name flowing into
+// whatever keyed on it. The E0047 below is the ordinary consequence of a self-less body: an
+// inherent method that never reads `self` is an associated function.
+// expect: error E0058 at 24:28
+// expect: error E0047 at 28:6
+// expect: exit 1
+struct Todo {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    fn model(): string {
+        return type_name::<T>();
+    }
+}
+rt: Repo<Todo> = Repo.new("todos");
+echo rt.model();

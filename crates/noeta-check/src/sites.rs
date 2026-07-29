@@ -181,6 +181,13 @@ pub struct Sites {
     /// `Expr::AttributesOf` spans whose turbofish is a FORWARDED type parameter → the hidden slot
     /// index; the manifest query resolves the type NAME through the table at runtime.
     pub dynamic_attr_sites: HashMap<Span, u32>,
+    /// `type_name::<T>()` spans inside a **generic type's instance method**, where `T` is one of
+    /// the enclosing type's own parameters → that parameter's index in the type's declaration order
+    /// (generic constructor reflection, Gap B). The instantiation is not in the compiled body — one
+    /// body serves every `Repo<…>` — but it *is* on the receiver: `self` carries the reflected type
+    /// tag its construction site stamped, so lowering reads argument `i` off that tag instead of
+    /// baking a constant string. A pure function of the program, like the other site maps.
+    pub self_type_arg_sites: HashMap<Span, (String, u32)>,
     /// Forwarding generic fns → their hidden-parameter count. Lowering prepends that many hidden
     /// parameters (`$ty0`, `$ty1`, …) to the fn's IR parameter list.
     pub forwarding_fns: HashMap<String, u32>,
@@ -318,6 +325,8 @@ pub(crate) struct SiteMaps {
     pub(crate) dynamic_recipe_sites: HashMap<Span, u32>,
     /// Dynamic manifest-query sites — see [`Sites::dynamic_attr_sites`].
     pub(crate) dynamic_attr_sites: HashMap<Span, u32>,
+    /// Enclosing-type type-argument reflection sites — see [`Sites::self_type_arg_sites`].
+    pub(crate) self_type_arg_sites: HashMap<Span, (String, u32)>,
     /// Forwarding fns' hidden-parameter counts — see [`Sites::forwarding_fns`].
     pub(crate) forwarding_fns: HashMap<String, u32>,
     /// Forwarding-fn-as-value wrap sites — see [`Sites::fn_value_sites`].
@@ -363,6 +372,7 @@ impl SiteMaps {
             hidden_arg_sites: self.hidden_arg_sites,
             dynamic_recipe_sites: self.dynamic_recipe_sites,
             dynamic_attr_sites: self.dynamic_attr_sites,
+            self_type_arg_sites: self.self_type_arg_sites,
             forwarding_fns: self.forwarding_fns,
             fn_value_sites: self.fn_value_sites,
             destructor_relevance,

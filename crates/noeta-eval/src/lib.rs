@@ -590,7 +590,13 @@ pub struct ObjectValue {
     /// shape) and every non-literal-constructed instance. Invisible to value semantics — `PartialEq`
     /// compares only `def`/`slots` — the tree-walker twin of the VM's node tag. An object's type is
     /// invariant under field mutation, so (unlike the collection tags) it is never cleared.
-    reflect: Option<Rc<TypeRepr>>,
+    ///
+    /// A [`RefCell`] because a **constructor call site** stamps it after the fact (generic
+    /// constructor reflection): the instantiation `Repo<Todo>` is known at the call, not inside
+    /// `fn new` where the literal is written. Rebuilding the value to re-tag it is not an option —
+    /// a `class` is a reference type whose `Rc` *is* its identity — so the tag is written in place.
+    /// Still invisible to value semantics: `PartialEq` compares only `def`/`slots`.
+    reflect: RefCell<Option<Rc<TypeRepr>>>,
 }
 
 thread_local! {
@@ -629,8 +635,21 @@ impl ObjectValue {
             def,
             slots: RefCell::new(slots),
             seq,
-            reflect,
+            reflect: RefCell::new(reflect),
         }
+    }
+
+    /// This instance's reflected type tag, if it carries one.
+    fn reflect(&self) -> Option<Rc<TypeRepr>> {
+        self.reflect.borrow().clone()
+    }
+
+    /// Stamp the reflected type tag **in place** (generic constructor reflection): the caller of a
+    /// generic type's fresh constructor knows the instantiation the constructor body could not.
+    /// Only ever called on a value the checker proved was freshly built by the very call being
+    /// stamped, so no other reference can observe the change.
+    fn set_reflect(&self, tag: Rc<TypeRepr>) {
+        *self.reflect.borrow_mut() = Some(tag);
     }
 
     /// The slot index of `name` in this object's shape, or `None` if it has no such field. A linear
@@ -6073,14 +6092,12 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         // (with type arguments); a non-generic/untagged instance falls back to the head-only shape name
         // with empty args. Mirrors `vm_type_repr`'s node-tag consultation.
         Value::Object(o) if o.def.is_struct => o
-            .reflect
-            .as_ref()
-            .map(|r| (**r).clone())
+            .reflect()
+            .map(|r| (*r).clone())
             .unwrap_or_else(|| TypeRepr::Struct(o.def.name().to_string(), Vec::new())),
         Value::Object(o) => o
-            .reflect
-            .as_ref()
-            .map(|r| (**r).clone())
+            .reflect()
+            .map(|r| (*r).clone())
             .unwrap_or_else(|| TypeRepr::Class(o.def.name().to_string(), Vec::new())),
         // An extern-type value reflects as its registered nominal type under its qualified
         // identity (`std.id.Uuid`), mirroring the checker's `Type::Named` for it.

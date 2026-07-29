@@ -466,12 +466,16 @@ const SSE_SINK_DOCS: &[(&str, &str)] = &[
 const CORE_TYPES: &[ExtType] = &[
     // `Span` (native OTEL T1) — a mutable, effectful, host-coupled handle (like `FileHandle`): its
     // methods reach the `Tracing` capability by id. NOT key-capable (identifies a host resource).
+    // `deep_marshal` so `add_event_with`'s `Map<string, …>` argument arrives as a full
+    // `NativeValue::Map` (the shallow projection collapses containers to opaque) — the same reason
+    // the metrics handles set it for their `*_with(_, attrs)` forms.
     ExtType {
         name: crate::tracing::SPAN_TYPE_NAME,
         namespace: "std.tracing",
         methods: crate::tracing::SPAN_METHODS,
         dispatch: crate::tracing::span_method_dispatch,
         key_capable: false,
+        deep_marshal: true,
         docs: SPAN_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
@@ -565,6 +569,19 @@ const CORE_TYPES: &[ExtType] = &[
         dispatch: process_method_dispatch,
         key_capable: false,
         docs: PROCESS_DOCS,
+        ..ExtType::DEFAULTS
+    },
+    // `OsError` (subprocess-doors arc) — the recoverable failure the `try_spawn`/`try_write` doors
+    // carry. Pure, content-equal data like `HttpError`; declares `Error` + `Display` so `<E: Error>`
+    // bounds accept it and `?` converts it through `From`.
+    ExtType {
+        name: crate::os::OS_ERROR_TYPE_NAME,
+        namespace: "std.os",
+        methods: OS_ERROR_METHODS,
+        dispatch: os_error_method_dispatch,
+        key_capable: false, // a subprocess failure is not a map key
+        traits: &["Error", "Display"],
+        docs: OS_ERROR_DOCS,
         ..ExtType::DEFAULTS
     },
     // `Cell<T>` (higher-order-abi H4) — the generic, Class-3 corner of the matrix: all methods
@@ -3836,7 +3853,8 @@ fn os_dispatch(
             )))
         }
         // `spawn(command, args?)` — start a child WITHOUT waiting and hand back a controllable
-        // `Process` handle (process-handle arc), unlike `exec`'s run-to-completion.
+        // `Process` handle (process-handle arc), unlike `exec`'s run-to-completion. The **aborting**
+        // door of the pair; `try_spawn` below is its recoverable twin.
         "spawn" => {
             want_arity_range(func, args, 1, 2)?;
             let command = want_str(func, args, 0)?;
@@ -3845,6 +3863,23 @@ fn os_dispatch(
             Ok(NativeOut::Extern(crate::ExternBox::new(
                 crate::os::Process { id },
             )))
+        }
+        // `try_spawn(command, args?)` — the **recoverable** door (subprocess-doors arc), the shape
+        // `json.parse`/`json.try_parse` sets. A tool server that is not installed is an ordinary
+        // condition for a client, not a reason to take the program down, so this hands back
+        // `Result<Process, OsError>` and never a `StdError` abort.
+        "try_spawn" => {
+            want_arity_range(func, args, 1, 2)?;
+            let command = want_str(func, args, 0)?;
+            let argv = want_argv(func, args, 1)?;
+            Ok(match host.os_try_spawn(command, &argv) {
+                Ok(id) => NativeOut::Ok(Box::new(NativeOut::Extern(crate::ExternBox::new(
+                    crate::os::Process { id },
+                )))),
+                Err(error) => {
+                    NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error))))
+                }
+            })
         }
         // `exit(code?)` — deliberate termination. Not a host effect and not a diagnostic: the
         // distinguished `ErrorKind::Exit` unwinds the backend, which halts cleanly and surfaces
@@ -4012,11 +4047,40 @@ const PROCESS_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::Option(&Str)),
     },
+    // The awaitable twins of the three reads (subprocess-async arc): each yields a `Future<?string>`
+    // an `.await` unwraps, so `race([p.read_line_async(), task.tick(500)])` is how a program bounds
+    // a child read. All three, not a chosen subset — a blocking read without a twin parks the
+    // isolate's whole scheduler, and the stderr side parks it exactly as the stdout side does.
+    ExtFn {
+        param_names: &[],
+        name: "read_line_async",
+        params: &[],
+        ret: Concrete(SigType::Future(&OPT_STR_SIG)),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "read_err_line_async",
+        params: &[],
+        ret: Concrete(SigType::Future(&OPT_STR_SIG)),
+    },
+    ExtFn {
+        param_names: &["count"],
+        name: "read_async",
+        params: &[Int],
+        ret: Concrete(SigType::Future(&OPT_STR_SIG)),
+    },
     ExtFn {
         param_names: &["contents"],
         name: "write",
         params: &[Str],
         ret: Concrete(SigType::Unit),
+    },
+    // The recoverable write door (subprocess-doors arc) — `write`'s `json.try_parse` twin.
+    ExtFn {
+        param_names: &["contents"],
+        name: "try_write",
+        params: &[Str],
+        ret: Concrete(SigType::Result(&SigType::Unit, &OS_ERROR_SIG)),
     },
     ExtFn {
         param_names: &[],
@@ -4025,6 +4089,78 @@ const PROCESS_METHODS: &[ExtFn] = &[
         ret: Concrete(SigType::Unit),
     },
 ];
+
+/// `?string` — the return of every streaming read, and (wrapped in a `Future`) of its async twin.
+const OPT_STR_SIG: SigType = SigType::Option(&Str);
+
+/// The `OsError` signature — the payload of both recoverable subprocess doors.
+const OS_ERROR_SIG: SigType = SigType::Named(crate::os::OS_ERROR_TYPE_NAME);
+
+/// The `OsError` instance methods (subprocess-doors arc): pure reads over the recoverable
+/// subprocess failure. The `HttpError`/`JsonError` shape — `message`/`to_string` satisfy the
+/// `Error` + `Display` declarations on its registration, so `?` converts it through `From` and
+/// `${e}` interpolates the sentence.
+const OS_ERROR_METHODS: &[ExtFn] = &[
+    ExtFn {
+        param_names: &[],
+        name: "message",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "kind",
+        params: &[],
+        ret: Concrete(Str),
+    },
+];
+
+const OS_ERROR_DOCS: &[(&str, &str)] = &[
+    (
+        "message",
+        "The composed human message (``spawn: cannot start `mcp-server`: No such file or \
+         directory``) — identical to what the aborting twin reports. The `Error` trait's required \
+         method.",
+    ),
+    (
+        "to_string",
+        "Same as `message()` — the `Display` rendering, so `${e}` interpolates the message.",
+    ),
+    (
+        "kind",
+        "What went wrong: `\"not_found\"` (the command is not on `PATH`), \
+         `\"permission_denied\"`, `\"broken_pipe\"` (the child is gone and took its stdin with \
+         it), `\"stdin_closed\"` (you closed it with `close_stdin`), or `\"other\"`. Branch on \
+         this rather than on the message — `not_found` usually means \"tell the user to install \
+         it\" while `broken_pipe` usually means \"restart the server and retry\".",
+    ),
+];
+
+fn os_error_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(error) = recv.as_any().downcast_ref::<crate::os::OsError>() else {
+        return Err(type_error(method, crate::os::OS_ERROR_TYPE_NAME));
+    };
+    want_arity(method, args, 0)?;
+    match method {
+        "message" | "to_string" => Ok(NativeOut::Str(error.message())),
+        "kind" => Ok(NativeOut::Str(error.kind.label().to_string())),
+        _ => Err(crate::no_method_error(
+            crate::os::OS_ERROR_TYPE_NAME,
+            method,
+        )),
+    }
+}
 
 /// Wrap an optional string read (a streaming `read_line`/`read`/`read_err_line`) into a native
 /// `some(...)`/`none`.
@@ -4095,11 +4231,48 @@ fn process_method_dispatch(
             want_arity(method, args, 0)?;
             Ok(opt_str_out(host.os_proc_read_stderr_line(id)?))
         }
+        // The awaitable twins of the three reads above (subprocess-async arc). Every blocking read
+        // has one, because whichever lacked it could still park the isolate's whole scheduler —
+        // which is the condition that makes a bounded child read inexpressible.
+        "read_line_async" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(
+                host.os_proc_read_spawn(id, crate::os::ProcRead::StdoutLine),
+            )))
+        }
+        "read_err_line_async" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(
+                host.os_proc_read_spawn(id, crate::os::ProcRead::StderrLine),
+            )))
+        }
+        "read_async" => {
+            want_arity(method, args, 1)?;
+            let count = want_int(method, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(host.os_proc_read_spawn(
+                id,
+                crate::os::ProcRead::Stdout(count),
+            ))))
+        }
         "write" => {
             want_arity(method, args, 1)?;
             let data = want_str(method, args, 0)?;
             host.os_proc_write_stdin(id, data)?;
             Ok(NativeOut::Unit)
+        }
+        // The **recoverable** write door (subprocess-doors arc). A child that exited between the
+        // program's last liveness check and this write is an ordinary condition — and the race
+        // cannot be closed from the language, because the child can die in the gap — so the failure
+        // is a value the caller decides about.
+        "try_write" => {
+            want_arity(method, args, 1)?;
+            let data = want_str(method, args, 0)?;
+            Ok(match host.os_proc_try_write_stdin(id, data) {
+                Ok(()) => NativeOut::Ok(Box::new(NativeOut::Unit)),
+                Err(error) => {
+                    NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error))))
+                }
+            })
         }
         "close_stdin" => {
             want_arity(method, args, 0)?;
@@ -4873,7 +5046,15 @@ const OS_DOCS: &[(&str, &str)] = &[
     (
         "spawn",
         "Start `program` with `args` as a child `Process` and return immediately — for streaming \
-         its I/O or awaiting it later.",
+         its I/O or awaiting it later. **Aborts** (E0021) if the child cannot be started at all; \
+         use `try_spawn` when a missing program is a case to handle rather than a bug.",
+    ),
+    (
+        "try_spawn",
+        "Recoverable `spawn`: `Result<Process, OsError>` instead of an abort. This is the door for \
+         starting a program you do not control — a language server, an MCP server, a formatter — \
+         where \"not installed\" is an ordinary answer to give the user. Branch on \
+         `e.kind()` (`\"not_found\"`, `\"permission_denied\"`).",
     ),
 ];
 
@@ -5289,6 +5470,34 @@ const TRACING_DOCS: &[(&str, &str)] = &[
         "Run `f` inside a new span named `name`, closing the span when it returns; returns `f`'s \
          result.",
     ),
+    (
+        "set_attribute",
+        "Set an attribute on the **active** span — the span you are already inside (a `with_span` \
+         body, or a request handler under the auto-instrumented SERVER span), which no handle \
+         names. Returns whether a live active span received it: `false` at top level, so the \
+         no-span case is visible rather than silent. Use `Span.set_attribute` for a span you hold.",
+    ),
+    (
+        "add_event",
+        "Add a timestamped event to the **active** span. This is the annotation to reach for \
+         instead of opening a short child span for something that merely *happened* during the \
+         current unit of work — a child span per event inflates trace volume and buries the \
+         signal. Returns whether a live active span received it (`false` at top level).",
+    ),
+    (
+        "add_event_with",
+        "Add a timestamped event carrying its own attributes to the **active** span. Prefer this \
+         over `set_attribute` for a *structured fact*: several facts recorded on one span each keep \
+         their own attribute set, where span-level attributes would overwrite each other by key. \
+         Returns whether a live active span received it.",
+    ),
+    (
+        "record_error",
+        "Set the **active** span's status to error with `message` — mark the span you are inside \
+         as failed without holding its handle. Returns whether a live active span received it; \
+         check it on a path that must not lose an error (`if !tracing.record_error(msg) { \
+         log.error(msg) }`), since at top level there is no span to carry it.",
+    ),
 ];
 
 const QUAT_DOCS: &[(&str, &str)] = &[
@@ -5663,7 +5872,34 @@ const PROCESS_DOCS: &[(&str, &str)] = &[
         "read_err_line",
         "Read the next line from the process's stderr.",
     ),
-    ("write", "Write to the process's stdin."),
+    (
+        "read_line_async",
+        "Await the next line of the process's stdout, yielding a `Future<?string>` — the async twin \
+         of `read_line`. This is how a child read is **bounded**: `race([p.read_line_async(), \
+         task.tick(500)])`. The blocking `read_line` parks the whole isolate, so a sibling \
+         watchdog task cannot fire while it waits.",
+    ),
+    (
+        "read_err_line_async",
+        "Await the next line of the process's stderr, yielding a `Future<?string>` — the async twin \
+         of `read_err_line`, on its own cursor.",
+    ),
+    (
+        "read_async",
+        "Await up to `count` characters of the process's stdout, yielding a `Future<?string>` — \
+         the async twin of `read`.",
+    ),
+    (
+        "write",
+        "Write to the process's stdin. **Aborts** (E0021) if the pipe is gone — a child that \
+         exited is a broken pipe; use `try_write` when that is a case to handle.",
+    ),
+    (
+        "try_write",
+        "Recoverable `write`: `Result<void, OsError>` instead of an abort. Prefer it whenever the \
+         child is a program you do not control, because no check can make the aborting door safe \
+         — the child can exit between a `try_wait()` poll and the write that follows it.",
+    ),
     (
         "close_stdin",
         "Close the process's stdin, signalling end of input.",
@@ -5704,10 +5940,35 @@ const VIEW_METHOD_DOCS: &[(&str, &str)] = &[
 ];
 
 const SPAN_METHOD_DOCS: &[(&str, &str)] = &[
-    ("set_attribute", "Attach a key→value attribute to the span."),
-    ("add_event", "Record a timestamped event on the span."),
-    ("record_error", "Record an error on the span."),
-    ("end", "End the span, fixing its duration."),
+    (
+        "set_attribute",
+        "Attach a key→value attribute to the span. This is for a span you hold; to annotate the \
+         span you are merely *inside* (a `with_span` body, a handler under the SERVER span), call \
+         `tracing.set_attribute` — no handle needed.",
+    ),
+    (
+        "add_event",
+        "Record a timestamped event on the span. `tracing.add_event` does the same to the *active* \
+         span, which is what you want instead of opening a short child span for something that \
+         merely happened.",
+    ),
+    (
+        "add_event_with",
+        "Record a timestamped event carrying its own attributes. Prefer it over `set_attribute` for \
+         a structured fact you may record more than once on one span — events accumulate, span \
+         attributes overwrite by key.",
+    ),
+    (
+        "record_error",
+        "Record an error on the span (sets its status). `tracing.record_error` does the same to \
+         the *active* span.",
+    ),
+    (
+        "end",
+        "End the span, fixing its duration. Deliberately absent from the active-span surface: \
+         ending a span you did not open would close a `with_span`'s span early, or the \
+         auto-instrumented SERVER span out from under `http.serve`.",
+    ),
     (
         "context",
         "The span's trace context, serialized for propagation across a boundary.",
@@ -5979,6 +6240,13 @@ const OS_FNS: &[ExtFn] = &[
         name: "spawn",
         params: &[Str, SigType::Optional(&SigType::List(&Str))],
         ret: Concrete(PROCESS_SIG),
+    },
+    // `try_spawn(command, args?)` — the recoverable twin (subprocess-doors arc).
+    ExtFn {
+        param_names: &["command", "args"],
+        name: "try_spawn",
+        params: &[Str, SigType::Optional(&SigType::List(&Str))],
+        ret: Concrete(SigType::Result(&PROCESS_SIG, &OS_ERROR_SIG)),
     },
     // `exit(code?)` types as unit; it never actually returns.
     ExtFn {
