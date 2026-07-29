@@ -89,7 +89,7 @@ struct User { name: string; id: int }
 
 ### `traits_of(value): List<string>` — trait-membership reflection
 
-`traits_of(value)` returns the trait names the value's nominal type has a **registered implementation** for — a standalone `impl Trait for T`, an in-body `impl` block, a `@derive(Trait)`, or a native type's ABI-declared impl — as a sorted, deduped `List<string>`. It reads the same membership table the precise `x is dyn Trait` test consults, so the two can never disagree. Names are **qualified**: a `.noe` trait keeps its linked name (bare for a program-local trait, `App.Models.Trait` for a namespaced module's), and a native trait reports its qualified identity (`std.vec.Kernels`). Built-in traits appear under their bare names (`Comparable`, `Display`) when a type registers an impl or derive of them; built-in *base* types (int, string, `List`, …) carry no declared impls, so `traits_of(42)` is `[]` even though built-in protocol behavior (echo, `<`) works on them. A non-nominal value (scalar, collection, function) yields the empty list — the same "nothing to report" answer `fields_of` gives a non-object.
+`traits_of(value)` returns the trait names the value's nominal type has a **registered implementation** for — a standalone `impl Trait for T`, an in-body `impl` block, a `@derive(Trait)`, or a native type's ABI-declared impl — as a sorted, deduped `List<string>`. It reads the same membership table the precise `x is dyn Trait` test consults, so the two can never disagree. Names are **qualified**: a `.noe` trait keeps its linked name (bare for a trait in a package-less script, `shop.models.Trait` for one in a module), and a native trait reports its qualified identity (`std.vec.Kernels`). Built-in traits appear under their bare names (`Comparable`, `Display`) when a type registers an impl or derive of them; built-in *base* types (int, string, `List`, …) carry no declared impls, so `traits_of(42)` is `[]` even though built-in protocol behavior (echo, `<`) works on them. A non-nominal value (scalar, collection, function) yields the empty list — the same "nothing to report" answer `fields_of` gives a non-object.
 
 ```noeta
 trait Speaks { fn speak(): string }
@@ -123,6 +123,9 @@ The payload-free cases are spelled **bare** here: the scrutinee is a `Type`, so 
 A type's **qualified runtime identity**, as a `string` — the same name `type_of` reports inside `Type.Struct(name, args)`, and the same key the name-keyed queries (`field_specs_of(name)`, `variants_of(name)`, `construct(name, …)`, `invoke(name, …)`) are stored under. It is how you *write* that key without hand-writing it:
 
 ```noeta
+// A single file with no package, so nothing derives and the declaration stands.
+// Inside a package `local/app` this would be `src/storage.noe`, deriving `app.storage`
+// with no declaration at all — see [Modules](Modules#where-a-modules-path-comes-from).
 namespace app.storage
 
 pub struct Todo {
@@ -133,7 +136,7 @@ echo type_name::<Todo>()                        // app.storage.Todo
 echo field_specs_of(type_name::<Todo>()).len()  // 1
 ```
 
-Turbofish only — a `type_name(s)` taking a runtime string would be the identity function on `s`. The value of the surface is that the **compiler** resolves the type: the name follows a `namespace`, a `use … as` alias, and a rename, none of which a string literal does. A name-keyed repository (`Repository.new(type_name::<Todo>(), "todos", "id")`) is the motivating case — before this it had to be handed `"app.storage.Todo"` spelled out by hand, and nothing checked it.
+Turbofish only — a `type_name(s)` taking a runtime string would be the identity function on `s`. The value of the surface is that the **compiler** resolves the type: the name follows the module's path, a `use … as` alias, and a rename, none of which a string literal does. A name-keyed repository (`Repository.new(type_name::<Todo>(), "todos", "id")`) is the motivating case — before this it had to be handed `"app.storage.Todo"` spelled out by hand, and nothing checked it.
 
 An unresolvable type is `E0013`, exactly as in any other annotation. A **type parameter** resolves wherever the instantiation actually reaches the site — a top-level generic function's parameter and a generic type's parameter in an instance method both do — and is `E0058` where neither channel does; see below.
 
@@ -270,7 +273,7 @@ The `Type` comes out of the same decoder `ParamInfo.type` goes through, so a sig
 
 The **type-level** field schema of a declared struct or class — one `FieldSpec` per field in declaration order: `{ name: string, type: Type, optional: bool }`. It is the declaration-side twin of `fields_of`: that one reflects an *instance*'s field **values** (and so sees the runtime-erased type), this one reflects the **declaration**, so `type` is precise and `optional` reports whether the field declared a default. An unknown name, or an enum, yields the empty list — an enum's cases are `variants_of`'s answer, and the two are meant to be asked as a pair.
 
-Two surfaces, one node: the turbofish `field_specs_of::<T>()` when you know the type statically, and `field_specs_of(name)` when you hold it only as a runtime string (a `Type.Struct(name, _)` you just reflected). They converge on one name-keyed query, so both behave identically — including under a `namespace`, where the turbofish resolves `T` to the same **qualified** identity `type_of` reports (`field_specs_of::<Todo>()` inside `namespace app.storage` asks for `app.storage.Todo`). The string surface takes the name verbatim, so it wants that qualified name too.
+Two surfaces, one node: the turbofish `field_specs_of::<T>()` when you know the type statically, and `field_specs_of(name)` when you hold it only as a runtime string (a `Type.Struct(name, _)` you just reflected). They converge on one name-keyed query, so both behave identically — including inside a module, where the turbofish resolves `T` to the same **qualified** identity `type_of` reports (`field_specs_of::<Todo>()` in the module `app.storage` asks for `app.storage.Todo`). The string surface takes the name verbatim, so it wants that qualified name too.
 
 ```noeta
 struct ServerOpts {
@@ -289,7 +292,7 @@ for spec in field_specs_of::<ServerOpts>() {
 
 ### `variants_of::<T>(): List<VariantSpec>` / `variants_of(name): List<VariantSpec>`
 
-The **type-level** variant schema of a declared enum — one `VariantSpec` per variant in declaration order: `{ name: string, payload: List<FieldSpec>, backing: ?dyn }`. It is the enum half of the same declaration-side query `field_specs_of` is the struct half of: two surfaces (turbofish and runtime string), one name-keyed query, the same **qualified**-identity resolution under a `namespace`, and the same lenient answer for a name it does not recognize — a struct, a class, or an unknown name yields the empty list, so a framework can probe any name without a guard.
+The **type-level** variant schema of a declared enum — one `VariantSpec` per variant in declaration order: `{ name: string, payload: List<FieldSpec>, backing: ?dyn }`. It is the enum half of the same declaration-side query `field_specs_of` is the struct half of: two surfaces (turbofish and runtime string), one name-keyed query, the same **qualified**-identity resolution inside a module, and the same lenient answer for a name it does not recognize — a struct, a class, or an unknown name yields the empty list, so a framework can probe any name without a guard.
 
 Ask them **together**, because neither alone can describe an arbitrary type. `field_specs_of` answers an enum with the empty list, and a field-less struct with the empty list too, so through that query alone an enum is indistinguishable from an empty struct: a schema builder that walked a `Type.Named(name, _)` recursed into an enum-typed field, found nothing, and emitted an empty object — silently wrong rather than loudly missing. With the pair, fields present means a struct or class, variants present means an enum, and both empty is the one honest "nothing is known about this name":
 
@@ -369,7 +372,7 @@ for a in attributes_of::<Doc>() {
 
 ### `construct::<T>(fields): Result<dyn, string>` / `construct(name, fields): Result<dyn, string>`
 
-Builds a struct, class, or **enum case** value **at runtime** from field values, through the *same* construction path a literal takes — so field defaults and full-initialization are honored identically, and a type that appears in no literal anywhere in the program still constructs. Like `field_specs_of` it has a turbofish and a runtime-string surface (with the same qualified-identity resolution under a `namespace`); like `invoke` it is fallible by construction, returning a `Result` rather than aborting. Both surfaces are typed `Result<dyn, string>` — the turbofish only spells the type *name*, so narrow the `Ok` payload back with `.as<T>()` when you need the static type.
+Builds a struct, class, or **enum case** value **at runtime** from field values, through the *same* construction path a literal takes — so field defaults and full-initialization are honored identically, and a type that appears in no literal anywhere in the program still constructs. Like `field_specs_of` it has a turbofish and a runtime-string surface (with the same qualified-identity resolution inside a module); like `invoke` it is fallible by construction, returning a `Result` rather than aborting. Both surfaces are typed `Result<dyn, string>` — the turbofish only spells the type *name*, so narrow the `Ok` payload back with `.as<T>()` when you need the static type.
 
 `fields` accepts either shape:
 
@@ -453,7 +456,7 @@ To go the other way — a single **wire value** to a case, rather than a payload
 
 Materializes every `#[T(...)]` attribute in the program — each entry's `.value` is a real `T`, and `.target` is the annotated declaration's name:
 
-**"In the program" means every file the program is built from**, not only the declarations something imported. A data attribute is a **link root**: an annotated declaration in a sibling module, or in a dependency package, is part of the program whether or not any `use` names it — which is the whole point of tagging a function for discovery. So a `#[Tool]`-scanning framework finds the tools nothing statically references, and finds them by their **qualified** target name (`app.tools.run`, matching `type_of`'s naming under a `namespace`). Visibility does not gate discovery either: a module-private `#[Tool] fn` is a registration, and `invoke(a.target, args)` really calls it — reflection and dispatch see the same set by construction. What the rule does *not* do is drag in unannotated code: a sibling's unannotated function that nothing imports stays out of the program, exactly as before.
+**"In the program" means every file the program is built from**, not only the declarations something imported. A data attribute is a **link root**: an annotated declaration in a sibling module, or in a dependency package, is part of the program whether or not any `use` names it — which is the whole point of tagging a function for discovery. So a `#[Tool]`-scanning framework finds the tools nothing statically references, and finds them by their **qualified** target name (`app.tools.run`, matching `type_of`'s naming inside a module). Visibility does not gate discovery either: a module-private `#[Tool] fn` is a registration, and `invoke(a.target, args)` really calls it — reflection and dispatch see the same set by construction. What the rule does *not* do is drag in unannotated code: a sibling's unannotated function that nothing imports stays out of the program, exactly as before.
 
 ```noeta check
 @attribute

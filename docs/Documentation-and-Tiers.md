@@ -89,7 +89,7 @@ means. A file that does not parse contributes nothing rather than failing the ru
 - **`docs.json`** — the canonical machine-readable form: schema-versioned, keyed by the package's `[package]` identity and version, modules with their namespace, module doc, and items in source order (sections woven between declarations). Deterministic — no timestamps, no absolute paths — so the artifact is content-addressable and **registry-ready**: a published package's docs can ride along and be rendered server-side.
 - **`index.md` + one page per module** — a faithful Markdown rendering of the same data: each public declaration as a signature code block (carrying its `@tier`/`@attribute` directives) followed by its adjacency-attached prose.
 
-A module that declares a `namespace` (a package module) documents its `pub` API only; a bare entry script documents every top-level declaration. Generation works from a bare parse — a sibling that fails to parse is skipped with a note, never fatal.
+A **package module** — a file whose module path derives from where it sits — documents its `pub` API only; a bare entry script outside any package documents every top-level declaration. Generation works from a bare parse — a sibling that fails to parse is skipped with a note, never fatal.
 
 ### Docs on the registry
 

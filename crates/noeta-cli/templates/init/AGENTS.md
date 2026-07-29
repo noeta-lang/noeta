@@ -6,7 +6,7 @@ This is a **Noeta** project. Noeta is a general-purpose programming language: so
 
 ## Project layout
 
-- `src/main.noe` — the entry point. Top-level statements execute top to bottom (there is no `main` function). Sibling `.noe` files next to the entry are linkable modules.
+- `src/main.noe` — the entry point. Top-level statements execute top to bottom (there is no `main` function). Every other `.noe` file under `src/` is a module. **A module's import path is derived from where its file sits** — the package's name plus the file's path below `src/`, `/` becoming `.` — so there is nothing to declare: `src/models.noe` is `<package>.models` and `src/deep/nested.noe` is `<package>.deep.nested`. Name files with a lowercase single word; every directory name and file stem has to be a legal identifier, because it is spelled out in somebody's `use`.
 - `noeta.toml` — the manifest: package identity, dependencies, and build targets.
 - `noeta.lock` — pinned dependency resolution. **Commit it.**
 - Tests, benchmarks, docs, and debug code live *inside* the source files as tier blocks (`@test { … }`, `@bench { … }`, `@doc { … }`, `@debug { … }`) — there is no separate test directory. A normal build strips every tier block; the matching tool (or a `--target`) activates them.
@@ -45,7 +45,7 @@ The toolchain ships an MCP server — the same compiler queries the IDE uses, ex
 - `check` — type-check and get diagnostics (the compile feedback loop).
 - `type_at` — the inferred type at a position: the compiler's answer, not a guess.
 - `definition` / `references` / `symbols` / `completions` / `signature` — navigation.
-- `module_graph` — the `namespace`/`use` import graph.
+- `module_graph` — the module/`use` import graph.
 - `trace` — unfold the static call path from a function.
 - `reflect` — the `@role`/`@semantic` architectural graph and declared types.
 - `project_docs` / `doc_browse` / `doc_page` — this project's own `@doc` documentation.
