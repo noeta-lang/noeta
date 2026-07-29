@@ -385,11 +385,10 @@ echo Money.new(5) < Money.new(9)     // true
 
 ## Modules
 
-Split code across files with `namespace` and `use`. Declarations are private unless marked `pub`:
+Split code across files. A file **is** a module, and its path is derived from where the file sits — the package's import prefix plus the file's path inside the package — so there is nothing to declare. Declarations are private unless marked `pub`:
 
 ```noeta
-// models.noe
-namespace App.Models
+// src/models.noe, in the package `local/shop`  →  the module `shop.models`
 
 pub class User {
     pub name: string
@@ -398,9 +397,9 @@ pub class User {
 ```
 
 ```noeta check
-// main.noe
-namespace App.Main
-use App.Models.User
+// src/main.noe  →  the module `shop.main`
+
+use shop.models.User
 
 echo User.new("Ada").name        // Ada
 ```
@@ -446,8 +445,6 @@ concurrent {
 Putting it together — a small order pipeline (this is `examples/orders.noe`, trimmed):
 
 ```noeta
-namespace Demo
-
 struct Item { price: float  qty: int }
 
 enum OrderError {

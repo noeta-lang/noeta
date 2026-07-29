@@ -7,7 +7,7 @@ The built-in [dev tiers](Dev-Tiers) — `@test`, `@bench`, `@doc`, `@debug` — 
 A package (or the program itself) brings a new tier into existence with a `@tier` declaration on its **runner** function:
 
 ```noeta
-namespace fuzz.tiers
+// `tiers.noe` in the package `acme/fuzzkit` → the module `fuzzkit.tiers`
 
 @attribute(Function)
 pub struct Fuzz { cases: int }          // the tier's knobs, as an ordinary attribute
