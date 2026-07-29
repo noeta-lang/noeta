@@ -520,7 +520,7 @@ fn resolve_dep_modules(
                     src.set_module_path(db)
                         .to(noeta_db::DerivedPath(module.path.clone()));
                     dep.set_root(db).to(package.root.clone());
-                    dep.set_key(db).to(package.key.clone());
+                    dep.set_prefix(db).to(package.prefix.clone());
                     dep.set_renames(db).to(renames.clone());
                     (dep, src)
                 }
@@ -539,7 +539,7 @@ fn resolve_dep_modules(
                         db,
                         src,
                         package.root.clone(),
-                        package.key.clone(),
+                        package.prefix.clone(),
                         renames.clone(),
                     );
                     (dep, src)
@@ -695,7 +695,7 @@ mod tests {
             .collect();
         let dep_modules: Vec<DepModule> = dep_programs
             .iter()
-            .map(|src| DepModule::new(db, *src, "root".into(), "key".into(), Vec::new()))
+            .map(|src| DepModule::new(db, *src, "root".into(), vec!["key".to_string()], Vec::new()))
             .collect();
         WorkspaceCache {
             workspace: Workspace::new(

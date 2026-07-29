@@ -286,11 +286,20 @@ pub fn run_case_path(entry: &Path, display: &str, stage: Stage) -> CaseResult {
 ///
 /// A conformance case is otherwise one package — entry plus siblings — which cannot express any rule
 /// whose boundary is the package, the orphan rule (E0070) first among them. A subdirectory is the
-/// smallest thing that can: the loader's `DepPackage` needs a key, a root, and modules, and a
-/// directory name supplies the first two. Root == key, so nothing is re-rooted and a package's
-/// modules are addressed by exactly the namespace they declare; every package is visible to every
-/// other, which models a graph where the entry depends on all of them and they depend on each other
-/// (the checker sees one merged pool either way).
+/// smallest thing that can: the loader's `DepPackage` needs a root segment, a derived prefix, and
+/// modules, and a directory name supplies the first two. A plain name gives `prefix == [name]` and
+/// `root == name`, so nothing is re-rooted and a package's modules are addressed by exactly the path
+/// their file names derive; every package is visible to every other, which models a graph where the
+/// entry depends on all of them and they depend on each other (the checker sees one merged pool
+/// either way).
+///
+/// **A dotted directory name is a scope-array member** — `para.db/` is the package `para/db` reached
+/// through `para = [{ package = "para/db" }, … ]`, so its modules derive under the two-segment prefix
+/// `para.db` while the package's own root segment stays `db` (what it derives under standalone, and
+/// therefore what its intra-package `use`s lead with). That shape is the *only* one in which a
+/// package's derived prefix is deeper than its own root segment, and it is where an intra-package
+/// import has to be re-rooted to keep resolving — inexpressible while a directory name gave one
+/// segment for both.
 ///
 /// **Empty for every existing case**, and callers must keep the deps-free path when it is: linking
 /// *with* a resolved dependency graph is deliberately stricter about foreign import roots than
@@ -309,14 +318,18 @@ fn dep_packages(dir: &Path) -> Vec<noeta_loader::DepPackage> {
         .filter_map(|package_dir| {
             let name = package_dir.file_name()?.to_string_lossy().into_owned();
             // A case's package subdirectory IS a package root: walked recursively, every module
-            // deriving its path under the directory name — the same prefix its key and root give it.
+            // deriving its path under the prefix the directory name spells.
+            let prefix: Vec<String> = name.split('.').map(str::to_string).collect();
+            // The package's own root segment is the LAST prefix segment — the package half of the
+            // identity, which is what a single-segment name gives too.
+            let root = prefix.last().cloned().unwrap_or_default();
             let modules = noeta_loader::read_package_modules(&noeta_loader::PackageRoot::new(
                 &package_dir,
-                vec![name.clone()],
+                prefix.clone(),
             ));
             (!modules.is_empty()).then(|| noeta_loader::DepPackage {
-                key: name.clone(),
-                root: name,
+                prefix,
+                root,
                 modules,
                 dep_renames: std::collections::BTreeMap::new(),
                 native: false,
@@ -352,7 +365,7 @@ pub(crate) fn dep_sources(entry: &Path, next_id: u32) -> Vec<noeta_db::DepSource
             let paths = pkg.modules.iter().map(|m| m.path.clone()).collect();
             noeta_db::DepSources {
                 root: pkg.root,
-                key: pkg.key,
+                prefix: pkg.prefix,
                 renames: Vec::new(),
                 modules,
                 paths,

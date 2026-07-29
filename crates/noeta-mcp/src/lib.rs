@@ -1199,7 +1199,7 @@ pub(crate) fn resolve_workspace(
                     next += package.modules.len();
                     noeta_db::DepSources {
                         root: package.root.clone(),
-                        key: package.key.clone(),
+                        prefix: package.prefix.clone(),
                         renames: package
                             .dep_renames
                             .iter()

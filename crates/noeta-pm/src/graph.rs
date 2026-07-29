@@ -1985,8 +1985,13 @@ fn assemble(
             &global,
         ));
         packages.push(noeta_loader::DepPackage {
-            key,
-            root: inst.root_segment.clone(),
+            // The loader re-roots the package's intra-package `use`s from the segment its modules
+            // derive under **standalone** — always the package half of the identity — to the prefix
+            // they derive under here. Never `root_segment` (the *scope* half for a scope member):
+            // that segment is not what any of this package's own modules ever derive under, so a
+            // scope member's internal `use db.query` matched nothing and was silently left alone.
+            root: inst.package_segment.clone(),
+            prefix,
             modules,
             dep_renames,
             directives,
@@ -2043,9 +2048,10 @@ fn assemble(
             exported: binding.exported.clone(),
         });
     }
-    // Sort by global segment so the loader's SourceId assignment and the startup-cache key are
-    // deterministic regardless of walk order.
-    packages.sort_by(|a, b| a.key.cmp(&b.key));
+    // Sort by derived prefix so the loader's SourceId assignment and the startup-cache key are
+    // deterministic regardless of walk order. The whole prefix, not just its first segment: every
+    // member of one scope shares that segment, so sorting by it alone left their order to the walk.
+    packages.sort_by(|a, b| a.prefix.cmp(&b.prefix));
     // `command_trust` is a BTreeMap, so `command_bindings` is already in local-name order.
     // The root's merged `@name` bindings resolve against the root's edges (the same context its
     // source uses). Named `root_directives` on the graph for historical continuity; it is the root's
@@ -2060,7 +2066,7 @@ fn assemble(
     for dep in &packages {
         for (local, u) in &dep.directives {
             package_uses.set(
-                noeta_span::PackageOrigin::Dependency(dep.key.clone()),
+                noeta_span::PackageOrigin::Dependency(dep.key().to_string()),
                 local.clone(),
                 u.clone(),
             );
@@ -2250,7 +2256,7 @@ mod tests {
         let graph = resolve_graph(&app.join("main.noe")).expect("a scope array resolves");
         assert_eq!(graph.packages.len(), 2, "both members are present");
         assert!(
-            graph.packages.iter().all(|p| p.key == "acme"),
+            graph.packages.iter().all(|p| p.key() == "acme"),
             "and they share the one root they were listed under"
         );
     }
@@ -2889,7 +2895,8 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("package para/{pkg} missing from the link set"));
             assert_eq!(
-                p.key, "para",
+                p.key(),
+                "para",
                 "scope member para/{pkg} must key on the scope"
             );
             assert_eq!(

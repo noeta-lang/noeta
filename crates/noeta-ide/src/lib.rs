@@ -933,7 +933,7 @@ impl DocumentStore {
         let key = path.first()?;
         let db = &self.db;
         for (i, sp) in cache.dep_programs.iter().enumerate() {
-            if cache.dep_modules.get(i)?.key(db) != key {
+            if cache.dep_modules.get(i)?.import_key(db) != key.as_str() {
                 continue;
             }
             let ast = noeta_db::ast(db, *sp);
@@ -2441,9 +2441,9 @@ impl DocumentStore {
                     .collect();
                 let mut deps = Vec::new();
                 for (i, ast) in dep_asts.iter().enumerate() {
-                    // A dep module's `key` is its consumer-facing import root (what the manifest
-                    // names); `root` is the package's own namespace segment.
-                    let root = cache.dep_modules[i].key(db).clone();
+                    // A dep module's import key is its consumer-facing import root (what the
+                    // manifest names); `root` is the package's own namespace segment.
+                    let root = cache.dep_modules[i].import_key(db).to_string();
                     if !direct.contains(&root) {
                         continue;
                     }
@@ -2860,7 +2860,7 @@ impl StoreDocEnv<'_> {
             .cache
             .dep_modules
             .iter()
-            .map(|d| d.key(&self.store.db).clone())
+            .map(|d| d.import_key(&self.store.db).to_string())
             .collect();
         roots.sort();
         roots.dedup();

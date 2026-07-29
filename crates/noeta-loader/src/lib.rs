@@ -291,10 +291,12 @@ pub fn load_with_deps_appending(
 
 /// A dependency package's sources, to be linked into the entry under the consumer's import root
 /// (package-manager P2.1, model R1). `root` is the package's own namespace root segment (the
-/// `package` half of its `[package] name`); `key` is the consumer's dependency-table key. The loader
-/// **re-roots** the package's modules from `root` to `key` — rewriting the leading segment of each
+/// `package` half of its `[package] name`); `prefix` is the prefix its modules derive under here (the
+/// consumer's dependency-table key, plus the package segment for a scope-array member). The loader
+/// **re-roots** the package's modules from `root` to `prefix` — rewriting the leading segment of each
 /// module's `namespace` and its intra-package `use`s — so the consumer addresses the package as
-/// `use <key>.<sub>.Name` while the package's own imports (written against `root`) keep resolving.
+/// `use <prefix>.<sub>.Name` while the package's own imports (written against `root`, which is what
+/// its own modules derive under standalone) keep resolving.
 ///
 /// A dependency module's own `use`s **drive** imports, exactly as a sibling's do (a package is a
 /// closed unit: its internal cross-references must resolve) — the re-rooting above is what makes its
@@ -306,11 +308,22 @@ pub fn load_with_deps_appending(
 /// it maps each of this package's local dependency keys to the **globally-unique segment** the resolver
 /// assigned the package that key resolves to, so every `use` leading segment in the flat pool addresses
 /// exactly one package. For a leaf/direct dependency with no dependencies of its own it is empty, so
-/// single-level linking is byte-for-byte unchanged. `key` is this package's own global segment (the
-/// consumer's dep-key for a direct dependency, a synthesized unique segment for a transitive-only one).
+/// single-level linking is byte-for-byte unchanged. [`DepPackage::key`] is this package's own global
+/// segment (the consumer's dep-key for a direct dependency, a synthesized unique segment for a
+/// transitive-only one).
 #[derive(Debug)]
 pub struct DepPackage {
-    pub key: String,
+    /// The prefix this package's modules **derive** under in this consumer's build — the key alone
+    /// for a plain `[dependencies]` entry, `{key}.{package root segment}` for a scope-array member
+    /// (`para = [{ package = "para/db" }, …]` → `para.db`). The same prefix `noeta-pm` handed
+    /// [`PackageRoot`] when it read the modules, so what a module's path derives to and what its
+    /// intra-package `use`s are re-rooted to cannot disagree. Its first segment is the consumer's
+    /// import key ([`Self::key`]).
+    pub prefix: Vec<String>,
+    /// The package's **own** root segment — the `package` half of its identity (`db` for `para/db`),
+    /// which is the prefix its modules derive under when it is built *standalone*. This is therefore
+    /// the segment an intra-package `use` leads with in every build, and what [`reroot_path`]
+    /// rewrites to [`Self::prefix`].
     pub root: String,
     pub modules: Vec<RawModule>,
     /// This package's local dependency keys → the global segment of the package each resolves to
@@ -338,28 +351,58 @@ pub struct DepPackage {
     pub directives: std::collections::HashMap<String, noeta_span::PackageUse>,
 }
 
+impl DepPackage {
+    /// The consumer's **import key** for this package — the first segment of [`Self::prefix`]. What
+    /// the package is addressed by as a whole (`PackageOrigin::Dependency`, a native package's
+    /// retained import root); the segments after it, if any, belong to the package rather than to the
+    /// consumer's manifest.
+    pub fn key(&self) -> &str {
+        self.prefix.first().map_or("", String::as_str)
+    }
+}
+
 /// Re-root a namespace/use path in place: replace its leading segment per the rules
-/// (package-manager P2.1/P2.4). If the leading segment is the package's own `root`, it becomes the
-/// package's global `key`; otherwise, if it is one of the package's local dependency keys, it becomes
-/// that dependency's global segment (`renames`). A path leading with anything else — `std`, or a
-/// malformed package path — is left untouched.
+/// (package-manager P2.1/P2.4).
+///
+/// **The rule: a leading segment equal to the package's own root segment becomes the whole prefix
+/// the package's modules derive under here.** `root` is always the *package* half of the identity
+/// (`db` for `para/db`) — the prefix the package derives under when it is built **standalone** — and
+/// `prefix` is what it derives under in *this* build (the consumer's key, plus the package segment
+/// for a scope-array member: `para = [{ package = "para/db" }, …]` → `para.db`). So the one spelling
+/// `use db.query` addresses the same module in both builds: standalone `prefix == [root]` and the
+/// rewrite is a no-op; as a dependency it becomes `use para.db.query`, which is what `query.noe`
+/// derives there.
+///
+/// That is what makes an intra-package import writable at all. Rewriting a *single* segment to the
+/// *key* could not: for a scope-array member the key is the **scope** half, so `use db.query` matched
+/// nothing and was never rewritten, while `use para.db.query` matched nothing standalone — a package
+/// author had to pick which of the two builds to break. It is also what makes the key real: keying
+/// `acme/cli` as `mycli` rewrites its internal `use cli.x` to `mycli.x`.
+///
+/// Otherwise, if the leading segment is one of the package's own local dependency keys it becomes
+/// that dependency's global segment (`renames`) — a **single** segment, because the author already
+/// spelled whatever follows (`use para.db.query` inside a package that keys the `para` scope array
+/// re-roots only `para`). A path leading with anything else — `std`, a native extension's own
+/// namespace root, or a malformed package path — is left untouched.
+///
 /// Public so a caller holding a namespace **outside** a [`Program`] can address it the same way
 /// [`reroot_program`] addresses a parsed one — the salsa layer recovers a broken dependency module's
 /// namespace from its tokens (it has no usable AST), and that namespace must be re-rooted to the
-/// consumer's key or it will never match the `use` that names it.
+/// consumer's prefix or it will never match the `use` that names it.
 pub fn reroot_path(
-    path: &mut [String],
+    path: &mut Vec<String>,
     root: &str,
-    key: &str,
+    prefix: &[String],
     renames: &std::collections::BTreeMap<String, String>,
 ) {
-    let Some(head) = path.first_mut() else {
+    let Some(head) = path.first() else {
         return;
     };
     if head.as_str() == root {
-        *head = key.to_string();
+        // The whole prefix, not one segment: a scope member's is two segments deep.
+        path.splice(0..1, prefix.iter().cloned());
     } else if let Some(global) = renames.get(head.as_str()) {
-        *head = global.clone();
+        path[0] = global.clone();
     }
 }
 
@@ -373,12 +416,12 @@ pub fn reroot_path(
 /// `hello.noe` derives, so the declaration is a restatement rather than a contradiction. (It is a
 /// no-op once the declarations are gone.)
 ///
-/// A declared `namespace` only ever leads with the package's own root, so it is rewritten
-/// `root` → `key`; a `use` may lead with the package root (an intra-package reference) or one of the package's local
-/// dependency keys (a transitive reference), both handled by [`reroot_path`]. Touches only those two
-/// statement kinds — both are consumed *during* linking (matching / import-driving) and never appear
-/// in the merged declaration output — so re-rooting cannot alter what a package contributes, only how
-/// it's addressed.
+/// Both kinds lead with the same segment when they refer to the package itself — its own root
+/// segment, which is what its modules derive under standalone — so both are rewritten `root` →
+/// `prefix`; a `use` may instead lead with one of the package's local dependency keys (a transitive
+/// reference), also handled by [`reroot_path`]. Touches only those two statement kinds — both are
+/// consumed *during* linking (matching / import-driving) and never appear in the merged declaration
+/// output — so re-rooting cannot alter what a package contributes, only how it's addressed.
 ///
 /// Public so a salsa-based linker (`noeta-db`) can re-root a dependency's parsed [`Program`] before
 /// feeding it to [`link_parsed_with_deps`] — the CLI's [`link_with_deps`] does this inline, but the
@@ -387,13 +430,13 @@ pub fn reroot_path(
 pub fn reroot_program(
     program: &mut Program,
     root: &str,
-    key: &str,
+    prefix: &[String],
     renames: &std::collections::BTreeMap<String, String>,
 ) {
     for stmt in &mut program.stmts {
         match stmt {
-            Stmt::Namespace { path, .. } => reroot_path(path, root, key, renames),
-            Stmt::Use { path, .. } => reroot_path(path, root, key, renames),
+            Stmt::Namespace { path, .. } => reroot_path(path, root, prefix, renames),
+            Stmt::Use { path, .. } => reroot_path(path, root, prefix, renames),
             _ => {}
         }
     }
@@ -855,7 +898,7 @@ pub fn link_with_deps_appending(
             editions.set(SourceId(next_id), dep.edition);
             packages.set(
                 SourceId(next_id),
-                PackageOrigin::Dependency(dep.key.clone()),
+                PackageOrigin::Dependency(dep.key().to_string()),
             );
             next_id += 1;
         }
@@ -1042,7 +1085,7 @@ fn parse_dep_programs(
                 &raw.path,
             ) {
                 Ok(mut program) => {
-                    reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
+                    reroot_program(&mut program, &dep.root, &dep.prefix, &dep.dep_renames);
                     dep_programs.push((dep_idx, program));
                 }
                 Err(module) => broken.push(*module),
@@ -1072,7 +1115,7 @@ fn dep_module_path(deps: &[DepPackage], flat: usize) -> &ModulePath {
 fn native_dep_roots(deps: &[DepPackage]) -> Vec<String> {
     deps.iter()
         .filter(|d| d.native)
-        .map(|d| d.key.clone())
+        .map(|d| d.key().to_string())
         .collect()
 }
 
@@ -1179,7 +1222,7 @@ pub fn parse_dir(
             editions.set(SourceId(next_id), dep.edition);
             packages.set(
                 SourceId(next_id),
-                PackageOrigin::Dependency(dep.key.clone()),
+                PackageOrigin::Dependency(dep.key().to_string()),
             );
             next_id += 1;
         }
@@ -3484,7 +3527,7 @@ mod tests {
         // *keying* — the map is populated, not left empty, and covers each source — which is the
         // wiring the first edition-gated rule will consult once editions diverge.)
         let dep_a = DepPackage {
-            key: "a".to_string(),
+            prefix: vec!["a".to_string()],
             root: "a".to_string(),
             modules: vec![module(
                 "a.noe",
@@ -3496,7 +3539,7 @@ mod tests {
             directives: Default::default(),
         };
         let dep_b = DepPackage {
-            key: "b".to_string(),
+            prefix: vec!["b".to_string()],
             root: "b".to_string(),
             modules: vec![module(
                 "b.noe",
@@ -3551,7 +3594,7 @@ mod tests {
         // keys it `webclient` and imports `use webclient.client.Client` — the loader re-roots
         // `http.*` → `webclient.*`.
         let dep = DepPackage {
-            key: "webclient".to_string(),
+            prefix: vec!["webclient".to_string()],
             root: "http".to_string(),
             modules: vec![module(
                 "client.noe",
@@ -3589,7 +3632,7 @@ mod tests {
         // root — a hard error (E0019), not a silent opaque stub. Foreign-package imports are exactly
         // the ones you fat-finger, and the loader *does* validate them (they are in the pool).
         let dep = DepPackage {
-            key: "webclient".to_string(),
+            prefix: vec!["webclient".to_string()],
             root: "http".to_string(),
             modules: vec![module(
                 "client.noe",
@@ -3624,7 +3667,7 @@ mod tests {
         // is a *declared* native dependency (`native: true`), the loader retains the import for the
         // composed toolchain to validate — it does not flag it.
         let dep = DepPackage {
-            key: "imgfx".to_string(),
+            prefix: vec!["imgfx".to_string()],
             root: "imgfx".to_string(),
             modules: Vec::new(),
             dep_renames: Default::default(),
@@ -3656,7 +3699,7 @@ mod tests {
     /// A dependency package whose `broken.noe` has a syntax error, plus a clean sibling module.
     fn dep_with_broken_module() -> DepPackage {
         DepPackage {
-            key: "para".to_string(),
+            prefix: vec!["para".to_string()],
             root: "para".to_string(),
             modules: vec![
                 module(
@@ -3731,7 +3774,7 @@ mod tests {
         // module, and a `use` under its key must still be retained, never flagged. A pure-Noeta
         // package with a broken file and a native package with no files must not be confused.
         let native = DepPackage {
-            key: "imgfx".to_string(),
+            prefix: vec!["imgfx".to_string()],
             root: "imgfx".to_string(),
             modules: Vec::new(),
             dep_renames: Default::default(),
@@ -3903,7 +3946,7 @@ mod tests {
         // `imgfx`) or a package never added to the manifest — is an error, not a silent stub. This is
         // the foreign-package typo case: exactly what you cannot catch by eye.
         let dep = DepPackage {
-            key: "imgfx".to_string(),
+            prefix: vec!["imgfx".to_string()],
             root: "imgfx".to_string(),
             modules: Vec::new(),
             dep_renames: Default::default(),
@@ -3937,7 +3980,7 @@ mod tests {
         // re-rooting rewrites it to `use webclient.models.Body`, and — because a dependency module's
         // `use`s drive imports — `Body` is pulled in even though the consumer never named it.
         let dep = DepPackage {
-            key: "webclient".to_string(),
+            prefix: vec!["webclient".to_string()],
             root: "http".to_string(),
             modules: vec![
                 module(
@@ -3975,7 +4018,7 @@ mod tests {
         // Both packages have root segment `http` (e.g. `a/http` and `b/http`); distinct keys keep
         // them apart — the collision the dep-key decoupling exists to prevent.
         let a = DepPackage {
-            key: "alpha".to_string(),
+            prefix: vec!["alpha".to_string()],
             root: "http".to_string(),
             modules: vec![module(
                 "a.noe",
@@ -3987,7 +4030,7 @@ mod tests {
             directives: Default::default(),
         };
         let b = DepPackage {
-            key: "beta".to_string(),
+            prefix: vec!["beta".to_string()],
             root: "http".to_string(),
             modules: vec![module(
                 "b.noe",
@@ -4021,7 +4064,7 @@ mod tests {
         // claimed `Middleware` for the whole program and `para-api`'s claim of *its* `Middleware`
         // came back as E0020.
         let aether = DepPackage {
-            key: "para".to_string(),
+            prefix: vec!["para".to_string()],
             root: "para".to_string(),
             modules: vec![
                 module(
@@ -4040,7 +4083,7 @@ mod tests {
             directives: Default::default(),
         };
         let api = DepPackage {
-            key: "para".to_string(),
+            prefix: vec!["para".to_string()],
             root: "para".to_string(),
             modules: vec![
                 module(
@@ -4153,7 +4196,7 @@ mod tests {
         // dependency file* remain the clash, and the diagnostic must render against that file — not
         // the entry, whose text does not contain the span at all.
         let dep = DepPackage {
-            key: "pkg".to_string(),
+            prefix: vec!["pkg".to_string()],
             root: "pkg".to_string(),
             modules: vec![
                 module("a.noe", "namespace pkg.a;\npub class User { id: int }\n"),
@@ -4196,7 +4239,7 @@ mod tests {
         let mut app_renames = std::collections::BTreeMap::new();
         app_renames.insert("jsonlib".to_string(), "pkg_json".to_string());
         let app = DepPackage {
-            key: "app".to_string(),
+            prefix: vec!["app".to_string()],
             root: "app".to_string(),
             modules: vec![module(
                 "widget.noe",
@@ -4208,7 +4251,7 @@ mod tests {
             directives: Default::default(),
         };
         let json = DepPackage {
-            key: "pkg_json".to_string(),
+            prefix: vec!["pkg_json".to_string()],
             root: "json".to_string(),
             modules: vec![module(
                 "parse.noe",
@@ -4243,7 +4286,7 @@ mod tests {
         // package, each dependency's modules that package's global key — and the checker's orphan
         // rule (E0070) reads it through each declaration's span.
         let dep = DepPackage {
-            key: "geo".to_string(),
+            prefix: vec!["geo".to_string()],
             root: "shapes".to_string(),
             modules: vec![module(
                 "circle.noe",
@@ -4323,7 +4366,7 @@ mod tests {
     fn a_drivers_entry_tail_imports_a_native_packages_noe_submodule() {
         noeta_stdlib::registry::default_seeded();
         let dep = DepPackage {
-            key: "para".to_string(),
+            prefix: vec!["para".to_string()],
             root: "para".to_string(),
             modules: vec![module(
                 "migrations.noe",
@@ -4412,7 +4455,7 @@ mod tests {
     fn a_drivers_entry_use_defers_to_one_the_entry_already_wrote() {
         noeta_stdlib::registry::default_seeded();
         let dep = DepPackage {
-            key: "para".to_string(),
+            prefix: vec!["para".to_string()],
             root: "para".to_string(),
             modules: vec![module(
                 "migrations.noe",
@@ -4455,7 +4498,7 @@ mod tests {
         // A package that `use`s `std.*` internally: the loader can't resolve std (not a module), so
         // the `use std.math.sqrt` is retained in the merged program for the compiler to bind.
         let dep = DepPackage {
-            key: "geo".to_string(),
+            prefix: vec!["geo".to_string()],
             root: "shapes".to_string(),
             modules: vec![module(
                 "circle.noe",
@@ -4850,7 +4893,7 @@ mod tests {
     #[test]
     fn an_imported_fn_drags_in_its_internal_helper() {
         let dep = DepPackage {
-            key: "mathx".to_string(),
+            prefix: vec!["mathx".to_string()],
             root: "mathx".to_string(),
             modules: vec![module(
                 "lib.noe",
@@ -4884,7 +4927,7 @@ mod tests {
     #[test]
     fn an_imported_fn_drags_in_a_module_local_type() {
         let dep = DepPackage {
-            key: "widgets".to_string(),
+            prefix: vec!["widgets".to_string()],
             root: "widgets".to_string(),
             modules: vec![module(
                 "lib.noe",
@@ -4918,7 +4961,7 @@ mod tests {
     #[test]
     fn the_closure_is_transitive_to_a_fixpoint() {
         let dep = DepPackage {
-            key: "chain".to_string(),
+            prefix: vec!["chain".to_string()],
             root: "chain".to_string(),
             modules: vec![module(
                 "lib.noe",
@@ -4959,7 +5002,7 @@ mod tests {
     #[test]
     fn a_standalone_impl_drags_in_what_its_bodies_reference() {
         let dep = DepPackage {
-            key: "svc".to_string(),
+            prefix: vec!["svc".to_string()],
             root: "svc".to_string(),
             modules: vec![module(
                 "lib.noe",

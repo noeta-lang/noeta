@@ -511,19 +511,32 @@ pub fn workspace_entry(db: &dyn salsa::Database, ws: Workspace) -> SourceProgram
 }
 
 /// One dependency package module in a salsa [`Workspace`] (package-manager P2.1c): its source input
-/// plus the re-root info [`linked`] applies before merging it (`root`→`key`, then each of the
+/// plus the re-root info [`linked`] applies before merging it (`root`→`prefix`, then each of the
 /// package's local dependency keys → the target package's global segment). `renames` is a **flat**
 /// list of `[local0, global0, local1, global1, …]` pairs — a `BTreeMap` is not a salsa input field
 /// type, so the query rebuilds it (see [`reroot_map`]).
 #[salsa::input(debug)]
 pub struct DepModule {
     pub src: SourceProgram,
+    /// The package's own root segment — what its modules derive under standalone, and therefore the
+    /// leading segment of its intra-package `use`s (`noeta_loader::DepPackage::root`).
     #[returns(ref)]
     pub root: String,
+    /// The prefix this package's modules derive under in this consumer's build — the import key alone,
+    /// or `{key}.{package segment}` for a scope-array member (`noeta_loader::DepPackage::prefix`).
     #[returns(ref)]
-    pub key: String,
+    pub prefix: Vec<String>,
     #[returns(ref)]
     pub renames: Vec<String>,
+}
+
+impl DepModule {
+    /// The consumer's **import key** for this module's package — the first segment of
+    /// [`Self::prefix`]. What the package is labeled by (`PackageOrigin::Dependency`) and addressed
+    /// as a whole; the segments after it, if any, belong to the package rather than to the manifest.
+    pub fn import_key(self, db: &dyn salsa::Database) -> &str {
+        self.prefix(db).first().map_or("", String::as_str)
+    }
 }
 
 /// A dependency package's sources + re-root info, the ergonomic input to [`workspace_with_deps`]
@@ -531,7 +544,9 @@ pub struct DepModule {
 #[derive(Debug)]
 pub struct DepSources {
     pub root: String,
-    pub key: String,
+    /// The prefix this package's modules derive under here — the import key alone, or
+    /// `{key}.{package segment}` for a scope-array member.
+    pub prefix: Vec<String>,
     pub renames: Vec<(String, String)>,
     pub modules: Vec<Source>,
     /// The module path each of `modules` derives, index-aligned with it. Empty for a caller that
@@ -600,7 +615,7 @@ pub fn workspace_with_deps(
                 db,
                 sp,
                 dep.root.clone(),
-                dep.key.clone(),
+                dep.prefix.clone(),
                 renames.clone(),
             ));
         }
@@ -716,7 +731,9 @@ fn workspace_renamed_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Rena
         if decls.is_empty() {
             continue;
         }
-        let entry = declared_by_segment.entry(dm.key(db).clone()).or_default();
+        let entry = declared_by_segment
+            .entry(dm.import_key(db).to_string())
+            .or_default();
         for name in decls {
             entry.insert(name.clone());
         }
@@ -896,7 +913,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
             noeta_loader::reroot_program(
                 &mut program,
                 dm.root(db),
-                dm.key(db),
+                dm.prefix(db),
                 &reroot_map(dm.renames(db)),
             );
             dep_programs.push(program);
@@ -1138,7 +1155,7 @@ pub fn broken_modules(db: &dyn salsa::Database, ws: Workspace) -> BrokenModules 
                     noeta_loader::reroot_path(
                         ns,
                         dm.root(db),
-                        dm.key(db),
+                        dm.prefix(db),
                         &reroot_map(dm.renames(db)),
                     );
                 }
@@ -1189,7 +1206,7 @@ pub fn workspace_packages(db: &dyn salsa::Database, ws: Workspace) -> noeta_span
     for dm in ws.dep_modules(db).iter() {
         map.set(
             SourceId(dm.src(db).id(db)),
-            noeta_span::PackageOrigin::Dependency(dm.key(db).clone()),
+            noeta_span::PackageOrigin::Dependency(dm.import_key(db).to_string()),
         );
     }
     map
@@ -1684,7 +1701,7 @@ mod tests {
         let dep = DepSources {
             paths: Vec::new(),
             root: "greet".to_string(),
-            key: "hi".to_string(),
+            prefix: vec!["hi".to_string()],
             renames: Vec::new(),
             modules: vec![Source::new(
                 SourceId(1),
