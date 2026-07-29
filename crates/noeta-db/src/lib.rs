@@ -1497,6 +1497,7 @@ mod tests {
             &entry,
             std::slice::from_ref(&a),
             noeta_lexer::Edition::DEFAULT,
+            &[],
         );
 
         let prog = match &linked(&db, ws).program {
@@ -1535,6 +1536,7 @@ mod tests {
             entry_text,
             noeta_lexer::Edition::DEFAULT,
             std::slice::from_ref(&raw),
+            noeta_loader::ModulePath::Declared,
         )
         .unwrap();
 
@@ -1546,6 +1548,7 @@ mod tests {
             &entry,
             std::slice::from_ref(&a),
             noeta_lexer::Edition::DEFAULT,
+            &[],
         );
         let salsa = match &linked(&db, ws).program {
             Ok(p) => p.clone(),
@@ -1684,6 +1687,7 @@ mod tests {
             "use hi.hello.greeting;\necho greeting();\n",
         );
         let dep = DepSources {
+            paths: Vec::new(),
             root: "greet".to_string(),
             key: "hi".to_string(),
             renames: Vec::new(),
@@ -1700,6 +1704,7 @@ mod tests {
             &[],
             std::slice::from_ref(&dep),
             noeta_lexer::Edition::DEFAULT,
+            &[],
         );
         let linked = linked(&db, ws);
         assert!(

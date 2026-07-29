@@ -561,6 +561,16 @@ fn resolve_dep_modules(
 /// editor overlays open buffers before the sort). A directory that cannot be read is an empty
 /// member set, not an error: the consumer degrades exactly as for an empty directory.
 pub(crate) fn disk_noe_uris(dir: &Path) -> Vec<String> {
+    // A directory inside a **package** contributes the whole package, walked as the compiler walks
+    // it — otherwise the editor would analyze `src/main.noe` against an empty sibling pool while
+    // `noeta run` links `src/deep/nested.noe` beside it, and report an unresolved import on a
+    // program that compiles.
+    if let Some(root) = noeta_pm::sources::package_root_of(dir) {
+        return noeta_loader::read_package_modules(&root)
+            .into_iter()
+            .map(|m| path_to_uri(Path::new(&m.name)))
+            .collect();
+    }
     let mut uris = Vec::new();
     if let Ok(read_dir) = std::fs::read_dir(dir) {
         uris.extend(
@@ -654,14 +664,30 @@ mod tests {
         let programs: Vec<SourceProgram> = members
             .iter()
             .enumerate()
-            .map(|(i, u)| SourceProgram::new(db, i as u32, (*u).to_string(), String::new(), ed))
+            .map(|(i, u)| {
+                SourceProgram::new(
+                    db,
+                    i as u32,
+                    (*u).to_string(),
+                    String::new(),
+                    ed,
+                    noeta_db::DerivedPath::default(),
+                )
+            })
             .collect();
         let first = first_dep_id(programs.len());
         let dep_programs: Vec<SourceProgram> = deps
             .iter()
             .enumerate()
             .map(|(i, u)| {
-                SourceProgram::new(db, first + i as u32, (*u).to_string(), String::new(), ed)
+                SourceProgram::new(
+                    db,
+                    first + i as u32,
+                    (*u).to_string(),
+                    String::new(),
+                    ed,
+                    noeta_db::DerivedPath::default(),
+                )
             })
             .collect();
         let dep_modules: Vec<DepModule> = dep_programs

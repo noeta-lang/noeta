@@ -7,14 +7,27 @@ Multi-file module loading and linking (M1.9).
 
 ## The model
 
-A program is rooted at an entry file. The other `.noe` files in the entry's directory are candidate **modules**, each declaring its identity with `namespace App.Models;`. The entry's imports —
+A program is rooted at an entry file. The other `.noe` files of its **package** are candidate **modules**, and a module's identity is *derived from where its file sits* — the package's import prefix plus the file's path inside the package, `/` → `.`, case preserved verbatim (`derive.rs`). The entry's imports —
 
 ```
-use App.Models.User;
-use App.Billing.{Invoice, Receipt};
+use dirscan.deep.nested.Scanner;
+use billing.{Invoice, Receipt};
 ```
 
-— resolve against those declared namespaces: each imported name's *real* declaration (a class, struct, enum, or function) is pulled from the providing module and **merged into a single `Program`** ahead of the entry's own statements. Both backends then run the merged program unchanged, so the differential oracle is preserved by construction — there is no module-aware runtime, only one linked program.
+— resolve against those derived paths: each imported name's *real* declaration (a class, struct, enum, or function) is pulled from the providing module and **merged into a single `Program`** ahead of the entry's own statements. Both backends then run the merged program unchanged, so the differential oracle is preserved by construction — there is no module-aware runtime, only one linked program.
+
+### The derivation rule
+
+| | |
+|---|---|
+| **Prefix** | a plain `[dependencies]` entry → the **key** (`mycli = { … }` → `mycli.…`); a scope-array member → `{key}.{package segment}`; the root package's own modules → its `[package] name`'s package half |
+| **Path** | the file's path relative to the package root, directories then stem, `/` → `.`; a leading `src/` is layout, not a segment |
+| **Root file** | a stem repeating the segment before it names *that* module (`para-db/db.noe` under prefix `para.db` is `para.db`, not `para.db.db`) |
+| **Case** | preserved verbatim; `use` matching is exact |
+
+A file reached with **no package** (a lone script) derives nothing, and is identified by the `namespace` it declares — the pre-derivation behavior. A `namespace` declaration on a file that *does* derive is accepted only as a restatement: one that disagrees is `E0072`. Two files deriving one path is `E0073`, naming both; a directory or stem that is not a legal identifier segment is `E0074`, with the rename to make.
+
+Deriving the path is what makes the consumer's import key real (`para/cli` keyed `mycli` is `mycli.cli`, where re-rooting a declared `namespace para.cli` silently did nothing), and what makes an app's subdirectories work — the app's own scan is the same recursive, pruned package walk a dependency has always had.
 
 ## What gets merged: imports, their closure, every impl, and every annotated declaration
 

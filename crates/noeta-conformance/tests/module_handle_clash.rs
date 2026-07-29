@@ -90,7 +90,13 @@ fn check_then_run(entry: &str, siblings: &[(&str, &str)]) -> String {
         .iter()
         .map(|(name, text)| RawModule::declared(*name, *text))
         .collect();
-    let linked = noeta_loader::link("main.noe", entry, noeta_lexer::Edition::DEFAULT, &siblings)
+    let linked = noeta_loader::link(
+        "main.noe",
+        entry,
+        noeta_lexer::Edition::DEFAULT,
+        &siblings,
+        noeta_loader::ModulePath::Declared,
+    )
         .unwrap_or_else(|errors| {
             panic!(
                 "the program must link: {:?}",

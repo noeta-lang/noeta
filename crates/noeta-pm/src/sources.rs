@@ -34,7 +34,12 @@ pub fn read_package_sources(dir: &Path, prefix: &[String]) -> Vec<RawModule> {
 /// overall: every invocation that reaches here also resolves dependencies through the same manifest,
 /// and *that* parse reports it (the same division as [`crate::manifest::root_edition`]).
 pub fn package_root(entry: &Path) -> Option<PackageRoot> {
-    let dir = entry.parent().unwrap_or_else(|| Path::new("."));
+    package_root_of(entry.parent().unwrap_or_else(|| Path::new(".")))
+}
+
+/// [`package_root`] asked of a **directory** — the package that directory's files belong to. What
+/// the editor asks: its unit of work is an open document's directory, not a single entry.
+pub fn package_root_of(dir: &Path) -> Option<PackageRoot> {
     let manifest_path = manifest::find(dir)?;
     let text = std::fs::read_to_string(&manifest_path).ok()?;
     let parsed = manifest::Manifest::parse(&text).ok()?;

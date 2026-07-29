@@ -3271,7 +3271,13 @@ mod tests {
         siblings: &[RawModule],
     ) -> Result<Linked, Vec<LoadDiagnostic>> {
         noeta_stdlib::registry::default_seeded();
-        super::link(entry_name, entry_text, root_edition, siblings)
+        super::link(
+            entry_name,
+            entry_text,
+            root_edition,
+            siblings,
+            ModulePath::Declared,
+        )
     }
 
     fn link_with_deps(
@@ -3289,14 +3295,12 @@ mod tests {
             siblings,
             deps,
             &noeta_span::PackageUses::new(),
+            ModulePath::Declared,
         )
     }
 
     fn module(name: &str, text: &str) -> RawModule {
-        RawModule {
-            name: name.to_string(),
-            text: text.to_string(),
-        }
+        RawModule::declared(name, text)
     }
 
     // --- cross-package linking (package-manager P2.1) -----------------------------------------
@@ -5027,6 +5031,7 @@ mod tests {
             &[],
             &[],
             &uses,
+            ModulePath::Declared,
         )
         .expect("a renamed text tier captures verbatim and links");
 
@@ -5039,6 +5044,7 @@ mod tests {
             &[],
             &[],
             &noeta_span::PackageUses::new(),
+            ModulePath::Declared,
         )
         .expect_err("without the binding, the markdown body is lexed as code and fails");
         assert!(!errs.is_empty());
