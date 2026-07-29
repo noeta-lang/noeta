@@ -1,0 +1,60 @@
+// A **native** (extension-declared) enum answers `variants_of` / `field_specs_of` too — the same
+// hole the prelude enums had, and for the same reason: `reflect::build` walks the program AST, and
+// a registry-declared type is not in it. `std.http.Framing` is the shipped one.
+//
+// Keyed by the **qualified** identity (`std.http.Framing`), which is what `type_of` stamps on one of
+// its values — so a framework that walks a `type_of` result and probes the name it finds gets the
+// cases, instead of the empty list that reads as "I know nothing about this name". The pair rule
+// holds: cases through `variants_of`, empty through `field_specs_of`, because an enum declares no
+// fields.
+//
+// **Every static spelling keys on that one identity.** The loader qualifies a group import
+// (`use std.http` → `http.Framing`) but deliberately leaves a *leaf* import short (`use
+// std.http.{Framing}`) — those resolve through the checker, and rewriting them would rewrite the
+// value spelling too — so the short turbofish used to fold to a name nothing is registered under and
+// answer empty, right after the program imported the type. Lowering now resolves a leaf-imported
+// native enum name to its qualified identity, for the turbofish AND for `type_name::<T>()`, whose
+// whole job is to hand that name to the others. A *dynamic* operand is still the literal string it
+// spells: `variants_of("Framing")` means the name `Framing`, and rewriting a runtime string because
+// it happens to match an import would be a different bug.
+//
+// The *group* spelling (`use std.http` then `variants_of::<http.Framing>()`) is not asserted here:
+// it is the loader's native-type aliasing that qualifies it, and this harness's single-file path
+// parses and checks without linking, so the alias never runs. `docs/Attributes-and-Reflection.md`
+// exercises that spelling through the doc-sample gate, which does link.
+// expect: stdout "leaf turbofish: Sse Ndjson Lines"
+// expect: stdout "aliased turbofish: Sse Ndjson Lines"
+// expect: stdout "qualified turbofish: Sse Ndjson Lines"
+// expect: stdout "dynamic name: Sse Ndjson Lines"
+// expect: stdout "type_name agrees: std.http.Framing"
+// expect: stdout "via type_name: Sse Ndjson Lines"
+// expect: stdout "framing fields: 0"
+// expect: stdout "framing backing: none none none"
+// expect: stdout "type_of names it: std.http.Framing"
+// expect: stdout "walked from type_of: Sse Ndjson Lines"
+// expect: exit 0
+use std.http.{Framing}
+use std.http.{Framing as Cut}
+
+fn cases(vs: List<VariantSpec>): string {
+    return vs.map(fn(v) => v.name).join(" ");
+}
+
+echo "leaf turbofish: ${cases(variants_of::<Framing>())}"
+echo "aliased turbofish: ${cases(variants_of::<Cut>())}"
+echo "qualified turbofish: ${cases(variants_of::<std.http.Framing>())}"
+echo "dynamic name: ${cases(variants_of("std.http.Framing"))}"
+
+// The surface whose job is to produce the key the others consume must produce the same key.
+echo "type_name agrees: ${type_name::<Framing>()}"
+echo "via type_name: ${cases(variants_of(type_name::<Framing>()))}"
+
+echo "framing fields: ${field_specs_of::<Framing>().len()}"
+// Fieldless and unbacked: the variants are a choice, not a value with a wire representation.
+echo "framing backing: ${variants_of::<Framing>().map(fn(v) => "${v.backing}").join(" ")}"
+
+// The walk a schema-deriving framework actually performs: take the name off a reflected `Type` and
+// ask what its cases are. This is the pair that used to answer "unknown".
+name = match type_of(Framing.Sse) { Type.Enum(n, args) => n, _ => "?" };
+echo "type_of names it: ${name}"
+echo "walked from type_of: ${cases(variants_of(name))}"

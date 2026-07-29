@@ -180,6 +180,31 @@ fn cross_entry_reflection_agrees() {
 }
 
 #[test]
+fn prelude_enum_reflection_agrees_across_entries() {
+    // The prelude enums are seeded into the reflection artifact (they are declared by the language,
+    // not by the program, so the AST walk cannot find them) — and a REPL entry rebuilds and
+    // accumulates that artifact every time, so the seeding has to survive every entry on **both**
+    // backends.
+    //
+    // The shadowing rule rides along: a user's own `enum Ordering` supersedes the prelude one for
+    // the rest of the session, and the seeding must not resurrect the prelude cases underneath it.
+    assert_sessions_agree(&[
+        Step::Eval("echo variants_of(\"Ordering\").len();"),
+        Step::Eval("struct Anything { n: int }"),
+        // Still seeded after an unrelated entry rebuilt the artifact.
+        Step::Eval("echo variants_of(\"Ordering\").map(fn(v) => v.name).join(\" \");"),
+        // The pair rule: an enum reports no fields, and an unknown name reports neither.
+        Step::Eval("echo field_specs_of(\"Ordering\").len();"),
+        Step::Eval("echo variants_of(\"Nope\").len() + field_specs_of(\"Nope\").len();"),
+        // A user declaration shadows the prelude enum — in the entry that declares it, and after.
+        Step::Eval("enum Ordering { Up; Down }"),
+        Step::Eval("echo variants_of(\"Ordering\").map(fn(v) => v.name).join(\" \");"),
+        Step::Eval("mut unrelated = 1;"),
+        Step::Eval("echo variants_of(\"Ordering\").map(fn(v) => v.name).join(\" \");"),
+    ]);
+}
+
+#[test]
 fn cross_entry_object_identity_and_method_dispatch_agree() {
     assert_sessions_agree(&[
         Step::Eval(

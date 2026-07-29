@@ -4816,8 +4816,11 @@ impl<'m> FnCompiler<'m> {
     /// conversion. Interns the shape of every **payload-free** variant (the only constructible ones
     /// here) plus the `Option` wrappers, and emits `Op::EnumFromStr` carrying each case's name AND
     /// its backing; the VM matches the runtime value through the shared
-    /// [`noeta_ast::reflect::variant_for_wire`]. The backing is baked in because the VM has no
-    /// reflection entry for a prelude or native enum to read one back from.
+    /// [`noeta_ast::reflect::variant_for_wire`]. The name and backing are baked alongside the
+    /// interned shape rather than read back through reflection at run time: the artifact does carry
+    /// them for a prelude/native enum now (it is seeded from the very tables `self.module.types` is),
+    /// but a **shape id** can only be minted here, so the dynamic path would need runtime interning
+    /// to buy nothing. Bake all three together and the case table stays one fact.
     fn lower_enum_from_str(
         &mut self,
         type_name: &str,

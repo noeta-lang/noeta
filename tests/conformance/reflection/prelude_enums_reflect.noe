@@ -1,0 +1,77 @@
+// The five **prelude enums** answer the type-level reflection queries like any enum you declare.
+//
+// `variants_of(name)` and `field_specs_of(name)` are documented as a PAIR: both empty is the one
+// honest "I know nothing about this name", and that is exactly what reflection used to say about
+// `Ordering` / `Type` / `Semantic` / `Layout` / `Cancelled` — types the language itself declares,
+// that a program can annotate with, `match` on exhaustively, and construct a case of by name. The
+// artifact is built by walking the program AST, and the prelude enums are not in it; they are now
+// seeded from the same `reflect::prelude_enums()` table the checker, both backends and the compiler
+// already read, so reflection reads the one table too.
+//
+// The consequence this closes is not cosmetic: a schema-deriving framework that walks a `Type` value
+// sees `Type.Enum("Ordering", [])` from `type_of` and then asked for its cases — and got none, so it
+// emitted an empty schema or refused. That is the silently-wrong outcome `variants_of` exists to
+// remove, reappearing one level up.
+//
+// The pair is asserted in full: a prelude enum reports its cases through `variants_of` and the empty
+// list through `field_specs_of` (it declares no fields — that is what makes it an enum and not a
+// field-less struct), while a genuinely unknown name still reports empty/empty.
+// expect: stdout "Ordering: Less Equal Greater | fields 0"
+// expect: stdout "Cancelled: Cancelled | fields 0"
+// expect: stdout "Semantic: EntryPoint PersistenceBoundary TrustBoundary Sink Layer | fields 0"
+// expect: stdout "Layout: Row Column | fields 0"
+// expect: stdout "Type has cases: true | fields 0"
+// expect: stdout "Type.Int payload: []"
+// expect: stdout "Type.List payload: [_0:Type.Enum(Type, [])]"
+// expect: stdout "Type.Enum payload: [_0:Type.String _1:Type.List(Type.Enum(Type, []))]"
+// expect: stdout "Type.IntN payload: [_0:Type.Int _1:Type.Bool]"
+// expect: stdout "unknown: cases 0 fields 0"
+// expect: stdout "every case is constructible: true"
+// expect: exit 0
+fn line(name: string): string {
+    cases = variants_of(name).map(fn(v) => v.name).join(" ");
+    return "${name}: ${cases} | fields ${field_specs_of(name).len()}";
+}
+
+echo line("Ordering")
+echo line("Cancelled")
+echo line("Semantic")
+echo line("Layout")
+
+// `Type` is derived from the reflection `TypeRepr` descriptor itself, so its case *count* moves when
+// a new type constructor is added — assert the property, then pin the payload shapes that matter.
+echo "Type has cases: ${variants_of("Type").len() > 0} | fields ${field_specs_of("Type").len()}"
+
+fn payload_of(enum_name: string, case: string): string {
+    for v in variants_of(enum_name) {
+        if v.name == case {
+            return v.payload.map(fn(p) => "${p.name}:${p.type}").join(" ");
+        }
+    }
+    return "<no such case>";
+}
+
+// A fieldless case, a recursive one, the nominal shape (`(name: string, args: List<Type>)`), and the
+// fixed-width descriptor — each payload field reported with its DECLARED type, exactly as a `.noe`
+// enum's variant payload is.
+echo "Type.Int payload: [${payload_of("Type", "Int")}]"
+echo "Type.List payload: [${payload_of("Type", "List")}]"
+echo "Type.Enum payload: [${payload_of("Type", "Enum")}]"
+echo "Type.IntN payload: [${payload_of("Type", "IntN")}]"
+
+// The honest unknown is still honest: both halves empty.
+echo "unknown: cases ${variants_of("NoSuchType").len()} fields ${field_specs_of("NoSuchType").len()}"
+
+// The reported schema is real: every fieldless case `variants_of` advertises is one `construct`
+// builds, which is the whole point of reporting it.
+mut all_built = true;
+for name in ["Ordering", "Cancelled", "Semantic", "Layout"] {
+    for v in variants_of(name) {
+        built = match construct("${name}.${v.name}", []) {
+            Ok(value) => true,
+            Err(e) => false,
+        };
+        if !built { all_built = false }
+    }
+}
+echo "every case is constructible: ${all_built}"

@@ -175,6 +175,13 @@ echo type_of([1]) == Type.List(Type.Int)      // true
 echo 5.compare(2) == Ordering.Greater         // true
 ```
 
+They are ordinary to **reflection** too: each answers [`variants_of`](#variants_oft-listvariantspec--variants_ofname-listvariantspec) with its cases and [`field_specs_of`](#field_specs_oft-listfieldspec--field_specs_ofname-listfieldspec) with the empty list — the pair that says "an enum, and here they are" rather than the both-empty pair that says "I have never heard of this name". That matters for the walk a schema-deriving framework actually performs, where the name it probes came from a `Type` value it was handed:
+
+```noeta
+echo variants_of("Ordering").map(fn(v) => v.name).join(" ")   // Less Equal Greater
+echo field_specs_of("Ordering").len()                         // 0 — an enum declares no fields
+```
+
 The prelude **structs** are ordinary structs in the same way — `Attributed`, `RoleBinding`, `ParamInfo`, `FieldEntry`, `FieldSpec`, `VariantSpec`, `TierRoot`, `TierText` are constructible by literal, and a constructed one equals the materialized one field for field:
 
 ```noeta
@@ -195,6 +202,17 @@ use std.http.{Framing}
 
 echo http.Framing.Sse == Framing.Sse   // true — one type, two spellings
 ```
+
+It reflects the same way, and every static spelling keys on the one **qualified** identity — the name `type_of` reports for one of its values, and therefore the name a consumer that walked a `Type` will be holding:
+
+```noeta
+use std.http.{Framing}
+
+echo variants_of::<Framing>().map(fn(v) => v.name).join(" ")   // Sse Ndjson Lines
+echo type_name::<Framing>()                                    // std.http.Framing
+```
+
+A *dynamic* operand is still the literal string it spells, so `variants_of("Framing")` asks about the name `Framing` — reach for `type_name::<Framing>()`, or the name off a `Type`, when you need the key as data.
 
 ### `params_of(name): List<ParamInfo>`
 

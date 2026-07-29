@@ -102,6 +102,15 @@ pub fn maybe_delegate(entry: &Path) -> Result<Option<graph::ResolvedGraph>, Exit
     let Ok(resolved) = graph::resolve_graph(entry) else {
         return Ok(None); // the command path re-resolves and renders the error
     };
+    delegate_resolved(resolved)
+}
+
+/// The half of [`maybe_delegate`] past resolution: delegate if this app has native crates, else
+/// hand the graph back. Shared with [`maybe_delegate_cwd`], which resolves for itself so it can
+/// *report* a resolution failure rather than swallow it.
+fn delegate_resolved(
+    resolved: graph::ResolvedGraph,
+) -> Result<Option<graph::ResolvedGraph>, ExitCode> {
     if resolved.native_crates.is_empty() {
         return Ok(Some(resolved));
     }
@@ -120,9 +129,28 @@ pub fn maybe_delegate(entry: &Path) -> Result<Option<graph::ResolvedGraph>, Exit
 /// that is really a native dependency's `ExtCommand`). Returns `None` when there is nothing to
 /// compose, exactly like the entry-file form's `Ok` (the resolved graph has no consumer here —
 /// the unknown-subcommand chain never loads a program).
+///
+/// **A resolution failure is reported here**, unlike in [`maybe_delegate`], where the command path
+/// re-resolves and renders it. Nothing downstream re-resolves *this* one: the unknown-subcommand
+/// chain never loads a program, so the manifest error was swallowed and the user got clap's
+/// "unrecognized subcommand" instead. That is what a project still on the pre-mapping
+/// `commands = ["company/package"]` array saw for the very command it was trying to trust —
+/// the migration message naming `[trust.commands]` was written, and thrown away.
 pub fn maybe_delegate_cwd() -> Option<ExitCode> {
+    if std::env::var_os(COMPOSED_GUARD).is_some() {
+        return None;
+    }
     let cwd = std::env::current_dir().ok()?;
-    maybe_delegate(&cwd).err()
+    // The manifest is discovered from the directory, so probe with a synthetic child (see
+    // `maybe_delegate`: `resolve_graph` only uses the entry's parent).
+    let resolved = match graph::resolve_graph(&cwd.join("_.noe")) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            return Some(ExitCode::from(2));
+        }
+    };
+    delegate_resolved(resolved).err()
 }
 
 /// The uninhabited "success" of [`delegate`] — on unix `exec` replaces the process; elsewhere we
