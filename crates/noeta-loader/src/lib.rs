@@ -1,9 +1,10 @@
 //! Multi-file module loading and linking (M1.9).
 //!
-//! A program is rooted at an *entry* `.noe` file. Sibling `.noe` files in the entry's
-//! directory are candidate *modules*, each declaring its identity with `namespace App.Models;`.
-//! The entry's `use App.Models.{User}` declarations resolve against those modules' declared
-//! namespaces; each resolved name's real declaration is **merged into one [`Program`]** ahead of
+//! A program is rooted at an *entry* `.noe` file. The other `.noe` files of its **package** are
+//! candidate *modules*, and a module's identity is **derived from where its file sits** (see
+//! [`derive`]) — the package's import prefix plus the file's path inside the package.
+//! The entry's `use dirscan.deep.nested.{Scanner}` declarations resolve against those derived
+//! paths; each resolved name's real declaration is **merged into one [`Program`]** ahead of
 //! the entry's own statements, so both backends run the linked program unchanged and the
 //! differential oracle is preserved by construction.
 //!
@@ -329,8 +330,17 @@ pub fn reroot_path(
 }
 
 /// Re-root a dependency module's `namespace` (its match key) and `use` paths (its import drivers).
-/// The `namespace` only ever leads with the package's own root, so it is rewritten `root` → `key`; a
-/// `use` may lead with the package root (an intra-package reference) or one of the package's local
+///
+/// **A module's path is now derived, not declared** ([`derive`]), so the `namespace` rewrite is no
+/// longer what gives a dependency its identity — the derivation already produces it under the
+/// consumer's key. What the rewrite still does is put a *declared* namespace into the consumer's
+/// naming space so [`apply_derived_paths`] can compare like with like: a package that declares
+/// `namespace greet.hello` and is keyed `hi` re-roots to `hi.hello`, which is exactly what
+/// `hello.noe` derives, so the declaration is a restatement rather than a contradiction. (It is a
+/// no-op once the declarations are gone.)
+///
+/// A declared `namespace` only ever leads with the package's own root, so it is rewritten
+/// `root` → `key`; a `use` may lead with the package root (an intra-package reference) or one of the package's local
 /// dependency keys (a transitive reference), both handled by [`reroot_path`]. Touches only those two
 /// statement kinds — both are consumed *during* linking (matching / import-driving) and never appear
 /// in the merged declaration output — so re-rooting cannot alter what a package contributes, only how

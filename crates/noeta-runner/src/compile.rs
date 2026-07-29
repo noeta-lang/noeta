@@ -463,6 +463,17 @@ fn open_startup_cache(
     for module in &workspace.modules {
         key.source(source_key_name(module), module.text().as_bytes());
     }
+    // …and each source's **derived module path** ([`noeta_loader::derive`]). A source is keyed by its
+    // file *name* on purpose (so `./app.noe` and `app.noe` share an entry), but a module's identity
+    // now comes from its whole location: two files named `pieces.noe` in different directories are
+    // different modules with identical key material, and moving a file changes what it is without
+    // changing a byte of it. Fold the path in, or a move serves the pre-move program back.
+    for (index, path) in workspace.paths.iter().enumerate() {
+        key.source(
+            format!("<module-path {index}>"),
+            module_path_key(path).as_bytes(),
+        );
+    }
     // Dependency packages are part of the compiled program: fold each dependency's identity, edition,
     // and sources into the key so any dependency change invalidates the cache.
     key_deps(&mut key, deps);
@@ -504,6 +515,17 @@ fn source_key_name(source: &Source) -> &str {
         .unwrap_or_else(|| source.name())
 }
 
+/// A derived module path as cache-key material — the dotted path, or a distinct marker for the two
+/// non-derived outcomes (no package context; a name that cannot be a path segment), so they key
+/// differently from each other and from every real path.
+fn module_path_key(path: &noeta_loader::ModulePath) -> String {
+    match path {
+        noeta_loader::ModulePath::Declared => "<declared>".to_string(),
+        noeta_loader::ModulePath::Derived(segments) => segments.join("."),
+        noeta_loader::ModulePath::Illegal { segment, .. } => format!("<illegal {segment}>"),
+    }
+}
+
 /// Fold the dependency packages into the startup-cache key: each dependency's key→root binding
 /// (re-rooting changes the linked program even when the sources are byte-identical), its **edition**,
 /// its local dependency renames, and every module's source text.
@@ -524,6 +546,12 @@ fn key_deps(key: &mut noeta_cache::KeyBuilder, deps: &[noeta_loader::DepPackage]
         }
         for module in &dep.modules {
             key.source(&module.name, module.text.as_bytes());
+            // A dependency module's identity is its derived path too — a package that moves a file
+            // ships a different API under identical bytes.
+            key.source(
+                format!("<dep-path {}>", module.name),
+                module_path_key(&module.path).as_bytes(),
+            );
         }
     }
 }
