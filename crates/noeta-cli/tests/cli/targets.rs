@@ -39,6 +39,35 @@ fn run_target_activates_its_tiers() {
 }
 
 #[test]
+fn a_renamed_std_tier_activates_and_strips_under_its_local_name() {
+    // The headline of per-package tier naming: a package renames std's `debug` tier to a local
+    // `@dbg` (`[tiers] dbg = "std:debug"`). `@dbg` is judged by its identity `(std, debug)`, so it
+    // activates under `--tier dbg` (the block runs) and strips without it — exactly as `@debug` would,
+    // proving activation keys on the tier's identity, not the hardcoded built-in name.
+    let src = "fn f(x: int): void {\n\
+               @dbg { echo \"dbg ${x}\" }\n\
+               echo \"out ${x}\"\n\
+               }\n\
+               f(5)\n";
+    let file = temp_project("rename_dbg", "[tiers]\ndbg = \"std:debug\"\n", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .arg("--tier")
+        .arg("dbg")
+        .assert()
+        .success()
+        .stdout("dbg 5\nout 5\n");
+    // Without activating it, the renamed block strips like any inactive tier.
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("out 5\n");
+}
+
+#[test]
 fn run_minimalist_target_strips_everything() {
     // A target that opts into no tiers leaves every tier block stripped (same as a bare run).
     let file = temp_project("prof_run_min", "[targets.prod]\n", TIERED_PROGRAM);

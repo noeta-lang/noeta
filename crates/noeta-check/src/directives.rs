@@ -262,6 +262,23 @@ impl Checker {
             .find_ext_directive_scoped(&use_.provider_roots, &use_.exported)
     }
 
+    /// Resolve a `@name` **tier** block for the package that wrote it (per-package naming arc), the
+    /// tier counterpart of [`Self::resolve_ext_directive_at`]: the span's package → its `[tiers]`
+    /// binding (rename/provider) → the concrete tier, else the ambient std/program-declared tier of
+    /// that bare name. The same [`crate::tiers::TierRegistry::resolve_at`] activation drives, so the
+    /// checker accepts exactly the `@name`s activation keeps — a renamed tier is not "unknown" here.
+    pub(crate) fn resolve_tier_at(
+        &self,
+        span: Span,
+        name: &str,
+    ) -> Option<crate::tiers::ResolvedTier<'_>> {
+        self.symbols.tier_registry.resolve_at(
+            name,
+            self.package_at(span),
+            &self.config.package_uses,
+        )
+    }
+
     fn check_foreign_directives(&mut self, at: &noeta_ast::Decorated<'_>) {
         let decorators = at.decorators;
         if decorators.foreign.is_empty() {

@@ -2218,58 +2218,68 @@ impl Checker {
                 // rather than reporting "unknown dev-tier" about a name the registry knows.
                 if let Some(d) = self.resolve_ext_directive_at(*tier_span, tier) {
                     self.check_ext_directive_block(d, items, *tier_span);
-                } else if !self.symbols.tier_registry.is_known(tier) {
-                    self.diags
-                        .push(tiers::unknown_tier_diagnostic(self.reg(), tier, *tier_span));
-                } else if self.symbols.tier_registry.is_expr_tier(tier) {
-                    // An expression tier's block in *statement* position (expr-tiers arc): its
-                    // value would be silently discarded — and it never activates/strips, so a
-                    // bare block would otherwise just vanish. Shared E0052 with activation.
-                    self.diags
-                        .push(tiers::expr_tier_statement_diagnostic(tier, *tier_span));
-                } else if let Some(d) = self
-                    .symbols
-                    .tier_registry
-                    .knobless_args_diagnostic(tier, args)
-                {
-                    // Args on a knob-less tier (`@test(x)`) — E0037.
-                    self.diags.push(d);
-                } else if !args.is_empty()
-                    && let Some(attr_name) = self
-                        .symbols
-                        .tier_registry
-                        .config_attribute(tier)
-                        .map(str::to_string)
-                {
-                    // Args on a knob-carrying tier construct its config attribute
-                    // (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]`) — validate that
-                    // construction through the ordinary attribute gate, so this default path
-                    // rejects exactly what the activated path's stamped attributes would.
-                    let synth = tiers::synthesized_config_attr(&attr_name, args, *tier_span);
-                    self.check_attrs(std::slice::from_ref(&synth), TargetKind::Function);
-                }
-                // The **annotation** form: `@test fn foo()` is desugared by the parser into a
-                // one-item `TierBlock`, so a tier attaching to a top-level declaration arrives
-                // here rather than at `check_directives` (a top-level `FnDecl::directives` is
-                // always empty — the parser says so). Nothing gated it, which is why
-                // `TierSite::Function` was declared by every std tier and enforced for none of
-                // them. A standalone block (`@debug { … }`) wraps items that came from *inside*
-                // the braces, so it is not an annotation and is skipped.
-                //
-                // Only when the branches above found nothing better to say. An unknown tier is
-                // already an E0036 and an expression tier an E0052 — both name the actual problem,
-                // where a site error would be a second, vaguer complaint about the same line.
-                let already_reported = self.diags.len() != diags_before;
-                if *attached && !already_reported {
-                    let sites = self.symbols.tier_registry.sites(tier);
-                    for item in items {
-                        self.check_declared_sites(
+                } else {
+                    // Resolve the `@name` in the package that wrote it (per-package naming arc), then
+                    // extract owned facts so the diagnostic pushes below don't borrow the registry — the
+                    // same resolution activation runs, so the checker accepts exactly what activation
+                    // keeps (a renamed tier is not "unknown" here). `sites` is `&'static`.
+                    let facts = self
+                        .resolve_tier_at(*tier_span, tier)
+                        .map(|r| (r.is_expr(), r.config().map(str::to_string), r.sites()));
+                    match &facts {
+                        None => self.diags.push(tiers::unknown_tier_diagnostic(
+                            self.reg(),
                             tier,
-                            sites,
-                            item.attachment_site(),
-                            None,
                             *tier_span,
-                        );
+                        )),
+                        Some((is_expr, config, _)) => {
+                            if *is_expr {
+                                // An expression tier's block in *statement* position (expr-tiers arc):
+                                // its value would be silently discarded — and it never activates/
+                                // strips. Shared E0052 with activation.
+                                self.diags
+                                    .push(tiers::expr_tier_statement_diagnostic(tier, *tier_span));
+                            } else if config.is_none() {
+                                // Args on a knob-less tier (`@test(x)`) — E0037. Resolved knob-less, so
+                                // the free check (args presence) not the name-keyed method.
+                                if let Some(d) = tiers::knobless_args_diagnostic_for(tier, args) {
+                                    self.diags.push(d);
+                                }
+                            } else if !args.is_empty()
+                                && let Some(attr_name) = config.clone()
+                            {
+                                // Args on a knob-carrying tier construct its config attribute
+                                // (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]`) — validate that
+                                // construction through the ordinary attribute gate, so this default
+                                // path rejects exactly what the activated path's stamped attributes do.
+                                let synth =
+                                    tiers::synthesized_config_attr(&attr_name, args, *tier_span);
+                                self.check_attrs(
+                                    std::slice::from_ref(&synth),
+                                    TargetKind::Function,
+                                );
+                            }
+                        }
+                    }
+                    // The **annotation** form: `@test fn foo()` is desugared by the parser into a
+                    // one-item `TierBlock`, so a tier attaching to a top-level declaration arrives
+                    // here rather than at `check_directives`. Only when the branches above found
+                    // nothing better to say — an unknown tier is already E0036, an expression tier
+                    // E0052; a site error would be a second, vaguer complaint about the same line.
+                    let already_reported = self.diags.len() != diags_before;
+                    if *attached
+                        && !already_reported
+                        && let Some((_, _, sites)) = facts
+                    {
+                        for item in items {
+                            self.check_declared_sites(
+                                tier,
+                                sites,
+                                item.attachment_site(),
+                                None,
+                                *tier_span,
+                            );
+                        }
                     }
                 }
             }
@@ -2316,14 +2326,23 @@ impl Checker {
             // complaint about a name the registry knows perfectly well. Its sites gate exactly as a
             // tier's do below.
             let ext_directive = self.resolve_ext_directive_at(dir.name_span, &dir.name);
-            if ext_directive.is_none() && !self.symbols.tier_registry.is_known(&dir.name) {
+            // Not an ext directive → resolve it as a tier for the package that wrote it (per-package
+            // naming arc). Owned facts (sites `&'static`, canonical id) so the diagnostic pushes below
+            // don't borrow the registry.
+            let tier_facts = if ext_directive.is_none() {
+                self.resolve_tier_at(dir.name_span, &dir.name)
+                    .map(|r| (r.sites(), r.id()))
+            } else {
+                None
+            };
+            if ext_directive.is_none() && tier_facts.is_none() {
                 let d = tiers::unknown_tier_diagnostic(self.reg(), &dir.name, dir.name_span);
                 self.diags.push(d);
                 continue;
             }
             let sites = match ext_directive {
                 Some(d) => d.sites,
-                None => self.symbols.tier_registry.sites(&dir.name),
+                None => tier_facts.as_ref().map_or(&[][..], |(s, _)| *s),
             };
             let before = self.diags.len();
             self.check_declared_sites(&dir.name, sites, target_sites(target), None, dir.name_span);
@@ -2332,8 +2351,13 @@ impl Checker {
             }
             // A `@test`/`@bench` method is invoked with no receiver, so it must not read `self` —
             // i.e. it must be reachable without one, which is every classification but `Instance`.
+            // Judged by the std test/bench *identity* (whatever local name a rename gave it), not the
+            // spelling.
+            let is_std_test_or_bench = tier_facts.as_ref().is_some_and(|(_, id)| {
+                *id == tiers::TierId::std("test") || *id == tiers::TierId::std("bench")
+            });
             if target == TargetKind::Method
-                && matches!(dir.name.as_str(), "test" | "bench")
+                && is_std_test_or_bench
                 && let Some(ty) = self.coloring.current_type.clone()
                 && !self
                     .receiver_of(&ty, decl.name.as_str())

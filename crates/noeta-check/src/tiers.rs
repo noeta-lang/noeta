@@ -504,7 +504,7 @@ impl TierRegistry {
 
 /// The `E0037` for directive args on a tier resolved to no config attribute — the shared message
 /// both the default-resolution wrapper and the provider-aware activation path emit.
-fn knobless_args_diagnostic_for(tier: &str, args: &[AttrArg]) -> Option<Diagnostic> {
+pub(crate) fn knobless_args_diagnostic_for(tier: &str, args: &[AttrArg]) -> Option<Diagnostic> {
     let span = args.first().map(|a| a.span)?;
     Some(
         Diagnostic::error(
