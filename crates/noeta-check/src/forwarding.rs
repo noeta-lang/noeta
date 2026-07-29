@@ -1,7 +1,8 @@
 //! **Type-param forwarding pre-pass** (poly-values F2b, extended by poly-deferrals D2a): which
 //! top-level generic functions forward a type parameter into a **call-site-typed position** — a
 //! native turbofish (`json.try_parse::<T>`), a reflection manifest query (`attributes_of::<T>`),
-//! or (transitively) another forwarding generic (`load::<T>(p)`).
+//! the type's own name (`type_name::<T>()`), or (transitively) another forwarding generic
+//! (`load::<T>(p)`).
 //!
 //! Generics are erased at runtime, so one compiled body serves every instantiation; a forwarded
 //! site therefore needs its per-instantiation data (`TypeRecipe` / type name) delivered
@@ -359,6 +360,19 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 }
             }
         }
+        // `type_name::<T>()` — the other **name-only** consumer, and the cheapest of them: it wants
+        // the slot's `TypeArgInfo.name` and nothing else, no build recipe, so it forwards wherever
+        // `attributes_of` does and additionally for instantiations that have no recipe at all.
+        // Bare parameters only, matching the surface's own head-keyed identity —
+        // `type_name::<List<T>>()` heads at `List`, a name no instantiation changes, and stays the
+        // compile-time constant it always was.
+        Expr::TypeName { ty, .. } => {
+            for p in cx.params {
+                if is_bare_param(ty, p) {
+                    mark(Type::Named(p.to_string(), Vec::new()), false);
+                }
+            }
+        }
         // Transitive forwarding: an explicit turbofish call of another forwarding function. Each
         // of the callee's slot templates, with the call's type arguments substituted in, that
         // still mentions one of OUR parameters becomes our slot (`g::<T>` against g's `List<U>`
@@ -528,11 +542,8 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 rec!(h);
             }
         }
-        // Leaves. `type_name::<T>()` is one on purpose: it is NOT a forwarding consumer, because a
-        // type parameter there is rejected outright (E0058) rather than resolved through a hidden
-        // slot — the string it yields is a compile-time constant, with no runtime node to feed.
-        Expr::TypeName { .. }
-        | Expr::Str { .. }
+        // Leaves.
+        Expr::Str { .. }
         | Expr::Int { .. }
         | Expr::IntN { .. }
         | Expr::Float { .. }

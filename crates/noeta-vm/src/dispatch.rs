@@ -2944,6 +2944,22 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
+                    // The fn-side twin: a FORWARDED `type_name::<T>()` reads the qualified name
+                    // off the hidden slot's type-argument entry. Mirrors the tree-walker, and
+                    // mirrors the dynamic `AttributesOf` arm — same slot, entry and field.
+                    Op::TypeSlotName { dst, src, span } => {
+                        let idx = regs[fbase + *src as usize].as_int().unwrap_or(-1);
+                        let Some(entry) = module.type_args.get(idx.max(0) as usize) else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "corrupt hidden type-argument slot".to_string(),
+                            ));
+                        };
+                        let result = Value::string(&entry.name);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
                     Op::FieldsOf { dst, src } => {
                         let result = self.materialize_fields(regs[fbase + *src as usize]);
                         set_reg(regs, fbase, *dst, result);

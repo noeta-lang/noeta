@@ -508,7 +508,9 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
-        Op::FromBytes { dst, src, .. } | Op::TypeArgName { dst, src, .. } => {
+        Op::FromBytes { dst, src, .. }
+        | Op::TypeArgName { dst, src, .. }
+        | Op::TypeSlotName { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
@@ -1035,7 +1037,9 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(src);
         }
-        Op::FromBytes { dst, src, .. } | Op::TypeArgName { dst, src, .. } => {
+        Op::FromBytes { dst, src, .. }
+        | Op::TypeArgName { dst, src, .. }
+        | Op::TypeSlotName { dst, src, .. } => {
             m(dst);
             m(src);
         }

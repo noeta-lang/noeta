@@ -187,6 +187,44 @@ pub enum Type {
 pub use noeta_ast::{BuiltinTy, Spelling, parse_int_width};
 
 impl Type {
+    /// The type's **name-keyed identity** — the qualified head name every name-keyed runtime
+    /// registry is stored under (`attributes_of`'s manifest, `field_specs_of`, `variants_of`,
+    /// `construct`, `invoke`), and the string `type_name::<T>()` answers with.
+    ///
+    /// The lattice twin of [`noeta_ast::TypeRef::head_name`], and deliberately head-only for the
+    /// same reason: a registry is keyed on the constructor, never on the instantiation, so
+    /// `List<int>` keys under `List` exactly as the surface `type_name::<List<int>>()` folds to
+    /// `"List"`. Keeping the two in lock-step is what lets a *forwarded* type parameter answer
+    /// identically to the concrete turbofish it was instantiated from — the property
+    /// [`Display`](std::fmt::Display) cannot serve, since it renders the **short** name
+    /// (`Todo`, not `app.storage.Todo`) and spells the arguments out.
+    ///
+    /// Empty for the forms that have no name-keyed head at the surface either — a function type, a
+    /// union, a tuple, an inference hole — matching `TypeRef::head_name`'s own empty answer.
+    pub fn head_name(&self) -> String {
+        match self {
+            Type::Named(name, _) => name.clone(),
+            Type::DynTrait(name) => name.clone(),
+            Type::List(_) => "List".to_string(),
+            Type::Set(_) => "Set".to_string(),
+            Type::Map(..) => "Map".to_string(),
+            Type::Option(_) => "Option".to_string(),
+            Type::Result(..) => "Result".to_string(),
+            Type::Unit
+            | Type::Int
+            | Type::Float
+            | Type::F32
+            | Type::F64
+            | Type::IntN { .. }
+            | Type::Bool
+            | Type::String
+            | Type::Bytes
+            | Type::Dyn
+            | Type::Kind(_) => self.to_string(),
+            Type::Unknown | Type::Fn { .. } | Type::Union(_) | Type::Tuple(_) => String::new(),
+        }
+    }
+
     /// Whether this is one of the two numeric types arithmetic (`+ - * / %`) accepts. (The
     /// checker separately lets an interior hole / `dyn` operand through via
     /// [`Self::defers_to_runtime`], so this is the strict concrete test only.)

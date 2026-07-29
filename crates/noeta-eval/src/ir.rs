@@ -1505,6 +1505,26 @@ impl Interpreter {
                     )),
                 }
             }
+            // `type_name::<T>()` where `T` is a FORWARDED parameter of the enclosing generic fn:
+            // the instantiation's qualified name, read off the hidden slot's table entry. The same
+            // slot, entry and field the dynamic `attributes_of` arm above reads, so a forwarded
+            // name and a forwarded manifest can never disagree about what `T` is.
+            noeta_ir::Rvalue::TypeSlotName { slot, span } => {
+                let idx = self.eval_ir_atom(slot, frame)?;
+                let Value::Int(i) = idx else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        "corrupt hidden type-argument slot".to_string(),
+                    ));
+                };
+                Ok(Value::Str(
+                    self.type_args
+                        .get(i as usize)
+                        .map(|e| e.name.clone())
+                        .unwrap_or_default(),
+                ))
+            }
             noeta_ir::Rvalue::FieldsOf { operand, .. } => {
                 let v = self.eval_ir_atom(operand, frame)?;
                 Ok(self.materialize_fields(&v))

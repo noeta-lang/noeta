@@ -15,13 +15,26 @@ pub fn workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// The root every CLI-test fixture directory hangs off: cargo's **per-target** temp directory.
+///
+/// Deliberately not `std::env::temp_dir()`. A fixture path built from a fixed test name under the
+/// system `/tmp` is shared by every checkout on the machine, and this repository is routinely
+/// worked in several git worktrees at once — so two sessions running the same test would each
+/// `remove_dir_all` the other's fixture mid-run. That is a flake with no local cause: the test
+/// passes alone and fails in a full-suite run beside a sibling session. `CARGO_TARGET_TMPDIR`
+/// tracks `CARGO_TARGET_DIR`, which those sessions already set per agent, so the fixtures separate
+/// exactly where the builds do. It also keeps the fixtures off the small `/tmp` tmpfs.
+pub fn temp_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+}
+
 /// Write a one-off program into its own private temp *directory* and return its path. The
 /// directory isolation matters: `lang run` resolves sibling `.noe` modules from the entry's
-/// directory (M1.9), so a bare temp file dropped into the shared `std::env::temp_dir()` would make
-/// the loader scan — and parse — every other test's (or stray) `.noe` file as a candidate module.
-/// A dedicated directory guarantees the entry is the only module in scope.
+/// directory (M1.9), so a bare temp file dropped into a shared temp root would make the loader
+/// scan — and parse — every other test's (or stray) `.noe` file as a candidate module. A dedicated
+/// directory guarantees the entry is the only module in scope.
 pub fn temp_program(name: &str, src: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("noeta_cli_test_{name}"));
+    let dir = temp_root().join(format!("noeta_cli_test_{name}"));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let path = dir.join("main.noe");
     std::fs::write(&path, src).expect("write temp program");
@@ -81,7 +94,7 @@ pub fn target_dir() -> PathBuf {
 /// Directory isolation matters for the same reason as `temp_program`: the loader treats every
 /// sibling `.noe` file as a candidate module, so a shared temp dir would cross-contaminate.
 pub fn temp_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("noeta_cli_test_{name}"));
+    let dir = temp_root().join(format!("noeta_cli_test_{name}"));
     // Start from a clean directory so a rerun does not see a previous run's stray files.
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");

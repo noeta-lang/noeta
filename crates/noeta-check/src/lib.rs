@@ -1216,6 +1216,15 @@ struct Coloring {
     /// nested `fn`'s own type parameter is masked to `Unknown` inside that nested body (D2b) so
     /// it can never match the shadowing parameter. Empty everywhere else.
     current_forwarding: Vec<Type>,
+    /// The type parameters a `type_name::<T>()` in the body being checked **would** forward — the
+    /// enclosing top-level generic fn's own parameters, minus any a nested `fn` shadows (D2b).
+    /// Empty in a method, in a nested fn's own shadowing parameters, and at top level.
+    ///
+    /// Distinct from [`Self::current_forwarding`], which holds only the slots some site actually
+    /// consumes: this is the *capability*, not the realized layout, so a diagnostic about a
+    /// different surface can say whether the composed route (`field_specs_of(type_name::<T>())`)
+    /// is open here without a `type_name::<T>()` having to appear first.
+    forwardable_params: Vec<String>,
     /// How many `fn` bodies enclose the statement being checked: `0` at top level, `1` inside a
     /// top-level fn/method body, `2+` inside a nested `fn`. Distinguishes a TOP-LEVEL fn (whose
     /// name keys the forwarding/symbol tables) from a nested one that may share its name (D2b).
@@ -2525,6 +2534,26 @@ impl Checker {
         } else {
             Vec::new()
         };
+        // The forwarding *capability* alongside the realized layout: which parameters a
+        // `type_name::<T>()` here would resolve through a hidden slot. Same top-level-fn scope and
+        // same D2b shadow-masking as the layout above, but derived from the declaration rather
+        // than from the sites, so a diagnostic can point at the composed route
+        // (`field_specs_of(type_name::<T>())`) whether or not a `type_name::<T>()` already appears.
+        let next_forwardable = if target == TargetKind::Function && self.coloring.fn_depth == 0 {
+            decl.type_params.iter().map(|p| p.name.clone()).collect()
+        } else if target == TargetKind::Function {
+            let shadowed: Vec<&str> = decl.type_params.iter().map(|p| p.name.as_str()).collect();
+            self.coloring
+                .forwardable_params
+                .iter()
+                .filter(|p| !shadowed.contains(&p.as_str()))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let saved_forwardable =
+            std::mem::replace(&mut self.coloring.forwardable_params, next_forwardable);
         let saved_forwarding =
             std::mem::replace(&mut self.coloring.current_forwarding, next_forwarding);
         self.coloring.fn_depth += 1;
@@ -2739,6 +2768,7 @@ impl Checker {
         self.coloring.self_type_params = saved_self_params;
         self.coloring.fn_depth -= 1;
         self.coloring.current_forwarding = saved_forwarding;
+        self.coloring.forwardable_params = saved_forwardable;
     }
 }
 

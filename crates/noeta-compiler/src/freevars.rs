@@ -580,6 +580,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::TypeArgName { operand, .. }
         | Rvalue::FieldsOf { operand, .. }
         | Rvalue::TraitsOf { operand, .. } => f(operand),
+        Rvalue::TypeSlotName { slot, .. } => f(slot),
         Rvalue::ParamsOf { target, .. } | Rvalue::ReturnsOf { target, .. } => f(target),
         Rvalue::FieldSpecsOf { name, .. } | Rvalue::VariantsOf { name, .. } => f(name),
         Rvalue::Construct { name, fields, .. } => {

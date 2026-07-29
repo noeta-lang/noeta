@@ -1492,6 +1492,57 @@ impl Checker {
     /// Recurses through nested packed fields, flattening them inline. `check_packed_struct` has
     /// already guaranteed every field of a packed struct is packable, so the field walk never bails on
     /// a well-typed program; the `?`s defend against a malformed registry (and an unpacked element).
+    /// Intern one **concrete instantiation** of a forwarding slot into the program-wide
+    /// type-argument table, and answer the [`noeta_ext_abi::HiddenArg`] that selects it.
+    ///
+    /// **The one place a [`noeta_ext_abi::TypeArgInfo`] is built.** Every projection an erased
+    /// instantiation can be asked for at run time is derived here, from the one resolved `sigma`:
+    /// its name-keyed identity ([`noeta_types::Type::head_name`]) and its build recipe
+    /// ([`Self::type_to_recipe`]). The two instantiating paths — a call
+    /// ([`Self::check_generic_call_seeded`]) and a value-position instantiation
+    /// (`resolve_value_hidden_slots`) — carried byte-identical copies of this, error text included.
+    /// That is precisely the drift this table has already suffered once: `name` was interned as
+    /// `sigma.to_string()`, which renders the SHORT name, while every name-keyed runtime registry is
+    /// keyed on the linker's qualified one — so a forwarded `attributes_of::<T>()` under a
+    /// `namespace` silently answered the empty list. One site, one derivation, so a projection added
+    /// later cannot reach one path and miss the other.
+    ///
+    /// A slot whose consumers need a recipe (`needs_recipe`) but whose instantiation has none is
+    /// reported here rather than at either caller, for the same reason: the message is part of the
+    /// contract, and two copies of a contract are one copy too many.
+    pub(crate) fn intern_type_arg(
+        &mut self,
+        sigma: &Type,
+        slot: &crate::forwarding::ForwardSlot,
+        callee: &str,
+        span: Span,
+    ) -> noeta_ext_abi::HiddenArg {
+        let recipe = self.type_to_recipe(sigma);
+        if slot.needs_recipe && recipe.is_none() {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`{sigma}` cannot be built by the call-site-typed `::<{}>` position of \
+                     `{callee}`",
+                    slot.template
+                ),
+            );
+        }
+        let info = noeta_ext_abi::TypeArgInfo {
+            name: sigma.head_name(),
+            recipe,
+        };
+        let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
+            Some(i) => i,
+            None => {
+                self.sites.type_arg_table.push(info);
+                self.sites.type_arg_table.len() - 1
+            }
+        };
+        noeta_ext_abi::HiddenArg::Table(idx as u32)
+    }
+
     /// Resolve a checker [`Type`] into a [`noeta_ext_abi::TypeRecipe`] for call-site-typed
     /// deserialization (`json.parse::<T>`), or `None` if `T` has no JSON decoding: a class (a
     /// reference/identity type), a tuple/set/result/`dyn`, a non-string-keyed map, a generic

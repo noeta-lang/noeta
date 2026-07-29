@@ -188,6 +188,14 @@ pub struct Sites {
     /// tag its construction site stamped, so lowering reads argument `i` off that tag instead of
     /// baking a constant string. A pure function of the program, like the other site maps.
     pub self_type_arg_sites: HashMap<Span, (String, u32)>,
+    /// `type_name::<T>()` spans whose turbofish is a FORWARDED type parameter of the enclosing
+    /// top-level generic **fn** → the hidden slot index holding the instantiation's table entry.
+    /// The fn-side twin of [`Sites::self_type_arg_sites`] (which reads a generic *type*'s argument
+    /// off the receiver): there is no receiver here, so the name comes from the same hidden slot
+    /// that already carries the decode recipe. Lowering emits an
+    /// [`Rvalue::TypeSlotName`](noeta_ir::Rvalue) instead of folding a constant string. A pure
+    /// function of the program, like the other site maps.
+    pub dynamic_type_name_sites: HashMap<Span, u32>,
     /// Forwarding generic fns → their hidden-parameter count. Lowering prepends that many hidden
     /// parameters (`$ty0`, `$ty1`, …) to the fn's IR parameter list.
     pub forwarding_fns: HashMap<String, u32>,
@@ -342,6 +350,8 @@ pub(crate) struct SiteMaps {
     pub(crate) dynamic_attr_sites: HashMap<Span, u32>,
     /// Enclosing-type type-argument reflection sites — see [`Sites::self_type_arg_sites`].
     pub(crate) self_type_arg_sites: HashMap<Span, (String, u32)>,
+    /// Forwarded `type_name::<T>()` sites — see [`Sites::dynamic_type_name_sites`].
+    pub(crate) dynamic_type_name_sites: HashMap<Span, u32>,
     /// Forwarding fns' hidden-parameter counts — see [`Sites::forwarding_fns`].
     pub(crate) forwarding_fns: HashMap<String, u32>,
     /// Forwarding-fn-as-value wrap sites — see [`Sites::fn_value_sites`].
@@ -388,6 +398,7 @@ impl SiteMaps {
             dynamic_recipe_sites: self.dynamic_recipe_sites,
             dynamic_attr_sites: self.dynamic_attr_sites,
             self_type_arg_sites: self.self_type_arg_sites,
+            dynamic_type_name_sites: self.dynamic_type_name_sites,
             forwarding_fns: self.forwarding_fns,
             fn_value_sites: self.fn_value_sites,
             destructor_relevance,

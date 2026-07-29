@@ -647,6 +647,14 @@ impl Checker {
     /// Only the **head** is rejected, matching [`TypeRef::head_name`] — what the query actually keys
     /// on. `field_specs_of::<List<T>>()` heads at `List`, a real type with no field schema, and keeps
     /// its honest empty answer.
+    ///
+    /// The turbofish arm stays a **compile-time** key: it resolves like an annotation, follows a
+    /// `namespace`/`use … as`/rename, and folds to a constant. What changed is that inside a
+    /// top-level generic fn the erased parameter now *has* a runtime name — `type_name::<T>()`
+    /// reads it off the same hidden slot that carries a forwarded decode recipe — so these
+    /// queries' own **runtime-string** arm reaches it: `field_specs_of(type_name::<T>())`. The help
+    /// says so where that route is actually open ([`Checker::forwardable_params`]), rather than
+    /// sending the author to restructure a signature that no longer needs it.
     fn reject_erased_type_param(&mut self, ty: &TypeRef, surface: &str) -> bool {
         let TypeRef::Named { name, args, span } = ty else {
             return false;
@@ -703,6 +711,26 @@ impl Checker {
                 .help(help);
             return true;
         }
+        // Inside a top-level generic fn the parameter DOES have a runtime name — the hidden
+        // type-argument slot carries it — so the fix is the surface's own runtime-string arm, not
+        // a signature change. Point at it; the turbofish arm stays the compile-time key.
+        // `type_name` itself is excluded: it IS the route, so pointing it at itself says nothing.
+        // (Reaching here from that surface means the slot did not resolve — a session-incremental
+        // entry whose forwarding table is still growing — where the general advice still applies.)
+        let help = if surface != "type_name"
+            && self.coloring.forwardable_params.iter().any(|p| p == name)
+        {
+            format!(
+                "pass the name instead of the type: `{surface}(type_name::<{name}>())` — \
+                 `type_name` resolves a forwarded parameter per instantiation, which the \
+                 compile-time `{surface}::<...>` key cannot"
+            )
+        } else {
+            format!(
+                "reflect where the type is concrete and pass the result in — give this function a \
+                 parameter for it and let the caller supply `{surface}::<TheRealType>`"
+            )
+        };
         self.error(
             DiagnosticCode::InvalidTypeArguments,
             *span,
@@ -711,10 +739,7 @@ impl Checker {
                  erased, so `{name}` names no type at run time"
             ),
         )
-        .help(format!(
-            "reflect where the type is concrete and pass the result in — give this function a \
-             parameter for it and let the caller supply `{surface}::<TheRealType>`"
-        ));
+        .help(help);
         true
     }
 
@@ -1468,11 +1493,15 @@ impl Checker {
                 Type::Bool
             }
             // `type_name::<T>()` — a type's qualified runtime identity as a `string`. The type is
-            // resolved like any annotation (an unresolvable `T` is E0013), and an erased type
-            // *parameter* is the same E0058 the name-keyed queries report: a parameter has no name
-            // at run time, so a `type_name::<T>()` inside `fn f<T>()` could only ever yield the
-            // literal `"T"`, which names nothing. Unlike `attributes_of`, there is no forwarding
-            // escape: this lowers to a compile-time constant, with no runtime node to feed a slot.
+            // resolved like any annotation (an unresolvable `T` is E0013). A type *parameter* is
+            // answerable exactly when the instantiation reaches the body through one of the two
+            // channels the language already has, and E0058 when neither does:
+            //
+            //   * a parameter of the enclosing generic TYPE, in an instance method — it rides the
+            //     receiver's reflected type tag (`self_type_arg_sites`, below);
+            //   * a parameter of the enclosing top-level generic FN — it rides the hidden
+            //     type-argument slot that already carries `json.try_parse::<T>`'s decode recipe,
+            //     and this surface needs only the slot's NAME, no recipe at all.
             Expr::TypeName { ty, span } => {
                 // Inside a generic type's INSTANCE method, a bare parameter of the enclosing type
                 // is not erased after all: the receiver carries the instantiation as a reflected
@@ -1492,6 +1521,22 @@ impl Checker {
                     self.sites
                         .self_type_arg_sites
                         .insert(*span, (owner, i as u32));
+                    return Type::String;
+                }
+                // A FORWARDED parameter of the enclosing top-level generic fn (poly-values F2b):
+                // the instantiation's name arrives per-call through the hidden slot, exactly as
+                // `attributes_of::<T>()`'s does. Checked only for a *bare* parameter — the head is
+                // what this surface answers with, and `type_name::<List<T>>()` heads at `List`
+                // whatever `T` is, so it stays the folded constant.
+                if let TypeRef::Named { name, args, .. } = ty
+                    && args.is_empty()
+                    && self.coloring.type_params.contains_key(name.as_str())
+                    && let Some(idx) =
+                        self.coloring.current_forwarding.iter().position(
+                            |t| matches!(t, Type::Named(p, a) if p == name && a.is_empty()),
+                        )
+                {
+                    self.sites.dynamic_type_name_sites.insert(*span, idx as u32);
                     return Type::String;
                 }
                 if !self.reject_erased_type_param(ty, "type_name") {

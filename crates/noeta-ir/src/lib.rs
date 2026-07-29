@@ -528,6 +528,20 @@ pub enum Rvalue {
         param: String,
         span: Span,
     },
+    /// `type_name::<T>()` where `T` is a **forwarded type parameter of the enclosing top-level
+    /// generic fn** (poly-values F2b): the instantiation's qualified name, read out of
+    /// [`Program::type_args`] at the index the hidden slot holds.
+    ///
+    /// The fn-side twin of [`Rvalue::TypeArgName`] — same answer, different channel. A generic
+    /// *type* carries its instantiation on the receiver; a generic *fn* has no receiver, so it
+    /// carries it in the hidden argument that already delivers `json.try_parse::<T>`'s decode
+    /// recipe. This surface reads only the entry's NAME, which is why it forwards even for an
+    /// instantiation that has no recipe at all.
+    ///
+    /// `slot` is the hidden `$ty<i>` local as lowering emits it. An index the table does not hold
+    /// cannot arise from a checked program (the checker resolves every slot at the instantiating
+    /// call); the backends treat it as the corrupt-slot abort the recipe path already does.
+    TypeSlotName { slot: Atom, span: Span },
     /// `type_of(value)` — the runtime `Type` descriptor of a value.
     TypeOf { operand: Atom, span: Span },
     /// `fields_of(value)` — a struct/class instance's fields as `List<FieldEntry>` (derive

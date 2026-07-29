@@ -873,6 +873,19 @@ pub enum Op {
         names: Box<(String, String)>,
         span: Span,
     },
+    /// `type_name::<T>()` where `T` is a **forwarded type parameter of the enclosing top-level
+    /// generic fn** (poly-values F2b): `dst = ` the qualified name of the [`Module::type_args`]
+    /// entry whose index the hidden slot register `src` holds.
+    ///
+    /// The fn-side twin of [`Op::TypeArgName`] — same answer, different channel: a generic type
+    /// carries its instantiation on the receiver, a generic fn in the hidden argument that already
+    /// delivers a forwarded decode recipe. Reads only the entry's name, so it serves an
+    /// instantiation with no recipe at all.
+    TypeSlotName {
+        dst: Reg,
+        src: Reg,
+        span: Span,
+    },
     /// `fields_of(value)`: `dst = List<FieldEntry>` — the struct/class instance in `src` read as
     /// `{ name, value }` pairs in declaration order (derive layer 3); the empty list for any other
     /// value.
@@ -1976,6 +1989,9 @@ fn op_repr(
         Op::TypeArgName {
             dst, src, index, ..
         } => format!("TypeArgName r{dst} <- r{src}.typearg[{index}]"),
+        Op::TypeSlotName { dst, src, .. } => {
+            format!("TypeSlotName r{dst} <- type_args[r{src}].name")
+        }
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::FieldsOf { dst, src } => format!("FieldsOf    r{dst} <- fields_of(r{src})"),
         Op::TraitsOf { dst, src } => format!("TraitsOf    r{dst} <- traits_of(r{src})"),

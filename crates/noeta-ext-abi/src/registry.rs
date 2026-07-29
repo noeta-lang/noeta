@@ -691,12 +691,21 @@ pub enum FieldDefault {
 /// runtime about one concrete instantiation. Generics are erased, so a single compiled body serves
 /// every instantiation — the checker interns these bundles into a program-wide table, each
 /// instantiating call passes its entry's INDEX as a hidden argument, and the forwarded sites
-/// (`json.try_parse::<T>`, `attributes_of::<T>`) resolve their data through it at runtime. A pure
-/// function of the program, identical for both backends by construction.
+/// (`json.try_parse::<T>`, `attributes_of::<T>`, `type_name::<T>`) resolve their data through it at
+/// runtime. A pure function of the program, identical for both backends by construction.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TypeArgInfo {
-    /// The instantiation's display name (`"Order"`) — what a name-keyed consumer
-    /// (`attributes_of`'s manifest) resolves with.
+    /// The instantiation's **name-keyed identity** — its qualified head name
+    /// (`"app.storage.Order"`): what a name-keyed consumer resolves with, both `attributes_of`'s
+    /// manifest and the string `type_name::<T>()` answers with.
+    ///
+    /// The qualified head, *not* a display rendering. The runtime registries are keyed on the name
+    /// the linker qualified, so the display form (which renders the SHORT name — `Order`, not
+    /// `app.storage.Order`) silently missed every namespaced type: a forwarded
+    /// `attributes_of::<T>()` answered the empty list where the concrete `attributes_of::<Order>()`
+    /// answered the manifest. Produced by `noeta_types::Type::head_name`, the lattice twin of
+    /// `TypeRef::head_name`, so a forwarded parameter and the turbofish that instantiated it key
+    /// identically by construction rather than by convention.
     pub name: String,
     /// The instantiation's build recipe, when the type has one — what a recipe-consuming door
     /// (`json.try_parse::<T>`) decodes with. `None` for an un-recipeable type: statically

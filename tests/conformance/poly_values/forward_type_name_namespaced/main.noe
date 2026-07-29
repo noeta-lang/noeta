@@ -1,0 +1,38 @@
+// A forwarded `type_name::<T>()` answers the **qualified** identity, byte-identical to what the
+// concrete `type_name::<Todo>()` answers at the same site. That agreement is the whole contract:
+// the string exists to key a name-keyed registry, so a forwarded parameter that answered the short
+// name would silently miss every namespaced type — which is exactly what the sibling
+// `forward_attributes_namespaced/` case caught in the hidden slot's other consumer.
+//
+// It holds by construction rather than by convention: the static form folds `TypeRef::head_name`,
+// and the hidden slot's table entry interns `Type::head_name`, the same projection over the
+// lattice type the checker resolved from that same already-qualified reference.
+//
+// A `main.noe` on purpose: the harness runs a *single-file* case straight from source text, with no
+// loader and therefore no namespace qualification, so in a bare `.noe` the short and qualified
+// names coincide and the case could not observe what it claims to pin.
+// expect: stdout "demo.storage.Todo"
+// expect: stdout "demo.storage.Todo"
+// expect: stdout "true"
+// expect: stdout "1"
+// expect: exit 0
+namespace demo.storage
+
+struct Todo {
+    id: int
+}
+
+fn named<T>(): string {
+    return type_name::<T>()
+}
+
+// The composed route the name-keyed queries' diagnostic now points at — it must find the real
+// schema, which only happens if the forwarded name carries the namespace.
+fn field_count<T>(): int {
+    return field_specs_of(type_name::<T>()).len()
+}
+
+echo type_name::<Todo>()
+echo named::<Todo>()
+echo named::<Todo>() == type_name::<Todo>()
+echo field_count::<Todo>()

@@ -608,6 +608,8 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::FieldsOf { operand, .. }
         | Rvalue::TraitsOf { operand, .. }
         | Rvalue::MaskWidth { operand, .. } => f(operand),
+        // The forwarded `type_name::<T>()` reads the enclosing fn's hidden type-argument slot.
+        Rvalue::TypeSlotName { slot, .. } => f(slot),
         // `params_of(target)` / `returns_of(target)` read their runtime target-string operand.
         Rvalue::ParamsOf { target, .. } | Rvalue::ReturnsOf { target, .. } => f(target),
         // `field_specs_of(name)` / `variants_of(name)` read their runtime type-name operand.
