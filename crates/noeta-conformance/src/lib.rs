@@ -308,30 +308,12 @@ fn dep_packages(dir: &Path) -> Vec<noeta_loader::DepPackage> {
     dirs.into_iter()
         .filter_map(|package_dir| {
             let name = package_dir.file_name()?.to_string_lossy().into_owned();
-            let Ok(files) = std::fs::read_dir(&package_dir) else {
-                return None;
-            };
-            let mut paths: Vec<PathBuf> = files
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|ext| ext == "noe"))
-                .collect();
-            paths.sort();
-            let modules: Vec<noeta_loader::RawModule> = paths
-                .iter()
-                .filter_map(|p| {
-                    // A case's package subdirectory IS the package root, so its modules derive
-                    // under the directory name — the same prefix the key/root give them.
-                    Some(noeta_loader::RawModule {
-                        path: noeta_loader::derive_module_path(
-                            std::slice::from_ref(&name),
-                            p.strip_prefix(&package_dir).unwrap_or(p),
-                        ),
-                        name: p.display().to_string(),
-                        text: std::fs::read_to_string(p).ok()?,
-                    })
-                })
-                .collect();
+            // A case's package subdirectory IS a package root: walked recursively, every module
+            // deriving its path under the directory name — the same prefix its key and root give it.
+            let modules = noeta_loader::read_package_modules(&noeta_loader::PackageRoot::new(
+                &package_dir,
+                vec![name.clone()],
+            ));
             (!modules.is_empty()).then(|| noeta_loader::DepPackage {
                 key: name.clone(),
                 root: name,

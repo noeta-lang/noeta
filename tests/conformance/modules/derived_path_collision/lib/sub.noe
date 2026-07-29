@@ -1,0 +1,3 @@
+pub fn first(): string {
+    return "first";
+}

@@ -1,0 +1,4 @@
+// `my-utils` is not spellable in a `use`, so it cannot be a module path segment.
+pub fn helper(): string {
+    return "helper";
+}
