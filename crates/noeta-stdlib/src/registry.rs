@@ -5117,7 +5117,8 @@ const JSON_DOCS: &[(&str, &str)] = &[
          map/list/scalar tree, addressed with `v[\"key\"]`. `json.parse::<T>(text)` decodes into \
          the type you name at the call site, filling declared field defaults and reporting a shape \
          mismatch by path. Reach for either when a malformed document means the program is wrong; \
-         use `try_parse` when it means the *input* is wrong.",
+         use `try_parse` when it means the *input* is wrong — including for the enum rules, which \
+         are the same for both doors and written up under `try_parse`.",
     ),
     (
         "try_parse",
@@ -5129,7 +5130,24 @@ const JSON_DOCS: &[(&str, &str)] = &[
          `json.try_parse::<T>(text): Result<T, JsonError>` additionally checks the document \
          against `T` and hands back a real `T`.\n\n\
          Either door composes with `?` and with `match … { Ok(v) => …, Err(e) => … }`; `JsonError` \
-         implements `Error` and `Display`, so `${e}` interpolates its composed message.",
+         implements `Error` and `Display`, so `${e}` interpolates its composed message.\n\n\
+         **Enums decode from the wire values their JSON Schema advertises** (this holds for \
+         `parse::<T>` and `decode_typed` too — one recipe walk serves all three). A *backed* enum \
+         is selected by its backing: `enum Plan: string { Free = \"free\" }` decodes `\"free\"`, \
+         not `\"Free\"`. A *plain* enum is selected by its case name. Those are exactly what each \
+         derives as its `{\"enum\": […]}` schema, so a document a schema describes is a document \
+         the decode accepts. Backings of any scalar type work, so an `int`-backed enum decodes \
+         from JSON numbers. The result is a real enum value — it `match`es exhaustively and \
+         compares equal to a case written in source, rather than a string standing in for one.\n\n\
+         A value naming no case is an `\"unknown_variant\"` error whose detail lists every accepted \
+         wire value, reported at the failing value's path — never a panic, never a silently-wrong \
+         value. A value of the wrong JSON *kind* (an object where a string-backed enum was \
+         expected) is an ordinary `\"mismatch\"`.\n\n\
+         An enum with a **payload-carrying** variant has no JSON decoding at all, and a type with \
+         such a field is refused at check time: a data-carrying sum has no canonical JSON \
+         spelling, and decoding only its payload-free half would accept documents against a schema \
+         that cannot describe the type. Build such a case with `construct(\"Enum.Variant\", \
+         payload)` instead.",
     ),
     ("stringify", "Serialize a value to a JSON string."),
 ];
@@ -6668,7 +6686,14 @@ const JSON_ERROR_DOCS: &[(&str, &str)] = &[
     (
         "kind",
         "What went wrong: `\"syntax\"` (malformed document), `\"mismatch\"` (wrong value kind), \
-         `\"missing_field\"`, or `\"unknown_type\"` (a `decode_typed` name with no recipe).",
+         `\"missing_field\"`, `\"unknown_variant\"` (a right-kind value naming no case of a target \
+         enum — the detail lists every accepted one), `\"validation\"` (a shape-correct value its \
+         type's `Validate::validate` rejected), or `\"unknown_type\"` (a `decode_typed` name with \
+         no recipe).\n\n\
+         `\"unknown_variant\"` is deliberately distinct from `\"mismatch\"`: a mismatch means the \
+         document has the wrong *shape*, while this means it has the right shape and an \
+         out-of-vocabulary *value* — something a caller can act on, since the accepted set is in \
+         the message.",
     ),
     (
         "path",

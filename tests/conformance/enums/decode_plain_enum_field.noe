@@ -6,6 +6,8 @@
 // expect: stdout "ok: nice / Sentiment.Positive"
 // expect: stdout "matched: negative"
 // expect: stdout "equal: true"
+// expect: stdout "router door: ok: Review {text: \"nice\", mood: Sentiment.Negative}"
+// expect: stdout "router door: unknown_variant: mood: \"Sideways\" is not a variant of `Sentiment`: expected one of \"Positive\", \"Negative\""
 // expect: exit 0
 use std.json
 use std.json.JsonError
@@ -34,3 +36,15 @@ echo "matched: " ~ match decoded {
     Sentiment.Negative => "negative",
 }
 echo "equal: ${decoded == Sentiment.Negative}"
+
+// The **router-facing** door decodes the same recipe by runtime type name, so a web framework
+// binding a handler's body parameter reaches an enum-typed field on the same terms — including the
+// same path-carrying rejection.
+fn routed(r: Result<dyn, JsonError>): string {
+    return match r {
+        Ok(v) => "ok: ${v}",
+        Err(e) => "${e.kind()}: ${e.message()}",
+    }
+}
+echo "router door: " ~ routed(json.decode_typed("Review", "{\"text\": \"nice\", \"mood\": \"Negative\"}"))
+echo "router door: " ~ routed(json.decode_typed("Review", "{\"text\": \"nice\", \"mood\": \"Sideways\"}"))
