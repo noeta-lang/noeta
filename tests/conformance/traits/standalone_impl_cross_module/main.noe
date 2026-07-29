@@ -1,10 +1,9 @@
 // A sibling module's STANDALONE `impl Trait for T {}` travels with its target type into the merged
 // program: `run_store` takes a `dyn Store`, and passing a `NullStore` requires the standalone impl
-// (in `lib.noe`) to be visible for the coercion + the dynamic `label()` dispatch. Previously only an
+// (in `Lib.noe`) to be visible for the coercion + the dynamic `label()` dispatch. Previously only an
 // INLINE impl (on the class declaration) survived cross-module linking; a standalone one was dropped.
 // expect: stdout "flushed"
 // expect: exit 0
-namespace App.Main;
 
 use App.Lib.{NullStore, run_store};
 

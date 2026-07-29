@@ -1,4 +1,4 @@
-namespace pkg.first;
+// (No `namespace`: this file sits at `first.noe` in package `pkg`, so it IS `pkg.first`.)
 
 use pkg.types.{Decoder, Target};
 

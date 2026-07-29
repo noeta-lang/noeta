@@ -1,7 +1,0 @@
-// One of two modules that each declare a type named `Amount`. Because identity is qualified
-// (`App.Money.Amount`), this is a wholly distinct nominal type from `App.Geo.Amount` — the whole
-// point of real module scoping.
-namespace App.Money;
-pub struct Amount {
-    cents: int
-}

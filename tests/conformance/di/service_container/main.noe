@@ -5,7 +5,7 @@
 //
 // Load-bearing facts this pins, empirically, so the container's design cannot silently drift:
 //   1. A `dyn Trait` parameter reflects (`params_of`) with its trait name FULLY QUALIFIED — here
-//      `di.container.Clock`, not `Clock` — so the container must normalize to the short name to meet
+//      `di.main.Clock`, not `Clock` — so the container must normalize to the short name to meet
 //      a registration written with the short spelling. (First echo pins the raw reflected name.)
 //   2. TWO DISTINCT services registered under different interfaces each inject correctly — `dyn Clock`
 //      gets the clock, `dyn Ledger` gets the ledger — which the single-service stub could not do.
@@ -13,12 +13,13 @@
 //      NOT a panic, and NOT the wrong service silently injected.
 // Both backends run the identical reflect -> resolve -> invoke loop, so the differential oracle holds
 // the two evaluators to the same resolution.
-// expect: stdout "raw: di.container.Clock"
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
+// expect: stdout "raw: di.main.Clock"
 // expect: stdout "Clock -> TICK"
 // expect: stdout "Ledger -> NOTE"
 // expect: stdout "missing: no service for `dyn Absent` — register it with bind(\"Absent\", <instance>)"
 // expect: exit 0
-namespace di.container
 
 trait Clock {
     fn tick(): string
@@ -121,21 +122,21 @@ c.bind("Ledger", MemLedger.new())
 handlers = Handlers.new()
 
 // (1) Pin the raw reflected spelling: fully qualified, not the short name.
-raw = match params_of("di.container.Handlers.on_clock")[0].type {
+raw = match params_of("di.main.Handlers.on_clock")[0].type {
     DynTrait(n) => n,
     _ => "not-dyntrait",
 }
 echo "raw: ${raw}"
 
 // (2) Two distinct services, each injected for its own interface.
-echo match c.arg_for("di.container.Handlers.on_clock") {
+echo match c.arg_for("di.main.Handlers.on_clock") {
     Ok(v) => "Clock -> " ~ (match invoke(handlers, "on_clock", [v]) {
         Ok(r) => r.as<string>() ?? "?",
         Err(e) => "invoke-err ${e}",
     }),
     Err(e) => "resolve-err ${e}",
 }
-echo match c.arg_for("di.container.Handlers.on_ledger") {
+echo match c.arg_for("di.main.Handlers.on_ledger") {
     Ok(v) => "Ledger -> " ~ (match invoke(handlers, "on_ledger", [v]) {
         Ok(r) => r.as<string>() ?? "?",
         Err(e) => "invoke-err ${e}",
@@ -144,7 +145,7 @@ echo match c.arg_for("di.container.Handlers.on_ledger") {
 }
 
 // (3) An unregistered interface: actionable error, no panic, no wrong service.
-echo match c.arg_for("di.container.Handlers.on_absent") {
+echo match c.arg_for("di.main.Handlers.on_absent") {
     Ok(v) => "WRONG: injected a service for an unregistered interface",
     Err(e) => "missing: ${e}",
 }

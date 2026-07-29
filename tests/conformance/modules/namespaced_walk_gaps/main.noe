@@ -17,12 +17,13 @@
 // A directory case on purpose: the harness runs a single-file case straight from source text with
 // no loader, so namespace qualification never runs for one and a bare `.noe` could not observe any
 // of these.
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
 // expect: stdout "key: Grade.High"
 // expect: stdout "rank 50: over"
 // expect: stdout "rank 1: under"
-// expect: stdout "role: App.Main.renderHome=controller"
+// expect: stdout "role: App.main.renderHome=controller"
 // expect: exit 0
-namespace App.Main;
 use App.Lib.WebRole;
 use App.Lib.Grade;
 use App.Lib.Keyed;

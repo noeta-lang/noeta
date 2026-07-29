@@ -18,7 +18,6 @@
 // expect: stdout "entry match: sse"
 // expect: stdout "type: Type.Enum(std.http.Framing, [])"
 // expect: exit 0
-namespace probe.main
 
 use probe.lib
 use std.http.Framing as Alias

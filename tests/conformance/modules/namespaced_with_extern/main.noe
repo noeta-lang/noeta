@@ -5,7 +5,6 @@
 // expect: stdout "true"
 // expect: stdout "true"
 // expect: exit 0
-namespace App.Main;
 use App.Lib.Record;
 use App.Lib.Marker;
 use std.id;

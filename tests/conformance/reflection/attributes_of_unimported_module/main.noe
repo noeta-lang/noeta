@@ -16,7 +16,6 @@
 // expect: stdout "ran: app.tools.hidden"
 // expect: stdout "role: app.tools.hidden Semantic.TrustBoundary"
 // expect: exit 0
-namespace app.main;
 
 use app.tools.{Marked, imported};
 
