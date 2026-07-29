@@ -2160,9 +2160,7 @@ mod tests {
 
     /// A tiny two-package fixture on disk: `app` with one path dependency `lib`.
     fn path_dep_fixture(name: &str) -> PathBuf {
-        let base =
-            std::env::temp_dir().join(format!("noeta_graph_test_{name}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new(name);
         let lib = base.join("lib");
         std::fs::create_dir_all(&lib).unwrap();
         std::fs::write(
@@ -2330,12 +2328,8 @@ mod tests {
     }
 
     /// A fresh fixture base directory for one `[patch]` test.
-    fn patch_base(name: &str) -> PathBuf {
-        let base =
-            std::env::temp_dir().join(format!("noeta_patch_test_{name}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        base
+    fn patch_base(name: &str) -> crate::test_temp::TempDir {
+        crate::test_temp::TempDir::new(name)
     }
 
     /// The locked entry for `identity`, panicking helpfully when absent.
@@ -2726,8 +2720,7 @@ mod tests {
     /// when `with_crate` says to create the crate dir (Phase 3, N3.1). When `trusted`, the app's
     /// `[trust].native` authorizes `acme/imgfx` (Phase 4) — otherwise resolution refuses the native.
     fn native_dep_project(name: &str, with_crate: bool, trusted: bool) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("noeta_graph_test_{name}"));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new(name);
         let app = base.join("app");
         let dep = base.join("imgfx");
         std::fs::create_dir_all(&app).unwrap();
@@ -2770,8 +2763,7 @@ mod tests {
     fn a_target_scoped_dependency_resolves_only_for_its_target() {
         // An app with a runtime dep `fx` and a dev-only dep `tool` (dev-deps arc): the global graph
         // sees `fx`; `--target dev` also sees `tool`.
-        let base = std::env::temp_dir().join("noeta_graph_test_target_deps");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("target-deps");
         let app = base.join("app");
         std::fs::create_dir_all(&app).unwrap();
         for (name, ver) in [("fx", "1.0.0"), ("tool", "1.0.0")] {
@@ -2821,8 +2813,7 @@ mod tests {
         // Two packages of the same scope `para` (`para/aether` + `para/db`) bound under one array
         // key: both resolve, and both get the scope key `para` as their global segment (so the app's
         // `use para.aether.…` and `use para.db.…` both reach the flat pool).
-        let base = std::env::temp_dir().join("noeta_graph_test_scope_dep");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("scope-dep");
         let app = base.join("app");
         std::fs::create_dir_all(&app).unwrap();
         for pkg in ["aether", "db"] {
@@ -2876,8 +2867,7 @@ mod tests {
 
     #[test]
     fn a_scope_dependency_rejects_members_from_different_scopes() {
-        let base = std::env::temp_dir().join("noeta_graph_test_scope_mixed");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("scope-mixed");
         let app = base.join("app");
         std::fs::create_dir_all(&app).unwrap();
         for (dir, ident) in [
@@ -2938,8 +2928,7 @@ mod tests {
     fn the_resolved_graph_carries_per_package_and_root_editions() {
         // An app pinning edition 2026 explicitly, with a dependency that omits `edition` (so it
         // defaults). The root edition is the app's; each package's own edition is on its LockedPackage.
-        let base = std::env::temp_dir().join("noeta_graph_test_editions");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("editions");
         let app = base.join("app");
         let dep = base.join("dep");
         std::fs::create_dir_all(&app).unwrap();
@@ -2988,8 +2977,7 @@ mod tests {
     fn an_unknown_dependency_edition_fails_resolution_actionably() {
         // A dependency pinned to an edition this toolchain doesn't understand must fail the resolve
         // (not be silently miscompiled under the root's edition) — naming the dependency and the fix.
-        let base = std::env::temp_dir().join("noeta_graph_test_future_edition");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("future-edition");
         let app = base.join("app");
         let dep = base.join("dep");
         std::fs::create_dir_all(&app).unwrap();
@@ -3027,8 +3015,7 @@ mod tests {
         // root — so `noeta check`/`run` on a file inside it resolves a `use` of its own namespace.
         // Before this, the root was never walked as its own dependency, so its native never entered
         // `native_crates` and the package was checkable only as somebody else's dependency.
-        let base = std::env::temp_dir().join("noeta_graph_test_root_native");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("root-native");
         let pkg = base.join("imgfx");
         std::fs::create_dir_all(pkg.join("native")).unwrap();
         // No `[trust].native` here on purpose: a package does not authorize its own native code,
@@ -3103,8 +3090,7 @@ mod tests {
         // A `[directives]` binding resolves, in the ROOT's own dependency context, to the provider
         // package's namespace root + exported name — what the checker matches an `ExtDirective`
         // against. Renaming (`local = "dep-key:exported"`) is carried through.
-        let base = std::env::temp_dir().join("noeta_graph_test_directives");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("directives");
         let app = base.join("app");
         let dep = base.join("imgfx");
         std::fs::create_dir_all(&app).unwrap();
@@ -3153,8 +3139,7 @@ mod tests {
         // A `[tiers]` binding resolves like a `[directives]` one — to the provider namespace root +
         // exported name — and lands in the SAME per-package `@name` table (a `@test` block and a
         // `@openapi` attribute share one namespace). `std` resolves to root `"std"`; renaming carries.
-        let base = std::env::temp_dir().join("noeta_graph_test_tiers");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("tiers");
         let app = base.join("app");
         let dep = base.join("fuzzkit");
         std::fs::create_dir_all(&app).unwrap();
@@ -3202,9 +3187,11 @@ mod tests {
     fn command_trust_gates_which_native_packages_may_add_commands() {
         // A native dep with no `[trust.commands]` entry contributes no binding; adding one binds a
         // local name to the package identity + exported command for the composer.
-        let base = std::env::temp_dir().join("noeta_graph_test_cmd_trust");
+        let base = crate::test_temp::TempDir::new("graph-test-cmd-trust");
         let make = |commands_trust: bool| -> Vec<ResolvedCommandBinding> {
-            let _ = std::fs::remove_dir_all(&base);
+            // Deliberate: each call rebuilds the same fixture from scratch. The path is this
+            // process's alone, so the wipe can only ever hit our own previous pass.
+            let _ = std::fs::remove_dir_all(&*base);
             let app = base.join("app");
             let dep = base.join("imgfx");
             std::fs::create_dir_all(&app).unwrap();
@@ -3274,8 +3261,7 @@ mod tests {
         // The anti-supply-chain invariant: a native package reached *transitively* (app → mid →
         // imgfx) is still refused unless the ROOT app trusts it — a dependency can't authorize its
         // own native sub-dependency.
-        let base = std::env::temp_dir().join("noeta_graph_test_native_transitive");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("native-transitive");
         let app = base.join("app");
         let mid = base.join("mid");
         let dep = base.join("imgfx");
@@ -3330,8 +3316,7 @@ mod tests {
         // is refused at resolve time — the compiler provides these, so a registry serving `std/…` is a
         // shadow-core supply-chain attack. Refusal happens in `solve`/`gather` before any index query,
         // so this needs no network and no configured registry.
-        let base = std::env::temp_dir().join("noeta_graph_test_reserved_scope");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("reserved-scope");
         let app = base.join("app");
         std::fs::create_dir_all(&app).unwrap();
         std::fs::write(
