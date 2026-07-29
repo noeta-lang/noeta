@@ -2178,14 +2178,18 @@ impl Interpreter {
         Value::list(items)
     }
 
-    /// `construct(name, fields)` — build a struct/class value of the type named by `name_val` from the
-    /// field values `fields_val` (declaration order), reusing the SAME construction path as a
-    /// `T { … }` literal so defaults and full-initialization are honored identically. Returns a
-    /// `Result<dyn, string>`: an unknown type, a non-list `fields`, an arity/scalar-type mismatch, or a
-    /// missing non-defaulted field is a recoverable `Err(message)`; success is `Ok(value)`. Validation
-    /// runs through the shared `plan_construct` (so the VM agrees on every accept/reject and every
-    /// message), then the accepted values feed `construct_object`, which fills the remaining
-    /// defaulted fields — so the two never both report a missing field.
+    /// `construct(name, fields)` — build a value of the type named by `name_val` from the field values
+    /// `fields_val` (declaration order), reusing the SAME construction path as a literal so defaults
+    /// and full-initialization are honored identically. Returns a `Result<dyn, string>`: an unknown
+    /// type, a non-list `fields`, an arity/scalar-type mismatch, or a missing non-defaulted field is a
+    /// recoverable `Err(message)`; success is `Ok(value)`. Validation runs through the shared
+    /// `plan_construct` (so the VM agrees on every accept/reject and every message), then the accepted
+    /// values feed `construct_object`, which fills the remaining defaulted fields — so the two never
+    /// both report a missing field.
+    ///
+    /// `name` spells a struct/class (`"ServerOpts"`) or an **enum case** (`"Shape.Circle"`), whose
+    /// `fields` are that variant's payload; `resolve_construct_target` decides which, so both backends
+    /// read the same spelling identically.
     fn construct_dynamic(&mut self, name_val: Value, fields_val: Value, span: Span) -> Eval<Value> {
         let Value::Str(type_name) = &name_val else {
             return Ok(invoke_err(format!(
@@ -2194,15 +2198,38 @@ impl Interpreter {
             )));
         };
         let type_name = type_name.clone();
-        // Only a declared struct/class is constructible; an enum or an unknown name is a clean `Err`
-        // (checked before field validation, so an unknown type reports as such, not "no field X").
-        match self.reflection.type_named(&type_name).map(|t| t.kind) {
-            Some(noeta_ast::reflect::TypeKind::Struct | noeta_ast::reflect::TypeKind::Class) => {}
-            _ => {
-                return Ok(invoke_err(format!(
-                    "`{type_name}` is not a constructible struct or class"
-                )));
+        // What the name refers to, decided once and shared with the VM. Resolved before any field
+        // validation, so an unconstructible name reports as such rather than as "no field X".
+        match noeta_ast::reflect::resolve_construct_target(&self.reflection, &type_name) {
+            noeta_ast::reflect::ConstructTarget::Rejected(msg) => return Ok(invoke_err(msg)),
+            noeta_ast::reflect::ConstructTarget::Variant {
+                enum_name,
+                variant,
+                index,
+                payload,
+            } => {
+                // An enum case is built directly rather than through `construct_object`: a variant has
+                // no defaults, no slot table and no methods of its own to inherit, so the payload
+                // values ARE the value. Pure, so it needs no `&mut self` and the reflection borrow
+                // above stays live through it.
+                return Ok(
+                    match plan_variant_payload(&type_name, &payload, &fields_val) {
+                        Err(msg) => invoke_err(msg),
+                        Ok(data) => builtin_enum(
+                            "Result",
+                            "Ok",
+                            vec![Value::Enum(Rc::new(EnumValue {
+                                enum_name: enum_name.to_string(),
+                                variant: variant.to_string(),
+                                data,
+                                variant_index: index as usize,
+                                reflect: None,
+                            }))],
+                        ),
+                    },
+                );
             }
+            noeta_ast::reflect::ConstructTarget::Fielded => {}
         }
         // The `fields` argument is either a `List<dyn>` (positional, declaration order) or a
         // `Map<string, dyn>` (named — the sparse, any-order form a framework binding `--field` flags
@@ -5978,6 +6005,56 @@ fn invoke_err(message: String) -> Value {
 /// name-keyed field values `construct_object` consumes, paired with the shared planner's validation
 /// outcome (deferred so the type-kind check and the plan error surface as one `Result.Err`).
 type ConstructResolve = (Vec<(String, Span, Value)>, Result<(), String>);
+
+/// Validate a `construct("Enum.Variant", fields)` payload against the variant's declared schema and
+/// order it into the positional `data` an enum value carries.
+///
+/// The two accepted `fields` shapes are the same two a struct takes and mean the same things — a
+/// `List<dyn>` in declaration order, a `Map<string, dyn>` keyed by the payload names `variants_of`
+/// reports (`_0`/`_1` for a positional payload) — and both go through the *same* shared planners a
+/// struct's fields do, so a payload mismatch is worded exactly like a field mismatch. Only the value
+/// extraction is backend-local; every accept/reject decision is shared, and the VM's twin is a
+/// mirror of this function (`plans/backend-mirror.md`).
+fn plan_variant_payload(
+    case_name: &str,
+    payload: &[noeta_ast::reflect::FieldSpecData<'_>],
+    fields_val: &Value,
+) -> Result<Vec<Value>, String> {
+    match fields_val {
+        Value::List(items) => {
+            let values: Vec<Value> = (*items.to_rc_vec()).clone();
+            let reprs: Vec<noeta_ast::reflect::TypeRepr> =
+                values.iter().map(eval_type_repr).collect();
+            noeta_ast::reflect::plan_construct(case_name, payload, &reprs)?;
+            Ok(values)
+        }
+        Value::Map(entries, _) => {
+            let provided: Vec<(String, Value)> = entries
+                .iter()
+                .filter_map(|(k, v)| match k {
+                    noeta_stdlib::MapKey::Str(s) => Some((s.as_str().to_owned(), v.clone())),
+                    _ => None,
+                })
+                .collect();
+            let reprs: Vec<(String, noeta_ast::reflect::TypeRepr)> = provided
+                .iter()
+                .map(|(n, v)| (n.clone(), eval_type_repr(v)))
+                .collect();
+            noeta_ast::reflect::plan_construct_named(case_name, payload, &reprs)?;
+            let names: Vec<String> = provided.iter().map(|(n, _)| n.clone()).collect();
+            Ok(
+                noeta_ast::reflect::plan_variant_payload_order(payload, &names)
+                    .into_iter()
+                    .map(|i| provided[i].1.clone())
+                    .collect(),
+            )
+        }
+        other => Err(format!(
+            "construct fields must be a list or a map, found {}",
+            other.type_name()
+        )),
+    }
+}
 
 /// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).
 /// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.

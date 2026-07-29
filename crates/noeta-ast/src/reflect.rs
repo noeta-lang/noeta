@@ -1155,6 +1155,120 @@ fn value_repr_name(ty: &TypeRepr) -> String {
     }
 }
 
+/// What a `construct(name, fields)` target string names — the shared resolution both backends run,
+/// so the two agree on every accept, every reject, and every message.
+#[derive(Debug)]
+pub enum ConstructTarget<'a> {
+    /// A declared struct or class: build it by name from its field schema.
+    Fielded,
+    /// An `Enum.Variant` spelling: build that case, with `payload` as its construction schema.
+    Variant {
+        /// The enum's own name, as the built value carries it (qualified under a `namespace`, exactly
+        /// as a source-written `Enum.Variant` is).
+        enum_name: &'a str,
+        variant: &'a str,
+        /// The variant's declaration index — what both backends stamp on the value, so a derived
+        /// `Comparable` orders a constructed case identically to a literal one.
+        index: u32,
+        /// The variant's payload as ordinary declared-field data, in declaration order; empty for a
+        /// fieldless case. These are the very [`FieldSpecData`]s `variants_of` reports, fed to the
+        /// very [`plan_construct`] a struct's fields go through.
+        payload: Vec<FieldSpecData<'a>>,
+    },
+    /// The name is not constructible; the string is the ready-to-surface message.
+    Rejected(String),
+}
+
+/// Resolve a `construct(name, …)` target string against the reflection artifact.
+///
+/// **A payload-carrying variant is spelled `"Enum.Variant"`, and its `fields` argument is the
+/// variant's payload.** That is the whole convention, and it falls out of what the surrounding
+/// surface already reports rather than being invented for `construct`:
+///
+/// * `variants_of(name)` gives each variant's payload as a `List<FieldSpec>` — the identical element
+///   type `field_specs_of(name)` gives a struct's fields, positional payloads included (they carry
+///   their synthesized `_0`/`_1` names). So a caller reads a schema from one query and hands the
+///   matching values straight to the other, in either of `construct`'s two shapes: a `List<dyn>` in
+///   declaration order, or a `Map<string, dyn>` keyed by those payload names.
+/// * `"Enum.Variant"` is how the case is written in source, and how the attribute manifest already
+///   keys a variant target — the same `Type.member` convention `attributes_of` uses. Nothing new is
+///   introduced to name a member.
+///
+/// The alternative — a bare `"Enum"` with the case name smuggled in as the first field value — was
+/// rejected because it makes the field list mean two different things depending on position, and
+/// leaves no spelling at all for a *fieldless* case that reads like the payload-carrying one.
+///
+/// A **bare enum name** is therefore a rejection, but a teaching one: it names the spelling that
+/// would have worked. Resolution tries the whole string as a type first, so a namespaced type name
+/// (which contains dots itself) is never mistaken for an `Enum.Variant` pair.
+pub fn resolve_construct_target<'a>(info: &'a ReflectionInfo, name: &str) -> ConstructTarget<'a> {
+    if let Some(t) = info.type_named(name) {
+        return match t.kind {
+            TypeKind::Struct | TypeKind::Class => ConstructTarget::Fielded,
+            TypeKind::Enum => ConstructTarget::Rejected(format!(
+                "`{name}` is an enum: name the variant to construct, as in \
+                 `construct(\"{name}.{}\", […])`",
+                t.variants
+                    .first()
+                    .map(|v| v.name.as_str())
+                    .unwrap_or("Variant")
+            )),
+        };
+    }
+    // Not a type name of its own, so try the `Enum.Variant` reading: split at the LAST dot, since a
+    // namespaced enum's own name carries the earlier ones.
+    if let Some((enum_name, variant)) = name.rsplit_once('.')
+        && let Some(t) = info.type_named(enum_name)
+        && t.kind == TypeKind::Enum
+    {
+        return match t.variants.iter().position(|v| v.name == variant) {
+            Some(index) => ConstructTarget::Variant {
+                enum_name: &t.name,
+                variant: &t.variants[index].name,
+                index: index as u32,
+                payload: variant_payload_specs(&t.variants[index]),
+            },
+            None => ConstructTarget::Rejected(format!("`{enum_name}` has no variant `{variant}`")),
+        };
+    }
+    ConstructTarget::Rejected(format!("`{name}` is not a constructible type"))
+}
+
+/// One variant's payload as [`FieldSpecData`]s — the same projection [`ReflectionInfo::variant_specs`]
+/// reports, reused here so `construct` validates a payload against exactly the schema `variants_of`
+/// advertises for it.
+fn variant_payload_specs(variant: &VariantInfo) -> Vec<FieldSpecData<'_>> {
+    variant
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, name)| FieldSpecData {
+            name,
+            ty: variant.field_types.get(i).unwrap_or(&TypeRepr::Dyn),
+            // A payload field has no syntax for a default, so it can never be omitted.
+            optional: false,
+        })
+        .collect()
+}
+
+/// Where each payload field's value sits in a **named** construction's `provided` list, in payload
+/// declaration order — the ordering step an enum needs and a struct does not (an object is filled by
+/// field name, an enum's payload is positional).
+///
+/// Shared rather than mirrored in each backend because it decides the built value's slot order, which
+/// is precisely the kind of glue the two have silently disagreed on before. Every payload field is
+/// present by the time this runs: payload fields are never optional, so [`plan_construct_named`] has
+/// already rejected any omission.
+pub fn plan_variant_payload_order(
+    payload: &[FieldSpecData<'_>],
+    provided: &[String],
+) -> Vec<usize> {
+    payload
+        .iter()
+        .filter_map(|spec| provided.iter().position(|n| n == spec.name))
+        .collect()
+}
+
 /// Plan a dynamic struct construction: validate a positional value list (in declaration order)
 /// against a type's field `specs`, given each supplied value's runtime head-repr `value_reprs` (which
 /// both backends compute with their own `type_of` classifier — the differential guarantees they

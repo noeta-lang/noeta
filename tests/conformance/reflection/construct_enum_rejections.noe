@@ -1,0 +1,38 @@
+// Every `construct` rejection over an enum is a recoverable `Err(string)` carrying a ready-to-surface
+// message, never an abort — the same contract the struct/class side already had.
+//
+// A **bare enum name** is a rejection, but a teaching one: it names the spelling that would have
+// worked. The alternative reading (a bare `"Enum"` whose first field value is the case name) was
+// rejected because it makes the field list mean two different things depending on position, and
+// leaves no spelling at all for a fieldless case that reads like the payload-carrying one.
+//
+// A payload is validated against the variant's declared schema by the very planners a struct's fields
+// go through, so a wrong scalar kind and a missing payload field are worded identically to their
+// struct counterparts.
+// expect: stdout "err: `Sentiment` is an enum: name the variant to construct, as in `construct(\"Sentiment.Positive\", […])`"
+// expect: stdout "err: `Sentiment` has no variant `Sideways`"
+// expect: stdout "err: field `r` of `Shape.Circle` expects int, got string"
+// expect: stdout "err: missing required field `r` of `Shape.Circle`"
+// expect: stdout "err: `Shape.Circle` has 1 field(s), but 2 value(s) were given"
+// expect: stdout "err: `Shape.Circle` has no field `radius`"
+// expect: stdout "err: `Nope.Thing` is not a constructible type"
+// expect: stdout "err: construct fields must be a list or a map, found int"
+// expect: exit 0
+enum Sentiment { Positive; Negative }
+enum Shape { Circle(r: int); Dot }
+
+fn say(r: Result<dyn, string>): string {
+    return match r {
+        Ok(v) => "ok: ${v}",
+        Err(e) => "err: ${e}",
+    }
+}
+
+echo say(construct("Sentiment", []))
+echo say(construct("Sentiment.Sideways", []))
+echo say(construct("Shape.Circle", ["big"]))
+echo say(construct("Shape.Circle", []))
+echo say(construct("Shape.Circle", [1, 2]))
+echo say(construct("Shape.Circle", {"radius": 1}))
+echo say(construct("Nope.Thing", []))
+echo say(construct("Shape.Circle", 7))
