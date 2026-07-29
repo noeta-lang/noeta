@@ -1,0 +1,5 @@
+# Makes this case a package, so its modules derive `shapes.…` from where their files sit
+# rather than declaring it. A case with no manifest is not a package and nothing derives.
+[package]
+name = "local/shapes"
+version = "0.1.0"

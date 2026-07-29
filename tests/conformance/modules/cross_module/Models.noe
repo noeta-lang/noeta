@@ -1,0 +1,15 @@
+// A library module: declares its namespace and exports a class. It has no executable top-level
+// statements — it is only `use`d by the entry (main.lang).
+
+pub class User {
+    pub name: string
+    pub id: int
+
+    fn new(name: string, id: int): User {
+        return User { name: name, id: id };
+    }
+
+    fn greeting(): string {
+        return "Hi, ${self.name}";
+    }
+}

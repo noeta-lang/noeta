@@ -1,6 +1,5 @@
 // A library module that renames a native type it imports. The alias is the whole point: two
 // packages can export the same short name, and `as` is how a file that needs both tells them apart.
-namespace probe.lib
 
 use std.http.Framing as F
 

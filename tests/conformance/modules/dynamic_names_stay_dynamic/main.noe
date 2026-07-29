@@ -6,8 +6,8 @@
 // a turbofish operand is a type reference, so `field_specs_of::<Todo>()` must resolve to the
 // qualified identity. This one pins the side that must NOT move: a string is a string, even when it
 // happens to spell a local declaration's short name, so `invoke("greet", …)` under
-// `namespace app.svc` asks for a top-level function literally called `greet` and honestly misses —
-// the declaration is now `app.svc.greet`. Sniffing the operand and rewriting it would make the two
+// `namespace app.main` asks for a top-level function literally called `greet` and honestly misses —
+// the declaration is now `app.main.greet`. Sniffing the operand and rewriting it would make the two
 // spellings agree for the wrong reason, and would silently change what a router or a serializer
 // means by a name it read off a request.
 //
@@ -24,7 +24,6 @@
 // expect: stdout "decode by qualified string: ok Ada"
 // expect: stdout "decode by bare string: err"
 // expect: exit 0
-namespace app.svc
 
 use std.json
 
@@ -56,7 +55,7 @@ echo match invoke("greet", ["ada"]) {
     Ok(v) => "fn by bare name: ${v}",
     Err(_) => "fn by bare name: miss",
 }
-echo match invoke("app.svc.greet", ["ada"]) {
+echo match invoke("app.main.greet", ["ada"]) {
     Ok(v) => "fn by qualified name: ${v}",
     Err(_) => "fn by qualified name: miss",
 }
@@ -69,5 +68,5 @@ fn decoded(r: Result<dyn, json.JsonError>): string {
         Err(_) => "err",
     }
 }
-echo "decode by qualified string: ${decoded(json.decode_typed("app.svc.User", "{\"name\": \"Ada\"}"))}"
+echo "decode by qualified string: ${decoded(json.decode_typed("app.main.User", "{\"name\": \"Ada\"}"))}"
 echo "decode by bare string: ${decoded(json.decode_typed("User", "{\"name\": \"Ada\"}"))}"

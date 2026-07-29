@@ -10,12 +10,11 @@
 // A `main.noe` on purpose: the harness runs a *single-file* case straight from source text, with no
 // loader and therefore no namespace qualification at all, so a bare `.noe` here could not observe
 // the property it claims to pin.
-// expect: stdout "todos:demo.storage.Todo"
-// expect: stdout "users:demo.storage.User"
-// expect: stdout "demo.storage.Todo"
+// expect: stdout "todos:demo.main.Todo"
+// expect: stdout "users:demo.main.User"
+// expect: stdout "demo.main.Todo"
 // expect: stdout "true"
 // expect: exit 0
-namespace demo.storage
 
 struct Todo {
     id: int

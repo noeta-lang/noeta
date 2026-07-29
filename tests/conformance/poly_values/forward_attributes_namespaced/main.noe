@@ -16,7 +16,6 @@
 // expect: stdout "1"
 // expect: stdout "GET"
 // expect: exit 0
-namespace app.storage
 
 @attribute
 struct Route {

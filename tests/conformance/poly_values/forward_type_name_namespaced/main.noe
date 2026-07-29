@@ -11,12 +11,11 @@
 // A `main.noe` on purpose: the harness runs a *single-file* case straight from source text, with no
 // loader and therefore no namespace qualification, so in a bare `.noe` the short and qualified
 // names coincide and the case could not observe what it claims to pin.
-// expect: stdout "demo.storage.Todo"
-// expect: stdout "demo.storage.Todo"
+// expect: stdout "demo.main.Todo"
+// expect: stdout "demo.main.Todo"
 // expect: stdout "true"
 // expect: stdout "1"
 // expect: exit 0
-namespace demo.storage
 
 struct Todo {
     id: int

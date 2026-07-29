@@ -4,7 +4,6 @@
 // INLINE impl (on the class declaration) survived cross-module linking; a standalone one was dropped.
 // expect: stdout "flushed"
 // expect: exit 0
-namespace App.Main;
 
 use App.Lib.{NullStore, run_store};
 

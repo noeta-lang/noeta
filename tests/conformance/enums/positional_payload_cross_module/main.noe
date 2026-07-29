@@ -17,7 +17,6 @@
 // expect: stdout "cyd"
 // expect: stdout "1"
 // expect: exit 0
-namespace App.Main;
 
 use App.Models.User;
 

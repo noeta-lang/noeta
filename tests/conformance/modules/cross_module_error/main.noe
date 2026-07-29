@@ -4,7 +4,6 @@
 // models.lang coordinates; a match proves the diagnostic resolved to the right source.
 // expect: error E0008 at 8:12
 // expect: exit 1
-namespace App.Main;
 
 use App.Math.boom;
 

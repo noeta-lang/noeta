@@ -3,7 +3,7 @@
 // coexistence fixture) is the way to admit both. The error points at the second, clashing import.
 // expect: error E0020 at 8:13
 // expect: exit 1
-namespace App.Main;
+// (No `namespace`: the entry of package `App` derives `App.main` from its own file name.)
 use App.Money.Amount;
 use App.Geo.Amount;
 

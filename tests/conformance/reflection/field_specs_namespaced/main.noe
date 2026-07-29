@@ -3,7 +3,7 @@
 //
 // Regression: the parser used to flatten `field_specs_of::<T>()`'s type into a string literal at
 // PARSE time — before the linker's namespace qualification, which rewrites type *references*. The
-// query then asked for the bare key `Todo` while the reflection registry holds `app.storage.Todo`,
+// query then asked for the bare key `Todo` while the reflection registry holds `app.main.Todo`,
 // so `field_specs_of::<Todo>()` returned the EMPTY schema and `construct::<Todo>(…)` an `Err`, both
 // with no diagnostic at all: a silent wrong answer indistinguishable from a legitimately empty type.
 //
@@ -15,7 +15,7 @@
 // A `main.noe` on purpose: the harness runs a *single-file* case straight from source text, with no
 // loader and therefore no namespace qualification at all, so a bare `.noe` here could not observe the
 // bug it pins. Only a directory case goes through `noeta_loader::load` and the linker.
-// expect: stdout "qualified identity: Type.Struct(app.storage.Todo, [])"
+// expect: stdout "qualified identity: Type.Struct(app.main.Todo, [])"
 // expect: stdout "turbofish: 2"
 // expect: stdout "by qualified string: 2"
 // expect: stdout "by bare string: 0"
@@ -23,7 +23,6 @@
 // expect: stdout "construct by qualified string: Ok"
 // expect: stdout "construct by bare string: Err"
 // expect: exit 0
-namespace app.storage
 
 pub struct Todo {
     pub id: int
@@ -34,7 +33,7 @@ t = Todo { id: 2, title: "x" }
 echo "qualified identity: ${type_of(t)}"
 
 echo "turbofish: ${field_specs_of::<Todo>().len()}"
-echo "by qualified string: ${field_specs_of("app.storage.Todo").len()}"
+echo "by qualified string: ${field_specs_of("app.main.Todo").len()}"
 echo "by bare string: ${field_specs_of("Todo").len()}"
 
 fields: Map<string, dyn> = {"id": 1, "title": "a"}
@@ -47,5 +46,5 @@ fn verdict(r: Result<dyn, string>): string {
 }
 
 echo "construct turbofish: ${verdict(construct::<Todo>(fields))}"
-echo "construct by qualified string: ${verdict(construct("app.storage.Todo", fields))}"
+echo "construct by qualified string: ${verdict(construct("app.main.Todo", fields))}"
 echo "construct by bare string: ${verdict(construct("Todo", fields))}"

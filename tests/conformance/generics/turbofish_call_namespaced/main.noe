@@ -22,7 +22,6 @@
 // expect: stdout "method: 4"
 // expect: stdout "module: 7"
 // expect: exit 0
-namespace app.storage
 
 use std.json;
 

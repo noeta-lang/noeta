@@ -20,9 +20,8 @@
 // expect: stdout "key: Grade.High"
 // expect: stdout "rank 50: over"
 // expect: stdout "rank 1: under"
-// expect: stdout "role: App.Main.renderHome=controller"
+// expect: stdout "role: App.main.renderHome=controller"
 // expect: exit 0
-namespace App.Main;
 use App.Lib.WebRole;
 use App.Lib.Grade;
 use App.Lib.Keyed;

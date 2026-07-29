@@ -1,8 +1,0 @@
-// The declaring module. `Todo`'s runtime identity — and the key the reflection registry stores its
-// field schema under — is the qualified `app.storage.Todo`.
-namespace app.storage
-
-pub struct Todo {
-    pub id: int
-    pub title: string
-}

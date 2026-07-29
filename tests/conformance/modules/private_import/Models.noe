@@ -1,0 +1,3 @@
+class Secret {
+  code: int
+}

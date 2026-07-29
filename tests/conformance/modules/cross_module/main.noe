@@ -6,7 +6,6 @@
 // expect: stdout "7"
 // expect: stdout "Hi, Ada"
 // expect: exit 0
-namespace App.Main;
 
 use App.Models.User;
 

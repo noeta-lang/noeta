@@ -9,13 +9,12 @@
 // string in the parser — and why this is a `main.noe` directory case: the harness runs a single-file
 // case straight from source text with no loader, so a bare `.noe` here would never qualify anything
 // and could not observe the difference it pins.
-// expect: stdout "name: app.storage.Todo"
-// expect: stdout "type_of: Type.Struct(app.storage.Todo, [])"
+// expect: stdout "name: app.main.Todo"
+// expect: stdout "type_of: Type.Struct(app.main.Todo, [])"
 // expect: stdout "agrees with type_of: true"
 // expect: stdout "keys field_specs_of: 2"
 // expect: stdout "keys construct: Ok"
 // expect: exit 0
-namespace app.storage
 
 pub struct Todo {
     pub id: int
