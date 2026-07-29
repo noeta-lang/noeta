@@ -2780,9 +2780,30 @@ impl Registry {
         self.units.iter().flat_map(|e| e.tiers().iter())
     }
 
-    /// The installed extension tier named `name`, if any.
+    /// The installed extension tier named `name`, if any. A bare-name lookup: it returns the first
+    /// unit's tier of that name, which is unambiguous only while no two units export the same tier
+    /// name. Per-package resolution (a `@name` a package's `[tiers]` binds) must go through
+    /// [`Registry::find_ext_tier_scoped`] so it lands on the *provider the binding named*.
     pub fn find_ext_tier(&self, name: &str) -> Option<&'static ExtTier> {
         self.ext_tiers().find(|t| t.name == name)
+    }
+
+    /// Resolve an extension tier **scoped to a set of provider namespace roots** (per-package naming
+    /// arc, the tier counterpart of [`Registry::find_ext_directive_scoped`]): the `exported` tier
+    /// declared by a unit whose [`Extension::root`] is one of `provider_roots`. This is how a
+    /// `@name { … }` block resolves to the specific provider a using package's `[tiers]` binding named
+    /// — so two providers exporting the same tier name (e.g. `std` and `criterion` both shipping
+    /// `bench`) never shadow each other. `provider_roots` empty → no match.
+    pub fn find_ext_tier_scoped(
+        &self,
+        provider_roots: &[String],
+        exported: &str,
+    ) -> Option<&'static ExtTier> {
+        self.units
+            .iter()
+            .filter(|u| provider_roots.iter().any(|r| r == u.root()))
+            .flat_map(|u| u.tiers().iter())
+            .find(|t| t.name == exported)
     }
 
     /// Every installed extension's **verbatim-body** tier names — the text tiers (`doc` →
@@ -3873,8 +3894,20 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
         };
     for (axis, names) in [
         (
+            // Tier names, like command names, are enforced unique only among **std-root** units. A
+            // dependency's tier reaches a using package through a `[tiers]` binding that fixes a
+            // distinct local `@name` (resolved scoped to the provider it named), so two dependency
+            // packages exporting the same tier name — or one colliding with a std tier — coexist:
+            // the binding resolves it (`crit = "criterion:bench"`), rather than making the assembled
+            // binary refuse to start.
             "tier",
-            collect(&|e| e.tiers().iter().map(|t| (t.name, e.name())).collect()),
+            collect(&|e| {
+                if e.root() == "std" {
+                    e.tiers().iter().map(|t| (t.name, e.name())).collect()
+                } else {
+                    Vec::new()
+                }
+            }),
         ),
         (
             "attribute",
@@ -4696,8 +4729,13 @@ mod runtime_registry_tests {
     }
 
     #[test]
-    fn a_duplicate_tier_name_across_units_is_rejected() {
-        // Tier lookup is first-wins; a collision must refuse at assembly instead of shadowing.
+    fn a_duplicate_tier_name_is_rejected_only_among_std_units() {
+        // Tier-name uniqueness is enforced only among **std-root** units (per-package naming arc,
+        // mirroring the command axis). A dependency's tier reaches a using package through a
+        // `[tiers]` binding that fixes a distinct local name (resolved scoped to the provider), so two
+        // dependency packages exporting the same tier name coexist — the binding resolves the
+        // collision (`crit = "criterion:bench"`). Two **std** units doing it would be an ambient
+        // ambiguity no binding can fix, so that still refuses to assemble.
         struct TierUnit(&'static str, &'static str);
         impl Extension for TierUnit {
             fn name(&self) -> &'static str {
@@ -4720,11 +4758,19 @@ mod runtime_registry_tests {
                 }]
             }
         }
+        // Two third-party providers exporting the same tier name — allowed (a binding disambiguates).
         static A_TIER: TierUnit = TierUnit("a.tools", "a");
         static B_TIER: TierUnit = TierUnit("b.tools", "b");
         assert!(
-            validate(&[&A_TIER, &B_TIER]).is_err(),
-            "a duplicate tier name across units must refuse to assemble"
+            validate(&[&A_TIER, &B_TIER]).is_ok(),
+            "two dependency providers may export the same tier name (a `[tiers]` binding resolves it)"
+        );
+        // Two std-root units exporting the same tier name — an ambient ambiguity, still rejected.
+        static STD_A: TierUnit = TierUnit("std.a", "std");
+        static STD_B: TierUnit = TierUnit("std.b", "std");
+        assert!(
+            validate(&[&STD_A, &STD_B]).is_err(),
+            "a duplicate tier name across std units must refuse to assemble"
         );
     }
 
