@@ -1,0 +1,48 @@
+// `t.name()` answers a type's **qualified** identity — the same string `type_name::<T>()` yields and
+// the same key the name-keyed registries are stored under. Nothing is shortened on the way out: the
+// accessor hands back the name the `Type` value carries, and a `type_of` inside a module carries the
+// qualified one.
+//
+// This is a `main.noe` DIRECTORY case for the reason `type_name_namespaced` is: the harness runs a
+// single-file case straight from source text with no loader, so nothing would qualify and the case
+// could not observe the difference it pins. The `noeta.toml` is what makes it a package, and
+// therefore what derives the entry's module path — delete the manifest and nothing qualifies.
+//
+// The three-way agreement is the contract: what a value's type is called, what the compiler resolves
+// the written type to, and what the registries answer for. A short name here would be a name the
+// name-keyed queries cannot find — the accessor's whole purpose is to be usable as that key.
+// expect: stdout "name: app.main.Todo"
+// expect: stdout "agrees with type_name: true"
+// expect: stdout "keys field_specs_of: 2"
+// expect: stdout "class: app.main.Session"
+// expect: stdout "enum: app.main.Mode"
+// expect: exit 0
+
+pub struct Todo {
+    pub id: int
+    pub title: string
+}
+
+pub class Session {
+    pub token: string
+    fn new(): Session {
+        return Session { token: "t" }
+    }
+}
+
+pub enum Mode {
+    Fast
+    Slow
+}
+
+t = Todo { id: 1, title: "a" }
+
+echo "name: ${type_of(t).name()}"
+echo "agrees with type_name: ${type_of(t).name() == type_name::<Todo>()}"
+
+// The name is a usable key, which is the point of it being qualified.
+echo "keys field_specs_of: ${field_specs_of(type_of(t).name()).len()}"
+
+// Every nominal kind qualifies the same way, not only a struct.
+echo "class: ${type_of(Session.new()).name()}"
+echo "enum: ${type_of(Mode.Fast).name()}"

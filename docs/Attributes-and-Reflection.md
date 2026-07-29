@@ -100,7 +100,7 @@ With that settled, the question you have picks the surface:
 | Is this value a `Todo`? (you can name the candidates) | `x is Todo` / `x.as<Todo>()` | Not reflection. Checked, and it narrows. |
 | Does this value's type implement `Store`? | `x is dyn Store` | Same — one known trait, checked. |
 | What type is this value, whatever it turns out to be? | [`type_of(x)`](#type_ofvalue-type) | The `Type` ADT, for a walk with no candidate set. |
-| What is this type *called*, as a `string`? | [`type_name::<T>()`](#type_namet-string) when you can spell the type; the head-name accessor on a [`Type`](#type_ofvalue-type) you are already holding | Either way the qualified identity — the key every name-keyed query below is stored under. Never hand-write the string. |
+| What is this type *called*, as a `string`? | [`type_name::<T>()`](#type_namet-string) when you can spell the type; [`t.name()`](#typename-string) on a `Type` you are already holding | Either way the qualified identity — the key every name-keyed query below is stored under. Never hand-write the string. |
 | Which traits does this value's type implement — all of them? | [`traits_of(x)`](#traits_ofvalue-liststring--trait-membership-reflection) | A list of names, for a report. `is dyn Trait` for a decision. |
 | What fields does this *value* carry, with their values? | [`fields_of(x)`](#fields_ofvalue--value-level-field-reflection) | Runtime-erased types — it sees values. |
 | What fields does this *type* declare, with their types and defaults? | [`field_specs_of`](#field_specs_oft-listfieldspec--field_specs_ofname-listfieldspec) | Declared types, precise. Ask with `variants_of`. |
@@ -240,9 +240,11 @@ echo type_of(5).name()                    // int
 echo Type.DynTrait("Greet").name()        // Greet
 ```
 
-It is the value-side counterpart of `type_name::<T>()` below: the same qualified identity, read off a `Type` you are *holding* rather than off a type you can spell — so the name-keyed queries (`field_specs_of(name)`, `variants_of(name)`, `construct(name, …)`) are reachable from a walked `Type` without destructuring it.
+It is the value-side counterpart of `type_name::<T>()` below: the **same qualified identity**, read off a `Type` you are *holding* rather than off a type you can spell. Inside a module `app.storage` that `Todo` reads `app.storage.Todo` — the name `type_of` shows inside `Type.Struct(name, args)`, verbatim and never shortened.
 
-**Every case answers a non-empty name**: a nominal its declared name, a container its constructor (`List`, `Map`, `Result`), a scalar its surface spelling (`int`, `f32`, `u8`), and the forms no bare name spells their constructor (`Fn`, `Union`, `unit`, `never`, `dyn`). That totality is the point — the `match type_of(v) { Struct(n, _) => n, _ => "" }` it replaces answers the **empty string** for every case its match forgot, and that empty name then travels on as a table name, a route, or a schema key.
+For a **nominal** that name is a *key*: it is what the name-keyed queries (`field_specs_of(name)`, `variants_of(name)`, `construct(name, …)`) are stored under, so a walk can look up a type it only encountered. For every other case it is a name to print, not to look up — a `List` has no schema to fetch, and its element type is not in the head at all (see [When the `Type` ADT earns its keep](#when-the-type-adt-earns-its-keep)).
+
+**Every case answers a non-empty name** — all 23 of them: a nominal its declared name, a container its constructor (`List`, `Map`, `Result`), a scalar its surface spelling (`int`, `f32`, `u8`), and the forms no bare name spells their constructor (`Fn`, `Union`, `unit`, `never`, `dyn`). That totality is the point — the `match type_of(v) { Struct(n, _) => n, _ => "" }` it replaces answers the **empty string** for every case its match forgot, and that empty name then travels on as a table name, a route, or a schema key.
 
 It is a zero-argument method rather than a field because `Type` is an enum, and an enum's accessor surface is a method (`.value()` on a backed enum); it is spelled `name` to match the `name` field the other reflected descriptors carry (`FieldSpec.name`, `ParamInfo.name`, `VariantSpec.name`).
 
