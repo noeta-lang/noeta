@@ -377,7 +377,7 @@ fn run_linked_both_agree(program: &str) -> String {
     let entry = dir.join("main.noe");
     std::fs::write(&entry, program).expect("entry file is writable");
 
-    let linked = match noeta_loader::load(&entry, noeta_lexer::Edition::DEFAULT) {
+    let linked = match noeta_loader::load(&entry, noeta_lexer::Edition::DEFAULT, None) {
         Ok(Ok(linked)) => linked,
         other => panic!("program must load + link cleanly: {other:?}"),
     };

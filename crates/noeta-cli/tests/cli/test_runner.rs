@@ -292,23 +292,23 @@ const BLOCK_USE_PACKAGE: &[(&str, &str)] = &[
     ),
     (
         "side.noe",
-        "namespace probe.lib.side;\npub struct Thing { n: int }\npub fn make(): int { return 3 }\n",
+        "pub struct Thing { n: int }\npub fn make(): int { return 3 }\n",
     ),
 ];
 
 #[test]
 fn test_a_tier_blocks_use_of_a_package_module_resolves() {
     // The linking half of a block-scoped `use`. Qualification alone was not enough: the overlay
-    // rewrote `Thing` to `probe.lib.side.Thing` correctly, but no `use` had *merged* that
+    // rewrote `Thing` to `lib.side.Thing` correctly, but no `use` had *merged* that
     // declaration into the program — the linker collected the entry's top-level statements only —
     // so `noeta check` reported 0 errors and every use site failed at run time with "cannot find
-    // type `probe.lib.side.Thing` in this scope". A std import inside the same block worked
+    // type `lib.side.Thing` in this scope". A std import inside the same block worked
     // throughout, because an extension module resolves through the registry and never needs the
     // unit graph, which is exactly what made the bug look like a qualification problem.
     let mut files = BLOCK_USE_PACKAGE.to_vec();
     files.push((
         "entry.noe",
-        "@test {\n  use probe.lib.side.{Thing}\n\n  fn builds(): void { x = Thing { n: 3 }\n    assert(x.n == 3) }\n}\n",
+        "@test {\n  use lib.side.{Thing}\n\n  fn builds(): void { x = Thing { n: 3 }\n    assert(x.n == 3) }\n}\n",
     ));
     let dir = temp_dir("test_block_use_package", &files);
     lang()
@@ -324,11 +324,11 @@ fn test_a_tier_blocks_use_of_a_package_module_resolves() {
 
 #[test]
 fn test_a_tier_blocks_whole_module_use_of_a_package_resolves() {
-    // The second import form (`use probe.lib.side` + `side.Thing`), which failed identically.
+    // The second import form (`use lib.side` + `side.Thing`), which failed identically.
     let mut files = BLOCK_USE_PACKAGE.to_vec();
     files.push((
         "entry.noe",
-        "@test {\n  use probe.lib.side\n\n  fn builds(): void { x = side.Thing { n: side.make() }\n    assert(x.n == 3) }\n}\n",
+        "@test {\n  use lib.side\n\n  fn builds(): void { x = side.Thing { n: side.make() }\n    assert(x.n == 3) }\n}\n",
     ));
     let dir = temp_dir("test_block_use_package_whole", &files);
     lang()
@@ -351,7 +351,7 @@ fn test_a_package_module_imported_in_a_block_stays_block_scoped() {
     let mut files = BLOCK_USE_PACKAGE.to_vec();
     files.push((
         "entry.noe",
-        "@test {\n  use probe.lib.side.{Thing}\n\n  fn inside(): void { assert(true) }\n}\n\
+        "@test {\n  use lib.side.{Thing}\n\n  fn inside(): void { assert(true) }\n}\n\
          fn outside(): void { y = Thing { n: 1 }\n  echo y.n }\noutside()\n",
     ));
     let dir = temp_dir("test_block_use_package_scope", &files);

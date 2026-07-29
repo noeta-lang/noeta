@@ -535,12 +535,16 @@ enum Color { Red; Green }
             .iter()
             .map(|r| (r.target.as_str(), r.role.as_str()))
             .collect();
+        // Targets are **qualified** now: the entry sits inside a package, so it derives a module
+        // path (`app.main`) and its declarations carry qualified identities. What this test is
+        // about — that a role conferred by a *dependency* is indexed at all — is unchanged; only
+        // the spelling of the target moved.
         assert!(
-            roles.contains(&("from_dep", "Semantic.TrustBoundary")),
+            roles.contains(&("app.main.from_dep", "Semantic.TrustBoundary")),
             "the dependency-conferred role must be indexed: {roles:?}"
         );
         assert!(
-            roles.contains(&("from_local", "Semantic.Sink")),
+            roles.contains(&("app.main.from_local", "Semantic.Sink")),
             "the same-file role still reports: {roles:?}"
         );
         // The attribute is listed under the package's **qualified** identity — proof the link
@@ -548,7 +552,7 @@ enum Color { Red; Green }
         assert!(
             out.attributes
                 .iter()
-                .any(|a| a.target == "from_dep" && a.name == "toolkit.api.Tool"),
+                .any(|a| a.target == "app.main.from_dep" && a.name == "toolkit.api.Tool"),
             "attributes: {:?}",
             out.attributes
         );

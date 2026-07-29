@@ -124,7 +124,7 @@ pub fn run_jit_differential(root: &Path, only: Option<&Path>) -> JitDiffReport {
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry) {
+            match noeta_loader::read_workspace(&case.entry, None) {
                 Ok(raw) => compare_tiers_workspace(&name, &raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
@@ -194,7 +194,13 @@ fn compare_tiers_workspace(
     // workspace they always did.
     let deps = crate::dep_sources(entry, (raw.modules.len() + 1) as u32);
     let ws = if deps.is_empty() {
-        noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT)
+        noeta_db::workspace(
+            &db,
+            &raw.entry,
+            &raw.modules,
+            noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
+        )
     } else {
         // No `@name` tables: the corpus's dependency graph is synthesized from the case's
         // subdirectories (`crate::dep_sources`), not from a `noeta.toml`, so no package binds a
@@ -206,6 +212,7 @@ fn compare_tiers_workspace(
             &deps,
             &noeta_span::PackageUses::new(),
             noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
         )
     };
 

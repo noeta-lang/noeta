@@ -155,7 +155,7 @@ pub fn run_wasm_differential(root: &Path, only: Option<&Path>) -> Result<WasmDif
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry) {
+            match noeta_loader::read_workspace(&case.entry, None) {
                 Ok(raw) => diff_workspace(&name, &raw, &tools, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
@@ -203,7 +203,13 @@ fn diff_workspace(
     report: &mut WasmDiffReport,
 ) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
+    let ws = noeta_db::workspace(
+        &db,
+        &raw.entry,
+        &raw.modules,
+        noeta_lexer::Edition::DEFAULT,
+        &raw.paths,
+    );
 
     if noeta_db::linked(&db, ws).program.is_err() {
         report.not_run.link_failed += 1;

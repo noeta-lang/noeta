@@ -1,0 +1,11 @@
+// A module's path is **derived from where its file sits** — no `namespace` declaration anywhere.
+// The package subdirectory `lib/` is the package root, so its modules derive under `lib`:
+// `lib/lib.noe` is `lib` (the root file collapses into the prefix it names) and
+// `lib/deep/thing.noe` is `lib.deep.thing` — a subdirectory is path segments, which is what a flat
+// scan could never see.
+// expect: stdout "deep + root"
+// expect: exit 0
+use lib.deep.thing.deep;
+use lib.root;
+
+echo "${deep()} + ${root()}"

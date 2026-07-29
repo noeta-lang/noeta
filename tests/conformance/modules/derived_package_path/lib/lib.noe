@@ -1,0 +1,4 @@
+// The package's root file: its stem repeats the prefix, so this module IS `lib`, not `lib.lib`.
+pub fn root(): string {
+    return "root";
+}

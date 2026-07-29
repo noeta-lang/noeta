@@ -409,6 +409,30 @@ pub enum DiagnosticCode {
     /// binding, or into a helper the test calls) is obvious from the message. Advisory: the tests
     /// still run.
     DroppedTierSetup,
+    /// A module's `namespace` declaration disagrees with the path **derived from where the file
+    /// sits** (namespace-derivation arc).
+    ///
+    /// A module's path is the package's import prefix plus the file's path relative to the package
+    /// root, so the declaration is redundant — and a declaration that says something *else* is a
+    /// second, contradictory answer to "what is this module called". Before derivation the
+    /// declaration simply won, which let a file at `helpers/uri.noe` call itself
+    /// `Totally.Unrelated`, and made a package's *internal* file names its public API. The fix is
+    /// always the same: delete the declaration (the derived path is the module's path), or move the
+    /// file to where the declaration says it lives.
+    ModulePathMismatch,
+    /// Two files derive the **same** module path (namespace-derivation arc).
+    ///
+    /// One path is one module. When two files claimed one namespace the second file's exports
+    /// silently vanished, and the failure surfaced far away, at the *importing* file, as "module X
+    /// has no export y". This names both files instead.
+    ModulePathCollision,
+    /// A file or directory name is not a legal module-path segment (namespace-derivation arc).
+    ///
+    /// The module path is derived from the path on disk, so every directory name and file stem in it
+    /// has to be spellable in a `use`. `my-utils.noe` is not: `use pkg.my-utils.…` does not parse.
+    /// It is an error with a rename hint rather than a silent `-` → `_` mapping, which would give
+    /// one module two spellings.
+    IllegalModulePath,
 }
 
 impl DiagnosticCode {
@@ -485,6 +509,9 @@ impl DiagnosticCode {
         DiagnosticCode::UnhandledError,
         DiagnosticCode::OrphanImpl,
         DiagnosticCode::DroppedTierSetup,
+        DiagnosticCode::ModulePathMismatch,
+        DiagnosticCode::ModulePathCollision,
+        DiagnosticCode::IllegalModulePath,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -562,6 +589,9 @@ impl DiagnosticCode {
             DiagnosticCode::UnhandledError => "E0069",
             DiagnosticCode::OrphanImpl => "E0070",
             DiagnosticCode::DroppedTierSetup => "E0071",
+            DiagnosticCode::ModulePathMismatch => "E0072",
+            DiagnosticCode::ModulePathCollision => "E0073",
+            DiagnosticCode::IllegalModulePath => "E0074",
         }
     }
 

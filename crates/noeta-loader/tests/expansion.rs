@@ -164,6 +164,7 @@ fn load(entry: &str) -> Result<Linked, Vec<LoadDiagnostic>> {
         entry,
         noeta_lexer::Edition::default(),
         &[] as &[RawModule],
+        noeta_loader::ModulePath::Declared,
     )
 }
 

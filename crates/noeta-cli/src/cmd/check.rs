@@ -116,17 +116,17 @@ pub(crate) fn cmd_check(
     // (`noeta_loader::parse_dir`/`link_entry` — per-entry semantics identical to
     // `load_with_deps`). Diagnostics still dedup/order by (file, span, code), so output is
     // unchanged.
-    let mut by_dir: std::collections::BTreeMap<PathBuf, Vec<&PathBuf>> =
-        std::collections::BTreeMap::new();
+    let mut by_dir: std::collections::BTreeMap<
+        PathBuf,
+        (Option<noeta_loader::PackageRoot>, Vec<&PathBuf>),
+    > = std::collections::BTreeMap::new();
     for entry in &entries {
-        // An empty parent (a bare relative name like `noeta check foo.noe`) is the current
-        // directory: `read_dir_modules` scans `.` for it while keeping the pool's module names
-        // unprefixed, so the entry-to-pool name match below still holds.
-        let dir = entry
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(""))
-            .to_path_buf();
-        by_dir.entry(dir).or_default().push(entry);
+        let (dir, root) = entry_pool(entry);
+        by_dir
+            .entry(dir)
+            .or_insert((root, Vec::new()))
+            .1
+            .push(entry);
     }
 
     // The directory the compose probe's graph belongs to: the checked path itself when it is a
@@ -140,7 +140,7 @@ pub(crate) fn cmd_check(
             .to_path_buf()
     };
     let mut unreadable = false;
-    for (dir, dir_entries) in &by_dir {
+    for (dir, (package_root, dir_entries)) in &by_dir {
         // Resolve the directory's dependency packages so a cross-package `use <dep-key>.…`
         // type-checks accurately under `noeta check`, matching `run` (package-manager P2.1c).
         // One resolve serves every entry in the directory (they share the manifest) — the compose
@@ -167,7 +167,7 @@ pub(crate) fn cmd_check(
         // Read + lex + parse the directory once; all entries share the parsed pool and one
         // SourceMap (ids are directory-stable, and the dedup key never uses them).
         let parsed = noeta_loader::parse_dir(
-            noeta_loader::read_dir_modules(dir),
+            pool_modules(dir, package_root.as_ref()),
             manifest::root_edition(dir_entries[0]),
             &deps,
             &package_uses,
@@ -249,7 +249,7 @@ pub(crate) fn cmd_check(
                     }
                     Ok(text) => {
                         let lone = noeta_loader::parse_dir(
-                            vec![noeta_loader::RawModule { name, text }],
+                            vec![noeta_loader::RawModule::declared(name, text)],
                             manifest::root_edition(entry),
                             &deps,
                             &package_uses,
@@ -312,6 +312,42 @@ pub(crate) fn cmd_check(
         ExitCode::from(2)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// The **module pool** an entry links against: the package it belongs to (walked recursively, every
+/// module carrying the path its location derives) or, for a file in no package, its own directory
+/// (flat, each module identified by the `namespace` it declares).
+///
+/// Returned as a grouping key plus the package root, because entries are batched by pool — every
+/// entry of one pool shares its sources, manifest, dependency graph and parsed module set, and is
+/// read/lexed/parsed once for all of them. Grouping by *package* rather than by directory is what
+/// makes `noeta check` see the same program `noeta run` links: an app's `src/deep/nested.noe` is a
+/// module of the app, not an unrelated file in another directory.
+pub(crate) fn entry_pool(entry: &std::path::Path) -> (PathBuf, Option<noeta_loader::PackageRoot>) {
+    match noeta_pm::sources::package_root(entry) {
+        Some(root) => (root.dir.clone(), Some(root)),
+        // An empty parent (a bare relative name like `noeta check foo.noe`) is the current
+        // directory: `read_dir_modules` scans `.` for it while keeping the pool's module names
+        // unprefixed, so the entry-to-pool name match still holds.
+        None => (
+            entry
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(""))
+                .to_path_buf(),
+            None,
+        ),
+    }
+}
+
+/// Read a pool's modules — the package walk, or the flat directory scan for a file in no package.
+pub(crate) fn pool_modules(
+    dir: &std::path::Path,
+    root: Option<&noeta_loader::PackageRoot>,
+) -> Vec<noeta_loader::RawModule> {
+    match root {
+        Some(root) => noeta_loader::read_package_modules(root),
+        None => noeta_loader::read_dir_modules(dir),
     }
 }
 

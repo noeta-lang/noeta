@@ -142,7 +142,7 @@ pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
             // A multi-file fixture flows through the salsa module graph (M1.9.3): its sources
             // become a `Workspace`, the `linked` query merges them, and both backends consume the
             // workspace queries — the multi-file analogue of the single-file path below.
-            match noeta_loader::read_workspace(&case.entry) {
+            match noeta_loader::read_workspace(&case.entry, None) {
                 Ok(raw) => compare_backends_workspace(&name, &raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
@@ -236,7 +236,13 @@ fn compare_backends_workspace(
     // pre-existing one) take the same deps-free workspace they always did.
     let deps = crate::dep_sources(entry, (raw.modules.len() + 1) as u32);
     let ws = if deps.is_empty() {
-        noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT)
+        noeta_db::workspace(
+            &db,
+            &raw.entry,
+            &raw.modules,
+            noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
+        )
     } else {
         // No `@name` tables: the corpus's dependency graph is synthesized from the case's
         // subdirectories (`crate::dep_sources`), not from a `noeta.toml`, so no package binds a
@@ -248,6 +254,7 @@ fn compare_backends_workspace(
             &deps,
             &noeta_span::PackageUses::new(),
             noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
         )
     };
 

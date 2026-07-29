@@ -1105,6 +1105,9 @@ pub(crate) struct ResolvedWorkspace {
     /// The root package's language edition — what the entry and its siblings are analyzed under
     /// (each dependency carries its own).
     pub edition: noeta_lexer::Edition,
+    /// The module path each **member** source's location derives, index-aligned with the members.
+    /// Empty for an inline source, which sits in no package and so derives nothing.
+    pub paths: Vec<noeta_loader::ModulePath>,
 }
 
 impl ResolvedWorkspace {
@@ -1131,6 +1134,7 @@ impl ResolvedWorkspace {
             &self.deps,
             &self.package_uses,
             self.edition,
+            &self.paths,
         )
     }
 }
@@ -1162,12 +1166,18 @@ pub(crate) fn resolve_workspace(
             deps: Vec::new(),
             package_uses: noeta_span::PackageUses::new(),
             edition: noeta_lexer::Edition::default(),
+            paths: Vec::new(),
         }),
         (None, Some(path)) => {
             let path = Path::new(path);
-            let raw = noeta_loader::read_workspace(path).map_err(|e| {
-                ErrorData::invalid_params(format!("cannot read {}: {e}", path.display()), None)
-            })?;
+            let raw =
+                noeta_loader::read_workspace(path, noeta_pm::sources::package_root(path).as_ref())
+                    .map_err(|e| {
+                        ErrorData::invalid_params(
+                            format!("cannot read {}: {e}", path.display()),
+                            None,
+                        )
+                    })?;
             // The query-path graph resolve (no lockfile refresh — answering a question must not
             // rewrite `noeta.lock`) yields both the dependency packages AND the per-package `@name`
             // tables, so a renamed text tier lexes verbatim exactly as under the CLI and editor. A
@@ -1196,6 +1206,7 @@ pub(crate) fn resolve_workspace(
                             .map(|(local, global)| (local.clone(), global.clone()))
                             .collect(),
                         modules,
+                        paths: package.modules.iter().map(|m| m.path.clone()).collect(),
                         edition: package.edition,
                     }
                 })
@@ -1205,6 +1216,7 @@ pub(crate) fn resolve_workspace(
                 deps,
                 package_uses,
                 edition: noeta_pm::manifest::root_edition(path),
+                paths: raw.paths,
             })
         }
         (Some(_), Some(_)) => Err(ErrorData::invalid_params(
