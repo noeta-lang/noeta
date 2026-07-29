@@ -488,9 +488,7 @@ mod tests {
 
     #[test]
     fn round_trips_pins_and_hashes() {
-        let dir = std::env::temp_dir().join("noeta_lock_test_roundtrip");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("roundtrip");
         let mut scope_trust = BTreeMap::new();
         scope_trust.insert("acme".to_string(), ScopeTrust::Key("b".repeat(64)));
         write(&dir, &[git_pkg(), path_pkg()], &scope_trust, None, None).unwrap();
@@ -553,9 +551,7 @@ mod tests {
 
     #[test]
     fn a_keyless_identity_pin_round_trips() {
-        let dir = std::env::temp_dir().join("noeta_lock_test_keyless_pin");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("keyless-pin");
         let pin = ScopeTrust::Keyless {
             issuer: "https://token.actions.githubusercontent.com".to_string(),
             identity:
@@ -598,9 +594,7 @@ mod tests {
         };
         // A lock written when keyless pinned the scope: one package in `acme`, so the pin
         // unambiguously belongs to it and is carried over intact.
-        let dir = std::env::temp_dir().join("noeta_lock_test_legacy_pin_one");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("legacy-pin-one");
         let mut legacy = BTreeMap::new();
         legacy.insert("acme".to_string(), pin.clone());
         write(&dir, &[git_pkg()], &legacy, None, None).unwrap();
@@ -614,9 +608,7 @@ mod tests {
 
         // Two packages in the scope: the old pin could only ever have matched one of them, so it
         // is dropped and each package re-pins (verified afresh) on the next resolve.
-        let dir = std::env::temp_dir().join("noeta_lock_test_legacy_pin_many");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("legacy-pin-many");
         write(&dir, &[git_pkg(), path_pkg()], &legacy, None, None).unwrap();
         let lock = Lock::read(&dir);
         // Ambiguous which package it was pinned from, so it stays a scope entry and keeps being
@@ -626,9 +618,7 @@ mod tests {
         assert_eq!(lock.trust_for("acme/local"), Some(&pin));
 
         // The same holds for a lock that records the pin but no packages at all.
-        let dir = std::env::temp_dir().join("noeta_lock_test_legacy_pin_none");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("legacy-pin-none");
         std::fs::write(
             dir.join(LOCK_NAME),
             format!(
@@ -643,9 +633,7 @@ mod tests {
 
     #[test]
     fn a_transparency_log_head_round_trips() {
-        let dir = std::env::temp_dir().join("noeta_lock_test_logtrust");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("logtrust");
         let log = LogTrust {
             public_key: "ab".repeat(32),
             tree_size: 42,
@@ -654,18 +642,14 @@ mod tests {
         write(&dir, &[git_pkg()], &BTreeMap::new(), Some(&log), None).unwrap();
         assert_eq!(Lock::read(&dir).log_trust(), Some(&log));
         // A lock with no `[log]` block reports no pin.
-        let dir2 = std::env::temp_dir().join("noeta_lock_test_nolog");
-        let _ = std::fs::remove_dir_all(&dir2);
-        std::fs::create_dir_all(&dir2).unwrap();
+        let dir2 = crate::test_temp::TempDir::new("nolog");
         write(&dir2, &[git_pkg()], &BTreeMap::new(), None, None).unwrap();
         assert_eq!(Lock::read(&dir2).log_trust(), None);
     }
 
     #[test]
     fn an_advisory_feed_head_round_trips() {
-        let dir = std::env::temp_dir().join("noeta_lock_test_advtrust");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("advtrust");
         let adv = AdvisoryTrust {
             public_key: "ef".repeat(32),
             count: 7,
@@ -690,9 +674,7 @@ mod tests {
         // Dev-time path override: the lock records only real, reproducible state — a `[patch]`ed
         // identity is not written at all (no entry, no marker), so removing the patch leaves a
         // self-consistent lock that simply re-pins the identity on the next resolve.
-        let dir = std::env::temp_dir().join("noeta_lock_test_patched_omitted");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("patched-omitted");
         let mut patched = path_pkg();
         patched.patched = true;
         write(&dir, &[git_pkg(), patched], &BTreeMap::new(), None, None).unwrap();
@@ -715,9 +697,7 @@ mod tests {
 
     #[test]
     fn rewrite_is_skipped_when_unchanged() {
-        let dir = std::env::temp_dir().join("noeta_lock_test_nochurn");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("nochurn");
         write(&dir, &[git_pkg()], &BTreeMap::new(), None, None).unwrap();
         let first = std::fs::metadata(dir.join(LOCK_NAME))
             .unwrap()
@@ -734,9 +714,7 @@ mod tests {
 
     #[test]
     fn a_missing_or_bad_lock_reads_empty() {
-        let dir = std::env::temp_dir().join("noeta_lock_test_missing");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("missing");
         assert!(
             Lock::read(&dir)
                 .git_pin("x", &crate::manifest::GitRef::Tag("y".to_string()))

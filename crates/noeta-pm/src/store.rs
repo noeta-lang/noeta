@@ -159,9 +159,7 @@ mod tests {
     use super::*;
 
     fn tmp_store(name: &str) -> Store {
-        let dir = std::env::temp_dir().join(format!("noeta_store_test_{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        Store::open_at(dir).unwrap()
+        Store::open_at(crate::test_temp::unique_path(name)).unwrap()
     }
 
     #[test]
