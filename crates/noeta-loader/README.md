@@ -29,6 +29,8 @@ A file reached with **no package** (a lone script) derives nothing, and is ident
 
 Deriving the path is what makes the consumer's import key real (`para/cli` keyed `mycli` is `mycli.cli`, where re-rooting a declared `namespace para.cli` silently did nothing), and what makes an app's subdirectories work — the app's own scan is the same recursive, pruned package walk a dependency has always had.
 
+**Intra-package imports** (`reroot_path`). A dependency's own modules import each other by the package's own root segment — the prefix they derive under when the package is built *standalone* — and that leading segment is replaced by the prefix they derive under **here**. `use db.query` inside `para/db` is a no-op standalone, becomes `para.db.query` under `para = [{ package = "para/db" }, …]`, and `mydb.query` under `mydb = { … }`, so one spelling works in every build. Rewriting a single segment to the *key* could not: for a scope-array member the key is the scope half, so `use db.query` matched nothing and was silently left alone while `use para.db.query` matched nothing standalone — a package author had to pick which build to break. A leading segment that is instead one of the package's *own* dependency keys maps to that dependency's global segment (one segment: the author spelled the rest); anything else — `std`, a native extension's namespace root — is untouched.
+
 ## What gets merged: imports, their closure, every impl, and every annotated declaration
 
 Four things put a pooled module's declaration into the merged program:

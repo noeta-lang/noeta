@@ -202,24 +202,32 @@ pub enum ResolvedSource {
     },
 }
 
-/// Which namespace root segment a dependency's modules re-root from ([`Walker::walk_one`]). A normal
-/// dependency authored `namespace <package>.…`, so its root is the package half; a **scope** member
-/// authored `namespace <scope>.<package>.…`, so its root is the company/scope segment.
+/// Which half of a dependency's identity names the **group** it links under ([`Walker::walk_one`]).
+/// A normal dependency stands alone, so it is its package half; a **scope** member shares one import
+/// root with its siblings, so it is the company/scope segment — the base a transitive-only scope
+/// group synthesizes its shared global segment from ([`assemble`]).
+///
+/// Never what a module's path is re-rooted *from*: that is always the package half, which is what the
+/// package's own modules derive under standalone ([`Instance::package_segment`]).
 #[derive(Clone, Copy)]
 enum ScopeRoot {
     Package,
     Scope,
 }
 
-/// A materialized package during the walk — its identity, version, its own namespace root segment,
-/// its on-disk tree, and its dependency edges (local key → child identity).
+/// A materialized package during the walk — its identity, version, the segments it links under, its
+/// on-disk tree, and its dependency edges (local key → child identity).
 struct Instance {
     version: Version,
     edition: crate::edition::Edition,
+    /// The segment this package's link **group** is named from ([`ScopeRoot`]) — its package half
+    /// standing alone, the scope half as a scope member. Read only when a global segment has to be
+    /// synthesized for a transitive group; never as a re-root source.
     root_segment: String,
     /// The package half of the identity (`db` for `para/db`) — always, unlike [`Self::root_segment`],
-    /// which is the *scope* for a scope member. This is what a scope member contributes to its
-    /// modules' derived path prefix (`para` + `db` → `para.db.…`).
+    /// which is the *scope* for a scope member. Two things come from it: the last segment of a scope
+    /// member's derived prefix (`para` + `db` → `para.db.…`), and the segment the loader re-roots the
+    /// package's intra-package `use`s *from* (what those files derive under standalone).
     package_segment: String,
     /// Whether this package was reached as a member of a **scope** dependency (`key = [ … ]`). It
     /// decides the prefix its modules derive under: a plain entry's is the key alone, a scope
