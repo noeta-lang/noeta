@@ -90,7 +90,7 @@ effect that **finishes**. The split is by what the statement *does*, not by its 
 | every declaration (`fn`, `class`, `struct`, `enum`, `trait`, `impl`, `@attribute`) | a call that **does not return**: `os.exit(…)`, `server.serve(…)`, `panic(…)` |
 | a binding or destructure: `x = …`, `mut x = …`, `(a, b) = …` | `while true { … }` with no `break` |
 | a statement-expression that returns: `conn.migrate(…)`, `log.push(…)` | `return` / `break` / `continue` |
-| `if` / `for` / `while`, and `concurrent { … }` | any of the above nested in an `if`/`for`/`while` body |
+| `if` / `for` / `while`, and `concurrent { … }` | an `if` / `for` / `while` / `concurrent` whose body holds either of the two rows above — it could not finish either |
 
 Dropping the second column is what makes a file with a `main` runnable as a test suite at all: a CLI
 entry's top-level `os.exit(run())` and a server's `server.serve(…)` would otherwise exit the runner

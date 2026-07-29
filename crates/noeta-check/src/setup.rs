@@ -370,8 +370,26 @@ fn collect_mutated(stmt: &Stmt, out: &mut Vec<String>) {
                 collect_mutated(s, out);
             }
         }
-        // A declaration writes nothing when it is *declared*, and the remaining forms bind nothing.
-        _ => {}
+        // Spelled out rather than left to a `_` arm. A leaf group is the cheapest way to satisfy the
+        // compiler when a `Stmt` variant is added and the standing house hazard here (see
+        // `noeta_loader::ast_walk_coverage`), so each of these says *why* it writes nothing: a
+        // declaration binds its own name at declaration time, not a top-level one a test could
+        // capture; the rest carry no assignment target at all.
+        Stmt::Fn(_)
+        | Stmt::Enum(_)
+        | Stmt::Struct(_)
+        | Stmt::Class(_)
+        | Stmt::Impl(_)
+        | Stmt::Trait(_)
+        | Stmt::Namespace { .. }
+        | Stmt::Use { .. }
+        | Stmt::Echo { .. }
+        | Stmt::Return { .. }
+        | Stmt::Yield { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        // A residual (inactive) tier block is stripped before it could run, so nothing in it writes.
+        | Stmt::TierBlock { .. } => {}
     }
 }
 
@@ -395,5 +413,147 @@ fn member_root(expr: &Expr) -> Option<String> {
         Expr::Member { receiver, .. } | Expr::Index { receiver, .. } => member_root(receiver),
         Expr::Ident { name, .. } => Some(name.to_string()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CheckOptions, check_all_with};
+    use noeta_span::{Source, SourceId};
+
+    /// Parse and check `src`. The filter's input (`diverging_stmts`) is a *typing* fact, so the
+    /// tests must drive the real pipeline — a hand-built AST could not produce it.
+    fn checked_program(src: &str) -> (noeta_ast::Program, HashSet<Span>) {
+        // These tests are their own assembling driver (see `tests.rs`): the checker consumes the
+        // extension registry as data, so the std units must be seeded before `os`/`cell` resolve.
+        noeta_stdlib::registry::default_seeded();
+        let source = Source::new(SourceId::FIRST, "setup_test.noe", src);
+        let lexed = noeta_lexer::lex(&source);
+        let parsed = noeta_parser::parse(&source, &lexed.tokens);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "must parse cleanly: {:?}",
+            parsed.diagnostics
+        );
+        let checked = check_all_with(&parsed.program, CheckOptions::default());
+        assert!(
+            checked
+                .diagnostics
+                .iter()
+                .all(|d| d.severity != noeta_diagnostics::Severity::Error),
+            "must check cleanly: {:?}",
+            checked.diagnostics
+        );
+        (parsed.program, checked.diverging_stmts)
+    }
+
+    /// [`setup_drop`] for each top-level statement, in source order.
+    fn drops(src: &str) -> Vec<Option<SetupDrop>> {
+        let (program, diverging) = checked_program(src);
+        program
+            .stmts
+            .iter()
+            .map(|s| setup_drop(s, &diverging))
+            .collect()
+    }
+
+    /// The bug this module exists for: a binding is kept, and so is the statement that writes to
+    /// what it holds. Before, the write was dropped for being a `Stmt::Expr` and every test saw the
+    /// binding half-initialized.
+    #[test]
+    fn a_statement_expression_that_returns_is_setup() {
+        assert_eq!(
+            drops("use std.cell\nbox = cell.new(0)\nbox.set(41)\n"),
+            vec![None, None, None]
+        );
+    }
+
+    /// And the reason the filter drops anything at all. Both of these are `Stmt::Expr` — the same
+    /// category as `box.set(41)` above — so nothing syntactic separates them; only the declared
+    /// `never` return does.
+    #[test]
+    fn a_call_that_does_not_return_is_not_setup() {
+        assert_eq!(
+            drops("use std.os\nos.exit(1)\n"),
+            vec![None, Some(SetupDrop::Diverges)]
+        );
+        assert_eq!(
+            drops("panic(\"nope\")\n"),
+            vec![Some(SetupDrop::Diverges)],
+            "`panic` types as `never` like any other diverging call"
+        );
+    }
+
+    /// `if`/`for` terminate structurally and are setup — a fixture seeded by a top-level loop used
+    /// to vanish. They are dropped only for what they *contain*, one level down.
+    #[test]
+    fn conditionals_and_for_loops_are_setup_unless_they_contain_a_divergence() {
+        assert_eq!(
+            drops("mut n = 0\nfor i in [1, 2] { n = n + i }\nif true { n = n + 1 }\n"),
+            vec![None, None, None]
+        );
+        assert_eq!(
+            drops("use std.os\nfor i in [1, 2] { os.exit(i) }\n"),
+            vec![None, Some(SetupDrop::Diverges)],
+            "the enclosing `for` cannot finish either"
+        );
+    }
+
+    /// Only the loop that provably never exits is dropped — the same `true`-and-no-`break` rule
+    /// E0048 uses. A condition-driven `while` is ordinary setup, and so is `while true` that breaks.
+    #[test]
+    fn only_an_inescapable_while_is_dropped() {
+        assert_eq!(
+            drops("mut n = 0\nwhile n < 3 { n = n + 1 }\n"),
+            vec![None, None]
+        );
+        assert_eq!(
+            drops("mut n = 0\nwhile true { n = n + 1\nbreak }\n"),
+            vec![None, None],
+            "a `break` targeting this loop makes it exit"
+        );
+        assert_eq!(
+            drops("mut n = 0\nwhile true { n = n + 1 }\n"),
+            vec![None, Some(SetupDrop::UnboundedLoop)]
+        );
+    }
+
+    /// A declaration is kept whatever its body does. The recursion walks statements that *execute*
+    /// at the top level; a function body only executes when something calls it, and the runner
+    /// calls only the tier fn.
+    #[test]
+    fn a_declaration_whose_body_diverges_is_still_setup() {
+        assert_eq!(
+            drops("use std.os\nfn main(): never { os.exit(0) }\n"),
+            vec![None, None]
+        );
+    }
+
+    /// The warning fires on the coupling — a dropped statement writing a name a selected test
+    /// captures — and stays quiet otherwise, including for `echo`, whose drop is a documented rule
+    /// rather than a limitation.
+    #[test]
+    fn the_warning_names_both_sides_and_only_on_a_real_coupling() {
+        let src = "use std.cell\n\
+                   tick = cell.new(0)\n\
+                   other = cell.new(0)\n\
+                   echo \"starting\"\n\
+                   while true { tick.set(1) }\n\
+                   fn sees_it() use (tick): void { assert(tick.get() == 1) }\n\
+                   fn ignores_it() use (other): void { assert(other.get() == 0) }\n";
+        let (program, diverging) = checked_program(src);
+
+        let warnings = dropped_setup_warnings(&program, &diverging, &["sees_it", "ignores_it"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].drop, SetupDrop::UnboundedLoop);
+        assert_eq!(warnings[0].names, vec!["tick".to_string()]);
+        assert_eq!(
+            warnings[0].fns,
+            vec!["sees_it".to_string()],
+            "the test capturing an unrelated binding is not implicated"
+        );
+        // Selecting only the uninvolved test leaves nothing to say.
+        assert!(dropped_setup_warnings(&program, &diverging, &["ignores_it"]).is_empty());
     }
 }

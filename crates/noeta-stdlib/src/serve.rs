@@ -89,9 +89,16 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
             SigType::Fn(&[REQUEST_SIG], &SigType::Dyn),
             SigType::Optional(&SigType::String),
         ],
-        // `never`, not `void`: the accept loop runs until the process is interrupted, so nothing
-        // after this call ever runs. A tier runner reads this to know it must not put
-        // `server.serve(…)` into the setup every test shares — it would block the runner forever.
+        // `never`, not `void`. The accept loop ends only on a SIGINT graceful drain — an external
+        // signal the *program* cannot cause — so no code a caller writes after this can ever be
+        // reached by the program's own control flow. `never` states exactly that: you do not get
+        // control back here. The nuance is worth naming, because it is the one declaration in the
+        // stdlib where the Rust dispatch does have a `return` path; what makes it honest is that
+        // the path is the process shutting down, which is the same reason `os.exit` is `never`.
+        //
+        // Nothing downstream treats `never` as license to eliminate code — the type drives checking
+        // and the tier runners' setup filter, not lowering — so this changes what a signature *says*
+        // without changing what a program *does*.
         ret: RetTy::Concrete(SigType::Never),
     },
     // `websocket(handler) -> Response` (server-hmr L0) — the connection-hijack response: returned
