@@ -102,11 +102,21 @@ A file may still open with a `namespace` declaration, but it is a **restatement 
          delete the declaration, or move the file to where it says it lives
 ```
 
-New code should not write one; it is being removed from the language.
+New code should not write one; it is being removed from the language. `namespace` is not *gone* — a declaration that agrees with the derivation is still accepted, so an existing package keeps compiling while its declarations are deleted file by file. It just no longer decides anything.
 
 ### Derivation needs a package
 
-A prefix comes from a manifest, so a file with **no `noeta.toml` above it** has nothing to derive from. A lone script run straight out of a directory is not silently made into a module of whatever tree it happens to stand in — it keeps whatever `namespace` it declares, and declares nothing if it declares nothing. Several samples on these pages rely on that: they are single files with no package, so their `namespace` line is the only thing naming them.
+A prefix comes from a manifest, so a file with **no `noeta.toml` above it** has nothing to derive from. A lone script run straight out of a directory is not silently made into a module of whatever tree it happens to stand in — nothing derives, and whatever the file declares stands. That is what keeps `noeta run scratch.noe` from swallowing the tree it happens to be sitting in, and it is why the single-file samples on these pages need no package to be valid programs.
+
+### The three diagnostics
+
+| Code | When | Fix |
+|---|---|---|
+| **E0072** | a `namespace` declaration disagrees with the derived path | delete the declaration, or move the file to where it claims to live |
+| **E0073** | two files derive the same module path | rename or move one — one path is one module |
+| **E0074** | a directory name or file stem is not a legal identifier segment | rename it to the spelling the help offers |
+
+All three come from the loader, so `check`, `run`, `build`, and `test` report them identically — a program that fails to name its modules never gets as far as type-checking.
 
 ## Importing with `use`
 
@@ -126,8 +136,6 @@ echo customer.name                          // Ada
 A declaration can also be referenced by a **module-qualified name** at any use site — a struct literal, an annotation, a call, an enum construction or pattern, even a first-class function value. Importing a whole module binds its last segment as a navigable handle, and once a module is in scope its spelled-out fully-qualified name works too:
 
 ```noeta check
-namespace App.Main
-
 use geometry.vec;                              // the whole module: binds `vec`
 
 a = vec.Vec2 { x: 1, y: 2 }                    // qualified struct literal
@@ -163,10 +171,8 @@ That holds for an imported **type** too, and there the binding and the identity 
 An import can be renamed locally with `as`. This is how a file brings in two types that share a short name from different namespaces — each under its own local name:
 
 ```noeta check
-namespace App.Main
-
-use App.Money.Amount as Money;      // App.Money.Amount
-use App.Geo.Amount as Distance;     // App.Geo.Amount — a wholly distinct type
+use shop.money.Amount as Money;     // shop.money.Amount
+use shop.geo.Amount as Distance;    // shop.geo.Amount — a wholly distinct type
 
 m = Money { cents: 500 }
 d = Distance { meters: 42 }
@@ -174,11 +180,11 @@ echo m is Money                     // true
 echo m is Distance                  // false — different types despite the shared short name
 ```
 
-Grouped imports may alias per-name: `use App.Metrics.{Counter as Hits, Gauge}`.
+Grouped imports may alias per-name: `use shop.metrics.{Counter as Hits, Gauge}`.
 
-## Type identity across namespaces
+## Type identity across modules
 
-Every named type — and every top-level function — has a **qualified identity**, `App.Models.User` or `App.Math.boom`, not just `User` / `boom`, formed from the namespace it is declared in. That identity is what the language keys on for method dispatch, call resolution, and `is`/`as` narrowing, so two types (or two functions) with the same short name in different namespaces never conflate: `use App.Metric.scale as mscale` and `use App.Audio.scale as ascale` bind distinct functions. Human-facing output (a value's display, `type_of`, error messages) shows the **short** name, so `App.Models.User` prints as `User`.
+Every named type — and every top-level function — has a **qualified identity**, `shop.models.User` or `shop.math.boom`, not just `User` / `boom`, formed from the path of the module it is declared in — which is to say, from where its file sits. That identity is what the language keys on for method dispatch, call resolution, and `is`/`as` narrowing, so two types (or two functions) with the same short name in different modules never conflate: `use shop.metric.scale as mscale` and `use shop.audio.scale as ascale` bind distinct functions. Human-facing output (a value's display, `type_of`, error messages) shows the **short** name, so `shop.models.User` prints as `User`.
 
 Because identity is qualified, a short name only ever clashes *within a single file's local names*: importing two `Amount`s without aliases, or importing a name the file also declares, is the E0020 collision below — resolved by aliasing one of them.
 
@@ -204,8 +210,6 @@ A declaration is **module-private by default**. Only `pub` items can be imported
 - Importing a name the file *also* declares locally (or imports twice) is a collision, E0020.
 
 ```noeta
-namespace App.Models
-
 pub class User { pub name: string }    // importable
 class Internal { secret: string }      // module-private
 ```
@@ -214,7 +218,7 @@ Field and method visibility inside a type is separate — see [Structs, Classes 
 
 ## How it resolves
 
-The loader parses the entry and its sibling modules, resolves the entry's `use` declarations to the real `pub` declarations (rewriting names to their qualified identities), and merges everything into one program — a diagnostic from a merged-in module still points at that file's own coordinates. The module graph is incremental — editing one module recomputes only its dependents; see [Architecture & Pipeline](Architecture-and-Pipeline) for the pipeline.
+The loader walks the package, derives each file's module path from its location, resolves every `use` to the real `pub` declarations (rewriting names to their qualified identities), and merges everything into one program — a diagnostic from a merged-in module still points at that file's own coordinates. Deriving happens before checking, so E0072/E0073/E0074 are reported by `check` exactly as by `run`. The module graph is incremental — editing one module recomputes only its dependents; see [Architecture & Pipeline](Architecture-and-Pipeline) for the pipeline.
 
 ## The standard library
 
