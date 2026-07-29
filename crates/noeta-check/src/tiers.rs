@@ -1493,11 +1493,12 @@ impl Checker {
     /// already guaranteed every field of a packed struct is packable, so the field walk never bails on
     /// a well-typed program; the `?`s defend against a malformed registry (and an unpacked element).
     /// Resolve a checker [`Type`] into a [`noeta_ext_abi::TypeRecipe`] for call-site-typed
-    /// deserialization (`json.parse::<T>`), or `None` if `T` has no JSON decoding: an enum or class
-    /// (a reference/identity type, or a sum with no canonical JSON form), a tuple/set/result/`dyn`,
-    /// a non-string-keyed map, a generic instantiation, or a struct with any such field. A struct
-    /// records its fields in **declared order** (so the decoder emits them in the order the backend's
-    /// registered type expects).
+    /// deserialization (`json.parse::<T>`), or `None` if `T` has no JSON decoding: a class (a
+    /// reference/identity type), a tuple/set/result/`dyn`, a non-string-keyed map, a generic
+    /// instantiation, an enum with a payload-carrying variant (see [`Self::enum_to_recipe`]), or a
+    /// struct with any such field. A struct records its fields in **declared order** (so the decoder
+    /// emits them in the order the backend's registered type expects); an enum records its variants
+    /// in declared order with the wire value each is selected by.
     pub(crate) fn type_to_recipe(&self, ty: &Type) -> Option<noeta_ext_abi::TypeRecipe> {
         use noeta_ext_abi::TypeRecipe;
         Some(match ty {
@@ -1513,8 +1514,8 @@ impl Checker {
             Type::Map(k, v) if matches!(**k, Type::String) => {
                 TypeRecipe::Map(Box::new(self.type_to_recipe(v)?))
             }
-            // Only a non-generic value struct decodes (a class is reference/identity; an enum has no
-            // canonical JSON shape). The field set is the declared record fields, in order.
+            // A non-generic value struct (a class is reference/identity, so it never decodes; an
+            // enum has its own arm below). The field set is the declared record fields, in order.
             Type::Named(name, args)
                 if args.is_empty()
                     && self.symbols.type_kinds.get(name)
@@ -1552,7 +1553,79 @@ impl Checker {
                     has_validator,
                 }
             }
+            // A non-generic enum whose every variant is payload-free decodes from the wire values its
+            // own JSON Schema advertises: a backed enum's backings, a plain enum's case names. See
+            // [`Self::enum_to_recipe`] for why a payload-carrying variant declines the whole enum.
+            Type::Named(name, args)
+                if args.is_empty()
+                    && self.symbols.type_kinds.get(name) == Some(&noeta_types::TypeKind::Enum) =>
+            {
+                self.enum_to_recipe(name)?
+            }
             _ => return None,
+        })
+    }
+
+    /// The [`noeta_ext_abi::TypeRecipe::Enum`] for the declared enum `name`, or `None` if it has no
+    /// JSON decoding.
+    ///
+    /// **The tag comes from the declaration, so decode and schema cannot drift.** A variant with a
+    /// folded backing tags on that backing; a variant of an unbacked enum tags on its case name
+    /// ([`noeta_ext_abi::VariantTag::Name`]). That is precisely the vocabulary a `{"enum": […]}`
+    /// schema derived from `variants_of` emits, which is the property that makes an enum-typed field
+    /// decodable from the very document its schema describes.
+    ///
+    /// Two shapes decline, and both decline the **whole** enum rather than half of it:
+    ///
+    /// - **any payload-carrying variant.** A data-carrying sum has no canonical JSON spelling, so
+    ///   decoding the payload-free cases alone would accept documents against a schema that cannot
+    ///   describe the type. Such a variant is built by `construct("Enum.Variant", payload)` instead.
+    /// - **a backed variant whose backing did not fold to a literal.** The recipe is pure data with
+    ///   no way to run an expression, exactly as a non-literal field default is
+    ///   [`noeta_ext_abi::FieldDefault::Dynamic`]; a partial tag set would make one case
+    ///   unreachable from the wire with nothing saying why.
+    fn enum_to_recipe(&self, name: &str) -> Option<noeta_ext_abi::TypeRecipe> {
+        use noeta_ext_abi::{TypeRecipe, VariantRecipe, VariantTag};
+        let variants = self.symbols.enums.get(name)?;
+        let recipes = variants
+            .iter()
+            .enumerate()
+            .map(|(index, variant)| {
+                if !variant.fields.is_empty() {
+                    return None;
+                }
+                let tag = match &variant.backing {
+                    None => VariantTag::Name,
+                    Some(noeta_ast::AttrValue::Str(s)) => VariantTag::Str(s.clone()),
+                    Some(noeta_ast::AttrValue::Int(n)) => VariantTag::Int(*n),
+                    Some(noeta_ast::AttrValue::Float(f)) => VariantTag::Float(*f),
+                    Some(noeta_ast::AttrValue::Bool(b)) => VariantTag::Bool(*b),
+                    // A backing that folded to a non-scalar (a list) has no wire spelling a tag can
+                    // match; the enum declines rather than silently omitting the case.
+                    Some(_) => return None,
+                };
+                Some(VariantRecipe {
+                    name: variant.name.clone(),
+                    index: u32::try_from(index).ok()?,
+                    tag,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        // An enum with no variants at all decodes nothing, so it is not a decodable type — reporting
+        // it as one would produce a recipe that rejects every document with an empty accepted list.
+        if recipes.is_empty() {
+            return None;
+        }
+        // Validation arc: an enum implementing `Validate` carries the flag so the decode door
+        // re-enters to run `validate()` on the built case, exactly as a struct's does.
+        let has_validator = self.satisfies(
+            &Type::Named(name.to_string(), Vec::new()),
+            noeta_types::BuiltinTrait::Validate,
+        );
+        Some(TypeRecipe::Enum {
+            name: name.to_string(),
+            variants: recipes,
+            has_validator,
         })
     }
 

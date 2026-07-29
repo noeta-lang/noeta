@@ -19,6 +19,11 @@ use crate::{compose, watch};
 /// The request-handler function `noeta serve` drives — the one name a served program must define.
 const HANDLER: &str = "fetch";
 
+/// The module the serve entry call names, qualified — see [`EntryCall::module`](noeta_stdlib::EntryCall).
+/// The multi-core path builds its own call rather than going through an `EntryCall`, so it names
+/// the module here; both must stay the same module.
+const SERVE_ENTRY_MODULE: &str = "std.http.server";
+
 /// The name a synthesized entry call must use to reach the program's `name` function — `name`
 /// itself, or the **qualified** spelling the linker gave it. An entry file that declares a
 /// `namespace` has its own top-level declarations rewritten to qualified identities (`fn fetch`
@@ -38,6 +43,26 @@ fn entry_ident(program: &noeta_ast::Program, name: &str) -> String {
         .find(|decl| *decl == name || decl.ends_with(&suffix))
         .unwrap_or(name)
         .to_string()
+}
+
+/// Split an [`EntryCall`](noeta_stdlib::EntryCall)'s module into the `use` path that binds it and
+/// the local name the call spells — `"std.http.server"` → `(["std", "http"], "server")`. A bare
+/// name binds nothing (`(vec![], "server")`) and resolves through the program's own imports.
+fn entry_module(module: &str) -> (Vec<String>, &str) {
+    match module.rsplit_once('.') {
+        Some((path, local)) => (path.split('.').map(str::to_string).collect(), local),
+        None => (Vec::new(), module),
+    }
+}
+
+/// Whether the program already binds `local` with a `use` — an entry file that imported the module
+/// itself. Re-importing it would be a second binding of the same name (E0020), so the synthetic
+/// `use` is only added when the program has none.
+fn already_imports(program: &noeta_ast::Program, local: &str) -> bool {
+    program.stmts.iter().any(|stmt| match stmt {
+        noeta_ast::Stmt::Use { names, .. } => names.iter().any(|n| n.local() == local),
+        _ => false,
+    })
 }
 
 pub(crate) fn ext_command_clap(ext: &'static noeta_stdlib::ExtCommand) -> clap::Command {
@@ -255,8 +280,26 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 name: noeta_ast::Name::canonical(name),
                 span: sp,
             };
+            // The call names the module's LAST segment and brings its own `use` — a synthesized
+            // statement has to carry the imports it needs, exactly as a handwritten one would.
+            // Without it `server.serve(…)` resolved only in programs that happened to import
+            // `std.http.server`, and every other one failed with "cannot find `server` in this
+            // scope" against the entry file's line 1 — a synthetic span, so the error pointed at a
+            // line that had nothing to do with it.
+            let (use_path, local) = entry_module(entry.module);
+            if !use_path.is_empty() && !already_imports(&loaded.program, local) {
+                loaded.program.stmts.push(Stmt::Use {
+                    path: use_path,
+                    names: vec![noeta_ast::UseName {
+                        name: local.to_string(),
+                        alias: None,
+                        span: sp,
+                    }],
+                    span: sp,
+                });
+            }
             let callee = Expr::Member {
-                receiver: Box::new(ident(entry.module)),
+                receiver: Box::new(ident(local)),
                 name: entry.func.to_string(),
                 name_span: sp,
                 span: sp,
@@ -424,9 +467,23 @@ pub(crate) fn serve_parallel_impl(
     } else {
         ident(&entry_ident(&loaded.program, HANDLER))
     };
+    // Same synthetic import the single-worker path adds (`entry_module`): the multi-core entry call
+    // is the same `server.serve(…)`, so it must bind `server` the same way.
+    let (use_path, local) = entry_module(SERVE_ENTRY_MODULE);
+    if !already_imports(&loaded.program, local) {
+        loaded.program.stmts.push(Stmt::Use {
+            path: use_path,
+            names: vec![noeta_ast::UseName {
+                name: local.to_string(),
+                alias: None,
+                span: sp,
+            }],
+            span: sp,
+        });
+    }
     let call = Expr::Call {
         callee: Box::new(Expr::Member {
-            receiver: Box::new(ident("server")),
+            receiver: Box::new(ident(local)),
             name: "serve".to_string(),
             name_span: sp,
             span: sp,

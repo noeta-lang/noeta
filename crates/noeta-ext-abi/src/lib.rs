@@ -85,7 +85,17 @@
 /// the rule above because it widens the registry surface an extension and a backend can rely on.
 /// Deliberately not a `current_span() -> ?Span`: that would hand a caller `.end()` on a span it
 /// never opened — see the `std.tracing` module header.
-pub const ABI_VERSION: u32 = 9;
+///
+/// **10** — the enum-construction arc: [`registry::TypeRecipe`] gained an `Enum` form (with
+/// [`registry::VariantRecipe`]/[`registry::VariantTag`]), so an enum-typed field decodes from the
+/// wire values its own JSON Schema advertises, and [`registry::NativeOut::Variant`] gained the
+/// required `has_validator` field that makes a decoded case honor the same `Validate` door contract a
+/// decoded struct already did. `TypeRecipe` is named in this list twice over now, so the form is
+/// squarely a bump; the `NativeOut` field is a genuine source break for an extension that returns an
+/// enum (add `has_validator: false` — a dispatch's own return value is not untrusted input crossing a
+/// door). Also `json.parse`/`try_parse`/`decode_typed` report a new
+/// [`crate::registry::TypeRecipe`]-driven failure kind, `unknown_variant`, distinct from `mismatch`.
+pub const ABI_VERSION: u32 = 10;
 
 pub mod args;
 pub mod channel;
@@ -133,7 +143,7 @@ pub use registry::{
     FieldedDispatch, FieldedKind, HiddenArg, ModuleDispatch, NativeOut, NativeValue, Nominal,
     NominalKind, NominalType, PackedConstraint, PackedLayoutKind, RetTy, Scalar, ScalarVec,
     SigType, TraitDispatch, TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch,
-    TypedTypeDispatch, VariantValue,
+    TypedTypeDispatch, VariantRecipe, VariantTag, VariantValue,
 };
 pub use stream::{
     Frame, FrameDecoder, FrameStream, Framing, SseCloseIo, SseSendIo, SseSink, StreamRecvIo,

@@ -217,7 +217,28 @@ enum Level {
 echo Level.High.rank()   // 2
 ```
 
-A **string-backed** enum gets `Enum.try_from(s): ?Enum` (name-matched, `none` on miss) and `Enum.from(s): Enum` (panics on miss). Payload variants are not name-constructible.
+### Converting a wire value to a case
+
+Every enum gets a pair: `Enum.try_from(v): ?Enum` (`none` on a miss) and `Enum.from(v): Enum` (panics on a miss) — the recoverable/aborting shape the [rest of the language uses](Error-Handling#aborting-and-recoverable-doors). Reach for `try_from` whenever the value came from outside the program; `from` when a bad value means the program itself is wrong.
+
+The value is matched against each case's **backing first, then its name**. A backed enum's backing is what its JSON Schema advertises and what a real document carries, so that is what a wire-facing conversion reads:
+
+```noeta
+enum Plan: string { Free = "free"; Paid = "paid" }
+enum Code: int { Ok = 200; Missing = 404 }
+
+echo Plan.try_from("free")     // some(Plan.Free)   — the backing
+echo Plan.try_from("Free")     // some(Plan.Free)   — the case name still works
+echo Plan.try_from("gold")     // none
+echo Code.try_from(404)        // some(Code.Missing) — backings are typed, so this takes an int
+echo Plan.from("paid")         // Plan.Paid
+```
+
+A **plain** enum has no backings, so its case names are what select — which is also exactly what its schema advertises. The argument type follows the backing: a `string`-backed or plain enum takes a `string`, an `int`-backed one takes `int | string`.
+
+Payload-carrying variants are never selected: there is no payload to supply. Build those with [`construct("Enum.Variant", payload)`](Attributes-and-Reflection#constructing-an-enum-case).
+
+To decode an enum sitting inside a larger document, derive [`Deserialize<Json>`](Derives#enum-typed-fields) on the enclosing type instead — the same backing-versus-name rule applies there, with path-carrying errors.
 
 ## Tuples
 

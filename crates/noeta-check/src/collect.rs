@@ -475,6 +475,14 @@ impl Checker {
                                 .iter()
                                 .map(|v| field_type(&v.ty, &self.imports.extern_types))
                                 .collect(),
+                            // A backed variant's literal, through the one `fold_const_expr` the
+                            // reflection manifest also folds with — so the backing a decode recipe
+                            // matches on and the backing `variants_of` reports are the same value,
+                            // not two independent readings of the same declaration.
+                            backing: v
+                                .backed_value
+                                .as_ref()
+                                .and_then(noeta_ast::reflect::fold_const_expr),
                         })
                         .collect();
                     self.symbols.enums.insert(e.name.to_string(), variants);

@@ -163,6 +163,8 @@ fn ext_enum_type_info(en: &noeta_ext_abi::registry::ExtEnum) -> TypeInfo {
                 VariantSlots {
                     index: i as u32,
                     fields: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
+                    // A native enum declares cases, not wire values.
+                    backing: None,
                 },
             )
         })
@@ -923,6 +925,11 @@ enum TypeInfo {
 struct VariantSlots {
     index: u32,
     fields: Vec<String>,
+    /// The variant's **backing value** in a backed enum, folded through the shared
+    /// `fold_const_expr`; `None` for a plain enum's case, a native or prelude enum (neither is
+    /// backed), and a backing that is not a literal. Baked into `Op::EnumFromStr` so a wire→case
+    /// conversion can match the backing — the value the enum's schema advertises.
+    backing: Option<noeta_ast::AttrValue>,
 }
 
 /// Accumulates the prototype table, the shape/method side tables, and the top-level type
@@ -1116,6 +1123,8 @@ impl ModuleCompiler {
                                 VariantSlots {
                                     index: i as u32,
                                     fields: v.field_names(),
+                                    // No prelude enum is backed.
+                                    backing: None,
                                 },
                             )
                         })
@@ -1233,6 +1242,10 @@ impl ModuleCompiler {
                                 VariantSlots {
                                     index: i as u32,
                                     fields: v.fields.iter().map(|f| f.name.clone()).collect(),
+                                    backing: v
+                                        .backed_value
+                                        .as_ref()
+                                        .and_then(noeta_ast::reflect::fold_const_expr),
                                 },
                             )
                         })
@@ -4735,10 +4748,12 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// `Enum.try_from(s)` / `Enum.from(s)` (`panic` = the `from` form) — lower the string→case
-    /// conversion. Interns the shape of every **payload-free** variant (the name-constructible ones)
-    /// plus the `Option` wrappers, and emits `Op::EnumFromStr`; the VM matches the runtime string
-    /// against the case names. The checker guarantees a single string argument.
+    /// `Enum.try_from(v)` / `Enum.from(v)` (`panic` = the `from` form) — lower the wire→case
+    /// conversion. Interns the shape of every **payload-free** variant (the only constructible ones
+    /// here) plus the `Option` wrappers, and emits `Op::EnumFromStr` carrying each case's name AND
+    /// its backing; the VM matches the runtime value through the shared
+    /// [`noeta_ast::reflect::variant_for_wire`]. The backing is baked in because the VM has no
+    /// reflection entry for a prelude or native enum to read one back from.
     fn lower_enum_from_str(
         &mut self,
         type_name: &str,
@@ -4752,23 +4767,27 @@ impl<'m> FnCompiler<'m> {
             _ => unreachable!("lower_enum_from_str is only reached for enum types"),
         };
         let runtime_name = self.module.runtime_type_name(type_name);
-        let mut cases: Vec<(String, u32)> = variants
+        let mut cases: Vec<(u32, String, Option<noeta_ast::AttrValue>)> = variants
             .into_iter()
             .filter(|(_, slots)| slots.fields.is_empty())
-            .map(|(vname, slots)| {
+            .map(|(vname, slots)| (slots.index, vname, slots.backing))
+            .collect();
+        // Ordered by **declaration index**, not by name. The source table is a `HashMap`, so some
+        // deterministic order is needed either way — and declaration order is the one the shared
+        // matcher documents and the tree-walker walks, so ordering by it is what keeps the two
+        // backends resolving an ambiguous probe (a backing that is also another case's name) to the
+        // same case, rather than each to merely *a* stable one.
+        cases.sort_by_key(|(index, _, _)| *index);
+        // Interned after sorting, since shape/name ids follow emission order, not lexical order.
+        let cases: Vec<(NameId, Option<noeta_ast::AttrValue>, u32)> = cases
+            .into_iter()
+            .map(|(index, vname, backing)| {
                 let shape = self.module.intern_shape(
                     Shape::enum_variant(runtime_name.clone(), vname.clone(), Vec::new(), false)
-                        .with_variant_index(slots.index),
+                        .with_variant_index(index),
                 );
-                (vname, shape)
+                (self.module.intern_name(&vname), backing, shape)
             })
-            .collect();
-        // Stable order keeps the case list deterministic (the source `HashMap` is not ordered).
-        // Sort by name *before* interning, since ids follow emission order, not lexical order.
-        cases.sort_by(|a, b| a.0.cmp(&b.0));
-        let cases: Vec<(NameId, u32)> = cases
-            .into_iter()
-            .map(|(vname, shape)| (self.module.intern_name(&vname), shape))
             .collect();
         let some_shape = self.module.builtin_enum_shape("Option", "some");
         let none_shape = self.module.builtin_enum_shape("Option", "none");
