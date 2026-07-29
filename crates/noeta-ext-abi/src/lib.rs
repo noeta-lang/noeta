@@ -95,7 +95,16 @@
 /// enum (add `has_validator: false` — a dispatch's own return value is not untrusted input crossing a
 /// door). Also `json.parse`/`try_parse`/`decode_typed` report a new
 /// [`crate::registry::TypeRecipe`]-driven failure kind, `unknown_variant`, distinct from `mismatch`.
-pub const ABI_VERSION: u32 = 10;
+///
+/// **11** — `regex.compile` got its recoverable twin, `regex.try_compile(pattern):
+/// Result<Pattern, string>`, and `std.regex` was re-rooted on it the way [`host::Os`] was in ABI 8:
+/// `regex::try_compile` is the primitive and the aborting `regex::compile` is derived from it, so
+/// the two doors cannot report different things about the same pattern. Purely additive
+/// registration (nothing written for ABI 10 stops compiling), counted anyway under the rule above
+/// because it widens the registry surface. The `Err` side is a plain `string` rather than a
+/// classified extern error: a pattern has exactly one way to be invalid, so a `kind()` would be a
+/// constant, and the engine's own caret-carrying diagnostic is the whole value.
+pub const ABI_VERSION: u32 = 11;
 
 pub mod args;
 pub mod channel;

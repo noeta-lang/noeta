@@ -1,0 +1,56 @@
+// `regex.try_compile` — the recoverable twin of `regex.compile`, on the `json.parse`/`json.try_parse`
+// model. `regex_invalid_pattern.noe` pins the aborting half: a bad pattern there stops the program,
+// which is the right report for a pattern written as program text. This is the other caller — a
+// pattern read from configuration or handed over by a user, where the caller cannot validate it
+// first (that would mean shipping a second, worse regex engine) and cannot report the failure at
+// all through a door that aborts.
+//
+// The `Err` side is a plain `string` carrying the engine's own caret-and-span diagnostic — the whole
+// value, since a pattern has exactly one way to be invalid. The two doors cannot drift: the aborting
+// one is derived from this one, and prefixes its own name onto the same text.
+// expect: stdout "ok \\d+"
+// expect: stdout "true"
+// expect: stdout "err carries the engine diagnostic"
+// expect: stdout "still running"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+use std.{regex}
+use std.regex.Pattern
+
+// A valid pattern comes back through the recoverable door indistinguishable from the aborting one.
+echo match regex.try_compile('\d+') {
+    Ok(p) => "ok ${p.source()}",
+    Err(e) => "unreached ${e}",
+}
+
+good = match regex.try_compile('\d+') {
+    Ok(p) => p,
+    Err(e) => panic("expected a valid pattern"),
+}
+echo good is Pattern
+
+// A malformed one is an ordinary value, not an abort — and the message is the engine's, not a
+// paraphrase of it.
+echo match regex.try_compile('a(b') {
+    Ok(p) => "unreached",
+    Err(e) => match e.index_of("unclosed group") {
+        some(i) => "err carries the engine diagnostic",
+        none => "unexpected message: ${e}",
+    },
+}
+
+// The program is still here, which is the whole point.
+echo "still running"
+
+// Lookaround and backreferences are compile failures of this engine, so they reach the recoverable
+// door as ordinary `Err`s too, rather than a separate category.
+echo match regex.try_compile('(?=foo)') {
+    Ok(p) => false,
+    Err(e) => true,
+}
+
+// A pattern from either door matches identically.
+echo good.is_match("a1b");
+echo good.is_match("abc");
