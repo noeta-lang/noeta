@@ -3024,6 +3024,19 @@ fn prec(e: &Expr) -> u8 {
         Expr::Binary { op, .. } => binop_prec(*op),
         Expr::Range { .. } => 6,
         Expr::Unary { .. } | Expr::Spawn { .. } => 13,
+        // `x is T`. Postfix in SHAPE but not in binding power: the parser registers it at the
+        // COMPARISON tier (bp 5, beside `< <= > >=`), so `a + b is int` is `(a + b) is int` and
+        // `x is int && y` is `(x is int) && y`.
+        //
+        // It sat in the 14 group below, which claims a form never needs parenthesizing as an
+        // operand — true of a call or a member access, false of this. `!(d is int)` therefore
+        // printed as `!d is int`, which the parser reads back as `(!d) is int`: a different AST, and
+        // the safety gate refused to format any file containing the construct. `(x is int).f()` was
+        // the same latent bug one step further along.
+        //
+        // Because this only ever LOWERS the reported binding power, it can add parentheses that
+        // preserve a parse and can never remove ones that were holding one together.
+        Expr::TypeTest { .. } => 5,
         // Postfix-position forms (bind tightest among operators).
         Expr::Call { .. }
         | Expr::Member { .. }
@@ -3032,7 +3045,6 @@ fn prec(e: &Expr) -> u8 {
         | Expr::Try { .. }
         | Expr::Await { .. }
         | Expr::As { .. }
-        | Expr::TypeTest { .. }
         | Expr::TypedModuleCall { .. }
         | Expr::TypedMethodCall { .. } => 14,
         // `receiver.field = value` — only ever a binding's RHS; parenthesize if it somehow nests.
