@@ -148,7 +148,7 @@ addressed as `scope.package.module` — the first-party `para/*` set is the stan
 bound with the array form to keep those addresses.
 
 That relation only runs one way: several packages may share one root, but **one package may not be
-bound under two roots**. A package has one identity and its modules re-root to one segment, so a
+bound under two roots**. A package has one identity and its modules derive under one prefix, so a
 second key could only be dropped — and a dropped key is a manifest that lies, with `use <that
 key>.…` failing later as "no module". Two keys naming one identity are refused at resolve time,
 naming both.
