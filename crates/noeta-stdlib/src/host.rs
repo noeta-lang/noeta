@@ -11,10 +11,10 @@ pub use noeta_ext_abi::host::{
 };
 pub use noeta_ext_abi::{Logging, Metrics, Tracing};
 
+use crate::StdError;
 use crate::env;
 use crate::fs::Vfs;
 use crate::random;
-use crate::{ErrorKind, StdError};
 use noeta_ext_abi::ExecResult;
 use noeta_ext_abi::{
     AttrValue, InstrumentId, InstrumentKind, LogRecord, MetricData, MetricStore, MetricValue,
@@ -260,13 +260,33 @@ struct InboundState {
     sse_transcript: Vec<(u64, String)>,
 }
 
-/// A scripted spawned process (process-handle + streaming arcs): its instant-complete outcome and
-/// independent stdout/stderr read cursors for `read_line`/`read`/`read_err_line`.
+/// A scripted spawned process (process-handle + streaming arcs): its instant-complete outcome,
+/// independent stdout/stderr read cursors for `read_line`/`read`/`read_err_line`, and the state of
+/// its stdin pipe.
 #[derive(Debug, Clone)]
 struct ScriptedProc {
     result: ExecResult,
     stdout_cursor: usize,
     stderr_cursor: usize,
+    stdin: ScriptedStdin,
+}
+
+/// The state of a scripted child's stdin pipe (subprocess-doors arc). The sandbox models it because
+/// a failing write is the *point* of the recoverable `try_write` door: without a scripted way to
+/// reach one, the door's `Err` arm could never be compared backend-to-backend. An enum rather than a
+/// `bool` because the two failures have different causes and different fixes, and `OsError.kind()`
+/// reports them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptedStdin {
+    /// Writable — the state every scripted child spawns in, so a stdin-feeding program is a
+    /// validated no-op exactly as before.
+    Open,
+    /// Closed from the program's own side by `close_stdin`. Writing after that is the program's
+    /// mistake, and the real host reports it identically (its `ChildStdin` is dropped).
+    Closed,
+    /// The child is gone and took its stdin with it — the scripted stand-in for the condition no
+    /// liveness check can close from the language, reachable through the `dead` scripted command.
+    Broken,
 }
 
 /// The next line of `text` from `*cursor` (without its trailing newline), advancing past it; `None`
@@ -756,48 +776,25 @@ impl Os for SandboxHost {
     }
 
     /// The scripted exec interpreter — a tiny fixed command set so exec-driving programs stay
-    /// in-oracle (the exec analogue of the Vfs / the inbound request script):
-    ///
-    /// - `echo <args…>` → status 0, stdout = the args joined with spaces + `\n`.
-    /// - `status <n> [message…]` → status `n`, stderr = the message + `\n` when present — the
-    ///   fixture for exercising failure paths.
-    /// - anything else → an `Io` error, like launching a missing binary on a real host.
+    /// in-oracle (the exec analogue of the Vfs / the inbound request script). See
+    /// [`SandboxHost::scripted_exec`] for the command set; the failure is worded for the `exec`
+    /// door here and for the `spawn` door in `os_try_spawn`.
     fn os_exec(&mut self, command: &str, args: &[String]) -> Result<ExecResult, StdError> {
-        match command {
-            "echo" => Ok(ExecResult {
-                status: 0,
-                stdout: format!("{}\n", args.join(" ")),
-                stderr: String::new(),
-            }),
-            "status" => {
-                let status = args
-                    .first()
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(0);
-                let message = args.get(1..).unwrap_or(&[]).join(" ");
-                Ok(ExecResult {
-                    status,
-                    stdout: String::new(),
-                    stderr: if message.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{message}\n")
-                    },
-                })
-            }
-            other => Err(StdError {
-                kind: ErrorKind::Io,
-                message: format!("exec: command not found: {other}"),
-            }),
-        }
+        self.scripted_exec("exec", command, args)
+            .map_err(noeta_ext_abi::os::OsError::into_std_error)
     }
 
     /// Spawn a scripted process: run the same fixed command set as `os_exec` **eagerly** (the
     /// sandbox has no real concurrency), store the outcome, and hand back a deterministic handle
-    /// id. An unknown command is an `Io` error at spawn, exactly as a real `Command::spawn` fails
-    /// for a missing binary.
-    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError> {
-        let result = self.os_exec(command, args)?;
+    /// id. An unknown command is an `OsError` at spawn, exactly as a real `Command::spawn` fails
+    /// for a missing binary — so `os.try_spawn` of a name the script does not know is a comparable,
+    /// in-oracle `Err(OsError)` and `os.spawn` of one is the same message as an abort.
+    fn os_try_spawn(
+        &mut self,
+        command: &str,
+        args: &[String],
+    ) -> Result<u64, noeta_ext_abi::os::OsError> {
+        let result = self.scripted_exec("spawn", command, args)?;
         let id = self.next_proc;
         self.next_proc += 1;
         self.procs.insert(
@@ -806,6 +803,13 @@ impl Os for SandboxHost {
                 result,
                 stdout_cursor: 0,
                 stderr_cursor: 0,
+                // The `dead` command models a child that is already gone, so its stdin is broken
+                // from the start; every other scripted child spawns writable.
+                stdin: if command == DEAD_SCRIPTED_COMMAND {
+                    ScriptedStdin::Broken
+                } else {
+                    ScriptedStdin::Open
+                },
             },
         );
         Ok(id)
@@ -892,26 +896,118 @@ impl Os for SandboxHost {
         ))
     }
 
-    /// The scripted commands don't read stdin, so a write is a validated no-op (the handle must
-    /// exist). `close_stdin` likewise no-ops. This keeps a stdin-feeding program deterministic and
-    /// terminating in-oracle.
-    fn os_proc_write_stdin(&mut self, handle: u64, _data: &str) -> Result<(), StdError> {
-        self.require_proc(handle)
+    /// The scripted commands don't read stdin, so a write to an **open** one is a validated no-op —
+    /// which keeps a stdin-feeding program deterministic and terminating in-oracle. The two failing
+    /// states are modelled, because they are the whole point of the recoverable `try_write` door:
+    /// writing after `close_stdin` is `stdin_closed` (the real host reports the same, its
+    /// `ChildStdin` having been dropped), and writing to a child spawned as `dead` is
+    /// `broken_pipe` — the scripted stand-in for a server that crashed mid-call.
+    fn os_proc_try_write_stdin(
+        &mut self,
+        handle: u64,
+        _data: &str,
+    ) -> Result<(), noeta_ext_abi::os::OsError> {
+        use noeta_ext_abi::os::{OsError, OsErrorKind};
+        let proc = self
+            .procs
+            .get(&handle)
+            .ok_or_else(|| OsError::unknown_process("write", handle))?;
+        match proc.stdin {
+            ScriptedStdin::Open => Ok(()),
+            ScriptedStdin::Closed => Err(OsError::new(
+                "write",
+                OsErrorKind::StdinClosed,
+                "the child's stdin is closed",
+            )),
+            ScriptedStdin::Broken => Err(OsError::new(
+                "write",
+                OsErrorKind::BrokenPipe,
+                "Broken pipe",
+            )),
+        }
     }
 
+    /// Close the scripted child's stdin. Idempotent, and it does not resurrect a `Broken` pipe.
     fn os_proc_close_stdin(&mut self, handle: u64) -> Result<(), StdError> {
-        self.require_proc(handle)
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_ext_abi::os::unknown_process_error(handle))?;
+        if proc.stdin == ScriptedStdin::Open {
+            proc.stdin = ScriptedStdin::Closed;
+        }
+        Ok(())
     }
 }
 
+/// The scripted command that models a child which is **already gone** — see
+/// [`SandboxHost::scripted_exec`].
+const DEAD_SCRIPTED_COMMAND: &str = "dead";
+
 impl SandboxHost {
-    /// Assert a scripted-process handle is live (else an `Io` error) — shared by the no-op stdin
-    /// operations.
+    /// Assert a scripted-process handle is live (else an `Io` error).
     fn require_proc(&self, handle: u64) -> Result<(), StdError> {
         if self.procs.contains_key(&handle) {
             Ok(())
         } else {
             Err(noeta_ext_abi::os::unknown_process_error(handle))
+        }
+    }
+
+    /// The scripted command set both `exec` and `spawn` run — a tiny fixed interpreter so
+    /// subprocess-driving programs stay in-oracle (the exec analogue of the Vfs / the inbound
+    /// request script):
+    ///
+    /// - `echo <args…>` → status 0, stdout = the args joined with spaces + `\n`.
+    /// - `status <n> [message…]` → status `n`, stderr = the message + `\n` when present — the
+    ///   fixture for exercising failure paths.
+    /// - `dead` → status 0, no output, and (when spawned) a stdin that is **broken from the
+    ///   start**: the fixture for a child that is already gone, so the recoverable write door's
+    ///   `Err` arm is reachable deterministically.
+    /// - anything else → an [`noeta_ext_abi::os::OsError`] classified `not_found`, like launching a
+    ///   missing binary on a real host.
+    ///
+    /// `op` names the door for the message, so a failure at `exec` and the same failure at `spawn`
+    /// each read as themselves.
+    fn scripted_exec(
+        &self,
+        op: &str,
+        command: &str,
+        args: &[String],
+    ) -> Result<ExecResult, noeta_ext_abi::os::OsError> {
+        use noeta_ext_abi::os::{OsError, OsErrorKind};
+        match command {
+            "echo" => Ok(ExecResult {
+                status: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            }),
+            "status" => {
+                let status = args
+                    .first()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let message = args.get(1..).unwrap_or(&[]).join(" ");
+                Ok(ExecResult {
+                    status,
+                    stdout: String::new(),
+                    stderr: if message.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{message}\n")
+                    },
+                })
+            }
+            DEAD_SCRIPTED_COMMAND => Ok(ExecResult {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            other => Err(OsError::new(
+                op,
+                OsErrorKind::NotFound,
+                format!("command not found: {other}"),
+            )),
         }
     }
 }
@@ -1089,6 +1185,8 @@ impl Metrics for SandboxHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the assertions inspect a `StdError`'s kind, so the import lives here.
+    use crate::ErrorKind;
 
     /// The overlay pattern (audit-2 F7): a custom host overrides ONE capability by hand and
     /// forwards the rest to a wrapped base with `delegate_host!` — instead of ~70 hand-written

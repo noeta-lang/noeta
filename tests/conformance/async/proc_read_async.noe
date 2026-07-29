@@ -1,0 +1,42 @@
+// `child.read_line_async()` / `read_err_line_async()` / `read_async(n)` (subprocess-async arc) —
+// the awaitable twins of the blocking streaming reads, each yielding a `Future<?string>`.
+//
+// They exist because a blocking `read_line` parks the isolate's whole scheduler: a sibling task
+// spawned as a watchdog does not run until the read returns, so a synchronous API cannot bound a
+// child read at all — the only ways out were killing the child or standing up a second isolate to
+// kill it by pid. With the awaitable form, bounding a read is an ordinary
+// `race([p.read_line_async(), deadline(ms)])`.
+//
+// In the sandbox the scripted child's output is already complete, so each read resolves at spawn,
+// deterministically and in-oracle; on the real executor it runs on the blocking pool and genuinely
+// overlaps. The read cursor is shared with the blocking reads, so the two interleave on one
+// position — which the last two lines pin.
+// expect: stdout "some(first)"
+// expect: stdout "some(second)"
+// expect: stdout "none"
+// expect: stdout "some(oops)"
+// expect: stdout "some(abc)"
+// expect: stdout "some(defgh)"
+// expect: stdout "done"
+// expect: exit 0
+use std.{os}
+
+async fn stream(): void {
+    p = os.spawn("echo", ["first\nsecond"])
+    echo p.read_line_async().await
+    echo p.read_line_async().await
+    echo p.read_line_async().await
+
+    // stderr has its own cursor and its own twin — a server that only ever logs would park the
+    // scheduler on `read_err_line` exactly as it would on `read_line`.
+    e = os.spawn("status", ["1", "oops"])
+    echo e.read_err_line_async().await
+
+    // `read_async(n)` is the character-count twin, and it shares the stdout cursor with the
+    // blocking `read`: the async read takes the first three characters, the sync one continues.
+    c = os.spawn("echo", ["abcdefgh"])
+    echo c.read_async(3).await
+    echo c.read(5)
+}
+stream().await
+echo "done"

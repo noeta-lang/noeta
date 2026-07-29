@@ -1,0 +1,48 @@
+// `Process.try_write` (subprocess-doors arc) — the **recoverable** twin of `Process.write`. A
+// write to a child that has exited is an ordinary condition for a client of an external server,
+// and it is the one a liveness check cannot avoid: the child can die in the gap between a
+// `try_wait()` poll and the write that follows it, so the failure has to be expressible as a value.
+//
+// The sandbox models both failing states so the `Err` arm is reachable in-oracle and comparable
+// backend-to-backend: the scripted `dead` command spawns a child whose stdin is broken from the
+// start (a server that crashed), and `close_stdin` genuinely closes the pipe (the real host reports
+// the same, its `ChildStdin` having been dropped).
+// expect: stdout "wrote"
+// expect: stdout "broken_pipe"
+// expect: stdout "write: Broken pipe"
+// expect: stdout "stdin_closed"
+// expect: stdout "write: the child's stdin is closed"
+// expect: stdout "still running"
+// expect: exit 0
+use std.{os}
+
+// A writable child: the recoverable door succeeds and carries nothing.
+live = os.spawn("echo", ["hello"])
+echo match live.try_write("input") {
+    Ok(_) => "wrote",
+    Err(e) => "failed: ${e.message()}",
+}
+
+// A child that is already gone — the condition no check can close.
+gone = os.spawn("dead", [])
+echo match gone.try_write("input") {
+    Ok(_) => "unexpectedly wrote",
+    Err(e) => e.kind(),
+}
+echo match gone.try_write("input") {
+    Ok(_) => "unexpectedly wrote",
+    Err(e) => e.message(),
+}
+
+// Closing the pipe ourselves is a different cause, and reports as one.
+closed = os.spawn("echo", ["hello"])
+closed.close_stdin()
+echo match closed.try_write("input") {
+    Ok(_) => "unexpectedly wrote",
+    Err(e) => e.kind(),
+}
+echo match closed.try_write("input") {
+    Ok(_) => "unexpectedly wrote",
+    Err(e) => e.message(),
+}
+echo "still running";

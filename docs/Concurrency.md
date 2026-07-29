@@ -244,13 +244,14 @@ concurrent {
 
 ## Streaming I/O
 
-Some sources produce values *over time* rather than all at once. The two in the standard library share the channel shape above — an awaited `recv` yielding `none` when the source is finished — so one `while` loop drains any of them:
+Some sources produce values *over time* rather than all at once. The ones in the standard library share the channel shape above — an awaited read yielding `none` when the source is finished — so one `while` loop drains any of them:
 
 | Source | Read | Ends when |
 |---|---|---|
 | `Receiver<T>` (a channel) | `rx.recv().await` → `?T` | the channel is closed and drained |
 | `FrameStream` (an HTTP response body) | `stream.recv().await` → `?Frame` | the body ends |
 | `Socket` (a websocket session) | `sock.recv().await` → `?string` | the peer closes |
+| `Process` (a child's output) | `p.read_line_async().await` → `?string` | the child's output ends |
 
 ```noeta
 use std.http.client
@@ -298,6 +299,38 @@ concurrent {
 Backpressure runs end to end: the real host's reader holds a bounded number of decoded frames and then stops reading the socket, so a slow consumer slows the *server* down instead of growing memory.
 
 Serving a stream is the mirror image. `server.sse(handler)` runs `handler(sink)` as a session and `sink.send(frame)` pushes to the client, exactly as `server.websocket` does for a socket — both are ordinary in-flight handlers to the serve loop, so a long-lived session interleaves with other requests rather than blocking them.
+
+## Streaming a subprocess
+
+A spawned child (`os.spawn` / `os.try_spawn` — see [Error Handling](Error-Handling#aborting-and-recoverable-doors) for which door to use) has both a **blocking** and an **awaitable** form of every read, and the choice matters more here than anywhere else in the standard library.
+
+| Blocking | Awaitable twin | Reads |
+|---|---|---|
+| `p.read_line(): ?string` | `p.read_line_async(): Future<?string>` | the next line of the child's stdout |
+| `p.read_err_line(): ?string` | `p.read_err_line_async(): Future<?string>` | the next line of its stderr, on its own cursor |
+| `p.read(n): ?string` | `p.read_async(n): Future<?string>` | up to `n` characters of stdout |
+| `p.wait(): ExecResult` | `p.wait_async(): Future<ExecResult>` | the child's exit |
+
+The blocking reads park the **whole isolate**, not just the calling task: a sibling task spawned as a watchdog does not get to run while a `read_line` waits on a child that has not spoken yet. So a synchronous read cannot be bounded from inside the language — the only escapes are killing the child or standing up a second isolate to kill it by pid.
+
+The awaitable twin makes a bounded read ordinary. `race` returns the first result, so pair the read with a deadline that resolves to the same type:
+
+```noeta
+use std.{os, task}
+
+async fn deadline(ms: int): ?string {
+    task.sleep(ms).await
+    return none
+}
+
+async fn first_line(p: Process, ms: int): ?string {
+    return task.race([p.read_line_async(), deadline(ms)])
+}
+```
+
+Both reads share one cursor per stream, so an awaited read and a blocking one interleave on the same position — `p.read_async(3).await` then `p.read(5)` continues where the first stopped.
+
+A child's stdout and stderr are drained continuously in the background, so a chatty child never deadlocks on a full pipe while you supervise it, and `p.wait()` still returns the *whole* captured output regardless of how much was streamed.
 
 ## Determinism
 
