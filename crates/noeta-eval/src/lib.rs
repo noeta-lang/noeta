@@ -780,6 +780,14 @@ impl Closure {
             name,
         }
     }
+
+    /// How many leading [`Self::params`] are **type-argument slots** rather than value parameters
+    /// (poly-values F2b) — the eval twin of the VM's `Chunk::hidden`, read straight off the lowered
+    /// `Func` so the two backends cannot disagree about the layout. Zero for every ordinary
+    /// callable.
+    fn hidden(&self) -> usize {
+        self.body.hidden as usize
+    }
 }
 
 thread_local! {
@@ -2842,38 +2850,60 @@ impl Interpreter {
     /// Call a method whose arguments may skip a defaulted parameter, per the mask lowering carried
     /// on the call. Only a user method or associated function can be masked; the built-in and
     /// native paths declare no defaults, so a mask never reaches them.
+    ///
+    /// `type_args` is the method's own type-argument channel (poly-values F2b / Axis A) — the
+    /// atoms filling a forwarding generic method's leading hidden slots, empty for every other
+    /// call. A call carrying either channel must reach the user-method path, because only that
+    /// path can honour them; the built-in and native receivers below neither declare hidden slots
+    /// nor defaults, so `&[]`/`None` is what they see.
+    #[allow(clippy::too_many_arguments)]
     fn call_method_masked(
         &mut self,
         receiver: Value,
         name: &str,
         args: Vec<Value>,
         span: Span,
+        type_args: &[Value],
         supplied: Option<u64>,
     ) -> Eval<Value> {
-        if supplied.is_some() {
+        if supplied.is_some() || !type_args.is_empty() {
             if let Value::Object(object) = &receiver
                 && let Some(method) = object.def.methods.get(name)
             {
                 let (object, method) = (Rc::clone(object), Rc::clone(method));
-                return self.call_method_on_masked(&object, &method, args, span, supplied);
+                return self
+                    .call_method_on_masked(&object, &method, args, span, type_args, supplied);
             }
             if let Value::Type(def) = &receiver
                 && let Some(method) = def.methods.get(name)
             {
-                return self.call_closure_masked(&Rc::clone(method), args, span, supplied);
+                return self.call_closure_masked(
+                    &Rc::clone(method),
+                    args,
+                    span,
+                    type_args,
+                    supplied,
+                );
             }
             if let Value::EnumType(def) = &receiver
                 && def.variant(name).is_none()
                 && let Some(method) = def.method(name)
             {
-                return self.call_closure_masked(&Rc::clone(method), args, span, supplied);
+                return self.call_closure_masked(
+                    &Rc::clone(method),
+                    args,
+                    span,
+                    type_args,
+                    supplied,
+                );
             }
             if let Value::Enum(e) = &receiver
                 && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
                 && let Some(method) = def.method(name)
             {
                 let method = Rc::clone(method);
-                return self.call_enum_method_masked(receiver, &method, args, span, supplied);
+                return self
+                    .call_enum_method_masked(receiver, &method, args, span, type_args, supplied);
             }
         }
         self.call_method(receiver, name, args, span)
@@ -3354,15 +3384,16 @@ impl Interpreter {
         positional: Vec<Value>,
         named: Option<Vec<(String, Value)>>,
     ) -> Result<(Vec<Value>, Option<u64>), String> {
+        // Arity is reckoned over the callee's VALUE parameters — a forwarding generic's leading
+        // hidden slots are not part of the surface signature the reflection artifact describes, so
+        // counting them here would report an arity the source never wrote. `invoke` supplies no
+        // type argument at all; that is the call's own business, and it aborts (see
+        // [`Self::check_type_arity`]) rather than misbinding.
+        let total = closure.params.len() - closure.hidden();
         let Some(named) = named else {
-            let required = required_count(&closure.defaults);
-            if positional.len() < required || positional.len() > closure.params.len() {
-                return Err(arity_message(
-                    kind,
-                    required,
-                    closure.params.len(),
-                    positional.len(),
-                ));
+            let required = required_count(&closure.defaults) - closure.hidden();
+            if positional.len() < required || positional.len() > total {
+                return Err(arity_message(kind, required, total, positional.len()));
             }
             return Ok((positional, None));
         };
@@ -3370,7 +3401,7 @@ impl Interpreter {
         let plan = noeta_ast::reflect::plan_invoke_named(
             target,
             self.reflection.params_for(target),
-            closure.params.len(),
+            total,
             &names,
         )?;
         let args = plan.order.iter().map(|&i| named[i].1.clone()).collect();
@@ -3439,7 +3470,7 @@ impl Interpreter {
                     Ok(bound) => bound,
                     Err(message) => return Ok(invoke_err(message)),
                 };
-            let result = self.call_closure_masked(&closure, args, span, supplied)?;
+            let result = self.call_closure_masked(&closure, args, span, &[], supplied)?;
             return Ok(builtin_enum("Result", "Ok", vec![result]));
         };
         // A reflection `Type` value (e.g. a stored attribute type-ref) dispatches like the type
@@ -3476,7 +3507,7 @@ impl Interpreter {
                     Ok(bound) => bound,
                     Err(message) => return Ok(invoke_err(message)),
                 };
-                let result = self.call_closure_masked(&closure, args, span, supplied)?;
+                let result = self.call_closure_masked(&closure, args, span, &[], supplied)?;
                 Ok(builtin_enum("Result", "Ok", vec![result]))
             }
             // A value → an instance method (the instance's fields are in scope).
@@ -3495,8 +3526,14 @@ impl Interpreter {
                         Ok(bound) => bound,
                         Err(message) => return Ok(invoke_err(message)),
                     };
-                let result =
-                    self.call_method_on_masked(&object, &method_closure, args, span, supplied)?;
+                let result = self.call_method_on_masked(
+                    &object,
+                    &method_closure,
+                    args,
+                    span,
+                    &[],
+                    supplied,
+                )?;
                 Ok(builtin_enum("Result", "Ok", vec![result]))
             }
             _ => Ok(invoke_err(format!(
@@ -4433,17 +4470,20 @@ impl Interpreter {
     /// supplied-mask the checker recorded and lowering carried. Only a user closure can be masked
     /// — nothing else has defaulted parameters — so every other callee ignores it, and a mask
     /// reaching one is a lowering bug rather than a user error.
+    /// `type_args` is the call's own type-argument channel — the atoms filling a forwarding
+    /// generic's leading hidden slots (poly-values F2b), empty for every other call.
     fn call_masked(
         &mut self,
         callee: Value,
         args: Vec<Value>,
         span: Span,
+        type_args: &[Value],
         supplied: Option<u64>,
     ) -> Eval<Value> {
-        match (&callee, supplied) {
-            (Value::Function(closure), Some(_)) => {
+        match &callee {
+            Value::Function(closure) if supplied.is_some() || !type_args.is_empty() => {
                 let closure = Rc::clone(closure);
-                self.call_closure_masked(&closure, args, span, supplied)
+                self.call_closure_masked(&closure, args, span, type_args, supplied)
             }
             _ => self.call(callee, args, span),
         }
@@ -4528,22 +4568,32 @@ impl Interpreter {
     /// parameter it was bound to at check time (its own position without a mask, the `i`-th
     /// supplied parameter with one), and every parameter the call did not fill takes its default,
     /// evaluated in the callee's captured (definition/global) scope — never seeing the call's other
-    /// arguments. `supplied` is indexed over the callee's DECLARED parameters; a receiver, where
-    /// there is one, binds as `self` and takes no parameter slot.
+    /// arguments. `supplied` is indexed over the callee's declared VALUE parameters; a receiver,
+    /// where there is one, binds as `self` and takes no parameter slot.
+    ///
+    /// A forwarding generic's leading type-argument slots are laid down first, from `type_args`,
+    /// and every position after them shifts by that count — which is exactly why `supplied` is
+    /// unaffected by forwarding: it indexes the value parameters, and those keep their positions
+    /// relative to each other. [`Self::check_type_arity`] has already established the count.
     fn bind_call_scope(
         &mut self,
         callee: &Rc<Closure>,
         args: Vec<Value>,
+        type_args: &[Value],
         supplied: Option<u64>,
         call_scope: &Scope,
     ) -> Eval<()> {
+        let hidden = callee.hidden();
+        for (i, ty) in type_args.iter().enumerate() {
+            call_scope.declare(callee.params[i].clone(), ty.clone(), false);
+        }
         let n_args = args.len();
         for (i, arg) in args.into_iter().enumerate() {
-            let p = noeta_bytecode::param_of_arg(i, supplied);
+            let p = hidden + noeta_bytecode::param_of_arg(i, supplied);
             call_scope.declare(callee.params[p].clone(), arg, false);
         }
-        for i in 0..callee.params.len() {
-            if noeta_bytecode::is_param_filled(i, n_args, supplied) {
+        for i in hidden..callee.params.len() {
+            if noeta_bytecode::is_param_filled(i - hidden, n_args, supplied) {
                 continue;
             }
             let value = self.eval_default(callee, i)?;
@@ -4552,8 +4602,29 @@ impl Interpreter {
         Ok(())
     }
 
+    /// The guard on the type-argument channel: a call must supply exactly the leading hidden slots
+    /// its callee declares. A checked call by name always does; the entry points that cannot —
+    /// a `dyn` receiver, a handle, `invoke`, a first-class value — supply none, and binding
+    /// positionally anyway would lay a *value* argument into a type-argument slot and read it as an
+    /// index into the type table. So this aborts instead, naming the callee.
+    fn check_type_arity(&mut self, callee: &Closure, supplied: usize, span: Span) -> Eval<()> {
+        let hidden = callee.hidden();
+        if supplied == hidden {
+            return Ok(());
+        }
+        Err(self.runtime_error(
+            DiagnosticCode::InvalidTypeArguments,
+            span,
+            noeta_ast::reflect::no_instantiation_message(
+                callee.name.as_deref().unwrap_or("<anonymous>"),
+                hidden,
+                supplied,
+            ),
+        ))
+    }
+
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
-        self.call_closure_masked(closure, args, span, None)
+        self.call_closure_masked(closure, args, span, &[], None)
     }
 
     fn call_closure_masked(
@@ -4561,14 +4632,18 @@ impl Interpreter {
         closure: &Rc<Closure>,
         args: Vec<Value>,
         span: Span,
+        type_args: &[Value],
         supplied: Option<u64>,
     ) -> Eval<Value> {
-        let required = required_count(&closure.defaults);
-        if args.len() < required || args.len() > closure.params.len() {
+        self.check_type_arity(closure, type_args.len(), span)?;
+        let hidden = closure.hidden();
+        let total = closure.params.len() - hidden;
+        let required = required_count(&closure.defaults) - hidden;
+        if args.len() < required || args.len() > total {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                arity_message("function", required, closure.params.len(), args.len()),
+                arity_message("function", required, total, args.len()),
             ));
         }
         // Safepoint-GC poll at the call boundary (memory-management 6.x) — with the loop
@@ -4578,7 +4653,7 @@ impl Interpreter {
             Some(allow) => Scope::sealed_child(&closure.captured, allow),
             None => Scope::child(&closure.captured),
         };
-        self.bind_call_scope(closure, args, supplied, &call_scope)?;
+        self.bind_call_scope(closure, args, type_args, supplied, &call_scope)?;
         // Shadow the call for the abort traceback: (callee name, call-site span). Popped on every
         // exit — an abort's trace is snapshotted deeper, at the diagnostic (see `record_abort_trace`).
         self.call_sites.push((closure.name.clone(), span));
@@ -4598,23 +4673,28 @@ impl Interpreter {
         args: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
-        self.call_method_on_masked(object, method, args, span, None)
+        self.call_method_on_masked(object, method, args, span, &[], None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn call_method_on_masked(
         &mut self,
         object: &Rc<ObjectValue>,
         method: &Rc<Closure>,
         args: Vec<Value>,
         span: Span,
+        type_args: &[Value],
         supplied: Option<u64>,
     ) -> Eval<Value> {
-        let required = required_count(&method.defaults);
-        if args.len() < required || args.len() > method.params.len() {
+        self.check_type_arity(method, type_args.len(), span)?;
+        let hidden = method.hidden();
+        let total = method.params.len() - hidden;
+        let required = required_count(&method.defaults) - hidden;
+        if args.len() < required || args.len() > total {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                arity_message("method", required, method.params.len(), args.len()),
+                arity_message("method", required, total, args.len()),
             ));
         }
         // Safepoint-GC poll at the call boundary — see `call_closure`.
@@ -4629,7 +4709,7 @@ impl Interpreter {
         // — is observed by a later bare read. A bare *write* `n = v` therefore declares a local (the
         // name is not in scope); mutating a field is the explicit `self.f = v`.
         call_scope.declare("self".to_string(), Value::Object(Rc::clone(object)), false);
-        self.bind_call_scope(method, args, supplied, &call_scope)?;
+        self.bind_call_scope(method, args, type_args, supplied, &call_scope)?;
         // Shadowed for the abort traceback, exactly as `call_closure` (popped on every exit).
         self.call_sites.push((method.name.clone(), span));
         let saved = std::mem::replace(&mut self.scope, call_scope);
@@ -4650,23 +4730,28 @@ impl Interpreter {
         args: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
-        self.call_enum_method_masked(receiver, method, args, span, None)
+        self.call_enum_method_masked(receiver, method, args, span, &[], None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn call_enum_method_masked(
         &mut self,
         receiver: Value,
         method: &Rc<Closure>,
         args: Vec<Value>,
         span: Span,
+        type_args: &[Value],
         supplied: Option<u64>,
     ) -> Eval<Value> {
-        let required = required_count(&method.defaults);
-        if args.len() < required || args.len() > method.params.len() {
+        self.check_type_arity(method, type_args.len(), span)?;
+        let hidden = method.hidden();
+        let total = method.params.len() - hidden;
+        let required = required_count(&method.defaults) - hidden;
+        if args.len() < required || args.len() > total {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                arity_message("method", required, method.params.len(), args.len()),
+                arity_message("method", required, total, args.len()),
             ));
         }
         let call_scope = match &method.body.captures {
@@ -4674,7 +4759,7 @@ impl Interpreter {
             None => Scope::child(&method.captured),
         };
         call_scope.declare("self".to_string(), receiver, false);
-        self.bind_call_scope(method, args, supplied, &call_scope)?;
+        self.bind_call_scope(method, args, type_args, supplied, &call_scope)?;
         // Shadowed for the abort traceback, exactly as `call_closure` (popped on every exit).
         self.call_sites.push((method.name.clone(), span));
         let saved = std::mem::replace(&mut self.scope, call_scope);

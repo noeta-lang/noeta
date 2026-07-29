@@ -218,6 +218,13 @@ impl Type {
             | Type::IntN { .. }
             | Type::Bool
             | Type::String
+            // The bottom type is spelled `never` at the surface (`BuiltinTy::Never`), so its
+            // name-key is that same word — what `Display` already writes, and what
+            // `TypeRef::head_name` folds for the surface spelling. No instantiation can be
+            // `never`, so this arm is unreachable through the forwarding table; it is here
+            // because the match is exhaustive on purpose, which is what turned the semantic
+            // merge conflict that produced it into a compile error rather than a silent wrong
+            // answer.
             | Type::Never
             | Type::Bytes
             | Type::Dyn

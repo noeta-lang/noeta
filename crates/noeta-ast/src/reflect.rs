@@ -1661,6 +1661,26 @@ pub fn missing_type_arg_message(type_name: &str, param: &str) -> String {
     )
 }
 
+/// The runtime abort message for a call that reaches a **forwarding generic** without supplying
+/// its type arguments — shared by both backends so the two cannot word it differently.
+///
+/// A forwarding generic (poly-values F2b) declares leading type-argument slots, and a checked call
+/// by name always fills them from the call node's own type-argument channel. The entry points that
+/// cannot are the ones with no static callee type for the checker to resolve against: a `dyn`
+/// receiver, a method/bound handle, `invoke`, or a first-class value of the function. Those bind
+/// arguments positionally, so proceeding would lay a *value* argument into a type-argument slot and
+/// read it as a type-table index — a silently wrong answer.
+///
+/// So this aborts instead, exactly as `missing_type_arg_message` does on the receiver channel: the
+/// instantiation is unknowable at this call, and the fix belongs at the call site that lost it.
+pub fn no_instantiation_message(callee: &str, declared: usize, supplied: usize) -> String {
+    // The callee is named exactly as it traces — `Type.method` for a method — rather than
+    // shortened: which `load` this is, is the first thing you need to know.
+    format!(
+        "`{callee}` forwards {declared} type argument(s), but no instantiation reaches here \u{2014} this call supplies {supplied} (a `dyn` receiver, a handle, `invoke`, or a first-class value carries none); call it by name at a concrete instantiation, so the call site can record one"
+    )
+}
+
 impl TypeRepr {
     /// This type's **head name**, the string `type_name::<T>()` yields — the counterpart of
     /// [`crate::TypeRef::head_name`] on the runtime side, so a name read off a value's reflected tag

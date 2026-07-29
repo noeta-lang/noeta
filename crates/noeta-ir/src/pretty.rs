@@ -265,18 +265,38 @@ impl Printer<'_> {
                 bits,
                 ..
             } => format!("{}.{method:?}({}) w{bits}", atom(receiver), atoms(args)),
-            Rvalue::Call { callee, args, .. } => format!("call {}({})", atom(callee), atoms(args)),
+            // A forwarding call's type arguments render as a turbofish, and are absent — so the
+            // dump and its golden are unchanged — for every call that forwards nothing.
+            Rvalue::Call {
+                callee,
+                args,
+                type_args,
+                ..
+            } => format!(
+                "call {}{}({})",
+                atom(callee),
+                turbofish(type_args),
+                atoms(args)
+            ),
             Rvalue::Method {
                 receiver,
                 name,
                 args,
+                type_args,
                 reuse,
                 ..
             } => {
                 // The reuse token renders only when set (the rare collection method self-update), so
                 // every other method dump — and its golden — is unchanged.
                 let marker = if *reuse { " reuse" } else { "" };
-                format!("{}.{}({}){}", atom(receiver), name, atoms(args), marker)
+                format!(
+                    "{}.{}{}({}){}",
+                    atom(receiver),
+                    name,
+                    turbofish(type_args),
+                    atoms(args),
+                    marker
+                )
             }
             Rvalue::TraitMethod {
                 receiver,
@@ -469,6 +489,15 @@ fn dst_prefix(dst: &Option<crate::Temp>) -> String {
 
 fn atoms(atoms: &[Atom]) -> String {
     atoms.iter().map(atom).collect::<Vec<_>>().join(", ")
+}
+
+/// A call's TYPE arguments, rendered as a turbofish — and rendered as nothing at all for the
+/// overwhelming majority of calls, which forward none, so existing dumps are byte-identical.
+fn turbofish(type_args: &[Atom]) -> String {
+    if type_args.is_empty() {
+        return String::new();
+    }
+    format!("::<{}>", atoms(type_args))
 }
 
 fn atom(atom: &Atom) -> String {

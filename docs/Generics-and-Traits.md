@@ -52,7 +52,7 @@ p = b.paired::<string>("hi")        // Pair<int, string> — T from b, U from th
 
 All three instantiation paths a free function has apply, consistent with them: **argument inference** (`b.choose(99, true)` infers `U = int`), the **member turbofish** `recv.m::<U>(args)` (the class's parameter never appears among these — only the method's own, arity-checked E0058), and **expected-type seeding** (`xs: List<int> = b.collect()` seeds a return-only `U` from the annotation). Bounds on a method parameter ride the ordinary trait machinery (`fn bigger<U: Comparable>(...)`; a non-`Comparable` argument is E0025). The parameters are erased like every generic — one compiled method serves every instantiation.
 
-Two boundaries hold statically. A generic method's own parameter does **not** forward into a call-site-typed position (`json.try_parse::<U>` inside a method body is E0058 — forwarding stays a top-level-generic-fn capability). And a **trait's** required-method set stays monomorphic — a per-method `<U>` on a trait method is E0058, since the trait is dispatched dynamically and each `impl` would have to agree on the parameter; put the generic method on a concrete type, or make the whole trait generic (`trait T<U> { ... }`).
+A method's own parameter **forwards** into a call-site-typed position exactly as a free function's does — `json.try_parse::<U>` inside a method body is fine (see [Forwarding `T`](#forwarding-t) for the one thing to know about it). One boundary still holds statically: a **trait's** required-method set stays monomorphic — a per-method `<U>` on a trait method is E0058, since the trait is dispatched dynamically and each `impl` would have to agree on the parameter; put the generic method on a concrete type, or make the whole trait generic (`trait T<U> { ... }`).
 
 ## Forwarding `T`
 
@@ -73,7 +73,39 @@ order = load::<Order>("{\"id\": 1}")
 user  = load::<User>("{\"name\": \"Ada\"}")   // same body, per-instantiation decode
 ```
 
-Forwarding works from a **top-level generic function** and from a **nested `fn`** inside one, and a **composite** parameter forwards too (`List<T>`, `Box<T>` in a `::<...>` position), not just the bare `T`. The boundaries, all reported statically: a **generic method's** own parameter does not forward into a call-site-typed position (E0058); an instantiation the call site cannot pin must be spelled with a turbofish (E0023); and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure.
+Forwarding works from a **top-level generic function**, from a **nested `fn`** inside one, and from a **generic method** — its own `<T>`, not the class's. A **composite** parameter forwards too (`List<T>`, `Box<T>` in a `::<...>` position), not just the bare `T`.
+
+The boundaries. An instantiation the call site cannot pin must be spelled with a turbofish (E0023), and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure. A generic **type**'s parameter does not forward from a method body (E0058): it reaches the body through the receiver's type tag, which records the instantiation's *name* but no build recipe, so take the type as the method's own parameter instead.
+
+The last one is a **runtime** boundary, and the only one that is. A forwarding method must be called by a name the checker can resolve a receiver type for, because that is what pins the instantiation. The four dynamic ways into a method — a `dyn` receiver, a bound handle (`v.m`), an unbound handle (`T.m`), and `invoke(v, "m", args)` — carry none, so a forwarding method reached through one of them **aborts** naming the callee rather than guessing. It is the same judgment `type_name::<T>()` makes on a value built at no known instantiation: a plausible-looking wrong type would travel silently, and the fix belongs at the call site that lost it.
+
+```noeta error
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+class Loader {
+    pub label: string
+
+    fn new(label: string): Loader {
+        return Loader { label: label }
+    }
+
+    fn load<T>(text: string): Result<T, JsonError> {
+        echo self.label
+        return json.try_parse::<T>(text)
+    }
+}
+
+l = Loader.new("orders")
+o = l.load::<Order>("{\"id\": 1}")     // fine — the receiver's type resolves `Loader.load`
+
+d: dyn = l
+d.load("{\"id\": 1}")                 // aborts: no instantiation reaches here
+```
 
 ### Asking what `T` is called
 
@@ -109,7 +141,9 @@ echo field_count::<Order>()
 
 The E0058 diagnostic points at exactly this route wherever it is open. See [Reflection over a type parameter](Attributes-and-Reflection#reflection-over-a-type-parameter).
 
-`type_name::<T>()` stays E0058 where **neither** instantiation channel reaches the site: a generic **method's own** `<U>` — the receiver's type tag carries the class's arguments, never the method's, and method dispatch has no hidden slot — and a self-less member of a generic type, whose parameter rides a receiver it does not have. A *composite* turbofish is unaffected either way: `type_name::<List<T>>()` heads at `List` whatever `T` is, so it stays the compile-time constant it always was.
+The two channels are separate and both reach a method body, so a method's own `<U>` and its class's `<K>` can be asked about in the same expression: `U` resolves through the slot the call supplied, `K` off the receiver's type tag. Where a name shadows, the method's own wins — ordinary scoping.
+
+What stays E0058 is a site **no** channel reaches: a self-less member of a generic type, whose parameter rides a receiver it does not have. A *composite* turbofish is unaffected either way: `type_name::<List<T>>()` heads at `List` whatever `T` is, so it stays the compile-time constant it always was.
 
 ## Generic functions as values
 

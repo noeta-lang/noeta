@@ -161,7 +161,7 @@ fn count_of<T>(): int {
 echo count_of::<Todo>()      // 1 — the real schema, per instantiation
 ```
 
-The `E0058` help says exactly this wherever that route is open. Where it is not — a generic **method's own** `<U>`, which no channel reaches — the older advice stands: reflect where the type is concrete and pass the result in, taking a `List<FieldSpec>` (or a `string`) as a parameter and letting the caller supply it.
+The `E0058` help says exactly this wherever that route is open. Where it is not — a generic **type**'s parameter inside a method, which reaches the body as a name but not as a recipe — the older advice stands: reflect where the type is concrete and pass the result in, taking a `List<FieldSpec>` (or a `string`) as a parameter and letting the caller supply it. A generic **method's own** `<U>` forwards like a function's, so it needs none of that.
 
 Two reflection turbofishes take a forwarded type parameter directly, both riding the hidden type-argument slot a generic call already carries: `attributes_of::<T>()`, which reads the slot's name to key the manifest, and `type_name::<T>()`, which *is* that name. The rest key on a compile-time constant by design.
 

@@ -1536,7 +1536,7 @@ impl Checker {
                             |t| matches!(t, Type::Named(p, a) if p == name && a.is_empty()),
                         )
                 {
-                    self.sites.dynamic_type_name_sites.insert(*span, idx as u32);
+                    self.sites.forwarded_slot_sites.insert(*span, idx as u32);
                     return Type::String;
                 }
                 if !self.reject_erased_type_param(ty, "type_name") {
@@ -1566,16 +1566,23 @@ impl Checker {
                         .position(|t| t == &target)
                     {
                         Some(idx) => {
-                            self.sites.dynamic_attr_sites.insert(*span, idx as u32);
+                            self.sites.forwarded_slot_sites.insert(*span, idx as u32);
                         }
                         None => {
                             self.error(
                                 DiagnosticCode::InvalidTypeArguments,
                                 *span,
                                 format!(
-                                    "cannot forward `{p}` here: call-site-typed forwarding is \
-                                     supported in top-level generic functions only"
+                                    "cannot forward `{p}` here: call-site-typed forwarding \
+                                     carries a generic `fn`'s or method's OWN type parameters, \
+                                     and `{p}` is not one of this body's"
                                 ),
+                            )
+                            .help(
+                                "an enclosing generic TYPE's parameter reaches a method through \
+                                 the receiver, which records the instantiation's name but no \
+                                 build recipe — take the type as the method's own parameter \
+                                 instead",
                             );
                         }
                     }
@@ -1897,16 +1904,23 @@ impl Checker {
                         .position(|s| s == &t)
                     {
                         Some(idx) => {
-                            self.sites.dynamic_recipe_sites.insert(*span, idx as u32);
+                            self.sites.forwarded_slot_sites.insert(*span, idx as u32);
                         }
                         None => {
                             self.error(
                                 DiagnosticCode::InvalidTypeArguments,
                                 *span,
                                 format!(
-                                    "cannot forward `{t}` here: call-site-typed forwarding is \
-                                     supported in top-level generic functions only"
+                                    "cannot forward `{t}` here: call-site-typed forwarding \
+                                     carries a generic `fn`'s or method's OWN type parameters, \
+                                     and `{t}` is not one of this body's"
                                 ),
+                            )
+                            .help(
+                                "an enclosing generic TYPE's parameter reaches a method through \
+                                 the receiver, which records the instantiation's name but no \
+                                 build recipe — take the type as the method's own parameter \
+                                 instead",
                             );
                         }
                     }
