@@ -545,3 +545,263 @@ fn reactive_flush_spans_are_absent_without_the_flag() {
         "no reactive spans without NOETA_TRACE_REACTIVE: {spans:?}"
     );
 }
+
+// ----- the active-span annotators -----------------------------------------------------------
+//
+// `tracing.set_attribute`/`add_event`/`record_error` apply the `Span` mutations to the span the
+// program is already INSIDE. Their `bool` return (did a live active span receive it) is ordinary
+// program output and is pinned by the conformance corpus (`tests/conformance/tracing/active_span_*`);
+// WHICH span received each annotation is only visible here, against the recorder.
+
+/// Whether `span` carries an event named `name`.
+fn has_event(span: &SpanData, name: &str) -> bool {
+    span.events.iter().any(|e| e.name == name)
+}
+
+/// The headline: annotations inside a `with_span` body land on THAT span — no child span is created
+/// to carry them. Before this surface the only way to record "a thing happened here" from inside a
+/// body was a short child span, which is a span where an annotation belongs.
+#[test]
+fn active_annotations_land_on_the_enclosing_span() {
+    let spans = emitted_spans(
+        "use std.{tracing}\n\
+         body = fn(): void {\n\
+         \x20   tracing.set_attribute(\"guardrail.verdict\", \"allow\")\n\
+         \x20   tracing.add_event(\"guardrail.checked\")\n\
+         \x20   tracing.record_error(\"policy violation\")\n\
+         }\n\
+         tracing.with_span(\"run\", body)\n",
+    );
+
+    assert_eq!(
+        names_of(&spans),
+        vec!["run"],
+        "exactly one span — the annotations did NOT mint a child"
+    );
+    let run = span_named(&spans, "run");
+    assert_eq!(
+        attr(run, "guardrail.verdict"),
+        Some(&AttrValue::Str("allow".into())),
+        "the attribute reached the enclosing span"
+    );
+    assert!(has_event(run, "guardrail.checked"), "the event reached it");
+    assert_eq!(
+        run.status,
+        SpanStatus::Error("policy violation".into()),
+        "record_error set the enclosing span's status"
+    );
+}
+
+/// Nesting: the active span is always the INNERMOST one, and the outer span becomes active again
+/// after the inner body returns (the pop restores it) — so a later annotation lands on the outer
+/// span and not on the already-ended inner one.
+#[test]
+fn active_annotations_target_the_innermost_span() {
+    let spans = emitted_spans(
+        "use std.{tracing}\n\
+         inner_body = fn(): void {\n\
+         \x20   tracing.set_attribute(\"depth\", 2)\n\
+         \x20   tracing.add_event(\"inner.step\")\n\
+         }\n\
+         outer_body = fn(): void {\n\
+         \x20   tracing.set_attribute(\"depth\", 1)\n\
+         \x20   tracing.with_span(\"inner\", inner_body)\n\
+         \x20   tracing.add_event(\"outer.after\")\n\
+         }\n\
+         tracing.with_span(\"outer\", outer_body)\n",
+    );
+
+    let inner = span_named(&spans, "inner");
+    let outer = span_named(&spans, "outer");
+    assert_eq!(attr(inner, "depth"), Some(&AttrValue::Int(2)));
+    assert_eq!(
+        attr(outer, "depth"),
+        Some(&AttrValue::Int(1)),
+        "the inner body's attribute did not overwrite the outer span's"
+    );
+    assert!(has_event(inner, "inner.step"));
+    assert!(!has_event(inner, "outer.after"));
+    assert!(
+        has_event(outer, "outer.after"),
+        "after the inner body returns, the OUTER span is active again"
+    );
+    assert!(!has_event(outer, "inner.step"));
+    assert_eq!(
+        inner.parent.map(|c| c.span_id),
+        Some(outer.context.span_id),
+        "still ordinary nesting"
+    );
+}
+
+/// The case the consumer actually wanted: a request handler runs under the auto-instrumented SERVER
+/// span, and an annotation from inside the handler reaches THAT span — no handle exists for it, and
+/// before this surface the only way to record a per-request fact was a child span per fact.
+#[test]
+fn handler_annotates_the_server_span_itself() {
+    let spans = emitted_spans(
+        "use std.http.server\n\
+         use std.http.{Request, Response}\n\
+         use std.{tracing}\n\
+         fn fetch(req: Request): Response {\n\
+         \x20   tracing.set_attribute(\"guardrail.verdict\", \"allow\")\n\
+         \x20   tracing.add_event(\"guardrail.checked\")\n\
+         \x20   return server.response(200, \"ok\")\n\
+         }\n\
+         server.serve(8080, fetch)\n",
+    );
+
+    let servers: Vec<_> = spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Server)
+        .collect();
+    assert_eq!(servers.len(), scripted());
+    // The whole point: the annotations rode the SERVER spans, and NO extra span was minted for
+    // them. One span per request, richer — not one span per request plus one per annotation.
+    assert_eq!(
+        spans.len(),
+        scripted(),
+        "no child spans were created to carry the annotations: {:?}",
+        names_of(&spans)
+    );
+    for server in &servers {
+        assert_eq!(
+            attr(server, "guardrail.verdict"),
+            Some(&AttrValue::Str("allow".into())),
+            "the handler annotated its own request's SERVER span"
+        );
+        assert!(has_event(server, "guardrail.checked"));
+        // The auto-instrumented attributes are untouched — the handler added to the span, it did
+        // not replace what `http.serve` records.
+        assert!(attr(server, "url.path").is_some());
+        assert_eq!(
+            attr(server, "http.response.status_code"),
+            Some(&AttrValue::Int(200)),
+            "http.serve still ended the span itself — the handler cannot end it"
+        );
+    }
+}
+
+/// `record_error` from a handler marks the request's SERVER span failed without holding its handle
+/// — and `http.serve` still ends the span (a `200` answer is not overridden into a 5xx; the status
+/// the handler recorded is what a collector shows).
+#[test]
+fn handler_records_an_error_on_the_server_span() {
+    let spans = emitted_spans(
+        "use std.http.server\n\
+         use std.http.{Request, Response}\n\
+         use std.{tracing}\n\
+         fn fetch(req: Request): Response {\n\
+         \x20   tracing.record_error(\"guardrail denied\")\n\
+         \x20   return server.response(200, \"ok\")\n\
+         }\n\
+         server.serve(8080, fetch)\n",
+    );
+    for server in spans.iter().filter(|s| s.kind == SpanKind::Server) {
+        assert_eq!(
+            server.status,
+            SpanStatus::Error("guardrail denied".into()),
+            "the handler's error status survived to the recorded span"
+        );
+        assert!(server.end_unix_ms.is_some(), "http.serve still ended it");
+    }
+}
+
+/// No active span: the annotations reach nothing and emit nothing — no span is invented to hold a
+/// top-level annotation. (That the program can SEE this is the `false` return, pinned by
+/// `tests/conformance/tracing/active_span_annotate.noe`.)
+#[test]
+fn top_level_annotations_emit_no_span() {
+    let spans = emitted_spans(
+        "use std.{tracing}\n\
+         tracing.set_attribute(\"k\", 1)\n\
+         tracing.add_event(\"e\")\n\
+         tracing.record_error(\"boom\")\n",
+    );
+    assert!(
+        spans.is_empty(),
+        "nothing to annotate, and nothing invented: {:?}",
+        names_of(&spans)
+    );
+}
+
+/// Task-locality, measured on the recorder rather than only through the `bool`: a task spawned at
+/// TOP LEVEL parks at a sleep while a sibling task holds a live span across its resume. The
+/// orphan's annotations must land nowhere — not on the sibling's span, which a global active-span
+/// stack would have handed it.
+#[test]
+fn a_spawned_tasks_annotations_do_not_reach_a_siblings_live_span() {
+    let spans = emitted_spans(
+        "use std.{tracing}\n\
+         use std.task.{sleep}\n\
+         async fn orphan(): bool {\n\
+         \x20   sleep(3).await\n\
+         \x20   return tracing.add_event(\"orphan.after\")\n\
+         }\n\
+         async fn holder_body(): bool {\n\
+         \x20   sleep(5).await\n\
+         \x20   return tracing.add_event(\"holder.own\")\n\
+         }\n\
+         async fn holder(): bool {\n\
+         \x20   return tracing.with_span(\"holder\", holder_body).await\n\
+         }\n\
+         async fn race(): bool {\n\
+         \x20   mut a = false\n\
+         \x20   mut b = false\n\
+         \x20   concurrent {\n\
+         \x20       ho = spawn orphan()\n\
+         \x20       hh = spawn holder()\n\
+         \x20       a = ho.await\n\
+         \x20       b = hh.await\n\
+         \x20   }\n\
+         \x20   return a || b\n\
+         }\n\
+         echo race().await\n",
+    );
+
+    let holder = span_named(&spans, "holder");
+    // The sibling's span WAS live and reachable from its own strand — without this the test would
+    // pass vacuously (nothing live to leak from).
+    assert!(
+        has_event(holder, "holder.own"),
+        "the holder annotated its own span"
+    );
+    assert!(
+        !has_event(holder, "orphan.after"),
+        "the orphan's annotation did not leak onto the sibling's live span"
+    );
+    assert!(
+        spans.iter().all(|s| !has_event(s, "orphan.after")),
+        "the orphan had no active span at all, so its event reached nothing"
+    );
+}
+
+/// The inverse leg: a task spawned INSIDE a `with_span` body inherits that span's context, so its
+/// annotation reaches the spawner's span — inheritance is a snapshot, not isolation.
+#[test]
+fn a_task_spawned_inside_a_span_annotates_that_span() {
+    let spans = emitted_spans(
+        "use std.{tracing}\n\
+         async fn child(): bool {\n\
+         \x20   return tracing.add_event(\"child.step\")\n\
+         }\n\
+         async fn parent_body(): bool {\n\
+         \x20   mut r = false\n\
+         \x20   concurrent {\n\
+         \x20       h = spawn child()\n\
+         \x20       r = h.await\n\
+         \x20   }\n\
+         \x20   return r\n\
+         }\n\
+         echo tracing.with_span(\"parent\", parent_body).await\n",
+    );
+    let parent = span_named(&spans, "parent");
+    assert!(
+        has_event(parent, "child.step"),
+        "the spawned task annotated the span it inherited"
+    );
+    assert_eq!(
+        names_of(&spans),
+        vec!["parent"],
+        "and did not mint a child span to do it"
+    );
+}
