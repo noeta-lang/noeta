@@ -345,6 +345,92 @@ fn a_dependency_declared_tier_dispatches_cross_package() {
         .stdout(predicate::str::is_empty());
 }
 
+/// A **tier-name collision**: two path dependencies each declare a runner-bearing `@tier(fuzz)`. The
+/// app depends on both and disambiguates in `[tiers]` — `fuzz = "depa"` keeps one under its own name,
+/// `crit = "depb:fuzz"` **renames** the other to a local `@crit`. This is the case rename exists for,
+/// and the residual the generic `noeta <localname>` dispatch used to miss: the runner is registered
+/// under what the provider exported (`fuzz` on `depb`), so a lookup keyed on the literal local name
+/// (`crit`) found nothing. Dispatch must resolve the local name to its tier *identity* first.
+fn tier_collision_project(name: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let depa = base.join("depa");
+    let depb = base.join("depb");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(&depa).expect("mk depa");
+    std::fs::create_dir_all(&depb).expect("mk depb");
+    // Each dependency ships the *same* tier name `fuzz` with a distinctly-named runner that prints
+    // its own package, then runs each root — so the output alone proves which runner fired.
+    let dep = |dir: &PathBuf, pkg: &str, ns: &str, runner: &str, label: &str| {
+        std::fs::write(
+            dir.join("noeta.toml"),
+            format!("[package]\nname = \"{pkg}\"\nversion = \"1.0.0\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("tiers.noe"),
+            format!(
+                "namespace {ns}.tiers;\n\
+                 @tier(fuzz)\n\
+                 pub fn {runner}(roots: List<TierRoot>): void {{\n\
+                     echo \"{label}: ${{roots.len()}} roots\"\n\
+                     for root in roots {{ run = root.run; run() }}\n\
+                 }}\n"
+            ),
+        )
+        .unwrap();
+    };
+    // The namespace root matches the package-name root (`depa`/`depb`), which is also the dependency
+    // import-root key, so `use depa.tiers.run_a` resolves through the loader's re-rooting.
+    dep(&depa, "acme/depa", "depa", "run_a", "depa fuzz");
+    dep(&depb, "acme/depb", "depb", "run_b", "depb fuzz");
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ndepa = { path = \"../depa\" }\ndepb = { path = \"../depb\" }\n\
+         [tiers]\nfuzz = \"depa\"\ncrit = \"depb:fuzz\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use depa.tiers.run_a\n\
+         use depb.tiers.run_b\n\
+         @fuzz {\n    fn a_case(): void { echo \"  a_case ran\" }\n}\n\
+         @crit {\n    fn b_case(): void { echo \"  b_case ran\" }\n}\n",
+    )
+    .unwrap();
+    app.join("main.noe")
+}
+
+#[test]
+fn a_renamed_collision_tier_dispatches_by_identity() {
+    // The renamed-local-name generic dispatch: `noeta fuzz` runs depa's runner (bound by its own
+    // name), and `noeta crit` runs depb's — the local name `crit` resolving through `[tiers]` to
+    // depb's exported `fuzz`, not a literal `find_tier_runner("crit")` that would miss. The other
+    // package's block strips each time (its identity is not active), so exactly one runner fires.
+    let entry = tier_collision_project("tier_collision");
+    lang().arg("fuzz").arg(&entry).assert().success().stdout(
+        predicate::str::contains("depa fuzz: 1 roots")
+            .and(predicate::str::contains("  a_case ran"))
+            .and(predicate::str::contains("depb fuzz").not())
+            .and(predicate::str::contains("  b_case ran").not()),
+    );
+    lang().arg("crit").arg(&entry).assert().success().stdout(
+        predicate::str::contains("depb fuzz: 1 roots")
+            .and(predicate::str::contains("  b_case ran"))
+            .and(predicate::str::contains("depa fuzz").not())
+            .and(predicate::str::contains("  a_case ran").not()),
+    );
+    // Both tier blocks strip on a normal run — the program prints nothing.
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
 /// A consumer app + a `speckit` path dependency declaring a **text** tier (text-tiers arc). The
 /// consumer writes `@spec { <xml/> }` bodies with no local declaration at all — the loader's
 /// program-wide lex (union of every package's `@tier(…, text:)` decls) is what makes the body
