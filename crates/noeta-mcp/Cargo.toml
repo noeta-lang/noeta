@@ -63,6 +63,9 @@ include_dir = { workspace = true }
 # features are test-only (dev-dep feature unification is scoped to this crate's own test build).
 rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
 serde_json = { workspace = true }
+# The on-disk project fixtures (sibling discovery, a path dependency) get a per-process temp root,
+# so two test processes never share — and delete — one project directory.
+noeta-test-temp = { workspace = true }
 
 [lints]
 workspace = true

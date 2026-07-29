@@ -43,3 +43,7 @@ workspace = true
 [dev-dependencies]
 # The alloc-profile test registers the counting allocator (the noeta binary does the same).
 noeta-alloc-probe = { workspace = true }
+# Every profiled program is written into its own per-process fixture directory (the loader treats the
+# containing directory as the module directory), so two test processes never share — or truncate —
+# one program file.
+noeta-test-temp = { workspace = true }
