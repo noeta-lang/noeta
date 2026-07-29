@@ -558,12 +558,7 @@ pub fn workspace_with_deps(
             ));
         }
     }
-    Workspace::new(
-        db,
-        members,
-        dep_inputs,
-        WorkspaceUses(package_uses.clone()),
-    )
+    Workspace::new(db, members, dep_inputs, WorkspaceUses(package_uses.clone()))
 }
 
 /// Reclaim the resident content of a [`SourceProgram`] whose file was **deleted** from a workspace
@@ -1653,7 +1648,10 @@ mod tests {
         let entry_src = ws.members(&db)[0];
         let toks = tokens_in(&db, ws, entry_src);
         assert!(
-            toks.0.tokens.iter().any(|t| t.kind == noeta_lexer::TokenKind::DocText),
+            toks.0
+                .tokens
+                .iter()
+                .any(|t| t.kind == noeta_lexer::TokenKind::DocText),
             "the renamed tier's body must be captured as one verbatim DocText token, got {:?}",
             toks.0.tokens.iter().map(|t| t.kind).collect::<Vec<_>>()
         );
