@@ -1323,6 +1323,70 @@ pub fn plan_variant_payload_order(
         .collect()
 }
 
+/// Validate one supplied value against the field it will fill — the single type check both
+/// [`plan_construct`] and [`plan_construct_named`] run, so the positional and named forms of
+/// `construct` cannot accept different things.
+///
+/// Two field kinds are enforced, and the boundary is what the declaration actually pins down:
+///
+/// * a **concrete scalar** field (`int`/`float`/`bool`/`string`/`bytes`, widths erased) must get a
+///   value of that scalar kind;
+/// * a **nominal** field (a declared struct, class or enum) must get a value of that same nominal.
+///   This was the hole: only the scalar half was checked, so `construct("Outer", {"inner": {"a": 2}})`
+///   stored a raw `Map` in a `Inner`-typed field, answered `Ok`, survived `.as<Outer>()` — where
+///   `type_of` on the field then reported the *declared* type, actively misdescribing the value — and
+///   aborted at the first field read with `no field `b` on map`, several layers from its cause.
+///
+/// Everything else passes: a `dyn`, a `dyn Trait` (a distinct repr, so an implementor is never
+/// rejected), an `Option`/collection, a bare type parameter. The callee's own typing is the backstop
+/// there, mirroring how `invoke` treats an unconstrained parameter.
+///
+/// Names are compared **kind-agnostically**: a declared field type reaches reflection as
+/// `TypeRepr::Named("Inner", …)` while a value classifies as `TypeRepr::Struct("Inner", …)`, and both
+/// are qualified consistently under a `namespace`. Generic arguments are deliberately not compared —
+/// they are erased on some runtime paths, and the head name is what makes the difference between a
+/// real instance and a map wearing its slot.
+fn check_field_value(
+    type_name: &str,
+    spec: &FieldSpecData<'_>,
+    repr: &TypeRepr,
+) -> Result<(), String> {
+    if let Some(expected) = enforced_scalar(spec.ty) {
+        let got = value_repr_name(repr);
+        if got != expected {
+            return Err(format!(
+                "field `{}` of `{type_name}` expects {expected}, got {got}",
+                spec.name
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(expected) = nominal_name(spec.ty)
+        && nominal_name(repr) != Some(expected)
+    {
+        return Err(format!(
+            "field `{}` of `{type_name}` expects {expected}, got {}",
+            spec.name,
+            value_repr_name(repr)
+        ));
+    }
+    Ok(())
+}
+
+/// The head **name** of a nominal type repr — a declared struct/class/enum, or the kind-agnostic
+/// `Named` a declaration site produces — and `None` for everything else (scalars, collections,
+/// `Option`, `dyn`, `dyn Trait`, a function type). The one place the two spellings of "a declared
+/// type" are collapsed, so a declaration's repr and a value's repr are comparable.
+fn nominal_name(ty: &TypeRepr) -> Option<&str> {
+    match ty {
+        TypeRepr::Named(n, _)
+        | TypeRepr::Struct(n, _)
+        | TypeRepr::Class(n, _)
+        | TypeRepr::Enum(n, _) => Some(n),
+        _ => None,
+    }
+}
+
 /// Plan a dynamic struct construction: validate a positional value list (in declaration order)
 /// against a type's field `specs`, given each supplied value's runtime head-repr `value_reprs` (which
 /// both backends compute with their own `type_of` classifier — the differential guarantees they
@@ -1331,7 +1395,8 @@ pub fn plan_variant_payload_order(
 /// struct-literal construction path — leaving every omitted-but-defaulted field for that path to
 /// fill from its default thunk. Errors (returned as a ready-to-surface message, no leading `error:`):
 ///   * more values than fields;
-///   * a value whose runtime scalar kind disagrees with a concrete-scalar field type;
+///   * a value whose runtime scalar kind disagrees with a concrete-scalar field type, or whose
+///     nominal head disagrees with a declared struct/class/enum field type;
 ///   * a missing field that declared no default.
 ///
 /// Because a missing field is rejected here unless it is optional, the construction path this feeds
@@ -1351,15 +1416,7 @@ pub fn plan_construct<'a>(
     let mut fill: Vec<&str> = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
         if i < value_reprs.len() {
-            if let Some(expected) = enforced_scalar(spec.ty) {
-                let got = value_repr_name(&value_reprs[i]);
-                if got != expected {
-                    return Err(format!(
-                        "field `{}` of `{type_name}` expects {expected}, got {got}",
-                        spec.name
-                    ));
-                }
-            }
+            check_field_value(type_name, spec, &value_reprs[i])?;
             fill.push(spec.name);
         } else if !spec.optional {
             return Err(format!(
@@ -1378,7 +1435,8 @@ pub fn plan_construct<'a>(
 /// positional form there is no gap problem: a field is supplied or it is not, so a middle field can
 /// be omitted while a later one is supplied. Errors (ready-to-surface messages):
 ///   * a provided name that is not a field of the type;
-///   * a provided value whose runtime scalar kind disagrees with a concrete-scalar field type;
+///   * a provided value whose runtime scalar kind disagrees with a concrete-scalar field type, or
+///     whose nominal head disagrees with a declared struct/class/enum field type;
 ///   * a field that is neither provided nor defaulted.
 ///
 /// On success the caller builds the object from the provided `(name, value)` pairs; the construction
@@ -1392,14 +1450,7 @@ pub fn plan_construct_named(
         let Some(spec) = specs.iter().find(|s| s.name == name) else {
             return Err(format!("`{type_name}` has no field `{name}`"));
         };
-        if let Some(expected) = enforced_scalar(spec.ty) {
-            let got = value_repr_name(repr);
-            if got != expected {
-                return Err(format!(
-                    "field `{name}` of `{type_name}` expects {expected}, got {got}"
-                ));
-            }
-        }
+        check_field_value(type_name, spec, repr)?;
     }
     for spec in specs {
         let supplied = provided.iter().any(|(n, _)| n == spec.name);
