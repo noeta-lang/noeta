@@ -13,10 +13,19 @@ version = "0.1.0"
 # http = { version = "^1.2", package = "acme/http" }
 # geometry = { path = "../geometry" }
 
-# Build targets are named recipes deciding which dev tiers (`@test`, `@bench`, `@doc`,
-# `@debug`) are live. The baseline — any command with no `--target` — ships **no** tiers:
-# it is already the minimal, production shape. `development` layers the std-provided
-# tiers back in:
+# The dev tiers this package uses. There are no ambient built-ins: `test`/`bench`/`doc`/
+# `debug` are ordinary tiers the standard library provides, so you name the ones you use
+# here (`local = "provider[:exported]"`). The provider is `"std"` or a `[dependencies]` key;
+# rename to avoid a collision between two providers' same-named tiers (`crit = "criterion:bench"`).
+[tiers]
+test = "std"
+bench = "std"
+doc = "std"
+debug = "std"
+
+# Build targets are named recipes deciding which of those tiers are *live*. The baseline —
+# any command with no `--target` — ships **no** tiers: it is already the minimal, production
+# shape. `development` switches the std tiers on (a live-set of the `[tiers]` names above):
 #
 #   noeta run src/main.noe --target development    # @debug blocks execute
 #   noeta check . --target development             # checks inside every tier block
@@ -24,10 +33,10 @@ version = "0.1.0"
 # (`noeta test`/`bench`/`doc` always activate their own tier; under `--target` they run
 # only if that target makes their tier live.)
 [targets.development.tiers]
-test = "std"
-bench = "std"
-doc = "std"
-debug = "std"
+test = true
+bench = true
+doc = true
+debug = true
 
 # An explicit name for the baseline: no tiers live. Handy as a stable label for CI and
 # release builds — `noeta build src/main.noe --target production`.

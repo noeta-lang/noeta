@@ -8,21 +8,34 @@
 //! default. The table shape leaves room for a target to absorb the rest of the recipe later
 //! (platform/artifact keys — the resolution of "target" the platform word, by subsumption).
 //!
+//! Two axes, kept apart. **Which provider** declares each tier a package uses is a per-package name
+//! table, `[tiers]` — the tier counterpart of `[directives]` (`local = "provider[:exported]"`, the
+//! provider being `"std"` or a `[dependencies]` key). **Which of those are live** in a given build is
+//! the target's `[targets.<t>.tiers]` — an activation live-set of the package's own local tier names:
+//!
 //! ```toml
-//! [targets.dev.tiers]
-//! test  = "std"                 # provider = the built-in stdlib tier
-//! bench = { package = "std" }   # table form (room for target-level options later)
+//! [tiers]
+//! test  = "std"                 # the std-declared `test` tier, named `@test` locally
 //! debug = "std"
+//! bench = "std"
+//! fuzz  = "fuzzkit"             # a dependency's `@tier`, named `@fuzz` locally
+//! crit  = "criterion:bench"     # …renamed, so it does not collide with std's `bench`
+//!
+//! [targets.dev.tiers]
+//! test  = true                  # live in `dev`
+//! debug = true
 //!
 //! [targets.ci]
-//! extends = "dev"               # inherit dev's tiers…
+//! extends = "dev"               # inherit dev's live set…
 //! [targets.ci.tiers]
-//! debug = "std"                 # …and override / add
+//! debug = false                 # …turn one off, and
+//! bench = true                  # …turn one on
 //! ```
 //!
-//! A tier's provider is the built-in `"std"` or a declared `[dependencies]` key (P2.6) — an
-//! undeclared name is an error. A target's *active tiers* are the tier names in its
-//! (inheritance-merged) map.
+//! There are no ambient built-in tiers: `test`/`bench`/`doc`/`debug` are ordinary `std`
+//! [`ExtTier`](noeta_ext_abi::registry::ExtTier) declarations a package names in `[tiers]` like any
+//! other provider's. A target's *active tiers* are the local names its (inheritance-merged) live-set
+//! marks `true`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -53,6 +66,16 @@ pub struct Manifest {
     /// it exported. Per-package (see [`UseBinding`]); resolution of a `@name` is scoped to the package
     /// that wrote it. Authorization to run the provider's native code stays root-only (`[trust].native`).
     directives: BTreeMap<String, UseBinding>,
+    /// The `[tiers]` table: the dev-tiers this package's own source writes as `@name { … }`, each a
+    /// local `@name` → the provider that declares it and the name it exported. The provider is one of
+    /// **this package's** `[dependencies]` keys or the built-in `"std"` (which declares `test`/`bench`/
+    /// `doc`/`debug` as ordinary [`ExtTier`](noeta_ext_abi::registry::ExtTier)s — there are no ambient
+    /// built-in tiers; a package names the std tiers it uses here, like any other provider). Per-package
+    /// (see [`UseBinding`]) so two packages can name the same provider's tier differently, or rename to
+    /// avoid a collision between two providers' same-named tiers. Which of these are *live* in a build is
+    /// a separate axis: `[targets.<t>.tiers]` (a live-set of these local names). Authorization to run a
+    /// provider's native tier runner stays root-only (`[trust].native`); this table only names.
+    tiers: BTreeMap<String, UseBinding>,
     targets: BTreeMap<String, Target>,
     trust: Trust,
     registries: Registries,
@@ -532,8 +555,11 @@ pub enum Dependency {
 struct Target {
     /// The base target this one inherits tiers and dependencies from (`extends = "dev"`), if any.
     extends: Option<String>,
-    /// This target's own tier → provider entries (overlaid on the base's during resolution).
-    tiers: BTreeMap<String, String>,
+    /// This target's own tier **activation** entries — a local `[tiers]` name → live (`true`) or
+    /// explicitly off (`false`, to turn off a tier an `extends` base left on). Overlaid on the base's
+    /// during resolution; the provider each name resolves to lives in the package's `[tiers]` table,
+    /// not here (that separation is the point — activation is a live-set, not a provider map).
+    tiers: BTreeMap<String, bool>,
     /// This target's own **target-scoped dependencies** — packages present only when building this
     /// target (dev-deps arc). Overlaid on the base's (via `extends`) and on the global
     /// `[dependencies]` during resolution. A dev tool a package ships lives here under `dev`, so it
@@ -1009,9 +1035,9 @@ pub fn resolve_fmt_config_lenient(file: &Path) -> FmtConfig {
 }
 
 impl Manifest {
-    /// Parse a `noeta.toml`'s text into a [`Manifest`], validating every tier name (a built-in tier)
-    /// and provider (only `"std"` for now). Unknown keys outside `[targets]` and unknown
-    /// target-level keys are ignored, leaving room for later codegen knobs.
+    /// Parse a `noeta.toml`'s text into a [`Manifest`], validating the shape of the `[tiers]`/
+    /// `[directives]` provider bindings and the `[targets.*.tiers]` activation live-set. Unknown keys
+    /// outside `[targets]` and unknown target-level keys are ignored, leaving room for later knobs.
     pub fn parse(text: &str) -> Result<Manifest, PmError> {
         Self::parse_inner(text).map_err(PmError::Manifest)
     }
@@ -1023,7 +1049,24 @@ impl Manifest {
         let table: toml::Table = text.parse().map_err(|err| format!("{err}"))?;
         let package = parse_package(&table)?;
         let dependencies = parse_dependencies(&table)?;
-        let directives = parse_use_bindings(&table, "directives", &dependencies, false)?;
+        let global_dep_keys: std::collections::BTreeSet<String> =
+            dependencies.keys().cloned().collect();
+        let directives = parse_use_bindings(&table, "directives", &global_dep_keys, false)?;
+        // `[tiers]` permits the built-in `"std"` provider (it declares `test`/`bench`/`doc`/`debug`);
+        // a directive always comes from a dependency, so `[directives]` does not. A tier's provider may
+        // also be a **target-scoped** dependency (a dev-only tier), so validate against the union of
+        // the global and every target's dependency keys.
+        let mut tier_provider_keys = global_dep_keys.clone();
+        tier_provider_keys.extend(target_scoped_dep_keys(&table)?);
+        let tiers = parse_use_bindings(&table, "tiers", &tier_provider_keys, true)?;
+        // A `@name` is one namespace per package: source cannot tell a directive apart from a tier
+        // until resolution, so a local name may not name both a `[directives]` and a `[tiers]` entry.
+        if let Some(dup) = directives.keys().find(|k| tiers.contains_key(*k)) {
+            return Err(format!(
+                "`{dup}` is declared in both `[directives]` and `[tiers]` — a local `@{dup}` names \
+                 one provider; rename one (`local = \"provider:{dup}\"`)"
+            ));
+        }
         let trust = parse_trust(&table)?;
         let registries = parse_registries(&table)?;
         let db = parse_db(&table)?;
@@ -1035,6 +1078,7 @@ impl Manifest {
                 package,
                 dependencies,
                 directives,
+                tiers,
                 targets,
                 trust,
                 registries,
@@ -1072,37 +1116,32 @@ impl Manifest {
 
             let mut tiers = BTreeMap::new();
             if let Some(tiers_value) = target_table.get("tiers") {
-                let tiers_table = tiers_value
-                    .as_table()
-                    .ok_or_else(|| format!("target `{name}`: `tiers` must be a table"))?;
-                for (tier, provider_value) in tiers_table {
-                    // The tier name-space is open (tier-providers T3): a name may be a built-in
-                    // tier or one a dependency declares with `@tier`. The manifest cannot see the
-                    // dependency's source, so it validates only the *shape* here — an identifier —
-                    // and resolution happens where the tier is used (activation validates the name
-                    // against the linked program's registry, E0036).
+                let tiers_table = tiers_value.as_table().ok_or_else(|| {
+                    format!(
+                        "target `{name}`: `tiers` must be a table of `local = true` activation flags \
+                         (the provider each tier resolves to lives in the top-level `[tiers]` table)"
+                    )
+                })?;
+                for (tier, active_value) in tiers_table {
+                    // `[targets.*.tiers]` is a live-set: it names local tier names (from the
+                    // package's own `[tiers]`) and switches each on/off for this build. It carries
+                    // no provider — that separation is the point (a provider-string here was the old
+                    // shape). The manifest validates only the name shape and the boolean; whether the
+                    // name resolves to a live provider is checked where the tier is used (E0036).
                     if !is_identifier(tier) {
                         return Err(format!(
                             "target `{name}`: tier `{tier}` is not a valid tier name (an identifier)"
                         ));
                     }
-                    let provider = provider_of(name, tier, provider_value)?;
-                    // A tier's provider is the built-in stdlib (`"std"`) or a **declared
-                    // dependency** — named by its `[dependencies]` key, the same import root used
-                    // elsewhere (package-manager P2.6). An undeclared name is an error pointing the
-                    // user to add the dependency.
-                    if provider != BUILTIN_PROVIDER
-                        && !dependencies.contains_key(&provider)
-                        && !target_deps.contains_key(&provider)
-                    {
-                        return Err(format!(
-                            "target `{name}`: tier `{tier}` names provider `{provider}`, which is \
-                             neither the built-in `\"{BUILTIN_PROVIDER}\"` nor a declared \
-                             dependency — add `{provider}` to `[dependencies]` or \
-                             `[targets.{name}.dependencies]` to provide this tier"
-                        ));
-                    }
-                    tiers.insert(tier.clone(), provider);
+                    let active = active_value.as_bool().ok_or_else(|| {
+                        format!(
+                            "target `{name}`: tier `{tier}` must be `true` or `false` — \
+                             `[targets.{name}.tiers]` activates local tier names, it no longer names \
+                             a provider (move the provider to the top-level `[tiers]` table: \
+                             `{tier} = \"…\"`)"
+                        )
+                    })?;
+                    tiers.insert(tier.clone(), active);
                 }
             }
 
@@ -1120,6 +1159,7 @@ impl Manifest {
             package,
             dependencies,
             directives,
+            tiers,
             targets,
             trust,
             registries,
@@ -1159,29 +1199,55 @@ impl Manifest {
         &self.directives
     }
 
+    /// The `[tiers]` table — the dev-tiers this package's source writes as `@name { … }`, each local
+    /// `@name` → the provider (`"std"` or a dependency import-root key) that declares it and its
+    /// exported name. Separate from `[targets.*.tiers]`, which selects which of these are *live*.
+    pub fn tiers(&self) -> &BTreeMap<String, UseBinding> {
+        &self.tiers
+    }
+
     /// The `[patch]` overrides (dev-time path override): package identity → the local tree that
     /// replaces it. Honored by the resolver **only when this is the root app's manifest**.
     pub fn patch(&self) -> &BTreeMap<String, PathBuf> {
         &self.patch
     }
 
-    /// The active tier names for `target`, merging inherited tiers (`extends`) under this target's
-    /// own (which win), returned sorted. Errors on an unknown target or an `extends` cycle.
+    /// The active tier (local) names for `target`, merging the inherited live-set (`extends`) under
+    /// this target's own (a nearer `false` turns an inherited tier off), returned sorted. Errors on an
+    /// unknown target or an `extends` cycle.
     pub fn active_tiers(&self, target: &str) -> Result<Vec<String>, PmError> {
         let mut chain = Vec::new();
         let merged = self
             .resolve(target, &mut chain)
             .map_err(PmError::Manifest)?;
-        Ok(merged.into_keys().collect())
+        Ok(merged
+            .into_iter()
+            .filter_map(|(tier, active)| active.then_some(tier))
+            .collect())
     }
 
-    /// The active tier → **provider** map for `target` (package-manager P2.6): each live tier mapped
-    /// to the package providing it — the built-in `"std"` or a declared dependency's import-root key.
+    /// The active tier → **provider** map for `target`: each live tier (a local name from the
+    /// activation live-set) mapped to the provider its `[tiers]` entry names — the built-in `"std"` or
+    /// a declared dependency's import-root key. This joins the two axes (the target's live-set and the
+    /// package's `[tiers]` table) for this *root* package's own tiers; a dependency's tiers resolve
+    /// through its own `[tiers]` (the per-package [`noeta_span::PackageUses`] the graph builds). An
+    /// active tier this package's `[tiers]` never mapped is an error pointing the user to add it.
+    ///
     /// The tier-execution layer dispatches on this: `"std"` runs the built-in native runner, a
     /// dependency key runs that package's `@tier` runner (`resolve_active_tier_providers`).
     pub fn active_tier_providers(&self, target: &str) -> Result<BTreeMap<String, String>, PmError> {
-        let mut chain = Vec::new();
-        self.resolve(target, &mut chain).map_err(PmError::Manifest)
+        let active = self.active_tiers(target)?;
+        let mut providers = BTreeMap::new();
+        for tier in active {
+            let binding = self.tiers.get(&tier).ok_or_else(|| {
+                PmError::Manifest(format!(
+                    "target `{target}` activates tier `{tier}`, but no `[tiers]` entry maps it to a \
+                     provider — add `{tier} = \"std\"` (or a dependency key) to `[tiers]`"
+                ))
+            })?;
+            providers.insert(tier, binding.provider_key.clone());
+        }
+        Ok(providers)
     }
 
     /// Resolve a target's effective tier map by walking its `extends` chain base-first, overlaying
@@ -1243,7 +1309,7 @@ impl Manifest {
         &self,
         name: &str,
         chain: &mut Vec<String>,
-    ) -> Result<BTreeMap<String, String>, String> {
+    ) -> Result<BTreeMap<String, bool>, String> {
         if chain.iter().any(|p| p == name) {
             chain.push(name.to_string());
             return Err(format!("target inheritance cycle: {}", chain.join(" -> ")));
@@ -1260,8 +1326,8 @@ impl Manifest {
         };
         chain.pop();
 
-        for (tier, provider) in &target.tiers {
-            merged.insert(tier.clone(), provider.clone());
+        for (tier, active) in &target.tiers {
+            merged.insert(tier.clone(), *active);
         }
         Ok(merged)
     }
@@ -1667,13 +1733,42 @@ fn parse_binding_table(
 
 /// Parse a per-package `[directives]` / `[tiers]` table (`local = "dep-key[:exported]"`) into a
 /// local-name → [`UseBinding`] map. The provider is named by one of **this package's** dependency
-/// import-root keys (`dependencies`), so a `@name` resolves in the same context a `use <key>.…`
+/// import-root keys (`valid_providers`), so a `@name` resolves in the same context a `use <key>.…`
 /// does. `allow_builtin` permits the built-in `"std"` provider (for `[tiers]`, whose `test`/`debug`/…
 /// come from the stdlib); `[directives]` passes `false` — a directive always comes from a dependency.
+///
+/// `valid_providers` is the set of legal provider keys: the global `[dependencies]` for `[directives]`,
+/// and those *plus every target-scoped dependency key* for `[tiers]` (a dev-only tier provider is
+/// declared under `[targets.<t>.dependencies]`, and the package-level `[tiers]` table must still be
+/// able to name it).
+/// Every dependency key declared under any `[targets.<t>.dependencies]` (dev-deps arc) — the extra
+/// provider keys a package-level `[tiers]` table may name beyond the global `[dependencies]`. Read
+/// straight off the raw TOML (the targets are not parsed into [`Target`]s until later), tolerating a
+/// malformed `[targets]`/target/`dependencies` shape here (the targets loop reports it precisely).
+fn target_scoped_dep_keys(
+    table: &toml::Table,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut keys = std::collections::BTreeSet::new();
+    let Some(targets) = table.get("targets").and_then(|v| v.as_table()) else {
+        return Ok(keys);
+    };
+    for target in targets.values() {
+        let Some(deps) = target
+            .as_table()
+            .and_then(|t| t.get("dependencies"))
+            .and_then(|d| d.as_table())
+        else {
+            continue;
+        };
+        keys.extend(deps.keys().cloned());
+    }
+    Ok(keys)
+}
+
 fn parse_use_bindings(
     table: &toml::Table,
     field: &str,
-    dependencies: &BTreeMap<String, Dependency>,
+    valid_providers: &std::collections::BTreeSet<String>,
     allow_builtin: bool,
 ) -> Result<BTreeMap<String, UseBinding>, String> {
     let Some(value) = table.get(field) else {
@@ -1705,7 +1800,7 @@ fn parse_use_bindings(
             ));
         }
         let is_builtin = allow_builtin && provider_key == BUILTIN_PROVIDER;
-        if !is_builtin && !dependencies.contains_key(provider_key) {
+        if !is_builtin && !valid_providers.contains(provider_key) {
             let std_hint = if allow_builtin {
                 format!(" (or the built-in `\"{BUILTIN_PROVIDER}\"`)")
             } else {
@@ -2007,27 +2102,6 @@ fn is_identifier(s: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// The provider package for a tier entry: a bare string (`test = "std"`) or a table whose `package`
-/// key carries it (`bench = { package = "std", samples = 100 }`); other table keys are target-level
-/// options, ignored for now.
-fn provider_of(target: &str, tier: &str, value: &toml::Value) -> Result<String, String> {
-    if let Some(s) = value.as_str() {
-        return Ok(s.to_string());
-    }
-    if let Some(table) = value.as_table() {
-        let package = table
-            .get("package")
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| {
-                format!("target `{target}`: tier `{tier}` table must have a string `package`")
-            })?;
-        return Ok(package.to_string());
-    }
-    Err(format!(
-        "target `{target}`: tier `{tier}` must be a provider string or a `{{ package = … }}` table"
-    ))
 }
 
 #[cfg(test)]
@@ -2669,7 +2743,7 @@ mod tests {
 
     #[test]
     fn a_bare_script_has_no_package() {
-        let m = Manifest::parse("[targets.dev.tiers]\ntest = \"std\"\n").expect("valid");
+        let m = Manifest::parse("[targets.dev.tiers]\ntest = true\n").expect("valid");
         assert!(m.package().is_none());
         assert!(m.dependencies().is_empty());
     }
@@ -2799,8 +2873,10 @@ mod tests {
              version = \"0.1.0\"\n\
              [dependencies]\n\
              http = { git = \"https://x/guzzle/http\", tag = \"v1.0.0\" }\n\
+             [tiers]\n\
+             test = \"std\"\n\
              [targets.dev.tiers]\n\
-             test = \"std\"\n",
+             test = true\n",
         )
         .expect("valid");
         assert_eq!(m.package().unwrap().name.company, "acme");
@@ -2812,33 +2888,45 @@ mod tests {
     fn parses_and_resolves_a_simple_target() {
         let m = Manifest::parse(
             "[targets.dev.tiers]\n\
-             test = \"std\"\n\
-             debug = \"std\"\n",
+             test = true\n\
+             debug = true\n",
         )
         .expect("valid manifest");
         assert_eq!(m.active_tiers("dev").unwrap(), vec!["debug", "test"]);
     }
 
     #[test]
-    fn table_provider_form_is_accepted() {
+    fn an_inactive_tier_is_dropped_from_the_live_set() {
+        // `false` is a live-set entry that turns a tier off — it lets a derived target (`extends`)
+        // switch an inherited tier off without redeclaring the base.
         let m = Manifest::parse(
             "[targets.dev.tiers]\n\
-             bench = { package = \"std\", samples = 100 }\n",
+             test = true\n\
+             bench = false\n",
         )
         .expect("valid manifest");
-        assert_eq!(m.active_tiers("dev").unwrap(), vec!["bench"]);
+        assert_eq!(m.active_tiers("dev").unwrap(), vec!["test"]);
+    }
+
+    #[test]
+    fn a_provider_string_in_a_target_live_set_is_rejected() {
+        // The old shape (`[targets.*.tiers]` naming a provider) is gone: the live-set takes booleans,
+        // and the error points at the top-level `[tiers]` table where providers now live.
+        let err = Manifest::parse("[targets.dev.tiers]\ntest = \"std\"\n").unwrap_err();
+        assert!(err.message().contains("must be `true` or `false`"), "{err}");
+        assert!(err.message().contains("[tiers]"), "{err}");
     }
 
     #[test]
     fn extends_merges_base_then_overrides() {
         let m = Manifest::parse(
             "[targets.base.tiers]\n\
-             test = \"std\"\n\
-             doc = \"std\"\n\
+             test = true\n\
+             doc = true\n\
              [targets.ci]\n\
              extends = \"base\"\n\
              [targets.ci.tiers]\n\
-             bench = \"std\"\n",
+             bench = true\n",
         )
         .expect("valid manifest");
         // ci inherits test+doc from base and adds bench.
@@ -2849,42 +2937,102 @@ mod tests {
     }
 
     #[test]
+    fn extends_can_turn_an_inherited_tier_off() {
+        let m = Manifest::parse(
+            "[targets.base.tiers]\n\
+             test = true\n\
+             debug = true\n\
+             [targets.prod]\n\
+             extends = \"base\"\n\
+             [targets.prod.tiers]\n\
+             debug = false\n",
+        )
+        .expect("valid manifest");
+        assert_eq!(m.active_tiers("prod").unwrap(), vec!["test"]);
+    }
+
+    #[test]
     fn tier_names_are_open_but_must_be_identifiers() {
-        // The tier name-space is open (tier-providers T3): a non-builtin name is accepted — it may
-        // be a tier a dependency declares with `@tier`; whether it resolves is activation's check.
-        let m = Manifest::parse("[targets.dev.tiers]\nfuzz = \"std\"\n").expect("open name-space");
+        // The activation live-set names local tier names; only the *shape* is validated here.
+        let m = Manifest::parse("[targets.dev.tiers]\nfuzz = true\n").expect("open name-space");
         assert_eq!(m.active_tiers("dev").unwrap(), ["fuzz"]);
-        // Only the *shape* is validated here: a non-identifier key is rejected.
-        let err = Manifest::parse("[targets.dev.tiers]\n\"fu zz\" = \"std\"\n").unwrap_err();
+        let err = Manifest::parse("[targets.dev.tiers]\n\"fu zz\" = true\n").unwrap_err();
         assert!(err.message().contains("not a valid tier name"), "{err}");
     }
 
     #[test]
-    fn an_undeclared_provider_is_rejected() {
-        // A provider that is neither `std` nor a declared dependency is an error.
-        let err = Manifest::parse("[targets.dev.tiers]\nbench = \"criterion\"\n").unwrap_err();
-        assert!(err.message().contains("declared dependency"), "{err}");
+    fn an_undeclared_tier_provider_is_rejected() {
+        // A `[tiers]` provider that is neither `std` nor a declared dependency is an error.
+        let err = Manifest::parse("[tiers]\nbench = \"criterion\"\n").unwrap_err();
+        assert!(err.message().contains("[dependencies]"), "{err}");
+    }
+
+    #[test]
+    fn an_active_tier_without_a_tiers_entry_is_rejected() {
+        // Joining the two axes: activating a tier the package's `[tiers]` never mapped is an error.
+        let m = Manifest::parse("[targets.dev.tiers]\nbench = true\n").unwrap();
+        let err = m.active_tier_providers("dev").unwrap_err();
+        assert!(err.message().contains("no `[tiers]` entry"), "{err}");
     }
 
     #[test]
     fn a_declared_dependency_may_provide_a_tier() {
-        // package-manager P2.6: a resolved dependency (`bench_kit`) is a valid tier provider.
+        // package-manager P2.6: a resolved dependency (`bench_kit`) is a valid tier provider, named
+        // in `[tiers]`; the target's live-set activates the local names.
         let m = Manifest::parse(
             "[dependencies]\n\
              bench_kit = { path = \"../bench_kit\" }\n\
-             [targets.dev.tiers]\n\
+             [tiers]\n\
              bench = \"bench_kit\"\n\
-             test = \"std\"\n",
+             test = \"std\"\n\
+             [targets.dev.tiers]\n\
+             bench = true\n\
+             test = true\n",
         )
         .expect("valid");
         let providers = m.active_tier_providers("dev").unwrap();
         assert_eq!(providers["bench"], "bench_kit"); // provided by the dependency
-        assert_eq!(providers["test"], "std"); // still the built-in
+        assert_eq!(providers["test"], "std"); // the std-declared tier
+    }
+
+    #[test]
+    fn a_tier_may_be_renamed_off_its_provider() {
+        // Surface rename: a local `@crit` bound to `criterion`'s `bench`, so it does not collide
+        // with std's own `bench`.
+        let m = Manifest::parse(
+            "[dependencies]\n\
+             criterion = { path = \"../criterion\" }\n\
+             [tiers]\n\
+             bench = \"std\"\n\
+             crit = \"criterion:bench\"\n",
+        )
+        .expect("valid");
+        assert_eq!(m.tiers()["bench"].provider_key, "std");
+        assert_eq!(m.tiers()["bench"].exported, "bench");
+        assert_eq!(m.tiers()["crit"].provider_key, "criterion");
+        assert_eq!(m.tiers()["crit"].exported, "bench");
+    }
+
+    #[test]
+    fn a_local_name_cannot_be_both_a_directive_and_a_tier() {
+        let err = Manifest::parse(
+            "[dependencies]\n\
+             para = { path = \"../para\" }\n\
+             [directives]\n\
+             foo = \"para\"\n\
+             [tiers]\n\
+             foo = \"para\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.message().contains("both `[directives]` and `[tiers]`"),
+            "{err}"
+        );
     }
 
     #[test]
     fn unknown_target_is_an_error() {
-        let m = Manifest::parse("[targets.dev.tiers]\ntest = \"std\"\n").unwrap();
+        let m = Manifest::parse("[targets.dev.tiers]\ntest = true\n").unwrap();
         assert!(
             m.active_tiers("nope")
                 .unwrap_err()
@@ -3113,13 +3261,15 @@ mod tests {
 
     #[test]
     fn a_tier_provider_may_be_a_target_scoped_dependency() {
-        // `dev`'s `@lint` tier is provided by a dep declared only under `dev`.
+        // A dev-only `@lint` tier: its provider is a dep declared only under `[targets.dev]`, named
+        // in the package-level `[tiers]` table and activated in `dev`'s live-set.
         let m = Manifest::parse(
             "[targets.dev.dependencies]\nlinter = { path = \"../lint\" }\n\
-             [targets.dev.tiers]\nlint = \"linter\"\n",
+             [tiers]\nlint = \"linter\"\n\
+             [targets.dev.tiers]\nlint = true\n",
         );
         assert!(m.is_ok(), "target-scoped provider should validate: {m:?}");
         // Still rejected when the provider is declared nowhere.
-        assert!(Manifest::parse("[targets.dev.tiers]\nlint = \"ghost\"\n").is_err());
+        assert!(Manifest::parse("[tiers]\nlint = \"ghost\"\n").is_err());
     }
 }

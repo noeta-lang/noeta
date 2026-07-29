@@ -237,7 +237,8 @@ fn tier_override_project(name: &str) -> PathBuf {
         app_dir.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
          [dependencies]\nfuzzkit = { path = \"../fuzzkit\" }\n\
-         [targets.custom.tiers]\nbench = \"fuzzkit\"\n",
+         [tiers]\nbench = \"fuzzkit\"\n\
+         [targets.custom.tiers]\nbench = true\n",
     )
     .unwrap();
     std::fs::write(
@@ -285,7 +286,8 @@ fn a_provider_that_declares_no_such_tier_is_an_error() {
         app_dir.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
          [dependencies]\nfuzzkit = { path = \"../fuzzkit\" }\n\
-         [targets.custom.tiers]\nbench = \"fuzzkit\"\n",
+         [tiers]\nbench = \"fuzzkit\"\n\
+         [targets.custom.tiers]\nbench = true\n",
     )
     .unwrap();
     lang()

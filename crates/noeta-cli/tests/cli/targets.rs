@@ -25,7 +25,7 @@ fn run_target_activates_its_tiers() {
     // `--tier debug` would — but driven by `noeta.toml`.
     let file = temp_project(
         "prof_run",
-        "[targets.dev.tiers]\ndebug = \"std\"\n",
+        "[tiers]\ndebug = \"std\"\n[targets.dev.tiers]\ndebug = true\n",
         TIERED_PROGRAM,
     );
     lang()
@@ -72,7 +72,7 @@ fn test_target_gates_the_runner() {
 fn test_target_with_tier_live_runs() {
     let file = temp_project(
         "prof_test_live",
-        "[targets.dev.tiers]\ntest = \"std\"\n",
+        "[tiers]\ntest = \"std\"\n[targets.dev.tiers]\ntest = true\n",
         TIERED_PROGRAM,
     );
     lang()
@@ -89,7 +89,7 @@ fn test_target_with_tier_live_runs() {
 fn run_unknown_target_is_an_error() {
     let file = temp_project(
         "prof_unknown",
-        "[targets.dev.tiers]\ndebug = \"std\"\n",
+        "[tiers]\ndebug = \"std\"\n[targets.dev.tiers]\ndebug = true\n",
         TIERED_PROGRAM,
     );
     lang()
