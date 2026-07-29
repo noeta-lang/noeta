@@ -1,9 +1,10 @@
 // The `App.Models` module that `orders.noe` imports (`use App.Models.User`), as described in
-// docs/Modules.md. Kept to just the `name` the order flow reads, so `User { name: "..." }`
+// docs/Modules.md. Its path is not declared — `examples/` is package `App`, and the file is
+// `Models.noe`, so the module IS `App.Models`. Kept to just the `name` the order flow reads, so
+// `User { name: "..." }`
 // constructs with no other required fields. Shipping this real module — rather than leaning on the
 // old opaque-stub fallback for an undefined type — is what lets `noeta run examples/orders.noe`
 // link its sibling and resolve `User` for real.
-namespace App.Models;
 
 pub class User {
     pub name: string
