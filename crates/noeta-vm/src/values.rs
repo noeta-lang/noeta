@@ -619,6 +619,36 @@ pub(crate) fn reflection_type_name(value: Value) -> Option<String> {
     None
 }
 
+/// The **head name** of a reflection `Type` value (`type_of(x).name()`), or `None` when `value` is
+/// not one. Read from the variant tag and the leading payload string through the shared
+/// [`noeta_ast::reflect::adt_head_name`] — the one door onto `TypeRepr::head_name` — so the VM and
+/// the tree-walker cannot word a type's name differently. Total over every `Type` case: a value the
+/// program *constructed* (`Type.Struct("app.Todo", [])`) answers exactly as one `type_of` built.
+pub(crate) fn reflection_head_name(value: Value) -> Option<String> {
+    let shape = value.shape()?;
+    if shape.name != noeta_ast::reflect::TYPE_ENUM {
+        return None;
+    }
+    // The head is spelled from at most two payload slots: the leading `name: string` of a nominal /
+    // trait object, or a `Type.IntN`'s `(bits, signed)`. `bits` outside `u8` is not a width any type
+    // has, so it reads as absent rather than as a truncated one. The tree-walker's
+    // `reflection_head_payload` reads the same two slots, so the answers cannot differ.
+    let data = value.enum_data().unwrap_or_default();
+    let name = data.first().and_then(|v| v.as_string()).unwrap_or_default();
+    let int_width = match (
+        data.first().and_then(|v| v.as_int()),
+        data.get(1).and_then(|v| v.as_bool()),
+    ) {
+        (Some(bits), Some(signed)) => u8::try_from(bits).ok().map(|bits| (bits, signed)),
+        _ => None,
+    };
+    let head = noeta_ast::reflect::AdtHead {
+        name: &name,
+        int_width,
+    };
+    noeta_ast::reflect::adt_head_name(shape.variant.as_deref()?, head)
+}
+
 /// Build an enum value (`Color.Red`, `Ok(5)`, `Mode.Fast(3)`) for an attribute argument, with a
 /// fresh payload-free or payload-carrying shape. Matches the tree-walker's `builtin_enum` by
 /// structural shape equality.

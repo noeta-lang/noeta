@@ -474,6 +474,19 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
                 _ => Type::Dyn,
             })
         }
+        // The prelude `Type` enum's `.name()` accessor: the reflected type's **head name**
+        // (`type_of(todo).name()` → `"app.storage.Todo"`, `type_of([1]).name()` → `"List"`). Total
+        // over every case, which is the point — a consumer hand-rolling
+        // `match type_of(v) { Type.Class(n, _) => n, Type.Struct(n, _) => n, _ => "" }` answers the
+        // empty string for every shape its match forgot, and that name then travels into a table or
+        // a route. Keyed on the enum name like the `value()` arm below, so a program that declares
+        // its own `enum Type` (shadowing the prelude one) shares the accessor.
+        Type::Named(n, _)
+            if n == noeta_ast::reflect::TYPE_ENUM
+                && name == noeta_ast::reflect::TYPE_NAME_METHOD =>
+        {
+            Some(Type::String)
+        }
         // A native **backed** enum's `.value()` accessor (native-extensibility S1): the constraint
         // `ExtEnum.backing` states the accessor's type — a `String`-backed enum's `.value()` is
         // `string`, an `Int`-backed one's is `int`. A non-backed enum has NO `.value()` (returns
@@ -796,6 +809,14 @@ pub(super) fn method_params(
         Type::Named(n, _) if reg.find_enum_method(n, name).is_some() => {
             let sig = reg.find_enum_method(n, name)?;
             Some(sig.params.iter().map(|p| sig_to_type(reg, p)).collect())
+        }
+        // The prelude `Type` enum's `.name()` head-name accessor takes nothing — stated here so a
+        // stray argument is an arity error at check time rather than a runtime abort.
+        Type::Named(n, _)
+            if n == noeta_ast::reflect::TYPE_ENUM
+                && name == noeta_ast::reflect::TYPE_NAME_METHOD =>
+        {
+            Some(Vec::new())
         }
         _ => None,
     }

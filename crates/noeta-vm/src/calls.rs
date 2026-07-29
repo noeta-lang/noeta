@@ -312,6 +312,24 @@ impl<'m> Vm<'m> {
                 )),
             };
         }
+        // `type_of(x).name()` — the reflected type's **head name**, total over every `Type` case
+        // (`reflection_head_name` → the shared `reflect::adt_head_name`, so the two backends cannot
+        // word a name differently). Reached only after the `Op::CallMethod` enum arm failed to
+        // resolve a user method proto, so a program declaring its own `enum Type` with a `name`
+        // method keeps it — the tree-walker orders the two the same way.
+        if hk == Some(HeapKind::Enum)
+            && method == noeta_ast::reflect::TYPE_NAME_METHOD
+            && let Some(head) = crate::values::reflection_head_name(v)
+        {
+            if !args.is_empty() {
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    arity_message("method", 0, 0, args.len()),
+                ));
+            }
+            return Ok(Value::string(&head));
+        }
         // Ring 1 string methods (`upper`/`split`/`replace`/...) — dispatched through
         // the shared `noeta-stdlib` surface so the tree-walker and the VM cannot drift.
         // `Unknown` falls through to the collection methods below. `as_string` clones

@@ -3045,6 +3045,27 @@ impl Interpreter {
         {
             return self.call_native_enum_method(&receiver, name, args, span);
         }
+        // `type_of(x).name()` — the reflected type's **head name**, total over every `Type` case
+        // (`reflect::adt_head_name`, the value-side door onto the one `TypeRepr::head_name`). Read
+        // from the tag and the leading payload string, so a `Type` a program *constructed*
+        // (`Type.Struct("app.Todo", [])`) answers exactly as one `type_of` built. Reached after the
+        // `EnumDef` method table above, so a program that declares its own `enum Type` with a `name`
+        // method keeps it — the VM's twin sits below its own enum method dispatch for the same reason.
+        if let Value::Enum(e) = &receiver
+            && e.enum_name == noeta_ast::reflect::TYPE_ENUM
+            && name == noeta_ast::reflect::TYPE_NAME_METHOD
+            && let Some(head) =
+                noeta_ast::reflect::adt_head_name(&e.variant, reflection_head_payload(&e.data))
+        {
+            if !args.is_empty() {
+                return Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    arity_message("method", 0, 0, args.len()),
+                ));
+            }
+            return Ok(Value::Str(head));
+        }
         // `x.compare(y)` — the `Ordering` of two primitives. This is the value a `Comparable`
         // impl returns (typically by delegating to a field's `compare`); it lights up nothing on
         // its own, but `Comparable` dispatch reads the variant to derive `< <= > >=`.
@@ -6458,6 +6479,27 @@ fn fresh_opaque_def(name: &str, fields: &[String]) -> TypeDef {
         structural_eq: true,
         ..fresh_type_def(name, fields, false)
     }
+}
+
+/// The payload fields a reflection `Type` value's **head name** is spelled from ([`AdtHead`]), read
+/// off its variant payload: the leading `name: string` of a nominal / trait object, or the
+/// `(bits, signed)` of a `Type.IntN`. Every other case's head is its constructor, so a payload that
+/// is neither reads as the default. The VM's `reflection_head_payload` reads the same two slots, so
+/// `type_of(x).name()` cannot differ across the differential.
+fn reflection_head_payload(data: &[Value]) -> noeta_ast::reflect::AdtHead<'_> {
+    let name = match data.first() {
+        Some(Value::Str(s)) => s.as_str(),
+        _ => "",
+    };
+    // A width payload only: `bits` outside `u8` is not a width any type has, so it reads as absent
+    // rather than as a truncated one.
+    let int_width = match (data.first(), data.get(1)) {
+        (Some(Value::Int(bits)), Some(Value::Bool(signed))) => {
+            u8::try_from(*bits).ok().map(|bits| (bits, *signed))
+        }
+        _ => None,
+    };
+    noeta_ast::reflect::AdtHead { name, int_width }
 }
 
 /// If `value` is a reflection `Type` value naming a nominal type (`Type.Named`/`Struct`/`Class`/

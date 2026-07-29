@@ -118,6 +118,25 @@ The payload-free cases are spelled **bare** here: the scrutinee is a `Type`, so 
 
 `Type` variants include the scalars `Type.Int`, `Type.Float`, `Type.F32`, `Type.F64`, `Type.IntN(bits, signed)`, `Type.Bool`, `Type.String`, `Type.Bytes`, `Type.Unit`, `Type.Dyn`; the containers `Type.List(inner)`, `Type.Set(inner)`, `Type.Map(k, v)`, `Type.Option(inner)`, `Type.Result(ok, err)`; `Type.Fn(params, ret)` and `Type.Union(members)`; the trait object `Type.DynTrait(name)`; and the nominals `Type.Struct(name, args)`, `Type.Enum(name, args)`, `Type.Class(name, args)`, `Type.Named(name, args)`. Collection literals carry their resolved element type as a runtime tag that survives a `dyn` launder (a content-changing op like `.set` drops the tag to head-only).
 
+### `Type.name(): string`
+
+A reflected type answers **its own head name** — the qualified, argument-free name of the type's head:
+
+```noeta
+struct Todo { id: int }
+
+echo type_of(Todo { id: 1 }).name()       // Todo
+echo type_of([1]).name()                  // List
+echo type_of(5).name()                    // int
+echo Type.DynTrait("Greet").name()        // Greet
+```
+
+It is the value-side counterpart of `type_name::<T>()` below: the same qualified identity, read off a `Type` you are *holding* rather than off a type you can spell — so the name-keyed queries (`field_specs_of(name)`, `variants_of(name)`, `construct(name, …)`) are reachable from a walked `Type` without destructuring it.
+
+**Every case answers a non-empty name**: a nominal its declared name, a container its constructor (`List`, `Map`, `Result`), a scalar its surface spelling (`int`, `f32`, `u8`), and the forms no bare name spells their constructor (`Fn`, `Union`, `unit`, `never`, `dyn`). That totality is the point — the `match type_of(v) { Struct(n, _) => n, _ => "" }` it replaces answers the **empty string** for every case its match forgot, and that empty name then travels on as a table name, a route, or a schema key.
+
+It is a zero-argument method rather than a field because `Type` is an enum, and an enum's accessor surface is a method (`.value()` on a backed enum); it is spelled `name` to match the `name` field the other reflected descriptors carry (`FieldSpec.name`, `ParamInfo.name`, `VariantSpec.name`).
+
 ### `type_name::<T>(): string`
 
 A type's **qualified runtime identity**, as a `string` — the same name `type_of` reports inside `Type.Struct(name, args)`, and the same key the name-keyed queries (`field_specs_of(name)`, `variants_of(name)`, `construct(name, …)`, `invoke(name, …)`) are stored under. It is how you *write* that key without hand-writing it:
