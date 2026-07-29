@@ -1757,6 +1757,7 @@ mod tests {
             &[],
             &package_uses,
             noeta_lexer::Edition::DEFAULT,
+            &[],
         );
         let entry_src = ws.members(&db)[0];
         let toks = tokens_in(&db, ws, entry_src);
