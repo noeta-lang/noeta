@@ -91,7 +91,7 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 ### Modules, incremental, tooling
 | Crate | Role |
 |---|---|
-| `noeta-loader` | Multi-file module loading + linking: resolves `use` to sibling-module declarations honouring `pub`, merges into one `Program`. |
+| `noeta-loader` | Multi-file module loading + linking: walks the package, derives each module's path from where its file sits (`derive.rs`; E0072/E0073/E0074), resolves `use` to module declarations honoring `pub`, merges into one `Program`. |
 | `noeta-db` | The salsa 0.27 query graph tying the pipeline together (`Workspace`/`linked`/`checked`/`bytecode`). |
 | `noeta-cache` | Default-on bytecode cache (`~/.cache/noeta/*.noeb`, build-identity-keyed): the `compile_whole_file` seam for run/dump/build. |
 | `noeta-conformance` | The dev-only harness: `// expect:` corpus runner, `--differential` oracle, JSON output, partial runs. |
