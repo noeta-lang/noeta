@@ -316,7 +316,7 @@ pub fn load_linked(
     file: &Path,
     facts: &FrontFacts,
 ) -> Result<noeta_loader::Linked, CompileFailure> {
-    match noeta_loader::load_with_deps(file, facts.edition, &facts.deps) {
+    match noeta_loader::load_with_deps(file, facts.edition, &facts.deps, &facts.package_uses) {
         Err(err) => Err(CompileFailure::Unreadable(format!(
             "cannot read {}: {err}",
             file.display()

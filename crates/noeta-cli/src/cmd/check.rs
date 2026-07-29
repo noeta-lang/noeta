@@ -170,6 +170,7 @@ pub(crate) fn cmd_check(
             noeta_loader::read_dir_modules(dir),
             manifest::root_edition(dir_entries[0]),
             &deps,
+            &package_uses,
         );
         let sources = std::rc::Rc::new(parsed.source_map());
         // Check one entry of a parsed directory: link it against the shared pool, then
@@ -251,6 +252,7 @@ pub(crate) fn cmd_check(
                             vec![noeta_loader::RawModule { name, text }],
                             manifest::root_edition(entry),
                             &deps,
+                            &package_uses,
                         );
                         let lone_sources = std::rc::Rc::new(lone.source_map());
                         check_entry(&lone, &lone_sources, 0);

@@ -104,10 +104,10 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
         } else {
             None
         };
-        let deps = match reusable {
-            Some(graph) => graph.packages,
+        let (deps, package_uses) = match reusable {
+            Some(graph) => (graph.packages, graph.package_uses),
             None => match graph::resolve_graph(dir_entries[0]) {
-                Ok(graph) => graph.packages,
+                Ok(graph) => (graph.packages, graph.package_uses),
                 Err(err) => {
                     for entry in dir_entries {
                         eprintln!("noeta: {}: {err}", entry.display());
@@ -121,6 +121,7 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
             noeta_loader::read_dir_modules(dir),
             manifest::root_edition(dir_entries[0]),
             &deps,
+            &package_uses,
         );
         let sources = std::rc::Rc::new(parsed.source_map());
 
@@ -173,6 +174,7 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
                             vec![noeta_loader::RawModule { name, text }],
                             manifest::root_edition(entry),
                             &deps,
+                            &package_uses,
                         );
                         let lone_sources = std::rc::Rc::new(lone.source_map());
                         expand_entry(&lone, &lone_sources, 0);

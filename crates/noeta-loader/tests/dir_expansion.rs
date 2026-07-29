@@ -95,6 +95,7 @@ fn dir(modules: &[(&str, &str)]) -> ParsedDir {
             .collect(),
         noeta_lexer::Edition::default(),
         &[] as &[DepPackage],
+        &noeta_span::PackageUses::new(),
     )
 }
 

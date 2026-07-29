@@ -223,17 +223,22 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         // cross-package `use <dep-key>.…` the plain `run` path does (package-manager P2.1c) —
         // the compose probe's graph when it resolved (audit-5 F2), else resolved here so the
         // error renders on this path.
-        let deps = match resolved {
-            Some(graph) => graph.packages,
+        let (deps, package_uses) = match resolved {
+            Some(graph) => (graph.packages, graph.package_uses),
             None => match graph::resolve_graph(file) {
-                Ok(graph) => graph.packages,
+                Ok(graph) => (graph.packages, graph.package_uses),
                 Err(err) => {
                     eprintln!("noeta: {err}");
                     return 2;
                 }
             },
         };
-        let linked = match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
+        let linked = match noeta_loader::load_with_deps(
+            file,
+            manifest::root_edition(file),
+            &deps,
+            &package_uses,
+        ) {
             Err(err) => {
                 eprintln!("noeta: cannot read {}: {err}", file.display());
                 return 2;
@@ -370,17 +375,22 @@ pub(crate) fn serve_parallel_impl(
     };
     // The compose probe's graph when it resolved (audit-5 F2), else resolved here so the error
     // renders on this path.
-    let deps = match resolved {
-        Some(graph) => graph.packages,
+    let (deps, package_uses) = match resolved {
+        Some(graph) => (graph.packages, graph.package_uses),
         None => match graph::resolve_graph(file) {
-            Ok(graph) => graph.packages,
+            Ok(graph) => (graph.packages, graph.package_uses),
             Err(err) => {
                 eprintln!("noeta: {err}");
                 return 2;
             }
         },
     };
-    let linked = match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
+    let linked = match noeta_loader::load_with_deps(
+        file,
+        manifest::root_edition(file),
+        &deps,
+        &package_uses,
+    ) {
         Err(err) => {
             eprintln!("noeta: cannot read {}: {err}", file.display());
             return 2;

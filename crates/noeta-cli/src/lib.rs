@@ -1363,10 +1363,12 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     // A file that fails to load or link cannot tell us whether it declares the tier — fall
     // through (the external probe, then clap's error). Dependencies resolve first: a declared
     // tier typically lives in a dependency package (`use fuzzkit.tiers.run_fuzz`).
-    let deps = graph::resolve_graph(&file).ok()?.packages;
-    let linked = noeta_loader::load_with_deps(&file, manifest::root_edition(&file), &deps)
-        .ok()?
-        .ok()?;
+    let resolved = graph::resolve_graph(&file).ok()?;
+    let (deps, package_uses) = (resolved.packages, resolved.package_uses);
+    let linked =
+        noeta_loader::load_with_deps(&file, manifest::root_edition(&file), &deps, &package_uses)
+            .ok()?
+            .ok()?;
     let ctx = noeta_check::TierContext {
         uses: &linked.package_uses,
         packages: &linked.packages,

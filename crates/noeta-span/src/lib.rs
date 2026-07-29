@@ -350,6 +350,16 @@ impl PackageUses {
         self.by_package.get(origin)?.get(local)
     }
 
+    /// Every recorded binding as `(using package, local `@name`, resolved use)`. The order is
+    /// unspecified (a `HashMap` walk); consumers that need determinism must sort. Used by the loader
+    /// to decide, before parsing, which local `@name`s a package binds to a **text** provider tier —
+    /// the per-package text-tier lexing of the naming arc (sub-step 3g).
+    pub fn iter(&self) -> impl Iterator<Item = (&PackageOrigin, &String, &PackageUse)> {
+        self.by_package.iter().flat_map(|(origin, binds)| {
+            binds.iter().map(move |(local, use_)| (origin, local, use_))
+        })
+    }
+
     /// Whether nothing has been recorded (no package binds any `@`-name — the single-file default).
     pub fn is_empty(&self) -> bool {
         self.by_package.is_empty()

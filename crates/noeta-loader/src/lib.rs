@@ -210,11 +210,19 @@ pub fn load_with_deps(
     entry_path: &Path,
     root_edition: noeta_lexer::Edition,
     deps: &[DepPackage],
+    package_uses: &noeta_span::PackageUses,
 ) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
     let text = std::fs::read_to_string(entry_path)?;
     let name = entry_path.display().to_string();
     let siblings = read_siblings(entry_path);
-    Ok(link_with_deps(&name, &text, root_edition, &siblings, deps))
+    Ok(link_with_deps(
+        &name,
+        &text,
+        root_edition,
+        &siblings,
+        deps,
+        package_uses,
+    ))
 }
 
 /// A dependency package's sources, to be linked into the entry under the consumer's import root
@@ -442,7 +450,15 @@ pub fn link(
         editions.set(id, root_edition);
         packages.set(id, PackageOrigin::Root);
     }
-    let (lexeds, text_tiers) = lex_program(&sources, &editions);
+    // The deps-free path has no manifest and so no `[tiers]`/`[directives]` bindings — an empty
+    // `PackageUses` means [`lex_program`] contributes no per-package renamed text tiers (only a
+    // file's own `@tier(…, text)` declarations, which its per-file scan discovers regardless).
+    let (lexeds, text_tiers) = lex_program(
+        &sources,
+        &editions,
+        &packages,
+        &noeta_span::PackageUses::new(),
+    );
 
     // Entry + siblings parse under the root package's edition (deps-free: no dependency packages,
     // so no other editions are in play). `link_with_deps` is the twin that also links dependencies,
@@ -617,6 +633,7 @@ pub fn link_with_deps(
     root_edition: noeta_lexer::Edition,
     siblings: &[RawModule],
     deps: &[DepPackage],
+    package_uses: &noeta_span::PackageUses,
 ) -> Result<Linked, Vec<LoadDiagnostic>> {
     // Assemble every module's `Source` up front — entry = 0, siblings `1..=S`, dependency modules
     // continuing the sequence — then lex them as one program (see [`lex_program`]: a text tier
@@ -657,7 +674,7 @@ pub fn link_with_deps(
             next_id += 1;
         }
     }
-    let (lexeds, text_tiers) = lex_program(&sources, &editions);
+    let (lexeds, text_tiers) = lex_program(&sources, &editions, &packages, package_uses);
 
     // The entry parses under the root package's edition.
     let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
@@ -738,7 +755,10 @@ pub fn link_with_deps(
         sources: SourceMap::new(sources),
         editions,
         packages,
-        package_uses: noeta_span::PackageUses::new(),
+        // Carry the resolved per-package `@name` tables through, so a caller reading `linked.package_uses`
+        // (the tier-name CLI fallback, the checker's activation) resolves `@name`s per the package that
+        // wrote them rather than reaching an empty table — the same map that drove the text-tier lex above.
+        package_uses: package_uses.clone(),
         reads,
     })
 }
@@ -848,10 +868,13 @@ pub struct EntryLink {
 /// once, for per-entry linking via [`ParsedDir::link_entry`]. Mirrors [`link_with_deps`]'s
 /// assembly: one program-wide lex (text-tier union spans every file, dependencies included),
 /// entry/sibling sources under the root package's edition, each dependency's under its own.
+/// `package_uses` (the whole program's resolved `@name` tables) lets that lex honor a package's
+/// renamed text tiers, exactly as [`link_with_deps`] does.
 pub fn parse_dir(
     modules: Vec<RawModule>,
     root_edition: noeta_lexer::Edition,
     deps: &[DepPackage],
+    package_uses: &noeta_span::PackageUses,
 ) -> ParsedDir {
     let mut sources: Vec<Source> = Vec::with_capacity(modules.len());
     let mut editions = noeta_lexer::EditionMap::new();
@@ -882,7 +905,7 @@ pub fn parse_dir(
             next_id += 1;
         }
     }
-    let (lexeds, text_tiers) = lex_program(&sources, &editions);
+    let (lexeds, text_tiers) = lex_program(&sources, &editions, &packages, package_uses);
 
     // Parse every directory module once — [`parse_module`] parses even after lex errors (as the
     // entry role always did) and chains lex + parse diagnostics onto the partial program, which is
@@ -1042,9 +1065,20 @@ impl ParsedDir {
 /// all declarations is applied and every file re-lexes with it — so a tier declared in one file
 /// (or one dependency package) captures `@x { … }` bodies verbatim in every other. Only programs
 /// declaring text tiers pay the second pass.
+///
+/// **Per-package renamed text tiers (per-package naming arc, sub-step 3g).** A `[tiers]` binding may
+/// map a *local* `@name` onto a text provider tier (`docs = "std:doc"`, `@docs { # markdown }`). The
+/// lexer only knows the provider's *exported* name (`doc`) as verbatim-capturing, so the local name
+/// must be added — but **only for the package that bound it**. Two packages can bind different locals,
+/// or the same local to different meanings, so the augmentation is keyed by [`PackageOrigin`] (from
+/// `packages`) and each source re-lexes with *its own* package's set. `package_uses` carries every
+/// package's `@name` bindings (the root's under [`PackageOrigin::Root`], each dependency's under its
+/// link segment); an empty map (a bare script, a single-file check) is exactly today's behavior.
 fn lex_program(
     sources: &[Source],
     editions: &noeta_lexer::EditionMap,
+    packages: &noeta_span::PackageMap,
+    package_uses: &noeta_span::PackageUses,
 ) -> (Vec<noeta_lexer::Lexed>, noeta_lexer::TextTiers) {
     // Each source lexes under ITS OWN package's edition (editions arc): the map was built in
     // lock-step with the sources, so a future edition that changes tokenization (a promoted
@@ -1061,29 +1095,129 @@ fn lex_program(
             )
         })
         .collect();
-    // Verbatim-body tiers come from two sources: a program's own `@tier(…, text/expr)` (found by
-    // the lexer's per-file token scan) and the installed extensions' declarations (`doc`, and any
-    // native `@json`/`@sql` — no `.noe` file declares these).
-    let mut declared: Vec<String> = lexeds
+    // Program-wide verbatim-body tiers come from two sources: a program's own `@tier(…, text/expr)`
+    // (found by the lexer's per-file token scan) and the installed extensions' declarations (`doc`,
+    // and any native `@json`/`@sql` — no `.noe` file declares these). These apply to EVERY file (a
+    // tier declared in one file names the same tier everywhere), unchanged by the per-package layer.
+    let mut global_names: Vec<String> = lexeds
         .iter()
         .flat_map(|l| l.text_tier_decls.iter().cloned())
         .collect();
-    declared.extend(
+    global_names.extend(
         noeta_ext_abi::registry::single_registry_process()
             .ext_verbatim_tier_names()
             .into_iter()
             .map(str::to_string),
     );
-    let set = noeta_lexer::TextTiers::with(declared.clone());
-    let default = noeta_lexer::TextTiers::default();
-    if declared.iter().all(|name| default.contains(name)) {
-        return (lexeds, set);
+    let global = noeta_lexer::TextTiers::with(global_names.clone());
+    // The per-package layer: each origin's local `@name`s that resolve to a text tier (see
+    // [`renamed_text_tier_locals`]). Keyed by origin so a rename in package A never forces verbatim
+    // capture of the same spelling in package B.
+    let renamed = renamed_text_tier_locals(package_uses, packages, &lexeds);
+
+    // The set the *parser* and *expansion* see is the union of every contribution — the parser
+    // consults it only to re-lex `${…}` interpolation holes (a nested `@name { … }` inside a hole),
+    // never to decide a top-level block's text-vs-code (that is already baked into the lexer's tokens
+    // by the per-package pass below); generated code has no single owning package, so the union is
+    // the only meaningful set there too. The union is broader than any one package's set, which only
+    // matters for the exotic nested-tier-in-a-hole case — safe, since it merely captures more prose.
+    let mut union = global.clone();
+    for locals in renamed.values() {
+        for name in locals {
+            union.insert(name.clone());
+        }
     }
+
+    // Fast path: the default `{doc}` covers every program-wide name and no package renamed a text
+    // tier — the first pass already lexed correctly, so nothing re-lexes (the common case: no text
+    // tier beyond `doc`, no `[tiers]` text binding).
+    let default = noeta_lexer::TextTiers::default();
+    if global_names.iter().all(|name| default.contains(name)) && renamed.is_empty() {
+        return (lexeds, global);
+    }
+
+    // Re-lex each source with ITS OWN package's set: the program-wide `global` plus the local names
+    // that package bound to a text tier. A source whose package renamed nothing re-lexes with exactly
+    // `global` (unchanged from the old behavior); only a package with a text-tier binding widens.
     let relexed = sources
         .iter()
-        .map(|source| noeta_lexer::lex_in(source, edition_of(source), &set))
+        .map(|source| {
+            let mut set = global.clone();
+            if let Some(origin) = packages.source_package(source.id())
+                && let Some(locals) = renamed.get(origin)
+            {
+                for name in locals {
+                    set.insert(name.clone());
+                }
+            }
+            noeta_lexer::lex_in(source, edition_of(source), &set)
+        })
         .collect();
-    (relexed, set)
+    (relexed, union)
+}
+
+/// The local `@name`s each package binds to a **text** (verbatim-body) tier — the per-package input
+/// to [`lex_program`]'s re-lex, keyed by the binding package's [`PackageOrigin`]. A `[tiers]` binding
+/// `local = "provider[:exported]"` makes `local` a text tier for that package iff the provider tier it
+/// names is itself a text (or expression) tier — resolved two ways, mirroring the checker's
+/// `TierRegistry::resolve_at`:
+///
+/// * an **extension** provider — `find_ext_tier_scoped(provider_roots, exported)` lands on the tier
+///   the binding named (scoped so `std`'s `doc` and a third party's same-named tier never conflate),
+///   and it is a text tier when its `.text`/`.expr` is set (the same predicate `ext_verbatim_tier_names`
+///   uses); or
+/// * a **program-declared** provider — a dependency shipping `@tier(exported, …, text: "…")`. At lex
+///   time there is no parsed AST, but the first lex pass already scanned each source's own text-tier
+///   declarations ([`noeta_lexer::Lexed::text_tier_decls`]); indexed by the declaring source's package
+///   segment, that answers "does the provider this local names declare `exported` as text?" — matched
+///   against `provider_roots` (a `.noe` `@tier` runner is re-rooted to the consumer's link segment,
+///   which is exactly the dependency's [`PackageOrigin::Dependency`] key, so the two line up).
+fn renamed_text_tier_locals(
+    package_uses: &noeta_span::PackageUses,
+    packages: &noeta_span::PackageMap,
+    lexeds: &[noeta_lexer::Lexed],
+) -> std::collections::HashMap<PackageOrigin, Vec<String>> {
+    if package_uses.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    // Program-declared text tiers, indexed by the declaring package's link segment. A dependency's
+    // modules carry `PackageOrigin::Dependency(key)`, and that `key` is the very segment a `@tier`
+    // runner is re-rooted to — so `provider_roots` (which carries that segment) matches here.
+    let mut declared_by_segment: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
+        std::collections::HashMap::new();
+    for (index, lexed) in lexeds.iter().enumerate() {
+        if lexed.text_tier_decls.is_empty() {
+            continue;
+        }
+        if let Some(PackageOrigin::Dependency(key)) =
+            packages.source_package(SourceId(index as u32))
+        {
+            let entry = declared_by_segment.entry(key.as_str()).or_default();
+            for name in &lexed.text_tier_decls {
+                entry.insert(name.as_str());
+            }
+        }
+    }
+
+    let registry = noeta_ext_abi::registry::single_registry_process();
+    let mut out: std::collections::HashMap<PackageOrigin, Vec<String>> =
+        std::collections::HashMap::new();
+    for (origin, local, use_) in package_uses.iter() {
+        // An extension provider whose named tier captures verbatim (a text or expression tier).
+        let ext_text = registry
+            .find_ext_tier_scoped(&use_.provider_roots, &use_.exported)
+            .is_some_and(|tier| tier.text.is_some() || tier.expr.is_some());
+        // Or a dependency-declared `@tier(exported, …, text: "…")` under one of the provider roots.
+        let declared_text = use_.provider_roots.iter().any(|root| {
+            declared_by_segment
+                .get(root.as_str())
+                .is_some_and(|names| names.contains(use_.exported.as_str()))
+        });
+        if ext_text || declared_text {
+            out.entry(origin.clone()).or_default().push(local.clone());
+        }
+    }
+    out
 }
 
 /// Parse an already-lexed source, yielding its [`Program`] when both lex and parse are clean and a
@@ -2617,7 +2751,14 @@ mod tests {
         deps: &[DepPackage],
     ) -> Result<Linked, Vec<LoadDiagnostic>> {
         noeta_stdlib::registry::default_seeded();
-        super::link_with_deps(entry_name, entry_text, root_edition, siblings, deps)
+        super::link_with_deps(
+            entry_name,
+            entry_text,
+            root_edition,
+            siblings,
+            deps,
+            &noeta_span::PackageUses::new(),
+        )
     }
 
     fn module(name: &str, text: &str) -> RawModule {
@@ -4327,5 +4468,48 @@ mod tests {
             "no top-level `use` may appear: {:?}",
             linked.program.stmts
         );
+    }
+
+    #[test]
+    fn a_renamed_text_tier_captures_verbatim_per_package() {
+        // 3g at the loader seam: a root package binds std's `doc` **text** tier under a local `@docs`
+        // (`PackageUses`: Root → `docs` = provider `std`, exported `doc`). The body is a hard lex error
+        // if tokenized as code — a bare `"` opens an unterminated string — so it links cleanly ONLY if
+        // `docs` reached the lexer's text-tier set for the Root package. The control (no binding) fails.
+        noeta_stdlib::registry::default_seeded();
+        let src = "@docs {\n# Heading with a bare \" quote and <angle> bits\n}\n\
+                   fn add(a: int, b: int): int { return a + b }\n";
+
+        let mut uses = noeta_span::PackageUses::new();
+        uses.set(
+            PackageOrigin::Root,
+            "docs".to_string(),
+            noeta_span::PackageUse {
+                provider_roots: vec!["std".to_string()],
+                exported: "doc".to_string(),
+            },
+        );
+        super::link_with_deps(
+            "main.noe",
+            src,
+            noeta_lexer::Edition::default(),
+            &[],
+            &[],
+            &uses,
+        )
+        .expect("a renamed text tier captures verbatim and links");
+
+        // Control: with no binding, `docs` is unknown (only the bare `doc` is a default text tier), so
+        // `@docs { … }` tokenizes as code and the bare quote is a lex error — the fix is load-bearing.
+        let errs = super::link_with_deps(
+            "main.noe",
+            src,
+            noeta_lexer::Edition::default(),
+            &[],
+            &[],
+            &noeta_span::PackageUses::new(),
+        )
+        .expect_err("without the binding, the markdown body is lexed as code and fails");
+        assert!(!errs.is_empty());
     }
 }

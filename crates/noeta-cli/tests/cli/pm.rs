@@ -413,6 +413,103 @@ fn a_dependency_declared_text_tier_captures_cross_package() {
     lang().arg("check").arg(&entry).assert().success();
 }
 
+/// A markdown body that is a hard **lex** error if tokenized as code — a bare `"` opens an
+/// unterminated string literal, `<`/`>` are stray operators. Only verbatim capture (the lexer taking
+/// the whole `@…{ … }` body as one `DocText` token) lets it through; without the per-package text-tier
+/// fix a *renamed* text tier would tokenize this as code and fail to parse. Kept adjacent to a `fn` so
+/// the tier has a declaration to target.
+const RENAMED_TEXT_TIER_SRC: &str = "\
+@docs {\n\
+# Widget\n\
+\n\
+A bare \" quote and <angle> brackets: invalid as code, fine as markdown.\n\
+}\n\
+fn add(a: int, b: int): int { return a + b }\n";
+
+#[test]
+fn a_renamed_text_tier_captures_under_its_local_name() {
+    // The 3g headline: `[tiers] docs = "std:doc"` renames std's `doc` **text** tier to a local
+    // `@docs`. The lexer only knows `doc` as verbatim-capturing, so the local `docs` must be added —
+    // per package, from the manifest binding — or `@docs { # markdown }` tokenizes as code and the
+    // parse blows up on the bare quote. Both `run` (the block strips, program prints nothing) and
+    // `check` (the body is verbatim markdown, not code) must be clean.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("rename_text_tier");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("mk project dir");
+    let entry = base.join("main.noe");
+    std::fs::write(&entry, RENAMED_TEXT_TIER_SRC).unwrap();
+    std::fs::write(
+        base.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n[tiers]\ndocs = \"std:doc\"\n",
+    )
+    .unwrap();
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+    lang().arg("check").arg(&entry).assert().success();
+}
+
+/// A consumer app + a `speckit` path dependency declaring a **text** tier `@tier(spec, text: "xml")`,
+/// which the app binds under a *different* local name via `[tiers] checks = "speckit:spec"`. The cross-
+/// package renamed-text-tier proof: capture must key on the app's own local `@checks`, resolved through
+/// the binding to the dependency's declared text tier — not on the exported `spec` spelling.
+fn renamed_dep_text_tier_project(name: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("speckit");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(&lib).expect("mk lib");
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nspeckit = { path = \"../speckit\" }\n\
+         [tiers]\nchecks = \"speckit:spec\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use speckit.tiers.run_specs\n\
+         @checks {\n  <case name=\"adds\" expect=\"3\"/> with a bare \" quote\n}\n\
+         fn add(a: int, b: int): int { return a + b }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/spec\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("tiers.noe"),
+        "namespace spec.tiers;\n\
+         @tier(spec, text: \"xml\")\n\
+         pub fn run_specs(roots: List<TierText>): void {\n\
+             echo \"speckit: ${roots.len()} bodies\"\n\
+         }\n",
+    )
+    .unwrap();
+    app.join("main.noe")
+}
+
+#[test]
+fn a_renamed_dependency_text_tier_captures_cross_package() {
+    // The app's `@checks { … }` XML body (quotes and all, invalid as Noeta tokens) captures verbatim
+    // only because the loader resolves the app's `[tiers] checks = "speckit:spec"` binding to the
+    // dependency's declared text tier and adds `checks` to the app package's text-tier set. Without
+    // 3g's per-package resolution, only the bare `spec` would capture and `@checks` would fail to parse.
+    let entry = renamed_dep_text_tier_project("rename_dep_text_tier");
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+    lang().arg("check").arg(&entry).assert().success();
+}
+
 #[test]
 fn a_path_dependency_resolves_and_runs() {
     let entry = path_dep_project("pm_pathdep_run");
