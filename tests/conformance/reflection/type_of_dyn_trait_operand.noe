@@ -1,0 +1,55 @@
+// `type_of` over a **trait-object** operand reports the value's own concrete type, not `Type.Dyn`.
+//
+// This was wrong: the checker's static `type_of` fidelity path treated `dyn Trait` as a concrete
+// head and baked `TypeRepr::Dyn` for it — right in a *nested/declared* position (`params_of` has its
+// own decoder and does report `Type.DynTrait(Trait)`, see `params_of_dyn_trait.noe`) but a wrong
+// answer at a `type_of` site, where the value behind the binding carries its own tag. The symptom
+// was one value giving two answers to one query: `type_of(v)` on a `dyn Sp` parameter said `dyn`,
+// while the same value laundered through a bare `dyn` hop said `Speaker`. `dyn Trait` now defers to
+// the runtime path exactly as bare `dyn` and a union do.
+// expect: stdout "direct: Speaker"
+// expect: stdout "laundered: Speaker"
+// expect: stdout "binding: Speaker"
+// expect: stdout "param: Type.DynTrait(Sp)"
+// expect: exit 0
+
+trait Sp {
+    fn speak(): string
+}
+
+struct Speaker {
+    volume: int
+}
+
+impl Sp for Speaker {
+    fn speak(): string { return "hello"; }
+}
+
+fn head(t: Type): string {
+    return match t {
+        Type.Struct(name, _) => name,
+        Type.Dyn => "dyn",
+        _ => "other",
+    };
+}
+
+fn launder(v: dyn): string { return head(type_of(v)); }
+
+// The operand's static type is `dyn Sp`; the answer is the concrete type behind it.
+fn direct(v: dyn Sp): string { return head(type_of(v)); }
+
+// The same value, one bare-`dyn` hop later. The two must agree.
+fn through(v: dyn Sp): string { return launder(v); }
+
+s = Speaker { volume: 3 };
+echo "direct: " ~ direct(s);
+echo "laundered: " ~ through(s);
+
+// A `dyn Trait` *binding* is the same site shape as a parameter.
+b: dyn Sp = s;
+echo "binding: " ~ head(type_of(b));
+
+// The declaration-side query is untouched: a declared `dyn Sp` parameter still reflects the bound.
+for p in params_of("direct") {
+    echo "param: ${p.type}";
+}
