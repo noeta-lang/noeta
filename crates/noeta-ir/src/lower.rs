@@ -211,18 +211,18 @@ pub struct LoweringSites<'a> {
     /// Forwarding-generic call spans → the hidden type-argument slots to PREPEND to the call's
     /// arguments (`Table(i)` → an int const; `Forward(j)` → the enclosing fn's `$ty<j>` local).
     pub hidden_arg_sites: &'a HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
-    /// `TypedModuleCall` spans whose recipe is per-instantiation → the hidden slot index; lowered
-    /// with a dynamic table-index operand instead of a baked recipe.
-    pub dynamic_recipe_sites: &'a HashMap<Span, u32>,
-    /// `attributes_of::<T>` spans whose type is per-instantiation → the hidden slot index.
-    pub dynamic_attr_sites: &'a HashMap<Span, u32>,
+    /// Spans whose turbofish is a FORWARDED type parameter of the enclosing top-level generic fn →
+    /// the hidden slot index whose table entry names the instantiation. One map over three
+    /// surfaces, each consulted from its own expression arm: a `TypedModuleCall` lowers with a
+    /// dynamic table-index operand instead of a baked recipe, an `attributes_of::<T>` resolves the
+    /// type name through the table at run time, and a `type_name::<T>()` becomes an
+    /// [`Rvalue::TypeSlotName`]. Same slot, same entry — which is why a forwarded name and a
+    /// forwarded manifest cannot disagree about what `T` is.
+    pub forwarded_slot_sites: &'a HashMap<Span, u32>,
     /// `type_name::<T>()` spans where `T` is a parameter of the ENCLOSING generic type, inside one
     /// of its instance methods → `(enclosing type name, the parameter's declaration index)`. The
     /// name is read off argument `index` of the receiver's reflected type tag at run time.
     pub self_type_arg_sites: &'a HashMap<Span, (String, u32)>,
-    /// `type_name::<T>()` spans where `T` is a FORWARDED parameter of the enclosing top-level
-    /// generic fn → the hidden slot index whose table entry names the instantiation.
-    pub dynamic_type_name_sites: &'a HashMap<Span, u32>,
     /// Forwarding generic fns → their hidden-parameter count (prepended as `$ty0`, `$ty1`, …).
     pub forwarding_fns: &'a HashMap<String, u32>,
     /// Forwarding-fn-as-value sites (poly-deferrals D2c): `Expr::Ident` spans → `(fn name,
@@ -275,9 +275,7 @@ impl LoweringSites<'static> {
             try_conversion_sites: NAMES.get_or_init(HashMap::new),
             type_arg_table: TYPE_ARGS.get_or_init(Vec::new),
             hidden_arg_sites: HIDDEN.get_or_init(HashMap::new),
-            dynamic_recipe_sites: SLOTS.get_or_init(HashMap::new),
-            dynamic_attr_sites: SLOTS.get_or_init(HashMap::new),
-            dynamic_type_name_sites: SLOTS.get_or_init(HashMap::new),
+            forwarded_slot_sites: SLOTS.get_or_init(HashMap::new),
             self_type_arg_sites: SELF_TY.get_or_init(HashMap::new),
             forwarding_fns: COUNTS.get_or_init(HashMap::new),
             fn_value_sites: FN_VALUES.get_or_init(HashMap::new),
@@ -319,9 +317,7 @@ macro_rules! lowering_sites {
             try_conversion_sites: &$s.try_conversion_sites,
             type_arg_table: &$s.type_arg_table,
             hidden_arg_sites: &$s.hidden_arg_sites,
-            dynamic_recipe_sites: &$s.dynamic_recipe_sites,
-            dynamic_attr_sites: &$s.dynamic_attr_sites,
-            dynamic_type_name_sites: &$s.dynamic_type_name_sites,
+            forwarded_slot_sites: &$s.forwarded_slot_sites,
             self_type_arg_sites: &$s.self_type_arg_sites,
             forwarding_fns: &$s.forwarding_fns,
             fn_value_sites: &$s.fn_value_sites,
@@ -1717,10 +1713,8 @@ impl Lowerer<'_> {
             // F2b): the same "one body serves every instantiation" reason, the other channel — the
             // hidden `$ty<i>` slot that already carries the decode recipe also names the
             // instantiation, and this surface wants nothing but that name.
-            Expr::TypeName { span, .. }
-                if self.sites.dynamic_type_name_sites.contains_key(span) =>
-            {
-                let slot = self.sites.dynamic_type_name_sites[span];
+            Expr::TypeName { span, .. } if self.sites.forwarded_slot_sites.contains_key(span) => {
+                let slot = self.sites.forwarded_slot_sites[span];
                 Ok(self.emit(
                     out,
                     Rvalue::TypeSlotName {
@@ -2752,7 +2746,7 @@ impl Lowerer<'_> {
                 let recipe = self.sites.typed_module_call_sites.get(span).cloned();
                 let dynamic = self
                     .sites
-                    .dynamic_recipe_sites
+                    .forwarded_slot_sites
                     .get(span)
                     .map(|&i| Atom::Var {
                         name: hidden_param_name(i),
@@ -2786,10 +2780,14 @@ impl Lowerer<'_> {
             Expr::AttributesOf { ty, span } => {
                 // A forwarded type parameter (F2b) resolves its concrete NAME at runtime through
                 // the hidden slot; a concrete `T` stays a compile-time name as before.
-                let dynamic = self.sites.dynamic_attr_sites.get(span).map(|&i| Atom::Var {
-                    name: hidden_param_name(i),
-                    span: *span,
-                });
+                let dynamic = self
+                    .sites
+                    .forwarded_slot_sites
+                    .get(span)
+                    .map(|&i| Atom::Var {
+                        name: hidden_param_name(i),
+                        span: *span,
+                    });
                 Ok(self.emit(
                     out,
                     Rvalue::AttributesOf {
@@ -3194,7 +3192,7 @@ impl Lowerer<'_> {
         let recipe = self.sites.typed_method_call_sites.get(&span).cloned();
         let dynamic = self
             .sites
-            .dynamic_recipe_sites
+            .forwarded_slot_sites
             .get(&span)
             .map(|&i| Atom::Var {
                 name: hidden_param_name(i),

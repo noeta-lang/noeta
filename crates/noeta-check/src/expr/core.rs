@@ -1536,7 +1536,7 @@ impl Checker {
                             |t| matches!(t, Type::Named(p, a) if p == name && a.is_empty()),
                         )
                 {
-                    self.sites.dynamic_type_name_sites.insert(*span, idx as u32);
+                    self.sites.forwarded_slot_sites.insert(*span, idx as u32);
                     return Type::String;
                 }
                 if !self.reject_erased_type_param(ty, "type_name") {
@@ -1566,7 +1566,7 @@ impl Checker {
                         .position(|t| t == &target)
                     {
                         Some(idx) => {
-                            self.sites.dynamic_attr_sites.insert(*span, idx as u32);
+                            self.sites.forwarded_slot_sites.insert(*span, idx as u32);
                         }
                         None => {
                             self.error(
@@ -1897,7 +1897,7 @@ impl Checker {
                         .position(|s| s == &t)
                     {
                         Some(idx) => {
-                            self.sites.dynamic_recipe_sites.insert(*span, idx as u32);
+                            self.sites.forwarded_slot_sites.insert(*span, idx as u32);
                         }
                         None => {
                             self.error(
