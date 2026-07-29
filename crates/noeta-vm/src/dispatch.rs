@@ -3106,10 +3106,15 @@ impl<'m> Vm<'m> {
                                     break 'resolve Err(free_fn_miss_message(&method));
                                 };
                                 // A free fn reserves no `self` register, so its declared arity is
-                                // the parameter count itself — unlike the method path below.
+                                // the parameter count itself — unlike the method path below — less
+                                // a forwarding generic's hidden type-argument slots, which are not
+                                // part of the surface signature the reflection artifact describes.
+                                // Counting them would report an arity the source never wrote;
+                                // `invoke` supplies no instantiation, so the CALL is what refuses
+                                // (see `Vm::no_instantiation`), and it must be reached to do so.
                                 let chunk =
                                     &module.protos[callee.as_closure().expect("filtered") as usize];
-                                let total = chunk.num_params as usize;
+                                let total = chunk.num_params as usize - chunk.hidden as usize;
                                 break 'resolve match bind_invoke_args(
                                     &module.reflection,
                                     &method,

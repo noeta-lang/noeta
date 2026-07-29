@@ -1310,6 +1310,7 @@ impl Interpreter {
                         name: recv_name, ..
                     } = receiver
                 {
+                    let tys = self.eval_ir_atoms(type_args, frame)?;
                     let values = self.eval_ir_atoms(args, frame)?;
                     let recv = match self.scope.take_mut(recv_name) {
                         Some(v) => v,
@@ -1334,7 +1335,12 @@ impl Interpreter {
                             return self.set_remove_in_place(recv, values, *span);
                         }
                     }
-                    return self.call_method(recv, name, values, *span);
+                    // The non-collection fall-through — a user method that happens to be named
+                    // `set`/`add`/`remove` — is an ordinary consuming call, so it must carry both
+                    // channels: the VM's reuse arm gates on the runtime receiver KIND and reaches
+                    // its ordinary dispatch with them intact, and reuse is supposed to be
+                    // observationally invisible.
+                    return self.call_method_masked(recv, name, values, *span, &tys, *supplied);
                 }
                 let recv = self.eval_ir_atom(receiver, frame)?;
                 let tys = self.eval_ir_atoms(type_args, frame)?;
