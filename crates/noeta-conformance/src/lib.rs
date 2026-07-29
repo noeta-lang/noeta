@@ -302,6 +302,14 @@ pub(crate) fn case_root(entry: &Path) -> Option<noeta_loader::PackageRoot> {
     Some(noeta_loader::PackageRoot::new(dir, vec![name]))
 }
 
+/// Read a discovered case's sources as a workspace, under whatever package root the case declares
+/// ([`case_root`]) — so every runner that drives cases through the salsa module graph derives module
+/// paths the same way the batch loader does. One helper, because six runners disagreeing about which
+/// package a case belongs to would be silent.
+pub(crate) fn read_case_workspace(entry: &Path) -> std::io::Result<noeta_loader::RawWorkspace> {
+    noeta_loader::read_workspace(entry, case_root(entry).as_ref())
+}
+
 /// The **dependency packages** of a multi-file case: every *subdirectory* of the case directory is
 /// one package, keyed (and rooted) by its directory name, holding that directory's `.noe` files as
 /// its modules.

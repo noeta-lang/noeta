@@ -89,7 +89,7 @@ pub fn run_bundle_roundtrip(root: &Path, only: Option<&Path>) -> BundleReport {
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry, crate::case_root(&case.entry).as_ref()) {
+            match crate::read_case_workspace(&case.entry) {
                 Ok(raw) => roundtrip_workspace(&name, &raw, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
