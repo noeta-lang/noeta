@@ -23,7 +23,7 @@ fn app(double_factor: &str) -> String {
          double = computed(fn() {{\n\
          \x20   return count.get() * {double_factor}\n\
          }})\n\n\
-         async fn session(sock: Socket): bool {{\n\
+         async fn session(sock: Socket) use (count, double): bool {{\n\
          \x20   v = view()\n\
          \x20   v.expose(\"count\", count)\n\
          \x20   v.expose(\"double\", double)\n\
@@ -60,7 +60,10 @@ fn a_live_client_gets_reload_on_swap_and_error_on_red_check() {
     let app_path = dir.join("app.noe");
     std::fs::write(&app_path, app("2")).unwrap();
 
-    let port = 8477;
+    // A kernel-assigned port, not a fixed one: a fixed port is shared with every other
+    // checkout and every concurrent run of this test on the machine, and the server that loses the
+    // bind dies where the client sees only a reset connection.
+    let port = noeta_test_temp::free_port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
         .args([
             "serve",

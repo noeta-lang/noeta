@@ -32,16 +32,9 @@ fn serve_routes_a_real_request() {
     .unwrap();
 
     // The *other* machine-global resource, and the one a per-process fixture directory cannot fix: a
-    // fixed port. Two concurrent runs of this test — two checkouts, or two `--ignored` invocations —
-    // had the second server fail to bind 8231 and die, which surfaced on the client side as
-    // `Connection reset by peer`, naming nothing. Ask the kernel for a free port instead and hand it
-    // to the child. Releasing the listener before the child binds leaves a window the OS could fill
-    // from elsewhere, but it is microseconds against a fixed port that is contended for the whole
-    // run; closing it fully would need `noeta serve` to accept an inherited socket, which it does not.
-    let port = {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a free port");
-        probe.local_addr().expect("the probe has an address").port()
-    };
+    // fixed port. Two concurrent runs of this test had the second server fail to bind 8231 and die,
+    // surfacing on the client side as `Connection reset by peer` and naming nothing — see `free_port`.
+    let port = noeta_test_temp::free_port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
         .args(["serve", app.to_str().unwrap(), "--port", &port.to_string()])
         .stderr(Stdio::null())

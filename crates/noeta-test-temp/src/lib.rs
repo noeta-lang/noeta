@@ -217,6 +217,25 @@ impl AsRef<Path> for TempPath {
     }
 }
 
+/// A free TCP port on loopback, for a test that spawns a server it does not own the socket of.
+///
+/// The sibling of the fixture-path problem, one layer down: a test with `let port = 8231` shares that
+/// port with every checkout and every concurrent run on the machine, and the loser does not fail
+/// where the cause is — the second server cannot bind, exits, and the client reports `Connection
+/// reset by peer`. Two concurrent runs of `noeta-cli`'s `serve` test failed 3 of 4 that way.
+///
+/// The port is obtained by binding `127.0.0.1:0`, reading what the kernel assigned, and closing the
+/// listener, so a window remains in which something else could take it — microseconds, against a
+/// fixed port that is contended for a whole run. Closing that window entirely would mean passing the
+/// listening socket to the child, which the servers under test do not accept.
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve a free loopback port")
+        .local_addr()
+        .expect("the reserved socket has an address")
+        .port()
+}
+
 /// A unique fixture path with **no** guard, for the handful of helpers that hand their directory
 /// straight to a type that takes ownership of it (`Store::open_at`, `LocalIndex::open_at`) and so
 /// have nowhere to keep one. Isolation is identical — the per-process root does that work; only the

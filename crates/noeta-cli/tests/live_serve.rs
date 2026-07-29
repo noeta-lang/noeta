@@ -17,7 +17,10 @@ use common::{get, ws_connect, ws_recv, ws_send};
 fn the_liveview_example_pushes_snapshot_and_patches_to_a_real_client() {
     let example = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/liveview_counter.noe");
-    let port = 8473;
+    // A kernel-assigned port, not a fixed one: a fixed port is shared with every other
+    // checkout and every concurrent run of this test on the machine, and the server that loses the
+    // bind dies where the client sees only a reset connection.
+    let port = noeta_test_temp::free_port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
         .args([
             "serve",

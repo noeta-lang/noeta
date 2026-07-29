@@ -46,7 +46,10 @@ fn sigint_drains_in_flight_requests_and_host_binds_local_only() {
     let app_path = dir.join("app.noe");
     std::fs::write(&app_path, app()).unwrap();
 
-    let port = 8481;
+    // A kernel-assigned port, not a fixed one: a fixed port is shared with every other
+    // checkout and every concurrent run of this test on the machine, and the server that loses the
+    // bind dies where the client sees only a reset connection.
+    let port = noeta_test_temp::free_port();
     // --host 127.0.0.1 binds local-only (S0): the loopback connect must work.
     let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
         .args([
