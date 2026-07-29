@@ -2159,7 +2159,11 @@ mod tests {
     use super::*;
 
     /// A tiny two-package fixture on disk: `app` with one path dependency `lib`.
-    fn path_dep_fixture(name: &str) -> PathBuf {
+    ///
+    /// Returns the fixture guard beside the `app` directory: the guard owns the whole tree and
+    /// deletes it on drop, so a caller that wants the path to keep existing must keep the guard
+    /// bound (`let (_fixture, app) = …`) rather than discard it.
+    fn path_dep_fixture(name: &str) -> (crate::test_temp::TempDir, PathBuf) {
         let base = crate::test_temp::TempDir::new(name);
         let lib = base.join("lib");
         std::fs::create_dir_all(&lib).unwrap();
@@ -2177,7 +2181,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
-        app
+        (base, app)
     }
 
     #[test]
@@ -2185,7 +2189,7 @@ mod tests {
         // Silently picking one was worse than refusing: the manifest declared two roots, only one
         // existed, and `use <the other>.…` failed far away with "no module" — suggesting the OTHER
         // dependency entry, which is a different package as far as the author knows.
-        let app = path_dep_fixture("two_roots");
+        let (_fixture, app) = path_dep_fixture("two_roots");
         std::fs::write(
             app.join("noeta.toml"),
             "[dependencies]\nlib = { path = \"../lib\" }\nalso = { path = \"../lib\" }\n",
@@ -2206,7 +2210,7 @@ mod tests {
     fn several_packages_under_one_root_still_resolve() {
         // The reverse is the *supported* form — the `para` scope binds `para/aether` and `para/api`
         // under one root — so the guard above must not touch it.
-        let app = path_dep_fixture("one_root_many");
+        let (_fixture, app) = path_dep_fixture("one_root_many");
         let base = app.parent().unwrap().to_path_buf();
         let other = base.join("other");
         std::fs::create_dir_all(&other).unwrap();
@@ -2231,7 +2235,7 @@ mod tests {
 
     #[test]
     fn a_dependency_requiring_a_newer_toolchain_fails_with_an_upgrade_message() {
-        let app = path_dep_fixture("toolchain_req_dep");
+        let (_fixture, app) = path_dep_fixture("toolchain_req_dep");
         std::fs::write(
             app.parent().unwrap().join("lib").join("noeta.toml"),
             "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\ntoolchain = \">=999.0\"\n",
@@ -2249,7 +2253,7 @@ mod tests {
 
     #[test]
     fn the_root_packages_own_toolchain_requirement_is_enforced() {
-        let app = path_dep_fixture("toolchain_req_root");
+        let (_fixture, app) = path_dep_fixture("toolchain_req_root");
         std::fs::write(
             app.join("noeta.toml"),
             "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\ntoolchain = \">=999.0\"\n\
@@ -2292,7 +2296,7 @@ mod tests {
         // The IDE (and `noeta fmt`) resolve the graph purely to SEE dependency modules — a query
         // must not mutate project state on disk. The build-command resolve refreshes the lock;
         // the query resolve leaves the directory untouched.
-        let app = path_dep_fixture("query_no_lock");
+        let (_fixture, app) = path_dep_fixture("query_no_lock");
         let entry = app.join("main.noe");
         let graph = resolve_graph_query(&entry).expect("query resolves");
         assert_eq!(graph.packages.len(), 1, "the path dep resolves");
@@ -2719,7 +2723,14 @@ mod tests {
     /// Lay out an app + one path dep under a fresh temp base; the dep declares `native = "native"`
     /// when `with_crate` says to create the crate dir (Phase 3, N3.1). When `trusted`, the app's
     /// `[trust].native` authorizes `acme/imgfx` (Phase 4) — otherwise resolution refuses the native.
-    fn native_dep_project(name: &str, with_crate: bool, trusted: bool) -> PathBuf {
+    ///
+    /// Returns the fixture guard beside the app's entry file; the guard deletes the tree on drop, so
+    /// the caller keeps it bound for as long as it uses the path.
+    fn native_dep_project(
+        name: &str,
+        with_crate: bool,
+        trusted: bool,
+    ) -> (crate::test_temp::TempDir, PathBuf) {
         let base = crate::test_temp::TempDir::new(name);
         let app = base.join("app");
         let dep = base.join("imgfx");
@@ -2756,7 +2767,8 @@ mod tests {
             )
             .unwrap();
         }
-        app.join("main.noe")
+        let entry = app.join("main.noe");
+        (base, entry)
     }
 
     #[test]
@@ -3055,7 +3067,7 @@ mod tests {
 
     #[test]
     fn a_native_dep_surfaces_its_entry_crate_and_lock_records_it() {
-        let entry = native_dep_project("native_ok", true, true);
+        let (_fixture, entry) = native_dep_project("native_ok", true, true);
         let graph = resolve_graph(&entry).expect("resolves");
         assert_eq!(graph.native_crates.len(), 1);
         let nc = &graph.native_crates[0];
@@ -3079,7 +3091,7 @@ mod tests {
     #[test]
     fn a_missing_native_crate_fails_at_resolve_time_naming_the_dep() {
         // Trusted, so it clears the authority gate and reaches the crate-existence check.
-        let entry = native_dep_project("native_missing", false, true);
+        let (_fixture, entry) = native_dep_project("native_missing", false, true);
         let err = resolve_graph(&entry).expect_err("must fail");
         assert!(err.message().contains("acme/imgfx"), "{err}");
         assert!(err.message().contains("Cargo.toml"), "{err}");
@@ -3246,7 +3258,7 @@ mod tests {
     fn an_untrusted_native_dep_is_refused() {
         // Phase 4: a native-declaring dependency the app did not authorize in `[trust].native` is
         // refused — the mere presence of native code no longer runs arbitrary Rust.
-        let entry = native_dep_project("native_untrusted", true, false);
+        let (_fixture, entry) = native_dep_project("native_untrusted", true, false);
         let err = resolve_graph(&entry).expect_err("must be refused");
         assert!(err.message().contains("acme/imgfx"), "{err}");
         assert!(
@@ -3337,7 +3349,7 @@ mod tests {
 
     #[test]
     fn a_pure_graph_has_no_native_crates() {
-        let entry = native_dep_project("native_pure", true, false);
+        let (_fixture, entry) = native_dep_project("native_pure", true, false);
         // Rewrite the dep manifest without the `native` key.
         let dep_manifest = entry
             .parent()
