@@ -283,6 +283,86 @@ fn test_a_tier_blocks_use_does_not_escape_the_block() {
         .stderr(predicate::str::contains("E0029"));
 }
 
+/// The two spellings of the repro, as a package with one sibling module. Only the `@test` block
+/// names the sibling — the production half of the file never does.
+const BLOCK_USE_PACKAGE: &[(&str, &str)] = &[
+    (
+        "noeta.toml",
+        "[package]\nname = \"probe/lib\"\nversion = \"0.1.0\"\n",
+    ),
+    (
+        "side.noe",
+        "namespace probe.lib.side;\npub struct Thing { n: int }\npub fn make(): int { return 3 }\n",
+    ),
+];
+
+#[test]
+fn test_a_tier_blocks_use_of_a_package_module_resolves() {
+    // The linking half of a block-scoped `use`. Qualification alone was not enough: the overlay
+    // rewrote `Thing` to `probe.lib.side.Thing` correctly, but no `use` had *merged* that
+    // declaration into the program — the linker collected the entry's top-level statements only —
+    // so `noeta check` reported 0 errors and every use site failed at run time with "cannot find
+    // type `probe.lib.side.Thing` in this scope". A std import inside the same block worked
+    // throughout, because an extension module resolves through the registry and never needs the
+    // unit graph, which is exactly what made the bug look like a qualification problem.
+    let mut files = BLOCK_USE_PACKAGE.to_vec();
+    files.push((
+        "entry.noe",
+        "@test {\n  use probe.lib.side.{Thing}\n\n  fn builds(): void { x = Thing { n: 3 }\n    assert(x.n == 3) }\n}\n",
+    ));
+    let dir = temp_dir("test_block_use_package", &files);
+    lang()
+        .arg("test")
+        .arg(dir.join("entry.noe"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ok    builds")
+                .and(predicate::str::contains("1 passed, 0 failed, 1 total")),
+        );
+}
+
+#[test]
+fn test_a_tier_blocks_whole_module_use_of_a_package_resolves() {
+    // The second import form (`use probe.lib.side` + `side.Thing`), which failed identically.
+    let mut files = BLOCK_USE_PACKAGE.to_vec();
+    files.push((
+        "entry.noe",
+        "@test {\n  use probe.lib.side\n\n  fn builds(): void { x = side.Thing { n: side.make() }\n    assert(x.n == 3) }\n}\n",
+    ));
+    let dir = temp_dir("test_block_use_package_whole", &files);
+    lang()
+        .arg("test")
+        .arg(dir.join("entry.noe"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ok    builds")
+                .and(predicate::str::contains("1 passed, 0 failed, 1 total")),
+        );
+}
+
+#[test]
+fn test_a_package_module_imported_in_a_block_stays_block_scoped() {
+    // Linking the module must not leak the import: the `use` stays inside the block, so a normal
+    // run (block stripped) still cannot see `Thing`, and the merged declaration — which carries a
+    // qualified identity and so binds no short name — does not quietly cover for the missing
+    // import. The counterpart of the std-only scope test above, for a `.noe` module.
+    let mut files = BLOCK_USE_PACKAGE.to_vec();
+    files.push((
+        "entry.noe",
+        "@test {\n  use probe.lib.side.{Thing}\n\n  fn inside(): void { assert(true) }\n}\n\
+         fn outside(): void { y = Thing { n: 1 }\n  echo y.n }\noutside()\n",
+    ));
+    let dir = temp_dir("test_block_use_package_scope", &files);
+    lang()
+        .arg("run")
+        .arg(dir.join("entry.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot find type `Thing`"));
+}
+
 #[test]
 fn test_group_filter_runs_only_that_group() {
     let file = temp_program("test_group", ATTR_TESTS);
