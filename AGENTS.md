@@ -193,6 +193,9 @@ This project is currently pre-alpha and not public, so you don't need to worry a
 > [!IMPORTANT]
 > **Use a per-agent `CARGO_TARGET_DIR` — a shared target dir causes last-writer-wins rlib contamination (identical-version path crates) and phantom test failures.** Target dirs are ~70–210 GB *each* and `/home` (450 GB) fills fast with several worktrees active — a full disk has **truncated a source file mid-write**. Check `df -h /home` before a long build, and **do not build in `/tmp`** (a 14 GB tmpfs, far too small — the build dies partway). Deleting a worktree's *own* `target/` is safe, but never another agent's while they may be mid-build.
 
+> [!IMPORTANT]
+> **Also set `CARGO_BUILD_JOBS` — isolating target dirs fixes correctness and makes throughput worse.** Cargo defaults to one job per core, so *each* concurrent build claims the whole machine: measured here, three agents on a 20-core box drove load to **60** with 51 rustc processes, none blocked on a lock and every build running at a third speed. That reads exactly like a deadlock and is not one. Divide the cores by the number of agents you expect and set it — `CARGO_BUILD_JOBS=6` for three agents on 20 cores lands near full utilization with no thrashing. Before diagnosing a "stuck" build, check `nproc` against `uptime`'s load and the process states (`S<l` is running, not blocked): oversubscription and lock contention look identical from the outside and have opposite fixes.
+
 > [!NOTE]
 > We follow conventional commits for all commit titles and PRs.
 
