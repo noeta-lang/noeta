@@ -259,6 +259,50 @@ fn check_sees_the_same_program_run_links() {
 }
 
 #[test]
+fn a_program_in_a_data_directory_is_run_without_deriving_a_module_path() {
+    // A migration/seed is a program the driver runs directly as its *entry*, named for when it runs
+    // (`20260719000002_…`) — a stem no `use` could spell. The package walk already prunes `migrations/`
+    // and `seeds/`, but running such a file as an entry went through `entry_module_path`, which derived
+    // a path from that timestamped stem and reported E0074 — the very failure the data-directory concept
+    // exists to prevent. A file inside a declared data directory has no module path (it is Declared),
+    // so it runs.
+    //
+    // It also links with *no* package siblings. `main.noe` here carries executable top-level statements
+    // naming its own top-level binding — valid as the program root, but a module that only links as one.
+    // Pulling it in as a sibling of the migration reported `whom` unresolved (E0005) against code the
+    // migration never wrote; a standalone data-directory program excludes it.
+    let base = tree(
+        "data_dir_entry",
+        &[
+            (
+                "noeta.toml",
+                "[package]\nname = \"local/app\"\nversion = \"0.1.0\"\n\
+                 [db]\nmigrations = \"migrations\"\nseeds = \"seeds\"\n",
+            ),
+            (
+                "main.noe",
+                "whom = \"app\"\necho \"hello ${whom}\"\n",
+            ),
+            (
+                "migrations/20260719000002_create_todos.noe",
+                "echo \"ran the migration program\"\n",
+            ),
+        ],
+    );
+
+    lang()
+        .current_dir(&base)
+        .args(["run", "migrations/20260719000002_create_todos.noe"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ran the migration program"))
+        .stdout(predicate::str::contains("hello app").not())
+        .stderr(predicate::str::contains("E0074").not())
+        .stderr(predicate::str::contains("E0072").not())
+        .stderr(predicate::str::contains("E0005").not());
+}
+
+#[test]
 fn a_lone_script_outside_a_package_keeps_its_declared_namespaces() {
     // The one place `namespace` survives, and it survives because it has to: no manifest → no
     // package → no prefix, so there is nothing to derive a path *from*, and a declaration is the
