@@ -5124,8 +5124,12 @@ mod tests {
     #[test]
     fn goto_definition_jumps_into_a_dependency_package() {
         // package-manager P2.1c: with dependency resolution wired into the salsa workspace, a
-        // cross-package `use hi.hello.greeting` resolves in-editor — goto-definition on the call
+        // cross-package `use hi.hello.Greeter` resolves in-editor — goto-definition on the type
         // jumps into the dependency package's own source file.
+        //
+        // The dependency's module is addressed `hi.hello` with nothing in the file saying so: `hi`
+        // is the dependency key, `hello` the file stem. It used to also declare `greet.hello`,
+        // which named a module no consumer could reach.
         let base = noeta_test_temp::TempDir::new("lsp-crosspkg");
         let app = base.join("app");
         let lib = base.join("greetlib");
@@ -5142,11 +5146,7 @@ mod tests {
             "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
         )
         .unwrap();
-        std::fs::write(
-            lib.join("hello.noe"),
-            "namespace greet.hello;\npub struct Greeter { n: int }\n",
-        )
-        .unwrap();
+        std::fs::write(lib.join("hello.noe"), "pub struct Greeter { n: int }\n").unwrap();
 
         let entry_uri = path_to_uri(&app.join("main.noe"));
         // The dependency's modules are addressed by their canonical path (the walk canonicalizes a

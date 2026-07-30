@@ -308,8 +308,7 @@ fn pure_source_package_publishes_and_resolves_from_the_registry() {
     .unwrap();
     std::fs::write(
         repo.join("page.noe"),
-        "namespace view.page;\n\
-         pub struct Page { title: string }\n\
+        "         pub struct Page { title: string }\n\
          pub fn render(p: Page): string { return \"<h1>\" ~ p.title ~ \"</h1>\" }\n",
     )
     .unwrap();

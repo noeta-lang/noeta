@@ -19,7 +19,7 @@ fn realistic_workspace(name: &str) -> PathBuf {
     let dir = temp_root().join(format!("noeta_cli_test_{name}"));
     std::fs::create_dir_all(&dir).expect("create temp dir");
 
-    let mut sibling = String::from("namespace app.calc;\n");
+    let mut sibling = String::from("");
     for i in 0..40 {
         sibling.push_str(&format!(
             "pub fn step{i}(a: int, b: int): int {{\n\
@@ -205,7 +205,7 @@ fn mcp_module_graph_covers_a_project_with_dependencies() {
     .expect("write dep manifest");
     std::fs::write(
         dep.join("dep.noe"),
-        "namespace dep;\npub fn twice(a: int): int { return a * 2 }\n",
+        "pub fn twice(a: int): int { return a * 2 }\n",
     )
     .expect("write dep module");
     std::fs::write(
@@ -213,11 +213,8 @@ fn mcp_module_graph_covers_a_project_with_dependencies() {
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n[dependencies]\ndep = { path = \"../dep\" }\n",
     )
     .expect("write app manifest");
-    std::fs::write(
-        app.join("helper.noe"),
-        "namespace app.helper;\npub fn one(): int { return 1 }\n",
-    )
-    .expect("write app sibling");
+    std::fs::write(app.join("helper.noe"), "pub fn one(): int { return 1 }\n")
+        .expect("write app sibling");
     let entry = app.join("main.noe");
     std::fs::write(
         &entry,

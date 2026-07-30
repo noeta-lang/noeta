@@ -4456,7 +4456,12 @@ where
                 })
             });
 
-        // `namespace App.Orders;` — a dotted path. M0 records it but does not scope on it.
+        // `namespace App.Orders;` — **retired surface syntax**, refused by the *loader* rather
+        // than here (`apply_derived_paths`). The grammar keeps it for two reasons: `Stmt::Namespace`
+        // is the loader's internal carrier, so it must be constructible, and a checker/IR unit test
+        // that parses a fixture without a package on disk has no other way to say "this declaration
+        // is qualified" — deleting the production would take that seam with it. Every user-facing
+        // command routes through the loader, so no real file can declare one.
         let namespace_decl = just(T::NamespaceKw)
             .ignore_then(id.clone())
             .then(

@@ -189,6 +189,46 @@ cargo fmt --all --check
 A loader change decides linking and merging, so slices A and B run the **full** `cargo test
 --workspace`. Toolchain is pinned at 1.97.0.
 
+## Outcome (2026-07-30)
+
+All five slices merged. `namespace` is retired: refused by the **loader**, not the parser.
+
+**Why the loader and not the grammar.** Rejecting it in the parser broke **96 tests across ~90
+files**, and most were checker/IR fixtures that legitimately need a declaration to express qualified
+identity — they never touch a package on disk, so the parser is their only seam. `Stmt::Namespace`
+also has to stay constructible because `apply_derived_paths` writes each derived path through it.
+Every user-facing command routes through the loader, so no real file escapes the refusal; the cost
+is that `noeta fmt` still parses one (a file carrying it fails `check` regardless).
+
+### The `para/*` migration recipe — four parts, not one
+
+Getting this wrong twice is what found all four. For each package:
+
+1. **Delete the declarations.**
+2. **Lead an intra-package `use` with the package's own root segment** — but *only* for `.noe`
+   modules. `use para.db.Connection` and bare `use para.db` name the **native** extension's module,
+   whose root is fixed by the Rust crate and has nothing to do with where a file sits. Rewriting
+   those points at a module that does not exist.
+3. **Bind the parent as a scope array in every example** (`para = [{ path = "../.." }]`). A plain key
+   becomes the *whole* prefix, so `para/aether`'s `openapi.noe` derived `para.openapi` instead of
+   `para.aether.openapi`. This is also what makes one file appear to derive two different paths in a
+   single `check .` — it is analyzed both as its own package and as an example's dependency.
+4. **Move a file whose declaration was deeper than its location.** `para/ai`'s four providers sat at
+   the package root declaring `namespace para.ai.providers.anthropic`. Deleting the declaration alone
+   silently renames four *public* modules; moving them to `providers/` is what preserves the address.
+
+Migrated and checking clean: para/cli, para/html, para/aether, para/api, para/db, para/ai.
+
+### Open
+
+- **A whole-module `use` of a package's own *collapsed root* module resolves to an empty module
+  name** when that package is consumed as a dependency — filed in `backlog.md` with a repro.
+  Worked around in para/aether with named imports.
+- `reroot_program` walks top-level statements only, so a `use` inside a **dependency** module's tier
+  block is never re-rooted. Nothing breaks today (slice B's linking is entry-only) — noted by slice F.
+- `editors/vscode-noeta/test-workspace` and `examples/aether-rest/noeta.toml` carry unrelated
+  migration debt from other slices (a `[targets.*.tiers]` schema change).
+
 ## Protocol
 
 - Worktree off `main` under `.claude/worktrees/<branch>`; **absolute paths everywhere** (the shell's

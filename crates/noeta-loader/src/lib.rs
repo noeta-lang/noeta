@@ -1660,8 +1660,8 @@ pub struct DerivedUnit<'a> {
 /// as its `namespace`, so everything downstream (`module_namespace`, resolution, qualification)
 /// reads one identity with one origin. Three things are errors here rather than silence:
 ///
-/// * a **`namespace` declaration that disagrees** with the derived path (E0072) — the declaration is
-///   still accepted while it is being removed from the ecosystem, but only as a *restatement*;
+/// * a **`namespace` declaration at all** (E0072) — retired syntax, refused whether it restates the
+///   derived path or contradicts it, since either way it is a second place to keep in sync;
 /// * **two files deriving one path** (E0073), naming both files. This used to be silent: the second
 ///   file's exports vanished and the failure surfaced at whoever imported them;
 /// * a **name that is not a legal path segment** (E0074), with the rename to make.
@@ -1718,41 +1718,45 @@ pub fn apply_derived_paths(units: Vec<DerivedUnit<'_>>) -> Vec<LoadDiagnostic> {
         }
         claimed.insert(derived.clone(), unit.source.name().to_string());
 
-        match unit.program.stmts.iter_mut().find_map(|stmt| match stmt {
-            Stmt::Namespace { path, span } => Some((path, span)),
+        // `namespace` is retired surface syntax, and this is where it is refused: a module's path
+        // is derived from where its file sits, so a declaration can only restate the derivation or
+        // contradict it, and neither earns a line of source. The refusal lives here rather than in
+        // the parser because `Stmt::Namespace` is *also* this function's own output — it writes the
+        // derived path into the program under that node, which keeps `module_namespace` the single
+        // identity seam every consumer downstream reads. Every user-facing command routes through
+        // the loader, so no real file escapes this.
+        // The message does not quote the declared path, and that is deliberate: by the time this
+        // runs, [`reroot_program`] has rewritten a *dependency's* declared leading segment into the
+        // consumer's naming space, so the node no longer holds what the file says. Quoting it told
+        // a `namespace lib.api;` author their file said `namespace hi.api`. The span points at the
+        // line and the renderer prints it, so the declaration is on screen regardless.
+        if let Some(span) = unit.program.stmts.iter().find_map(|stmt| match stmt {
+            Stmt::Namespace { span, .. } => Some(*span),
             _ => None,
         }) {
-            Some((declared, span)) if declared != derived => {
-                let message = format!(
-                    "this module declares `namespace {}`, but its path derives as `{}`",
-                    declared.join("."),
+            diagnostics.push(LoadDiagnostic {
+                source: unit.source.clone(),
+                diagnostic: Diagnostic::error(
+                    DiagnosticCode::ModulePathMismatch,
+                    span,
+                    "a module's path is derived from where its file sits, so it cannot be declared"
+                        .to_string(),
+                )
+                .with_help(format!(
+                    "delete this line: this file's path derives as `{}`, and moving the file is \
+                     how you rename the module",
                     derived.join(".")
-                );
-                diagnostics.push(LoadDiagnostic {
-                    source: unit.source.clone(),
-                    diagnostic: Diagnostic::error(
-                        DiagnosticCode::ModulePathMismatch,
-                        *span,
-                        message,
-                    )
-                    .with_help(
-                        "a module's path is the package's import prefix plus the file's path \
-                         inside the package — delete the declaration, or move the file to where \
-                         it says it lives",
-                    ),
-                });
-            }
-            // A declaration that agrees is a restatement — leave it be (it is removed corpus-wide
-            // in a later slice, and the syntax with it).
-            Some(_) => {}
-            None => unit.program.stmts.insert(
-                0,
-                Stmt::Namespace {
-                    path: derived.clone(),
-                    span: first_line(unit.source),
-                },
-            ),
+                )),
+            });
+            continue;
         }
+        unit.program.stmts.insert(
+            0,
+            Stmt::Namespace {
+                path: derived.clone(),
+                span: first_line(unit.source),
+            },
+        );
     }
     diagnostics
 }

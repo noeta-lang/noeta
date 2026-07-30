@@ -1,6 +1,0 @@
-// This file sits at `lib/thing.noe`, so its module path is `lib.thing` — whatever it says here.
-namespace totally.unrelated;
-
-pub fn f(): string {
-    return "f";
-}

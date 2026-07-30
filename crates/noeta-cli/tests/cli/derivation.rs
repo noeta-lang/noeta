@@ -129,8 +129,10 @@ fn two_files_deriving_one_path_name_both_files() {
 }
 
 #[test]
-fn a_namespace_that_contradicts_the_files_location_is_refused() {
-    // `namespace` is still accepted while it is being removed, but only as a restatement.
+fn a_namespace_declaration_is_refused_whatever_it_says() {
+    // `namespace` is retired. A path is derived from where the file sits, so a declaration can only
+    // restate the derivation or contradict it — this one contradicts, and the next one restates.
+    // Both are refused, which is the whole point: neither earns a line of source.
     let base = tree(
         "mismatch",
         &[
@@ -141,7 +143,7 @@ fn a_namespace_that_contradicts_the_files_location_is_refused() {
             ("main.noe", "use app.helper.f;\necho f();\n"),
             (
                 "helper.noe",
-                "namespace totally.unrelated;\n\npub fn f(): string {\n    return \"f\";\n}\n",
+                "namespace totally.unrelated\n\npub fn f(): string {\n    return \"f\";\n}\n",
             ),
         ],
     );
@@ -153,14 +155,20 @@ fn a_namespace_that_contradicts_the_files_location_is_refused() {
         .failure()
         .stderr(predicate::str::contains("E0072"))
         .stderr(predicate::str::contains(
-            "declares `namespace totally.unrelated`, but its path derives as `app.helper`",
-        ));
+            "a module's path is derived from where its file sits, so it cannot be declared",
+        ))
+        // The help names the path this file actually has, so the fix is mechanical. The message
+        // deliberately does not echo what was declared — the rendered snippet shows the line, and
+        // for a *dependency* the node has already been re-rooted out of the author's spelling.
+        .stderr(predicate::str::contains("derives as `app.helper`"));
 }
 
 #[test]
-fn a_namespace_that_restates_the_derived_path_is_accepted() {
-    // The migration is a no-op on a package that already followed the convention: the declaration
-    // says exactly what the location derives, so it is left alone (a later slice deletes it).
+fn a_namespace_that_restates_the_derived_path_is_refused_too() {
+    // The contract this reverses: while derivation was landing, a declaration that agreed was left
+    // alone so a package kept compiling while its declarations were deleted file by file. That
+    // window is closed — an agreeing declaration is still a second place to keep in sync, and the
+    // only reason to keep the syntax was to be lenient during the migration.
     let base = tree(
         "agrees",
         &[
@@ -171,7 +179,7 @@ fn a_namespace_that_restates_the_derived_path_is_accepted() {
             ("main.noe", "use app.helper.f;\necho f();\n"),
             (
                 "helper.noe",
-                "namespace app.helper;\n\npub fn f(): string {\n    return \"ok\";\n}\n",
+                "namespace app.helper\n\npub fn f(): string {\n    return \"ok\";\n}\n",
             ),
         ],
     );
@@ -180,8 +188,14 @@ fn a_namespace_that_restates_the_derived_path_is_accepted() {
         .current_dir(&base)
         .args(["run", "main.noe"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("ok"));
+        .failure()
+        .stderr(predicate::str::contains("E0072"))
+        .stderr(predicate::str::contains(
+            "a module's path is derived from where its file sits, so it cannot be declared",
+        ))
+        // Refused even though it agrees, and the help still names the derivation — an author who
+        // wrote the right thing gets the same one-line fix as one who wrote the wrong thing.
+        .stderr(predicate::str::contains("derives as `app.helper`"));
 }
 
 #[test]
@@ -246,16 +260,18 @@ fn check_sees_the_same_program_run_links() {
 
 #[test]
 fn a_lone_script_outside_a_package_keeps_its_declared_namespaces() {
-    // No manifest → no package → no prefix, so nothing is derived and a module is identified by the
-    // `namespace` it declares, exactly as before. A bare `noeta run` must also not recursively
-    // swallow whatever tree it happens to stand in.
+    // The one place `namespace` survives, and it survives because it has to: no manifest → no
+    // package → no prefix, so there is nothing to derive a path *from*, and a declaration is the
+    // only way a loose sibling can be addressed at all. Retirement is therefore scoped to files
+    // whose path *can* be derived — inside a package, where a declaration could only restate it.
+    // (A bare `noeta run` must also not recursively swallow whatever tree it stands in.)
     let base = tree(
         "no_package",
         &[
             ("main.noe", "use App.Models.f;\necho f();\n"),
             (
                 "models.noe",
-                "namespace App.Models;\n\npub fn f(): string {\n    return \"loose\";\n}\n",
+                "namespace App.Models\n\npub fn f(): string {\n    return \"loose\";\n}\n",
             ),
         ],
     );

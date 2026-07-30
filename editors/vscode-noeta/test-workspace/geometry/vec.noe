@@ -5,8 +5,6 @@
   editor's **Dependencies** docs corpus has a real source package to browse — every
   declaration below carries its own `@doc`.
 }
-namespace geometry.vec
-
 use std.math.abs
 
 @doc {
