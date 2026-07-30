@@ -1,0 +1,95 @@
+// `construct` is "the reflective literal", so it may not set a field a literal cannot: a **private**
+// one. A `class`'s fields default private with a per-field `pub` opt-in (object-model slice 2d), so
+// `Box { secret: 9 }` written outside the class is E0035 — while `construct("Box", {"secret": 9})`
+// used to build it and answer `Ok`, reflection minting a value the declaration forbids.
+//
+// The checker enforces privacy off a symbol table no runtime door can see, and the reflection artifact
+// carried no visibility at all — so the rule had nothing to read here. `TypeInfo` now carries
+// `field_public` beside `field_optional`, and the shared `plan_construct`/`plan_construct_named`
+// refuse a supplied private field **by name**, in the checker's own wording ("cannot set private field
+// ... from outside it"), so both backends refuse identically.
+//
+// Three boundaries this pins:
+//
+//   * only a **supplied** field is refused. An omitted private field with a default still fills from
+//     its thunk — exactly what an outside-the-class literal that omits it does, since E0035 only ever
+//     looks at the fields a literal names.
+//   * a value **`struct`**'s fields are always public, so nothing about a struct changed. Reading the
+//     raw `pub` bit instead of applying the kind rule would have refused every struct field in the
+//     language (a struct field carries `is_public: false` for want of a keyword it has no need of).
+//   * the refusal is **context-free**. The checker's gate relaxes inside the declaring type's own
+//     methods; a runtime door knows neither its caller's type nor its tier, so it refuses there too —
+//     the conservative direction, and those are precisely the sites where the literal is available.
+// expect: stdout "positional into a private field: cannot set private field `secret` of `Box` from outside it"
+// expect: stdout "named into a private field: cannot set private field `secret` of `Box` from outside it"
+// expect: stdout "public fields alone: Box {label: \"hi\", secret: 0}"
+// expect: stdout "struct fields are public: Point {x: 1, y: 2}"
+// expect: stdout "private refused before the type check: cannot set private field `secret` of `Box` from outside it"
+// expect: stdout "even from inside the class: cannot set private field `secret` of `Box` from outside it"
+// expect: stdout "the refused build is never a value: none"
+// expect: exit 0
+class Box {
+    pub label: string
+    secret: int = 0
+
+    // The class's own code may write the literal — that is what privacy means — so this is how a
+    // `Box` with a real secret is built. The reflective door is refused even here.
+    fn sealed(l: string, s: int): Box { return Box { label: l, secret: s } }
+
+    fn reflectively(): Result<dyn, string> {
+        mut named: Map<string, dyn> = {}
+        named["label"] = self.label
+        named["secret"] = 1
+        return construct("Box", named)
+    }
+}
+
+struct Point { x: int  y: int }
+
+fn say(r: Result<dyn, string>): string {
+    return match r {
+        Ok(v) => "${v}",
+        Err(e) => e,
+    }
+}
+
+// Positional: the second value lands on `secret`, which is private.
+mut positional: List<dyn> = []
+positional = positional ~ ["hi"]
+positional = positional ~ [9]
+echo "positional into a private field: " ~ say(construct("Box", positional))
+
+mut named: Map<string, dyn> = {}
+named["label"] = "hi"
+named["secret"] = 9
+echo "named into a private field: " ~ say(construct("Box", named))
+
+// Supplying only the public fields is fine: `secret` is omitted, so it fills from its declared
+// default and no private field is set — the same construction an outside-the-class literal makes.
+mut public_only: List<dyn> = []
+public_only = public_only ~ ["hi"]
+echo "public fields alone: " ~ say(construct("Box", public_only))
+
+// A value struct's fields are always public, so the gate is invisible there.
+mut pt: List<dyn> = []
+pt = pt ~ [1]
+pt = pt ~ [2]
+echo "struct fields are public: " ~ say(construct("Point", pt))
+
+// Visibility is the prior question, so a private field reports as private even when the value's type
+// is also wrong — "may I set this at all" before "is this the right type".
+mut wrong: Map<string, dyn> = {}
+wrong["secret"] = "not even an int"
+echo "private refused before the type check: " ~ say(construct("Box", wrong))
+
+// Context-free: the class's own method gets the same refusal its own literal is exempt from.
+echo "even from inside the class: " ~ say(Box.sealed("z", 3).reflectively())
+
+// Nothing downstream can read a `Box` whose private field was set reflectively.
+echo "the refused build is never a value: " ~ match construct("Box", named) {
+    Ok(v) => match v.as<Box>() {
+        some(b) => "narrowed",
+        none => "none",
+    },
+    Err(e) => "none",
+}

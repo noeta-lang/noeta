@@ -169,7 +169,17 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// length prefix lands where a version-14 reader expects `names`, and the inserted `Op` variant shifts
 /// every discriminant after it. This arrived alongside the 14 above rather than after it, so 15 is
 /// what rejects an artifact either change alone would have labelled 14.
-pub const FORMAT_VERSION: u8 = 15;
+///
+/// Bumped to 16 by the construct-guards arc: `reflect::TypeInfo` (in `Module::reflection`) gained a
+/// `field_public: Vec<bool>` parallel to `fields`, between `field_optional` and `field_defaults` — the
+/// per-field visibility the reflective construction door reads to refuse setting a private field (the
+/// E0035 rule the checker enforces at a literal). Same non-self-describing-encoding reasoning as
+/// version 8, which added the two `Vec`s beside it: postcard writes the sequence's length prefix
+/// where a reader of the previous version expects `field_defaults`, so the whole manifest
+/// desynchronises from that field on rather than failing cleanly. This landed independently of the 14
+/// and 15 above — all three were in flight at once, and each is its own wire break — so 16 is what
+/// rejects an artifact any one of them alone would have mislabelled.
+pub const FORMAT_VERSION: u8 = 16;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

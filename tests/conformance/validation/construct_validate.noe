@@ -1,0 +1,157 @@
+// The reflective `construct` door enforces `Validate`, exactly as the `json`/`from_bytes` decode doors
+// do (validation arc slice 2). `construct(name, fields)` builds a value from untrusted data the same
+// way a recipe decode does, and the recipe doors' exemption from the `@validated` construction ban
+// (E0060) is *earned* by re-entering `validate()` on the freshly-built value — `construct` used to take
+// the exemption without the check, so `construct("Email", ["nope"])` handed back an `Email` whose own
+// declaration says it cannot exist, the very value `json.try_parse::<Email>` refuses.
+//
+// The condition is **implementing `Validate`**, not carrying `@validated`: `@validated` decides where a
+// *literal* may be written, the validator's presence decides whether a data door enforces it, and
+// `json.try_parse` already validates an undecorated implementor (see `json_validate.noe`'s `Port`).
+// Both halves are pinned below.
+//
+// **BOTTOM-UP.** In the recipe walk, inner values validate before their container, so a container's
+// `validate` only ever sees already-valid fields. `construct` gets the same order structurally rather
+// than by an ordering step: it never *builds* a nested value — every field value it is handed is an
+// existing value that already passed its own door — and the defaulted slots are filled before the
+// type's own `validate` runs. So an invalid inner never reaches an outer `construct` call at all, and
+// an outer validator that would also reject reports nothing, exactly as `json_validate.noe`'s `Cluster`
+// stays silent behind a bad `Port`. The `nested:` lines below invert if that order ever does.
+//
+// A rejection is the door's own recoverable `Err(message)` carrying the validator's words — never an
+// abort, and never a value.
+// expect: stdout "validated struct rejected: missing @: nope"
+// expect: stdout "validated struct accepted: Email {addr: \"a@b.com\"}"
+// expect: stdout "undecorated implementor rejected too: bad port 70000"
+// expect: stdout "undecorated implementor accepted: Port {n: 8080}"
+// expect: stdout "validator sees a defaulted slot: bad port 0"
+// expect: stdout "nested: inner refused at its own door: bad port -1"
+// expect: stdout "nested: outer never saw the invalid inner: true"
+// expect: stdout "nested: valid inner, outer rejects: too many ports"
+// expect: stdout "nested: both valid: Cluster {ports: [Port {n: 80}]}"
+// expect: stdout "validated enum case rejected: dark mode is off"
+// expect: stdout "validated enum case accepted: Theme.Light"
+// expect: stdout "the rejected build is never a value: none"
+// expect: exit 0
+
+// A `@validated` struct: a bare literal outside its own `impl` is E0060, so the sanctioned door is
+// `new` — and now `construct` too, on the same terms the recipe doors have.
+@validated
+struct Email {
+    addr: string
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if !self.addr.contains("@") {
+                return Err("missing @: ${self.addr}")
+            }
+            return Ok()
+        }
+    }
+}
+
+// An **undecorated** `Validate` implementor: freely literal-constructible, and validated by every data
+// door — the condition `has_validator` uses, which is why `construct` uses it too. The default on `n`
+// also pins that the validator sees a *complete* object: an omitted `n` fills from its thunk first.
+struct Port {
+    n: int = 0
+
+    fn label(): string { return "port ${self.n}" }
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if self.n < 1 || self.n > 65535 {
+                return Err("bad ${self.label()}")
+            }
+            return Ok()
+        }
+    }
+}
+
+// A container whose OWN validator rejects two-or-more ports. Its `validate` can only ever run on ports
+// that already passed theirs, because a `Port` reaches this construction only by having been built.
+struct Cluster {
+    ports: List<Port>
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if self.ports.len() >= 2 {
+                return Err("too many ports")
+            }
+            return Ok()
+        }
+    }
+}
+
+// A validated ENUM: the case is built from the `"Theme.Dark"` spelling, but membership is keyed on the
+// enum, so the validator is found under `Theme` — the same read the decode door's variant arm makes.
+enum Theme {
+    Light
+    Dark
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if self == Theme.Dark {
+                return Err("dark mode is off")
+            }
+            return Ok()
+        }
+    }
+}
+
+fn say(r: Result<dyn, string>): string {
+    return match r {
+        Ok(v) => "${v}",
+        Err(e) => e,
+    }
+}
+
+// A `@validated` type's invariant now holds through the reflective door.
+echo "validated struct rejected: " ~ say(construct("Email", ["nope"]))
+echo "validated struct accepted: " ~ say(construct("Email", ["a@b.com"]))
+
+// And an undecorated implementor's, on the identical condition the recipe doors use.
+echo "undecorated implementor rejected too: " ~ say(construct("Port", [70000]))
+echo "undecorated implementor accepted: " ~ say(construct("Port", [8080]))
+
+// The validator runs on the COMPLETE object: `n` is omitted, filled from its declared default of 0,
+// and the invariant then reads that 0 — not an unset slot.
+mut empty: List<dyn> = []
+echo "validator sees a defaulted slot: " ~ say(construct("Port", empty))
+
+// Bottom-up. An invalid inner is refused at its own door, so the outer construction is never even
+// reachable with it — the inner message is the one that surfaces, never the container's.
+inner_bad = construct("Port", [-1])
+echo "nested: inner refused at its own door: " ~ say(inner_bad)
+echo "nested: outer never saw the invalid inner: " ~ match inner_bad {
+    Ok(v) => "false",
+    Err(e) => "true",
+}
+
+// Valid inners, container invariant violated: the container's own validator fires — and only then,
+// after every element passed. (Two valid ports; the `Cluster` rejects the pair.)
+mut two: List<Port> = []
+two = two ~ [Port { n: 80 }]
+two = two ~ [Port { n: 443 }]
+mut cluster_two: List<dyn> = []
+cluster_two = cluster_two ~ [two]
+echo "nested: valid inner, outer rejects: " ~ say(construct("Cluster", cluster_two))
+
+mut one: List<Port> = []
+one = one ~ [Port { n: 80 }]
+mut cluster_one: List<dyn> = []
+cluster_one = cluster_one ~ [one]
+echo "nested: both valid: " ~ say(construct("Cluster", cluster_one))
+
+// The enum arm: the validator is found under `Theme`, not under the `"Theme.Dark"` spelling.
+echo "validated enum case rejected: " ~ say(construct("Theme.Dark", []))
+echo "validated enum case accepted: " ~ say(construct("Theme.Light", []))
+
+// A rejected construction never becomes a value, so no invariant-violating `Email` is reachable.
+echo "the rejected build is never a value: " ~ match construct("Email", ["nope"]) {
+    Ok(v) => match v.as<Email>() {
+        some(e) => "narrowed",
+        none => "none",
+    },
+    Err(e) => "none",
+}

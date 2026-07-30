@@ -1252,13 +1252,18 @@ impl<'m> Vm<'m> {
     /// missing non-defaulted field is a recoverable `Err(message)` (via `err_shape`); success wraps the
     /// object in `Ok` (via `ok_shape`). Validation runs through the shared `plan_construct` — the same
     /// one the tree-walker uses — so both backends agree on every accept/reject and every message.
+    ///
+    /// A target that implements `Validate` has its `validate()` run on the freshly-built value before
+    /// the door hands it back — the same re-entry the `json`/`from_bytes` decode doors make (see
+    /// [`noeta_ast::reflect::construct_validates`]), through the same `validate_message`, so a
+    /// rejection is the door's own `Err(message)` carrying the validator's words.
     pub(crate) fn construct_dynamic(
         &mut self,
         name_val: Value,
         fields_val: Value,
         ok_shape: u32,
         err_shape: u32,
-        _span: Span,
+        span: Span,
     ) -> Result<Value, Abort> {
         let err_of = |vm: &Self, msg: String| {
             let shape = vm.persist.shapes[err_shape as usize];
@@ -1297,19 +1302,32 @@ impl<'m> Vm<'m> {
                         .with_variant_index(index),
                     ),
                     plan_variant_payload(&type_name, &payload, &fields_val),
+                    // A validated ENUM validates on its own name, not the `"Enum.Variant"` spelling
+                    // the call site used: membership is keyed on the type. Decided here, under the
+                    // reflection borrow, because the re-entry below needs `&mut self`.
+                    noeta_ast::reflect::construct_validates(&self.module.reflection, enum_name),
                 ))),
                 noeta_ast::reflect::ConstructTarget::Fielded => Ok(None),
             };
         match variant_plan {
             Err(msg) => return Ok(err_of(self, msg)),
-            Ok(Some((shape, payload))) => {
-                return Ok(match payload {
-                    Err(msg) => err_of(self, msg),
-                    Ok(data) => {
-                        let ok = self.persist.shapes[ok_shape as usize];
-                        Value::enum_value(ok, vec![Value::enum_value(shape, data)])
+            Ok(Some((shape, payload, validates))) => {
+                let data = match payload {
+                    Err(msg) => return Ok(err_of(self, msg)),
+                    Ok(data) => data,
+                };
+                let value = Value::enum_value(shape, data);
+                if validates {
+                    // `validate_message` consumes its argument, so retain first: the case stays owned
+                    // here and is either handed on inside `Ok` or released on a rejection.
+                    retain(value);
+                    if let Some(msg) = self.validate_message(value, span)? {
+                        release(value);
+                        return Ok(err_of(self, msg));
                     }
-                });
+                }
+                let ok = self.persist.shapes[ok_shape as usize];
+                return Ok(Value::enum_value(ok, vec![value]));
             }
             Ok(None) => {}
         }
@@ -1455,6 +1473,19 @@ impl<'m> Vm<'m> {
                 }
             };
             object.set_reflect(Some(Rc::new(repr)));
+        }
+        // Bottom-up, exactly as the recipe walk is: every field value handed in was built and (if its
+        // own type validates) checked at its own door before it reached this call, and the defaulted
+        // slots were filled above — so the type's own `validate` sees a complete, already-valid value,
+        // and a rejection short-circuits before the object escapes into `Ok`. The reflected tag is
+        // already stamped, so a native type's validator dispatches to its own `validate`.
+        if noeta_ast::reflect::construct_validates(&self.module.reflection, &type_name) {
+            // `validate_message` consumes its argument; retain so `object` stays owned here.
+            retain(object);
+            if let Some(msg) = self.validate_message(object, span)? {
+                release(object);
+                return Ok(err_of(self, msg));
+            }
         }
         let ok = self.persist.shapes[ok_shape as usize];
         Ok(Value::enum_value(ok, vec![object]))

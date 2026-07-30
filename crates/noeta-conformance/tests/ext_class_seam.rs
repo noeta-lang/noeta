@@ -857,6 +857,13 @@ fn run_one(backend: &str, program: &str) -> (String, i32, i64) {
 /// 3. A **fully supplied** construction produces a real instance of the class: its native method
 ///    dispatches (`bump()` reaches `point_dispatch` and mutates in place), and its reflected identity is
 ///    the class's own qualified name. Both backends agree on all of it.
+/// 4. `construct` **refuses to set a private field**. `guard` is `is_public: false`, so writing it in a
+///    source literal is E0035, and the reflective door now says the same thing in the checker's own
+///    words. That is the other half of fact 2: an *omission* is refused because a native field has no
+///    default, and a *supply* is refused because this field is private — so `fx.Handle` stays reachable
+///    only through the native `kit.open` that owns its state, which is what its privacy declares. No
+///    shipped extension declares a private field, so this fixture is the only exerciser for the native
+///    side of the gate.
 const REFLECT_PROGRAM: &str = r#"
 use fx.Point
 use fx.Handle
@@ -871,6 +878,18 @@ echo "variants: ${variants_of("fx.Point").len()}"
 
 // An omission is refused — a native field has no default, so there is nothing to fill it with.
 echo "omitted: ${match construct("fx.Handle", {"label": "x"}) { Ok(v) => "Ok", Err(e) => e }}"
+
+// SUPPLYING the private `guard` is refused too, in the checker's E0035 words — so there is no route
+// to a `fx.Handle` that skips the native constructor owning its state. Positionally, `guard` is the
+// first field, so it is refused before the value's type is even considered.
+mut byname: Map<string, dyn> = {}
+byname["guard"] = 1
+byname["label"] = "x"
+byname["peer"] = 0
+echo "private named: ${match construct("fx.Handle", byname) { Ok(v) => "Ok", Err(e) => e }}"
+mut bypos: List<dyn> = []
+bypos = bypos ~ [1]
+echo "private positional: ${match construct("fx.Handle", bypos) { Ok(v) => "Ok", Err(e) => e }}"
 
 // A full construction is a real class instance: native dispatch works on it, and it reports the
 // class's own identity.
@@ -896,6 +915,8 @@ fn native_class_reflects_its_schema_and_constructs_from_it_on_both_backends() {
          point: x=Type.Int y=Type.Int\n\
          variants: 0\n\
          omitted: missing required field `guard` of `fx.Handle`\n\
+         private named: cannot set private field `guard` of `fx.Handle` from outside it\n\
+         private positional: cannot set private field `guard` of `fx.Handle` from outside it\n\
          made: 7 8 Type.Class(fx.Point, [])\n\
          bumped: 9 9\n"
     );

@@ -2370,8 +2370,9 @@ impl Interpreter {
     /// mid-materialize. Returns `Some(message)` (the validator's own error message) when the
     /// validator's `Result` is an `Err`, `None` when it is `Ok`. The message is a `string`-typed
     /// error's bare string, or an `Error`-typed error's `message()`. Shared by the JSON recipe doors
-    /// (which wrap it in a path-carrying `JsonError`) and `from_bytes` (its own error channel).
-    fn validate_message(&mut self, value: Value, span: Span) -> Eval<Option<String>> {
+    /// (which wrap it in a path-carrying `JsonError`), `from_bytes` (its own error channel), and the
+    /// reflective `construct` door (whose channel is its own `Result<dyn, string>`).
+    pub(crate) fn validate_message(&mut self, value: Value, span: Span) -> Eval<Option<String>> {
         let result = self.call_method(value, "validate", vec![], span)?;
         match crate::result_err_payload(&result) {
             Some(payload) => Ok(Some(self.validation_message(payload, span)?)),
