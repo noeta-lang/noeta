@@ -547,12 +547,33 @@ pub fn read_workspace(entry_path: &Path, root: Option<&PackageRoot>) -> io::Resu
     })
 }
 
+/// Whether `entry_path` sits inside one of the package's **data directories** (`migrations/`,
+/// `seeds/`). A file there is a *program the driver runs*, not a module of the package: `noeta migrate`
+/// loads it as an entry, and it is neither imported by the package's modules nor an importer of them.
+/// Both facts follow — it has no derived module path ([`entry_module_path`]), and it links with none of
+/// the package's own modules as siblings ([`read_siblings`]).
+fn entry_in_data_dir(root: &PackageRoot, entry_path: &Path) -> bool {
+    root.relative(entry_path)
+        .is_some_and(|relative| root.data_dirs.iter().any(|dir| relative.starts_with(dir)))
+}
+
 /// The module path the **entry** file's own location derives — it is a file of the package like any
 /// other, and a sibling may legitimately `use` what it declares.
+///
+/// The one exception is an entry inside a package **data directory** (`migrations/`, `seeds/`): a
+/// `noeta migrate` run loads such a file *as its entry* rather than reaching it through the package
+/// walk (which already prunes those directories — [`read_package_modules`]). A migration is a program
+/// named for *when* it runs (`20260719000002_more_users.noe`), a stem no `use` could ever spell, so
+/// it has no module path — [`ModulePath::Declared`], the same treatment the walk gives it. Deriving
+/// one here instead reported E0074 against a file whose name is exactly right for what it is, which is
+/// the very failure the data-directory concept exists to prevent.
 fn entry_module_path(entry_path: &Path, root: Option<&PackageRoot>) -> ModulePath {
     let Some(root) = root else {
         return ModulePath::Declared;
     };
+    if entry_in_data_dir(root, entry_path) {
+        return ModulePath::Declared;
+    }
     root.relative(entry_path)
         .map_or(ModulePath::Declared, |relative| {
             derive_module_path(&root.prefix, relative)
@@ -570,8 +591,16 @@ fn entry_module_path(entry_path: &Path, root: Option<&PackageRoot>) -> ModulePat
 /// in, and with no package there is no prefix to derive under either.
 ///
 /// A read failure yields no siblings — a lone file simply links to itself.
+///
+/// A **data-directory entry** (a `migrations/`/`seeds/` program the driver runs) links with *no*
+/// package siblings: it is a standalone program that reaches its dependency packages through `deps`,
+/// and the app's own modules are no more its concern than it is theirs. Pulling them in also broke
+/// outright — a sibling module carrying executable top-level statements (an app entry naming its own
+/// top-level bindings) only links as the program root, so linking it beside a migration reported the
+/// app's own names as unresolved against code the migration never wrote.
 fn read_siblings(entry_path: &Path, root: Option<&PackageRoot>) -> Vec<RawModule> {
     let mut modules = match root {
+        Some(root) if entry_in_data_dir(root, entry_path) => return Vec::new(),
         Some(root) => read_package_modules(root),
         None => {
             let Some(dir) = entry_path.parent() else {
