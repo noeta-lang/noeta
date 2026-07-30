@@ -616,13 +616,19 @@ pub fn extension_attribute_types() -> Vec<noeta_ast::reflect::TypeInfo> {
 /// it. It cannot: an [`ExtField`](noeta_ext_abi::registry::ExtField) carries no literal default, so
 /// every field of a native type is **mandatory**, and the shared `plan_construct` /
 /// `plan_construct_named` refuse a construction that omits a mandatory field — `construct("fx.Handle",
-/// {})` is `Err("missing required field `guard` of `fx.Handle`")`, not an empty `Handle`. Supplying
-/// the field means supplying a real extern handle obtained from native code, which is exactly the
-/// requirement a source-written `Handle { guard: g }` literal has (both backends already register
-/// every native fielded type as constructible, so the source literal was always the same operation).
-/// So reflection reporting the schema and `construct` accepting a value are two views of one
-/// declaration here, which is the invariant the type-level queries exist to keep — not two
-/// permissions that had to be granted separately.
+/// {})` is `Err("missing required field `guard` of `fx.Handle`")`, not an empty `Handle`.
+///
+/// **The other half of that argument was wrong, and is now fixed rather than argued.** It read:
+/// "supplying the field means supplying a real extern handle obtained from native code, which is
+/// exactly the requirement a source-written `Handle { guard: g }` literal has". It is not — `guard` is
+/// `is_public: false`, so writing it in a literal from outside the class is E0035, while `construct`
+/// happily set it. The seeded `TypeInfo` now carries `field_public` (read straight off
+/// [`ExtField::is_public`](noeta_ext_abi::registry::ExtField), the same bit `seed_ext_fielded` turns
+/// into `symbols.private_fields`) and the shared planners refuse a supplied private field by name, so
+/// `fx.Handle` is reachable only through the native constructor that owns its state — which is what
+/// its privacy declares. So reflection reporting the schema and `construct` accepting a value really
+/// are two views of one declaration, which is the invariant the type-level queries exist to keep; the
+/// gap was that visibility was the one part of that declaration reflection did not carry.
 pub fn extension_fielded_types() -> Vec<noeta_ast::reflect::TypeInfo> {
     use noeta_ext_abi::registry as ext;
     let Some(reg) = ext::default_registry() else {
