@@ -222,9 +222,25 @@ fn from_native(value: NativeValue) -> Value {
                 .collect(),
         ),
         NativeValue::Opaque(name) => Value::Str(format!("<{name}>")),
-        // A native enum value (native-extensibility S1): surface its case name (a fieldless/backed
-        // variant is fully described by it), consistent with the display-string convention above.
-        NativeValue::Variant { variant, .. } => Value::Str(variant),
+        // An enum value: a fieldless/backed variant is fully described by its case name, so it
+        // surfaces as that string (consistent with the display-string convention above). A
+        // payload-carrying one surfaces as the single-entry map `{case: [payload…]}` — the same
+        // shape `json.stringify` writes it as, for the same reason `Bytes` above surfaces as a list
+        // of byte values: this door and the JSON door describe one value, so they describe it
+        // identically. `Value` has no variant kind, so *some* spelling had to be chosen; dropping
+        // the payload and keeping only the tag is the one choice that loses data.
+        NativeValue::Variant {
+            variant, fields, ..
+        } => {
+            if fields.is_empty() {
+                Value::Str(variant)
+            } else {
+                Value::Map(vec![(
+                    variant,
+                    Value::List(fields.into_iter().map(from_native).collect()),
+                )])
+            }
+        }
         // A native class instance (native-extensibility S2): surface its fields as a keyed map,
         // like an object/record aggregate.
         NativeValue::Instance { fields, .. } => Value::Map(

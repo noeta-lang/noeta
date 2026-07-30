@@ -7,9 +7,9 @@ use crate::registry::{NativeValue, Scalar};
 
 /// Serialize a deeply-marshalled [`NativeValue`] to a JSON string — the shared half of
 /// `json.stringify` and the `@derive(Serialize<Json>)` method (`o.to_json()`). Each backend marshals
-/// its own value into the neutral [`NativeValue`] tree (numbers as scalars, strings/enum-variants/
-/// opaque summaries as [`NativeValue::Str`], byte buffers as [`NativeValue::Bytes`],
-/// lists/tuples/sets as [`NativeValue::List`], maps and
+/// its own value into the neutral [`NativeValue`] tree (numbers as scalars, strings and opaque
+/// summaries as [`NativeValue::Str`], byte buffers as [`NativeValue::Bytes`], enum values as
+/// [`NativeValue::Variant`], lists/tuples/sets as [`NativeValue::List`], maps and
 /// objects as [`NativeValue::Map`]); this single walk produces the bytes, so both backends agree by
 /// construction rather than by two hand-kept-identical copies.
 ///
@@ -38,9 +38,14 @@ pub fn stringify(value: &NativeValue) -> String {
         // An extern-type value serializes as its display form, quoted — a `Uuid` is its
         // canonical string in JSON, the same form `echo` prints.
         NativeValue::Extern(e) => json_string(&e.display_string()),
-        // A native enum value (native-extensibility S1): a fieldless/backed variant renders as its
-        // case name (the same string an enum already stringified to via the `Str` projection), a
-        // payload-carrying one as `{"Variant": [fields]}`.
+        // An enum value — every enum reaches the serializer this way now that the deep projection
+        // carries the real variant instead of flattening it to its name. A fieldless/backed variant
+        // renders as its case name (byte-identical to the old `Str` flattening, which is why no
+        // payload-free encoding moved), a payload-carrying one as `{"Variant":[fields]}`: the tag
+        // names the case and the array carries the positional payload, so no field is dropped.
+        // Not symmetric with decoding, deliberately — a payload-carrying variant has no canonical
+        // JSON spelling, so `type_to_recipe` declines such an enum *whole* (`TypeRecipe::Enum`
+        // documents this) and nothing round-tripped one before this change either.
         NativeValue::Variant {
             variant, fields, ..
         } => {
