@@ -134,11 +134,13 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
     // name, plus every generic METHOD, keyed `Type.method` — the same string `symbols.methods` and
     // the call site build, so a body's slots and its call sites agree on the layout.
     //
-    // A method is walked over its **own** type parameters only. Its class's parameters reach a
-    // reflected site through a different channel — the receiver's type tag, which the construction
-    // site stamped — so a site naming one of those is not this pass's business and must not take a
-    // hidden slot; a method parameter shadowing a class one is therefore correctly walked as the
-    // method's.
+    // A method is walked over its own type parameters, plus — for a **self-less inherent member of
+    // a generic type** — its class's (see [`forwardable_class_params`]). An *instance* method's
+    // class parameters reach a reflected site through the other channel, the receiver's type tag
+    // stamped at the construction site, so a site naming one of those is not this pass's business
+    // and must not take a hidden slot. A self-less member has no receiver to read that tag from,
+    // and this channel is the only one it has; a method parameter shadowing a class one is
+    // therefore still correctly walked as the method's.
     let mut candidates: Vec<Candidate<'_>> = fns
         .iter()
         .map(|f| Candidate {
@@ -147,11 +149,11 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
             own: f.type_params.iter().map(|p| p.name.as_str()).collect(),
         })
         .collect();
-    for (ty, method) in generic_methods(program) {
+    for (ty, method, own) in method_candidates(program) {
         candidates.push(Candidate {
             key: format!("{ty}.{}", method.name),
             decl: method,
-            own: method.type_params.iter().map(|p| p.name.as_str()).collect(),
+            own,
         });
     }
     // The declaration-order type parameters of every candidate, for aligning turbofish arguments.
@@ -242,32 +244,84 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
 
 /// One function the fixpoint walks: the key its slots are recorded under (a bare `fn` name, or
 /// `Type.method`), the declaration whose body is walked, and the type parameters that body may
-/// forward — its own, never an enclosing type's.
+/// forward — its own, plus (for a self-less inherent member) its enclosing type's.
 struct Candidate<'a> {
     key: String,
     decl: &'a FnDecl,
     own: Vec<&'a str>,
 }
 
-/// Every generic method in the program, as `(owning type name, declaration)`. Classes, structs and
-/// enums alike — all three flatten their `impl` blocks into `methods`, which is also what the
-/// `(type, method)` dispatch machinery reads, so this sees exactly the methods a call can reach.
-fn generic_methods(program: &Program) -> Vec<(&str, &FnDecl)> {
-    let mut out: Vec<(&str, &FnDecl)> = Vec::new();
+/// Every method the fixpoint walks, as `(owning type name, declaration, forwardable parameters)`.
+/// Classes, structs and enums alike — all three flatten their `impl` blocks into `methods`, which is
+/// also what the `(type, method)` dispatch machinery reads, so this sees exactly the methods a call
+/// can reach. A method with nothing to forward is left out entirely.
+fn method_candidates(program: &Program) -> Vec<(&str, &FnDecl, Vec<&str>)> {
+    let mut out: Vec<(&str, &FnDecl, Vec<&str>)> = Vec::new();
     for stmt in &program.stmts {
-        let (name, methods) = match stmt {
-            Stmt::Class(d) => (d.name.as_str(), &d.methods),
-            Stmt::Struct(d) => (d.name.as_str(), &d.methods),
-            Stmt::Enum(d) => (d.name.as_str(), &d.methods),
+        let (name, type_params, methods, impls) = match stmt {
+            Stmt::Class(d) => (d.name.as_str(), &d.type_params, &d.methods, &d.impls),
+            Stmt::Struct(d) => (d.name.as_str(), &d.type_params, &d.methods, &d.impls),
+            Stmt::Enum(d) => (d.name.as_str(), &d.type_params, &d.methods, &d.impls),
             _ => continue,
         };
+        // Which of `methods` came from an `impl Trait { … }` block (they are flattened in), keyed by
+        // the one thing that identifies a declaration uniquely — its name span.
+        let from_impl: HashSet<noeta_span::Span> = impls
+            .iter()
+            .flat_map(|b| b.methods.iter())
+            .map(|m| m.name_span)
+            .collect();
         for m in methods {
-            if !m.type_params.is_empty() {
-                out.push((name, m));
+            let mut own: Vec<&str> = m.type_params.iter().map(|p| p.name.as_str()).collect();
+            own.extend(forwardable_class_params(
+                type_params,
+                m,
+                from_impl.contains(&m.name_span),
+            ));
+            if !own.is_empty() {
+                out.push((name, m, own));
             }
         }
     }
     out
+}
+
+/// The **enclosing generic type's** parameters this member may forward through a hidden slot — its
+/// class parameters when the member is one that has no other channel, and empty otherwise.
+///
+/// The split is the receiver. An *instance* method reads its class's instantiation off the
+/// receiver's reflected type tag, stamped at the construction site, so its class parameters must NOT
+/// take a hidden slot: two channels for one fact would let a call through one of the receiverless
+/// entry points (a `dyn` receiver, a method handle, `invoke`) supply nothing and abort where the tag
+/// was right there. A **self-less** member has no receiver at all — a generic type's constructor is
+/// the motivating one, `fn new(tbl: string): Repo<T>`, where `T` is known only to the caller — and
+/// the hidden slot is the only channel it has.
+///
+/// Two exclusions, both matching what `collect_method_sig_classified` classifies as
+/// [`crate::Receiver::Associated`], so the pre-pass and the checker cannot disagree about which
+/// members have a receiver:
+///
+/// * a body that mentions `self` is an instance method, receiver channel;
+/// * a member supplied by an `impl Trait { … }` block is reachable *either* way even when its body
+///   is self-less (the trait's contract puts it in the instance interface, and `dyn Trait` dispatches
+///   it on a value), so it keeps the receiver channel too.
+///
+/// A class parameter the method's own `<…>` shadows is a different type entirely and is dropped —
+/// the method's own parameter is already in the list and owns the name.
+fn forwardable_class_params<'a>(
+    type_params: &'a [noeta_ast::TypeParam],
+    m: &FnDecl,
+    from_impl: bool,
+) -> Vec<&'a str> {
+    if type_params.is_empty() || from_impl || m.body.iter().any(|s| s.mentions("self")) {
+        return Vec::new();
+    }
+    let shadowed: HashSet<&str> = m.type_params.iter().map(|p| p.name.as_str()).collect();
+    type_params
+        .iter()
+        .map(|p| p.name.as_str())
+        .filter(|p| !shadowed.contains(p))
+        .collect()
 }
 
 /// The walk's read-only context: the enclosing fn's type parameters, the fixpoint state, every

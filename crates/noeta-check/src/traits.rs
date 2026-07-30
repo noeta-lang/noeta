@@ -1902,20 +1902,11 @@ impl Checker {
                 && matches!(args[i], Type::Unknown)
             {
                 let expected = subst_or_dyn(raw, &subst, &tps);
-                // Absorb the (substituted) parameter type into the deferred literal — a `Fn` into a
-                // closure (or a deferred polymorphic-function reference, F1), a `List`/`Map` into a
-                // container literal — so its resolved type then binds any still-unbound type
-                // parameter below; a mismatched or unguiding param synthesizes standalone (unchanged
-                // from the closure-only behavior).
-                args[i] = match (expr, &expected) {
-                    (Expr::Closure { .. } | Expr::Ident { .. }, Type::Fn { .. }) => {
-                        self.check(expr, &expected, env)
-                    }
-                    (Expr::List { .. } | Expr::Map { .. }, Type::List(_) | Type::Map(..)) => {
-                        self.check(expr, &expected, env)
-                    }
-                    _ => self.synth(expr, env),
-                };
+                // Absorb the (substituted) parameter type into the deferred argument — one shared
+                // definition with the non-generic path, so the two agree by construction — and its
+                // resolved type then binds any still-unbound type parameter below; a mismatched or
+                // unguiding param synthesizes standalone (unchanged from the closure-only behavior).
+                args[i] = self.absorb_deferred_arg(expr, Some(&expected), env);
             }
             let arg = args[i].clone();
             bind_type_params(raw, &arg, &tps, &mut subst);
@@ -1969,6 +1960,25 @@ impl Checker {
                             .is_none_or(|t| t.defers_to_runtime() || t.contains_unknown())
                     })
                 {
+                    // A parameter of the enclosing **type** (the leading `class_params` of the
+                    // composed list) cannot be spelled with a turbofish here — a method's `::<…>`
+                    // names the METHOD's own parameters, never its class's, which come from the
+                    // receiver's type arguments. So "supply it explicitly" is a dead end for one and
+                    // the fix for the other, and each says which it is.
+                    let class_param = generic
+                        .params
+                        .iter()
+                        .take(generic.class_params)
+                        .any(|(p, _)| *p == open);
+                    let help = if class_param {
+                        format!(
+                            "a self-less member reads `{open}` from the CALL's instantiation, and \
+                             nothing here determines one — annotate the position this call flows \
+                             into so its result type pins `{open}` (`x: Type<Something> = …`)"
+                        )
+                    } else {
+                        format!("supply it explicitly: `{name}::<...>(...)`")
+                    };
                     self.error(
                         DiagnosticCode::CannotInfer,
                         span,
@@ -1977,7 +1987,7 @@ impl Checker {
                              a call-site-typed result"
                         ),
                     )
-                    .help(format!("supply it explicitly: `{name}::<...>(...)`"));
+                    .help(help);
                     continue;
                 }
                 if self.mentions_in_scope_param(&sigma) {

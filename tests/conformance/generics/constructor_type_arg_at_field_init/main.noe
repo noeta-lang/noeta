@@ -1,0 +1,58 @@
+// A **field initializer** is a checked position: the field's declared type is written right there.
+// So a generic type's fresh-constructor call in one absorbs it, exactly as the annotated binding
+// `i: Inner<Todo> = Inner.new("todos")` does, and the construction site records the instantiation.
+//
+// It used to synthesize bottom-up instead. `noeta check` reported `0 error(s)` and the program then
+// ABORTED at run time — `type_name::<T>()` found no recorded argument — and the abort's own help
+// prescribed a form a field initializer cannot express ("build it at `x: Inner<Something> = …`").
+// That silent check/run divergence is what this pins.
+//
+// A `main.noe` with a `noeta.toml` on purpose: the harness runs a *single-file* case straight from
+// source text, with no loader and therefore no namespace qualification, so a bare `.noe` here could
+// not observe that the recorded tag carries the **linked** identity. Delete the manifest and the
+// expectations below silently lose their qualification.
+// expect: stdout "todos:demo.main.Todo"
+// expect: stdout "users:demo.main.User"
+// expect: stdout "true"
+// expect: exit 0
+
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+class Inner<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Inner<T> {
+        return Inner { tbl: tbl };
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+class Outer {
+    inner: Inner<Todo>
+    other: Inner<User>
+
+    fn new(): Outer {
+        return Outer { inner: Inner.new("todos"), other: Inner.new("users") };
+    }
+
+    fn go(): string {
+        return self.inner.model();
+    }
+
+    fn go_other(): string {
+        return self.other.model();
+    }
+}
+o = Outer.new();
+echo o.go();
+echo o.go_other();
+// Two differently-instantiated `Inner`s built by sibling field initializers of ONE literal: the
+// per-field expectation is what keeps them distinct, so this would be `true` for the wrong reason
+// if both recorded the same argument.
+echo o.go() != o.go_other();

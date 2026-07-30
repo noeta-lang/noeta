@@ -1,0 +1,47 @@
+// An **argument position** is a checked position: the parameter's declared type is the expectation
+// the site already has. So a generic type's fresh-constructor call passed as an argument absorbs it
+// and records its instantiation — `describe(Inner.new("todos"))` against `fn describe(i:
+// Inner<Todo>)` pins `T = Todo` exactly as the annotated binding does.
+//
+// It used to synthesize bottom-up (arguments are typed before the callee's signature is known), so
+// `noeta check` reported `0 error(s)` and the program ABORTED at run time on the missing type
+// argument. Both callee shapes are covered, because they reach the expectation through different
+// seams: a free `fn` finalizes its deferred arguments against plain parameter types, an associated
+// `fn` of a class through the same generic-call path a method uses.
+// expect: stdout "todos:Todo"
+// expect: stdout "users:User"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+class Inner<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Inner<T> {
+        return Inner { tbl: tbl };
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+class Holder {
+    inner: Inner<User>
+
+    fn new(i: Inner<User>): Holder {
+        return Holder { inner: i };
+    }
+
+    fn go(): string {
+        return self.inner.model();
+    }
+}
+fn describe(i: Inner<Todo>): string {
+    return i.model();
+}
+echo describe(Inner.new("todos"));
+h = Holder.new(Inner.new("users"));
+echo h.go();

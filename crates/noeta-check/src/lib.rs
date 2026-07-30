@@ -2601,8 +2601,26 @@ impl Checker {
         // same D2b shadow-masking as the layout above, but derived from the declaration rather
         // than from the sites, so a diagnostic can point at the composed route
         // (`field_specs_of(type_name::<T>())`) whether or not a `type_name::<T>()` already appears.
+        // A **self-less member of a generic type** forwards its CLASS's parameters too: it has no
+        // receiver to read the instantiation's tag off, so the hidden slot is its only channel (see
+        // `forwarding::forwardable_class_params`, which decides the same thing for the layout).
         let next_forwardable = if fwd_key.is_some() {
-            decl.type_params.iter().map(|p| p.name.clone()).collect()
+            let mut ps: Vec<String> = decl.type_params.iter().map(|p| p.name.clone()).collect();
+            if target == TargetKind::Method
+                && let Some(ct) = self.coloring.current_type.clone()
+                && !self
+                    .receiver_of(&ct, decl.name.as_str())
+                    .allows_instance_call()
+                && let Some(class_params) = self.symbols.generic_types.get(&ct)
+            {
+                let extra: Vec<String> = class_params
+                    .iter()
+                    .filter(|p| !ps.contains(p))
+                    .cloned()
+                    .collect();
+                ps.extend(extra);
+            }
+            ps
         } else if target == TargetKind::Function {
             let shadowed: Vec<&str> = decl.type_params.iter().map(|p| p.name.as_str()).collect();
             self.coloring
