@@ -3985,7 +3985,7 @@ pub(crate) fn runtime_narrow_target(
     dynamic: Option<u16>,
 ) -> Option<NarrowTarget> {
     let reg = dynamic?;
-    regs[fbase + reg as usize].with_str(|name| NarrowTarget::from_runtime_name(name))
+    regs[fbase + reg as usize].with_str(NarrowTarget::from_runtime_name)
 }
 
 pub(crate) fn set_reg(regs: &mut [Value], base: usize, dst: u16, value: Value) {
