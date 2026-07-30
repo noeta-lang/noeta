@@ -253,16 +253,15 @@ It is a zero-argument method rather than a field because `Type` is an enum, and 
 A type's **qualified runtime identity**, as a `string` — the same name `type_of` reports inside `Type.Struct(name, args)`, and the same key the name-keyed queries (`field_specs_of(name)`, `variants_of(name)`, `construct(name, …)`, `invoke(name, …)`) are stored under. It is how you *write* that key without hand-writing it:
 
 ```noeta
-// A single file with no package, so nothing derives and the declaration stands.
-// Inside a package `local/app` this would be `src/storage.noe`, deriving `app.storage`
-// with no declaration at all — see [Modules](Modules#where-a-modules-path-comes-from).
-namespace app.storage
-
+// A single file with no package: nothing derives, so the identity is the bare name. The same
+// declaration inside a package `local/app` as `src/storage.noe` derives `app.storage`, and
+// `type_name` then reports `app.storage.Todo` — see
+// [Modules](Modules#where-a-modules-path-comes-from).
 pub struct Todo {
     pub id: int
 }
 
-echo type_name::<Todo>()                        // app.storage.Todo
+echo type_name::<Todo>()                        // Todo
 echo field_specs_of(type_name::<Todo>()).len()  // 1
 ```
 

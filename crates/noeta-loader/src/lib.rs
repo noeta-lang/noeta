@@ -1718,41 +1718,16 @@ pub fn apply_derived_paths(units: Vec<DerivedUnit<'_>>) -> Vec<LoadDiagnostic> {
         }
         claimed.insert(derived.clone(), unit.source.name().to_string());
 
-        match unit.program.stmts.iter_mut().find_map(|stmt| match stmt {
-            Stmt::Namespace { path, span } => Some((path, span)),
-            _ => None,
-        }) {
-            Some((declared, span)) if declared != derived => {
-                let message = format!(
-                    "this module declares `namespace {}`, but its path derives as `{}`",
-                    declared.join("."),
-                    derived.join(".")
-                );
-                diagnostics.push(LoadDiagnostic {
-                    source: unit.source.clone(),
-                    diagnostic: Diagnostic::error(
-                        DiagnosticCode::ModulePathMismatch,
-                        *span,
-                        message,
-                    )
-                    .with_help(
-                        "a module's path is the package's import prefix plus the file's path \
-                         inside the package — delete the declaration, or move the file to where \
-                         it says it lives",
-                    ),
-                });
-            }
-            // A declaration that agrees is a restatement — leave it be (it is removed corpus-wide
-            // in a later slice, and the syntax with it).
-            Some(_) => {}
-            None => unit.program.stmts.insert(
-                0,
-                Stmt::Namespace {
-                    path: derived.clone(),
-                    span: first_line(unit.source),
-                },
-            ),
-        }
+        // Nothing to compare against: the parser refuses a `namespace` declaration outright now
+        // (its path is derived), so the only namespace node a program carries is the one written
+        // here. `module_namespace` stays the single identity seam every consumer downstream reads.
+        unit.program.stmts.insert(
+            0,
+            Stmt::Namespace {
+                path: derived.clone(),
+                span: first_line(unit.source),
+            },
+        );
     }
     diagnostics
 }

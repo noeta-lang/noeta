@@ -1,0 +1,10 @@
+// `namespace` is retired surface syntax. A module's path is derived from where its file sits, so a
+// declaration is redundant by construction and cannot disagree without one of the two being wrong —
+// the parser refuses it and says so, rather than leaving a reader of older code with an unexpected
+// token. The node itself lives on internally: the loader writes each derived path into the program
+// under it.
+// expect: error E0072 at 1:1
+// expect: exit 1
+use lib.thing.f;
+
+echo f()

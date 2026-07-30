@@ -1,9 +1,0 @@
-// A `namespace` declaration is still accepted, but only as a **restatement** of the path the file's
-// location derives. One that says something else is E0072 naming both paths: before derivation the
-// declaration simply won, which let a file call itself anything at all and made a package's internal
-// file names its public API.
-// expect: error E0072 at 2:1
-// expect: exit 1
-use lib.thing.f;
-
-echo f()

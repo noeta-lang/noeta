@@ -110,15 +110,15 @@ The usual objection is PSR-4's cross-platform wound, and it does not apply here.
 
 ### `namespace` is redundant
 
-A file may still open with a `namespace` declaration, but it is a **restatement of the derived path, not a definition of it**. A declaration that disagrees is **E0072**:
+`namespace` is **retired syntax**. A file that declares one is **E0072**, whatever it says — the path is derived, so a declaration can only restate it or contradict it, and neither is worth a line of source:
 
 ```text
-[E0072] this module declares `namespace App.Models`, but its path derives as `hello.models`
+[E0072] `namespace App.Models` — a module's path is derived from where its file sits, so it cannot be declared
    help: a module's path is the package's import prefix plus the file's path inside the package —
          delete the declaration, or move the file to where it says it lives
 ```
 
-New code should not write one; it is being removed from the language. `namespace` is not *gone* — a declaration that agrees with the derivation is still accepted, so an existing package keeps compiling while its declarations are deleted file by file. It just no longer decides anything.
+Deleting the line is the whole migration: the path it named is the path the file already derives, as long as the file sits where the declaration said it did. If the two ever disagreed, the declaration was the wrong half — move the file.
 
 ### Derivation needs a package
 
@@ -128,7 +128,7 @@ A prefix comes from a manifest, so a file with **no `noeta.toml` above it** has 
 
 | Code | When | Fix |
 |---|---|---|
-| **E0072** | a `namespace` declaration disagrees with the derived path | delete the declaration, or move the file to where it claims to live |
+| **E0072** | a file declares a `namespace` — retired syntax | delete the line; move the file if you meant to rename the module |
 | **E0073** | two files derive the same module path | rename or move one — one path is one module |
 | **E0074** | a directory name or file stem is not a legal identifier segment | rename it to the spelling the help offers |
 
