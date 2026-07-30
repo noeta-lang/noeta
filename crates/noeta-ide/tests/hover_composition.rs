@@ -134,3 +134,33 @@ fn empty_space_hovers_nothing() {
             .is_none()
     );
 }
+
+/// A **call-site instantiation** reaches hover with its type arguments: a value produced by
+/// `Repo::<Todo>.new("todos")` hovers as `Repo<Todo>`, not as a head-only `Repo`.
+///
+/// The instantiation is not written on the binding — that is the point of the spelling — so hover
+/// and the inlay hint are the only two places the reader sees it. A head-only answer would be worse
+/// than none: it would confidently report `Repo` for a value that is a `Repo<Todo>`. It does not
+/// happen because the hover index records `type_to_repr_top` of the fully resolved type.
+#[test]
+fn a_call_site_instantiation_hovers_with_its_type_arguments() {
+    const SRC: &str = "\
+struct Todo { id: int }
+class Repo<T> {
+  pub tbl: string
+  fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }
+}
+r = Repo::<Todo>.new(\"todos\");
+echo r.tbl;
+";
+    let store = store_with("instantiation.noe", SRC);
+    // `r` in `echo r.tbl` on line 6, column 5 — the binding the un-annotated call produced.
+    let (value, range) = store
+        .hover_markdown("instantiation.noe", pos(6, 5), Encoding::Utf16)
+        .expect("the binding hovers");
+    assert_eq!(
+        value, "```noeta\nRepo<Todo>\n```",
+        "hover must carry the instantiation: {value}"
+    );
+    assert!(range.is_some(), "a type hover underlines the expression");
+}
