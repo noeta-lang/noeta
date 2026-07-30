@@ -2649,9 +2649,26 @@ where
         // fires when the expression parse FAILS, so it depends on every brace-taking expression
         // refusing the braces it does not mean — see the map-entry grammar below, which is why
         // `=> { f(x) }` is a block rather than a one-entry map that errors after the fact.
+        //
+        // **`.memoized()` is load-bearing, not an optimization.** This is the grammar's one genuine
+        // garden path: on `=> { … }` the value-expression alternative parses the whole brace body as a
+        // map literal, fails, backtracks, and the block alternative parses it *again*. Nested one level
+        // deeper per arm, that is 2^depth — measured before this line, `match a { _ => { … } }` nested
+        // 16 deep took ~62 s of parsing and 20 deep ~162 s, so a ~1 KB file hung the compiler with no
+        // diagnostic and no timeout. Memoizing the alternative that fails makes the second attempt at
+        // the same offset return from the memo instead of re-descending, which collapses the whole
+        // shape back to linear (16 deep: 62 s → 0.02 s). A depth cap would not have fixed this: the
+        // problem is the complexity, and a cap only moves the cliff.
+        //
+        // Memoization caches *failures* only (chumsky drops the entry on success), so the cached fact
+        // is exactly "a map literal cannot start here", which is what the block alternative needs and
+        // what every level below re-asks. It is applied to this one rule rather than to `sub`
+        // generally: a garden path is a property of the ambiguity, and memoizing the whole expression
+        // grammar would cost every parse a hash lookup per node.
         let arm_body = sub
             .clone()
             .map(|e| noeta_ast::ClosureBody::Expr(Box::new(e)))
+            .memoized()
             .or(recovering_list(stmt.clone())
                 .delimited_by(just(T::LBrace), just(T::RBrace))
                 .map(noeta_ast::ClosureBody::Block));
@@ -6468,6 +6485,85 @@ mod tests {
                 parsed.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn nested_block_bodied_match_arms_parse_in_linear_time() {
+        // `=> { … }` is the grammar's one genuine ambiguity — map literal or statement block — and it
+        // used to be resolved by parsing the brace body twice: once as a map (which fails) and once as
+        // a block. Nested one level per arm, that doubled per level: measured 5 s at depth 15, 37 s at
+        // 18, 162 s at 20, so depth 30 would have been about two days and a ~1 KB file hung the
+        // compiler with no diagnostic and no timeout. `arm_body`'s `.memoized()` is what collapses it.
+        //
+        // Depth 32 is 64 delimiters, comfortably inside `MAX_NESTING_DEPTH`, and would have taken
+        // roughly 2^12 × 162 s — days — under the old grammar. So the assertion is mostly that this
+        // *finishes*; the wall-clock bound is there so an exponential regression fails with a message
+        // instead of hanging a CI run forever, and it is ~1000× the measured cost so it cannot flake.
+        const DEPTH: usize = 32;
+        let src = format!(
+            "a = 1;\nmatch a {{ _ => {{ {}42{} }} }}\n",
+            "match a { _ => { ".repeat(DEPTH),
+            " } }".repeat(DEPTH),
+        );
+        let start = std::time::Instant::now();
+        let parsed = parse_str(&src);
+        let elapsed = start.elapsed();
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "the nested match should parse cleanly: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.program.stmts.len(), 2);
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "parsing {DEPTH} nested block-bodied match arms took {elapsed:?} — the map-vs-block \
+             alternative is re-parsing the subtree again (see `arm_body`'s `.memoized()`)"
+        );
+    }
+
+    #[test]
+    fn a_block_bodied_arm_and_a_map_bodied_arm_still_mean_what_they_meant() {
+        // The behaviour `.memoized()` must not have changed: an arm body is a value EXPRESSION first,
+        // so `=> {}` and `=> {"k": v}` stay map literals, and only a brace body that is *not* an
+        // expression is a statement block. Memoization caches failures, so the map alternative still
+        // gets its chance at every offset — it just does not get it twice.
+        let parsed = parse_str(
+            "a = 1;\n\
+             m = match a { 1 => {}, 2 => {\"k\": 9}, 3 => {x}, _ => 0 };\n\
+             match a { 1 => { echo 1 }, _ => { echo 2 } }\n",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Binding { value, .. } = &parsed.program.stmts[1] else {
+            panic!("expected a binding, got {:?}", parsed.program.stmts[1]);
+        };
+        let Expr::Match { arms, .. } = value else {
+            panic!("expected a match, got {value:?}");
+        };
+        let kinds: Vec<&str> = arms
+            .iter()
+            .map(|arm| match &arm.body {
+                ClosureBody::Expr(e) => match **e {
+                    Expr::Map { .. } => "map",
+                    _ => "expr",
+                },
+                ClosureBody::Block(_) => "block",
+            })
+            .collect();
+        // `{}` empty map, `{"k": 9}` map, `{x}` map shorthand, `0` a plain expression.
+        assert_eq!(kinds, vec!["map", "map", "map", "expr"]);
+
+        let Stmt::Expr { expr, .. } = &parsed.program.stmts[2] else {
+            panic!("expected an expression statement, got {:?}", parsed.program.stmts[2]);
+        };
+        let Expr::Match { arms, .. } = expr else {
+            panic!("expected a match, got {expr:?}");
+        };
+        // `{ echo 1 }` is not an expression, so both arms are statement blocks.
+        assert!(
+            arms.iter()
+                .all(|arm| matches!(arm.body, ClosureBody::Block(_))),
+            "side-effecting arms should be blocks"
+        );
     }
 
     #[test]
