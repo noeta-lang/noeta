@@ -155,9 +155,11 @@ fn a_namespace_declaration_is_refused_whatever_it_says() {
         .failure()
         .stderr(predicate::str::contains("E0072"))
         .stderr(predicate::str::contains(
-            "`namespace totally.unrelated` — a module's path is derived from where its file sits",
+            "a module's path is derived from where its file sits, so it cannot be declared",
         ))
-        // The help names the path this file actually has, so the fix is mechanical.
+        // The help names the path this file actually has, so the fix is mechanical. The message
+        // deliberately does not echo what was declared — the rendered snippet shows the line, and
+        // for a *dependency* the node has already been re-rooted out of the author's spelling.
         .stderr(predicate::str::contains("derives as `app.helper`"));
 }
 
@@ -189,8 +191,11 @@ fn a_namespace_that_restates_the_derived_path_is_refused_too() {
         .failure()
         .stderr(predicate::str::contains("E0072"))
         .stderr(predicate::str::contains(
-            "`namespace app.helper` — a module's path is derived from where its file sits",
-        ));
+            "a module's path is derived from where its file sits, so it cannot be declared",
+        ))
+        // Refused even though it agrees, and the help still names the derivation — an author who
+        // wrote the right thing gets the same one-line fix as one who wrote the wrong thing.
+        .stderr(predicate::str::contains("derives as `app.helper`"));
 }
 
 #[test]

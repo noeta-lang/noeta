@@ -497,8 +497,7 @@ enum Color { Red; Green }
         .unwrap();
         std::fs::write(
             toolkit.join("api.noe"),
-            "namespace toolkit.api;\n\
-             @attribute(Function)\n@role(Semantic.TrustBoundary)\npub struct Tool { name: string }\n",
+            "@attribute(Function)\n@role(Semantic.TrustBoundary)\npub struct Tool { name: string }\n",
         )
         .unwrap();
         std::fs::write(

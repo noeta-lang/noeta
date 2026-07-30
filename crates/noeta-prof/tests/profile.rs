@@ -643,7 +643,7 @@ fn profiles_a_program_with_a_path_dependency() {
     .unwrap();
     std::fs::write(
         lib.join("api.noe"),
-        "namespace lib.api;\npub fn answer(): int { return 42; }\n",
+        "pub fn answer(): int { return 42; }\n",
     )
     .unwrap();
 
