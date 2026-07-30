@@ -1,0 +1,22 @@
+// The instantiation is consumed by the ASSOCIATED CALL that follows it, and there is nowhere else
+// for it to go: a bare `Repo::<Todo>` is not a value (the grammar requires the `.member`), an
+// instance method reads its class parameters off the receiver's own tag, and a field read has no
+// instantiation to consume either. So a `::<…>` followed by anything but an associated call is
+// E0058 rather than a silently discarded turbofish.
+//
+// `Repo::<Todo>.model` here is a method HANDLE — a real value form (`Type.method` yields an unbound
+// handle) — which is exactly why it needs the error: it would otherwise type fine and drop `Todo`.
+// expect: error E0058 at 21:5
+// expect: exit 1
+struct Todo {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+}
+h = Repo::<Todo>.new;
+echo "unreachable";

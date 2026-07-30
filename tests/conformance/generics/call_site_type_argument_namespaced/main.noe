@@ -1,0 +1,35 @@
+// The call-site turbofish carries **qualified identity**, like every other type reference.
+//
+// The type arguments are `TypeRef`s that the linker's qualification pass must rewrite, and missing
+// that is the silent-wrong-answer shape this project has hit three times: a turbofish the qualifier
+// never visits resolves against an unqualified key and answers with nothing, no diagnostic. The
+// last line is the oracle — the name read off the object's tag at run time must equal the name
+// folded from a written `type_name::<Todo>()` at the same site.
+//
+// A directory case with a `noeta.toml` on purpose: the harness runs a *single-file* case straight
+// from source text, with no loader and therefore no qualification at all, so a bare `.noe` here
+// could not observe the property it claims to pin. Delete the manifest and nothing qualifies,
+// silently.
+// expect: stdout "todos:demo.main.Todo"
+// expect: stdout "demo.main.Todo"
+// expect: stdout "true"
+// expect: exit 0
+
+struct Todo {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+rt = Repo::<Todo>.new("todos");
+echo rt.model();
+echo type_name::<Todo>();
+echo rt.model() == "todos:" ~ type_name::<Todo>();

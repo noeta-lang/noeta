@@ -1,0 +1,24 @@
+// The one construction shape whose missing instantiation is still a RUN-TIME abort, pinned here so
+// the shared abort message stays exercised now that the constructor-call route is a check-time
+// error (`class_type_param_unknown_instantiation.noe`).
+//
+// A **direct object literal** of a generic class, written outside the class, whose type parameter
+// no field determines: `Repo { tbl: "x" }` says nothing about `T` — `T` appears in no field type —
+// so the literal types as a bare `Repo` with no arguments and nothing is tagged.
+//
+// It is a different path from the constructor call this arc closed (`note_construction` on a
+// literal, not `note_constructor_call` on a call), and it is not the same judgement either: the
+// *same* literal inside `fn new` is erased ON PURPOSE (its `T` is a parameter, resolved one frame
+// up by the call), so the erasure cannot simply be made an error where it is written. Closing it
+// belongs with the literal's own inference, not here.
+// expect: error E0058 at 20:33
+// expect: exit 1
+class Repo<T> {
+    pub tbl: string
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+r = Repo { tbl: "x" };
+echo r.model();

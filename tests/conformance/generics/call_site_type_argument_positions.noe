@@ -1,0 +1,64 @@
+// The call-site turbofish is **additive**. Bidirectional inference stays the language's declared
+// direction (inferred-static, explicit `dyn`), so all four expected-type positions that supplied a
+// generic constructor's instantiation before still do, unchanged, alongside the new spelling:
+//
+//   1. an annotated binding      `rt: Repo<Todo> = Repo.new(…)`
+//   2. a declared return         `fn users(): Repo<User> { return Repo.new(…); }`
+//   3. a field's declared type   `Holder { inner: Repo.new(…) }` against `inner: Repo<Note>`
+//   4. a parameter's type        `describe(Repo.new(…))` against `fn describe(r: Repo<Tag>)`
+//   5. the call site itself      `Repo::<Todo>.new(…)`            ← new
+//
+// One file rather than five so a regression that widens the new arm into the old ones — or one
+// that quietly routes an old position through it — fails here with all five side by side.
+// expect: stdout "todos:Todo"
+// expect: stdout "users:User"
+// expect: stdout "notes:Note"
+// expect: stdout "tags:Tag"
+// expect: stdout "spelled:Todo"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+struct Note {
+    id: int
+}
+struct Tag {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+class Holder {
+    inner: Repo<Note>
+
+    fn new(i: Repo<Note>): Holder {
+        return Holder { inner: i };
+    }
+
+    fn go(): string {
+        return self.inner.model();
+    }
+}
+fn users(): Repo<User> {
+    return Repo.new("users");
+}
+fn describe(r: Repo<Tag>): string {
+    return r.model();
+}
+rt: Repo<Todo> = Repo.new("todos");
+echo rt.model();
+echo users().model();
+echo Holder.new(Repo.new("notes")).go();
+echo describe(Repo.new("tags"));
+echo Repo::<Todo>.new("spelled").model();
