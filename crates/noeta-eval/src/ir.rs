@@ -946,6 +946,45 @@ impl Interpreter {
         Ok(Flow::Normal)
     }
 
+    /// The narrowing target a [`noeta_ir::Rvalue::As`]/[`noeta_ir::Rvalue::TypeTest`] with a
+    /// **dynamic** head-name atom resolves to, or `None` when it carries none (the ordinary
+    /// statically-written target, which stays authoritative).
+    ///
+    /// The atom is the `TypeArgName`/`TypeSlotName` that also answers `type_name::<T>()`, so it
+    /// evaluates to the instantiation's qualified name; wrapping it back into a bare
+    /// [`noeta_ir::TypeRef::Named`] re-enters `runtime_matches` on that name and reuses the whole
+    /// matcher unchanged — the built-in head funnel, `Option`/`Result`, a user shape name, and an
+    /// extern's qualified identity all decided exactly as for a written target. The VM's
+    /// `NarrowTarget::from_runtime_name` is the mirror of that re-entry.
+    ///
+    /// Head-only is not a simplification here: the checker records the site only for a *bare*
+    /// parameter target, so there is exactly one name and no arguments to carry.
+    fn runtime_narrow_target(
+        &mut self,
+        ty: &noeta_ir::TypeRef,
+        dynamic: &Option<noeta_ir::Atom>,
+        frame: &mut Frame,
+        span: noeta_span::Span,
+    ) -> Eval<Option<noeta_ir::TypeRef>> {
+        let Some(atom) = dynamic else {
+            return Ok(None);
+        };
+        let name = self.eval_ir_atom(atom, frame)?;
+        Ok(match name {
+            Value::Str(name) => Some(noeta_ir::TypeRef::Named {
+                name: noeta_ast::Name::canonical(name.to_string()),
+                args: Vec::new(),
+                span,
+            }),
+            // Both producers write a string, so this is unreachable in a checked program; a narrow
+            // has no failure channel, so it degrades to the baked target rather than aborting.
+            _ => {
+                let _ = ty;
+                None
+            }
+        })
+    }
+
     /// Resolve an atom to a value: a constant, a frame temporary (moved out — see
     /// [`Frame::take`]), or a lexical lookup. The `Var` not-found path reproduces the AST
     /// walker's `Ident` diagnostic exactly.
@@ -1478,19 +1517,36 @@ impl Interpreter {
                 let value = self.eval_ir_atom(operand, frame)?;
                 self.eval_try_ir(value, on_error, *span)
             }
-            noeta_ir::Rvalue::As { operand, ty, .. } => {
+            // A narrow whose target is an enclosing generic's type parameter reads the head name out
+            // of the `dynamic` atom — the very `TypeArgName`/`TypeSlotName` that answers
+            // `type_name::<T>()` — and re-enters the matcher on that name, so the two surfaces
+            // resolve one `T` and built-in instantiations (`T = int`) go through the same
+            // `BuiltinTy` funnel a written `int` does. The VM's `from_runtime_name` mirrors it.
+            noeta_ir::Rvalue::As {
+                operand,
+                ty,
+                dynamic,
+                span,
+            } => {
                 let value = self.eval_ir_atom(operand, frame)?;
-                if crate::runtime_matches(&value, ty, &self.reflection) {
+                let target = self.runtime_narrow_target(ty, dynamic, frame, *span)?;
+                if crate::runtime_matches(&value, target.as_ref().unwrap_or(ty), &self.reflection) {
                     Ok(crate::builtin_enum("Option", "some", vec![value]))
                 } else {
                     Ok(crate::builtin_enum("Option", "none", vec![]))
                 }
             }
-            noeta_ir::Rvalue::TypeTest { operand, ty, .. } => {
+            noeta_ir::Rvalue::TypeTest {
+                operand,
+                ty,
+                dynamic,
+                span,
+            } => {
                 let value = self.eval_ir_atom(operand, frame)?;
+                let target = self.runtime_narrow_target(ty, dynamic, frame, *span)?;
                 Ok(Value::Bool(crate::runtime_matches(
                     &value,
-                    ty,
+                    target.as_ref().unwrap_or(ty),
                     &self.reflection,
                 )))
             }

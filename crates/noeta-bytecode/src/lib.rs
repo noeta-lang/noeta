@@ -215,6 +215,83 @@ pub enum NarrowTarget {
     },
 }
 
+impl NarrowTarget {
+    /// The runtime head constructor a **built-in type name** narrows to, or `None` when the name has
+    /// no dedicated head and falls back to a nominal ([`NarrowTarget::Named`]) match by shape name.
+    ///
+    /// Exhaustive over [`noeta_ast::BuiltinTy`] so this and the tree-walker's `runtime_matches` —
+    /// the two halves of the differential — cannot drift: a new built-in fails to compile in both
+    /// until handled.
+    ///
+    /// This funnel dropped a bare `tuple` head the VM alone recognized. `tuple` is not a built-in
+    /// type name (`Type::is_builtin_name` rejects it, so the checker reports an unknown type before
+    /// any narrowing runs) and the tree-walker always treated it nominally — so the two backends now
+    /// agree on an unreachable case they used to answer differently. A tuple target is written
+    /// `(A, B)`, which reaches [`NarrowTarget::Tuple`] through the compiler's `TypeRef::Tuple` arm.
+    ///
+    /// It lives here rather than in the compiler because the VM needs it too: a narrow whose target
+    /// is a generic's type parameter learns the name only at run time
+    /// ([`NarrowTarget::from_runtime_name`]), and resolving it through any other mapping would let
+    /// `v.as<T>()` with `T = int` disagree with `v.as<int>()`.
+    pub fn builtin_head(name: &str) -> Option<NarrowTarget> {
+        use noeta_ast::BuiltinTy;
+        Some(match BuiltinTy::from_name_any(name)? {
+            BuiltinTy::Int => NarrowTarget::Int,
+            // `f32` is reified at runtime (distinct NaN-box tag), so it gets a head; the matcher's
+            // `F32 <: float` edge makes `(f32) is float` true while `(float) is f32` stays false.
+            BuiltinTy::F32 => NarrowTarget::F32,
+            BuiltinTy::Float => NarrowTarget::Float,
+            BuiltinTy::Bool => NarrowTarget::Bool,
+            BuiltinTy::Str => NarrowTarget::String,
+            BuiltinTy::Bytes => NarrowTarget::Bytes,
+            BuiltinTy::Unit => NarrowTarget::Unit,
+            BuiltinTy::Dyn => NarrowTarget::Dyn,
+            // The bottom type is uninhabited, so `x is never` is false for every value. Spelled as
+            // the EMPTY `AnyOf` rather than a head of its own: "matches none of these" is exactly
+            // what an empty disjunction means, and it needs no new runtime case in either backend.
+            BuiltinTy::Never => NarrowTarget::AnyOf(Vec::new()),
+            BuiltinTy::List => NarrowTarget::List,
+            BuiltinTy::Map => NarrowTarget::Map,
+            BuiltinTy::Set => NarrowTarget::Set,
+            // Abstract kind-types match any value of that declaration kind.
+            BuiltinTy::KindEnum => NarrowTarget::AnyEnum,
+            BuiltinTy::KindStruct => NarrowTarget::AnyStruct,
+            BuiltinTy::KindClass => NarrowTarget::AnyClass,
+            // `number` is a union, so it narrows through the union machinery (`AnyOf`) rather than
+            // earning a head of its own. Only three heads are listed because the runtime erases the
+            // rest: every fixed-width integer is a `Value::Int` and `f64` is a `Value::Float` (there
+            // is no boxing site to stamp a width on), while `f32` alone is reified — the same
+            // erasure the `Int`/`Float`/`F32` arms above already encode.
+            BuiltinTy::Number => NarrowTarget::AnyOf(vec![
+                NarrowTarget::Int,
+                NarrowTarget::Float,
+                NarrowTarget::F32,
+            ]),
+            // `Option`/`Result` are enums whose shape name *is* the type name, so they narrow
+            // through the nominal path like a user enum rather than needing a head of their own.
+            BuiltinTy::Option | BuiltinTy::Result => return None,
+            // The erased widths (`f64`, `i8..u64`) carry no runtime tag on a scalar, so they fall to
+            // the nominal path and never match a scalar. The checker warns on a bare-scalar `is
+            // i32`/`is f64` (statically always-false); giving them heads would need scalar
+            // reification, which the arc deliberately declines. `f32` alone is reified and handled
+            // above. Both backends agree.
+            BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
+        })
+    }
+
+    /// The head-only target for a type name known only at **run time** — the instantiation of an
+    /// enclosing generic's type parameter, delivered by [`Op::Narrow`]'s / [`Op::IsType`]'s
+    /// `dynamic` register (the receiver's reflected type tag, or the hidden type-argument slot).
+    ///
+    /// Head-only by construction: the name is a single string, so there are no arguments to test —
+    /// which is exactly why the checker refuses a *composite* parameter target (`v is List<T>`)
+    /// rather than lowering one here. Built-ins resolve through [`Self::builtin_head`], so
+    /// `v.as<T>()` at `T = int` answers what the written `v.as<int>()` does.
+    pub fn from_runtime_name(name: &str) -> NarrowTarget {
+        Self::builtin_head(name).unwrap_or_else(|| NarrowTarget::Named(name.to_string()))
+    }
+}
+
 /// How a [`Op::MakeStructInPlace`] is allowed to reuse its consumed `base` object's allocation.
 ///
 /// This is the compile-time half of reuse analysis: the compiler always knows the construct is a
@@ -754,6 +831,16 @@ pub enum Op {
         /// Boxed (P-VMT-OPSZ): `NarrowTarget` is 32 bytes and narrowing is a cold op, so it lives
         /// behind a pointer to keep it off the hot instruction stream.
         target: Box<NarrowTarget>,
+        /// A register holding the target's head name as a **string**, when `T` is a type parameter
+        /// of an enclosing generic: generics are erased, so `target` would be the literal letter
+        /// `T` — a name nothing is registered under, which answered `none` for every value. The
+        /// register is filled by the same [`Op::TypeArgName`]/[`Op::TypeSlotName`] that serves
+        /// `type_name::<T>()`, and the VM resolves it through
+        /// [`NarrowTarget::from_runtime_name`], so a narrow can never disagree with that surface
+        /// about what `T` is.
+        ///
+        /// `None` — the common case — leaves `target` authoritative.
+        dynamic: Option<Reg>,
         some_shape: u32,
         none_shape: u32,
     },
@@ -765,6 +852,9 @@ pub enum Op {
         src: Reg,
         /// Boxed (P-VMT-OPSZ), as in [`Op::Narrow`].
         target: Box<NarrowTarget>,
+        /// The run-time head name, exactly as [`Op::Narrow`] carries it — the two share the matcher,
+        /// so they share this channel.
+        dynamic: Option<Reg>,
     },
     /// `dst = make_gen(src)` (Track G.1b): wrap the step closure in `src` into a generator iterator
     /// (`IterState::Gen`). The generator desugar emits this as the tail of a generator function — the
@@ -2114,9 +2204,19 @@ fn op_repr(
         Op::Coalesce {
             dst, src, fallback, ..
         } => format!("Coalesce    r{dst} <- r{src} ?? -> {fallback}"),
+        // A dynamic head name is rendered as the register it arrives in — the disassembly must show
+        // that the target is not the baked one, or a narrow over a type parameter would read as a
+        // match on the letter `T`.
         Op::Narrow {
-            dst, src, target, ..
-        } => format!("Narrow      r{dst} <- r{src}.as<{target:?}>()"),
+            dst,
+            src,
+            target,
+            dynamic,
+            ..
+        } => match dynamic {
+            Some(r) => format!("Narrow      r{dst} <- r{src}.as<name r{r}>()"),
+            None => format!("Narrow      r{dst} <- r{src}.as<{target:?}>()"),
+        },
         Op::AttributesOf {
             dst,
             type_name,
@@ -2215,9 +2315,15 @@ fn op_repr(
                 n(trait_name)
             )
         }
-        Op::IsType { dst, src, target } => {
-            format!("IsType      r{dst} <- r{src} is {target:?}")
-        }
+        Op::IsType {
+            dst,
+            src,
+            target,
+            dynamic,
+        } => match dynamic {
+            Some(r) => format!("IsType      r{dst} <- r{src} is name r{r}"),
+            None => format!("IsType      r{dst} <- r{src} is {target:?}"),
+        },
         Op::MakeFuture { dst, src } => {
             format!("MakeFuture  r{dst} <- future r{src}")
         }

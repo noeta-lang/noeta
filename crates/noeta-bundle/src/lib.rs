@@ -154,7 +154,12 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// line. The last is a wire break even though the *meaning* is identical: postcard writes an
 /// `Option`'s discriminant byte followed by the payload either way, but a niche-optimised `Option`
 /// is not guaranteed to encode as the plain one, and the two ops around it moved regardless.
-pub const FORMAT_VERSION: u8 = 13;
+/// Bumped to 14 by the narrow-over-a-type-parameter fix: `Op::Narrow` and `Op::IsType` each gained
+/// a `dynamic: Option<Reg>` — the register carrying the instantiation's runtime head name — placed
+/// after `target` and so before `Narrow`'s two shape indices. Same non-self-describing-encoding rule
+/// as every bump above: postcard writes the `Option`'s discriminant byte where a version-13 reader
+/// expects `some_shape`'s first byte, desynchronising the rest of the stream.
+pub const FORMAT_VERSION: u8 = 14;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

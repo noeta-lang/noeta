@@ -3743,8 +3743,17 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            Rvalue::As { operand, ty, .. } => {
+            // A narrow whose target is an enclosing generic's type parameter carries the head name in
+            // a register instead (`dynamic`) — lowering put the same `TypeArgName`/`TypeSlotName`
+            // there that `type_name::<T>()` reads, so the two surfaces resolve one `T`.
+            Rvalue::As {
+                operand,
+                ty,
+                dynamic,
+                ..
+            } => {
                 let src = self.atom_reg(operand)?;
+                let dynamic = dynamic.as_ref().map(|a| self.atom_reg(a)).transpose()?;
                 let target = Box::new(narrow_target(ty));
                 let some_shape = self.module.builtin_enum_shape("Option", "some");
                 let none_shape = self.module.builtin_enum_shape("Option", "none");
@@ -3752,15 +3761,27 @@ impl<'m> FnCompiler<'m> {
                     dst,
                     src,
                     target,
+                    dynamic,
                     some_shape,
                     none_shape,
                 });
                 Ok(())
             }
-            Rvalue::TypeTest { operand, ty, .. } => {
+            Rvalue::TypeTest {
+                operand,
+                ty,
+                dynamic,
+                ..
+            } => {
                 let src = self.atom_reg(operand)?;
+                let dynamic = dynamic.as_ref().map(|a| self.atom_reg(a)).transpose()?;
                 let target = Box::new(narrow_target(ty));
-                self.code.push(Op::IsType { dst, src, target });
+                self.code.push(Op::IsType {
+                    dst,
+                    src,
+                    target,
+                    dynamic,
+                });
                 Ok(())
             }
             Rvalue::MakeGen { step, .. } => {
@@ -5162,10 +5183,15 @@ impl<'m> FnCompiler<'m> {
             // fall through on `true` / jump to the next arm on `false`. Binds nothing.
             Pattern::IsType { ty, .. } => {
                 let test = self.alloc_reg();
+                // Always the baked target: a `match` arm's `is T` over a type parameter is refused at
+                // check time (E0058), because a pattern is tested in place — the IR reuses the AST
+                // `Pattern`, which has no operand position an instantiation's name could be computed
+                // into. The expression form `v.as<T>()` carries one and resolves.
                 self.code.push(Op::IsType {
                     dst: test,
                     src: reg,
                     target: Box::new(narrow_target(ty)),
+                    dynamic: None,
                 });
                 fail_jumps.push(self.code.len());
                 self.code.push(Op::JumpIfFalse {
@@ -5305,62 +5331,6 @@ fn unknown_field_diag(type_name: &str, field: &str, span: Span) -> Diagnostic {
     )
 }
 
-/// The runtime head constructor a **built-in type name** narrows to, or `None` when the name has
-/// no dedicated head and falls back to a nominal (`NarrowTarget::Named`) match by shape name.
-///
-/// Exhaustive over [`BuiltinTy`] so this and the tree-walker's `runtime_matches` — the two halves
-/// of the differential — cannot drift: a new built-in fails to compile in both until handled.
-///
-/// This funnel dropped a bare `tuple` head the VM alone recognized. `tuple` is not a built-in type
-/// name (`Type::is_builtin_name` rejects it, so the checker reports an unknown type before any
-/// narrowing runs) and the tree-walker always treated it nominally — so the two backends now agree
-/// on an unreachable case they used to answer differently. A tuple target is written `(A, B)`,
-/// which reaches [`NarrowTarget::Tuple`] through `TypeRef::Tuple`.
-fn narrow_head(name: &str) -> Option<NarrowTarget> {
-    use noeta_ast::BuiltinTy;
-    Some(match BuiltinTy::from_name_any(name)? {
-        BuiltinTy::Int => NarrowTarget::Int,
-        BuiltinTy::Float => NarrowTarget::Float,
-        // `f32` is reified at runtime (distinct NaN-box tag), so it gets a head; the matcher's
-        // `F32 <: float` edge makes `(f32) is float` true while `(float) is f32` stays false.
-        BuiltinTy::F32 => NarrowTarget::F32,
-        BuiltinTy::Bool => NarrowTarget::Bool,
-        BuiltinTy::Str => NarrowTarget::String,
-        BuiltinTy::Bytes => NarrowTarget::Bytes,
-        BuiltinTy::Unit => NarrowTarget::Unit,
-        BuiltinTy::Dyn => NarrowTarget::Dyn,
-        // The bottom type is uninhabited, so `x is never` is false for every value. Spelled as
-        // the EMPTY `AnyOf` rather than a head of its own: "matches none of these" is exactly
-        // what an empty disjunction means, and it needs no new runtime case in either backend.
-        BuiltinTy::Never => NarrowTarget::AnyOf(Vec::new()),
-        BuiltinTy::List => NarrowTarget::List,
-        BuiltinTy::Map => NarrowTarget::Map,
-        BuiltinTy::Set => NarrowTarget::Set,
-        // Abstract kind-types match any value of that declaration kind.
-        BuiltinTy::KindEnum => NarrowTarget::AnyEnum,
-        BuiltinTy::KindStruct => NarrowTarget::AnyStruct,
-        BuiltinTy::KindClass => NarrowTarget::AnyClass,
-        // `number` is a union, so it narrows through the union machinery (`AnyOf`) rather than
-        // earning a head of its own. Only three heads are listed because the runtime erases the
-        // rest: every fixed-width integer is a `Value::Int` and `f64` is a `Value::Float` (there is
-        // no boxing site to stamp a width on), while `f32` alone is reified — the same erasure the
-        // `Int`/`Float`/`F32` arms above already encode.
-        BuiltinTy::Number => NarrowTarget::AnyOf(vec![
-            NarrowTarget::Int,
-            NarrowTarget::Float,
-            NarrowTarget::F32,
-        ]),
-        // `Option`/`Result` are enums whose shape name *is* the type name, so they narrow through
-        // the nominal path like a user enum rather than needing a head of their own.
-        BuiltinTy::Option | BuiltinTy::Result => return None,
-        // The erased widths (`f64`, `i8..u64`) carry no runtime tag on a scalar, so they fall to the
-        // nominal path and never match a scalar. The checker warns on a bare-scalar `is i32`/`is f64`
-        // (statically always-false); giving them heads would need scalar reification, which the arc
-        // deliberately declines. `f32` alone is reified and handled above. Both backends agree.
-        BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
-    })
-}
-
 /// Reduce a narrowing target type (`x.as<T>()`) to its runtime head constructor. Mirrors the
 /// tree-walker's `runtime_matches` mapping exactly so both backends decide a narrowing the same
 /// way. `Option`/`Result` and user records/classes/enums all become `Named` (matched by shape
@@ -5389,8 +5359,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         // element type.
         TypeRef::Fn { .. } => NarrowTarget::Fn,
         TypeRef::Named { name, args, .. } => {
-            let head =
-                narrow_head(name.as_str()).unwrap_or_else(|| NarrowTarget::Named(name.to_string()));
+            let head = NarrowTarget::from_runtime_name(name.as_str());
             // A parametrized target (`List<int>`, `Box<int>`) additionally checks its type arguments
             // against the value's reflected tag (R3); a bare name (`List`, `Box`, `Struct`) stays the
             // head-only target, preserving the widening `x is List` and the untagged fallback.

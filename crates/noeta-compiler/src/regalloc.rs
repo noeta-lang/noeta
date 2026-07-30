@@ -472,13 +472,18 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*src);
             f.targets.push(*fallback);
         }
-        Op::Narrow { dst, src, .. } => {
-            f.def = Some(*dst);
-            f.uses.push(*src);
+        // A narrow's `dynamic` head-name register is a use like any other — it holds the
+        // instantiation's name, produced by a preceding `TypeArgName`/`TypeSlotName`. Missing it
+        // here let coalescing reuse that register's slot and shrink the frame under it.
+        Op::Narrow {
+            dst, src, dynamic, ..
         }
-        Op::IsType { dst, src, .. } => {
+        | Op::IsType {
+            dst, src, dynamic, ..
+        } => {
             f.def = Some(*dst);
             f.uses.push(*src);
+            f.uses.extend(dynamic.iter().copied());
         }
         Op::MakeGen { dst, src }
         | Op::MakeFuture { dst, src }
@@ -1020,13 +1025,18 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(src);
         }
-        Op::Narrow { dst, src, .. } => {
-            m(dst);
-            m(src);
+        // The `dynamic` head-name register is remapped with the rest — see the use-set arm above.
+        Op::Narrow {
+            dst, src, dynamic, ..
         }
-        Op::IsType { dst, src, .. } => {
+        | Op::IsType {
+            dst, src, dynamic, ..
+        } => {
             m(dst);
             m(src);
+            if let Some(reg) = dynamic {
+                m(reg);
+            }
         }
         Op::MakeGen { dst, src }
         | Op::MakeFuture { dst, src }

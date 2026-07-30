@@ -1,8 +1,8 @@
 //! **Type-param forwarding pre-pass** (poly-values F2b, extended by poly-deferrals D2a): which
 //! generic functions and methods forward a type parameter into a **call-site-typed position** — a
 //! native turbofish (`json.try_parse::<T>`), a reflection manifest query (`attributes_of::<T>`),
-//! the type's own name (`type_name::<T>()`), or (transitively) another forwarding generic
-//! (`load::<T>(p)`).
+//! the type's own name (`type_name::<T>()`), a **narrow** to it (`v.as<T>()` / `v is T`), or
+//! (transitively) another forwarding generic (`load::<T>(p)`).
 //!
 //! Generics are erased at runtime, so one compiled body serves every instantiation; a forwarded
 //! site therefore needs its per-instantiation data (`TypeRecipe` / type name) delivered
@@ -513,6 +513,22 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 }
             }
         }
+        // The **narrow** consumers — `v.as<T>()` and `v is T`. Name-only, like `type_name` above
+        // and for the same reason: a narrow is a head-constructor match on the instantiation's
+        // runtime NAME ([`noeta_ast::Expr::As`]), so a slot's `TypeArgInfo.name` is the whole of
+        // what it reads and it forwards even for an instantiation that has no recipe at all.
+        //
+        // Bare parameters only, matching the head-keyed match the runtime performs: one narrow
+        // reads one name, so a parameter buried in a *tested* argument position (`v is List<T>`)
+        // has no slot it could be spelled as and is an E0058 at the checker instead.
+        Expr::As { expr: e, ty, .. } | Expr::TypeTest { expr: e, ty, .. } => {
+            for p in cx.params {
+                if is_bare_param(ty, p) {
+                    mark(Type::Named(p.to_string(), Vec::new()), false);
+                }
+            }
+            rec!(e);
+        }
         // Transitive forwarding: an explicit turbofish call of another forwarding function. Each
         // of the callee's slot templates, with the call's type arguments substituted in, that
         // still mentions one of OUR parameters becomes our slot (`g::<T>` against g's `List<U>`
@@ -576,8 +592,6 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         | Expr::Try { expr: e, .. }
         | Expr::Await { expr: e, .. }
         | Expr::Spawn { future: e, .. }
-        | Expr::As { expr: e, .. }
-        | Expr::TypeTest { expr: e, .. }
         | Expr::TypeOf { value: e, .. }
         | Expr::FieldsOf { value: e, .. }
         | Expr::TraitsOf { value: e, .. }

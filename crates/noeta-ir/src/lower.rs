@@ -1750,6 +1750,59 @@ impl Lowerer<'_> {
             .unwrap_or(name)
     }
 
+    /// The **run-time name atom** of a target type whose head the checker resolved to a
+    /// per-instantiation channel at `span` — `Some` exactly for a bare type parameter of an
+    /// enclosing generic, `None` for every statically-written type (which stays a folded constant).
+    ///
+    /// One helper over three surfaces, because there is one fact — what `T` *is* here.
+    /// `type_name::<T>()` answers with it, and `v.as<T>()` / `v is T` match on it; routing all three
+    /// through this function is what makes them agree by construction rather than by convention,
+    /// which is the whole reason the narrow works: `Expr::As` is a head-constructor match on a
+    /// name, and this is the name.
+    ///
+    /// The two channels, mirroring the checker's [`Sites::self_type_arg_sites`] /
+    /// [`Sites::forwarded_slot_sites`] split: a generic TYPE's parameter travels on the receiver's
+    /// reflected type tag (read off `self` — a generic fn has no receiver), and a generic FN's or
+    /// METHOD's own parameter travels in the hidden `$ty<i>` slot that also carries a forwarded
+    /// decode recipe, of which this reads only the name.
+    fn type_param_name_atom(
+        &mut self,
+        ty: &TypeRef,
+        span: &Span,
+        out: &mut Vec<Stmt>,
+    ) -> Option<Atom> {
+        if let Some((owner, index)) = self.sites.self_type_arg_sites.get(span).cloned() {
+            return Some(self.emit(
+                out,
+                Rvalue::TypeArgName {
+                    operand: Atom::Var {
+                        name: "self".to_string(),
+                        span: *span,
+                    },
+                    index,
+                    type_name: owner,
+                    param: ty.head_name(),
+                    span: *span,
+                },
+                *span,
+            ));
+        }
+        if let Some(&slot) = self.sites.forwarded_slot_sites.get(span) {
+            return Some(self.emit(
+                out,
+                Rvalue::TypeSlotName {
+                    slot: Atom::Var {
+                        name: hidden_param_name(slot),
+                        span: *span,
+                    },
+                    span: *span,
+                },
+                *span,
+            ));
+        }
+        None
+    }
+
     /// Lower an expression to an [`Atom`], emitting the `let`s that compute any
     /// sub-expressions into `out` first (A-normal form). Literals and identifiers reduce
     /// directly to an atom with no `let`.
@@ -1772,46 +1825,15 @@ impl Lowerer<'_> {
             // qualified identity (`app.storage.Todo`) and there is nothing left to look up. Resolved
             // through the same `TypeRef::head_name` the name-keyed reflection queries use, which is
             // what makes the two agree by construction rather than by convention.
-            // …unless the checker recognized `T` as a parameter of the ENCLOSING generic type inside
-            // one of its instance methods (generic constructor reflection, Gap B): one compiled body
-            // serves every instantiation, so there is no constant to fold — the instantiation rides
-            // on the receiver's reflected type tag, and the name is read off argument `index` of it.
-            Expr::TypeName { ty, span } if self.sites.self_type_arg_sites.contains_key(span) => {
-                let (owner, index) = self.sites.self_type_arg_sites[span].clone();
-                Ok(self.emit(
-                    out,
-                    Rvalue::TypeArgName {
-                        operand: Atom::Var {
-                            name: "self".to_string(),
-                            span: *span,
-                        },
-                        index,
-                        type_name: owner,
-                        param: ty.head_name(),
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
-            // …or as a FORWARDED parameter of the enclosing top-level generic fn (poly-values
-            // F2b): the same "one body serves every instantiation" reason, the other channel — the
-            // hidden `$ty<i>` slot that already carries the decode recipe also names the
-            // instantiation, and this surface wants nothing but that name.
-            Expr::TypeName { span, .. } if self.sites.forwarded_slot_sites.contains_key(span) => {
-                let slot = self.sites.forwarded_slot_sites[span];
-                Ok(self.emit(
-                    out,
-                    Rvalue::TypeSlotName {
-                        slot: Atom::Var {
-                            name: hidden_param_name(slot),
-                            span: *span,
-                        },
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
-            Expr::TypeName { ty, .. } => Ok(Atom::Const(Const::Str(self.reflection_head_name(ty)))),
+            // …unless the checker recognized `T` as a parameter of an ENCLOSING generic (a type's,
+            // read off the receiver's reflected tag — Gap B; or a fn's own, read off the hidden
+            // type-argument slot — F2b). One compiled body serves every instantiation, so there is
+            // no constant to fold: the name arrives per call, from `type_param_name_atom` — the same
+            // helper the narrow surfaces read, so `type_name::<T>()` and `v.as<T>()` agree on `T`.
+            Expr::TypeName { ty, span } => match self.type_param_name_atom(ty, span, out) {
+                Some(atom) => Ok(atom),
+                None => Ok(Atom::Const(Const::Str(self.reflection_head_name(ty)))),
+            },
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
             // magnitude's bit pattern is the runtime i64 word (a `u64` with the high bit set boxes as
@@ -2712,13 +2734,19 @@ impl Lowerer<'_> {
                 });
                 Ok(Atom::Temp(dst))
             }
+            // A narrow is a head-constructor match on the target's runtime NAME, so a target that is
+            // an enclosing generic's type parameter needs exactly what `type_name::<T>()` reads and
+            // nothing more — the same helper supplies it, and the backends match on that string
+            // instead of the erased letter `T` (which nothing is ever registered under).
             Expr::As { expr, ty, span } => {
                 let operand = self.lower_expr(expr, out)?;
+                let dynamic = self.type_param_name_atom(ty, span, out);
                 Ok(self.emit(
                     out,
                     Rvalue::As {
                         operand,
                         ty: self.resolve_type_aliases(ty),
+                        dynamic,
                         span: *span,
                     },
                     *span,
@@ -2726,11 +2754,13 @@ impl Lowerer<'_> {
             }
             Expr::TypeTest { expr, ty, span } => {
                 let operand = self.lower_expr(expr, out)?;
+                let dynamic = self.type_param_name_atom(ty, span, out);
                 Ok(self.emit(
                     out,
                     Rvalue::TypeTest {
                         operand,
                         ty: self.resolve_type_aliases(ty),
+                        dynamic,
                         span: *span,
                     },
                     *span,

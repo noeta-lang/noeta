@@ -620,9 +620,21 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
                 }
             }
         }
+        // A narrow's `dynamic` head-name atom is an operand like any other: it is the temporary the
+        // preceding `TypeArgName`/`TypeSlotName` produced, so a walk that skipped it would lose that
+        // temporary's last use.
+        Rvalue::As {
+            operand, dynamic, ..
+        }
+        | Rvalue::TypeTest {
+            operand, dynamic, ..
+        } => {
+            f(operand);
+            if let Some(name) = dynamic {
+                f(name);
+            }
+        }
         Rvalue::Try { operand, .. }
-        | Rvalue::As { operand, .. }
-        | Rvalue::TypeTest { operand, .. }
         | Rvalue::TypeOf { operand, .. }
         | Rvalue::TypeArgName { operand, .. }
         | Rvalue::FieldsOf { operand, .. }
