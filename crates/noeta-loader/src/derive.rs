@@ -40,6 +40,15 @@ const SOURCE_DIR: &str = "src";
 /// The build-output directory (`cargo`'s, for a package shipping a native crate). Never source.
 const BUILD_DIR: &str = "target";
 
+/// A Rust crate's manifest. A subdirectory holding one is a Rust crate — a native package's
+/// engine, or an internal helper crate — and never contributes `.noe` *modules*: a native
+/// package's surface reaches the program through composition, not through files the loader walks.
+/// Its tree does hold `.noe` files (conformance fixtures under `tests/`, throwaway `examples/`),
+/// and those are compiler test inputs, deliberately including ill-formed names and hyphenated crate
+/// directories — deriving a module path from them yields segments no `use` can spell (E0074). So a
+/// nested Rust crate is a boundary exactly as a nested [`MANIFEST_NAME`] package is.
+const CARGO_MANIFEST_NAME: &str = "Cargo.toml";
+
 /// A package's root on disk and the path prefix its modules derive under.
 ///
 /// The **prefix** is the consumer's view of the package, which only the caller can know:
@@ -306,12 +315,18 @@ fn collect_noe_files(dir: &Path, data: &[PathBuf], out: &mut Vec<PathBuf>) {
 ///   a *whole second checkout of the package*, every module in it deriving the same path as the real
 ///   one.
 /// * **It is build output** ([`BUILD_DIR`]).
+/// * **It is a nested Rust crate** (holds a [`CARGO_MANIFEST_NAME`]). A native package keeps its
+///   engine — and often internal helper crates — as ordinary cargo crates in its tree, whose
+///   `tests/`/`examples/` hold `.noe` *test inputs*, not package modules. Walking those and deriving
+///   module paths from a hyphenated crate directory raised a spurious E0074 against the dependency.
 ///
 /// The package root itself is never asked — it is expected to hold a manifest, which is what made it
-/// the root.
+/// the root (a native package's root may hold a `Cargo.toml` too, but the root is never tested here).
 pub fn is_outside_package(dir: &Path) -> bool {
     let name = dir.file_name().and_then(|n| n.to_str());
-    name.is_some_and(|n| n.starts_with('.') || n == BUILD_DIR) || dir.join(MANIFEST_NAME).is_file()
+    name.is_some_and(|n| n.starts_with('.') || n == BUILD_DIR)
+        || dir.join(MANIFEST_NAME).is_file()
+        || dir.join(CARGO_MANIFEST_NAME).is_file()
 }
 
 #[cfg(test)]
@@ -405,6 +420,61 @@ mod tests {
                 segment: "2fa".to_string(),
                 rename_to: "_2fa".to_string(),
             }
+        );
+    }
+
+    /// A unique scratch directory for one test, removed on drop.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("noeta-derive-{tag}-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+        fn write(&self, rel: &str, text: &str) {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_nested_cargo_crate_is_outside_the_package() {
+        let s = Scratch::new("boundary");
+        s.write("Cargo.toml", "[package]\nname=\"x\"\n");
+        assert!(is_outside_package(&s.0), "a directory with a Cargo.toml is a Rust crate, not source");
+
+        let plain = Scratch::new("plain");
+        plain.write("keep.noe", "");
+        assert!(!is_outside_package(&plain.0));
+    }
+
+    #[test]
+    fn a_native_packages_rust_crate_fixtures_are_not_modules() {
+        // A native package (`para/p2p`): its surface reaches the program through composition, and
+        // its only `.noe` files are the engine crate's conformance fixtures — test inputs under a
+        // hyphenated crate directory that no `use` could spell. Walking them raised E0074 against
+        // the dependency; the Cargo.toml boundary keeps them out of the module set entirely.
+        let s = Scratch::new("native");
+        s.write("surface.noe", "echo 1\n");
+        s.write("crates/noeta-para-p2p/Cargo.toml", "[package]\nname=\"noeta-para-p2p\"\n");
+        s.write("crates/noeta-para-p2p/tests/conformance/synced/case.noe", "echo 2\n");
+
+        let root = PackageRoot::new(s.0.clone(), prefix(&["para", "p2p"]));
+        let mods = read_package_modules(&root);
+
+        let paths: Vec<&ModulePath> = mods.iter().map(|m| &m.path).collect();
+        assert_eq!(
+            paths,
+            vec![&ModulePath::Derived(prefix(&["para", "p2p", "surface"]))],
+            "only the package's own `.noe` is a module; no fixture under the nested crate"
         );
     }
 }

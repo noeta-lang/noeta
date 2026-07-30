@@ -140,7 +140,7 @@ running 2 tests on 2 threads
 
 The scaffold works before you edit a line:
 
-- **`noeta.toml`** — the package identity, the `[dependencies]` table (add one with `noeta add`), and two build targets: `development` with the dev tiers live — the `@test`/`@bench`/`@doc`/`@debug` blocks that sit beside your code and are stripped from a production build (see [Dev Tiers](Dev-Tiers)) — and `production` as an explicit name for the tier-free baseline.
+- **`noeta.toml`** — the package identity, the `[dependencies]` table (add one with `noeta add`), and two build targets: `development` with the dev tiers live (`tiers = ["test", "bench", "doc", "debug"]` — a bare name turns a tier on, a `-name` turns one off) — the `@test`/`@bench`/`@doc`/`@debug` blocks that sit beside your code and are stripped from a production build (see [Dev Tiers](Dev-Tiers)) — and `production` as an explicit name for the tier-free baseline.
 - **`src/main.noe`** — a small entry file that exercises all four tiers, so `run`, `test`, `bench`, and `doc` each have something to do immediately.
 - **`.vscode/`, `AGENTS.md`, `SYNTAX.md`** — run/debug profiles for the [editor extension](Editor-and-AI-Tooling), and the docs an AI agent needs to drive the project.
 

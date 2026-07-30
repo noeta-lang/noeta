@@ -39,6 +39,25 @@ fn run_target_activates_its_tiers() {
 }
 
 #[test]
+fn run_target_activates_its_tiers_via_the_array_spelling() {
+    // The canonical array form (`tiers = ["debug"]` on the target) activates the tier exactly like
+    // the boolean sub-table does — end to end through a real `noeta run`.
+    let file = temp_project(
+        "prof_run_array",
+        "[tiers]\ndebug = \"std\"\n[targets.dev]\ntiers = [\"debug\"]\n",
+        TIERED_PROGRAM,
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .arg("--target")
+        .arg("dev")
+        .assert()
+        .success()
+        .stdout("dbg 5\nout 5\n");
+}
+
+#[test]
 fn a_renamed_std_tier_activates_and_strips_under_its_local_name() {
     // The headline of per-package tier naming: a package renames std's `debug` tier to a local
     // `@dbg` (`[tiers] dbg = "std:debug"`). `@dbg` is judged by its identity `(std, debug)`, so it
