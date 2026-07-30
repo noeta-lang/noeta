@@ -76,6 +76,9 @@ impl Checker {
             if let Pattern::IsType { ty, .. } = &arm.pattern {
                 let before = self.diags.len();
                 self.check_type_ref(ty);
+                // A type-parameter target is refused here — unlike the expression form, which now
+                // resolves it. See `reject_type_param_pattern` for why the pattern cannot.
+                self.reject_type_param_pattern(ty);
                 // …and, when the target does resolve, the same always-false rule the expression
                 // form applies (E0065): an `is P` arm on an `Option<P>` scrutinee can never be
                 // taken, so it is reported and — below — narrows nothing.

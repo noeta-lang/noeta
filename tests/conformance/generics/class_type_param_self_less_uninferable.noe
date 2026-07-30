@@ -1,0 +1,21 @@
+// The boundary of the self-less slot channel, pinned from the other side. The slot is filled from
+// the CALL's instantiation, so a self-less member whose result says nothing about `T` leaves nothing
+// to fill it from: `Repo.label()` returns `string`, no argument mentions `T`, and no annotation can
+// reach it. That is E0023 at **check** time — not a silent `"dyn"`, and not a run-time abort.
+//
+// The help matters as much as the code. A method's `::<…>` names the METHOD's own type parameters,
+// never its class's (those come from the receiver's type arguments), so "supply it explicitly" is a
+// dead end here and the message says the thing that does work instead.
+// expect: error E0023 at 21:6
+// expect: exit 1
+struct Todo {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn label(): string {
+        return type_name::<T>();
+    }
+}
+echo Repo.label();

@@ -336,6 +336,7 @@ fn compile_inner(
         tojson_derives: module.tojson_derives,
         deserialize_recipes: module.deserialize_recipes,
         type_args: module.type_args,
+        type_arg_reprs: module.type_arg_reprs,
         destruct_reachable,
         cache_slots: module.cache_slots,
         // The attribute manifest + type registry, built from the AST by the *same* pure builder the
@@ -515,6 +516,7 @@ fn compile_to_mc(
         tojson_derives: Vec::new(),
         deserialize_recipes: sites.deserialize_recipes,
         type_args: ir.type_args.clone(),
+        type_arg_reprs: Vec::new(),
         structural_eq_types: HashSet::new(),
         native_type_names: HashMap::new(),
         packed_fields: HashMap::new(),
@@ -533,6 +535,10 @@ fn compile_to_mc(
         debug,
         registry,
     };
+    // The type-argument table's reflection projection, interned BEFORE any body compiles so a
+    // `RetagDynamic` resolves through a table that is already complete (its own indices are the
+    // checker's, not this pool's, so ordering is a determinism property only).
+    module.type_arg_reprs = module.intern_type_arg_reprs(&ir);
     // Type registration reads the surface declarations (shapes, derives, the method/destructor
     // proto table) the IR carries verbatim; bodies are lowered from the IR.
     module.register_globals(program);
@@ -639,6 +645,7 @@ impl SessionCompiler {
             tojson_derives: Vec::new(),
             deserialize_recipes: Vec::new(),
             type_args: Vec::new(),
+            type_arg_reprs: Vec::new(),
             structural_eq_types: HashSet::new(),
             native_type_names: HashMap::new(),
             packed_fields: HashMap::new(),
@@ -750,6 +757,7 @@ impl SessionCompiler {
             // entries (indexes are append-only), so the lowered snapshot is cumulative and a
             // wholesale replace stays index-stable.
             self.mc.type_args = ir.type_args.clone();
+            self.mc.type_arg_reprs = self.mc.intern_type_arg_reprs(&ir);
         }
 
         // Register this entry's globals/types/methods into the persistent tables (all additive:
@@ -845,6 +853,7 @@ impl SessionCompiler {
             tojson_derives: self.mc.tojson_derives.clone(),
             deserialize_recipes: self.mc.deserialize_recipes.clone(),
             type_args: self.mc.type_args.clone(),
+            type_arg_reprs: self.mc.type_arg_reprs.clone(),
             destruct_reachable,
             cache_slots: self.mc.cache_slots,
             reflection: self.reflection.clone(),
@@ -953,6 +962,10 @@ struct ModuleCompiler {
     /// The program-wide type-argument table (poly-values F2b), taken from the lowered IR
     /// `Program::type_args` and copied onto [`Module::type_args`].
     type_args: Vec<noeta_ext_abi::TypeArgInfo>,
+    /// The reflection projection of [`Self::type_args`], indexed identically: each instantiation's
+    /// reflected type interned into [`Self::type_reprs`], or `None` where it has none. Becomes
+    /// [`Module::type_arg_reprs`], which [`Op::RetagDynamic`] reads through a hidden slot's value.
+    type_arg_reprs: Vec<Option<u32>>,
     /// Type names whose `==` is **structural** (baked into each instance's `Shape::structural_eq`):
     /// every `struct`, plus a `class` that is `Equatable` (derives it or hand-`impl`s `eq`). A
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
@@ -1781,6 +1794,21 @@ impl ModuleCompiler {
         let idx = self.type_reprs.len() as u32;
         self.type_reprs.push(repr.clone());
         idx
+    }
+
+    /// Intern the lowered program's type-argument **reflection projection** into [`Self::type_reprs`],
+    /// producing [`Module::type_arg_reprs`] — the table [`Op::RetagDynamic`] resolves a hidden slot's
+    /// value through. Interned through the same pool as every other reflected type, so an
+    /// instantiation whose repr a list/object construction tag already carries is stored once.
+    ///
+    /// Recomputed wholesale on a session recompile, exactly as `type_args` is: the checker accumulates
+    /// both across entries so the indices are append-only, and re-interning an already-present repr
+    /// answers the same index.
+    fn intern_type_arg_reprs(&mut self, ir: &noeta_ir::Program) -> Vec<Option<u32>> {
+        ir.type_arg_reprs
+            .iter()
+            .map(|r| r.as_ref().map(|r| self.intern_type_repr(r)))
+            .collect()
     }
 
     /// Intern a built-in `Result`/`Option` variant shape (these display with their bare
@@ -3450,6 +3478,7 @@ impl<'m> FnCompiler<'m> {
                 type_args,
                 reuse,
                 reflect,
+                reflect_slot,
                 span,
                 supplied,
                 name_span: _,
@@ -3457,8 +3486,24 @@ impl<'m> FnCompiler<'m> {
                 // A generic enum-variant construction carries its reflected type (R2b.2); intern it so
                 // the `MakeEnum` op can stamp it. `None` for an ordinary method call.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
+                // Its dynamic twin (generic-in-generic construction): the hidden slot register whose
+                // type-argument entry names the tag. Resolved to a register HERE, before the call is
+                // emitted, so the slot local is live across it — see `Op::RetagDynamic`.
+                let reflect_slot = reflect_slot
+                    .as_ref()
+                    .map(|a| self.atom_reg(a))
+                    .transpose()?;
                 self.lower_method(
-                    receiver, name, args, type_args, *reuse, reflect, dst, *span, *supplied,
+                    receiver,
+                    name,
+                    args,
+                    type_args,
+                    *reuse,
+                    reflect,
+                    reflect_slot,
+                    dst,
+                    *span,
+                    *supplied,
                 )
             }
             Rvalue::Field {
@@ -3743,8 +3788,17 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            Rvalue::As { operand, ty, .. } => {
+            // A narrow whose target is an enclosing generic's type parameter carries the head name in
+            // a register instead (`dynamic`) — lowering put the same `TypeArgName`/`TypeSlotName`
+            // there that `type_name::<T>()` reads, so the two surfaces resolve one `T`.
+            Rvalue::As {
+                operand,
+                ty,
+                dynamic,
+                ..
+            } => {
                 let src = self.atom_reg(operand)?;
+                let dynamic = dynamic.as_ref().map(|a| self.atom_reg(a)).transpose()?;
                 let target = Box::new(narrow_target(ty));
                 let some_shape = self.module.builtin_enum_shape("Option", "some");
                 let none_shape = self.module.builtin_enum_shape("Option", "none");
@@ -3752,15 +3806,27 @@ impl<'m> FnCompiler<'m> {
                     dst,
                     src,
                     target,
+                    dynamic,
                     some_shape,
                     none_shape,
                 });
                 Ok(())
             }
-            Rvalue::TypeTest { operand, ty, .. } => {
+            Rvalue::TypeTest {
+                operand,
+                ty,
+                dynamic,
+                ..
+            } => {
                 let src = self.atom_reg(operand)?;
+                let dynamic = dynamic.as_ref().map(|a| self.atom_reg(a)).transpose()?;
                 let target = Box::new(narrow_target(ty));
-                self.code.push(Op::IsType { dst, src, target });
+                self.code.push(Op::IsType {
+                    dst,
+                    src,
+                    target,
+                    dynamic,
+                });
                 Ok(())
             }
             Rvalue::MakeGen { step, .. } => {
@@ -4313,6 +4379,7 @@ impl<'m> FnCompiler<'m> {
         type_args: &[Atom],
         reuse: bool,
         reflect: Option<u32>,
+        reflect_slot: Option<Reg>,
         dst: Reg,
         span: Span,
         supplied: Option<u64>,
@@ -4356,6 +4423,13 @@ impl<'m> FnCompiler<'m> {
                 // which is what makes the in-place tag unobservable.
                 if let Some(k) = reflect {
                     self.code.push(Op::Retag { reg: dst, repr: k });
+                }
+                // …and the same stamp with the tag chosen at run time, when the instantiation is a
+                // type parameter of the enclosing self-less member and rides its hidden slot
+                // (generic-in-generic construction). Mutually exclusive with `reflect` above: the
+                // checker's two recording arms cannot both fire at one span.
+                if let Some(slot) = reflect_slot {
+                    self.code.push(Op::RetagDynamic { reg: dst, slot });
                 }
                 return Ok(());
             }
@@ -5162,10 +5236,15 @@ impl<'m> FnCompiler<'m> {
             // fall through on `true` / jump to the next arm on `false`. Binds nothing.
             Pattern::IsType { ty, .. } => {
                 let test = self.alloc_reg();
+                // Always the baked target: a `match` arm's `is T` over a type parameter is refused at
+                // check time (E0058), because a pattern is tested in place — the IR reuses the AST
+                // `Pattern`, which has no operand position an instantiation's name could be computed
+                // into. The expression form `v.as<T>()` carries one and resolves.
                 self.code.push(Op::IsType {
                     dst: test,
                     src: reg,
                     target: Box::new(narrow_target(ty)),
+                    dynamic: None,
                 });
                 fail_jumps.push(self.code.len());
                 self.code.push(Op::JumpIfFalse {
@@ -5305,62 +5384,6 @@ fn unknown_field_diag(type_name: &str, field: &str, span: Span) -> Diagnostic {
     )
 }
 
-/// The runtime head constructor a **built-in type name** narrows to, or `None` when the name has
-/// no dedicated head and falls back to a nominal (`NarrowTarget::Named`) match by shape name.
-///
-/// Exhaustive over [`BuiltinTy`] so this and the tree-walker's `runtime_matches` — the two halves
-/// of the differential — cannot drift: a new built-in fails to compile in both until handled.
-///
-/// This funnel dropped a bare `tuple` head the VM alone recognized. `tuple` is not a built-in type
-/// name (`Type::is_builtin_name` rejects it, so the checker reports an unknown type before any
-/// narrowing runs) and the tree-walker always treated it nominally — so the two backends now agree
-/// on an unreachable case they used to answer differently. A tuple target is written `(A, B)`,
-/// which reaches [`NarrowTarget::Tuple`] through `TypeRef::Tuple`.
-fn narrow_head(name: &str) -> Option<NarrowTarget> {
-    use noeta_ast::BuiltinTy;
-    Some(match BuiltinTy::from_name_any(name)? {
-        BuiltinTy::Int => NarrowTarget::Int,
-        BuiltinTy::Float => NarrowTarget::Float,
-        // `f32` is reified at runtime (distinct NaN-box tag), so it gets a head; the matcher's
-        // `F32 <: float` edge makes `(f32) is float` true while `(float) is f32` stays false.
-        BuiltinTy::F32 => NarrowTarget::F32,
-        BuiltinTy::Bool => NarrowTarget::Bool,
-        BuiltinTy::Str => NarrowTarget::String,
-        BuiltinTy::Bytes => NarrowTarget::Bytes,
-        BuiltinTy::Unit => NarrowTarget::Unit,
-        BuiltinTy::Dyn => NarrowTarget::Dyn,
-        // The bottom type is uninhabited, so `x is never` is false for every value. Spelled as
-        // the EMPTY `AnyOf` rather than a head of its own: "matches none of these" is exactly
-        // what an empty disjunction means, and it needs no new runtime case in either backend.
-        BuiltinTy::Never => NarrowTarget::AnyOf(Vec::new()),
-        BuiltinTy::List => NarrowTarget::List,
-        BuiltinTy::Map => NarrowTarget::Map,
-        BuiltinTy::Set => NarrowTarget::Set,
-        // Abstract kind-types match any value of that declaration kind.
-        BuiltinTy::KindEnum => NarrowTarget::AnyEnum,
-        BuiltinTy::KindStruct => NarrowTarget::AnyStruct,
-        BuiltinTy::KindClass => NarrowTarget::AnyClass,
-        // `number` is a union, so it narrows through the union machinery (`AnyOf`) rather than
-        // earning a head of its own. Only three heads are listed because the runtime erases the
-        // rest: every fixed-width integer is a `Value::Int` and `f64` is a `Value::Float` (there is
-        // no boxing site to stamp a width on), while `f32` alone is reified — the same erasure the
-        // `Int`/`Float`/`F32` arms above already encode.
-        BuiltinTy::Number => NarrowTarget::AnyOf(vec![
-            NarrowTarget::Int,
-            NarrowTarget::Float,
-            NarrowTarget::F32,
-        ]),
-        // `Option`/`Result` are enums whose shape name *is* the type name, so they narrow through
-        // the nominal path like a user enum rather than needing a head of their own.
-        BuiltinTy::Option | BuiltinTy::Result => return None,
-        // The erased widths (`f64`, `i8..u64`) carry no runtime tag on a scalar, so they fall to the
-        // nominal path and never match a scalar. The checker warns on a bare-scalar `is i32`/`is f64`
-        // (statically always-false); giving them heads would need scalar reification, which the arc
-        // deliberately declines. `f32` alone is reified and handled above. Both backends agree.
-        BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
-    })
-}
-
 /// Reduce a narrowing target type (`x.as<T>()`) to its runtime head constructor. Mirrors the
 /// tree-walker's `runtime_matches` mapping exactly so both backends decide a narrowing the same
 /// way. `Option`/`Result` and user records/classes/enums all become `Named` (matched by shape
@@ -5389,8 +5412,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         // element type.
         TypeRef::Fn { .. } => NarrowTarget::Fn,
         TypeRef::Named { name, args, .. } => {
-            let head =
-                narrow_head(name.as_str()).unwrap_or_else(|| NarrowTarget::Named(name.to_string()));
+            let head = NarrowTarget::from_runtime_name(name.as_str());
             // A parametrized target (`List<int>`, `Box<int>`) additionally checks its type arguments
             // against the value's reflected tag (R3); a bare name (`List`, `Box`, `Struct`) stays the
             // head-only target, preserving the widening `x is List` and the untagged fallback.

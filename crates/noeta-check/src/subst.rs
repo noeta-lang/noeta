@@ -382,10 +382,6 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
     }
 }
 
-/// Unify a running element type with the next element's type, for synthesizing a list literal's
-/// element type. Returns the unified type, or `None` if the two are concretely incompatible (a
-/// heterogeneous list). A deferred type (hole / `dyn`) is compatible with anything; two numeric
-/// types unify to `float` (the int/float promotion the runtime performs).
 /// Join a block-bodied closure's collected `return` types into its inferred return type. If the
 /// block does not definitely end in a value-`return` it can fall through to the end, which returns
 /// `void`, so `void` is added to the join. Compatible types collapse via [`unify_element`] (the same
@@ -528,11 +524,31 @@ pub(crate) fn stmt_breaks(stmt: &Stmt) -> bool {
     }
 }
 
+/// Unify a running element type with the next element's type — a list literal's element, a map
+/// literal's key/value, a `~` concatenation's element, a block closure's `return`s. Returns the
+/// unified type, or `None` when the two are concretely incompatible (a heterogeneous list). Two
+/// numeric types unify to `float` (the int/float promotion the runtime performs).
+///
+/// This is a **join** — a least *upper* bound — so it reads `dyn` the way [`Type::subtype`] does: as
+/// the **top**. Only an inference HOLE ([`Type::Unknown`]) is the no-information case absorbed by
+/// whatever it meets (the `acc` this loop starts from, `[]`'s element completed by a later write);
+/// `dyn` is not a hole but a nameable type, so joining it with anything is `dyn` — which the
+/// `subtype` arms below already produce, with no special case of its own.
+///
+/// That distinction is load-bearing, and conflating the two was a hole rather than an instance of the
+/// checker's deliberate `Type::Named` leniency. The leniency is about a nominal type's *members*: the
+/// checker does not know every method a `Named` has, so it defers the lookup to the runtime, which
+/// then verifies it. Here nothing verified anything — reading `dyn` as no-information made the join
+/// answer with the *other* side, so `List<T> ~ [d]` stayed a `List<T>` and `[1, d]` a `List<int>` for
+/// a `dyn` `d`. That silently admitted a value whose type was never checked into a checked slot,
+/// which is precisely what `dyn <: T` being false everywhere else exists to prevent: `some(d)` into a
+/// `?T` was always the E0007 it should be, and the two now agree. The sound route out of `dyn` is the
+/// checked narrow — `d.as<T>()`, which resolves a type parameter as of the same arc as this note.
 pub(crate) fn unify_element(acc: &Type, next: &Type) -> Option<Type> {
-    if acc.defers_to_runtime() {
+    if acc.is_gradual() {
         return Some(next.clone());
     }
-    if next.defers_to_runtime() {
+    if next.is_gradual() {
         return Some(acc.clone());
     }
     if Type::subtype(next, acc) {

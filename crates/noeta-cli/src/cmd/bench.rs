@@ -33,11 +33,18 @@ pub(crate) const BENCH_MAX_ITERATIONS: u64 = 100_000;
 pub(crate) struct BenchOutcome {
     name: String,
     iterations: u64,
-    /// `Some` on success; `None` when the bench failed (see `message`).
+    /// The per-iteration cost. `None` when the bench failed (see `message`); `Some(0.0)` when it ran
+    /// but the two-point subtraction did not resolve, which is **not** a measurement — see
+    /// [`resolved`] and [`UNRESOLVED_NOTE`], and note that every consumer has to ask, because a zero
+    /// here reads as "immeasurably fast" and used to be persisted as a baseline on that reading.
     per_iter_ns: Option<f64>,
     message: Option<String>,
     /// Percent change vs the `--baseline` entry, when one exists for this bench.
     baseline_delta_pct: Option<f64>,
+    /// Why there is **no** `baseline_delta_pct` even though `--baseline` asked for one. A comparison
+    /// the user requested and did not get is a thing to say out loud, not to omit: silently dropping
+    /// the delta is how a useless baseline stayed invisible.
+    baseline_note: Option<String>,
 }
 
 /// Everything a bench run carries besides the path it runs over — threaded as one value so the
@@ -232,11 +239,16 @@ fn run_file_benches(
             (Ok(t1), Ok(t2)) => BenchOutcome {
                 name: bench.name.clone(),
                 iterations: n,
+                // Clamped at zero, and zero means **unresolved** rather than free: the clamp is what
+                // makes an unluckier N run than 2N run land on a number at all. Everything that could
+                // mistake it for a measurement now tests `resolved()` — the report line, the baseline
+                // comparison, and the baseline *save*, which refuses it outright.
                 per_iter_ns: Some(
                     ((t2.as_nanos() as f64 - t1.as_nanos() as f64) / n as f64).max(0.0),
                 ),
                 message: None,
                 baseline_delta_pct: None,
+                baseline_note: None,
             },
             (Err(msg), _) | (_, Err(msg)) => BenchOutcome {
                 name: bench.name.clone(),
@@ -244,13 +256,11 @@ fn run_file_benches(
                 per_iter_ns: None,
                 message: Some(msg),
                 baseline_delta_pct: None,
+                baseline_note: None,
             },
         };
-        if let (Some(base), Some(cur)) = (&base, outcome.per_iter_ns)
-            && let Some(prev) = base.get(&outcome.name).copied()
-            && prev > 0.0
-        {
-            outcome.baseline_delta_pct = Some((cur - prev) / prev * 100.0);
+        if let Some(base) = &base {
+            compare_to_baseline(&mut outcome, base);
         }
         if !opts.json {
             print_bench_outcome(&outcome, opts.baseline.as_deref(), label);
@@ -274,6 +284,59 @@ fn run_file_benches(
     FileBenches::Collected(outcomes)
 }
 
+/// What a per-iteration figure of `0.0` means, and what to do about it.
+///
+/// The two-point subtraction is only meaningful when the 2N run actually took longer than the N run.
+/// It often does not: a body far cheaper than the ~46 ms of fixed per-run overhead is measured almost
+/// entirely in noise, so the difference lands at or below zero and the `.max(0.0)` clamp reports it as
+/// exactly `0.0`. That is not a measurement of zero, it is the absence of a measurement — and it is
+/// *routine*, not exceptional (a smoke bench at `iterations: 5` lands here most runs), which is why it
+/// is a note on the report line rather than a bench failure.
+const UNRESOLVED_NOTE: &str = "no per-iteration cost resolved above the timer noise — raise `--iterations` or give the body \
+     more work";
+
+/// Whether a per-iteration figure is a real measurement. Zero is the clamp's way of saying "the
+/// subtraction did not resolve" (see [`UNRESOLVED_NOTE`]); a genuine measurement is strictly positive,
+/// since the smallest nonzero nanosecond difference divided by `n` still is.
+fn resolved(per_iter_ns: f64) -> bool {
+    per_iter_ns > 0.0
+}
+
+/// Fill in `outcome`'s comparison against a loaded `--baseline`: the percent delta when **both** sides
+/// have a real measurement, and otherwise a note saying why there is none.
+///
+/// The `else` branches are the point. `--baseline <name>` is a request for a comparison, so every way
+/// of not producing one has to be visible in the report. Three ways it silently was not: a missing
+/// entry (a benchmark added since the baseline was saved), a stored entry of `0.0` (persisted by a
+/// version that saved the clamp's output — the `prev > 0.0` test dropped the delta without a word),
+/// and — worse than dropping it — an *unresolved current* measurement compared against a real
+/// baseline, which produced a confident `-100.0%`.
+fn compare_to_baseline(outcome: &mut BenchOutcome, base: &std::collections::HashMap<String, f64>) {
+    let Some(cur) = outcome.per_iter_ns else {
+        // This run has no measurement at all; its own failure message is the report.
+        return;
+    };
+    if !resolved(cur) {
+        outcome.baseline_note = Some(format!("this run measured nothing — {UNRESOLVED_NOTE}"));
+        return;
+    }
+    match base.get(&outcome.name).copied() {
+        Some(prev) if resolved(prev) => {
+            outcome.baseline_delta_pct = Some((cur - prev) / prev * 100.0);
+        }
+        Some(prev) => {
+            outcome.baseline_note = Some(format!(
+                "the stored baseline is {prev} ns/iter, which nothing can be compared against; \
+                 re-save it"
+            ));
+        }
+        None => {
+            outcome.baseline_note =
+                Some("this baseline has no entry for this benchmark".to_string());
+        }
+    }
+}
+
 /// Print the summary (human or `--json`) and decide the exit code. `broken` counts files whose
 /// prologue failed — they rendered their own diagnostics and fail the run.
 fn report_benches(outcomes: &[BenchOutcome], opts: &BenchOptions, broken: usize) -> u8 {
@@ -294,8 +357,15 @@ fn report_benches(outcomes: &[BenchOutcome], opts: &BenchOptions, broken: usize)
                 "name": o.name,
                 "iterations": o.iterations,
                 "perIterNs": o.per_iter_ns,
+                // Whether `perIterNs` is a measurement at all. `0` is the clamp's way of saying the
+                // two-point subtraction did not resolve, and a consumer charting the series has to be
+                // able to drop that point rather than plot a benchmark that got infinitely fast.
+                "unresolved": o.per_iter_ns.is_some_and(|ns| !resolved(ns)),
                 "message": o.message,
                 "baselineDeltaPct": o.baseline_delta_pct,
+                // Why `baselineDeltaPct` is null under `--baseline`, when it is. A consumer that
+                // charts deltas needs to be able to tell "unchanged" from "never compared".
+                "baselineNote": o.baseline_note,
             })).collect::<Vec<_>>(),
             "ran": total - failed,
             "failed": failed,
@@ -348,7 +418,21 @@ pub(crate) fn print_bench_outcome(
         (Some(per_ns), _) => {
             let delta = match (outcome.baseline_delta_pct, baseline) {
                 (Some(pct), Some(name)) => format!("  ({pct:+.1}% vs {name})"),
+                // No delta, but one was asked for: say which comparison did not happen and why,
+                // rather than printing a line that looks like an ordinary uncompared run.
+                (None, Some(name)) => match &outcome.baseline_note {
+                    Some(note) => format!("  (no comparison vs {name}: {note})"),
+                    None => String::new(),
+                },
                 _ => String::new(),
+            };
+            // `0 ns/iter` on its own reads as "immeasurably fast", which is the opposite of what it
+            // means. Say what it means. The line keeps its shape — the number, the unit and the
+            // iteration count — so this is a note, not a new report format.
+            let delta = if resolved(per_ns) {
+                delta
+            } else {
+                format!("{delta}  ({UNRESOLVED_NOTE})")
             };
             println!(
                 "  {:<28} {:>11}/iter  ({} iterations){delta}",
@@ -413,22 +497,49 @@ pub(crate) fn bench_baseline_path(entry: &std::path::Path, name: &str) -> Result
 }
 
 /// Persist a run's successful measurements as the named baseline (`name → per-iteration ns`).
+///
+/// **Refuses to write a baseline nothing can be compared against**, and writes nothing at all when it
+/// refuses — this is the one place an unresolved measurement is fatal rather than a note, because it is
+/// the only one that outlives the run.
+///
+/// Two ways that used to happen quietly. A per-iteration cost of `0.0` — which the clamp produces
+/// whenever the two-point subtraction does not resolve (see [`UNRESOLVED_NOTE`]) — was stored without
+/// comment, and the next `--baseline <name>` then skipped the delta because `prev > 0.0` failed and
+/// said nothing about why: a plain report, no error, no warning, no comparison. And a baseline with no
+/// entries at all (every bench failed) is the same silence by a different route. Both surface days
+/// later as "the run I asked to compare printed no comparison", which is exactly the report that took
+/// two CI reds and eleven unreproducible runs to pin down.
 pub(crate) fn save_bench_baseline(
     entry: &std::path::Path,
     name: &str,
     outcomes: &[BenchOutcome],
 ) -> Result<(), String> {
+    let mut map = serde_json::Map::new();
+    for outcome in outcomes {
+        // A bench that failed outright is left out, as it always was: the run reports it and exits
+        // nonzero, and its absence from the baseline is then explained by the compare-time note.
+        let Some(ns) = outcome.per_iter_ns else {
+            continue;
+        };
+        if !resolved(ns) {
+            return Err(format!(
+                "`{}` measured {ns} ns/iter — {UNRESOLVED_NOTE}. Saving it would make every later \
+                 comparison against this baseline vacuous",
+                outcome.name
+            ));
+        }
+        map.insert(outcome.name.clone(), serde_json::json!(ns));
+    }
+    if map.is_empty() {
+        return Err(format!(
+            "no benchmark produced a usable measurement ({} ran)",
+            outcomes.len()
+        ));
+    }
     let path = bench_baseline_path(entry, name)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let map: serde_json::Map<String, serde_json::Value> = outcomes
-        .iter()
-        .filter_map(|o| {
-            o.per_iter_ns
-                .map(|ns| (o.name.clone(), serde_json::json!(ns)))
-        })
-        .collect();
     let doc = serde_json::json!({ "benches": map });
     std::fs::write(&path, doc.to_string()).map_err(|e| e.to_string())
 }
@@ -575,5 +686,120 @@ pub(crate) fn fmt_per_iter(ns: f64) -> String {
         format!("{:.2} ms", ns / 1_000_000.0)
     } else {
         format!("{:.2} s", ns / 1_000_000_000.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    /// An outcome with a given measurement, as the two-point path would produce it.
+    fn measured(name: &str, per_iter_ns: Option<f64>) -> BenchOutcome {
+        BenchOutcome {
+            name: name.to_string(),
+            iterations: 100,
+            per_iter_ns,
+            message: None,
+            baseline_delta_pct: None,
+            baseline_note: None,
+        }
+    }
+
+    #[test]
+    fn zero_is_the_absence_of_a_measurement_not_a_fast_one() {
+        // The whole bug turns on this distinction. `0.0` is what the `.max(0.0)` clamp produces when
+        // the N run came out unluckier than the 2N run, which happens routinely for a body far cheaper
+        // than the fixed per-run overhead — so it cannot be treated as a bench failure, and it must
+        // not be treated as a number either.
+        assert!(resolved(1.0));
+        assert!(resolved(f64::MIN_POSITIVE));
+        assert!(!resolved(0.0));
+        assert!(!resolved(-1.0));
+    }
+
+    #[test]
+    fn saving_a_baseline_refuses_a_measurement_of_nothing() {
+        let entry = std::path::Path::new(file!());
+        // A zero is refused by name, so the message says which bench and what to do about it.
+        let err = save_bench_baseline(entry, "unit-test", &[measured("b", Some(0.0))])
+            .expect_err("a zero baseline must be refused");
+        assert!(err.contains("`b`"), "{err}");
+        assert!(err.contains("vacuous"), "{err}");
+        assert!(err.contains("--iterations"), "{err}");
+        // So is a negative, which no honest measurement can be.
+        assert!(save_bench_baseline(entry, "unit-test", &[measured("b", Some(-1.0))]).is_err());
+        // And so is a baseline with no entries at all: every bench failed, so there is nothing to
+        // compare against later — the same silence by a different route.
+        let err = save_bench_baseline(entry, "unit-test", &[measured("b", None)])
+            .expect_err("an empty baseline must be refused");
+        assert!(
+            err.contains("no benchmark produced a usable measurement"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn every_comparison_that_did_not_happen_says_why() {
+        let mut base = HashMap::new();
+        base.insert("good".to_string(), 100.0);
+        base.insert("zero".to_string(), 0.0);
+
+        let mut good = measured("good", Some(150.0));
+        compare_to_baseline(&mut good, &base);
+        assert_eq!(good.baseline_delta_pct, Some(50.0));
+        assert!(good.baseline_note.is_none());
+
+        // A stored entry of 0 — what an older `--save-baseline` could persist. The delta is undefined,
+        // and *saying so* is the fix: it used to be dropped in silence.
+        let mut zero = measured("zero", Some(150.0));
+        compare_to_baseline(&mut zero, &base);
+        assert!(zero.baseline_delta_pct.is_none());
+        assert!(
+            zero.baseline_note
+                .as_deref()
+                .is_some_and(|n| n.contains("re-save")),
+            "{:?}",
+            zero.baseline_note
+        );
+
+        // A benchmark added since the baseline was written.
+        let mut fresh = measured("fresh", Some(150.0));
+        compare_to_baseline(&mut fresh, &base);
+        assert!(fresh.baseline_delta_pct.is_none());
+        assert!(
+            fresh
+                .baseline_note
+                .as_deref()
+                .is_some_and(|n| n.contains("no entry")),
+            "{:?}",
+            fresh.baseline_note
+        );
+
+        // An unresolved *current* measurement against a real baseline. This one was worse than a
+        // dropped delta: `(0 - 100) / 100` is a confident -100.0%, a benchmark reported as having got
+        // infinitely faster.
+        let mut unresolved = measured("good", Some(0.0));
+        compare_to_baseline(&mut unresolved, &base);
+        assert!(
+            unresolved.baseline_delta_pct.is_none(),
+            "an unresolved run must not report a delta: {:?}",
+            unresolved.baseline_delta_pct
+        );
+        assert!(
+            unresolved
+                .baseline_note
+                .as_deref()
+                .is_some_and(|n| n.contains("measured nothing")),
+            "{:?}",
+            unresolved.baseline_note
+        );
+
+        // A bench with no measurement of its own has its own failure message; no baseline note is
+        // added on top of it.
+        let mut failed = measured("good", None);
+        compare_to_baseline(&mut failed, &base);
+        assert!(failed.baseline_note.is_none());
     }
 }

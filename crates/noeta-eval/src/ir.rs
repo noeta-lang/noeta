@@ -272,6 +272,7 @@ impl Interpreter {
         // The forwarding type-argument table (poly-values F2b) rides the IR itself, so both
         // backends read the same entries by construction.
         self.type_args = ir.type_args.clone();
+        self.type_arg_reprs = ir.type_arg_reprs.clone();
         let mut frame = Frame::new(ir.temp_count);
         // The top-level statements run directly in the global scope (no child).
         match self.exec_ir_stmts(&ir.top.stmts, &mut frame) {
@@ -946,6 +947,45 @@ impl Interpreter {
         Ok(Flow::Normal)
     }
 
+    /// The narrowing target a [`noeta_ir::Rvalue::As`]/[`noeta_ir::Rvalue::TypeTest`] with a
+    /// **dynamic** head-name atom resolves to, or `None` when it carries none (the ordinary
+    /// statically-written target, which stays authoritative).
+    ///
+    /// The atom is the `TypeArgName`/`TypeSlotName` that also answers `type_name::<T>()`, so it
+    /// evaluates to the instantiation's qualified name; wrapping it back into a bare
+    /// [`noeta_ir::TypeRef::Named`] re-enters `runtime_matches` on that name and reuses the whole
+    /// matcher unchanged — the built-in head funnel, `Option`/`Result`, a user shape name, and an
+    /// extern's qualified identity all decided exactly as for a written target. The VM's
+    /// `NarrowTarget::from_runtime_name` is the mirror of that re-entry.
+    ///
+    /// Head-only is not a simplification here: the checker records the site only for a *bare*
+    /// parameter target, so there is exactly one name and no arguments to carry.
+    fn runtime_narrow_target(
+        &mut self,
+        ty: &noeta_ir::TypeRef,
+        dynamic: &Option<noeta_ir::Atom>,
+        frame: &mut Frame,
+        span: noeta_span::Span,
+    ) -> Eval<Option<noeta_ir::TypeRef>> {
+        let Some(atom) = dynamic else {
+            return Ok(None);
+        };
+        let name = self.eval_ir_atom(atom, frame)?;
+        Ok(match name {
+            Value::Str(name) => Some(noeta_ir::TypeRef::Named {
+                name: noeta_ast::Name::canonical(name.to_string()),
+                args: Vec::new(),
+                span,
+            }),
+            // Both producers write a string, so this is unreachable in a checked program; a narrow
+            // has no failure channel, so it degrades to the baked target rather than aborting.
+            _ => {
+                let _ = ty;
+                None
+            }
+        })
+    }
+
     /// Resolve an atom to a value: a constant, a frame temporary (moved out — see
     /// [`Frame::take`]), or a lexical lookup. The `Var` not-found path reproduces the AST
     /// walker's `Ident` diagnostic exactly.
@@ -1290,6 +1330,7 @@ impl Interpreter {
                 args,
                 reuse,
                 reflect,
+                reflect_slot,
                 // A forwarding generic METHOD's type arguments (Axis A), in slot order — empty for
                 // the overwhelming majority of method calls. The reuse fast paths below are all
                 // built-in collection updates, which declare no slots, so they never carry any.
@@ -1359,7 +1400,14 @@ impl Interpreter {
                 };
                 // When this "method call" was a generic enum-variant construction, stamp the reflected
                 // type onto the freshly-built value (R2b.2) — the tree-walker twin of the VM's node tag.
-                result.map(|v| tag_call_reflect(v, reflect))
+                // …or a generic-in-generic construction, whose tag the hidden slot names: resolve the
+                // slot's table index through the same `type_arg_reprs` table the VM's
+                // `Op::RetagDynamic` reads, so both backends stamp the identical interned repr.
+                let dynamic = match reflect_slot {
+                    Some(slot) => self.dynamic_construction_tag(slot, frame)?,
+                    None => None,
+                };
+                result.map(|v| tag_call_reflect(tag_call_reflect(v, reflect), &dynamic))
             }
             // A trait method call (native default body, slice 2; or a kernel-trait method since the
             // ExtBundle→ExtTrait fold-in, slice 4): the route was baked at the call site — straight to
@@ -1478,19 +1526,36 @@ impl Interpreter {
                 let value = self.eval_ir_atom(operand, frame)?;
                 self.eval_try_ir(value, on_error, *span)
             }
-            noeta_ir::Rvalue::As { operand, ty, .. } => {
+            // A narrow whose target is an enclosing generic's type parameter reads the head name out
+            // of the `dynamic` atom — the very `TypeArgName`/`TypeSlotName` that answers
+            // `type_name::<T>()` — and re-enters the matcher on that name, so the two surfaces
+            // resolve one `T` and built-in instantiations (`T = int`) go through the same
+            // `BuiltinTy` funnel a written `int` does. The VM's `from_runtime_name` mirrors it.
+            noeta_ir::Rvalue::As {
+                operand,
+                ty,
+                dynamic,
+                span,
+            } => {
                 let value = self.eval_ir_atom(operand, frame)?;
-                if crate::runtime_matches(&value, ty, &self.reflection) {
+                let target = self.runtime_narrow_target(ty, dynamic, frame, *span)?;
+                if crate::runtime_matches(&value, target.as_ref().unwrap_or(ty), &self.reflection) {
                     Ok(crate::builtin_enum("Option", "some", vec![value]))
                 } else {
                     Ok(crate::builtin_enum("Option", "none", vec![]))
                 }
             }
-            noeta_ir::Rvalue::TypeTest { operand, ty, .. } => {
+            noeta_ir::Rvalue::TypeTest {
+                operand,
+                ty,
+                dynamic,
+                span,
+            } => {
                 let value = self.eval_ir_atom(operand, frame)?;
+                let target = self.runtime_narrow_target(ty, dynamic, frame, *span)?;
                 Ok(Value::Bool(crate::runtime_matches(
                     &value,
-                    ty,
+                    target.as_ref().unwrap_or(ty),
                     &self.reflection,
                 )))
             }
@@ -1525,6 +1590,8 @@ impl Interpreter {
             // the instantiation's qualified name, read off the hidden slot's table entry. The same
             // slot, entry and field the dynamic `attributes_of` arm above reads, so a forwarded
             // name and a forwarded manifest can never disagree about what `T` is.
+            // The other slot reader is not an `Rvalue` of its own but a field on the associated-call
+            // one — see `Self::dynamic_construction_tag`.
             noeta_ir::Rvalue::TypeSlotName { slot, span } => {
                 let idx = self.eval_ir_atom(slot, frame)?;
                 let Value::Int(i) = idx else {
@@ -2679,6 +2746,29 @@ impl Interpreter {
                 format!("cannot assign field `{field}` on {}", other.type_name()),
             )),
         }
+    }
+
+    /// The reflected type a **dynamic construction site** stamps (generic-in-generic construction):
+    /// read the hidden type-argument slot `slot` and project its table entry through
+    /// [`Self::type_arg_reprs`].
+    ///
+    /// The tree-walker twin of the VM's `Op::RetagDynamic`, resolving the same index in the same
+    /// table — so the tag both backends write is the identical interned repr, not two independent
+    /// reconstructions. A non-integer or out-of-range slot, or an entry with no reflection
+    /// projection, answers `None`: the value stays untagged and `type_of` falls back to the head-only
+    /// classification, exactly as an unrecorded construction site does.
+    fn dynamic_construction_tag(
+        &mut self,
+        slot: &noeta_ir::Atom,
+        frame: &mut Frame,
+    ) -> Eval<Option<noeta_ast::reflect::TypeRepr>> {
+        let Value::Int(i) = self.eval_ir_atom(slot, frame)? else {
+            return Ok(None);
+        };
+        if i < 0 {
+            return Ok(None);
+        }
+        Ok(self.type_arg_reprs.get(i as usize).cloned().flatten())
     }
 
     /// Resolve a list of atoms to values, left-to-right.

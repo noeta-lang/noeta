@@ -1,0 +1,46 @@
+// The **silent-failure class, closed**: a construction whose instantiation is structurally
+// unrecordable is an error at CHECK time, not an abort at run time.
+//
+// `rebuild` is an INSTANCE method (it reads `self`), so `T` reaches it on the receiver's reflected
+// type tag. That tag describes `self`; it cannot become the tag of an object the body *builds*.
+// Re-tagging `self`'s own fields instead was considered and rejected: a field may be shared, and the
+// whole soundness of a construction tag rests on the value being fresh. So no channel here can carry
+// the instantiation to the new `Repository`, the tag provably never gets written, and the first
+// `type_name::<T>()` inside it aborts.
+//
+// Before this the program checked clean (`0 error(s)`) and died at run time — exactly the check/run
+// divergence the construction-site tag exists to remove. E0058 is reused deliberately: it is the code
+// the run-time abort already carried, so the failure MOVED rather than changed identity.
+//
+// The guard that keeps this from being noise is pinned by `generic_in_generic_quiet_type` — a generic
+// type that never asks what `T` is does not need a tag, and constructing one here is left alone.
+// expect: error E0058 at 41:28
+// expect: exit 1
+struct Todo {
+    id: int
+}
+class Repository<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repository<T> {
+        return Repository { tbl: tbl };
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+class Live<T> {
+    repo: Repository<T>
+
+    fn new(tbl: string): Live<T> {
+        return Live { repo: Repository.new(tbl) };
+    }
+
+    fn rebuild(): Repository<T> {
+        r: Repository<T> = Repository.new(self.repo.tbl ~ "2");
+        return r;
+    }
+}
+l: Live<Todo> = Live.new("todos");
+echo l.rebuild().model();

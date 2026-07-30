@@ -1,8 +1,9 @@
 //! **Type-param forwarding pre-pass** (poly-values F2b, extended by poly-deferrals D2a): which
 //! generic functions and methods forward a type parameter into a **call-site-typed position** — a
 //! native turbofish (`json.try_parse::<T>`), a reflection manifest query (`attributes_of::<T>`),
-//! the type's own name (`type_name::<T>()`), or (transitively) another forwarding generic
-//! (`load::<T>(p)`).
+//! the type's own name (`type_name::<T>()`), a **narrow** to it (`v.as<T>()` / `v is T`), the
+//! **instantiation of a generic type constructed from it** (`Repository.new(…)` initializing a
+//! `repo: Repository<T>`), or (transitively) another forwarding generic (`load::<T>(p)`).
 //!
 //! Generics are erased at runtime, so one compiled body serves every instantiation; a forwarded
 //! site therefore needs its per-instantiation data (`TypeRecipe` / type name) delivered
@@ -41,8 +42,9 @@
 //! through an EXPLICIT turbofish only (`g::<T>(x)`) — forwarding via argument inference alone is
 //! rejected at the call site with a "spell the turbofish" help.
 
+use crate::constructors::FreshConstructors;
 use crate::subst::{apply_subst, bind_type_params, from_ref_q, mentions_param};
-use noeta_ast::{ClosureBody, Expr, FnDecl, Program, Stmt, StrPart, TypeRef};
+use noeta_ast::{ClosureBody, Expr, FnDecl, ObjectLit, Program, Stmt, StrPart, TypeRef};
 use noeta_types::Type;
 use std::collections::{HashMap, HashSet};
 
@@ -88,10 +90,77 @@ pub(crate) enum ForwardSpelling {
 }
 
 /// The pre-pass result: the slot table, plus the functions whose slot set failed to converge
-/// (polymorphic recursion through a composite forward — the checker reports these).
+/// (polymorphic recursion through a composite forward — the checker reports these), plus the generic
+/// types that read their own parameters reflectively.
 pub(crate) struct Forwarding {
     pub(crate) map: ForwardingMap,
     pub(crate) poisoned: HashSet<String>,
+    pub(crate) reflective: HashSet<String>,
+}
+
+/// Every **generic type that asks what one of its own type parameters is** — a member whose body
+/// spells `type_name::<T>()`, `attributes_of::<T>()` or a native turbofish on a bare class parameter.
+///
+/// Such a type *needs* its instances tagged: the answer comes off the reflected type tag a
+/// construction site stamped, so an untagged instance aborts at the first such query. A generic type
+/// with no such member is indifferent to tagging, which is exactly why this set exists — it is the
+/// guard that keeps [`crate::Checker::report_unrecordable`] from rejecting a working program that
+/// merely happens to build a generic value at an unrecoverable instantiation and never reflect on it.
+///
+/// Computed with the same walk the slot fixpoint uses, over the class's parameters, so "a site that
+/// consumes a bare parameter" means the identical thing in both — no second definition to drift.
+/// Every member is walked, instance and self-less alike: which *channel* delivers the parameter is
+/// the slot table's business, while this is only about whether the type asks at all.
+fn reflective_generic_types<'a>(program: &'a Program, cx: &WalkCx<'a>) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    for stmt in &program.stmts {
+        let (name, type_params, methods) = match stmt {
+            Stmt::Class(d) => (d.name.as_str(), &d.type_params, &d.methods),
+            Stmt::Struct(d) => (d.name.as_str(), &d.type_params, &d.methods),
+            Stmt::Enum(d) => (d.name.as_str(), &d.type_params, &d.methods),
+            _ => continue,
+        };
+        if type_params.is_empty() {
+            continue;
+        }
+        let own: Vec<&str> = type_params.iter().map(|p| p.name.as_str()).collect();
+        for m in methods {
+            let mut reads = false;
+            {
+                // Only a **bare** parameter counts: that is what the name-keyed reflective surfaces
+                // consume, and what a missing tag makes unanswerable. A composite slot
+                // (`List<T>`) belongs to the recipe channel, which is a different failure.
+                let mut mark_fn = |template: Type, _: bool| {
+                    if let Type::Named(n, args) = &template
+                        && args.is_empty()
+                        && own.contains(&n.as_str())
+                    {
+                        reads = true;
+                    }
+                };
+                let mark: &mut dyn FnMut(Type, bool) = &mut mark_fn;
+                let inner = WalkCx {
+                    params: &own,
+                    map: cx.map,
+                    decl_params: cx.decl_params,
+                    sigs: cx.sigs,
+                    xt: cx.xt,
+                    fresh: cx.fresh,
+                    obj_fields: cx.obj_fields,
+                    type_params: cx.type_params,
+                    ret: m.ret.as_ref(),
+                };
+                for s in &m.body {
+                    walk_stmt(s, &inner, mark);
+                }
+            }
+            if reads {
+                out.insert(name.to_string());
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// The deepest template the fixpoint will register. Substitution-grown templates past this depth
@@ -121,7 +190,13 @@ fn type_depth(t: &Type) -> usize {
 /// forwards transitively through a turbofish call of another forwarding function). `xt` is the
 /// program's extern-type import map, so a template's non-parameter names carry the same
 /// qualified identity the checker's body-site and call-site types do.
-pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>) -> Forwarding {
+pub(crate) fn compute_forwarding(
+    program: &Program,
+    xt: &HashMap<String, String>,
+    fresh: &FreshConstructors,
+) -> Forwarding {
+    let obj_fields = object_field_types(program);
+    let decl_type_params = declared_type_params(program);
     let fns: Vec<&FnDecl> = program
         .stmts
         .iter()
@@ -134,11 +209,13 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
     // name, plus every generic METHOD, keyed `Type.method` — the same string `symbols.methods` and
     // the call site build, so a body's slots and its call sites agree on the layout.
     //
-    // A method is walked over its **own** type parameters only. Its class's parameters reach a
-    // reflected site through a different channel — the receiver's type tag, which the construction
-    // site stamped — so a site naming one of those is not this pass's business and must not take a
-    // hidden slot; a method parameter shadowing a class one is therefore correctly walked as the
-    // method's.
+    // A method is walked over its own type parameters, plus — for a **self-less inherent member of
+    // a generic type** — its class's (see [`forwardable_class_params`]). An *instance* method's
+    // class parameters reach a reflected site through the other channel, the receiver's type tag
+    // stamped at the construction site, so a site naming one of those is not this pass's business
+    // and must not take a hidden slot. A self-less member has no receiver to read that tag from,
+    // and this channel is the only one it has; a method parameter shadowing a class one is
+    // therefore still correctly walked as the method's.
     let mut candidates: Vec<Candidate<'_>> = fns
         .iter()
         .map(|f| Candidate {
@@ -147,11 +224,11 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
             own: f.type_params.iter().map(|p| p.name.as_str()).collect(),
         })
         .collect();
-    for (ty, method) in generic_methods(program) {
+    for (ty, method, own) in method_candidates(program) {
         candidates.push(Candidate {
             key: format!("{ty}.{}", method.name),
             decl: method,
-            own: method.type_params.iter().map(|p| p.name.as_str()).collect(),
+            own,
         });
     }
     // The declaration-order type parameters of every candidate, for aligning turbofish arguments.
@@ -218,6 +295,10 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
                     decl_params: &decl_params,
                     sigs: &sigs,
                     xt,
+                    fresh,
+                    obj_fields: &obj_fields,
+                    type_params: &decl_type_params,
+                    ret: f.ret.as_ref(),
                 };
                 for stmt in &f.body {
                     walk_stmt(stmt, &cx, mark);
@@ -235,36 +316,151 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
             }
         }
         if !changed {
-            return Forwarding { map, poisoned };
+            break;
         }
+    }
+    // The reflective-type set rides along: it needs the same walk over a *type's* parameters, and
+    // computing it here keeps "a site that consumes a bare parameter" one definition.
+    let cx = WalkCx {
+        params: &[],
+        map: &map,
+        decl_params: &decl_params,
+        sigs: &sigs,
+        xt,
+        fresh,
+        obj_fields: &obj_fields,
+        type_params: &decl_type_params,
+        ret: None,
+    };
+    let reflective = reflective_generic_types(program, &cx);
+    Forwarding {
+        map,
+        poisoned,
+        reflective,
     }
 }
 
 /// One function the fixpoint walks: the key its slots are recorded under (a bare `fn` name, or
 /// `Type.method`), the declaration whose body is walked, and the type parameters that body may
-/// forward — its own, never an enclosing type's.
+/// forward — its own, plus (for a self-less inherent member) its enclosing type's.
 struct Candidate<'a> {
     key: String,
     decl: &'a FnDecl,
     own: Vec<&'a str>,
 }
 
-/// Every generic method in the program, as `(owning type name, declaration)`. Classes, structs and
-/// enums alike — all three flatten their `impl` blocks into `methods`, which is also what the
-/// `(type, method)` dispatch machinery reads, so this sees exactly the methods a call can reach.
-fn generic_methods(program: &Program) -> Vec<(&str, &FnDecl)> {
-    let mut out: Vec<(&str, &FnDecl)> = Vec::new();
+/// Every method the fixpoint walks, as `(owning type name, declaration, forwardable parameters)`.
+/// Classes, structs and enums alike — all three flatten their `impl` blocks into `methods`, which is
+/// also what the `(type, method)` dispatch machinery reads, so this sees exactly the methods a call
+/// can reach. A method with nothing to forward is left out entirely.
+fn method_candidates(program: &Program) -> Vec<(&str, &FnDecl, Vec<&str>)> {
+    let mut out: Vec<(&str, &FnDecl, Vec<&str>)> = Vec::new();
     for stmt in &program.stmts {
-        let (name, methods) = match stmt {
-            Stmt::Class(d) => (d.name.as_str(), &d.methods),
-            Stmt::Struct(d) => (d.name.as_str(), &d.methods),
-            Stmt::Enum(d) => (d.name.as_str(), &d.methods),
+        let (name, type_params, methods, impls) = match stmt {
+            Stmt::Class(d) => (d.name.as_str(), &d.type_params, &d.methods, &d.impls),
+            Stmt::Struct(d) => (d.name.as_str(), &d.type_params, &d.methods, &d.impls),
+            Stmt::Enum(d) => (d.name.as_str(), &d.type_params, &d.methods, &d.impls),
             _ => continue,
         };
+        // Which of `methods` came from an `impl Trait { … }` block (they are flattened in), keyed by
+        // the one thing that identifies a declaration uniquely — its name span.
+        let from_impl: HashSet<noeta_span::Span> = impls
+            .iter()
+            .flat_map(|b| b.methods.iter())
+            .map(|m| m.name_span)
+            .collect();
         for m in methods {
-            if !m.type_params.is_empty() {
-                out.push((name, m));
+            let mut own: Vec<&str> = m.type_params.iter().map(|p| p.name.as_str()).collect();
+            own.extend(forwardable_class_params(
+                type_params,
+                m,
+                from_impl.contains(&m.name_span),
+            ));
+            if !own.is_empty() {
+                out.push((name, m, own));
             }
+        }
+    }
+    out
+}
+
+/// The **enclosing generic type's** parameters this member may forward through a hidden slot — its
+/// class parameters when the member is one that has no other channel, and empty otherwise.
+///
+/// The split is the receiver. An *instance* method reads its class's instantiation off the
+/// receiver's reflected type tag, stamped at the construction site, so its class parameters must NOT
+/// take a hidden slot: two channels for one fact would let a call through one of the receiverless
+/// entry points (a `dyn` receiver, a method handle, `invoke`) supply nothing and abort where the tag
+/// was right there. A **self-less** member has no receiver at all — a generic type's constructor is
+/// the motivating one, `fn new(tbl: string): Repo<T>`, where `T` is known only to the caller — and
+/// the hidden slot is the only channel it has.
+///
+/// Two exclusions, both matching what `collect_method_sig_classified` classifies as
+/// [`crate::Receiver::Associated`], so the pre-pass and the checker cannot disagree about which
+/// members have a receiver:
+///
+/// * a body that mentions `self` is an instance method, receiver channel;
+/// * a member supplied by an `impl Trait { … }` block is reachable *either* way even when its body
+///   is self-less (the trait's contract puts it in the instance interface, and `dyn Trait` dispatches
+///   it on a value), so it keeps the receiver channel too.
+///
+/// A class parameter the method's own `<…>` shadows is a different type entirely and is dropped —
+/// the method's own parameter is already in the list and owns the name.
+fn forwardable_class_params<'a>(
+    type_params: &'a [noeta_ast::TypeParam],
+    m: &FnDecl,
+    from_impl: bool,
+) -> Vec<&'a str> {
+    if type_params.is_empty() || from_impl || m.body.iter().any(|s| s.mentions("self")) {
+        return Vec::new();
+    }
+    let shadowed: HashSet<&str> = m.type_params.iter().map(|p| p.name.as_str()).collect();
+    type_params
+        .iter()
+        .map(|p| p.name.as_str())
+        .filter(|p| !shadowed.contains(p))
+        .collect()
+}
+
+/// Every declared struct/class's **field types by name**, for the generic-in-generic construction
+/// consumer: an object literal's field initializer is a *checked* position, and the type it is
+/// checked against is written on the field's declaration, so a fresh-constructor call there
+/// instantiates whatever that declaration says.
+type ObjectFieldTypes<'a> = HashMap<&'a str, HashMap<&'a str, &'a TypeRef>>;
+
+/// Build [`ObjectFieldTypes`] over the program's structs and classes. Enums are absent: a variant
+/// payload is positional, not a named field initializer.
+fn object_field_types(program: &Program) -> ObjectFieldTypes<'_> {
+    let mut out: ObjectFieldTypes<'_> = HashMap::new();
+    for stmt in &program.stmts {
+        let (name, fields) = match stmt {
+            Stmt::Class(d) => (d.name.as_str(), &d.fields),
+            Stmt::Struct(d) => (d.name.as_str(), &d.fields),
+            _ => continue,
+        };
+        let entry = out.entry(name).or_default();
+        for f in fields {
+            if let Some(ty) = f.ty.as_ref() {
+                entry.insert(f.name.as_str(), ty);
+            }
+        }
+    }
+    out
+}
+
+/// Every declared generic type's parameters, in declaration order — the alignment a nested
+/// constructor's slot templates are substituted through.
+fn declared_type_params(program: &Program) -> HashMap<&str, Vec<&str>> {
+    let mut out: HashMap<&str, Vec<&str>> = HashMap::new();
+    for stmt in &program.stmts {
+        let (name, type_params) = match stmt {
+            Stmt::Class(d) => (d.name.as_str(), &d.type_params),
+            Stmt::Struct(d) => (d.name.as_str(), &d.type_params),
+            Stmt::Enum(d) => (d.name.as_str(), &d.type_params),
+            _ => continue,
+        };
+        if !type_params.is_empty() {
+            out.insert(name, type_params.iter().map(|p| p.name.as_str()).collect());
         }
     }
     out
@@ -278,6 +474,17 @@ struct WalkCx<'a> {
     decl_params: &'a HashMap<&'a str, Vec<&'a str>>,
     sigs: &'a HashMap<&'a str, (Vec<Type>, Type)>,
     xt: &'a HashMap<String, String>,
+    /// The program's provable fresh constructors — the one call form whose reflected instantiation
+    /// comes from its *position* rather than from its own arguments (see [`crate::constructors`]).
+    fresh: &'a FreshConstructors,
+    /// Declared field types, for the object-literal field-initializer position.
+    obj_fields: &'a ObjectFieldTypes<'a>,
+    /// Every declared generic **type**'s parameters in declaration order, for aligning a nested
+    /// constructor's slot templates with the instantiation the position spells.
+    type_params: &'a HashMap<&'a str, Vec<&'a str>>,
+    /// The walked declaration's declared **return** type, for the `return` position (and for
+    /// resolving a target-typed `.{ … }` returned from it).
+    ret: Option<&'a TypeRef>,
 }
 
 impl WalkCx<'_> {
@@ -290,6 +497,118 @@ impl WalkCx<'_> {
     fn mentions(&self, t: &Type) -> bool {
         let params: Vec<String> = self.params.iter().map(|p| p.to_string()).collect();
         mentions_param(t, &params)
+    }
+
+    /// The **generic-in-generic construction** consumer: a fresh-constructor call of a generic type
+    /// standing in a *checked* position whose declared type mentions one of the enclosing
+    /// parameters. `Repository.new(tbl, pk)` initializing a field declared `repo: Repository<T>`
+    /// inside `LiveRepository<T>` is the motivating one.
+    ///
+    /// The slot template is the **whole declared instantiation** (`Repository<T>`), not the bare
+    /// parameter, and that is what makes this consumer cheap: the call site substitutes its own
+    /// instantiation into the template and interns the *finished* `Repository<Todo>` statically,
+    /// exactly as every other forwarding slot does — so the body's construction site stamps an
+    /// already-interned `TypeRepr` chosen by one table index, and no template is ever composed at
+    /// run time. It also composes for free: `Pair<int, T>` or `Repository<List<T>>` need nothing
+    /// extra, and a body that also spells `type_name::<T>()` keeps that as its own separate slot.
+    ///
+    /// The head must match the constructor's own type, mirroring
+    /// [`crate::Checker::note_constructor_call`]'s gate: a call whose result the position wraps
+    /// (`items: List<Repository<T>>`) is not what this call constructs, and marking it would
+    /// register a slot no body site ever reads while still obliging every caller to fill it.
+    fn mark_ctor_position(
+        &self,
+        position: Option<&TypeRef>,
+        value: &Expr,
+        mark: &mut dyn FnMut(Type, bool),
+    ) {
+        let Some(position) = position else { return };
+        let Some((ctor_ty, method)) = fresh_ctor_call_type(value, self.fresh) else {
+            return;
+        };
+        let t = self.to_type(position);
+        let Type::Named(n, args) = &t else { return };
+        if n != ctor_ty || args.is_empty() || !self.mentions(&t) {
+            return;
+        }
+        mark(t.clone(), false);
+        // **Transitive** pass-through, one level of nesting at a time and therefore any depth: the
+        // constructor we are calling may itself construct a generic out of ITS parameter, in which
+        // case it carries a slot of its own that the call has to fill. Its template is over the
+        // callee's class parameters, and this position's type arguments say what those are here
+        // (`Outer<T>`'s `live: LiveRepository<T>` binds `LiveRepository`'s parameter to our `T`), so a
+        // substituted template still mentioning ours becomes our slot — exactly the propagation the
+        // explicit-turbofish call arm performs for a free function.
+        //
+        // A template mentioning the callee's OWN `<…>` parameters is deliberately left alone: those
+        // are bound by argument inference, which this syntactic pass cannot see. The call site refuses
+        // such a call outright rather than resolving it wrongly.
+        let key = format!("{ctor_ty}.{method}");
+        if let (Some(slots), Some(params)) = (self.map.get(&key), self.type_params.get(ctor_ty))
+            && params.len() == args.len()
+        {
+            let subst: HashMap<String, Type> = params
+                .iter()
+                .map(|p| p.to_string())
+                .zip(args.iter().cloned())
+                .collect();
+            for slot in slots {
+                let sigma = apply_subst(&slot.template, &subst);
+                if self.mentions(&sigma) {
+                    mark(sigma, slot.needs_recipe);
+                }
+            }
+        }
+    }
+
+    /// Mark every field initializer of `lit` that is a fresh-constructor call, against the field's
+    /// **declared** type. `elided` supplies the nominal type of a target-typed `.{ … }` (whose name
+    /// the source omits) where the position it sits in makes it known.
+    fn mark_object_positions(
+        &self,
+        lit: &ObjectLit,
+        elided: Option<&str>,
+        mark: &mut dyn FnMut(Type, bool),
+    ) {
+        let Some(name) = lit.type_name.as_ref().map(|n| n.as_str()).or(elided) else {
+            return;
+        };
+        let Some(fields) = self.obj_fields.get(name) else {
+            return;
+        };
+        for f in &lit.fields {
+            self.mark_ctor_position(fields.get(f.name.as_str()).copied(), &f.value, mark);
+        }
+    }
+}
+
+/// The generic user type whose provable fresh constructor `expr` calls — the syntactic twin of
+/// [`crate::Checker::fresh_constructor_type`], which answers the same question after name resolution.
+/// `None` for every other expression.
+fn fresh_ctor_call_type<'e>(
+    expr: &'e Expr,
+    fresh: &FreshConstructors,
+) -> Option<(&'e str, &'e str)> {
+    let Expr::Call { callee, .. } = expr else {
+        return None;
+    };
+    let Expr::Member { receiver, name, .. } = callee.as_ref() else {
+        return None;
+    };
+    let Expr::Ident { name: tn, .. } = receiver.as_ref() else {
+        return None;
+    };
+    fresh
+        .contains(&(tn.to_string(), name.to_string()))
+        .then_some((tn.as_str(), name.as_str()))
+}
+
+/// The head name of a surface type reference, for resolving a target-typed `.{ … }` against the
+/// position it stands in.
+fn head_of(ty: &TypeRef) -> Option<&str> {
+    match ty {
+        TypeRef::Named { name, .. } => Some(name.as_str()),
+        _ => None,
     }
 }
 
@@ -334,6 +653,11 @@ fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                     }
                 }
             }
+            // An ANNOTATED binding is also a checked position for a generic type's fresh
+            // constructor (`r: Repository<T> = Repository.new(…)`), and the one that gives a
+            // construction the pre-pass cannot otherwise see — an argument, say — a spelling that
+            // works: bind it here first, then pass the binding.
+            cx.mark_ctor_position(Some(ann), value, mark);
             walk_expr(value, cx, mark)
         }
         Stmt::Binding { value, .. } => walk_expr(value, cx, mark),
@@ -341,6 +665,13 @@ fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         Stmt::Expr { expr, .. } => walk_expr(expr, cx, mark),
         Stmt::Return { value, .. } => {
             if let Some(v) = value {
+                // A declared `return` is a checked position: `fn repo(): Repository<T> { return
+                // Repository.new(…); }`. A returned target-typed `.{ … }` takes its nominal type
+                // from the same declaration, so its field initializers resolve too.
+                cx.mark_ctor_position(cx.ret, v, mark);
+                if let Expr::Object(lit) = v {
+                    cx.mark_object_positions(lit, cx.ret.and_then(head_of), mark);
+                }
                 walk_expr(v, cx, mark);
             }
         }
@@ -399,6 +730,11 @@ fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 decl_params: cx.decl_params,
                 sigs: cx.sigs,
                 xt: cx.xt,
+                fresh: cx.fresh,
+                obj_fields: cx.obj_fields,
+                type_params: cx.type_params,
+                // The nested declaration's own `return` position, not the enclosing one's.
+                ret: decl.ret.as_ref(),
             };
             for s in &decl.body {
                 walk_stmt(s, &inner, mark);
@@ -458,6 +794,22 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                     mark(Type::Named(p.to_string(), Vec::new()), false);
                 }
             }
+        }
+        // The **narrow** consumers — `v.as<T>()` and `v is T`. Name-only, like `type_name` above
+        // and for the same reason: a narrow is a head-constructor match on the instantiation's
+        // runtime NAME ([`noeta_ast::Expr::As`]), so a slot's `TypeArgInfo.name` is the whole of
+        // what it reads and it forwards even for an instantiation that has no recipe at all.
+        //
+        // Bare parameters only, matching the head-keyed match the runtime performs: one narrow
+        // reads one name, so a parameter buried in a *tested* argument position (`v is List<T>`)
+        // has no slot it could be spelled as and is an E0058 at the checker instead.
+        Expr::As { expr: e, ty, .. } | Expr::TypeTest { expr: e, ty, .. } => {
+            for p in cx.params {
+                if is_bare_param(ty, p) {
+                    mark(Type::Named(p.to_string(), Vec::new()), false);
+                }
+            }
+            rec!(e);
         }
         // Transitive forwarding: an explicit turbofish call of another forwarding function. Each
         // of the callee's slot templates, with the call's type arguments substituted in, that
@@ -522,8 +874,6 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         | Expr::Try { expr: e, .. }
         | Expr::Await { expr: e, .. }
         | Expr::Spawn { future: e, .. }
-        | Expr::As { expr: e, .. }
-        | Expr::TypeTest { expr: e, .. }
         | Expr::TypeOf { value: e, .. }
         | Expr::FieldsOf { value: e, .. }
         | Expr::TraitsOf { value: e, .. }
@@ -590,6 +940,10 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
             }
         }
         Expr::Object(lit) => {
+            // A field initializer is a checked position (see [`WalkCx::mark_ctor_position`]) — the
+            // motivating one for generic-in-generic construction, since a generic type's constructor
+            // builds its inner generic right there in the literal it returns.
+            cx.mark_object_positions(lit, None, mark);
             if let Some(spread) = &lit.spread {
                 rec!(spread);
             }

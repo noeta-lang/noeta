@@ -403,10 +403,26 @@ impl Printer<'_> {
             }
             Rvalue::Closure { func, .. } => format!("closure fn({})", func.params.join(", ")),
             Rvalue::Try { operand, .. } => format!("{}?", atom(operand)),
-            Rvalue::As { operand, ty, .. } => format!("{}.as<{}>()", atom(operand), type_ref(ty)),
-            Rvalue::TypeTest { operand, ty, .. } => {
-                format!("{} is {}", atom(operand), type_ref(ty))
-            }
+            // A dynamic head name is rendered as the atom it arrives in, not as the erased `T` the
+            // baked `ty` still spells — a snapshot must show which target the narrow will use.
+            Rvalue::As {
+                operand,
+                ty,
+                dynamic,
+                ..
+            } => match dynamic {
+                Some(name) => format!("{}.as<name {}>()", atom(operand), atom(name)),
+                None => format!("{}.as<{}>()", atom(operand), type_ref(ty)),
+            },
+            Rvalue::TypeTest {
+                operand,
+                ty,
+                dynamic,
+                ..
+            } => match dynamic {
+                Some(name) => format!("{} is name {}", atom(operand), atom(name)),
+                None => format!("{} is {}", atom(operand), type_ref(ty)),
+            },
             Rvalue::TypeArgName {
                 operand,
                 index,

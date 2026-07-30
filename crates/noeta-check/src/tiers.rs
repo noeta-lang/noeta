@@ -591,18 +591,69 @@ pub fn extension_attribute_types() -> Vec<noeta_ast::reflect::TypeInfo> {
     // empty instance. Assembly guarantees a fielded `@attribute` is `Struct`-kind. `ExtField` carries
     // no literal default, so every field is mandatory (`None`) — the E0009 construction check ensures
     // each is supplied at the application site, exactly as for a data-only attribute's mandatory field.
-    let fielded = ext::ext_fielded_attributes().map(|f| noeta_ast::reflect::TypeInfo {
+    let fielded = ext::ext_fielded_attributes().map(fielded_type_info);
+    data_only.chain(fielded).collect()
+}
+
+/// Every installed extension's declared **fielded types** — native classes and native value structs
+/// — as reflection [`TypeInfo`]s. The fielded twin of [`extension_enum_types`], and what makes
+/// `field_specs_of("std.http.Frame")` report a native type's four fields instead of the empty list
+/// that, paired with `variants_of`'s empty one, means "I know nothing about this name".
+///
+/// Only the fielded types that are `@attribute`s used to be seeded (by [`extension_attribute_types`],
+/// which needed their shapes to materialize an attribute instance), so a native type that is simply a
+/// *type* was skipped — though its `ExtField` list carries exactly the `SigType`s the attribute arm
+/// already projected. Both arms now go through one [`fielded_type_info`], so an attribute and a plain
+/// native type cannot come to report their fields differently.
+///
+/// **Seeding this does not make a native type falsely constructible, and that was measured rather
+/// than assumed.** A seeded `TypeInfo` is also what makes `construct(name, …)` resolve, and the
+/// hazard this was split off for was `construct` minting a native class with no native state behind
+/// it. It cannot: an [`ExtField`](noeta_ext_abi::registry::ExtField) carries no literal default, so
+/// every field of a native type is **mandatory**, and the shared `plan_construct` /
+/// `plan_construct_named` refuse a construction that omits a mandatory field — `construct("fx.Handle",
+/// {})` is `Err("missing required field `guard` of `fx.Handle`")`, not an empty `Handle`. Supplying
+/// the field means supplying a real extern handle obtained from native code, which is exactly the
+/// requirement a source-written `Handle { guard: g }` literal has (both backends already register
+/// every native fielded type as constructible, so the source literal was always the same operation).
+/// So reflection reporting the schema and `construct` accepting a value are two views of one
+/// declaration here, which is the invariant the type-level queries exist to keep — not two
+/// permissions that had to be granted separately.
+pub fn extension_fielded_types() -> Vec<noeta_ast::reflect::TypeInfo> {
+    use noeta_ext_abi::registry as ext;
+    let Some(reg) = ext::default_registry() else {
+        return Vec::new();
+    };
+    reg.fielded().map(fielded_type_info).collect()
+}
+
+/// One native fielded type as a reflection [`TypeInfo`] — the single projection both
+/// [`extension_attribute_types`]'s fielded arm and [`extension_fielded_types`] read.
+///
+/// The kind comes from the declaration's own [`FieldedKind`](noeta_ext_abi::FieldedKind), so a native
+/// class reflects as `Class` and a native value struct as `Struct` — the same discriminant the
+/// compiler's constructible-type record and the checker's `type_kinds` take, so a consumer branching
+/// on kind sees what the rest of the language sees. (A fielded `@attribute` is `Struct`-kind by
+/// assembly, so the attribute arm's shape is unchanged by sharing this.)
+///
+/// Field types come from the same `SigType` signature vocabulary the checker seeds into
+/// `symbols.records`, projected through [`sig_type_to_repr`]. An `ExtField` carries no literal
+/// default, so every field is mandatory (`optional: false`, `default: None`) — for an attribute that
+/// is what makes the E0009 construction check require each one at the application site, and for a
+/// plain native type it is what makes a `construct` that omits one a refusal.
+fn fielded_type_info(f: &noeta_ext_abi::registry::ExtFielded) -> noeta_ast::reflect::TypeInfo {
+    use noeta_ext_abi::NominalType;
+    noeta_ast::reflect::TypeInfo {
         name: f.qualified(),
-        kind: noeta_ast::reflect::TypeKind::Struct,
+        kind: match f.kind {
+            noeta_ext_abi::FieldedKind::Class => noeta_ast::reflect::TypeKind::Class,
+            noeta_ext_abi::FieldedKind::Struct => noeta_ast::reflect::TypeKind::Struct,
+        },
         fields: f
             .fields
             .iter()
             .map(|field| field.name.to_string())
             .collect(),
-        // A fielded attribute's field types come from the same `SigType` signature vocabulary the
-        // checker seeds into `symbols.records`; project each to its reflection `TypeRepr` so
-        // `field_specs_of` reports a native fielded attribute's field types precisely (struct-
-        // reflection arc). An `ExtField` carries no literal default, so every field is mandatory.
         field_types: f
             .fields
             .iter()
@@ -611,18 +662,24 @@ pub fn extension_attribute_types() -> Vec<noeta_ast::reflect::TypeInfo> {
         field_optional: f.fields.iter().map(|_| false).collect(),
         field_defaults: f.fields.iter().map(|_| None).collect(),
         variants: Vec::new(),
-    });
-    data_only.chain(fielded).collect()
+    }
 }
 
 /// Project a registry [`SigType`](noeta_ext_abi::registry::SigType) onto its reflection
 /// [`TypeRepr`](noeta_ast::reflect::TypeRepr) — the type-level counterpart of the checker's
 /// [`sig_to_typeref`](crate::stdlib::sig_to_typeref)/[`sig_to_type`](crate::stdlib::sig_to_type),
 /// so a native fielded type's field types reflect through `field_specs_of` the same way a `.noe`
-/// struct's do. Registry-free (unlike `sig_to_typeref`, which needs the registry to qualify a name):
-/// a nominal keeps its bare registry name as a kind-agnostic `Named`, matching how `params_of`
-/// projects a declared nominal. A polymorphic/variable position has no declaration-site type and
-/// becomes `Dyn`; a trailing-optional wrapper is an arity marker and unwraps to its inner type.
+/// struct's do. A polymorphic/variable position has no declaration-site type and becomes `Dyn`; a
+/// trailing-optional wrapper is an arity marker and unwraps to its inner type.
+///
+/// A **nominal** resolves through the registry to the identity and kind a *value* of that type
+/// carries ([`nominal_to_repr`]), which is a correction this projection needed the moment
+/// `extension_param_records` started reporting native signatures: a registry signature spells a
+/// nominal by its **short** name (`Named("Uuid")`), while `type_of` on one of its values reports the
+/// qualified identity (`Type.Named(std.id.Uuid, [])`). So `returns_of("std.id.uuid")` said
+/// `Type.Named(Uuid, [])` about a value that says `Type.Named(std.id.Uuid, [])` — one type, two
+/// names, from the two queries the docs promise share a decoder, and a framework matching a declared
+/// return against a runtime tag would have missed on every native type.
 fn sig_type_to_repr(sig: &noeta_ext_abi::registry::SigType) -> noeta_ast::reflect::TypeRepr {
     use noeta_ast::reflect::TypeRepr;
     use noeta_ext_abi::registry::SigType;
@@ -642,11 +699,10 @@ fn sig_type_to_repr(sig: &noeta_ext_abi::registry::SigType) -> noeta_ast::reflec
         SigType::Map(k, v) => TypeRepr::Map(boxed(k), boxed(v)),
         SigType::Result(ok, err) => TypeRepr::Result(boxed(ok), boxed(err)),
         SigType::Future(t) => TypeRepr::Named("Future".to_string(), vec![sig_type_to_repr(t)]),
-        SigType::Named(n) => TypeRepr::Named((*n).to_string(), Vec::new()),
-        SigType::Generic(n, args) => TypeRepr::Named(
-            (*n).to_string(),
-            args.iter().map(sig_type_to_repr).collect(),
-        ),
+        SigType::Named(n) => nominal_to_repr(n, Vec::new()),
+        SigType::Generic(n, args) => {
+            nominal_to_repr(n, args.iter().map(sig_type_to_repr).collect())
+        }
         SigType::Union(members) => TypeRepr::Union(members.iter().map(sig_type_to_repr).collect()),
         SigType::Fn(params, ret) => {
             TypeRepr::Fn(params.iter().map(sig_type_to_repr).collect(), boxed(ret))
@@ -666,6 +722,46 @@ fn sig_type_to_repr(sig: &noeta_ext_abi::registry::SigType) -> noeta_ast::reflec
         // less than the hole does, since reflection consumers read a shape, not a constraint.
         SigType::Numeric => TypeRepr::Dyn,
     }
+}
+
+/// One nominal name out of a registry signature as a reflection [`TypeRepr`] under the **identity**
+/// the rest of the language knows that type by — its qualified `namespace.name`, resolved through the
+/// installed registry.
+///
+/// A registry signature spells a nominal by the short name its own extension knows it under
+/// (`Named("Uuid")`, `Named("Framing")`), but identity is the qualified name: it is what `type_of`
+/// stamps on a value, what `field_specs_of` / `variants_of` are keyed on, and what a `.noe`
+/// annotation of the same type reflects as once the loader has qualified it. Without this resolution
+/// `returns_of("std.id.uuid")` said `Type.Named(Uuid, [])` about a value that says
+/// `Type.Named(std.id.Uuid, [])` — one type under two names, from the two queries the reflection docs
+/// promise share a decoder, so a framework matching a declared return against a runtime tag missed on
+/// every native type.
+///
+/// Kind-**agnostic** [`TypeRepr::Named`], deliberately, and for the same reason: that is exactly what
+/// a `.noe` declaration of this type reflects as (`fn f(): Framing` → `Type.Named(std.http.Framing,
+/// [])`, the documented spelling of a declared nominal annotation), so one type in a declared position
+/// reads the same however it was declared. Classifying the native side into `Enum`/`Struct`/`Class`
+/// would report the *value* channel's spelling in the *declaration* channel and make a consumer that
+/// branches on `Type.Named(n, _)` miss precisely the native declarations.
+///
+/// A name the registry does not resolve keeps its bare spelling (the synthesized `Future` wrapper, a
+/// third-party name registered elsewhere): inventing a namespace for it would fabricate an identity,
+/// which is the failure this resolution exists to prevent.
+fn nominal_to_repr(
+    name: &str,
+    args: Vec<noeta_ast::reflect::TypeRepr>,
+) -> noeta_ast::reflect::TypeRepr {
+    use noeta_ast::reflect::TypeRepr;
+    use noeta_ext_abi::NominalType;
+    use noeta_ext_abi::registry as ext;
+    let qualified = ext::default_registry().and_then(|reg| {
+        reg.resolve_enum(name)
+            .map(|t| t.qualified())
+            .or_else(|| reg.resolve_fielded(name).map(|t| t.qualified()))
+            .or_else(|| reg.resolve_type(name).map(|t| t.qualified()))
+            .or_else(|| reg.resolve_trait(name).map(|t| t.qualified()))
+    });
+    TypeRepr::Named(qualified.unwrap_or_else(|| name.to_string()), args)
 }
 
 /// Every installed extension's declared **enums** as reflection [`TypeInfo`]s — the native twin of
@@ -710,6 +806,181 @@ pub fn extension_enum_types() -> Vec<noeta_ast::reflect::TypeInfo> {
         .collect()
 }
 
+/// Every installed extension's declared **callables** as reflection
+/// [`ParamRecord`](noeta_ast::reflect::ParamRecord)s — the signature twin of
+/// [`extension_enum_types`], and what makes `params_of` / `returns_of` answer for a native function
+/// or method instead of reporting a shipped stdlib callable as a typo.
+///
+/// `returns_of`'s `none` is documented to mean *this target names no known callable* — chosen
+/// deliberately over folding into a `void` so a mistyped target stays distinguishable from a real
+/// one. Nothing seeded `ReflectionInfo::params` from the registry, so `returns_of("std.math.sqrt")`
+/// was that `none`: reflection called a function the checker types, the linker resolves and both
+/// backends dispatch a nonexistent name.
+///
+/// **What is keyed, and under what string.** Every callable an extension declares, under exactly the
+/// spelling the rest of reflection uses for that kind of declaration:
+///
+/// * a **module function** (`ExtModule::functions`, plus the higher-order `ctx_functions` and the
+///   call-site-typed `typed_functions` — a name lives in exactly one table) under its root-qualified
+///   path, `std.math.sqrt`;
+/// * a **native type's method** — an extern handle's ([`ExtType`](noeta_ext_abi::registry::ExtType)),
+///   a native fielded type's, a native enum's — under `Type.method` on the type's **qualified**
+///   identity, `std.id.Uuid.to_string`, the same identity `type_of` stamps on its values and
+///   `extension_enum_types` keys a type on;
+/// * a **native trait's method** under `Trait.method` on the trait's qualified identity, matching the
+///   convention `reflect::build` already keys a `.noe` trait's method signatures under.
+///
+/// A native method's `params` exclude the receiver, exactly as a `.noe` method's `ParamRecord` does,
+/// so the reported arity is the one a call site writes.
+///
+/// **Parameter names are real, and that was measured rather than assumed.** The row that filed this
+/// hole warned that shipped `ExtFn`s "mostly leave `param_names` empty", which would have made a DI
+/// framework inject by a blank name — a silently-wrong answer of its own, and a reason to fill the
+/// tables before seeding. Measured across the installed std registry: of 214 module functions and 180
+/// native methods, **every one that takes a parameter names it**; the empty `param_names` are all on
+/// zero-arity signatures, where empty is the only correct value. A name is synthesized positionally
+/// (`_0`, `_1`, …) only where a declaration genuinely has none — the convention a native enum's
+/// positional payload already reflects under — so a blank name never travels.
+///
+/// The return type projects through the same [`sig_type_to_repr`] the type side uses, with the three
+/// polymorphic [`RetTy`](noeta_ext_abi::registry::RetTy) forms resolved as precisely as the
+/// declaration allows rather than flattened to `dyn`: `SameAsArg(n)` reports parameter `n`'s declared
+/// type (`vec.add(v, w): typeof v`), `NumericPreserving` reports the union it means (`int | float`),
+/// and a call-site-typed `TypeArg` reports its declared *wrapper* around a `dyn` hole — `T` itself is
+/// named at the call site, so a signature reflection has nothing to resolve it against, the same
+/// permissive hole `SigType::Var` takes.
+pub fn extension_param_records() -> Vec<noeta_ast::reflect::ParamRecord> {
+    use noeta_ext_abi::registry as ext;
+    let Some(reg) = ext::default_registry() else {
+        return Vec::new();
+    };
+    let mut out: Vec<noeta_ast::reflect::ParamRecord> = Vec::new();
+    // A module function's target is its root-qualified path (`std.math.sqrt`) — the module identity
+    // `Registry::find_module` resolves, extended by the function's own name.
+    for unit in reg.extensions() {
+        for module in unit.modules() {
+            for table in [
+                module.functions,
+                module.ctx_functions,
+                module.typed_functions,
+            ] {
+                for f in table {
+                    out.push(ext_fn_record(
+                        format!("{}.{}.{}", unit.root(), module.name, f.name),
+                        f,
+                    ));
+                }
+            }
+        }
+        // A native trait's methods, keyed `Trait.method` on the trait's qualified identity — the
+        // convention `reflect::build` uses for a `.noe` trait's own method signatures.
+        for tr in unit.traits() {
+            for m in tr.methods {
+                out.push(ext_fn_record(
+                    format!("{}.{}", tr.qualified(), m.sig.name),
+                    &m.sig,
+                ));
+            }
+        }
+    }
+    // Every native type's methods, keyed `Type.method` on the type's qualified identity: an extern
+    // handle's, a native fielded type's, and a native enum's.
+    for t in reg.extensions().iter().flat_map(|e| e.types()) {
+        for table in [t.methods, t.ctx_methods] {
+            for f in table {
+                out.push(ext_fn_record(format!("{}.{}", t.qualified(), f.name), f));
+            }
+        }
+    }
+    for t in reg.fielded() {
+        for f in t.methods {
+            out.push(ext_fn_record(format!("{}.{}", t.qualified(), f.name), f));
+        }
+    }
+    for t in reg.enums() {
+        for f in t.methods {
+            out.push(ext_fn_record(format!("{}.{}", t.qualified(), f.name), f));
+        }
+    }
+    out
+}
+
+/// One native signature as a reflection [`ParamRecord`](noeta_ast::reflect::ParamRecord) under
+/// `target` — the single projection every callable kind in [`extension_param_records`] goes through,
+/// so a module function and a method cannot come to describe their parameters differently.
+///
+/// A parameter is **optional** exactly when the declaration makes it so: a trailing
+/// [`SigType::Optional`](noeta_ext_abi::registry::SigType::Optional) is the registry's arity marker
+/// (a call may leave it unsupplied), which is precisely what `ParamSig::optional` reports for a
+/// `.noe` parameter carrying a default. Its *type* is the wrapped inner type, not an `Option<…>` —
+/// `sig_type_to_repr` already unwraps it, and reporting the marker as the value type would describe
+/// a parameter the callee never sees.
+fn ext_fn_record(
+    target: String,
+    f: &noeta_ext_abi::registry::ExtFn,
+) -> noeta_ast::reflect::ParamRecord {
+    use noeta_ext_abi::registry as ext;
+    let params = f
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| noeta_ast::reflect::ParamSig {
+            // A declared name where there is one (measured: every std signature that takes a
+            // parameter names it); the positional slot name a native payload already reflects under
+            // where there is not, so a blank name never reaches a consumer keying on it.
+            name: f
+                .param_names
+                .get(i)
+                .map(|n| (*n).to_string())
+                .unwrap_or_else(|| format!("_{i}")),
+            ty: sig_type_to_repr(ty),
+            optional: matches!(ty, ext::SigType::Optional(_)),
+        })
+        .collect();
+    noeta_ast::reflect::ParamRecord {
+        target,
+        params,
+        ret: ret_ty_to_repr(&f.ret, f.params),
+    }
+}
+
+/// Project a registry [`RetTy`](noeta_ext_abi::registry::RetTy) onto its reflection
+/// [`TypeRepr`](noeta_ast::reflect::TypeRepr) — the return-type half of [`sig_type_to_repr`], and
+/// deliberately more precise than the checker's `ret_to_typeref`, which flattens every polymorphic
+/// form to `dyn` because it only needs a *declaration-site* annotation for the user-trait checkers.
+/// `returns_of` reports what the signature says, so each form resolves as far as the declaration
+/// does:
+///
+/// * `SameAsArg(n)` **is** parameter `n`'s declared type (`vec.add(v, w): typeof v`), so it reports
+///   that type — `dyn` only when the parameter itself is a hole, or when the index names no
+///   parameter (a declaration bug the registry's own conformance test catches).
+/// * `NumericPreserving` means `int` when every argument is concretely `int` and `float` otherwise —
+///   a union of exactly those two, which is what the surface renderer already prints for it.
+/// * `TypeArg(wrap)` is named by the call site's turbofish, which a signature reflection has nothing
+///   to resolve against — so the declared *wrapper* is reported around a `dyn` hole, the same
+///   permissive hole a `SigType::Var` takes. The `Result` wrap's error type is declared, not
+///   call-site, so it stays precise.
+fn ret_ty_to_repr(
+    ret: &noeta_ext_abi::registry::RetTy,
+    params: &[noeta_ext_abi::registry::SigType],
+) -> noeta_ast::reflect::TypeRepr {
+    use noeta_ast::reflect::TypeRepr;
+    use noeta_ext_abi::registry as ext;
+    match ret {
+        ext::RetTy::Concrete(s) => sig_type_to_repr(s),
+        ext::RetTy::SameAsArg(n) => params
+            .get(*n)
+            .map(sig_type_to_repr)
+            .unwrap_or(TypeRepr::Dyn),
+        ext::RetTy::NumericPreserving => TypeRepr::Union(vec![TypeRepr::Int, TypeRepr::Float]),
+        ext::RetTy::TypeArg(ext::TypeArgWrap::Plain) => TypeRepr::Dyn,
+        ext::RetTy::TypeArg(ext::TypeArgWrap::Option) => TypeRepr::Option(Box::new(TypeRepr::Dyn)),
+        ext::RetTy::TypeArg(ext::TypeArgWrap::Result(e)) => {
+            TypeRepr::Result(Box::new(TypeRepr::Dyn), Box::new(sig_type_to_repr(e)))
+        }
+    }
+}
+
 /// Embed every type the **language and its installed extensions** declare into a freshly built
 /// reflection artifact: the prelude enums, the extensions' attribute shapes, and the extensions'
 /// enums. Idempotent (a name the program itself declares, or one already embedded by an earlier
@@ -721,14 +992,27 @@ pub fn extension_enum_types() -> Vec<noeta_ast::reflect::TypeInfo> {
 /// this name". That is why the prelude enums and the native enums are seeded here and not left to
 /// the AST walk: `Ordering` and `std.http.Framing` are as constructible, matchable and namable as
 /// any declared enum, and reflection was the one consumer still reporting them as unknown.
+///
+/// The **signature** index is seeded the same way and for the same reason
+/// ([`extension_param_records`]): a native callable has no AST declaration either, so `params_of`
+/// answered the empty list and `returns_of` the `none` that means "no such callable" for every
+/// function the stdlib ships. Guarded identically — a program's own `fn` or method of that target
+/// wins — and keyed on `returns_for`, because the two queries read one record and a callable present
+/// in one index is present in both.
 pub fn extend_reflection(info: &mut noeta_ast::reflect::ReflectionInfo) {
     let seeded = noeta_ast::reflect::prelude_type_infos()
         .into_iter()
         .chain(extension_attribute_types())
-        .chain(extension_enum_types());
+        .chain(extension_enum_types())
+        .chain(extension_fielded_types());
     for ty in seeded {
         if info.type_named(&ty.name).is_none() {
             info.types.push(ty);
+        }
+    }
+    for record in extension_param_records() {
+        if info.returns_for(&record.target).is_none() {
+            info.params.push(record);
         }
     }
 }
@@ -1794,10 +2078,28 @@ impl Checker {
             name: sigma.head_name(),
             recipe,
         };
-        let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
+        // The third projection: the instantiation's reflected [`TypeRepr`], for a slot a
+        // **construction site** reads (`Sites::dynamic_construction_sites` stamps it onto the object
+        // an inner fresh constructor built). It lives in the parallel `type_arg_reprs` table rather
+        // than on `TypeArgInfo`, which is `noeta-ext-abi`'s and may not depend on `noeta-ast`.
+        //
+        // It is part of the DEDUP KEY. `name` is head-keyed and a class carries no decode recipe, so
+        // `Repository<Todo>` and `Repository<Order>` produce the identical `TypeArgInfo` — folding
+        // them into one entry would make two differently-instantiated construction sites report each
+        // other's argument. Every existing consumer reads only the fields it always read; the pair
+        // merely stops entries that differ in a fact SOME consumer needs from collapsing.
+        let repr = crate::type_to_repr_top(sigma, &self.symbols.type_kinds);
+        let idx = match self
+            .sites
+            .type_arg_table
+            .iter()
+            .zip(&self.sites.type_arg_reprs)
+            .position(|(e, r)| *e == info && *r == repr)
+        {
             Some(i) => i,
             None => {
                 self.sites.type_arg_table.push(info);
+                self.sites.type_arg_reprs.push(repr);
                 self.sites.type_arg_table.len() - 1
             }
         };

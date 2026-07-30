@@ -1,0 +1,73 @@
+// `params_of` / `returns_of` answer for a **native** (extension-declared) callable, not just a `.noe`
+// fn or method.
+//
+// `returns_of`'s `none` is documented to mean *this target names no known callable* — chosen over
+// folding into a `void` precisely so a mistyped target stays distinguishable from a real one. Nothing
+// seeded the signature index from the registry, so `returns_of("std.math.sqrt")` was that `none`:
+// reflection reported a function the checker types, the linker resolves and both backends dispatch as
+// a typo. The signature index is now seeded from the installed extensions the same way the type index
+// is (`extend_reflection`), so the two indices describe the same set of declarations.
+//
+// The key is the declaration's own identity, exactly as for a native type: a module function under its
+// root-qualified path (`std.math.sqrt`), a native type's method under `Type.method` on the type's
+// qualified identity (`std.id.Uuid.to_string`). A native method's parameters exclude the receiver,
+// like a `.noe` method's.
+//
+// Parameter NAMES are real, not blank: every shipped signature that takes a parameter names it (214
+// module functions and 180 native methods, measured), so a consumer that injects by name gets the name
+// the documentation shows. Optionality is the registry's own trailing-optional marker, so a call that
+// may omit the argument reports `optional=true` with the argument's real type — not an `Option<…>` the
+// callee never sees.
+// expect: stdout "sqrt: [x: Type.Float, optional=false] -> some(Type.Float)"
+// expect: stdout "pow: [base: Type.Float, optional=false | exp: Type.Float, optional=false] -> some(Type.Float)"
+// expect: stdout "client.new: [base: Type.String, optional=true] -> some(Type.Named(std.http.Client, []))"
+// expect: stdout "abs returns: some(Type.Union([Type.Int, Type.Float]))"
+// expect: stdout "try_parse returns: some(Type.Result(Type.Dyn, Type.Named(std.json.JsonError, [])))"
+// expect: stdout "uuid method: [] -> some(Type.String)"
+// expect: stdout "declared and reflected agree: true"
+// expect: stdout "typo is still none: none"
+// expect: stdout "unqualified is a different name: 0 none"
+// expect: exit 0
+use std.id
+use std.http.client
+
+fn render(target: string): string {
+    ps = params_of(target).map(fn(p) => "${p.name}: ${p.type}, optional=${p.optional}").join(" | ");
+    return "[${ps}] -> ${returns_of(target)}";
+}
+
+// A module function, keyed by its root-qualified path.
+echo "sqrt: ${render("std.math.sqrt")}"
+echo "pow: ${render("std.math.pow")}"
+// The optional trailing parameter: the registry's arity marker, reported as optionality on the
+// argument's own type.
+echo "client.new: ${render("std.http.client.new")}"
+
+// `NumericPreserving` — `int` when every argument is concretely `int`, else `float`. The declared
+// return really is that union; reporting it says more than a `dyn` would.
+echo "abs returns: ${returns_of("std.math.abs")}"
+// A call-site-typed function's `T` is named by the turbofish, which a signature reflection has nothing
+// to resolve against — so the declared WRAPPER is reported around a hole, and the `Result` wrap's
+// error type, which IS declared, stays precise.
+echo "try_parse returns: ${returns_of("std.json.try_parse")}"
+
+// A native type's method, keyed `Type.method` on the type's QUALIFIED identity. Its parameter list
+// excludes the receiver, exactly as a `.noe` method's does.
+echo "uuid method: ${render("std.id.Uuid.to_string")}"
+
+// The declaration channel and the value channel name one type ONE way. A registry signature spells a
+// nominal by its short name (`Uuid`), but identity is the qualified `std.id.Uuid` that `type_of`
+// stamps — so the projection resolves it, and a framework matching a declared return against a
+// runtime tag matches instead of missing on every native type.
+u = id.uuid();
+declared = match returns_of("std.id.uuid") { some(t) => "${t}", none => "<none>" };
+echo "declared and reflected agree: ${declared == "${type_of(u)}"}"
+
+// The `none` still means what it says for a name that is genuinely nothing.
+echo "typo is still none: ${returns_of("std.math.sqrtt")}"
+
+// A dynamic operand is the literal string it spells: the import-relative spelling a program CALLS with
+// (`math.sqrt` after `use std.math`) is a different name from the identity the registry declares, and
+// rewriting a runtime string because it resembles an import would be its own bug — the same line
+// `variants_of("Framing")` holds.
+echo "unqualified is a different name: ${params_of("math.sqrt").len()} ${returns_of("math.sqrt")}"

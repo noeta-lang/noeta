@@ -29,30 +29,57 @@ impl Checker {
             if !matches!(slot, Type::Unknown) {
                 continue;
             }
-            // Absorb the expected parameter type where it can guide the literal — a `Fn` for a
-            // closure (or a deferred polymorphic-function reference, F1), a `List`/`Map` for a
-            // container literal; anything else (a mismatched param, or an unknown one) synthesizes
-            // standalone, preserving the pre-deferral behavior (the mismatch is then caught by
-            // `check_args`' assignability check).
-            *slot = match (expr, params.get(i)) {
-                (Expr::Closure { .. } | Expr::Ident { .. }, Some(expected @ Type::Fn { .. })) => {
-                    self.check(expr, expected, env)
-                }
-                (
-                    Expr::List { .. } | Expr::Map { .. },
-                    Some(expected @ (Type::List(_) | Type::Map(..))),
-                ) => self.check(expr, expected, env),
-                // A target-typed `.{ … }` absorbs **whatever** the parameter type is — unlike the
-                // arms above it does not pre-filter on the expected type's shape, because the
-                // literal has no standalone meaning to fall back to. `check` owns the decision:
-                // a concrete named record type is adopted, anything else is E0023 reported there.
-                // Falling through to `synth` instead would report "no expected type", which would
-                // be a lie at a call site that has one.
-                (Expr::Object(lit), Some(expected)) if lit.type_name.is_none() => {
-                    self.check(expr, expected, env)
-                }
-                _ => self.synth(expr, env),
-            };
+            let expected = params.get(i).cloned();
+            *slot = self.absorb_deferred_arg(expr, expected.as_ref(), env);
+        }
+    }
+
+    /// Type one **deferred** argument against the callee's now-known parameter type — the single
+    /// definition of "absorb the expectation at an argument position", shared by the non-generic
+    /// path ([`Self::finalize_closure_args`]) and the generic one
+    /// ([`Self::check_generic_call_seeded`], whose `expected` is the parameter with everything bound
+    /// so far substituted in). Keeping it in one place is what makes the two paths agree by
+    /// construction: an argument form that absorbs an expectation must absorb it identically whether
+    /// or not the callee happens to be generic.
+    ///
+    /// A form the expectation cannot guide — or an absent/unguiding parameter — synthesizes
+    /// standalone, preserving the pre-deferral behavior (the mismatch is then caught by the
+    /// assignability check that follows).
+    pub(crate) fn absorb_deferred_arg(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Type>,
+        env: &mut Env,
+    ) -> Type {
+        match (expr, expected) {
+            (Expr::Closure { .. } | Expr::Ident { .. }, Some(expected @ Type::Fn { .. })) => {
+                self.check(expr, expected, env)
+            }
+            (
+                Expr::List { .. } | Expr::Map { .. },
+                Some(expected @ (Type::List(_) | Type::Map(..))),
+            ) => self.check(expr, expected, env),
+            // A target-typed `.{ … }` absorbs **whatever** the parameter type is — unlike the
+            // arms above it does not pre-filter on the expected type's shape, because the
+            // literal has no standalone meaning to fall back to. `check` owns the decision:
+            // a concrete named record type is adopted, anything else is E0023 reported there.
+            // Falling through to `synth` instead would report "no expected type", which would
+            // be a lie at a call site that has one.
+            (Expr::Object(lit), Some(expected)) if lit.type_name.is_none() => {
+                self.check(expr, expected, env)
+            }
+            // A generic type's **fresh-constructor call** (`Inner.new("todos")`) absorbs a
+            // fully-concrete instantiation of that very type, so `f(Inner.new("todos"))` against
+            // `fn f(i: Inner<Todo>)` pins `T = Todo` exactly as the annotated binding `i:
+            // Inner<Todo> = Inner.new("todos")` does. The parameter type IS the expectation the
+            // position already has; without pushing it in, the call synthesized bottom-up as an
+            // uninstantiated `Inner` and the construction site recorded nothing to reflect.
+            (Expr::Call { .. }, Some(expected))
+                if self.absorbs_constructor_expectation(expr, expected, env) =>
+            {
+                self.check(expr, expected, env)
+            }
+            _ => self.synth(expr, env),
         }
     }
 
@@ -60,9 +87,14 @@ impl Checker {
     /// known: the literal forms ([`is_deferred_literal_arg`] — closures and container literals),
     /// plus (F1, poly-values) a bare identifier naming an unshadowed **polymorphic named function**
     /// — a generic user fn, or a prelude constructor (`Ok`/`Err`/`some`) — whose precise type only
-    /// an expected `Fn` type can instantiate. Everything else synthesizes eagerly as before.
+    /// an expected `Fn` type can instantiate, plus a generic type's **fresh-constructor call**
+    /// ([`Self::fresh_constructor_type`]), whose instantiation only the parameter type pins.
+    /// Everything else synthesizes eagerly as before.
     pub(crate) fn is_deferred_arg(&self, expr: &Expr, env: &Env) -> bool {
         if is_deferred_literal_arg(expr) {
+            return true;
+        }
+        if self.fresh_constructor_type(expr, env).is_some() {
             return true;
         }
         matches!(expr, Expr::Ident { name, .. }
@@ -73,6 +105,93 @@ impl Checker {
                         .functions
                         .get(name.as_str())
                         .is_some_and(|sig| sig.generic.is_some())))
+    }
+
+    /// The **generic user type whose provable fresh constructor** `expr` statically calls —
+    /// `Some("Inner")` for `Inner.new("todos")`, the one call form whose *reflected instantiation*
+    /// comes from the expected type rather than from its own arguments (see [`crate::constructors`]:
+    /// inside the body the literal's type is `Inner<T>`, with `T` still a parameter).
+    ///
+    /// This is the syntactic trigger for treating such a call as a **checked** position wherever the
+    /// position's declared type is known — an argument, an object-literal field initializer — so
+    /// that all four such positions (those two plus the annotated binding and the declared return)
+    /// route through the one expectation channel instead of each recording specially.
+    ///
+    /// Narrow on purpose: [`crate::SymbolTable::fresh_constructors`] already holds only *generic*
+    /// types' provably-fresh associated functions, so an ordinary factory, a non-generic type's
+    /// `new`, and an instance-method call (whose instantiation rides the receiver's own tag) are all
+    /// excluded and keep synthesizing eagerly.
+    pub(crate) fn fresh_constructor_type<'e>(&self, expr: &'e Expr, env: &Env) -> Option<&'e str> {
+        let Expr::Call { callee, .. } = expr else {
+            return None;
+        };
+        let Expr::Member { receiver, name, .. } = callee.as_ref() else {
+            return None;
+        };
+        let Expr::Ident { name: tn, .. } = receiver.as_ref() else {
+            return None;
+        };
+        (lookup(env, tn.as_str()).is_none()
+            && self
+                .symbols
+                .fresh_constructors
+                .contains(&(tn.to_string(), name.to_string())))
+        .then_some(tn.as_str())
+    }
+
+    /// Whether a fresh-constructor call **absorbs** `expected` — the pre-filter that keeps this arm
+    /// from turning a genuine mismatch into a double report.
+    ///
+    /// Like every other absorbing arm ([`Checker::check_inner`]), this one fires only where the
+    /// expectation can actually guide the expression: `expected` must be a **fully-concrete
+    /// instantiation of the constructor's own type**. That is exactly the shape
+    /// [`Checker::note_constructor_call`] can record from, so a non-matching expectation had nothing
+    /// to offer anyway — and letting it through would run [`Checker::subsume`] over a mismatch the
+    /// caller's own assignability check is about to report at the same span (`need_int(Box.new(1))`
+    /// printing one `E0007`, not two).
+    ///
+    /// The `fully_concrete` half is the load-bearing one: an open parameter (`fn keep<T>(x: T)`)
+    /// makes no claim about the instantiation, so the call keeps synthesizing bottom-up and binds
+    /// the callee's `T` itself. Recording `Inner<dyn>` there would invent a fact the site does not
+    /// have.
+    pub(crate) fn absorbs_constructor_expectation(
+        &self,
+        expr: &Expr,
+        expected: &Type,
+        env: &Env,
+    ) -> bool {
+        let Type::Named(n, args) = expected else {
+            return false;
+        };
+        !args.is_empty()
+            && self.fresh_constructor_type(expr, env) == Some(n.as_str())
+            && (self.fully_concrete(expected) || self.dynamic_ctor_slot(expected).is_some())
+    }
+
+    /// The **hidden type-argument slot** that can deliver `instantiation` at run time, or `None`
+    /// (generic-in-generic construction).
+    ///
+    /// The one definition of "this body can still record a construction at this instantiation", and it
+    /// is deliberately consulted from both ends of the same fact: [`Self::absorbs_constructor_expectation`]
+    /// asks it before pushing an open expectation into a fresh-constructor call, and
+    /// [`Self::note_constructor_call`] asks it again to record the site. Two answers here would mean a
+    /// call typed against an expectation nothing then recorded — silence exactly where the arc exists
+    /// to remove it.
+    ///
+    /// Both halves are load-bearing. `open_only_by_params` keeps a `dyn` or an inference hole out (a
+    /// tag is a claim, and neither is one). The template match is what proves a *caller* is obliged to
+    /// resolve it: a slot exists for this instantiation only because the syntactic pre-pass saw a
+    /// declared position demanding it, and every call of this member then substitutes its own
+    /// instantiation into that template and interns the finished type.
+    pub(crate) fn dynamic_ctor_slot(&self, instantiation: &Type) -> Option<u32> {
+        if !self.open_only_by_params(instantiation, &self.coloring.forwardable_params) {
+            return None;
+        }
+        self.coloring
+            .current_forwarding
+            .iter()
+            .position(|t| t == instantiation)
+            .map(|i| i as u32)
     }
 
     /// The precise monomorphic [`Type::Fn`] of a **polymorphic named function used in value
