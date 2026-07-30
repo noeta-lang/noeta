@@ -99,10 +99,11 @@ Each door decides how a rejection surfaces — the same choice it already makes 
 | `json.try_parse::<T>(text)` | **Recoverable**: `Result.Err(JsonError)` with the path-carrying message. |
 | `json.decode_typed(name, text)` | **Recoverable**: `Result.Err(JsonError)` (the router-facing decode). |
 | `from_bytes::<T>(bytes)` | **Aborts** at `[i]` (runtime `E0007`) — a `@packed` type may `impl Validate`, and each decoded element is checked. |
+| [`construct(name, fields)`](Attributes-and-Reflection#construct-enforces-impl-validate) | **Recoverable**: the door's own `Err(string)`, carrying the validator's message. |
 
 A type with no validator pays nothing: the decode walk never re-enters for it.
 
-**`construct` is not a door.** [`construct(name, fields)`](Attributes-and-Reflection#construct-is-the-reflective-literal-not-your-constructor) is the reflective form of a `T { … }` literal, and a literal has never validated — so it runs no `validate()`, and a `@validated` type constructs through it without a check (that directive is purely static; see below). If a reflective path builds values from untrusted input, call `validate()` on the `Ok` payload yourself.
+**`construct` is a door too.** [`construct(name, fields)`](Attributes-and-Reflection#construct-enforces-impl-validate) is the *reflective* form of a `T { … }` literal, but what it consumes is data — a `List<dyn>` or a `Map<string, dyn>` off a CLI, a request body, a model's tool arguments — so it enforces `Validate` on the same terms `json.try_parse` does. The condition is the same one too: implementing `Validate`, decoration or not. It is bottom-up for a simpler reason than the recipe walk — it never *builds* a nested value, so every field value it is handed already passed its own door, and the defaulted slots are filled before the type's own `validate` runs.
 
 ## `@validated` — channeling construction
 
@@ -169,7 +170,8 @@ And it does **not** restrict the recipe doors: a `@validated` type decoded from 
 is built directly and its `validate()` runs automatically — that is exactly the guarantee `@validated`
 completes, so a decode and a constructor both validate.
 
-Because it is purely static, `@validated` has nothing to say about a path with no source literal to
-reject: `construct::<T>(fields)` builds a `@validated` type and runs no `validate()`. Reflective
-construction is the one way in this directive does not cover — see the note under the door table
-above.
+Because it is purely static, `@validated` has nothing of its own to say about a path with no source
+literal to reject — and reflective construction is such a path. That gap is closed on the *runtime*
+side rather than the static one, exactly as it is for the decode doors: `construct::<T>(fields)` builds
+the value and then runs its `validate()`, so the rejection arrives as the door's `Err` rather than as a
+compile error. See the note under the door table above.

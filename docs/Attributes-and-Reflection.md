@@ -598,8 +598,15 @@ Every rejection is an `Err(string)` carrying a ready-to-surface message, never a
 | a named field the type does not have | ``` `Foo` has no field `nope` ``` |
 | a value whose scalar kind disagrees with the declared field type | ``` field `port` of `Foo` expects int, got string ``` |
 | a field that is neither supplied nor defaulted | ``` missing required field `port` of `Foo` ``` |
+| a value supplied for a **private** field | ``` cannot set private field `secret` of `Box` from outside it ``` |
+| the built value's own `validate()` rejected it | the validator's own message, e.g. ``` missing @: nope ``` |
 
 Validation runs through one shared planner, so both backends accept, reject, and *word* every case identically.
+
+The last two rows are the door refusing to mint a value the type's own declaration forbids — the sense in which `construct` really is the reflective form of a literal, rather than a way around one:
+
+- **A private field cannot be set.** A `class`'s fields default private with a per-field `pub` opt-in, so `Box { secret: 9 }` written outside the class is `E0035`, and `construct("Box", {"secret": 9})` is that construction spelled reflectively. Only a *supplied* field is refused: omit a private field that has a default and it fills from that default, exactly as an outside-the-class literal which omits it does. A value `struct`'s fields are always public, so nothing about a struct is affected. The refusal is **context-free** — a runtime door knows neither its caller's type nor its tier, where the checker's gate relaxes inside the declaring type's own methods and inside a `@test` body — so it refuses there too; those are precisely the places where you can write the literal instead.
+- **A `Validate` implementor's invariant runs.** See [`construct` enforces `impl Validate`](#construct-enforces-impl-validate).
 
 #### `construct` is the reflective literal, not your constructor
 
@@ -633,13 +640,40 @@ echo match construct::<Slug>(raw) {
 // construct: '  Hello World  ' normalized=false
 ```
 
-This is the sharp edge in anything that builds user structs from **untrusted input** — CLI tokens, a model's JSON tool arguments, a request body. `construct` hands you a well-typed value that never passed through your invariants.
+This is the sharp edge in anything that builds user structs from **untrusted input** — CLI tokens, a model's JSON tool arguments, a request body. `construct` hands you a well-typed value that never passed through *your* hand-written normalization.
 
-It does not run [`impl Validate`](Validation) either. The JSON and `from_bytes` decode doors do; `construct` is not a decode door, it is a literal, and a literal has never validated. Nor can `@validated` catch it: that directive is **purely static** — it rejects a *source* literal (E0060), and `construct`'s whole point is that there is no source literal to reject. So a `@validated` type really does construct reflectively without validating.
+What it does **not** bypass is anything the type's own declaration states. A private field cannot be set through it, and an `impl Validate` invariant runs on the built value — see the two sections below. The line is: `construct` honors the declaration and skips the convention.
 
-Two ways to keep the invariant:
+#### `construct` enforces `impl Validate`
 
-- **Validate on the way out.** One line on the `Ok` payload, and the check is back:
+If the constructed type implements [`Validate`](Validation), its `validate()` runs on the freshly built value and a rejection is the door's own `Err` carrying the validator's message — the same re-entry the `json` and `from_bytes` decode doors make. `construct` builds directly from untrusted data exactly as they do, so it enforces the invariant exactly as they do; a data door's exemption from the `@validated` construction ban (`E0060`) is earned by running the check, not granted by not being a literal.
+
+The condition is **implementing `Validate`**, not carrying `@validated`. `@validated` decides where a *literal* may be written; the validator's presence decides whether a data door enforces it.
+
+```noeta
+struct Port {
+    n: int
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if self.n < 1 || self.n > 65535 { return Err("port ${self.n} out of range") }
+            return Ok()
+        }
+    }
+}
+
+echo match construct("Port", [70000]) {
+    Ok(v)  => "built ${v}",
+    Err(e) => "refused: ${e}",
+}
+// refused: port 70000 out of range
+```
+
+It is **bottom-up**, in the same sense the decode doors are, and for a simpler reason: `construct` never builds a nested value. Every field value you hand it is an existing value that already passed its own door, and the defaulted slots are filled before the type's own `validate` runs — so a container's validator only ever sees complete, already-valid fields, and an invalid inner is refused at its own `construct` call rather than surfacing as the container's complaint.
+
+What is still yours to do is anything the type does not *declare*: normalization, derived fields, a `new` that means more than its fields.
+
+Narrowing the `Ok` payload back to the static type is still yours — the door is typed `Result<dyn, string>` either way:
 
 ```noeta
 struct Email {
@@ -654,13 +688,11 @@ struct Email {
 }
 
 fn build(fields: Map<string, dyn>): Result<Email, string> {
+    // The `?` carries the validator's rejection out — `construct` already ran it.
     v = construct::<Email>(fields)?
     match v.as<Email>() {
-        some(e) => {
-            e.validate()?              // `construct` did not do this for you
-            return Ok(e)
-        },
-        none => { return Err("not an Email") },
+        some(e) => { return Ok(e) },
+        none    => { return Err("not an Email") },
     }
 }
 
@@ -675,7 +707,7 @@ echo match build(good) { Ok(e) => "ok ${e.addr}", Err(m) => "rejected: ${m}" }
 // ok a@b.com
 ```
 
-- **Call the constructor by name instead.** If the type is statically known, `invoke(Slug, "new", args)` really does run `new`'s body — see [the receiver rules](#invokerecv-name-args-resultdyn-dyn--invokename-args-resultdyn-dyn). What you cannot do is get there from a *runtime string* name, which is exactly the gap `construct` fills and exactly why the gap has this shape.
+To run the *convention* rather than the declaration — a `new` that normalizes, derives, or means more than its fields — **call it by name.** If the type is statically known, `invoke(Slug, "new", args)` really does run `new`'s body — see [the receiver rules](#invokerecv-name-args-resultdyn-dyn--invokename-args-resultdyn-dyn). What you cannot do is get there from a *runtime string* name, which is exactly the gap `construct` fills and exactly why the gap has this shape.
 
 #### Constructing an enum case
 
