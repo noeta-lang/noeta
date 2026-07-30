@@ -1,0 +1,64 @@
+// The eight **prelude structs** answer the type-level reflection queries like any struct you declare
+// — the struct half of the hole the prelude enums had.
+//
+// `field_specs_of("FieldSpec")` and `variants_of("FieldSpec")` were **both** empty, which by the pair
+// rule those queries are documented under means "I know nothing about this name" — said about the very
+// types a reflection consumer walks *while* reflecting. A schema deriver that recursed into its own
+// result type got that answer.
+//
+// The fix is not symmetric with the enum one: a prelude struct's field *names* came from the shared
+// declaration table, but its field *types* were hand-listed at the checker's registration sites, where
+// neither reflection nor the backends could see them. The table now carries both (a closed field-type
+// vocabulary each consumer projects onto its own), so the reported types are the declared ones — not
+// `Type.Dyn` holes, which would have been worse than reporting nothing: a wrong type travels, an
+// absent one is caught.
+// expect: stdout "FieldSpec: name=Type.String type=Type.Named(Type, []) optional=Type.Bool"
+// expect: stdout "ParamInfo: name=Type.String type=Type.Named(Type, []) optional=Type.Bool attrs=Type.List(Type.Dyn)"
+// expect: stdout "VariantSpec: name=Type.String payload=Type.List(Type.Named(FieldSpec, [])) backing=Type.Option(Type.Dyn)"
+// expect: stdout "FieldEntry: name=Type.String value=Type.Dyn"
+// expect: stdout "Attributed: target=Type.String value=Type.Named(T, [])"
+// expect: stdout "RoleBinding: target=Type.String role=Type.Dyn"
+// expect: stdout "TierRoot: name=Type.String run=Type.Fn([], Type.Unit)"
+// expect: stdout "TierText: target=Type.String text=Type.String"
+// expect: stdout "none is optional: false false false"
+// expect: stdout "a struct has no variants: 0"
+// expect: stdout "unknown is still unknown: 0 0"
+// expect: stdout "the reported schema is the schema you can build: true"
+// expect: exit 0
+
+fn schema(name: string): string {
+    fields = field_specs_of(name).map(fn(f) => "${f.name}=${f.type}").join(" ");
+    return "${name}: ${fields}";
+}
+
+// The type-level surface's own element types, which is where the hole bit hardest.
+echo schema("FieldSpec")
+echo schema("ParamInfo")
+echo schema("VariantSpec")
+// The value-level twin, the generic one, and the role/tier records.
+echo schema("FieldEntry")
+echo schema("Attributed")
+echo schema("RoleBinding")
+echo schema("TierRoot")
+echo schema("TierText")
+
+// No prelude struct field declares a default, so none may be omitted at construction — reporting one
+// as optional would misdescribe what `construct` requires.
+echo "none is optional: ${field_specs_of("FieldSpec").map(fn(f) => "${f.optional}").join(" ")}"
+
+// The pair rule from the other side: a struct reports its schema through `field_specs_of` and the
+// empty list through `variants_of`, and both-empty still means "never heard of it".
+echo "a struct has no variants: ${variants_of("FieldSpec").len()}"
+echo "unknown is still unknown: ${variants_of("NoSuchThing").len()} ${field_specs_of("NoSuchThing").len()}"
+
+// The point of reporting a schema at all: it is the one `construct` accepts, and the value it builds
+// is the value reflection hands you. `P`'s single field reflects as a `FieldSpec`, and building that
+// same `FieldSpec` by name produces an equal value (structs compare structurally).
+struct P { label: string }
+
+payload: List<dyn> = ["label", Type.String, false];
+agrees = match construct("FieldSpec", payload) {
+    Ok(v) => v.as<FieldSpec>() == some(field_specs_of("P")[0]),
+    Err(e) => false,
+};
+echo "the reported schema is the schema you can build: ${agrees}"

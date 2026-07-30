@@ -1,0 +1,80 @@
+// A **native fielded type** — a class or a value struct an extension declares — answers
+// `field_specs_of` with its real field schema. `std.http.Frame` is the shipped one.
+//
+// Only the native fielded types that are `@attribute`s were seeded into the reflection artifact (their
+// shapes are what materialize an attribute instance), so a native type that is simply a *type* was
+// skipped — and with `variants_of` empty too, that is the pair that reads as "I know nothing about this
+// name", about a type whose values the stdlib hands you and whose fields you read.
+//
+// The schema is the declaration's: every field of a native type is mandatory, because the extension ABI
+// gives a field no literal default. That is also why seeding this does not make a native type falsely
+// constructible — `construct` validates against this same schema, so omitting a field is a refusal, and
+// supplying one means supplying a value of the declared type. Reflection reporting the schema and
+// `construct` accepting a value are two views of one declaration.
+//
+// Every static spelling keys on that one identity, which needed the same lowering rewrite the native
+// enums needed: the loader deliberately leaves a *leaf* import short, so `field_specs_of::<Frame>()`
+// used to fold to a name nothing is registered under and answer the empty schema right after the
+// program imported the type — and `type_name::<Uuid>()` handed that unregistered name out as a key,
+// which is worse, since producing keys is its whole job. Lowering resolves every native nominal kind
+// now, not only enums.
+// expect: stdout "Frame: event=Type.String data=Type.String id=Type.String retry=Type.Option(Type.Int)"
+// expect: stdout "all mandatory: false false false false"
+// expect: stdout "a struct has no variants: 0"
+// expect: stdout "leaf turbofish agrees: true"
+// expect: stdout "type_name agrees: std.http.Frame std.id.Uuid"
+// expect: stdout "construct with the whole schema: Ok"
+// expect: stdout "built frame reads back: msg hello 7"
+// expect: stdout "a constructed frame is a real Frame: true"
+// expect: stdout "and equals the literal one: true"
+// expect: stdout "omitting a field is refused: missing required field `event` of `std.http.Frame`"
+// expect: stdout "a wrong field type is refused: field `event` of `std.http.Frame` expects string, got int"
+// expect: exit 0
+
+use std.http.{Frame}
+use std.id.{Uuid}
+
+// Keyed by the QUALIFIED identity — the name `type_of` stamps on one of its values, and therefore the
+// name a consumer that walked a `Type` is holding.
+specs = field_specs_of("std.http.Frame");
+echo "Frame: ${specs.map(fn(f) => "${f.name}=${f.type}").join(" ")}"
+echo "all mandatory: ${specs.map(fn(f) => "${f.optional}").join(" ")}"
+echo "a struct has no variants: ${variants_of("std.http.Frame").len()}"
+
+// The leaf-imported short spelling asks about the same type, and `type_name` produces that same key —
+// for an extern handle (`Uuid`) as much as for a fielded type, since both are registered qualified.
+echo "leaf turbofish agrees: ${field_specs_of::<Frame>() == specs}"
+echo "type_name agrees: ${type_name::<Frame>()} ${type_name::<Uuid>()}"
+
+// The reported schema is the one `construct` accepts: supply every field, in declaration order.
+whole: List<dyn> = ["msg", "hello", "id-1", some(7)];
+result = construct("std.http.Frame", whole);
+echo "construct with the whole schema: ${match result { Ok(v) => "Ok", Err(e) => "Err(${e})" }}"
+
+// Narrowed by the imported short name — a native fielded value's runtime narrowing identity is the
+// short one, for a constructed instance exactly as for a literal one (both backends agree; the
+// qualified spelling answers `none` for either, which is a separate pre-existing asymmetry between
+// narrowing identity and reflection identity, not something dynamic construction introduces).
+built = match result { Ok(v) => v.as<Frame>(), Err(e) => none };
+match built {
+    some(frame) => {
+        echo "built frame reads back: ${frame.event} ${frame.data} ${match frame.retry { some(n) => n, none => -1 }}"
+        // And it IS the native type, not a look-alike: its reflected identity is the type's own, and it
+        // is the very value a source literal builds. A native fielded type is the one case where the
+        // reflection key (`std.http.Frame`, qualified) and the runtime shape name (`Frame`, short)
+        // differ, so both backends' dynamic-construct path builds the shape under the registry's own
+        // name and stamps the qualified identity — the pair a literal carries. Before that the
+        // tree-walker aborted here ("cannot find type in this scope") while the VM built an object
+        // under the qualified name that equalled nothing.
+        echo "a constructed frame is a real Frame: ${"${type_of(frame)}" == "Type.Struct(std.http.Frame, [])"}"
+        echo "and equals the literal one: ${frame == Frame { event: "msg", data: "hello", id: "id-1", retry: some(7) }}"
+    },
+    none => { echo "construct did not build a Frame" },
+}
+
+// The two refusals that make the schema load-bearing rather than decorative. A native field has no
+// default, so an omission cannot be filled — this is why seeding a native type's fields cannot mint a
+// half-built one.
+echo "omitting a field is refused: ${match construct("std.http.Frame", {"data": "x"}) { Ok(v) => "Ok", Err(e) => e }}"
+wrong: List<dyn> = [1, "hello", "id", none];
+echo "a wrong field type is refused: ${match construct("std.http.Frame", wrong) { Ok(v) => "Ok", Err(e) => e }}"

@@ -1378,24 +1378,34 @@ impl<'m> Vm<'m> {
         // compiled shape in `module.shapes`, so the shape is rebuilt from the reflection artifact —
         // same kind, name, and field order the compiler would have interned, and shape interning is
         // structural, so a dynamically built instance and a literal one share the one shape.
-        let shape =
-            match self.module.shapes.iter().find(|s| {
-                s.name == type_name && matches!(s.kind, ShapeKind::Struct | ShapeKind::Class)
-            }) {
-                Some(shape) => noeta_object::intern_shape(shape.clone()),
-                None => {
-                    let info = self
-                        .module
-                        .reflection
-                        .type_named(&type_name)
-                        .expect("validated type is in the reflection artifact");
-                    let kind = match info.kind {
-                        noeta_ast::reflect::TypeKind::Class => ShapeKind::Class,
-                        _ => ShapeKind::Struct,
-                    };
-                    noeta_object::intern_shape(Shape::object(kind, &type_name, info.fields.clone()))
-                }
-            };
+        //
+        // A **native** fielded target is the one case where the artifact's key and the runtime identity
+        // differ: reflection registers it as `std.http.Frame` while a value of it carries the canonical
+        // short shape name (`Frame`) plus a *stamped* qualified reflected type — the pair a source
+        // literal `Frame { … }` produces. So the shape is built under the registry's own name and the
+        // qualified identity is stamped below, which makes a constructed instance the same value as a
+        // literal one: the interned shape is shared, `==` holds, and it marshals into native code. The
+        // tree-walker applies the identical rule off the identical registry lookup (`native_fielded_repr`).
+        let native = noeta_stdlib::registry::default_registry()
+            .and_then(|reg| reg.resolve_fielded(&type_name));
+        let shape_name = native.map(|cl| cl.name).unwrap_or(type_name.as_str());
+        let shape = match self.module.shapes.iter().find(|s| {
+            s.name == shape_name && matches!(s.kind, ShapeKind::Struct | ShapeKind::Class)
+        }) {
+            Some(shape) => noeta_object::intern_shape(shape.clone()),
+            None => {
+                let info = self
+                    .module
+                    .reflection
+                    .type_named(&type_name)
+                    .expect("validated type is in the reflection artifact");
+                let kind = match info.kind {
+                    noeta_ast::reflect::TypeKind::Class => ShapeKind::Class,
+                    _ => ShapeKind::Struct,
+                };
+                noeta_object::intern_shape(Shape::object(kind, shape_name, info.fields.clone()))
+            }
+        };
         let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
         for (name, value) in &named {
             if let Some(idx) = shape.fields.iter().position(|f| f == name) {
@@ -1431,6 +1441,21 @@ impl<'m> Vm<'m> {
             .map(|s| s.unwrap_or_else(Value::unit))
             .collect();
         let object = Value::object(shape, slots);
+        // The stamped reflected identity for a native fielded type (see above) — the qualified name
+        // `type_of` must report, which the short shape name alone cannot supply. Written before the
+        // value escapes, so no other reference can observe the untagged state.
+        if let Some(cl) = native {
+            use noeta_stdlib::NominalType;
+            let repr = match cl.kind {
+                noeta_stdlib::FieldedKind::Class => {
+                    noeta_ast::reflect::TypeRepr::Class(cl.qualified(), Vec::new())
+                }
+                noeta_stdlib::FieldedKind::Struct => {
+                    noeta_ast::reflect::TypeRepr::Struct(cl.qualified(), Vec::new())
+                }
+            };
+            object.set_reflect(Some(Rc::new(repr)));
+        }
         let ok = self.persist.shapes[ok_shape as usize];
         Ok(Value::enum_value(ok, vec![object]))
     }
