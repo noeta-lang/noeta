@@ -68,6 +68,7 @@ pub fn thread_reuse(program: &Program) -> Program {
         top: rewrite_block(&program.top, &own_destructors, &HashSet::new()),
         temp_count: program.temp_count,
         type_args: program.type_args.clone(),
+        type_arg_reprs: program.type_arg_reprs.clone(),
         span: program.span,
     }
 }

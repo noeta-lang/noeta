@@ -154,7 +154,15 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// line. The last is a wire break even though the *meaning* is identical: postcard writes an
 /// `Option`'s discriminant byte followed by the payload either way, but a niche-optimised `Option`
 /// is not guaranteed to encode as the plain one, and the two ops around it moved regardless.
-pub const FORMAT_VERSION: u8 = 13;
+///
+/// Bumped to 14 by generic-in-generic construction: `Module` gained `type_arg_reprs: Vec<Option<u32>>`
+/// — the reflection projection of `type_args`, so a construction whose instantiation arrives on a
+/// hidden slot can resolve the interned `TypeRepr` that slot names — and `Op` (in `Module::code`)
+/// gained a `RetagDynamic` variant, declared beside `Retag` rather than at the end. Both are wire
+/// breaks by the same non-self-describing-encoding rule as every bump above: the new module table's
+/// length prefix lands where a version-13 reader expects `names`, and the inserted `Op` variant shifts
+/// every discriminant after it.
+pub const FORMAT_VERSION: u8 = 14;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

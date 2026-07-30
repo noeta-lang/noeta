@@ -336,6 +336,7 @@ fn compile_inner(
         tojson_derives: module.tojson_derives,
         deserialize_recipes: module.deserialize_recipes,
         type_args: module.type_args,
+        type_arg_reprs: module.type_arg_reprs,
         destruct_reachable,
         cache_slots: module.cache_slots,
         // The attribute manifest + type registry, built from the AST by the *same* pure builder the
@@ -515,6 +516,7 @@ fn compile_to_mc(
         tojson_derives: Vec::new(),
         deserialize_recipes: sites.deserialize_recipes,
         type_args: ir.type_args.clone(),
+        type_arg_reprs: Vec::new(),
         structural_eq_types: HashSet::new(),
         native_type_names: HashMap::new(),
         packed_fields: HashMap::new(),
@@ -533,6 +535,10 @@ fn compile_to_mc(
         debug,
         registry,
     };
+    // The type-argument table's reflection projection, interned BEFORE any body compiles so a
+    // `RetagDynamic` resolves through a table that is already complete (its own indices are the
+    // checker's, not this pool's, so ordering is a determinism property only).
+    module.type_arg_reprs = module.intern_type_arg_reprs(&ir);
     // Type registration reads the surface declarations (shapes, derives, the method/destructor
     // proto table) the IR carries verbatim; bodies are lowered from the IR.
     module.register_globals(program);
@@ -639,6 +645,7 @@ impl SessionCompiler {
             tojson_derives: Vec::new(),
             deserialize_recipes: Vec::new(),
             type_args: Vec::new(),
+            type_arg_reprs: Vec::new(),
             structural_eq_types: HashSet::new(),
             native_type_names: HashMap::new(),
             packed_fields: HashMap::new(),
@@ -750,6 +757,7 @@ impl SessionCompiler {
             // entries (indexes are append-only), so the lowered snapshot is cumulative and a
             // wholesale replace stays index-stable.
             self.mc.type_args = ir.type_args.clone();
+            self.mc.type_arg_reprs = self.mc.intern_type_arg_reprs(&ir);
         }
 
         // Register this entry's globals/types/methods into the persistent tables (all additive:
@@ -845,6 +853,7 @@ impl SessionCompiler {
             tojson_derives: self.mc.tojson_derives.clone(),
             deserialize_recipes: self.mc.deserialize_recipes.clone(),
             type_args: self.mc.type_args.clone(),
+            type_arg_reprs: self.mc.type_arg_reprs.clone(),
             destruct_reachable,
             cache_slots: self.mc.cache_slots,
             reflection: self.reflection.clone(),
@@ -953,6 +962,10 @@ struct ModuleCompiler {
     /// The program-wide type-argument table (poly-values F2b), taken from the lowered IR
     /// `Program::type_args` and copied onto [`Module::type_args`].
     type_args: Vec<noeta_ext_abi::TypeArgInfo>,
+    /// The reflection projection of [`Self::type_args`], indexed identically: each instantiation's
+    /// reflected type interned into [`Self::type_reprs`], or `None` where it has none. Becomes
+    /// [`Module::type_arg_reprs`], which [`Op::RetagDynamic`] reads through a hidden slot's value.
+    type_arg_reprs: Vec<Option<u32>>,
     /// Type names whose `==` is **structural** (baked into each instance's `Shape::structural_eq`):
     /// every `struct`, plus a `class` that is `Equatable` (derives it or hand-`impl`s `eq`). A
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
@@ -1781,6 +1794,21 @@ impl ModuleCompiler {
         let idx = self.type_reprs.len() as u32;
         self.type_reprs.push(repr.clone());
         idx
+    }
+
+    /// Intern the lowered program's type-argument **reflection projection** into [`Self::type_reprs`],
+    /// producing [`Module::type_arg_reprs`] — the table [`Op::RetagDynamic`] resolves a hidden slot's
+    /// value through. Interned through the same pool as every other reflected type, so an
+    /// instantiation whose repr a list/object construction tag already carries is stored once.
+    ///
+    /// Recomputed wholesale on a session recompile, exactly as `type_args` is: the checker accumulates
+    /// both across entries so the indices are append-only, and re-interning an already-present repr
+    /// answers the same index.
+    fn intern_type_arg_reprs(&mut self, ir: &noeta_ir::Program) -> Vec<Option<u32>> {
+        ir.type_arg_reprs
+            .iter()
+            .map(|r| r.as_ref().map(|r| self.intern_type_repr(r)))
+            .collect()
     }
 
     /// Intern a built-in `Result`/`Option` variant shape (these display with their bare
@@ -3450,6 +3478,7 @@ impl<'m> FnCompiler<'m> {
                 type_args,
                 reuse,
                 reflect,
+                reflect_slot,
                 span,
                 supplied,
                 name_span: _,
@@ -3457,8 +3486,24 @@ impl<'m> FnCompiler<'m> {
                 // A generic enum-variant construction carries its reflected type (R2b.2); intern it so
                 // the `MakeEnum` op can stamp it. `None` for an ordinary method call.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
+                // Its dynamic twin (generic-in-generic construction): the hidden slot register whose
+                // type-argument entry names the tag. Resolved to a register HERE, before the call is
+                // emitted, so the slot local is live across it — see `Op::RetagDynamic`.
+                let reflect_slot = reflect_slot
+                    .as_ref()
+                    .map(|a| self.atom_reg(a))
+                    .transpose()?;
                 self.lower_method(
-                    receiver, name, args, type_args, *reuse, reflect, dst, *span, *supplied,
+                    receiver,
+                    name,
+                    args,
+                    type_args,
+                    *reuse,
+                    reflect,
+                    reflect_slot,
+                    dst,
+                    *span,
+                    *supplied,
                 )
             }
             Rvalue::Field {
@@ -4313,6 +4358,7 @@ impl<'m> FnCompiler<'m> {
         type_args: &[Atom],
         reuse: bool,
         reflect: Option<u32>,
+        reflect_slot: Option<Reg>,
         dst: Reg,
         span: Span,
         supplied: Option<u64>,
@@ -4356,6 +4402,13 @@ impl<'m> FnCompiler<'m> {
                 // which is what makes the in-place tag unobservable.
                 if let Some(k) = reflect {
                     self.code.push(Op::Retag { reg: dst, repr: k });
+                }
+                // …and the same stamp with the tag chosen at run time, when the instantiation is a
+                // type parameter of the enclosing self-less member and rides its hidden slot
+                // (generic-in-generic construction). Mutually exclusive with `reflect` above: the
+                // checker's two recording arms cannot both fire at one span.
+                if let Some(slot) = reflect_slot {
+                    self.code.push(Op::RetagDynamic { reg: dst, slot });
                 }
                 return Ok(());
             }

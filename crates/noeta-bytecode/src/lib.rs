@@ -941,6 +941,26 @@ pub enum Op {
         reg: Reg,
         repr: u32,
     },
+    /// [`Op::Retag`] with the tag chosen at run time (generic-in-generic construction): `slot` is the
+    /// register holding a hidden type-argument slot's value — an index into [`Module::type_args`] —
+    /// and the tag stamped is that entry's [`Module::type_arg_reprs`] projection.
+    ///
+    /// Emitted after a fresh constructor of a generic type whose instantiation is a type *parameter*
+    /// of the enclosing self-less member (`Repository.new(tbl, pk)` initializing a `repo:
+    /// Repository<T>` inside `LiveRepository<T>.new`). One compiled body serves every `LiveRepository
+    /// <…>`, so the concrete `Repository<Todo>` is not in it — the outer call resolved and interned it
+    /// and handed over its index. The tag is therefore still a statically-interned `TypeRepr`; only
+    /// *which* one is dynamic, which is what keeps the two backends' answers identical (one table
+    /// index each).
+    ///
+    /// An entry with no reflection projection (`None` — a `dyn`/hole top) leaves the value untagged,
+    /// the same head-only fallback an unrecorded construction site takes. Sound for the same reason
+    /// [`Op::Retag`] is: the checker records the site only for a *provably fresh* constructor, so no
+    /// other reference to this object exists.
+    RetagDynamic {
+        reg: Reg,
+        slot: Reg,
+    },
     /// `type_of(value)`: `dst = Type` — the runtime [`noeta_ast::reflect`] head-constructor descriptor
     /// of the value in `src` (`List(Dyn)`, `Named("Route")`, `Int`, …). Generics are erased at
     /// runtime, so element/argument types collapse to `Dyn` at this fidelity.
@@ -1622,6 +1642,16 @@ pub struct Module {
     /// [`Op::TypedModuleCall::dynamic`] / [`Op::AttributesOf::dynamic`]). Copied from the IR
     /// `Program`, so both backends resolve identical entries. Empty without forwarding.
     pub type_args: Vec<noeta_ext_abi::TypeArgInfo>,
+    /// The **reflection projection** of [`Module::type_args`], indexed identically: each interned
+    /// instantiation's reflected type, as an index into [`Module::type_reprs`], or `None` where the
+    /// instantiation has none (a `dyn`/hole top). Read by [`Op::RetagDynamic`], which stamps the
+    /// entry a hidden slot names onto a freshly-constructed object.
+    ///
+    /// A parallel table rather than a field on [`noeta_ext_abi::TypeArgInfo`]: `noeta-ext-abi` is the
+    /// lean ABI crate and deliberately has no `noeta-ast` dependency, which a `TypeRepr` would force
+    /// on it. Interned through the same pool as every other reflected type, so a repr shared with a
+    /// list/object construction tag is stored once.
+    pub type_arg_reprs: Vec<Option<u32>>,
     /// The interned instruction name table (P-VMT-OPSZ): every [`NameId`] in an op indexes here.
     /// Deduped module-wide by the compiler, so a name used at N sites is stored once. Holds field /
     /// method / global / type names, ext-call module+func, and `match`-literal strings; the VM
@@ -2141,6 +2171,9 @@ fn op_repr(
             dst, name, fields, ..
         } => format!("Construct   r{dst} <- construct(r{name}, r{fields})"),
         Op::Retag { reg, repr } => format!("Retag       r{reg} <- tag #{repr}"),
+        Op::RetagDynamic { reg, slot } => {
+            format!("RetagDyn    r{reg} <- tag of type_args[r{slot}]")
+        }
         Op::TypeArgName {
             dst, src, index, ..
         } => format!("TypeArgName r{dst} <- r{src}.typearg[{index}]"),

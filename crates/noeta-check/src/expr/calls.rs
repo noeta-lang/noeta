@@ -165,7 +165,33 @@ impl Checker {
         };
         !args.is_empty()
             && self.fresh_constructor_type(expr, env) == Some(n.as_str())
-            && self.fully_concrete(expected)
+            && (self.fully_concrete(expected) || self.dynamic_ctor_slot(expected).is_some())
+    }
+
+    /// The **hidden type-argument slot** that can deliver `instantiation` at run time, or `None`
+    /// (generic-in-generic construction).
+    ///
+    /// The one definition of "this body can still record a construction at this instantiation", and it
+    /// is deliberately consulted from both ends of the same fact: [`Self::absorbs_constructor_expectation`]
+    /// asks it before pushing an open expectation into a fresh-constructor call, and
+    /// [`Self::note_constructor_call`] asks it again to record the site. Two answers here would mean a
+    /// call typed against an expectation nothing then recorded — silence exactly where the arc exists
+    /// to remove it.
+    ///
+    /// Both halves are load-bearing. `open_only_by_params` keeps a `dyn` or an inference hole out (a
+    /// tag is a claim, and neither is one). The template match is what proves a *caller* is obliged to
+    /// resolve it: a slot exists for this instantiation only because the syntactic pre-pass saw a
+    /// declared position demanding it, and every call of this member then substitutes its own
+    /// instantiation into that template and interns the finished type.
+    pub(crate) fn dynamic_ctor_slot(&self, instantiation: &Type) -> Option<u32> {
+        if !self.open_only_by_params(instantiation, &self.coloring.forwardable_params) {
+            return None;
+        }
+        self.coloring
+            .current_forwarding
+            .iter()
+            .position(|t| t == instantiation)
+            .map(|i| i as u32)
     }
 
     /// The precise monomorphic [`Type::Fn`] of a **polymorphic named function used in value

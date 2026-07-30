@@ -291,6 +291,15 @@ fn op_facts(op: &Op) -> OpFacts {
         // very same value, so this is a pure USE (no `def`): the object must still be live here, and
         // it stays live for whoever consumes it afterwards.
         Op::Retag { reg, .. } => f.uses.push(*reg),
+        // The dynamic twin (generic-in-generic construction) additionally READS the hidden
+        // type-argument slot register that names the tag. Both are pure uses: the object keeps
+        // holding the same value, and the slot local is the enclosing member's parameter, live for
+        // its whole body — but it must be recorded, or the slot's register could be reused for
+        // something else between the call and this stamp.
+        Op::RetagDynamic { reg, slot } => {
+            f.uses.push(*reg);
+            f.uses.push(*slot);
+        }
         Op::ConcatInPlace { dst, lhs, rhs, .. } => {
             f.def = Some(*dst);
             f.uses.push(*lhs);
@@ -837,6 +846,10 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::TakeGlobal { dst, .. } => m(dst),
         Op::Drop { reg, .. } => m(reg),
         Op::Retag { reg, .. } => m(reg),
+        Op::RetagDynamic { reg, slot } => {
+            m(reg);
+            m(slot);
+        }
         Op::ConcatInPlace { dst, lhs, rhs, .. } => {
             m(dst);
             m(lhs);

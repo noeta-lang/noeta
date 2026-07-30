@@ -69,6 +69,13 @@ pub struct Program {
     /// call-site-typed sites (`json.try_parse::<T>` with a forwarded `T`) through this one table,
     /// so they agree by construction. Empty for programs without forwarding.
     pub type_args: Vec<noeta_ext_abi::TypeArgInfo>,
+    /// The **reflection projection** of [`Program::type_args`], indexed identically: each interned
+    /// instantiation's [`noeta_ast::reflect::TypeRepr`], or `None` where it has none. Read by
+    /// [`Rvalue::Method::reflect_slot`] — a construction whose instantiation arrives on a hidden slot
+    /// resolves its tag here, so the tag is still a statically-interned repr and only the *choice* of
+    /// entry is dynamic. A parallel table because `noeta_ext_abi::TypeArgInfo` may not depend on
+    /// `noeta-ast` (the lean-ABI-crate decision).
+    pub type_arg_reprs: Vec<Option<noeta_ast::reflect::TypeRepr>>,
     pub span: Span,
 }
 
@@ -267,6 +274,22 @@ pub enum Rvalue {
         /// type arguments after a `dyn` launder. `None` for an ordinary method call (the common case)
         /// and for a non-generic enum. Invisible to value semantics.
         reflect: Option<noeta_ast::reflect::TypeRepr>,
+        /// The **dynamic** twin of `reflect` (generic-in-generic construction): the enclosing body's
+        /// hidden type-argument slot atom (`$ty<i>`) whose entry names the instantiation to stamp on
+        /// the object this call freshly built.
+        ///
+        /// `Some` only where the checker recorded a
+        /// [`dynamic construction site`](noeta_check::Sites::dynamic_construction_sites): a provably
+        /// fresh constructor of a generic type whose instantiation is a type *parameter* of the
+        /// enclosing self-less member (`Repository.new(…)` initializing a `repo: Repository<T>` inside
+        /// `LiveRepository<T>`). One compiled body serves every instantiation, so the concrete
+        /// `Repository<Todo>` is not in it — but the OUTER call resolved and interned it, and passes
+        /// its table index on this slot. Both backends read the same index out of the same table, so
+        /// they resolve the identical tag.
+        ///
+        /// Never `Some` together with `reflect`: a call site's instantiation is either in the body or
+        /// on the slot, and the checker's two recording arms are mutually exclusive.
+        reflect_slot: Option<Atom>,
         /// The [`Rvalue::Call::type_args`] twin (Axis A): the type arguments this call supplies to
         /// a forwarding generic **method**'s leading [`Func::hidden`] slots, in slot order — empty
         /// for the overwhelming majority of method calls.

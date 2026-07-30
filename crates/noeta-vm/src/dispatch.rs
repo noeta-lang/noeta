@@ -3009,6 +3009,24 @@ impl<'m> Vm<'m> {
                             .set_reflect(Some(Rc::clone(&self.persist.type_reprs[*repr as usize])));
                         pc += 1;
                     }
+                    // The same stamp with the tag named at run time (generic-in-generic
+                    // construction): the hidden type-argument slot in `slot` indexes the module's
+                    // `type_args`, whose parallel `type_arg_reprs` entry is the interned tag. The
+                    // reference backend resolves the identical index in the identical table, which is
+                    // what makes the two agree; a corrupt slot or an entry with no reflection
+                    // projection leaves the value untagged (the head-only fallback), never guesses.
+                    Op::RetagDynamic { reg, slot } => {
+                        let idx = regs[fbase + *slot as usize].as_int().unwrap_or(-1);
+                        if idx >= 0
+                            && let Some(Some(repr)) =
+                                module.type_arg_reprs.get(idx as usize).copied()
+                        {
+                            regs[fbase + *reg as usize].set_reflect(Some(Rc::clone(
+                                &self.persist.type_reprs[repr as usize],
+                            )));
+                        }
+                        pc += 1;
+                    }
                     Op::TypeOfStatic { dst, repr } => {
                         let result = build_type_value(repr);
                         set_reg(regs, fbase, *dst, result);

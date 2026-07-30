@@ -1370,6 +1370,12 @@ struct Interpreter {
     /// call-site-typed site resolves its per-instantiation recipe/name through the hidden slot's
     /// index into this table; identical to the VM's copy by construction.
     type_args: Vec<noeta_stdlib::TypeArgInfo>,
+    /// The reflection projection of [`Self::type_args`], indexed identically (generic-in-generic
+    /// construction): each instantiation's [`TypeRepr`], or `None` where it has none. A construction
+    /// whose instantiation arrives on a hidden slot stamps the entry this table names — the same table
+    /// and the same index the VM's `Op::RetagDynamic` resolves, which is what makes the two backends'
+    /// tags identical rather than merely similar.
+    type_arg_reprs: Vec<Option<TypeRepr>>,
     /// The live **call-site shadow stack**: one `(callee name, call-site span)` per function/method
     /// activation currently on the Rust call stack, pushed at each call boundary and popped on the
     /// way out (abort included). Only read when an abort snapshots [`Self::abort_trace`], so it
@@ -1492,6 +1498,7 @@ impl Interpreter {
             deserialize_recipes: std::collections::HashMap::new(),
             packed_type_layouts: std::collections::HashMap::new(),
             type_args: Vec::new(),
+            type_arg_reprs: Vec::new(),
             call_sites: Vec::new(),
             abort_trace: Vec::new(),
             registry: None,

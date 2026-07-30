@@ -533,11 +533,16 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             receiver,
             args,
             type_args,
+            // The dynamic construction tag's hidden slot is an operand like any other: a nested `fn`
+            // or closure that constructs through it CAPTURES the enclosing `$ty<i>` local, and the
+            // slot must stay live across the call it re-tags after.
+            reflect_slot,
             ..
         } => {
             f(receiver);
             args.iter().for_each(&mut *f);
             type_args.iter().for_each(&mut *f);
+            reflect_slot.iter().for_each(&mut *f);
         }
         Rvalue::TraitMethod { receiver, args, .. } => {
             f(receiver);

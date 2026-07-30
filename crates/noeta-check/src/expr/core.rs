@@ -2204,9 +2204,22 @@ impl Checker {
             // construction site with no instantiation to record. The type's own parameters are
             // erased first (they are inferred *from* this value), and only a fully-concrete
             // expectation is pushed: an open one makes no claim.
+            //
+            // One exception to the erasure, and it is what lets a generic type construct another
+            // generic type out of its own parameter: a parameter the ENCLOSING member forwards on a
+            // hidden slot is not inferred from this value — it is *delivered* to it — so erasing it
+            // would throw away the only fact the position has. `repo: Repository<T>` inside
+            // `LiveRepository<T>.new` keeps its `T`, and `dynamic_ctor_slot` (consulted by
+            // `absorbs_constructor_expectation` below) is what decides whether that `T` really
+            // arrives; a `T` with no slot still erases and records nothing.
+            let inferred_params: HashSet<String> = pset
+                .iter()
+                .filter(|p| !self.coloring.forwardable_params.contains(*p))
+                .cloned()
+                .collect();
             let absorbed_declared = if field_fn_expectation.is_none()
                 && let Some((_, declared)) = declared_field
-                && let e = erase_type_params(declared.clone(), &pset)
+                && let e = erase_type_params(declared.clone(), &inferred_params)
                 && self.absorbs_constructor_expectation(&f.value, &e, env)
             {
                 Some(e)

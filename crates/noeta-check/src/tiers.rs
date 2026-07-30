@@ -1794,10 +1794,28 @@ impl Checker {
             name: sigma.head_name(),
             recipe,
         };
-        let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
+        // The third projection: the instantiation's reflected [`TypeRepr`], for a slot a
+        // **construction site** reads (`Sites::dynamic_construction_sites` stamps it onto the object
+        // an inner fresh constructor built). It lives in the parallel `type_arg_reprs` table rather
+        // than on `TypeArgInfo`, which is `noeta-ext-abi`'s and may not depend on `noeta-ast`.
+        //
+        // It is part of the DEDUP KEY. `name` is head-keyed and a class carries no decode recipe, so
+        // `Repository<Todo>` and `Repository<Order>` produce the identical `TypeArgInfo` — folding
+        // them into one entry would make two differently-instantiated construction sites report each
+        // other's argument. Every existing consumer reads only the fields it always read; the pair
+        // merely stops entries that differ in a fact SOME consumer needs from collapsing.
+        let repr = crate::type_to_repr_top(sigma, &self.symbols.type_kinds);
+        let idx = match self
+            .sites
+            .type_arg_table
+            .iter()
+            .zip(&self.sites.type_arg_reprs)
+            .position(|(e, r)| *e == info && *r == repr)
+        {
             Some(i) => i,
             None => {
                 self.sites.type_arg_table.push(info);
+                self.sites.type_arg_reprs.push(repr);
                 self.sites.type_arg_table.len() - 1
             }
         };
