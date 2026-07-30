@@ -1,0 +1,61 @@
+// `dyn` is the **top**, so a join with it is `dyn` — a `dyn` element cannot become a `T` element just
+// by being unified with one.
+//
+// The element-unifying join (a list literal's element, a map literal's value, a `~` concatenation, a
+// block closure's `return`s) used to read `dyn` as *no information* and answer with the other side, so
+// `List<T> ~ [d]` stayed a `List<T>` for a `dyn` `d`, and `[1, d]` a `List<int>`. That admitted a value
+// whose type was never verified into a checked slot — which `dyn <: T` being false everywhere else
+// exists to prevent, and which the very next line here proves it prevents: `some(d)` into a `?T` was
+// always the `E0007` it should be. The two directions now agree.
+//
+// Only the *nameable* top is affected. An inference HOLE stays no-information and is absorbed by
+// whatever it meets, which is what makes `mut acc = []` completed by its first write still work — the
+// `ints` row below pins that.
+//
+// The sound route out of `dyn` is the checked narrow, and for a type parameter that route now exists
+// (see `type_param_instance_method`): `d.as<T>()` and match on the result.
+// expect: error E0007 at 35:15
+// expect: error E0007 at 42:21
+// expect: exit 1
+struct Wrapped {
+    id: int
+}
+
+class Bag<T> {
+    pub label: string
+
+    fn new(label: string): Bag<T> {
+        return Bag { label: label };
+    }
+
+    // A `dyn` element joins the declared `List<T>` to `List<dyn>`, which the binding refuses.
+    fn unsound_concat(v: dyn): List<T> {
+        echo self.label;
+        mut out: List<T> = [];
+        out = out ~ [v];
+        return out;
+    }
+
+    // The direction that was always rejected, kept beside it so the pair reads as one rule.
+    fn unsound_option(v: dyn): ?T {
+        echo self.label;
+        return some(v);
+    }
+
+    // The sound route: narrow first, and only a verified `T` reaches the list. Checks clean.
+    fn sound(v: dyn): List<T> {
+        echo self.label;
+        mut out: List<T> = [];
+        return match v.as<T>() {
+            some(t) => out ~ [t],
+            none => out,
+        };
+    }
+}
+
+// A hole is still absorbed: `[]`'s element type is completed by the write, not widened to `dyn`.
+fn ints(): List<int> {
+    mut acc: List<int> = [];
+    acc = acc ~ [1];
+    return acc;
+}

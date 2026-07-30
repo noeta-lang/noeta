@@ -1,0 +1,64 @@
+// A narrow whose target is the enclosing generic **fn's own** type parameter resolves, over the
+// same hidden type-argument slot `type_name::<T>()` reads (poly-values F2b).
+//
+// A narrow is a head-constructor match on the target's runtime NAME, and a type parameter has one
+// per instantiation even though generics are erased: the slot that carries a forwarded decode recipe
+// also carries the entry's name, and a narrow wants nothing but that name — which is why it forwards
+// for instantiations that have no recipe at all (`int`, an enum, a plain struct).
+//
+// Left unwired it matched the literal letter `U`, which nothing is ever registered under, so
+// `v.as<U>()` answered `none` and `v is U` `false` for EVERY value — with no diagnostic, and even
+// with a concrete turbofish at the call site, because one compiled body serves every instantiation.
+//
+// The `int`/`string` rows are the oracle for the built-in funnel: the runtime name resolves through
+// the same `BuiltinTy` mapping a *written* `v.as<int>()` does (`NarrowTarget::builtin_head`, shared
+// by both backends), so a parameter instantiated at a built-in cannot answer differently from the
+// spelled-out target. The mismatched rows pin that the narrow still says no when it should.
+// expect: stdout "name int    = int"
+// expect: stdout "int  -> int    = some(7)"
+// expect: stdout "str  -> int    = none"
+// expect: stdout "str  -> string = some(hi)"
+// expect: stdout "obj  -> User   = some(User {id: 1})"
+// expect: stdout "obj  -> Color  = none"
+// expect: stdout "enum -> Color  = some(Color.Blue)"
+// expect: stdout "is int  (7)    = true"
+// expect: stdout "is string (7)  = false"
+// expect: stdout "is User (obj)  = true"
+// expect: exit 0
+struct User {
+    id: int
+}
+enum Color {
+    Red;
+    Blue
+}
+
+fn narrow<U>(v: dyn): ?U {
+    return v.as<U>();
+}
+
+fn holds<U>(v: dyn): bool {
+    return v is U;
+}
+
+// The surface the narrow now shares its channel with — pinned here so a drift between the two shows
+// up as this case failing rather than as a wrong `none` somewhere else.
+fn name_of<U>(): string {
+    return type_name::<U>();
+}
+
+n: dyn = 7;
+s: dyn = "hi";
+o: dyn = User { id: 1 };
+c: dyn = Color.Blue;
+
+echo "name int    = " ~ name_of::<int>();
+echo "int  -> int    = " ~ "${narrow::<int>(n)}";
+echo "str  -> int    = " ~ "${narrow::<int>(s)}";
+echo "str  -> string = " ~ "${narrow::<string>(s)}";
+echo "obj  -> User   = " ~ "${narrow::<User>(o)}";
+echo "obj  -> Color  = " ~ "${narrow::<Color>(o)}";
+echo "enum -> Color  = " ~ "${narrow::<Color>(c)}";
+echo "is int  (7)    = " ~ "${holds::<int>(n)}";
+echo "is string (7)  = " ~ "${holds::<string>(n)}";
+echo "is User (obj)  = " ~ "${holds::<User>(o)}";

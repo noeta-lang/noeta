@@ -1,0 +1,6 @@
+# Makes this case a package, so its modules derive `demo.…` from where their files sit rather than
+# declaring it. A case with no manifest is not a package and nothing derives — which would make the
+# qualified identity this case pins unobservable.
+[package]
+name = "local/demo"
+version = "0.1.0"
