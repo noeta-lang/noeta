@@ -202,24 +202,32 @@ pub enum ResolvedSource {
     },
 }
 
-/// Which namespace root segment a dependency's modules re-root from ([`Walker::walk_one`]). A normal
-/// dependency authored `namespace <package>.…`, so its root is the package half; a **scope** member
-/// authored `namespace <scope>.<package>.…`, so its root is the company/scope segment.
+/// Which half of a dependency's identity names the **group** it links under ([`Walker::walk_one`]).
+/// A normal dependency stands alone, so it is its package half; a **scope** member shares one import
+/// root with its siblings, so it is the company/scope segment — the base a transitive-only scope
+/// group synthesizes its shared global segment from ([`assemble`]).
+///
+/// Never what a module's path is re-rooted *from*: that is always the package half, which is what the
+/// package's own modules derive under standalone ([`Instance::package_segment`]).
 #[derive(Clone, Copy)]
 enum ScopeRoot {
     Package,
     Scope,
 }
 
-/// A materialized package during the walk — its identity, version, its own namespace root segment,
-/// its on-disk tree, and its dependency edges (local key → child identity).
+/// A materialized package during the walk — its identity, version, the segments it links under, its
+/// on-disk tree, and its dependency edges (local key → child identity).
 struct Instance {
     version: Version,
     edition: crate::edition::Edition,
+    /// The segment this package's link **group** is named from ([`ScopeRoot`]) — its package half
+    /// standing alone, the scope half as a scope member. Read only when a global segment has to be
+    /// synthesized for a transitive group; never as a re-root source.
     root_segment: String,
     /// The package half of the identity (`db` for `para/db`) — always, unlike [`Self::root_segment`],
-    /// which is the *scope* for a scope member. This is what a scope member contributes to its
-    /// modules' derived path prefix (`para` + `db` → `para.db.…`).
+    /// which is the *scope* for a scope member. Two things come from it: the last segment of a scope
+    /// member's derived prefix (`para` + `db` → `para.db.…`), and the segment the loader re-roots the
+    /// package's intra-package `use`s *from* (what those files derive under standalone).
     package_segment: String,
     /// Whether this package was reached as a member of a **scope** dependency (`key = [ … ]`). It
     /// decides the prefix its modules derive under: a plain entry's is the key alone, a scope
@@ -1985,8 +1993,13 @@ fn assemble(
             &global,
         ));
         packages.push(noeta_loader::DepPackage {
-            key,
-            root: inst.root_segment.clone(),
+            // The loader re-roots the package's intra-package `use`s from the segment its modules
+            // derive under **standalone** — always the package half of the identity — to the prefix
+            // they derive under here. Never `root_segment` (the *scope* half for a scope member):
+            // that segment is not what any of this package's own modules ever derive under, so a
+            // scope member's internal `use db.query` matched nothing and was silently left alone.
+            root: inst.package_segment.clone(),
+            prefix,
             modules,
             dep_renames,
             directives,
@@ -2043,9 +2056,10 @@ fn assemble(
             exported: binding.exported.clone(),
         });
     }
-    // Sort by global segment so the loader's SourceId assignment and the startup-cache key are
-    // deterministic regardless of walk order.
-    packages.sort_by(|a, b| a.key.cmp(&b.key));
+    // Sort by derived prefix so the loader's SourceId assignment and the startup-cache key are
+    // deterministic regardless of walk order. The whole prefix, not just its first segment: every
+    // member of one scope shares that segment, so sorting by it alone left their order to the walk.
+    packages.sort_by(|a, b| a.prefix.cmp(&b.prefix));
     // `command_trust` is a BTreeMap, so `command_bindings` is already in local-name order.
     // The root's merged `@name` bindings resolve against the root's edges (the same context its
     // source uses). Named `root_directives` on the graph for historical continuity; it is the root's
@@ -2060,7 +2074,7 @@ fn assemble(
     for dep in &packages {
         for (local, u) in &dep.directives {
             package_uses.set(
-                noeta_span::PackageOrigin::Dependency(dep.key.clone()),
+                noeta_span::PackageOrigin::Dependency(dep.key().to_string()),
                 local.clone(),
                 u.clone(),
             );
@@ -2250,7 +2264,7 @@ mod tests {
         let graph = resolve_graph(&app.join("main.noe")).expect("a scope array resolves");
         assert_eq!(graph.packages.len(), 2, "both members are present");
         assert!(
-            graph.packages.iter().all(|p| p.key == "acme"),
+            graph.packages.iter().all(|p| p.key() == "acme"),
             "and they share the one root they were listed under"
         );
     }
@@ -2877,7 +2891,8 @@ mod tests {
         assert!(ids.contains(&"para/aether".to_string()));
         assert!(ids.contains(&"para/db".to_string()));
         // Both members share the scope key `para` as their global segment, and each re-roots from its
-        // company (`para`) — an identity re-root here — so its literal `para.<pkg>.…` lands in the pool.
+        // own **package** segment (`aether`/`db` — what it derives under standalone) to the scope
+        // prefix, so one intra-package `use db.query` resolves in both builds.
         for pkg in ["aether", "db"] {
             let p = graph
                 .packages
@@ -2889,12 +2904,20 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("package para/{pkg} missing from the link set"));
             assert_eq!(
-                p.key, "para",
+                p.key(),
+                "para",
                 "scope member para/{pkg} must key on the scope"
             );
             assert_eq!(
-                p.root, "para",
-                "scope member para/{pkg} re-roots from its scope"
+                p.root, pkg,
+                "scope member para/{pkg} re-roots FROM its own package segment — never the scope \
+                 half, which none of its modules ever derive under, so its intra-package `use`s \
+                 were silently left unrewritten"
+            );
+            assert_eq!(
+                p.prefix,
+                vec!["para".to_string(), pkg.to_string()],
+                "scope member para/{pkg} re-roots TO the two-segment prefix its modules derive under"
             );
             // …and its modules derive under `{key}.{package segment}` — the scope-array prefix, so
             // `m.noe` is `para.<pkg>.m`, exactly what it declares. (A *plain* key would give the
@@ -2906,6 +2929,45 @@ mod tests {
                 "scope member para/{pkg} derives under the scope prefix"
             );
         }
+    }
+
+    #[test]
+    fn a_plain_key_reroots_from_the_package_segment_to_the_key_alone() {
+        // The plain-entry twin of the scope-array case above: `mycli = { path = … }` on `acme/cli`
+        // derives the ONE-segment prefix `mycli`, and re-roots from the package's own segment `cli`.
+        // So the package's internal `use cli.args` becomes `use mycli.args` — which is what makes
+        // the import key real, and what a non-conventional key had no way to express before.
+        let base = crate::test_temp::TempDir::new("plain-key-dep");
+        let app = base.join("app");
+        let lib = base.join("acme-cli");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(
+            lib.join("noeta.toml"),
+            "[package]\nname = \"acme/cli\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(lib.join("args.noe"), "pub fn one(): int { return 1; }\n").unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nmycli = { path = \"../acme-cli\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+
+        let graph = resolve_graph(&app.join("main.noe")).expect("resolves");
+        let p = &graph.packages[0];
+        assert_eq!(p.key(), "mycli");
+        assert_eq!(p.prefix, vec!["mycli".to_string()]);
+        assert_eq!(
+            p.root, "cli",
+            "re-roots from the package half of the identity"
+        );
+        assert_eq!(
+            p.modules[0].path.derived(),
+            Some(["mycli".to_string(), "args".to_string()].as_slice()),
+        );
     }
 
     #[test]

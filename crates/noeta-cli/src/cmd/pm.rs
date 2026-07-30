@@ -379,7 +379,7 @@ pub(crate) fn cmd_add(
             let bound: Vec<&noeta_loader::DepPackage> = resolved
                 .packages
                 .iter()
-                .filter(|p| p.key == binding_key)
+                .filter(|p| p.key() == binding_key)
                 .collect();
             if widened_a_scope {
                 println!(

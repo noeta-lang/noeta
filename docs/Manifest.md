@@ -122,6 +122,13 @@ the dependency — they are derived from where its files sit, under the key *you
 `codec.parse`, and renaming the key renames every import path, with nothing inside the package able
 to override it.
 
+**A dependency's own internal imports are rewritten to match.** A package's files import each other
+by the `package` half of its identity (`use codec.parse` inside `acme/codec`), which is what they
+derive under when the package is built on its own; a consumer's build rewrites that leading segment
+to whatever prefix the package derives under here. So the key is free to be anything, and the
+package's author never writes it. If you are *writing* a package, see
+[importing your own package's modules](Modules#importing-your-own-packages-modules).
+
 **Scope dependencies.** An array value binds several packages that share one `company` scope under a
 single import root:
 
@@ -141,7 +148,7 @@ addressed as `scope.package.module` — the first-party `para/*` set is the stan
 bound with the array form to keep those addresses.
 
 That relation only runs one way: several packages may share one root, but **one package may not be
-bound under two roots**. A package has one identity and its modules re-root to one segment, so a
+bound under two roots**. A package has one identity and its modules derive under one prefix, so a
 second key could only be dropped — and a dropped key is a manifest that lies, with `use <that
 key>.…` failing later as "no module". Two keys naming one identity are refused at resolve time,
 naming both.

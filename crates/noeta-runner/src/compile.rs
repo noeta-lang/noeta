@@ -526,7 +526,7 @@ fn module_path_key(path: &noeta_loader::ModulePath) -> String {
     }
 }
 
-/// Fold the dependency packages into the startup-cache key: each dependency's key→root binding
+/// Fold the dependency packages into the startup-cache key: each dependency's root→prefix binding
 /// (re-rooting changes the linked program even when the sources are byte-identical), its **edition**,
 /// its local dependency renames, and every module's source text.
 ///
@@ -536,13 +536,17 @@ fn module_path_key(path: &noeta_loader::ModulePath) -> String {
 /// edition was keyed, so a dependency-edition change could serve a stale artifact.
 fn key_deps(key: &mut noeta_cache::KeyBuilder, deps: &[noeta_loader::DepPackage]) {
     for dep in deps {
-        key.source(format!("<dep {}>", dep.key), dep.root.as_bytes());
+        // The whole derived prefix, not just the import key: a scope-array member derives (and
+        // re-roots to) two segments, so keying the first alone would serve one member's cached
+        // bytecode for another.
+        let prefix = dep.prefix.join(".");
+        key.source(format!("<dep {prefix}>"), dep.root.as_bytes());
         key.source(
-            format!("<dep-edition {}>", dep.key),
+            format!("<dep-edition {prefix}>"),
             dep.edition.as_str().as_bytes(),
         );
         for (local, global) in &dep.dep_renames {
-            key.source(format!("<rename {} {local}>", dep.key), global.as_bytes());
+            key.source(format!("<rename {prefix} {local}>"), global.as_bytes());
         }
         for module in &dep.modules {
             key.source(&module.name, module.text.as_bytes());
@@ -562,7 +566,7 @@ mod tests {
 
     fn a_dep() -> noeta_loader::DepPackage {
         noeta_loader::DepPackage {
-            key: "lib".to_string(),
+            prefix: vec!["lib".to_string()],
             root: "lib".to_string(),
             modules: vec![noeta_loader::RawModule {
                 path: noeta_loader::ModulePath::Declared,
@@ -606,7 +610,7 @@ mod tests {
             1,
             "the pre-resolved default-selection deps must be adopted, not re-resolved"
         );
-        assert_eq!(facts.deps[0].key, "lib");
+        assert_eq!(facts.deps[0].key(), "lib");
         // …but a `--target` is a legitimately different selection ([targets.<name>.dependencies]
         // layer onto the globals), so the pre-resolved deps are ignored and the target selection
         // resolves fresh — here the manifest-less entry's target fails to resolve, proving the
@@ -666,9 +670,15 @@ mod tests {
         let with_edition = key_of(std::slice::from_ref(&dep));
         let mut without = noeta_cache::KeyBuilder::new();
         // The key_deps recipe, minus the `<dep-edition>` fold — must NOT collide.
-        without.source(format!("<dep {}>", dep.key), dep.root.as_bytes());
+        without.source(
+            format!("<dep {}>", dep.prefix.join(".")),
+            dep.root.as_bytes(),
+        );
         for (local, global) in &dep.dep_renames {
-            without.source(format!("<rename {} {local}>", dep.key), global.as_bytes());
+            without.source(
+                format!("<rename {} {local}>", dep.prefix.join(".")),
+                global.as_bytes(),
+            );
         }
         for module in &dep.modules {
             without.source(&module.name, module.text.as_bytes());

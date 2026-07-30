@@ -1,0 +1,4 @@
+// The package's root file — its stem repeats the last prefix segment, so this module IS `para.db`.
+pub fn open(): string {
+    return "conn";
+}
