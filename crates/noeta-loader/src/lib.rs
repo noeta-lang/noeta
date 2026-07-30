@@ -406,6 +406,51 @@ pub fn reroot_path(
     }
 }
 
+/// Re-root a `use`, whose leading segment is **not always in its `path`**.
+///
+/// The parser splits a non-grouped import so that its *leaf* is the imported name and only what
+/// precedes it is the `path` (`use App.Models.User` → path `App.Models`, name `User`). A
+/// **single-segment** import therefore has an *empty* path and carries its one segment — the whole
+/// module it names — in `names`. That is exactly the shape a package's own collapsed root takes
+/// (`aether.noe` at the root of `para/aether` derives the bare path `aether`, so a sibling imports
+/// it `use aether`), and keying re-rooting on `path.first()` alone skipped it silently: the module
+/// was re-rooted to `para.aether` while the `use` still named `aether`, so the import resolved to
+/// nothing and the diagnostic had an empty path to name.
+///
+/// So the dotted spelling is re-rooted whole and re-split. When the trailing segment changes the
+/// **local binding** must not follow it — the source wrote `use aether` and its body says
+/// `aether.App`, while a consumer keying the package `myweb` re-roots the module to `myweb` — so an
+/// un-aliased import pins its original spelling as an explicit alias. A scope-array member
+/// (`aether` → `para.aether`) keeps its trailing segment and needs none.
+fn reroot_use(
+    path: &mut Vec<String>,
+    names: &mut [UseName],
+    root: &str,
+    prefix: &[String],
+    renames: &std::collections::BTreeMap<String, String>,
+) {
+    if !path.is_empty() {
+        reroot_path(path, root, prefix, renames);
+        return;
+    }
+    // An empty path means a single-segment import, which is the only shape that puts the leading
+    // segment in `names`; a group (`use a.{B}`) always has its prefix in `path`.
+    let [name] = names else {
+        return;
+    };
+    let mut full = vec![name.name.clone()];
+    reroot_path(&mut full, root, prefix, renames);
+    let Some(last) = full.pop() else {
+        return;
+    };
+    if last != name.name && name.alias.is_none() {
+        name.alias = Some(std::mem::replace(&mut name.name, last));
+    } else {
+        name.name = last;
+    }
+    *path = full;
+}
+
 /// Re-root a dependency module's `namespace` (its match key) and `use` paths (its import drivers).
 ///
 /// **A module's path is now derived, not declared** ([`derive`]), so the `namespace` rewrite is no
@@ -436,7 +481,9 @@ pub fn reroot_program(
     for stmt in &mut program.stmts {
         match stmt {
             Stmt::Namespace { path, .. } => reroot_path(path, root, prefix, renames),
-            Stmt::Use { path, .. } => reroot_path(path, root, prefix, renames),
+            Stmt::Use { path, names, .. } => {
+                reroot_use(path, names, root, prefix, renames);
+            }
             _ => {}
         }
     }
@@ -2142,8 +2189,17 @@ fn link_core(
                             errors.extend(module.load_diagnostics());
                         }
                     } else {
+                        // Match on the same spelling the message names — for a single-segment
+                        // import that is the leaf, since the path is empty (see
+                        // [`unknown_module_error`]); measuring "" against every module suggests
+                        // whichever is shortest.
+                        let target = if path.is_empty() {
+                            name.name.clone()
+                        } else {
+                            path.join(".")
+                        };
                         let suggestion = noeta_diagnostics::closest(
-                            &path.join("."),
+                            &target,
                             import_targets.iter().map(String::as_str),
                         );
                         errors.push(unknown_module_error(
@@ -3306,7 +3362,14 @@ fn unknown_module_error(
     suggestion: Option<&str>,
     unparseable: &[&str],
 ) -> LoadDiagnostic {
-    let namespace = path.join(".");
+    // A single-segment import carries its one segment in `name`, not `path` (the parser splits a
+    // non-grouped `use` at its leaf), so an empty path is not a module named "" — it is the
+    // whole-module reading, and the leaf is the only name the reader wrote.
+    let namespace = if path.is_empty() {
+        name.name.clone()
+    } else {
+        path.join(".")
+    };
     let mut diagnostic = Diagnostic::error(
         DiagnosticCode::UnresolvedImport,
         name.span,
@@ -3766,6 +3829,90 @@ mod tests {
             &renames,
         );
         assert_eq!(path, ["para_1", "db", "query"]);
+    }
+
+    #[test]
+    fn a_single_segment_use_carries_its_module_in_the_name_and_is_still_rerooted() {
+        // The parser splits a non-grouped `use` at its leaf, so `use aether` has an EMPTY path and
+        // its one segment — the whole module — sits in `names`. Keying re-rooting on `path.first()`
+        // alone skipped exactly this shape, which is the one a package's own collapsed root takes.
+        let no_renames = std::collections::BTreeMap::new();
+        let reroot = |spelled: &str, root: &str, prefix: &[&str]| {
+            let mut path = Vec::new();
+            let mut names = vec![UseName {
+                name: spelled.to_string(),
+                span: Span::new(0, 0),
+                alias: None,
+            }];
+            let prefix: Vec<String> = prefix.iter().map(|s| (*s).to_string()).collect();
+            reroot_use(&mut path, &mut names, root, &prefix, &no_renames);
+            let n = names.remove(0);
+            (path, n.name, n.alias)
+        };
+
+        // A scope member: the module becomes `para.aether`, and because the trailing segment is
+        // unchanged the local binding needs no alias — the body's `aether.App` still resolves.
+        assert_eq!(
+            reroot("aether", "aether", &["para", "aether"]),
+            (vec!["para".to_string()], "aether".to_string(), None)
+        );
+        // A plain key renames the trailing segment, so the original spelling is pinned as an alias:
+        // the module is `myweb`, but the source that wrote `use aether` still binds `aether`.
+        assert_eq!(
+            reroot("aether", "aether", &["myweb"]),
+            (
+                Vec::<String>::new(),
+                "myweb".to_string(),
+                Some("aether".to_string())
+            )
+        );
+        // Standalone the prefix IS the root, so the same source is untouched — no synthetic alias.
+        assert_eq!(
+            reroot("aether", "aether", &["aether"]),
+            (Vec::<String>::new(), "aether".to_string(), None)
+        );
+        // Not the package itself: a bare `use math` naming something else is left alone.
+        assert_eq!(
+            reroot("math", "aether", &["para", "aether"]),
+            (Vec::<String>::new(), "math".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn a_single_segment_use_of_a_dependencys_collapsed_root_links() {
+        // The end-to-end shape the unit test above is the mechanism for: package `aether` consumed
+        // under the scope-array prefix `para.aether`, whose own `openapi.noe` imports the collapsed
+        // root as a whole module. Before the fix this failed as ``no module `` in this project`` —
+        // an EMPTY name, because the diagnostic had only the (empty) path to report.
+        let dep = DepPackage {
+            prefix: vec!["para".to_string(), "aether".to_string()],
+            root: "aether".to_string(),
+            modules: vec![
+                derived(
+                    "aether.noe",
+                    &["para", "aether"],
+                    "pub struct App {\n  port: int\n}\n",
+                ),
+                derived(
+                    "openapi.noe",
+                    &["para", "aether", "openapi"],
+                    "use aether\npub fn describe(a: aether.App): int {\n  return a.port;\n}\n",
+                ),
+            ],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let linked = link_with_deps(
+            "main.noe",
+            "use para.aether.openapi.describe\nfn main(): int { return 0; }\n",
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            &[dep],
+        )
+        .expect("the collapsed root resolves through a whole-module `use`");
+        assert!(has_fn(&linked, "describe"));
     }
 
     #[test]
