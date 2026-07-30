@@ -11,7 +11,9 @@
 //! Two axes, kept apart. **Which provider** declares each tier a package uses is a per-package name
 //! table, `[tiers]` — the tier counterpart of `[directives]` (`local = "provider[:exported]"`, the
 //! provider being `"std"` or a `[dependencies]` key). **Which of those are live** in a given build is
-//! the target's `[targets.<t>.tiers]` — an activation live-set of the package's own local tier names:
+//! the target's `tiers` — an activation live-set of the package's own local tier names. The live-set
+//! is written as an array on the target: a bare name is live, a `-`-prefixed name turns one off (to
+//! drop a tier an `extends` base left on):
 //!
 //! ```toml
 //! [tiers]
@@ -21,15 +23,21 @@
 //! fuzz  = "fuzzkit"             # a dependency's `@tier`, named `@fuzz` locally
 //! crit  = "criterion:bench"     # …renamed, so it does not collide with std's `bench`
 //!
-//! [targets.dev.tiers]
-//! test  = true                  # live in `dev`
-//! debug = true
+//! [targets.dev]
+//! tiers = ["test", "debug"]     # live in `dev`
 //!
 //! [targets.ci]
 //! extends = "dev"               # inherit dev's live set…
-//! [targets.ci.tiers]
-//! debug = false                 # …turn one off, and
-//! bench = true                  # …turn one on
+//! tiers = ["bench", "-debug"]   # …turn `bench` on and `debug` off
+//! ```
+//!
+//! The equivalent legacy boolean sub-table is still accepted, and is exactly what the array desugars
+//! into (`["test", "-debug"]` ≡ `{test = true, debug = false}`):
+//!
+//! ```toml
+//! [targets.dev.tiers]
+//! test  = true
+//! debug = true
 //! ```
 //!
 //! There are no ambient built-in tiers: `test`/`bench`/`doc`/`debug` are ordinary `std`
@@ -563,6 +571,10 @@ struct Target {
     /// explicitly off (`false`, to turn off a tier an `extends` base left on). Overlaid on the base's
     /// during resolution; the provider each name resolves to lives in the package's `[tiers]` table,
     /// not here (that separation is the point — activation is a live-set, not a provider map).
+    ///
+    /// Spelled either as the canonical array on the target (`tiers = ["test", "-debug"]` — bare name
+    /// live, `-name` off) or as the legacy boolean sub-table (`[targets.<t>.tiers]`, `name = true`);
+    /// both parse into this same map.
     tiers: BTreeMap<String, bool>,
     /// This target's own **target-scoped dependencies** — packages present only when building this
     /// target (dev-deps arc). Overlaid on the base's (via `extends`) and on the global
@@ -1134,34 +1146,72 @@ impl Manifest {
                     })?)?,
                 };
 
+            // `tiers` is a live-set: local tier names (from the package's own `[tiers]`) each
+            // switched on/off for this build. It has two spellings that parse to the *same*
+            // `BTreeMap<String, bool>`:
+            //   * the canonical ARRAY on the target, `tiers = ["test", "-debug"]` — a bare name is
+            //     live (`true`), a `-`-prefixed name is off (`false`, to turn off a tier an `extends`
+            //     base left on);
+            //   * the legacy boolean sub-table, `[targets.<t>.tiers]` with `name = true|false`.
+            // Neither carries a provider — that separation is the point (a provider-string here was
+            // the old shape). Only the name *shape* is validated; whether a name resolves to a live
+            // provider is checked where the tier is used (E0036).
             let mut tiers = BTreeMap::new();
             if let Some(tiers_value) = target_table.get("tiers") {
-                let tiers_table = tiers_value.as_table().ok_or_else(|| {
-                    format!(
-                        "target `{name}`: `tiers` must be a table of `local = true` activation flags \
-                         (the provider each tier resolves to lives in the top-level `[tiers]` table)"
-                    )
-                })?;
-                for (tier, active_value) in tiers_table {
-                    // `[targets.*.tiers]` is a live-set: it names local tier names (from the
-                    // package's own `[tiers]`) and switches each on/off for this build. It carries
-                    // no provider — that separation is the point (a provider-string here was the old
-                    // shape). The manifest validates only the name shape and the boolean; whether the
-                    // name resolves to a live provider is checked where the tier is used (E0036).
-                    if !is_identifier(tier) {
-                        return Err(format!(
-                            "target `{name}`: tier `{tier}` is not a valid tier name (an identifier)"
-                        ));
+                if let Some(array) = tiers_value.as_array() {
+                    for element in array {
+                        let raw = element.as_str().ok_or_else(|| {
+                            format!(
+                                "target `{name}`: every entry in the `tiers` array must be a string \
+                                 tier name (bare = live, `-name` = off)"
+                            )
+                        })?;
+                        // Strip an optional leading `-` (subtraction: turn a tier OFF).
+                        let (tier, active) = match raw.strip_prefix('-') {
+                            Some(rest) => (rest, false),
+                            None => (raw, true),
+                        };
+                        if tier.is_empty() || !is_identifier(tier) {
+                            return Err(format!(
+                                "target `{name}`: tier entry `{raw}` is not a valid tier name (an \
+                                 identifier, optionally `-`-prefixed to turn it off)"
+                            ));
+                        }
+                        // A direct `"x"` + `"-x"` contradiction in one array is an error; a plain
+                        // duplicate of the same polarity is last-wins.
+                        if let Some(&prior) = tiers.get(tier)
+                            && prior != active
+                        {
+                            return Err(format!(
+                                "target `{name}`: tier `{tier}` is listed both on and off (`\"{tier}\"` \
+                                 and `\"-{tier}\"`) — pick one"
+                            ));
+                        }
+                        tiers.insert(tier.to_string(), active);
                     }
-                    let active = active_value.as_bool().ok_or_else(|| {
-                        format!(
-                            "target `{name}`: tier `{tier}` must be `true` or `false` — \
-                             `[targets.{name}.tiers]` activates local tier names, it no longer names \
-                             a provider (move the provider to the top-level `[tiers]` table: \
-                             `{tier} = \"…\"`)"
-                        )
-                    })?;
-                    tiers.insert(tier.clone(), active);
+                } else if let Some(tiers_table) = tiers_value.as_table() {
+                    for (tier, active_value) in tiers_table {
+                        if !is_identifier(tier) {
+                            return Err(format!(
+                                "target `{name}`: tier `{tier}` is not a valid tier name (an identifier)"
+                            ));
+                        }
+                        let active = active_value.as_bool().ok_or_else(|| {
+                            format!(
+                                "target `{name}`: tier `{tier}` must be `true` or `false` — \
+                                 `[targets.{name}.tiers]` activates local tier names, it no longer names \
+                                 a provider (move the provider to the top-level `[tiers]` table: \
+                                 `{tier} = \"…\"`)"
+                            )
+                        })?;
+                        tiers.insert(tier.clone(), active);
+                    }
+                } else {
+                    return Err(format!(
+                        "target `{name}`: `tiers` must be an array of tier names \
+                         (`tiers = [\"test\", \"-debug\"]`, bare = live, `-name` = off) or a table of \
+                         `local = true` activation flags"
+                    ));
                 }
             }
 
@@ -2987,6 +3037,92 @@ mod tests {
         assert_eq!(m.active_tiers("dev").unwrap(), ["fuzz"]);
         let err = Manifest::parse("[targets.dev.tiers]\n\"fu zz\" = true\n").unwrap_err();
         assert!(err.message().contains("not a valid tier name"), "{err}");
+    }
+
+    // --- `tiers = [...]` array sugar (parity with the boolean sub-table) ------------------------
+
+    #[test]
+    fn the_tiers_array_activates_exactly_those_bare_names() {
+        // A bare-name array with no `extends` makes exactly those tiers active.
+        let m = Manifest::parse("[targets.dev]\ntiers = [\"test\", \"debug\"]\n")
+            .expect("valid manifest");
+        assert_eq!(m.active_tiers("dev").unwrap(), vec!["debug", "test"]);
+    }
+
+    #[test]
+    fn a_dash_prefixed_tier_in_the_array_yields_false() {
+        // `-name` desugars to `name = false`, so on its own it activates nothing.
+        let m = Manifest::parse("[targets.dev]\ntiers = [\"-debug\"]\n").expect("valid manifest");
+        assert!(m.active_tiers("dev").unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_tiers_array_desugars_to_the_boolean_map() {
+        // `["bench", "-debug"]` ≡ `{bench = true, debug = false}` — over an `extends` base that left
+        // `debug` on, the array must subtract it exactly like the boolean table does.
+        let array = Manifest::parse(
+            "[targets.base]\n\
+             tiers = [\"test\", \"debug\"]\n\
+             [targets.ci]\n\
+             extends = \"base\"\n\
+             tiers = [\"bench\", \"-debug\"]\n",
+        )
+        .expect("valid manifest");
+        assert_eq!(array.active_tiers("ci").unwrap(), vec!["bench", "test"]);
+
+        // The boolean-table spelling of the same target resolves identically.
+        let table = Manifest::parse(
+            "[targets.base.tiers]\n\
+             test = true\n\
+             debug = true\n\
+             [targets.ci]\n\
+             extends = \"base\"\n\
+             [targets.ci.tiers]\n\
+             bench = true\n\
+             debug = false\n",
+        )
+        .expect("valid manifest");
+        assert_eq!(
+            array.active_tiers("ci").unwrap(),
+            table.active_tiers("ci").unwrap()
+        );
+    }
+
+    #[test]
+    fn the_legacy_boolean_tiers_table_still_parses() {
+        // The boolean sub-table is retained verbatim (legacy) — both forms coexist.
+        let m = Manifest::parse("[targets.dev.tiers]\ntest = true\ndebug = false\n")
+            .expect("valid manifest");
+        assert_eq!(m.active_tiers("dev").unwrap(), vec!["test"]);
+    }
+
+    #[test]
+    fn a_non_string_or_invalid_tier_array_element_is_rejected() {
+        // A non-string element.
+        let err = Manifest::parse("[targets.dev]\ntiers = [\"test\", 3]\n").unwrap_err();
+        assert!(err.message().contains("must be a string"), "{err}");
+        // An empty element.
+        let err = Manifest::parse("[targets.dev]\ntiers = [\"\"]\n").unwrap_err();
+        assert!(err.message().contains("not a valid tier name"), "{err}");
+        // A bare `-` (empty after stripping the prefix).
+        let err = Manifest::parse("[targets.dev]\ntiers = [\"-\"]\n").unwrap_err();
+        assert!(err.message().contains("not a valid tier name"), "{err}");
+        // A non-identifier name.
+        let err = Manifest::parse("[targets.dev]\ntiers = [\"fu zz\"]\n").unwrap_err();
+        assert!(err.message().contains("not a valid tier name"), "{err}");
+    }
+
+    #[test]
+    fn the_tiers_array_rejects_an_on_off_contradiction() {
+        // Listing a tier both live and off in one array is a contradiction, not last-wins.
+        let err = Manifest::parse("[targets.dev]\ntiers = [\"debug\", \"-debug\"]\n").unwrap_err();
+        assert!(err.message().contains("both on and off"), "{err}");
+    }
+
+    #[test]
+    fn a_tiers_value_that_is_neither_array_nor_table_is_rejected() {
+        let err = Manifest::parse("[targets.dev]\ntiers = \"test\"\n").unwrap_err();
+        assert!(err.message().contains("must be an array"), "{err}");
     }
 
     #[test]

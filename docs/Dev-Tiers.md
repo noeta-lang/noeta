@@ -112,15 +112,20 @@ crit  = "criterion:bench"   # a dependency's `bench` tier, named `@crit` locally
                             # collide with std's `@bench`
 ```
 
-**Which of those tiers are *live* in a build** is a named target's `[targets.<t>.tiers]` — an activation live-set of your local tier names (`name = true`, or `name = false` to turn an inherited one off). It no longer names a provider (that moved to `[tiers]`); a tier's provider is package-level, the same in every build:
+**Which of those tiers are *live* in a build** is a named target's `tiers` — an activation live-set of your local tier names, written as an array on the target: a bare name turns a tier on, a `-name` turns one off (to drop a tier an `extends` base left live). It no longer names a provider (that moved to `[tiers]`); a tier's provider is package-level, the same in every build:
 
 ```toml
-[targets.dev.tiers]
-test  = true
-debug = true
+[targets.dev]
+tiers = ["test", "debug"]
 
 [targets.ci]
 extends = "dev"
+tiers = ["bench", "-debug"]   # add bench, and drop the inherited debug
+```
+
+The equivalent boolean sub-table is still accepted — `["bench", "-debug"]` is exactly `{bench = true, debug = false}`:
+
+```toml
 [targets.ci.tiers]
 bench = true          # add bench…
 debug = false         # …and drop the inherited debug

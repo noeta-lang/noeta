@@ -322,26 +322,27 @@ tiers are *live* (below). A local name may not appear in both `[tiers]` and
 
 A target is a named build recipe: an **activation live-set** of the local tier names (from `[tiers]`)
 that are live in the build, plus its own dependencies (dev-dependencies) and an optional base to
-inherit from. The live-set no longer names a provider (that is `[tiers]`'s job) — each entry is
-`name = true` (live) or `name = false` (turn an inherited tier off).
+inherit from. The live-set no longer names a provider (that is `[tiers]`'s job) — it is an array of
+tier names where a bare name is live and a `-`-prefixed name turns an inherited tier off.
 
 ```toml
 [targets.test]
 # dev-only dependencies, overlaid on the globals for this target:
 dependencies = { check = { version = "^1.0", package = "acme/check" } }
 # activation live-set — which local tier names are live:
-tiers = { test = true }
+tiers = ["test"]
 
 [targets.bench]
 extends = "test"                     # inherit test's live-set and dependencies
-tiers = { bench = true }
+tiers = ["bench", "-test"]           # add bench, drop the inherited test
 ```
 
 - **`extends`** names a base target to inherit the live-set and dependencies from; a nearer entry
-  overrides the base's (a `false` turns an inherited tier off). Inheritance cycles are an error.
+  overrides the base's (a `-name` turns an inherited tier off). Inheritance cycles are an error.
 - **`dependencies`** follows the same rules as the global `[dependencies]` table.
-- **`tiers`** is a live-set of local tier names → `true`/`false`; the provider each resolves to lives
-  in the top-level `[tiers]` table.
+- **`tiers`** is a live-set of local tier names — the array form above (bare = live, `-name` = off),
+  or the equivalent boolean sub-table `[targets.<name>.tiers]` with `name = true`/`false`; the provider
+  each resolves to lives in the top-level `[tiers]` table.
 
 The target to build is chosen at the command line (`--target`), not in the manifest.
 
@@ -362,11 +363,8 @@ bench = "std"
 doc = "std"
 debug = "std"
 
-[targets.development.tiers]
-test = true
-bench = true
-doc = true
-debug = true
+[targets.development]
+tiers = ["test", "bench", "doc", "debug"]
 
 [targets.production]
 ```
