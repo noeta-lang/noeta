@@ -175,6 +175,8 @@ echo kind(5)            // int
 
 An `is` test also **flow-narrows**: inside `if x is T { … }` the checker sees `x` as `T`.
 
+**These two are the answer whenever you can name the candidates**, and they beat reflection at it — they are checked at compile time and they narrow, which `type_of` does neither of. Reach for `type_of` and the `Type` ADT only when there *is* no candidate set to enumerate. See [Choosing a reflection surface](Attributes-and-Reflection#choosing-a-surface).
+
 ### Trait-object tests are precise membership
 
 **`x is dyn Trait`** (and `.as<dyn Trait>()`) is a *precise membership test*: it is `true` iff the value's runtime nominal type has a **registered implementation** of the trait — a standalone `impl Trait for T`, an in-body `impl Trait { … }` block, a `@derive(Trait)`, or a native type's ABI-declared impl. The test is driven by the same registration data trait-method dispatch resolves through, so `x is dyn Trait` being `true` and "calling a `Trait` method on `x` works" can never disagree. Inside the `true` branch, `x` flow-narrows to `dyn Trait` and its trait methods dispatch — typed from the trait's declaration, `async` included (see [Trait objects](Generics-and-Traits#trait-objects)), so a narrowed receiver and a `dyn Trait` parameter type a call identically.
@@ -200,6 +202,8 @@ Two edges worth knowing:
 
 - **Non-nominal values never match.** Scalars, collections, and functions carry no nominal type, so they implement no *declared* trait. `42 is dyn Display` is `false` even though `echo 42` works — the built-in base types' protocol behavior is structural, not a registered `impl`, and only registered impls count. Use the head test (`x is int`) for built-ins.
 - **`Self::Name` projections stay permissive.** A `.as<Self::Item>()`-style associated-type target has no runtime head to test (the binding is per-impl, and the erased value carries no impl identity), so it still matches any value — unlike the now-precise trait-object target.
+
+`dyn Trait` is a *declared* bound, never a value's own type, and the two reflection queries split on exactly that line: `type_of(x)` on a value held behind a `dyn Trait` binding reports the **concrete** type (`Type.Struct(Dog, [])`), because that is what the value is, while `params_of` on a `fn f(x: dyn Speaks)` reports `Type.DynTrait(Speaks)`, because that is what the signature says. Neither is the other's answer, and a framework injecting a service by its interface needs both.
 
 ## Abstract kind-types
 
@@ -229,5 +233,5 @@ Two rules keep a binding's static type **trustworthy**: a `mut` binding's type i
 
 - [Error Handling](Error-Handling) — `Option`, `Result`, `?`, `??`.
 - [Generics & Traits](Generics-and-Traits) — type parameters and bounds.
-- [Attributes & Reflection](Attributes-and-Reflection) — `type_of` and the runtime `Type` value.
+- [Attributes & Reflection](Attributes-and-Reflection) — `type_of`, the runtime `Type` value, and [when to use it instead of `is`](Attributes-and-Reflection#choosing-a-surface).
 - [The Type Checker](Type-Checker-Internals) — the bidirectional engine behind all of this.

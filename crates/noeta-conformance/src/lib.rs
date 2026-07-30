@@ -280,6 +280,36 @@ pub fn run_case_path(entry: &Path, display: &str, stage: Stage) -> CaseResult {
     compare(display, &expectations, &outcome, stage)
 }
 
+/// The **root package** a multi-file case declares, if it declares one: a case directory holding a
+/// [`noeta_loader::MANIFEST_NAME`] is a package, and its `.noe` files derive their module paths under
+/// the manifest's `[package] name` root segment (`local/App` → `App.…`).
+///
+/// This is what lets a case exercise **derivation** at all. Without a manifest there is no package,
+/// nothing derives, and each file's own `namespace` declaration stands — which is exactly the
+/// behavior a bare `noeta run` on a lone script keeps, and what every package-less case relies on.
+///
+/// Looked for in the case directory **only**, never up the tree: a corpus fixture must not change
+/// meaning because of a `noeta.toml` sitting somewhere above the checkout.
+pub(crate) fn case_root(entry: &Path) -> Option<noeta_loader::PackageRoot> {
+    let dir = entry.parent()?;
+    let text = std::fs::read_to_string(dir.join(noeta_loader::MANIFEST_NAME)).ok()?;
+    let name = noeta_pm::manifest::Manifest::parse(&text)
+        .ok()?
+        .package()?
+        .name
+        .root()
+        .to_string();
+    Some(noeta_loader::PackageRoot::new(dir, vec![name]))
+}
+
+/// Read a discovered case's sources as a workspace, under whatever package root the case declares
+/// ([`case_root`]) — so every runner that drives cases through the salsa module graph derives module
+/// paths the same way the batch loader does. One helper, because six runners disagreeing about which
+/// package a case belongs to would be silent.
+pub(crate) fn read_case_workspace(entry: &Path) -> std::io::Result<noeta_loader::RawWorkspace> {
+    noeta_loader::read_workspace(entry, case_root(entry).as_ref())
+}
+
 /// The **dependency packages** of a multi-file case: every *subdirectory* of the case directory is
 /// one package, keyed (and rooted) by its directory name, holding that directory's `.noe` files as
 /// its modules.
@@ -305,6 +335,12 @@ pub fn run_case_path(entry: &Path, display: &str, stage: Stage) -> CaseResult {
 /// *with* a resolved dependency graph is deliberately stricter about foreign import roots than
 /// sibling-only linking, so routing a package-less case through it would change its meaning.
 fn dep_packages(dir: &Path) -> Vec<noeta_loader::DepPackage> {
+    // A case that is *itself* a package ([`case_root`]) owns its subdirectories — they are its own
+    // module tree, walked recursively under its prefix. Treating them as separate packages too would
+    // link every file twice and collide on every derived path.
+    if dir.join(noeta_loader::MANIFEST_NAME).is_file() {
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -381,10 +417,11 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     // A case with package subdirectories links through the dependency-aware path so its sources
     // carry real package provenance; one without keeps the deps-free path byte-for-byte.
     let deps = entry.parent().map(dep_packages).unwrap_or_default();
+    // A case declaring a manifest is a package: its files derive their module paths ([`case_root`]).
+    // One without keeps `None` — nothing derives and each file's `namespace` declaration stands.
+    let root = case_root(entry);
     let load = if deps.is_empty() {
-        // The corpus carries no manifests, so there is no package root and nothing derives: each
-        // case's modules are identified by the `namespace` they declare, exactly as before.
-        noeta_loader::load(entry, noeta_lexer::Edition::DEFAULT, None)
+        noeta_loader::load(entry, noeta_lexer::Edition::DEFAULT, root.as_ref())
     } else {
         // Conformance cases carry no manifest `[tiers]`/`[directives]`, so an empty `PackageUses`
         // suffices — a dependency's own `@tier(…, text)` still captures via the global scan.
@@ -393,7 +430,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
             noeta_lexer::Edition::DEFAULT,
             &deps,
             &noeta_span::PackageUses::new(),
-            None,
+            root.as_ref(),
         )
     };
     let linked = match load {

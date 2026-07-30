@@ -1,7 +1,6 @@
 // The declaring module. Both functions are `app.util.*` after qualification; `indirect` reaches
 // `pick` through a turbofish call, so the linker's same-module reference graph only drags `pick`
 // into the merged program if that callee name is visited by the qualification walk.
-namespace app.util
 
 pub struct Tag { pub id: int }
 

@@ -375,7 +375,16 @@ impl FileSystem for RealHost {
                 .map_err(|e| io_error(format!("cannot open `{path}` for append: {e}")))?;
             file.write_all(content.as_bytes())
                 .await
-                .map_err(|e| io_error(format!("cannot append to `{path}`: {e}")))
+                .map_err(|e| io_error(format!("cannot append to `{path}`: {e}")))?;
+            // `tokio::fs::File` buffers, and dropping it does **not** guarantee the buffer reaches
+            // the OS — `write_all` returning `Ok` only means the bytes were accepted into that
+            // buffer. Without this flush `fs.append` silently loses data whose write the blocking
+            // pool had not got to: the very next `fs_read` of the same path returns the pre-append
+            // content. (`fs_write`/`fs_read` are safe by construction — those are the free functions,
+            // which hand the whole operation to `std::fs` inside the blocking pool.)
+            file.flush()
+                .await
+                .map_err(|e| io_error(format!("cannot flush `{path}` after append: {e}")))
         })
     }
 
@@ -2555,10 +2564,8 @@ mod tests {
     #[test]
     fn real_host_disk_round_trip() {
         let mut host = RealHost::new().unwrap();
-        let mut path = std::env::temp_dir();
-        path.push("noeta_host_real_roundtrip_test.txt");
-        let path = path.to_string_lossy().into_owned();
-        let _ = host.fs_remove(&path);
+        let dir = noeta_test_temp::TempDir::new("host-roundtrip");
+        let path = dir.join("roundtrip.txt").to_string_lossy().into_owned();
 
         host.fs_write(&path, "hello disk").unwrap();
         assert!(host.fs_exists(&path));
@@ -2577,11 +2584,8 @@ mod tests {
     #[test]
     fn real_host_directory_hierarchy() {
         let mut host = RealHost::new().unwrap();
-        let mut root = std::env::temp_dir();
-        root.push("noeta_host_real_dirs_test");
-        let root = root.to_string_lossy().into_owned();
-        // Start clean.
-        let _ = std::fs::remove_dir_all(&root);
+        let dir = noeta_test_temp::TempDir::new("host-dirs");
+        let root = dir.join("tree").to_string_lossy().into_owned();
 
         let nested = format!("{root}/logs/sub");
         host.fs_mkdir(&nested).unwrap();
@@ -2619,10 +2623,8 @@ mod tests {
     #[test]
     fn real_host_reads_lazily_through_a_file_handle() {
         let mut host = RealHost::new().unwrap();
-        let mut path = std::env::temp_dir();
-        path.push("noeta_host_real_lazy_read_test.txt");
-        let path = path.to_string_lossy().into_owned();
-        let _ = host.fs_remove(&path);
+        let dir = noeta_test_temp::TempDir::new("host-lazy-read");
+        let path = dir.join("lazy_read.txt").to_string_lossy().into_owned();
 
         // A multi-line file with a multibyte character and a final unterminated line.
         let content = "alpha\nbéta\ngamma";

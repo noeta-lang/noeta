@@ -59,6 +59,9 @@ nix = { version = "0.29", features = ["signal"] }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# The disk tests and the lazy-read bench write into a per-process fixture directory, so two test
+# processes never share — and delete — one file path.
+noeta-test-temp = { workspace = true }
 
 [[bench]]
 name = "lazy_fs"

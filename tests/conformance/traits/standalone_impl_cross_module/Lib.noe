@@ -1,0 +1,28 @@
+// A library module: a user trait, a type, and a STANDALONE `impl Trait for T {}` — the impl is a
+// top-level statement, not carried inline on the class declaration. It must still travel with its
+// target type into the merged program, or a `dyn Store` coercion / method dispatch across the module
+// boundary cannot see it.
+
+pub trait Store {
+    fn label(): string
+}
+
+pub class NullStore {
+    fn new(): NullStore {
+        return NullStore {}
+    }
+}
+
+// STANDALONE impl (not inside the `class` body) — the case the linker previously dropped for a
+// non-entry module.
+impl Store for NullStore {
+    fn label(): string {
+        return "flushed"
+    }
+}
+
+// Accepts a `dyn Store`: the argument coercion `NullStore -> dyn Store` only type-checks if the
+// standalone impl above was linked into the merged program.
+pub fn run_store(s: dyn Store): string {
+    return s.label()
+}

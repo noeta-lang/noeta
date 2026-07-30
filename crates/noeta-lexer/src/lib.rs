@@ -199,8 +199,9 @@ pub enum TokenKind {
     /// The reflection keyword `construct` — build a struct value from field values at runtime, reusing
     /// the same construction path as a `T { … }` literal (defaults + full-initialization honored).
     /// Two surfaces: the static turbofish `construct::<T>(fields)` (desugared to the type name) and
-    /// the dynamic `construct(name, fields)`. Returns `Result<T, string>` (static) /
-    /// `Result<dyn, string>` (dynamic) — a recoverable outcome, mirroring `invoke`.
+    /// the dynamic `construct(name, fields)`. **Both** are typed `Result<dyn, string>` — the turbofish
+    /// spells only the type *name*, so the checker has no `T` to put in the `Ok` slot; narrow the
+    /// payload back with `.as<T>()`. A recoverable outcome either way, mirroring `invoke`.
     #[token("construct")]
     ConstructKw,
     // `channel::<T>(capacity)` — the bounded-channel constructor (isolates I.1) — is deliberately NOT a

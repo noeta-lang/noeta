@@ -6,7 +6,6 @@
 // expect: stdout "15"
 // expect: stdout "110"
 // expect: exit 0
-namespace App.Main;
 use App.Lib.Shape;
 use App.Lib.Wrap;
 use App.Lib.Counter;

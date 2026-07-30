@@ -3,7 +3,7 @@
 // the fix is renaming the binding or aliasing the import (`use geometry.vec as gv`).
 // expect: error E0020 at 8:14
 // expect: exit 1
-namespace App.Main;
+// (No `namespace`: the entry of package `geometry` derives `geometry.main` from its file name.)
 
 use geometry.vec;
 

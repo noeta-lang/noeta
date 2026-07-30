@@ -248,13 +248,12 @@ mod tests {
         assert_eq!(vsix_asset("0.3.0-rc.1"), "noeta-0.3.0-rc.1.vsix");
     }
 
-    /// A temp dir holding the given file names, executably. Returns the dir.
+    /// A temp dir holding the given file names, executably. Returns the dir — hold the guard for as
+    /// long as the PATH built from it is consulted, since dropping it removes the tree.
     #[cfg(unix)]
-    fn dir_with_executables(name: &str, files: &[&str]) -> PathBuf {
+    fn dir_with_executables(name: &str, files: &[&str]) -> noeta_test_temp::TempDir {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = std::env::temp_dir().join(format!("noeta_ide_unit_{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = noeta_test_temp::TempDir::new(&format!("ide-unit-{name}"));
         for file in files {
             let path = dir.join(file);
             std::fs::write(&path, "#!/bin/sh\n").unwrap();
@@ -270,13 +269,13 @@ mod tests {
         // first), not the PATH order of whichever happens to exist.
         let first = dir_with_executables("cand_first", &["codium"]);
         let second = dir_with_executables("cand_second", &["code"]);
-        let path_var = std::env::join_paths([&first, &second]).unwrap();
+        let path_var = std::env::join_paths([first.path(), second.path()]).unwrap();
         assert_eq!(
             resolve_editor(None, &path_var).unwrap(),
             second.join("code")
         );
         // Without `code`, the next candidate is found.
-        let path_var = std::env::join_paths([&first]).unwrap();
+        let path_var = std::env::join_paths([first.path()]).unwrap();
         assert_eq!(
             resolve_editor(None, &path_var).unwrap(),
             first.join("codium")
@@ -287,7 +286,7 @@ mod tests {
     #[test]
     fn editor_resolution_errors_name_the_candidates_and_the_flag() {
         let empty = dir_with_executables("cand_empty", &[]);
-        let path_var = std::env::join_paths([&empty]).unwrap();
+        let path_var = std::env::join_paths([empty.path()]).unwrap();
         let err = resolve_editor(None, &path_var).unwrap_err();
         for expected in ["`code`", "`codium`", "`code-insiders`", "--bin"] {
             assert!(err.contains(expected), "missing {expected} in: {err}");
@@ -298,7 +297,7 @@ mod tests {
     #[test]
     fn editor_resolution_bin_override_takes_a_name_or_a_path() {
         let dir = dir_with_executables("bin_override", &["my-editor"]);
-        let path_var = std::env::join_paths([&dir]).unwrap();
+        let path_var = std::env::join_paths([dir.path()]).unwrap();
         // A bare name goes through PATH lookup.
         assert_eq!(
             resolve_editor(Some("my-editor"), &path_var).unwrap(),
@@ -328,7 +327,7 @@ mod tests {
     fn path_lookup_requires_the_execute_bit() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = dir_with_executables("exec_bit", &["tool"]);
-        let path_var = std::env::join_paths([&dir]).unwrap();
+        let path_var = std::env::join_paths([dir.path()]).unwrap();
         assert!(find_on_path("tool", &path_var).is_some());
         std::fs::set_permissions(dir.join("tool"), std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(find_on_path("tool", &path_var).is_none());

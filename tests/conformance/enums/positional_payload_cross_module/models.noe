@@ -1,6 +1,0 @@
-// A library module exporting the type the entry's enum wraps positionally.
-namespace App.Models;
-
-pub struct User {
-    pub name: string
-}

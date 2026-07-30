@@ -1,0 +1,172 @@
+// A reflected type answers its own **head name**: `type_of(x).name()` is the qualified,
+// argument-free name of the type's head — a nominal's declared name, a container's constructor
+// (`List<int>` → `"List"`), a scalar's surface spelling (`"int"`). It is TOTAL: every `Type` case
+// answers a non-empty name, including the ones no value carries (`Type.Unit`, `Type.Never`,
+// `Type.Fn`, `Type.Union`, `Type.DynTrait`).
+//
+// What it replaces is a real silently-wrong-answer path. A consumer that needs a name out of a
+// `type_of` result hand-rolls `match type_of(v) { Type.Class(n, _) => n, Type.Struct(n, _) => n, _ =>
+// "" }` — and answers the EMPTY STRING for every shape its match forgot (an enum, an extern `Named`,
+// a container), which then travels on as a table name, a route, or a schema key. The accessor is a
+// projection of the one `TypeRepr::head_name` the checker and both backends already share, so there
+// is nothing left for a consumer to forget.
+//
+// It is a zero-argument method rather than a field because `Type` is an enum, and an enum's accessor
+// surface is a method (`.value()` on a backed enum); it is spelled `name` to match the `name` field
+// every other reflected descriptor carries (`FieldSpec.name`, `ParamInfo.name`, `VariantSpec.name`).
+// expect: stdout "int: int"
+// expect: stdout "float: float"
+// expect: stdout "f32: f32"
+// expect: stdout "bool: bool"
+// expect: stdout "string: string"
+// expect: stdout "bytes: bytes"
+// expect: stdout "list: List"
+// expect: stdout "map: Map"
+// expect: stdout "set: Set"
+// expect: stdout "option: Option"
+// expect: stdout "result: Result"
+// expect: stdout "struct: Todo"
+// expect: stdout "class: Session"
+// expect: stdout "enum: Mode"
+// expect: stdout "case Int: int"
+// expect: stdout "case Float: float"
+// expect: stdout "case F32: f32"
+// expect: stdout "case F64: f64"
+// expect: stdout "case IntN(8, false): u8"
+// expect: stdout "case IntN(64, true): i64"
+// expect: stdout "case Bool: bool"
+// expect: stdout "case String: string"
+// expect: stdout "case Bytes: bytes"
+// expect: stdout "case Unit: unit"
+// expect: stdout "case Dyn: dyn"
+// expect: stdout "case Never: never"
+// expect: stdout "case List: List"
+// expect: stdout "case Set: Set"
+// expect: stdout "case Option: Option"
+// expect: stdout "case Map: Map"
+// expect: stdout "case Result: Result"
+// expect: stdout "case Enum: Mode"
+// expect: stdout "case Struct: app.storage.Todo"
+// expect: stdout "case Class: app.web.Session"
+// expect: stdout "case Named: id.Uuid"
+// expect: stdout "case Fn: Fn"
+// expect: stdout "case Union: Union"
+// expect: stdout "case DynTrait: Greet"
+// expect: stdout "hand-rolled on an enum: [] vs [Mode]"
+// expect: stdout "hand-rolled on a list: [] vs [List]"
+// expect: stdout "every case answers a name: true ()"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+
+class Session {
+    token: string
+    fn new(): Session {
+        return Session { token: "t" }
+    }
+}
+
+enum Mode {
+    Fast
+    Slow
+}
+
+// --- off a value's reflected type -------------------------------------------------------------
+echo "int: ${type_of(1).name()}"
+echo "float: ${type_of(1.5).name()}"
+echo "f32: ${type_of(1.0f32).name()}"
+echo "bool: ${type_of(true).name()}"
+echo "string: ${type_of("s").name()}"
+echo "bytes: ${type_of("s".to_bytes()).name()}"
+echo "list: ${type_of([1]).name()}"
+echo "map: ${type_of({"a": 1}).name()}"
+echo "set: ${type_of(#{1, 2}).name()}"
+echo "option: ${type_of(some(1)).name()}"
+echo "result: ${type_of(Ok(1)).name()}"
+echo "struct: ${type_of(Todo { id: 1 }).name()}"
+echo "class: ${type_of(Session.new()).name()}"
+echo "enum: ${type_of(Mode.Fast).name()}"
+
+// --- every case of the ADT, including the ones no value carries -------------------------------
+// A nominal reports its QUALIFIED declared name verbatim (nothing is shortened); a fixed-width
+// integer is spelled from its own width, not from a default one.
+echo "case Int: ${Type.Int.name()}"
+echo "case Float: ${Type.Float.name()}"
+echo "case F32: ${Type.F32.name()}"
+echo "case F64: ${Type.F64.name()}"
+echo "case IntN(8, false): ${Type.IntN(8, false).name()}"
+echo "case IntN(64, true): ${Type.IntN(64, true).name()}"
+echo "case Bool: ${Type.Bool.name()}"
+echo "case String: ${Type.String.name()}"
+echo "case Bytes: ${Type.Bytes.name()}"
+echo "case Unit: ${Type.Unit.name()}"
+echo "case Dyn: ${Type.Dyn.name()}"
+echo "case Never: ${Type.Never.name()}"
+echo "case List: ${Type.List(Type.Int).name()}"
+echo "case Set: ${Type.Set(Type.Int).name()}"
+echo "case Option: ${Type.Option(Type.Int).name()}"
+echo "case Map: ${Type.Map(Type.String, Type.Int).name()}"
+echo "case Result: ${Type.Result(Type.Int, Type.String).name()}"
+echo "case Enum: ${Type.Enum("Mode", []).name()}"
+echo "case Struct: ${Type.Struct("app.storage.Todo", []).name()}"
+echo "case Class: ${Type.Class("app.web.Session", []).name()}"
+echo "case Named: ${Type.Named("id.Uuid", []).name()}"
+echo "case Fn: ${Type.Fn([Type.Int], Type.Bool).name()}"
+echo "case Union: ${Type.Union([Type.Int, Type.String]).name()}"
+echo "case DynTrait: ${Type.DynTrait("Greet").name()}"
+
+// --- the projection this replaces --------------------------------------------------------------
+fn hand_rolled(t: Type): string {
+    return match t {
+        Type.Class(name, _) => name,
+        Type.Struct(name, _) => name,
+        _ => "",
+    }
+}
+
+echo "hand-rolled on an enum: [${hand_rolled(type_of(Mode.Fast))}] vs [${type_of(Mode.Fast).name()}]"
+echo "hand-rolled on a list: [${hand_rolled(type_of([1]))}] vs [${type_of([1]).name()}]"
+
+// --- the totality gate --------------------------------------------------------------------------
+// Derived from the ADT's own reported schema rather than a list written here, so a `Type` case added
+// in the future cannot slip in unnamed: every case `variants_of` reports is constructed from its own
+// payload spec and must answer a non-empty name.
+fn arg_for(field: Type): dyn {
+    if field == Type.String {
+        return "app.storage.Todo"
+    }
+    if field == Type.Int {
+        return 8
+    }
+    if field == Type.Bool {
+        return false
+    }
+    if field == Type.List(Type.Enum("Type", [])) {
+        return []
+    }
+    return Type.Int
+}
+
+mut all_named = true
+mut missing = ""
+for v in variants_of("Type") {
+    mut args: List<dyn> = []
+    for p in v.payload {
+        args = args ~ [arg_for(p.type)]
+    }
+    match construct("Type.${v.name}", args) {
+        Ok(built) => {
+            head = "${built.name()}"
+            if head.len() == 0 {
+                all_named = false
+                missing = "${missing}${v.name} answered nothing;"
+            }
+        },
+        Err(e) => {
+            all_named = false
+            missing = "${missing}${v.name}: ${e};"
+        },
+    }
+}
+echo "every case answers a name: ${all_named} (${missing})"

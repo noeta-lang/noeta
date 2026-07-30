@@ -11,7 +11,6 @@
 // A **directory** case: a single file cannot express two modules.
 // expect: error E0027 at 5:6
 // expect: exit 1
-namespace pkg.main;
 
 use pkg.types.{Decoder, Target};
 

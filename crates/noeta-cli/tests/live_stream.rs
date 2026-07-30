@@ -109,7 +109,10 @@ fn fetch(req: Request): Response {
     )
     .expect("write the fixture program");
 
-    let port = 8479;
+    // A kernel-assigned port, not a fixed one: a fixed port is shared with every other
+    // checkout and every concurrent run of this test on the machine, and the server that loses the
+    // bind dies where the client sees only a reset connection.
+    let port = noeta_test_temp::free_port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
         .args([
             "serve",

@@ -41,6 +41,9 @@ noeta-db = { path = "crates/noeta-db" }
 noeta-conformance = { path = "crates/noeta-conformance" }
 # Test-only heap-residency probe (dev-dependency; tracking global allocator)
 noeta-alloc-probe = { path = "crates/noeta-alloc-probe" }
+# Test-only fixture directories (dev-dependency): per-process temp roots, so no two test processes
+# or checkouts share a fixture path. The one place a test temp path is built.
+noeta-test-temp = { path = "crates/noeta-test-temp" }
 # Core IR (memory-management migration: ANF lowering target)
 noeta-ir = { path = "crates/noeta-ir" }
 # Core IR passes (memory-management migration: precise-RC analyses + transforms)

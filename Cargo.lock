@@ -2543,6 +2543,7 @@ dependencies = [
  "noeta-runner",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-test-temp",
  "noeta-vm",
  "notify",
  "predicates",
@@ -2598,6 +2599,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-loader",
  "noeta-parser",
+ "noeta-pm",
  "noeta-span",
  "noeta-stdlib",
  "noeta-value",
@@ -2753,6 +2755,7 @@ dependencies = [
  "getrandom 0.3.4",
  "nix",
  "noeta-stdlib",
+ "noeta-test-temp",
  "reqwest 0.12.28",
  "serde_json",
  "sha1",
@@ -2784,6 +2787,7 @@ dependencies = [
  "noeta-pm",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-test-temp",
  "noeta-types",
  "salsa",
 ]
@@ -2903,6 +2907,7 @@ dependencies = [
  "noeta-runner",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-test-temp",
  "noeta-vm",
  "rmcp",
  "serde",
@@ -2968,6 +2973,7 @@ dependencies = [
  "noeta-fmt",
  "noeta-loader",
  "noeta-span",
+ "noeta-test-temp",
  "p256",
  "pubgrub",
  "reqwest 0.12.28",
@@ -3003,6 +3009,7 @@ dependencies = [
  "noeta-runner",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-test-temp",
  "noeta-vm",
  "serde_json",
 ]
@@ -3073,6 +3080,10 @@ dependencies = [
  "subtle",
  "uuid",
 ]
+
+[[package]]
+name = "noeta-test-temp"
+version = "0.2.3"
 
 [[package]]
 name = "noeta-types"

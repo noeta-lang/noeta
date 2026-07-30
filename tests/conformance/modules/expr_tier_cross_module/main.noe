@@ -5,7 +5,6 @@
 // internal `wrap` helper is dragged into the merged program.
 // expect: stdout "greeting:  hi [Ada]! "
 // expect: exit 0
-namespace App;
 
 use Tmpl.{render, Html};
 

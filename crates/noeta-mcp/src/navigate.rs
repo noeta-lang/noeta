@@ -515,9 +515,7 @@ struct Counter { n: int\n  fn get(): int { return self.n }\n}\nc = Counter { n: 
     fn definition_jumps_into_a_sibling_module_file() {
         // A real directory: `file` entries get the engine's sibling discovery, so the imported
         // struct's definition resolves into the other file.
-        let dir = std::env::temp_dir().join("noeta_mcp_nav_sibling");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = noeta_test_temp::TempDir::new("mcp-nav-sibling");
         std::fs::write(
             dir.join("models.noe"),
             "namespace App.Models;\npub struct User { id: int }\n",

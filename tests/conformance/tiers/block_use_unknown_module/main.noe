@@ -12,7 +12,7 @@
 // stripped for a run with no tier active.
 // expect: error E0019 at 18:21
 // expect: exit 1
-namespace App.Main;
+// (No `namespace`: this case is not a package, so the entry declares no module path at all.)
 
 @test {
     use probe.nope.{Missing}

@@ -1,0 +1,14 @@
+[package]
+name = "noeta-test-temp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# Test-only, and depends on nothing: the one place a test fixture path is built, so no two processes
+# can share one. Pulled in as a `dev-dependency` by every crate whose tests touch the disk.
+[dependencies]
+
+[lints]
+workspace = true

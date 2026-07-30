@@ -1888,17 +1888,27 @@ impl AdtFields {
 /// **Adding a [`TypeRepr`] variant**: both matches above will fail to compile until you handle it;
 /// add its sample here at the same time, or the prelude enum will silently lack the variant.
 pub fn type_adt_variants() -> Vec<TypeRepr> {
+    type_adt_variants_with(AdtHead::DEFAULT)
+}
+
+/// [`type_adt_variants`], with `head`'s payload stamped into the samples whose head name is spelled
+/// *from* their payload — the nominals, the trait object, and the fixed-width integer.
+/// `type_adt_variants()` passes [`AdtHead::DEFAULT`] (no sample stands for a particular type);
+/// [`adt_head_name`] passes what it read off a runtime `Type` value, so the sample it selects answers
+/// that value's own head rather than a placeholder.
+///
+/// Parameterizing the one list is deliberate: a separate "which variants spell their head from their
+/// payload" table would be a second statement of the same fact, free to drift from this one.
+fn type_adt_variants_with(head: AdtHead<'_>) -> Vec<TypeRepr> {
     let any = || Box::new(TypeRepr::Dyn);
-    let name = || String::new();
+    let name = || head.name.to_string();
+    let (bits, signed) = head.int_width.unwrap_or((32, true));
     vec![
         TypeRepr::Int,
         TypeRepr::Float,
         TypeRepr::F32,
         TypeRepr::F64,
-        TypeRepr::IntN {
-            signed: true,
-            bits: 32,
-        },
+        TypeRepr::IntN { signed, bits },
         TypeRepr::Bool,
         TypeRepr::Str,
         TypeRepr::Bytes,
@@ -1920,6 +1930,62 @@ pub fn type_adt_variants() -> Vec<TypeRepr> {
         // ordinals come from this order and are baked into compiled programs.
         TypeRepr::Never,
     ]
+}
+
+/// The name of the prelude `Type` enum's **head-name accessor** — `type_of(x).name()`. Spelled to
+/// match the `name` field every other reflected descriptor carries (`FieldSpec.name`,
+/// `ParamInfo.name`, `VariantSpec.name`); it is a zero-argument method rather than a field because
+/// `Type` is an enum, and an enum's accessor surface is a method (`.value()` on a backed enum).
+///
+/// One constant because three places key on it — the checker's built-in method table and both
+/// backends' method dispatch — and a typo in one of the three would be a backend divergence.
+pub const TYPE_NAME_METHOD: &str = "name";
+
+/// The payload fields of a runtime prelude `Type` value that its own **head name** is spelled from —
+/// everything [`adt_head_name`] needs beyond the variant tag, and nothing more, so a backend answers
+/// `.name()` by reading at most two payload slots instead of decoding the whole type tree.
+///
+/// Only two cases contribute anything: a nominal (or trait object), whose head *is* its declared
+/// `name` payload, and `Type.IntN(bits, signed)`, whose head is spelled from the width. Every other
+/// case's head is its constructor, so [`AdtHead::DEFAULT`] answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdtHead<'a> {
+    /// The leading `name: string` payload of a nominal (`Type.Struct`/`Class`/`Enum`/`Named`) or a
+    /// `Type.DynTrait`. Empty for every other case, which ignores it.
+    pub name: &'a str,
+    /// A `Type.IntN(bits, signed)`'s width descriptor. `None` for every other case — and for an
+    /// `IntN` whose `bits` payload is not a `u8`, which is not a width any type has; that answers the
+    /// ADT's declared default width rather than a truncated one.
+    pub int_width: Option<(u8, bool)>,
+}
+
+impl AdtHead<'_> {
+    /// The head payload of no particular type — an empty nominal name and no width. What
+    /// [`type_adt_variants`] stamps into its samples.
+    pub const DEFAULT: AdtHead<'static> = AdtHead {
+        name: "",
+        int_width: None,
+    };
+}
+
+/// The **head name** of a runtime prelude `Type` enum value, from its `variant` tag and the payload
+/// fields that head is spelled from ([`AdtHead`]).
+///
+/// This is the value-side door onto [`TypeRepr::head_name`], which stays the single statement of what
+/// a type's head is called: the tag selects the sample descriptor [`type_adt_variants`] already
+/// carries — stamped with `head`, so a nominal answers its own name and an `IntN` its own width — and
+/// the answer is that descriptor's `head_name`. A mapping keyed directly on variant strings would be
+/// a second copy of that table, free to drift from it; this cannot.
+///
+/// `None` only when `variant` names no `Type` case at all. Every case answers a name, which is the
+/// point of the surface: the hand-rolled `match type_of(v) { Type.Class(n, _) => n, … _ => "" }` a
+/// consumer writes instead answers the empty string for every shape its match forgot, and that empty
+/// name then travels into a table or a route.
+pub fn adt_head_name(variant: &str, head: AdtHead<'_>) -> Option<String> {
+    type_adt_variants_with(head)
+        .iter()
+        .find(|repr| repr.variant_name() == variant)
+        .map(TypeRepr::head_name)
 }
 
 /// A [`TypeRepr`] displays as its **Noeta surface spelling** — the source form a developer
@@ -3193,5 +3259,93 @@ mod tests {
             TypeRepr::Union(vec![vec2(), TypeRepr::Int]).display_short(),
             "Vec2 | int"
         );
+    }
+
+    /// **Totality is the surface's whole point**: every prelude `Type` case answers a non-empty head
+    /// name through [`adt_head_name`], and the answer is exactly its descriptor's
+    /// [`TypeRepr::head_name`]. A new `TypeRepr` variant that forgot its name — the hole a consumer's
+    /// hand-rolled `match … _ => ""` has — fails here.
+    #[test]
+    fn every_type_adt_case_answers_a_head_name() {
+        let nominal = AdtHead {
+            name: "app.storage.Todo",
+            int_width: Some((8, false)),
+        };
+        for repr in type_adt_variants() {
+            let variant = repr.variant_name();
+            let answered = adt_head_name(variant, nominal)
+                .unwrap_or_else(|| panic!("`Type.{variant}` answers no head name"));
+            assert!(
+                !answered.is_empty(),
+                "`Type.{variant}` answered the empty head name"
+            );
+            // The tag alone (no payload) is answerable too — every case's head is either its
+            // constructor or its payload, never nothing.
+            assert!(adt_head_name(variant, AdtHead::DEFAULT).is_some());
+        }
+        // The cases whose head is spelled FROM their payload report that payload; the rest ignore it
+        // and report their constructor — the same answer `TypeRepr::head_name` gives the descriptor.
+        fn named(n: &str) -> AdtHead<'_> {
+            AdtHead {
+                name: n,
+                ..AdtHead::DEFAULT
+            }
+        }
+        assert_eq!(
+            adt_head_name("Struct", named("app.Todo")).as_deref(),
+            Some("app.Todo")
+        );
+        assert_eq!(
+            adt_head_name("Class", named("app.Todo")).as_deref(),
+            Some("app.Todo")
+        );
+        assert_eq!(
+            adt_head_name("Enum", named("app.Todo")).as_deref(),
+            Some("app.Todo")
+        );
+        assert_eq!(
+            adt_head_name("Named", named("id.Uuid")).as_deref(),
+            Some("id.Uuid")
+        );
+        assert_eq!(
+            adt_head_name("DynTrait", named("Greet")).as_deref(),
+            Some("Greet")
+        );
+        assert_eq!(
+            adt_head_name("List", named("ignored")).as_deref(),
+            Some("List")
+        );
+        assert_eq!(
+            adt_head_name("Int", named("ignored")).as_deref(),
+            Some("int")
+        );
+        assert_eq!(
+            adt_head_name("String", named("ignored")).as_deref(),
+            Some("string")
+        );
+        assert_eq!(adt_head_name("Fn", named("ignored")).as_deref(), Some("Fn"));
+        assert_eq!(
+            adt_head_name("Union", named("ignored")).as_deref(),
+            Some("Union")
+        );
+        // A fixed-width integer is spelled from its own width, not from the sample's.
+        let width = |bits: u8, signed: bool| AdtHead {
+            int_width: Some((bits, signed)),
+            ..AdtHead::DEFAULT
+        };
+        assert_eq!(
+            adt_head_name("IntN", width(8, false)).as_deref(),
+            Some("u8")
+        );
+        assert_eq!(
+            adt_head_name("IntN", width(64, true)).as_deref(),
+            Some("i64")
+        );
+        assert_eq!(
+            adt_head_name("IntN", AdtHead::DEFAULT).as_deref(),
+            Some("i32")
+        );
+        // A tag that names no case is the honest `None`, never a placeholder name.
+        assert_eq!(adt_head_name("NoSuchCase", AdtHead::DEFAULT), None);
     }
 }

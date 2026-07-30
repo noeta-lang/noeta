@@ -84,7 +84,7 @@ pub fn run_ir_corpus(root: &Path, only: Option<&Path>) -> IrCorpusReport {
             continue;
         }
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry, None) {
+            match crate::read_case_workspace(&case.entry) {
                 Ok(raw) => run_workspace(&raw, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }

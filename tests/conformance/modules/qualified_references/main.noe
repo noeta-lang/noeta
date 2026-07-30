@@ -10,7 +10,6 @@
 // expect: stdout "7"
 // expect: stdout "0"
 // expect: exit 0
-namespace App.Main;
 
 use geometry.vec;
 

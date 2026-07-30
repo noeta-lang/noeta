@@ -96,6 +96,7 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 | `noeta-cache` | Default-on bytecode cache (`~/.cache/noeta/*.noeb`, build-identity-keyed): the `compile_whole_file` seam for run/dump/build. |
 | `noeta-conformance` | The dev-only harness: `// expect:` corpus runner, `--differential` oracle, JSON output, partial runs. |
 | `noeta-alloc-probe` | Test-only global-allocator probe for heap-residency assertions. |
+| `noeta-test-temp` | Test-only per-process fixture directories — the one place a test temp path is built, so no two test processes or checkouts share one. |
 | `noeta-cli` | The `noeta` binary. Core verbs `run`/`build`/`check`/`repl`, `test`/`bench`/`doc`, `dump`/`fmt`/`profile`/`cache`, the editor/agent servers `lsp`/`dap`/`mcp`, and the package-manager verbs `add`/`update`/`publish`/`audit`/`key` (plus the dynamically-wired `serve`). |
 
 ### Editor, agent & dev tooling

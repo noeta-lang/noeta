@@ -480,9 +480,13 @@ enum Color { Red; Green }
     /// A two-package project on disk: `acme/toolkit` declares a `@role(Semantic.TrustBoundary)`
     /// attribute struct, and `acme/app` depends on it by path and applies the attribute to a
     /// function (alongside a same-file role, as the control). Returns the app's entry path.
-    fn dep_role_project(name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join("noeta-mcp-tests").join(name);
-        let _ = std::fs::remove_dir_all(&root);
+    ///
+    /// The root is per-process: `/tmp/noeta-mcp-tests/<name>` was shared by every checkout and every
+    /// concurrent test binary, each of which opened by `remove_dir_all`ing it. The returned path
+    /// carries the root's guard, so the project survives until the caller is done with it — returning
+    /// a bare `PathBuf` would delete the tree at this function's `return`.
+    fn dep_role_project(name: &str) -> noeta_test_temp::TempPath {
+        let root = noeta_test_temp::TempDir::new(&format!("mcp-{name}"));
         let (app, toolkit) = (root.join("app"), root.join("toolkit"));
         std::fs::create_dir_all(&app).unwrap();
         std::fs::create_dir_all(&toolkit).unwrap();
@@ -512,7 +516,7 @@ enum Color { Red; Green }
              echo \"ok\";\n",
         )
         .unwrap();
-        app.join("main.noe")
+        root.into_child("app/main.noe")
     }
 
     /// A role conferred by a **dependency package's** `@role`-bearing attribute reaches `reflect`.

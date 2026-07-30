@@ -15,7 +15,7 @@ fn add(a: int, b: int): int { return a + b }
 | `@test` | code — assertions against the surrounding module | `noeta test` — see [Testing](Testing) |
 | `@bench` | code — measured runs | `noeta bench` — see [Benchmarking](Benchmarking) |
 | `@doc` | text — Markdown prose | `noeta doc` — see [Documentation](Documentation-and-Tiers) |
-| `@debug` | code — conditional instrumentation | no dedicated command — `--tier debug`, or a [build target](#build-targets--noetatoml) |
+| `@debug` | code — conditional instrumentation | no dedicated command — `--tier debug`, or a [build target](#naming-tiers-and-build-targets--noetatoml) |
 
 ## The tier model
 

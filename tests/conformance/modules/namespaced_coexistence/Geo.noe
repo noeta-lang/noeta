@@ -1,0 +1,3 @@
+pub struct Amount {
+    meters: int
+}

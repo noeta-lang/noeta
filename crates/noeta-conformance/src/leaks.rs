@@ -110,7 +110,7 @@ pub fn run_leak_check(root: &Path, only: Option<&Path>) -> LeakReport {
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry, None) {
+            match crate::read_case_workspace(&case.entry) {
                 Ok(raw) => measure_workspace(&name, &raw, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
