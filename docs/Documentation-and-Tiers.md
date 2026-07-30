@@ -75,12 +75,7 @@ $ noeta doc adder.noe
 noeta doc [OPTIONS] [PATH]
 ```
 
-`PATH` (default `.`) is a file or a **directory**. A directory extracts every `.noe` beneath it; a
-file extracts that file **and its sibling modules**, because a `@doc` block belongs to the file it
-sits in and linking merges declarations without the blocks beside them — extracting from the linked
-program alone would silently drop the documentation of every imported symbol. This is the same
-workspace `--out` has always documented, so the two halves of `noeta doc` agree on what "the docs"
-means. A file that does not parse contributes nothing rather than failing the run.
+`PATH` (default `.`) is a file or a **directory**. A directory extracts every `.noe` beneath it; a file extracts that file **and its sibling modules**, because a `@doc` block belongs to the file it sits in and linking merges declarations without the blocks beside them — extracting from the linked program alone would silently drop the documentation of every imported symbol. This is the same workspace `--out` has always documented, so the two halves of `noeta doc` agree on what "the docs" means. A file that does not parse contributes nothing rather than failing the run.
 
 ### Generating a documentation artifact
 
@@ -118,11 +113,7 @@ Stored docs are *advisory metadata*, not provenance: unsigned, last-wins on re-p
 
 ## Folding a sample's context — `// sample:start` / `// sample:end`
 
-Every ` ```noeta ` block in these docs is run through the real `noeta` binary by CI, which is what
-keeps the documentation honest: a renamed method or a changed diagnostic fails the build instead of
-quietly misleading a reader. The cost is that a sample has to be a **complete program** — and the
-struct, imports and helper that make a two-line call compile can easily bury the two lines worth
-reading.
+Every ` ```noeta ` block in these docs is run through the real `noeta` binary by CI, which is what keeps the documentation honest: a renamed method or a changed diagnostic fails the build instead of quietly misleading a reader. The cost is that a sample has to be a **complete program** — and the struct, imports and helper that make a two-line call compile can easily bury the two lines worth reading.
 
 Mark the interesting region and the rest folds away:
 
@@ -134,8 +125,7 @@ echo e.addr
 // sample:end
 ```
 
-Which renders as the two marked lines, with the whole program behind the expander — this block is
-the live article, so open it to see the `struct` the sample needs:
+Which renders as the two marked lines, with the whole program behind the expander — this block is the live article, so open it to see the `struct` the sample needs:
 
 ```noeta
 struct Email { addr: string }
@@ -146,18 +136,13 @@ echo e.addr
 // sample:end
 ```
 
-The markers are ordinary comments, so **the whole block still compiles and still runs in CI** —
-nothing about the gate changes. Only presentation does:
+The markers are ordinary comments, so **the whole block still compiles and still runs in CI** — nothing about the gate changes. Only presentation does:
 
 - the **Docs browser** (VS Code) shows the marked region, with a *Show full example* expander;
-- **`noeta doc --out`** and other static markdown bake the same fold in as a `<details>` block, so a
-  reader on GitHub gets the short version with the full program one click away;
+- **`noeta doc --out`** and other static markdown bake the same fold in as a `<details>` block, so a reader on GitHub gets the short version with the full program one click away;
 - a block with **no markers** renders exactly as it always has.
 
-A block may mark several regions — they concatenate in order, so a page can show two interesting
-stretches of one program and fold the plumbing between them. Shortening a sample this way is
-strictly better than deleting the context: the deleted version stops compiling, and a sample that
-does not compile is a sample nothing can check.
+A block may mark several regions — they concatenate in order, so a page can show two interesting stretches of one program and fold the plumbing between them. Shortening a sample this way is strictly better than deleting the context: the deleted version stops compiling, and a sample that does not compile is a sample nothing can check.
 
 ## See also
 
