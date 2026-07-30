@@ -2189,7 +2189,24 @@ impl Checker {
                     }
                     _ => None,
                 });
-            let vty = match &field_fn_expectation {
+            // A generic type's **fresh-constructor call** in a field initializer absorbs the
+            // field's declared type, so `Outer { inner: Inner.new("todos") }` against `inner:
+            // Inner<Todo>` pins `T = Todo` exactly as the annotated binding `i: Inner<Todo> =
+            // Inner.new("todos")` and the argument position do. A field initializer is a *checked*
+            // position — the declared type is right there — and synthesizing it bottom-up left the
+            // construction site with no instantiation to record. The type's own parameters are
+            // erased first (they are inferred *from* this value), and only a fully-concrete
+            // expectation is pushed: an open one makes no claim.
+            let absorbed_declared = if field_fn_expectation.is_none()
+                && let Some((_, declared)) = declared_field
+                && let e = erase_type_params(declared.clone(), &pset)
+                && self.absorbs_constructor_expectation(&f.value, &e, env)
+            {
+                Some(e)
+            } else {
+                None
+            };
+            let vty = match field_fn_expectation.as_ref().or(absorbed_declared.as_ref()) {
                 Some(expected) => self.check(&f.value, expected, env),
                 None => self.synth(&f.value, env),
             };
@@ -2208,7 +2225,12 @@ impl Checker {
                 // `dyn` (they are inferred from this very value above), so a generic field
                 // accepts any value while a concrete field type is enforced.
                 let expected = erase_type_params(declared.clone(), &pset);
-                if !self.arg_assignable(&vty, &expected) {
+                // …unless the value was just CHECKED against that very type above, whose `subsume`
+                // has already reported any mismatch at this same span. Re-testing it here would
+                // print the identical error twice.
+                if absorbed_declared.as_ref() != Some(&expected)
+                    && !self.arg_assignable(&vty, &expected)
+                {
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         f.value.span(),

@@ -1902,20 +1902,11 @@ impl Checker {
                 && matches!(args[i], Type::Unknown)
             {
                 let expected = subst_or_dyn(raw, &subst, &tps);
-                // Absorb the (substituted) parameter type into the deferred literal — a `Fn` into a
-                // closure (or a deferred polymorphic-function reference, F1), a `List`/`Map` into a
-                // container literal — so its resolved type then binds any still-unbound type
-                // parameter below; a mismatched or unguiding param synthesizes standalone (unchanged
-                // from the closure-only behavior).
-                args[i] = match (expr, &expected) {
-                    (Expr::Closure { .. } | Expr::Ident { .. }, Type::Fn { .. }) => {
-                        self.check(expr, &expected, env)
-                    }
-                    (Expr::List { .. } | Expr::Map { .. }, Type::List(_) | Type::Map(..)) => {
-                        self.check(expr, &expected, env)
-                    }
-                    _ => self.synth(expr, env),
-                };
+                // Absorb the (substituted) parameter type into the deferred argument — one shared
+                // definition with the non-generic path, so the two agree by construction — and its
+                // resolved type then binds any still-unbound type parameter below; a mismatched or
+                // unguiding param synthesizes standalone (unchanged from the closure-only behavior).
+                args[i] = self.absorb_deferred_arg(expr, Some(&expected), env);
             }
             let arg = args[i].clone();
             bind_type_params(raw, &arg, &tps, &mut subst);

@@ -1,0 +1,28 @@
+// The **`fully_concrete` gate**, from the other side: an argument position whose parameter type is
+// still OPEN records nothing. `fn keep<T>(x: T): T` says nothing about `Inner`'s instantiation, so
+// the call keeps synthesizing bottom-up and binds `T = Inner` itself — and the `Inner` it returns
+// carries no type argument, so `type_name::<T>()` aborts.
+//
+// Deliberate, not a gap. A tag is a claim about the value; recording `Inner<dyn>` here would invent
+// a fact the site does not have, which is the silent-wrong-name failure the abort exists to prevent.
+// This case is what keeps the expectation-driven positions from widening into a guess.
+// expect: error E0058 at 22:33
+// expect: exit 1
+struct Todo {
+    id: int
+}
+class Inner<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Inner<T> {
+        return Inner { tbl: tbl };
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+fn keep<T>(x: T): T {
+    return x;
+}
+echo keep(Inner.new("todos")).model();
