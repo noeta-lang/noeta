@@ -9,7 +9,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, `--native` for machine code, `--wasm`/`--serve` for [WebAssembly](WebAssembly-and-the-Edge)). |
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
 | [`noeta expand`](#noeta-expand) | Print the source that compile-time `@`-directive expansions generated. |
-| [`noeta migrate`](#noeta-migrate) | Apply plain-SQL database migrations — an extension command the [para/db](para-db) package provides. |
+| [`noeta migrate`](#noeta-migrate) | Apply database schema migrations — an extension command the [para/db](para-db) package provides. |
 | [`noeta serve`](#noeta-serve-and---watch) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
 | [`noeta repl`](#noeta-repl) | Interactive REPL. |
 | [`noeta dump`](#noeta-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
@@ -55,7 +55,7 @@ noeta init [PATH]            # default: the current directory (created if missin
 
 What it writes — never overwriting a file that already exists, so it is safe in a non-empty directory:
 
-- **`noeta.toml`** — package identity plus two build targets: `development` wires the four std dev tiers (`@test`, `@bench`, `@doc`, `@debug`) live, and `production` is an explicit name for the tier-free baseline (see [build targets](Dev-Tiers#build-targets--noetatoml)).
+- **`noeta.toml`** — package identity plus two build targets: `development` wires the four std dev tiers (`@test`, `@bench`, `@doc`, `@debug`) live, and `production` is an explicit name for the tier-free baseline (see [build targets](Dev-Tiers#naming-tiers-and-build-targets--noetatoml)).
 - **`src/main.noe`** — a fmt-canonical entry file exercising every tier: a documented function with a `@debug` trace, a two-case `@test` block, and a `@bench`.
 - **`.vscode/`** — the run/debug profiles the [Noeta extension](Editor-and-AI-Tooling) picks up (F5 debugging over `noeta dap`), plus the extension recommendation.
 - **`.gitignore`** — build/profiler artifacts ignored; `noeta.lock` deliberately not (commit it).
@@ -231,15 +231,20 @@ Exit codes match `check`: **0** on success, **1** if any expansion failed (a hoo
 
 ## `noeta migrate`
 
-Applies a project's **plain-SQL migrations**. `migrate` is **not a core verb** — it is an
+Applies a project's **schema migrations**. `migrate` is **not a core verb** — it is an
 extension-contributed command the **para/db package** provides (the `cargo clippy` model): it is
 available in a project whose manifest depends on `para/db` and binds the command
 ([`[trust.commands]`](Manifest#trustcommands--contributed-subcommands) / `migrate = "para/db"` — the
 key is the name you type, so `undo = "para/db:rollback"` would make it `noeta undo`), dispatched
-through the app's composed toolchain like any other extension subcommand. Forward-only `.sql` migrations apply from a `migrations/` directory,
-re-runnable seeds from `seeds/`, and the connection string resolves from `--db`, then
-`DATABASE_URL`, then the manifest's [`[db]` table](Manifest#db--database-connection). The full
-command reference — every invocation, seed semantics, `--reset`, and exit codes — is on the
+through the app's composed toolchain like any other extension subcommand.
+
+Forward-only migrations apply from a `migrations/` directory in filename order, re-runnable seeds
+from `seeds/`, and the connection string resolves from `--db`, then `DATABASE_URL`, then the
+manifest's [`[db]` table](Manifest#db--database-connection). A migration's **extension picks its
+body language**, and both kinds share one ordering: a `.noe` migration is a Noeta program declaring
+`up(): List<Statement>`, whose returned statements are lowered to the connected driver's DDL, while
+a `.sql` migration runs verbatim — the escape hatch for whatever a backend spells its own way. The
+full command reference — every invocation, seed semantics, `--reset`, and exit codes — is on the
 [para/db](para-db) page.
 
 ## `noeta serve` and `--watch`

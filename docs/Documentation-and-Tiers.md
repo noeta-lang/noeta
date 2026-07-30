@@ -108,7 +108,7 @@ Stored docs are *advisory metadata*, not provenance: unsigned, last-wins on re-p
 
 | Flag | Applies to | Effect |
 |---|---|---|
-| `--target <NAME>` | plain extraction (`noeta doc <FILE>`, no `--out`/`--package`) | Gate: extract only when the `doc` tier is live in that [build target](Dev-Tiers#build-targets--noetatoml); otherwise nothing is emitted. |
+| `--target <NAME>` | plain extraction (`noeta doc <FILE>`, no `--out`/`--package`) | Gate: extract only when the `doc` tier is live in that [build target](Dev-Tiers#naming-tiers-and-build-targets--noetatoml); otherwise nothing is emitted. |
 | `--api` | — | Document the intrinsic registry instead of `.noe` source. |
 | `--root <NAMESPACE>` | `--api` | Scope to the extensions rooted at one namespace (excluding `std`). |
 | `--non-builtin` | `--api` | Scope to every non-builtin extension — what `noeta publish` uses in a package's composed toolchain: it never guesses a root, so an extension whose namespace root diverges from its package name still documents. |

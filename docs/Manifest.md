@@ -240,7 +240,8 @@ them under a different key. The first `:` splits the identity from the exported 
 identity always contains a `/` and never a `:` — so the exported half may contain any character,
 including a space (`remote-add = "acme/tools:remote add"`).
 
-Unlike [`[tiers]`](#tiers--tier-providers) and `[directives]`, which are per-package and keyed by
+Unlike [`[tiers]`](#tiers--tier-providers) and [`[directives]`](#directives--extension-directives),
+which are per-package and keyed by
 the using package's own dependency keys, this table is **root-only** and keyed by full package
 **identity**: it is a capability grant, and a grant is the top-level project's alone to make. A
 dependency's own `[trust.commands]` is not read.
@@ -266,10 +267,41 @@ imported  = "warn"     # imported feeds are broader — warn, don't fail
 A bare string under `[trust]` — `advisories = "fail"` — sets every tier at once. A key that is not
 one of the three tiers, or an action that is not `"fail"`/`"warn"`/`"off"`, is a manifest error.
 
+## `[directives]` — extension directives
+
+The `[directives]` table names which dependency provides each extension `@`-directive your source
+uses — a local `@name` → `"dep-key[:exported]"`, the directive counterpart of
+[`[tiers]`](#tiers--tier-providers). A directive an extension declares is not ambient: a `@name` your
+package writes resolves only through an entry here.
+
+```toml
+[dependencies]
+para = { version = "^0.2", package = "para/api" }
+
+[directives]
+openapi = "para"            # para/api's `@openapi`
+oapi    = "para:openapi"    # the same directive, written `@oapi` in this package's source
+```
+
+The provider is a key of **this package's** `[dependencies]` — the same key a `use <key>.…` resolves
+through. Unlike `[tiers]` there is no built-in `"std"` provider, because a directive always comes
+from a dependency; naming a provider that is not a declared dependency is a manifest error.
+
+Both tables are **per-package**: a `@name` resolves in the source that wrote it, so a dependency's
+`@openapi` means whatever *its* manifest said regardless of what you bind `@openapi` to, and two
+packages can name one provider's directive differently. `:exported` renames — which is how two
+providers' same-named directives coexist. A local name may not appear in both `[directives]` and
+`[tiers]`: source cannot tell a directive from a tier before resolution, so a `@name` is one
+namespace.
+
+Binding a directive does **not** authorize the provider's native code. That stays root-only, in
+[`[trust].native`](#trust--grants-and-provenance-policy).
+
 ## `[tiers]` — tier providers
 
 The `[tiers]` table names which provider declares each dev-tier your source writes as `@name { … }` —
-a local `@name` → `"provider[:exported]"`, the tier counterpart of `[directives]`. The provider is the
+a local `@name` → `"provider[:exported]"`, the tier counterpart of
+[`[directives]`](#directives--extension-directives). The provider is the
 built-in `"std"` or a dependency declared in `[dependencies]` (or under a `[targets.<name>.dependencies]`,
 for a dev-only tier). There are no ambient built-in tiers — `test`/`bench`/`doc`/`debug` are ordinary
 `std` tiers you name here — and `:exported` renames one to dodge a collision between two providers'
@@ -283,8 +315,8 @@ crit  = "criterion:bench"   # a dependency's `bench` tier, written `@crit` local
 ```
 
 A provider is bound per package and is the same in every build; a target only selects which of these
-tiers are *live* (below). A local name may not appear in both `[tiers]` and `[directives]` — a `@name`
-is one namespace.
+tiers are *live* (below). A local name may not appear in both `[tiers]` and
+[`[directives]`](#directives--extension-directives) — a `@name` is one namespace.
 
 ## `[targets]` — build recipes
 
