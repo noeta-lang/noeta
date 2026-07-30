@@ -1329,6 +1329,33 @@ pub fn resolve_construct_target<'a>(info: &'a ReflectionInfo, name: &str) -> Con
     ConstructTarget::Rejected(format!("`{name}` is not a constructible type"))
 }
 
+/// The built-in `Validate` trait's name, as the membership table [`ReflectionInfo::trait_impls`]
+/// records it (a built-in trait keeps its bare name; a `.noe` in-body `impl Validate`, a standalone
+/// `impl Validate for T`, and a native type's ABI-advertised `traits: ["Validate"]` all land here).
+pub const VALIDATE_TRAIT: &str = "Validate";
+
+/// Whether a `construct` of `type_name` must run the built value's own `validate()` before handing it
+/// back — the shared decision both backends read, so the two cannot disagree about which
+/// constructions are validated.
+///
+/// **`construct` is a decode door, so it validates like one.** `json.try_parse::<T>` / `from_bytes`
+/// re-enter a type's `validate()` on the freshly-built value via `TypeRecipe::has_validator`, and that
+/// is what makes them exempt from the `@validated` construction ban (E0060) rather than a hole in it:
+/// they build directly *and* enforce the invariant. `construct` builds directly from untrusted
+/// data the same way, and used to skip the check — so `construct("Email", ["nope"])` handed back an
+/// `Email` whose own declaration says it cannot exist, the exact value `json.try_parse` refuses.
+///
+/// The condition is **implementing `Validate`**, not carrying `@validated` — the identical condition
+/// `type_to_recipe` computes `has_validator` from (`satisfies(Validate)`). `@validated` decides where
+/// a *literal* may be written; the validator's presence decides whether a data door enforces it, and
+/// a type that implements `Validate` without the decorator is already validated by `json.try_parse`.
+///
+/// Read off the same [`ReflectionInfo::trait_impls`] table `traits_of(value)` and the precise
+/// `x is dyn Validate` read, so "does this type validate" has one answer across every surface.
+pub fn construct_validates(info: &ReflectionInfo, type_name: &str) -> bool {
+    info.type_implements(type_name, VALIDATE_TRAIT)
+}
+
 /// One variant's payload as [`FieldSpecData`]s — the same projection [`ReflectionInfo::variant_specs`]
 /// reports, reused here so `construct` validates a payload against exactly the schema `variants_of`
 /// advertises for it.

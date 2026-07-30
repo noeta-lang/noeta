@@ -2211,6 +2211,12 @@ impl Interpreter {
     /// `name` spells a struct/class (`"ServerOpts"`) or an **enum case** (`"Shape.Circle"`), whose
     /// `fields` are that variant's payload; `resolve_construct_target` decides which, so both backends
     /// read the same spelling identically.
+    ///
+    /// A target that implements `Validate` has its `validate()` run on the freshly-built value before
+    /// the door hands it back, exactly as the `json`/`from_bytes` decode doors do — see
+    /// [`noeta_ast::reflect::construct_validates`] for why a construction door must. A rejection is
+    /// the same recoverable `Err(message)` every other refusal here is, carrying the validator's own
+    /// message.
     fn construct_dynamic(&mut self, name_val: Value, fields_val: Value, span: Span) -> Eval<Value> {
         let Value::Str(type_name) = &name_val else {
             return Ok(invoke_err(format!(
@@ -2231,24 +2237,33 @@ impl Interpreter {
             } => {
                 // An enum case is built directly rather than through `construct_object`: a variant has
                 // no defaults, no slot table and no methods of its own to inherit, so the payload
-                // values ARE the value. Pure, so it needs no `&mut self` and the reflection borrow
-                // above stays live through it.
-                return Ok(
-                    match plan_variant_payload(&type_name, &payload, &fields_val) {
-                        Err(msg) => invoke_err(msg),
-                        Ok(data) => builtin_enum(
-                            "Result",
-                            "Ok",
-                            vec![Value::Enum(Rc::new(EnumValue {
-                                enum_name: enum_name.to_string(),
-                                variant: variant.to_string(),
-                                data,
-                                variant_index: index as usize,
-                                reflect: None,
-                            }))],
-                        ),
+                // values ARE the value. Built under the immutable reflection borrow, which is released
+                // before the validator re-entry below (that needs `&mut self`).
+                let built = match plan_variant_payload(&type_name, &payload, &fields_val) {
+                    Err(msg) => Err(msg),
+                    Ok(data) => Ok(Value::Enum(Rc::new(EnumValue {
+                        enum_name: enum_name.to_string(),
+                        variant: variant.to_string(),
+                        data,
+                        variant_index: index as usize,
+                        reflect: None,
+                    }))),
+                };
+                // A validated ENUM validates on its own name, not on the `"Enum.Variant"` spelling the
+                // call site used — the membership table is keyed on the type, and the decode door runs
+                // the identical check for a `NativeOut::Variant`.
+                let validates =
+                    noeta_ast::reflect::construct_validates(&self.reflection, enum_name);
+                return Ok(match built {
+                    Err(msg) => invoke_err(msg),
+                    Ok(value) => match validates {
+                        true => match self.validate_message(value.clone(), span)? {
+                            Some(msg) => invoke_err(msg),
+                            None => builtin_enum("Result", "Ok", vec![value]),
+                        },
+                        false => builtin_enum("Result", "Ok", vec![value]),
                     },
-                );
+                });
             }
             noeta_ast::reflect::ConstructTarget::Fielded => {}
         }
@@ -2314,6 +2329,15 @@ impl Interpreter {
         // where the VM reported the qualified one — a divergence the differential catches.
         let reflect = native_fielded_repr(self.reg(), &type_name).map(Rc::new);
         let object = self.construct_object(&type_name, span, field_values, None, reflect, span)?;
+        // Bottom-up, exactly as the recipe walk is: every field value handed in was built and (if its
+        // own type validates) checked at its own door before it reached this call, and the defaulted
+        // slots are filled by `construct_object` above — so the type's own `validate` sees a complete,
+        // already-valid value, and a rejection short-circuits before the object escapes into `Ok`.
+        if noeta_ast::reflect::construct_validates(&self.reflection, &type_name)
+            && let Some(msg) = self.validate_message(object.clone(), span)?
+        {
+            return Ok(invoke_err(msg));
+        }
         Ok(builtin_enum("Result", "Ok", vec![object]))
     }
 
