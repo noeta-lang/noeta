@@ -74,9 +74,16 @@ commands** (like `para/db`'s `noeta migrate`):
 
 ```toml
 [trust]
-native   = ["para/db"]
-commands = ["para/db"]
+native = ["para/db"]
+
+[trust.commands]
+migrate = "para/db"          # `noeta migrate`
 ```
+
+Native code is authorized per package. A command is authorized **one at a time**, and the same
+entry decides what you type: the key is the local name (`noeta migrate`), the value the provider —
+add `:exported` to rename one (`undo = "para/db:rollback"`), which is also how two packages
+exporting the same command name coexist.
 
 An unauthorized native package or command is refused with an error naming the grant to add —
 nothing runs on the strength of appearing in `[dependencies]` alone. `noeta audit` reports the

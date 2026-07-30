@@ -196,24 +196,57 @@ trust model.
 [trust]
 # Packages allowed to compile and run their native Rust crate (runs cargo/build.rs/proc-macros):
 native = ["acme/imgfx"]
-# Packages allowed to contribute `noeta <subcommand>` CLI commands:
-commands = ["acme/tools"]
 # Require signed provenance: true (every scope), false (default), or a list of scopes:
 require_provenance = ["acme", "para"]
 # Require every registry dependency to appear in the transparency log:
 require_transparency = true
 # Refuse a release published within this window (defends against a compromised-token rush):
 publish_cooldown = "24h"
+
+# Each `noeta <subcommand>` a dependency may contribute, under the name you choose for it:
+[trust.commands]
+migrate = "para/db"              # `noeta migrate`
+undo    = "para/db:rollback"     # `noeta undo`, renamed from para/db's `rollback`
 ```
 
-- **`native`** and **`commands`** are arrays of `"company/package"` — an unlisted package's native
-  crate is refused and its CLI commands are ignored. A typo'd identity is a hard error.
+- **`native`** is an array of `"company/package"` — an unlisted package's native crate is refused.
+  A typo'd identity is a hard error.
 - **`require_provenance`** is a boolean or an array of **scopes** (the `company` half, not full
   package names): `true` requires provenance from every scope, `false` (the default) from none,
   `["acme"]` only from the named scopes.
 - **`require_transparency`** is a boolean (default `false`).
 - **`publish_cooldown`** is a duration string — an integer with an optional `s`/`m`/`h`/`d` suffix
   (`"24h"`, `"30m"`, `"7d"`; a bare number is seconds), not a raw number.
+
+### `[trust.commands]` — contributed subcommands
+
+A dependency that ships CLI commands (`ExtCommand` — see
+[Native Extensions](Native-Extensions#extension-commands)) contributes none of them by default.
+Each entry binds one command: the **key** is the name you will type (`noeta <local>`), the value is
+the providing package, optionally followed by `:` and the name that package exported it under.
+
+```toml
+[trust.commands]
+migrate = "para/db"              # `noeta migrate` — no rename, so the exported name is `migrate`
+undo    = "para/db:rollback"     # `noeta undo` — para/db exported it as `rollback`
+```
+
+The binding *is* the grant. One entry both authorizes the provider to contribute this one command
+and fixes the name it appears under, so a package is never named twice to be trusted and bound, and
+a command from a package with no entry is never registered — a capability you never asked for.
+
+Because the local name is yours, two packages exporting the same command name coexist: bind one of
+them under a different key. The first `:` splits the identity from the exported name — a package
+identity always contains a `/` and never a `:` — so the exported half may contain any character,
+including a space (`remote-add = "acme/tools:remote add"`).
+
+Unlike [`[tiers]`](#tiers--tier-providers) and `[directives]`, which are per-package and keyed by
+the using package's own dependency keys, this table is **root-only** and keyed by full package
+**identity**: it is a capability grant, and a grant is the top-level project's alone to make. A
+dependency's own `[trust.commands]` is not read.
+
+The pre-binding form — `commands = ["company/package"]`, an array that granted every command a
+package shipped — is refused with a message naming its replacement.
 
 ### `[trust.advisories]` — per-tier advisory policy
 

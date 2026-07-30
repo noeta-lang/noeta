@@ -233,9 +233,10 @@ Exit codes match `check`: **0** on success, **1** if any expansion failed (a hoo
 
 Applies a project's **plain-SQL migrations**. `migrate` is **not a core verb** — it is an
 extension-contributed command the **para/db package** provides (the `cargo clippy` model): it is
-available in a project whose manifest depends on `para/db` and trusts its commands
-(`[trust] commands = ["para/db"]`), dispatched through the app's composed toolchain like any other
-extension subcommand. Forward-only `.sql` migrations apply from a `migrations/` directory,
+available in a project whose manifest depends on `para/db` and binds the command
+([`[trust.commands]`](Manifest#trustcommands--contributed-subcommands) / `migrate = "para/db"` — the
+key is the name you type, so `undo = "para/db:rollback"` would make it `noeta undo`), dispatched
+through the app's composed toolchain like any other extension subcommand. Forward-only `.sql` migrations apply from a `migrations/` directory,
 re-runnable seeds from `seeds/`, and the connection string resolves from `--db`, then
 `DATABASE_URL`, then the manifest's [`[db]` table](Manifest#db--database-connection). The full
 command reference — every invocation, seed semantics, `--reset`, and exit codes — is on the
