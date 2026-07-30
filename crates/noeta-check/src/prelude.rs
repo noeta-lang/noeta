@@ -15,10 +15,7 @@ impl Checker {
     /// element type of `attributes_of::<T>()`'s result; it is an ordinary generic struct so member
     /// access (`a.target`, `a.value`) and `value`'s instantiation to `T` reuse the generic path.
     pub(crate) fn register_prelude(&mut self) {
-        self.register_prelude_struct(
-            noeta_ast::reflect::ATTRIBUTED,
-            &[Type::String, Type::Named("T".to_string(), Vec::new())],
-        );
+        self.register_prelude_struct(noeta_ast::reflect::ATTRIBUTED);
         self.symbols.generic_types.insert(
             noeta_ast::reflect::ATTRIBUTED.to_string(),
             vec!["T".to_string()],
@@ -506,97 +503,54 @@ impl Checker {
     }
 
     /// Register the prelude structs that ride alongside the prelude *enums* — `RoleBinding`,
-    /// `ParamInfo`, `FieldEntry`, `FieldSpec`. (The enums themselves, `Semantic` included, come from
-    /// the one shared table in [`register_prelude_enums`](Self::register_prelude_enums).)
+    /// `ParamInfo`, `FieldEntry`, `FieldSpec`, `VariantSpec`. (The enums themselves, `Semantic`
+    /// included, come from the one shared table in
+    /// [`register_prelude_enums`](Self::register_prelude_enums).)
     ///
-    /// `RoleBinding { target: string, role: Enum }` is the element type of `roles_of()`'s result —
-    /// `role` is the abstract `Enum` kind because a binding's role may be any `@semantic` enum, not
-    /// a single fixed type. Each registers like any prelude type, so a user declaration of the same
-    /// name shadows it and the backends materialize the matching shapes.
+    /// Each registers like any prelude type, so a user declaration of the same name shadows it and
+    /// the backends materialize the matching shapes. What each field *is*, and why, is stated once —
+    /// in the shared declaration table these read ([`noeta_ast::reflect::prelude_structs`]), which
+    /// now carries the field types the hand-written lists here used to.
     pub(crate) fn register_semantic_prelude(&mut self) {
-        let type_adt = || Type::Named(noeta_ast::reflect::TYPE_ENUM.to_string(), Vec::new());
-        // `RoleBinding { target: string, role: Enum }`.
-        self.register_prelude_struct(
-            noeta_ast::reflect::ROLE_BINDING,
-            &[Type::String, Type::Kind(noeta_types::TypeKind::Enum)],
-        );
-        // `ParamInfo { name: string, type: Type, optional: bool, attrs: List<dyn> }` — the element
-        // type of `params_of()`'s result. `type` is the prelude `Type` enum (the same ADT `type_of`
-        // returns), built from the parameter's declared type annotation; `optional` is true when the
-        // parameter declared a default, so a signature-driven consumer can tell a required parameter
-        // from one a call may omit; `attrs` holds the parameter's `#[...]` attribute instances.
-        //
-        // `attrs` is `List<dyn>` because a parameter's attributes are heterogeneous — `#[Arg]` and
-        // `#[Sensitive]` are different structs — so there is no one element type to name. A consumer
-        // recovers the one it cares about by narrowing (`if a is Arg { … }`), the same way it would
-        // with any `dyn`.
-        self.register_prelude_struct(
-            noeta_ast::reflect::PARAM_INFO,
-            &[
-                Type::String,
-                type_adt(),
-                Type::Bool,
-                Type::List(Box::new(Type::Dyn)),
-            ],
-        );
-        // `FieldEntry { name: string, value: dyn }` — the element type of `fields_of()`'s result
-        // (derive layer 3).
-        self.register_prelude_struct(noeta_ast::reflect::FIELD_ENTRY, &[Type::String, Type::Dyn]);
-        // `FieldSpec { name: string, type: Type, optional: bool }` — the element type of the
-        // TYPE-level `field_specs_of::<T>()` / `field_specs_of(name)` query. The type-level twin of
-        // `FieldEntry`: `type` is the field's declared type as the same `Type` ADT `type_of` returns
-        // (precise, from the declaration — not a value's erased head), and `optional` reports whether
-        // the field declared a default.
-        self.register_prelude_struct(
-            noeta_ast::reflect::FIELD_SPEC,
-            &[Type::String, type_adt(), Type::Bool],
-        );
-        // `VariantSpec { name: string, payload: List<FieldSpec>, backing: ?dyn }` — the element type
-        // of the TYPE-level `variants_of::<T>()` / `variants_of(name)` query, the enum twin of
-        // `FieldSpec`. `payload` reuses `FieldSpec` because a variant payload IS ordinary declared
-        // field data (a positional payload carries a synthesized `_0`/`_1` name and its real declared
-        // type), so the two halves of the type-level surface share one member vocabulary. `backing` is
-        // the variant's value in a backed enum — `?dyn` rather than `?string`/`?int` because a backing
-        // may be either, and `none` for a plain enum.
-        self.register_prelude_struct(
-            noeta_ast::reflect::VARIANT_SPEC,
-            &[
-                Type::String,
-                Type::List(Box::new(Type::Named(
-                    noeta_ast::reflect::FIELD_SPEC.to_string(),
-                    Vec::new(),
-                ))),
-                Type::Option(Box::new(Type::Dyn)),
-            ],
-        );
+        self.register_prelude_struct(noeta_ast::reflect::ROLE_BINDING);
+        self.register_prelude_struct(noeta_ast::reflect::PARAM_INFO);
+        self.register_prelude_struct(noeta_ast::reflect::FIELD_ENTRY);
+        self.register_prelude_struct(noeta_ast::reflect::FIELD_SPEC);
+        self.register_prelude_struct(noeta_ast::reflect::VARIANT_SPEC);
     }
 
-    /// Register one **prelude struct**: its field *names* come from the shared declaration table
+    /// Register one **prelude struct** from the shared declaration table
     /// ([`noeta_ast::reflect::prelude_structs`]) — the same table both backends materialize and
-    /// construct these values from — and its field *types* from the caller, since the checker
-    /// lattice is not visible to `noeta-ast`. Splitting it that way is what stops the checker and
-    /// the backends from coming to disagree about *which* fields a prelude struct has.
+    /// construct these values from.
+    ///
+    /// Its field *types* used to come from the caller, because the checker lattice is not visible to
+    /// `noeta-ast`. That split is what made the prelude structs invisible to reflection: the field
+    /// names were shared, the types were not, and reflection — which cannot see the lattice either —
+    /// had nothing to report, so `field_specs_of("FieldSpec")` and `variants_of("FieldSpec")` were
+    /// both empty about the very types a reflection consumer walks while reflecting. The table now
+    /// carries a closed [`PreludeStructFieldTy`](noeta_ast::reflect::PreludeStructFieldTy)
+    /// vocabulary and [`prelude_struct_field_type`] projects it onto the lattice, so the checker and
+    /// reflection can no more disagree about a prelude struct's field *types* than about its field
+    /// *names*.
     ///
     /// Registered like any prelude type (before `collect`), so a user declaration of the same name
-    /// shadows it. Panics unless `types` has exactly one entry per table field: both sides describe
-    /// one fixed declaration, so a mismatch is a programming error, and every program's first check
-    /// runs this.
-    fn register_prelude_struct(&mut self, name: &str, types: &[Type]) {
-        let fields = noeta_ast::reflect::prelude_struct_fields(name);
-        assert_eq!(
-            fields.len(),
-            types.len(),
-            "prelude struct `{name}`: {} field(s) in the shared table, {} type(s) here",
-            fields.len(),
-            types.len()
-        );
+    /// shadows it. Panics for a name the table does not carry: every call site passes one of its
+    /// constants, so a miss is a programming error, and every program's first check runs this.
+    fn register_prelude_struct(&mut self, name: &str) {
+        let decl = noeta_ast::reflect::prelude_struct(name)
+            .unwrap_or_else(|| panic!("`{name}` is not a prelude struct"));
+        let types: Vec<Type> = decl
+            .field_types
+            .iter()
+            .map(|t| prelude_struct_field_type(*t))
+            .collect();
         self.symbols.types.insert(name.to_string());
         self.symbols
             .type_kinds
             .insert(name.to_string(), noeta_types::TypeKind::Struct);
         self.symbols.records.insert(
             name.to_string(),
-            fields.into_iter().zip(types.iter().cloned()).collect(),
+            decl.fields.into_iter().zip(types).collect(),
         );
     }
 
@@ -608,18 +562,9 @@ impl Checker {
     /// `attributes_of::<Config>()`, whose `target` matches `name`. Registered like any prelude
     /// type, so a user declaration shadows it.
     pub(crate) fn register_tier_prelude(&mut self) {
-        self.register_prelude_struct(
-            noeta_ast::reflect::TIER_ROOT,
-            &[
-                Type::String,
-                Type::Fn {
-                    params: Vec::new(),
-                    ret: Box::new(Type::Unit),
-                },
-            ],
-        );
+        self.register_prelude_struct(noeta_ast::reflect::TIER_ROOT);
         // Its text-tier counterpart (text-tiers arc): one `TierText` per activated verbatim body.
-        self.register_prelude_struct(noeta_ast::reflect::TIER_TEXT, &[Type::String, Type::String]);
+        self.register_prelude_struct(noeta_ast::reflect::TIER_TEXT);
     }
 
     /// Register **every prelude enum** — `Ordering`, `Cancelled`, `Semantic`, `Layout`, and the
@@ -673,6 +618,36 @@ fn prelude_field_type(enum_name: &str, field: noeta_ast::reflect::PreludeFieldTy
         F::Str => Type::String,
         F::Int => Type::Int,
         F::Bool => Type::Bool,
+    }
+}
+
+/// Map one prelude **struct** field's declared shape onto the checker lattice — the struct twin of
+/// [`prelude_field_type`], and the lattice half of the projection whose reflection half is
+/// [`PreludeStructFieldTy::repr`](noeta_ast::reflect::PreludeStructFieldTy::repr). One vocabulary,
+/// two lattices: this is what replaced the hand-written `&[Type]` lists at the registration sites, so
+/// a prelude struct's field types are stated once and every consumer — the checker, both backends'
+/// materializations, and now reflection — reads that one statement.
+fn prelude_struct_field_type(field: noeta_ast::reflect::PreludeStructFieldTy) -> Type {
+    use noeta_ast::reflect::PreludeStructFieldTy as F;
+    match field {
+        F::Str => Type::String,
+        F::Bool => Type::Bool,
+        F::Dyn => Type::Dyn,
+        // The prelude `Type` ADT enum — the same type `type_of` returns.
+        F::TypeAdt => Type::Named(noeta_ast::reflect::TYPE_ENUM.to_string(), Vec::new()),
+        // The abstract `Enum` kind: any enum. A lattice type of its own, which is why the vocabulary
+        // spells it separately from a named enum — a role binding's role may come from any
+        // `@semantic` enum, not one fixed one.
+        F::EnumKind => Type::Kind(noeta_types::TypeKind::Enum),
+        // A nominal — another prelude struct, or this struct's own type parameter. Both are a named
+        // type to the lattice; a parameter resolves through `generic_types` at instantiation.
+        F::Struct(n) | F::Param(n) => Type::Named(n.to_string(), Vec::new()),
+        F::List(inner) => Type::List(Box::new(prelude_struct_field_type(*inner))),
+        F::Option(inner) => Type::Option(Box::new(prelude_struct_field_type(*inner))),
+        F::VoidFn => Type::Fn {
+            params: Vec::new(),
+            ret: Box::new(Type::Unit),
+        },
     }
 }
 

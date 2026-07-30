@@ -133,6 +133,12 @@ fn bench_baseline_saves_and_compares() {
     // seen once to report no baseline comparison at all under a fully parallel suite, and did not
     // reproduce — removing the shared-directory variable rules that class out rather than leaving a
     // rare CI red no one can reproduce.
+    //
+    // That sighting is now understood, and it was not isolation: under enough load the two-point
+    // subtraction does not resolve, and `--save-baseline` used to persist the clamped `0.0`, after
+    // which `--baseline` skipped the delta in silence and this assertion failed with no explanation.
+    // The product no longer does that — the save is refused, with the reason on stderr — so if this
+    // test goes red under load again it now says why rather than pointing at a missing substring.
     let cache_dir = PathBuf::from(concat!(
         env!("CARGO_TARGET_TMPDIR"),
         "/bench-baseline-cache"
@@ -179,6 +185,83 @@ fn bench_baseline_saves_and_compares() {
         .failure()
         .code(2)
         .stderr(predicate::str::contains("no baseline `nope`"));
+}
+
+#[test]
+fn bench_baseline_says_when_it_cannot_compare() {
+    // `--baseline <name>` is a request for a comparison, so every way of not producing one has to be
+    // visible. The delta used to be dropped in silence whenever the baseline had no usable entry —
+    // which is how a baseline of `0.0` (persisted by the old `.max(0.0)` clamp) made every later
+    // comparison vacuous without anything saying so. Here the silent case is the ordinary one: a
+    // benchmark added after the baseline was saved.
+    // A body with real margin over timer noise: `--save-baseline` now *refuses* an unresolved
+    // measurement, so a bench too cheap to resolve makes this test fail on the setup step rather than
+    // on what it is testing. (Which is the fix working — it caught exactly that while being written.)
+    let one = "fn work(n: int): int {\n\
+                   mut t = 0\n\
+                   for i in 0..n { t = t + i }\n\
+                   return t\n\
+               }\n\
+               @bench(iterations: 2000) fn kept(): void { work(2000) }\n";
+    let dir = temp_dir("bench_no_entry", &[("b.noe", one)]);
+    let file = dir.join("b.noe");
+    // Owns its cache dir for the same reason as `bench_baseline_saves_and_compares` above.
+    let cache_dir = dir.join("cache");
+    let bench = || {
+        let mut cmd = lang();
+        cmd.env("NOETA_CACHE_DIR", &cache_dir);
+        cmd
+    };
+    bench()
+        .arg("bench")
+        .arg(&file)
+        .arg("--save-baseline")
+        .arg("cli-test")
+        .assert()
+        .success();
+
+    // A second benchmark the baseline knows nothing about.
+    std::fs::write(
+        &file,
+        format!("{one}@bench(iterations: 2000) fn added(): void {{ work(1500) }}\n"),
+    )
+    .expect("write the two-bench program");
+    bench()
+        .arg("bench")
+        .arg(&file)
+        .arg("--baseline")
+        .arg("cli-test")
+        .assert()
+        .success()
+        .stdout(
+            // The known bench still compares; the new one says why it does not.
+            predicate::str::contains("% vs cli-test").and(predicate::str::contains(
+                "no comparison vs cli-test: this baseline has no entry for this benchmark",
+            )),
+        );
+    // And the `--json` seam carries the same fact, so a delta consumer can tell "unchanged" from
+    // "never compared".
+    let out = bench()
+        .arg("bench")
+        .arg(&file)
+        .arg("--baseline")
+        .arg("cli-test")
+        .arg("--json")
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("valid JSON");
+    let added = json["benches"]
+        .as_array()
+        .expect("benches")
+        .iter()
+        .find(|b| b["name"] == "added")
+        .expect("the added bench");
+    assert!(added["baselineDeltaPct"].is_null());
+    assert_eq!(
+        added["baselineNote"],
+        serde_json::json!("this baseline has no entry for this benchmark")
+    );
 }
 
 #[test]

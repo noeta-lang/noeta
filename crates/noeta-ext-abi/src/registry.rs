@@ -3281,12 +3281,20 @@ impl Registry {
         self.structs().find(|t| t.is_qualified(qualified))
     }
 
+    /// Find a native **fielded type** (class OR struct) by its **qualified identity** — the
+    /// kind-agnostic member of the `find_*_qualified` family, for a caller that holds a qualified
+    /// name and does not care which of the two kinds answers (the lowering pass that resolves a
+    /// leaf-imported native type name to its reflection key). Allocation-free probing, like the rest
+    /// of the family.
+    pub fn find_fielded_qualified(&self, qualified: &str) -> Option<&'static ExtFielded> {
+        self.fielded().find(|t| t.is_qualified(qualified))
+    }
+
     /// Resolve a native **fielded type** (class OR struct) from either a qualified identity or a
     /// bare short name. What both backends consult to materialize a [`NativeOut::Instance`] with the
     /// right shape kind (via [`ExtFielded::kind`]) and to marshal a native fielded receiver/arg.
     pub fn resolve_fielded(&self, name: &str) -> Option<&'static ExtFielded> {
-        self.fielded()
-            .find(|t| t.is_qualified(name))
+        self.find_fielded_qualified(name)
             .or_else(|| self.fielded().find(|t| t.name == name))
     }
 

@@ -650,7 +650,7 @@ pub fn lower_with_sites_opts(
         synth_step_name: None,
         synth_step_captures: None,
         type_aliases: collect_type_aliases(program, registry),
-        native_enum_imports: collect_native_enum_imports(program, registry),
+        native_type_imports: collect_native_type_imports(program, registry),
         expr_tiers: noeta_ast::desugar::expr_tier_handlers(program)
             .into_iter()
             .collect(),
@@ -704,13 +704,15 @@ struct Lowerer<'a> {
     ///
     /// A plain (non-aliased) *user* import needs no entry — its local name is already the tag.
     type_aliases: HashMap<String, String>,
-    /// The **qualified identity** each leaf-imported native ENUM's local name denotes (`Framing` →
+    /// The **qualified identity** each leaf-imported native type's local name denotes (`Framing` →
     /// `std.http.Framing`), built from the program's own `use` statements — the rewrite
     /// [`Lowerer::lower_type_operand`] applies so a reflection turbofish keys on the name the
-    /// reflection artifact registers the type under. Import-driven rather than a registry-wide
-    /// short-name lookup on purpose: only a name this program actually imported is rewritten, so a
-    /// program's own `Framing` is never redirected to a native type it never mentioned.
-    native_enum_imports: HashMap<String, String>,
+    /// reflection artifact registers the type under. Every native nominal kind (enum, fielded,
+    /// extern handle) is resolved; see [`collect_native_type_imports`]. Import-driven rather than a
+    /// registry-wide short-name lookup on purpose: only a name this program actually imported is
+    /// rewritten, so a program's own `Framing` is never redirected to a native type it never
+    /// mentioned.
+    native_type_imports: HashMap<String, String>,
     /// The program's declared expression-tier handlers (tier name → handler fn name), so an
     /// [`Expr::TierExpr`] lowers as the handler call it means — the same
     /// [`noeta_ast::desugar::tier_expr_call`] construction the checker typed. The checker gated
@@ -875,10 +877,18 @@ fn collect_type_aliases(
     map
 }
 
-/// The **qualified identity** each leaf-imported native enum's local name denotes (`use
+/// The **qualified identity** each leaf-imported native type's local name denotes (`use
 /// std.http.{Framing}` → `Framing` ⇒ `std.http.Framing`, honoring `as` renames) — the key the
-/// reflection artifact registers a native enum under, and the name `type_of` reports for one of its
+/// reflection artifact registers a native type under, and the name `type_of` reports for one of its
 /// values.
+///
+/// Every native nominal kind is resolved, not just enums: an **enum**, a **fielded** type (a native
+/// class or value struct), and an **extern handle** type. It covered enums only until the native
+/// fielded types reached the reflection artifact, and the omission had the same shape for each kind —
+/// `field_specs_of::<Frame>()` answered the empty schema right after `use std.http.{Frame}`, and
+/// `type_name::<Uuid>()` answered `"Uuid"`, a name nothing is registered under. The latter is the
+/// worse of the two: `type_name`'s whole job is to hand a key to something that looks it up, so a
+/// plausible-looking wrong name travels silently, which is exactly what the surface exists to prevent.
 ///
 /// Only the *leaf* form needs an entry: a group import (`use std.http` → `http.Framing`) is already
 /// rewritten to the qualified identity by the loader's native-type aliasing, and a name written
@@ -886,10 +896,10 @@ fn collect_type_aliases(
 /// short name the program never imported is left exactly as written.
 ///
 /// **A local declaration wins**, the same shadowing rule the loader's own native-type aliasing
-/// follows: a name the linked program declares itself is never rewritten to a native enum of that
+/// follows: a name the linked program declares itself is never rewritten to a native type of that
 /// name. (A declaration under a `namespace` links to a qualified name and could not collide in the
 /// first place; the guard is what covers the un-namespaced case.)
-fn collect_native_enum_imports(
+fn collect_native_type_imports(
     program: &AstProgram,
     registry: &'static noeta_ext_abi::registry::Registry,
 ) -> HashMap<String, String> {
@@ -915,8 +925,24 @@ fn collect_native_enum_imports(
                 continue;
             }
             let qualified = format!("{prefix}.{}", n.name);
-            if let Some(en) = registry.find_enum_qualified(&qualified) {
-                map.insert(local.to_string(), en.qualified());
+            // One probe per native nominal kind, all keyed on the qualified identity the import
+            // spells out; a name that resolves to none of them is not a native type and is left as
+            // written.
+            let resolved = registry
+                .find_enum_qualified(&qualified)
+                .map(|t| t.qualified())
+                .or_else(|| {
+                    registry
+                        .find_fielded_qualified(&qualified)
+                        .map(|t| t.qualified())
+                })
+                .or_else(|| {
+                    registry
+                        .find_type_qualified(&qualified)
+                        .map(|t| t.qualified())
+                });
+            if let Some(q) = resolved {
+                map.insert(local.to_string(), q);
             }
         }
     }
@@ -1719,10 +1745,11 @@ impl Lowerer<'_> {
     /// (`use std.http.{Framing}`): the loader aliases only native *attribute* structs there, since
     /// rewriting the rest would also rewrite the value spelling the backends bind under. Those
     /// resolve through the checker instead — so the head name arrives short, while the reflection
-    /// artifact keys a native enum on the qualified identity `type_of` stamps on its values. Left
-    /// alone, `variants_of::<Framing>()` folded to a name nothing is registered under and answered
-    /// the empty list, right after the program imported the type. [`Self::native_enum_imports`]
-    /// carries the one rewrite that closes it.
+    /// artifact keys a native type on the qualified identity `type_of` stamps on its values. Left
+    /// alone, `variants_of::<Framing>()` / `field_specs_of::<Frame>()` folded to a name nothing is
+    /// registered under and answered the empty list, right after the program imported the type, and
+    /// `type_name::<Uuid>()` handed out that unregistered name as a key.
+    /// [`Self::native_type_imports`] carries the one rewrite that closes it.
     fn lower_type_operand(
         &mut self,
         operand: &TypeOperand,
@@ -1735,8 +1762,8 @@ impl Lowerer<'_> {
     }
 
     /// The **name a reflection surface keys on** for a statically written type: its linked head
-    /// name, with a leaf-imported native enum's short spelling resolved to the qualified identity
-    /// the reflection artifact registers it under (see [`Lowerer::native_enum_imports`]).
+    /// name, with a leaf-imported native type's short spelling resolved to the qualified identity
+    /// the reflection artifact registers it under (see [`Lowerer::native_type_imports`]).
     ///
     /// Shared by the turbofish operands (`field_specs_of::<T>()`, `variants_of::<T>()`,
     /// `construct::<T>(…)`) and by `type_name::<T>()`, which is the surface whose whole job is to
@@ -1744,7 +1771,7 @@ impl Lowerer<'_> {
     /// and `variants_of(type_name::<Framing>())` answers what `variants_of::<Framing>()` does.
     fn reflection_head_name(&self, ty: &TypeRef) -> String {
         let name = ty.head_name();
-        self.native_enum_imports
+        self.native_type_imports
             .get(name.as_str())
             .cloned()
             .unwrap_or(name)
