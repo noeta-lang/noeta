@@ -437,9 +437,12 @@ impl Checker {
         // *position* is not one the forwarding pre-pass reads a declared type from; an instance
         // method cannot, because its class parameters ride the receiver's reflected tag and a tag on
         // the receiver cannot become a tag on something the body constructs.
+        //
+        // Non-empty by construction: the caller reached here because some argument failed
+        // `fully_concrete`, and the check above already refused every other way that can fail (a
+        // `dyn`, a `dyn Trait`, an inference hole), leaving a parameter mention as the only cause.
         let open: Vec<String> = in_scope
             .iter()
-            .filter(|p| self.mentions_in_scope_param(&Type::Named((*p).clone(), Vec::new())))
             .filter(|p| {
                 args.iter()
                     .any(|a| mentions_param(a, std::slice::from_ref(*p)))
@@ -447,6 +450,11 @@ impl Checker {
             .cloned()
             .collect();
         let names = open.join("`, `");
+        let is_are = if open.len() == 1 {
+            "is a type parameter"
+        } else {
+            "are type parameters"
+        };
         let forwardable = open
             .iter()
             .all(|p| self.coloring.forwardable_params.contains(p));
@@ -454,8 +462,8 @@ impl Checker {
             DiagnosticCode::InvalidTypeArguments,
             span,
             format!(
-                "this `{type_name}` cannot record its instantiation: `{names}` is a type parameter \
-                 of the enclosing declaration, and no instantiation of it reaches this position"
+                "this `{type_name}` cannot record its instantiation: `{names}` {is_are} of the \
+                 enclosing declaration, and no instantiation reaches this position"
             ),
         );
         if forwardable {
