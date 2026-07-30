@@ -1,0 +1,37 @@
+// A **delegating factory** of a generic type now records too — the case the fresh-constructor rule
+// deliberately cannot cover on its own.
+//
+// `relay` is NOT a fresh constructor (`compute_fresh_constructors` requires every `return` to hand
+// back a bare literal; this one returns another call's result), so its own call site may not stamp the
+// object: the value it returns need not be freshly allocated by *this* call, and re-tagging a possibly
+// shared instance is what the fresh-constructor rule exists to forbid.
+//
+// It works anyway, and through the other end: the `Inner.new(raw)` INSIDE `relay` is a fresh
+// constructor at a checked position (`relay`'s declared return), and `T` there is `relay`'s own class
+// parameter — so it takes the hidden slot, and the caller's instantiation reaches the literal that
+// really is fresh. The tag lands on the object at the one point it is provably unshared.
+//
+// Without an annotation to pin the instantiation this is E0023 at check time (nothing determines `T`),
+// which is the boundary `class_type_param_self_less_uninferable` pins for the same channel.
+// expect: stdout "todos:Todo"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+class Inner<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Inner<T> {
+        return Inner { tbl: tbl };
+    }
+
+    fn relay(raw: string): Inner<T> {
+        return Inner.new(raw);
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+i: Inner<Todo> = Inner.relay("todos");
+echo i.model();

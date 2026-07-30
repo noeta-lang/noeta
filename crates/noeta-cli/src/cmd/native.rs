@@ -563,6 +563,7 @@ mod tests {
             tojson_derives: Vec::new(),
             deserialize_recipes: Vec::new(),
             type_args: Vec::new(),
+            type_arg_reprs: Vec::new(),
             destruct_reachable: Vec::new(),
             cache_slots: 0,
             reflection: Default::default(),

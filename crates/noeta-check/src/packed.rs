@@ -319,6 +319,17 @@ impl Checker {
     ///   parameter. A partially-open instantiation is left untagged rather than recorded as
     ///   `Repo<dyn>`: erasure is what the value already reports, and inventing a `dyn` argument
     ///   would claim a fact the call site does not have.
+    ///
+    /// The third condition has exactly one **narrowing**, and it is what makes a generic type able to
+    /// build another generic type out of its own parameter: an instantiation left open *only* by
+    /// **forwardable** in-scope parameters, for which this body carries a hidden type-argument slot
+    /// whose template is this very instantiation, is recorded as a
+    /// [`dynamic construction site`](crate::Sites::dynamic_construction_sites). Nothing is invented —
+    /// the concrete `TypeRepr` is still resolved and interned *statically*, by the outer call that
+    /// pins `T`; only *which* interned entry applies is read from the slot. A parameter with no
+    /// channel to fill it (an instance method's, whose class parameters ride the receiver's tag, or a
+    /// position the pre-pass does not see) still records nothing, and [`Self::report_unrecordable`]
+    /// turns the run-time abort that would follow into a check-time diagnostic.
     pub(crate) fn note_constructor_call(
         &mut self,
         type_name: &str,
@@ -334,10 +345,142 @@ impl Checker {
             return;
         }
         let Type::Named(n, args) = ret else { return };
-        if n != type_name || args.is_empty() || !args.iter().all(|a| self.fully_concrete(a)) {
+        if n != type_name || args.is_empty() {
             return;
         }
-        self.note_construction(ret, span);
+        if args.iter().all(|a| self.fully_concrete(a)) {
+            self.note_construction(ret, span);
+            return;
+        }
+        // Open by an in-scope parameter. The slot channel is the only thing that can still deliver
+        // the instantiation, and the template match is the whole gate: a slot exists for this exact
+        // instantiation only because the forwarding pre-pass saw a *declared* position demanding it,
+        // and the outer call resolved that template against its own (concrete) instantiation.
+        if let Some(slot) = self.dynamic_ctor_slot(ret) {
+            self.sites.dynamic_construction_sites.insert(span, slot);
+            return;
+        }
+        self.report_unrecordable(type_name, ret, span);
+    }
+
+    /// Whether `ty` is concrete **except** for bare mentions of the type parameters `allowed` — the
+    /// dynamic half of [`Self::fully_concrete`], parameterized over *which* openness is acceptable.
+    ///
+    /// Two callers, one judgment. Passing [`Coloring::forwardable_params`] asks "can the slot channel
+    /// still deliver this?" — the gate on recording a dynamic construction site. Passing every
+    /// in-scope parameter asks "is the only thing missing an instantiation?" — the gate on
+    /// [`Self::report_unrecordable`], which must stay silent where the openness is an ordinary
+    /// inference hole instead (the deliberate bottom-up path a `fn keep<T>(x: T)` argument takes).
+    ///
+    /// Deliberately as strict as its static twin everywhere else: a `dyn`, a `dyn Trait` or an
+    /// inference hole is refused wherever it appears, and so is a mention of an in-scope parameter
+    /// outside `allowed`.
+    pub(crate) fn open_only_by_params(&self, ty: &Type, allowed: &[String]) -> bool {
+        if let Type::Named(n, args) = ty
+            && args.is_empty()
+            && allowed.iter().any(|p| p == n)
+        {
+            return true;
+        }
+        if matches!(ty, Type::Dyn | Type::Unknown | Type::DynTrait(_)) {
+            return false;
+        }
+        let rec = |t: &Type| self.open_only_by_params(t, allowed);
+        match ty {
+            // A composite's HEAD may not itself be a parameter (`T<int>` is not a type this
+            // language spells, but a bare `T` reaching here has already failed the check above —
+            // it is an in-scope parameter no slot carries).
+            Type::Named(n, args) => {
+                !self.mentions_in_scope_param(&Type::Named(n.clone(), Vec::new()))
+                    && args.iter().all(rec)
+            }
+            Type::Tuple(args) | Type::Union(args) => args.iter().all(rec),
+            Type::List(e) | Type::Set(e) | Type::Option(e) => rec(e),
+            Type::Map(k, v) | Type::Result(k, v) => rec(k) && rec(v),
+            Type::Fn { params, ret } => params.iter().all(&rec) && rec(ret),
+            _ => true,
+        }
+    }
+
+    /// Report a fresh generic construction whose instantiation is **structurally unrecordable**
+    /// (`E0058`) — the check-time replacement for a run-time abort, and the reason it is worth an
+    /// error rather than silence.
+    ///
+    /// The situation: this call freshly builds a `G<…>` whose type arguments are known to be
+    /// in-scope type *parameters* — not inference holes, so nothing is waiting to be inferred — and
+    /// no channel here can carry their instantiation to the value. The tag therefore provably never
+    /// gets written, and the first `type_name::<T>()` inside `G` aborts. Before this it checked clean
+    /// and failed at run time, which is the very check/run divergence the construction-site tag
+    /// exists to close.
+    ///
+    /// Two guards keep it from being noise:
+    ///
+    /// * `G` must actually **read one of its own parameters reflectively**
+    ///   ([`crate::forwarding::reflective_generic_types`]). A generic type that never asks what `T`
+    ///   is does not care whether it carries a tag, and erroring there would reject working code.
+    /// * the openness must be by a parameter, not a hole — the caller checks that, because an
+    ///   un-inferred argument is the deliberate bottom-up path (`keep(Inner.new("todos"))`), whose
+    ///   run-time abort `constructor_type_arg_open_parameter` pins on purpose.
+    ///
+    /// The message names the real cause, which differs by channel, and the route that works.
+    fn report_unrecordable(&mut self, type_name: &str, ret: &Type, span: Span) {
+        if !self.symbols.reflective_generic_types.contains(type_name) {
+            return;
+        }
+        let in_scope: Vec<String> = self.coloring.type_params.keys().cloned().collect();
+        let Type::Named(_, args) = ret else { return };
+        if !args.iter().all(|a| self.open_only_by_params(a, &in_scope)) {
+            return;
+        }
+        // Which parameters are open here, and whether this member could forward them at all. A
+        // self-less member CAN (the hidden slot is its channel) and reached here because the
+        // *position* is not one the forwarding pre-pass reads a declared type from; an instance
+        // method cannot, because its class parameters ride the receiver's reflected tag and a tag on
+        // the receiver cannot become a tag on something the body constructs.
+        //
+        // Non-empty by construction: the caller reached here because some argument failed
+        // `fully_concrete`, and the check above already refused every other way that can fail (a
+        // `dyn`, a `dyn Trait`, an inference hole), leaving a parameter mention as the only cause.
+        let open: Vec<String> = in_scope
+            .iter()
+            .filter(|p| {
+                args.iter()
+                    .any(|a| mentions_param(a, std::slice::from_ref(*p)))
+            })
+            .cloned()
+            .collect();
+        let names = open.join("`, `");
+        let is_are = if open.len() == 1 {
+            "is a type parameter"
+        } else {
+            "are type parameters"
+        };
+        let forwardable = open
+            .iter()
+            .all(|p| self.coloring.forwardable_params.contains(p));
+        let d = self.error(
+            DiagnosticCode::InvalidTypeArguments,
+            span,
+            format!(
+                "this `{type_name}` cannot record its instantiation: `{names}` {is_are} of the \
+                 enclosing declaration, and no instantiation reaches this position"
+            ),
+        );
+        if forwardable {
+            d.help(format!(
+                "a self-less member carries its instantiation on a hidden slot, resolved from the \
+                 DECLARED type of the position the construction stands in — a field's type, a \
+                 declared `return`, or an annotated binding. Bind it first \
+                 (`r: {type_name}<{names}> = …`) and use the binding here"
+            ));
+        } else {
+            d.help(format!(
+                "`{names}` reaches this body on the RECEIVER's reflected tag, which can describe \
+                 `self` but cannot tag an object this body builds. Construct the \
+                 `{type_name}<{names}>` in a self-less member instead (its caller pins the \
+                 instantiation), or take it as a parameter"
+            ));
+        }
     }
 
     /// Whether `ty` names a fully-determined type: no `dyn`/`dyn Trait` top, no inference hole, and

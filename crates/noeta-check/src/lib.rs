@@ -302,16 +302,22 @@ fn check_all_impl(program: &Program, opts: CheckOptions, cancel: &dyn Fn()) -> C
     checker.register_prelude();
     checker.collect_imports(program);
     checker.collect(program);
-    // The type-param forwarding pre-pass (poly-values F2b) must precede body checking: a call
-    // site of a forwarding fn records hidden arguments, whether it appears before or after the
-    // callee's declaration.
-    let fwd = compute_forwarding(program, &checker.imports.extern_types);
+    // The fresh-constructor pre-pass (generic constructor reflection) must precede body checking: a
+    // `Repo.new(...)` call site stamps its instantiation onto the result whether it is written
+    // before or after `Repo`'s declaration. It runs FIRST because the forwarding pre-pass below
+    // consumes it: a fresh constructor in a checked position is one of the sites that forwards.
+    checker.symbols.fresh_constructors = compute_fresh_constructors(program);
+    // The type-param forwarding pre-pass (poly-values F2b) must precede body checking too, for the
+    // same reason: a call site of a forwarding fn records hidden arguments, whether it appears
+    // before or after the callee's declaration.
+    let fwd = compute_forwarding(
+        program,
+        &checker.imports.extern_types,
+        &checker.symbols.fresh_constructors,
+    );
     checker.symbols.forwarding = fwd.map;
     checker.symbols.forwarding_poisoned = fwd.poisoned;
-    // The fresh-constructor pre-pass (generic constructor reflection), for the same reason: a
-    // `Repo.new(...)` call site stamps its instantiation onto the result whether it is written
-    // before or after `Repo`'s declaration.
-    checker.symbols.fresh_constructors = compute_fresh_constructors(program);
+    checker.symbols.reflective_generic_types = fwd.reflective;
     // Compute destruct-reachability + parameter relevance before checking bodies (local-binding
     // relevance is recorded inline during `check_program`, and needs the reachable set ready).
     checker.compute_relevance(program);
@@ -381,13 +387,15 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
     checker.register_prelude();
     checker.collect_imports(program);
     checker.collect(program);
-    let fwd = compute_forwarding(program, &checker.imports.extern_types);
+    checker.symbols.fresh_constructors = compute_fresh_constructors(program);
+    let fwd = compute_forwarding(
+        program,
+        &checker.imports.extern_types,
+        &checker.symbols.fresh_constructors,
+    );
     checker.symbols.forwarding = fwd.map;
     checker.symbols.forwarding_poisoned = fwd.poisoned;
-    // The fresh-constructor pre-pass (generic constructor reflection), for the same reason: a
-    // `Repo.new(...)` call site stamps its instantiation onto the result whether it is written
-    // before or after `Repo`'s declaration.
-    checker.symbols.fresh_constructors = compute_fresh_constructors(program);
+    checker.symbols.reflective_generic_types = fwd.reflective;
     checker.compute_relevance(program);
     // Tier declarations FIRST: they build the tier registry, and the directive placement check
     // resolves a declaration's unrecognized `@name` against the whole name-space (which includes
@@ -519,10 +527,21 @@ impl SessionChecker {
         let diag_mark = self.checker.diags.len();
         self.checker.collect_imports(entry);
         self.checker.collect(entry);
+        // This entry's fresh constructors first — the forwarding pre-pass below consumes them (a
+        // fresh constructor in a checked position is a forwarding site). Accumulated, like the
+        // forwarding table.
+        self.checker
+            .symbols
+            .fresh_constructors
+            .extend(compute_fresh_constructors(entry));
         // A session entry's forwarding table extends the accumulated one (an entry may declare a
         // forwarding fn a later entry calls; cross-entry transitive forwarding is out of scope,
         // like any cross-entry forward reference).
-        let fwd = compute_forwarding(entry, &self.checker.imports.extern_types);
+        let fwd = compute_forwarding(
+            entry,
+            &self.checker.imports.extern_types,
+            &self.checker.symbols.fresh_constructors,
+        );
         self.checker.symbols.forwarding.extend(fwd.map);
         self.checker
             .symbols
@@ -530,8 +549,8 @@ impl SessionChecker {
             .extend(fwd.poisoned);
         self.checker
             .symbols
-            .fresh_constructors
-            .extend(compute_fresh_constructors(entry));
+            .reflective_generic_types
+            .extend(fwd.reflective);
         // Re-run the reachability fixpoint over the ACCUMULATED registries (this entry's
         // `destruct` class can make an earlier entry's type reachable), and record this entry's
         // parameter relevance.
@@ -703,7 +722,7 @@ fn is_nongeneric_nominal(repr: &noeta_ast::reflect::TypeRepr) -> bool {
     )
 }
 
-fn type_to_repr_top(
+pub(crate) fn type_to_repr_top(
     ty: &Type,
     kinds: &HashMap<String, noeta_types::TypeKind>,
 ) -> Option<noeta_ast::reflect::TypeRepr> {
@@ -1112,6 +1131,12 @@ struct Symbols {
     /// its resolved instantiation as a construction site, so the caller stamps the object with the
     /// type argument the constructor body could not know.
     fresh_constructors: crate::constructors::FreshConstructors,
+    /// Generic types that **read one of their own type parameters reflectively** — a member spelling
+    /// `type_name::<T>()` or another bare-parameter query ([`reflective_generic_types`]). Such a type
+    /// needs its instances tagged at construction; one that is absent here never asks, so an untagged
+    /// instance of it is harmless. Read by [`Checker::report_unrecordable`] as the guard on turning a
+    /// provably-untaggable construction into a check-time error rather than noise.
+    reflective_generic_types: HashSet<String>,
     /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
     /// through the type's own block, its fields, or its collection elements (the fixpoint
     /// [`compute_destruct_reachable`] computes). The input to per-binding destructor-relevance.

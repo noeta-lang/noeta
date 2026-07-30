@@ -208,10 +208,18 @@ pub struct LoweringSites<'a> {
     /// The program-wide type-argument table (poly-values F2b) — embedded into
     /// [`Program::type_args`] so both backends resolve a hidden slot's instantiation identically.
     pub type_arg_table: &'a Vec<noeta_ext_abi::TypeArgInfo>,
+    /// The type-argument table's reflection projection, indexed identically — embedded into
+    /// [`Program::type_arg_reprs`] so a dynamic construction site resolves the same interned
+    /// `TypeRepr` in either backend.
+    pub type_arg_reprs: &'a Vec<Option<noeta_ast::reflect::TypeRepr>>,
     /// Forwarding-generic call spans → the type-argument slots the call supplies, in slot order
     /// (`Table(i)` → an int const; `Forward(j)` → the enclosing body's `$ty<j>` local). They land
     /// in the call node's own `type_args` channel, beside the value arguments.
     pub hidden_arg_sites: &'a HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
+    /// **Dynamic** construction sites (generic-in-generic construction): a fresh-constructor call
+    /// span → the enclosing body's hidden slot index whose table entry names the instantiation to
+    /// stamp on the object the call built. Lowered onto [`Rvalue::Method::reflect_slot`].
+    pub dynamic_construction_sites: &'a HashMap<Span, u32>,
     /// Spans whose turbofish is a FORWARDED type parameter of the enclosing top-level generic fn →
     /// the hidden slot index whose table entry names the instantiation. One map over three
     /// surfaces, each consulted from its own expression arm: a `TypedModuleCall` lowers with a
@@ -248,6 +256,8 @@ impl LoweringSites<'static> {
         static NAMES: OnceLock<HashMap<Span, String>> = OnceLock::new();
         static VARIANT_PATTERNS: OnceLock<VariantPatternSites> = OnceLock::new();
         static TYPE_ARGS: OnceLock<Vec<noeta_ext_abi::TypeArgInfo>> = OnceLock::new();
+        static TYPE_ARG_REPRS: OnceLock<Vec<Option<noeta_ast::reflect::TypeRepr>>> =
+            OnceLock::new();
         static HIDDEN: OnceLock<HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>> = OnceLock::new();
         static SLOTS: OnceLock<HashMap<Span, u32>> = OnceLock::new();
         static SELF_TY: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
@@ -276,6 +286,8 @@ impl LoweringSites<'static> {
             namespace_module_sites: NAMES.get_or_init(HashMap::new),
             try_conversion_sites: NAMES.get_or_init(HashMap::new),
             type_arg_table: TYPE_ARGS.get_or_init(Vec::new),
+            type_arg_reprs: TYPE_ARG_REPRS.get_or_init(Vec::new),
+            dynamic_construction_sites: SLOTS.get_or_init(HashMap::new),
             hidden_arg_sites: HIDDEN.get_or_init(HashMap::new),
             forwarded_slot_sites: SLOTS.get_or_init(HashMap::new),
             self_type_arg_sites: SELF_TY.get_or_init(HashMap::new),
@@ -318,6 +330,8 @@ macro_rules! lowering_sites {
             namespace_module_sites: &$s.namespace_module_sites,
             try_conversion_sites: &$s.try_conversion_sites,
             type_arg_table: &$s.type_arg_table,
+            type_arg_reprs: &$s.type_arg_reprs,
+            dynamic_construction_sites: &$s.dynamic_construction_sites,
             hidden_arg_sites: &$s.hidden_arg_sites,
             forwarded_slot_sites: &$s.forwarded_slot_sites,
             self_type_arg_sites: &$s.self_type_arg_sites,
@@ -662,6 +676,7 @@ pub fn lower_with_sites_opts(
         top,
         temp_count: lowerer.temps,
         type_args: sites.type_arg_table.clone(),
+        type_arg_reprs: sites.type_arg_reprs.clone(),
         span: program.span,
     })
 }
@@ -1445,6 +1460,23 @@ impl Lowerer<'_> {
             .collect()
     }
 
+    /// The **dynamic construction tag** operand for a call span (generic-in-generic construction):
+    /// the enclosing body's `$ty<i>` hidden local whose table entry names the instantiation to stamp
+    /// on the freshly-built object. `None` at every ordinary call — the overwhelming majority.
+    ///
+    /// A `Var` reference to a hidden parameter, exactly as [`Self::type_arg_atoms`]'s pass-through
+    /// arm builds: a nested `fn` or closure reaches the enclosing slot the same way it reaches any
+    /// other local, through closure conversion, so no separate capture rule is needed.
+    fn reflect_slot_atom(&self, span: &Span) -> Option<Atom> {
+        self.sites
+            .dynamic_construction_sites
+            .get(span)
+            .map(|slot| Atom::Var {
+                name: hidden_param_name(*slot),
+                span: *span,
+            })
+    }
+
     // The lowering inputs for one function/closure body — a bundle, not a signature worth a struct.
     #[allow(clippy::too_many_arguments)]
     fn lower_func(
@@ -1777,6 +1809,59 @@ impl Lowerer<'_> {
             .unwrap_or(name)
     }
 
+    /// The **run-time name atom** of a target type whose head the checker resolved to a
+    /// per-instantiation channel at `span` — `Some` exactly for a bare type parameter of an
+    /// enclosing generic, `None` for every statically-written type (which stays a folded constant).
+    ///
+    /// One helper over three surfaces, because there is one fact — what `T` *is* here.
+    /// `type_name::<T>()` answers with it, and `v.as<T>()` / `v is T` match on it; routing all three
+    /// through this function is what makes them agree by construction rather than by convention,
+    /// which is the whole reason the narrow works: `Expr::As` is a head-constructor match on a
+    /// name, and this is the name.
+    ///
+    /// The two channels, mirroring the checker's [`Sites::self_type_arg_sites`] /
+    /// [`Sites::forwarded_slot_sites`] split: a generic TYPE's parameter travels on the receiver's
+    /// reflected type tag (read off `self` — a generic fn has no receiver), and a generic FN's or
+    /// METHOD's own parameter travels in the hidden `$ty<i>` slot that also carries a forwarded
+    /// decode recipe, of which this reads only the name.
+    fn type_param_name_atom(
+        &mut self,
+        ty: &TypeRef,
+        span: &Span,
+        out: &mut Vec<Stmt>,
+    ) -> Option<Atom> {
+        if let Some((owner, index)) = self.sites.self_type_arg_sites.get(span).cloned() {
+            return Some(self.emit(
+                out,
+                Rvalue::TypeArgName {
+                    operand: Atom::Var {
+                        name: "self".to_string(),
+                        span: *span,
+                    },
+                    index,
+                    type_name: owner,
+                    param: ty.head_name(),
+                    span: *span,
+                },
+                *span,
+            ));
+        }
+        if let Some(&slot) = self.sites.forwarded_slot_sites.get(span) {
+            return Some(self.emit(
+                out,
+                Rvalue::TypeSlotName {
+                    slot: Atom::Var {
+                        name: hidden_param_name(slot),
+                        span: *span,
+                    },
+                    span: *span,
+                },
+                *span,
+            ));
+        }
+        None
+    }
+
     /// Lower an expression to an [`Atom`], emitting the `let`s that compute any
     /// sub-expressions into `out` first (A-normal form). Literals and identifiers reduce
     /// directly to an atom with no `let`.
@@ -1799,46 +1884,15 @@ impl Lowerer<'_> {
             // qualified identity (`app.storage.Todo`) and there is nothing left to look up. Resolved
             // through the same `TypeRef::head_name` the name-keyed reflection queries use, which is
             // what makes the two agree by construction rather than by convention.
-            // …unless the checker recognized `T` as a parameter of the ENCLOSING generic type inside
-            // one of its instance methods (generic constructor reflection, Gap B): one compiled body
-            // serves every instantiation, so there is no constant to fold — the instantiation rides
-            // on the receiver's reflected type tag, and the name is read off argument `index` of it.
-            Expr::TypeName { ty, span } if self.sites.self_type_arg_sites.contains_key(span) => {
-                let (owner, index) = self.sites.self_type_arg_sites[span].clone();
-                Ok(self.emit(
-                    out,
-                    Rvalue::TypeArgName {
-                        operand: Atom::Var {
-                            name: "self".to_string(),
-                            span: *span,
-                        },
-                        index,
-                        type_name: owner,
-                        param: ty.head_name(),
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
-            // …or as a FORWARDED parameter of the enclosing top-level generic fn (poly-values
-            // F2b): the same "one body serves every instantiation" reason, the other channel — the
-            // hidden `$ty<i>` slot that already carries the decode recipe also names the
-            // instantiation, and this surface wants nothing but that name.
-            Expr::TypeName { span, .. } if self.sites.forwarded_slot_sites.contains_key(span) => {
-                let slot = self.sites.forwarded_slot_sites[span];
-                Ok(self.emit(
-                    out,
-                    Rvalue::TypeSlotName {
-                        slot: Atom::Var {
-                            name: hidden_param_name(slot),
-                            span: *span,
-                        },
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
-            Expr::TypeName { ty, .. } => Ok(Atom::Const(Const::Str(self.reflection_head_name(ty)))),
+            // …unless the checker recognized `T` as a parameter of an ENCLOSING generic (a type's,
+            // read off the receiver's reflected tag — Gap B; or a fn's own, read off the hidden
+            // type-argument slot — F2b). One compiled body serves every instantiation, so there is
+            // no constant to fold: the name arrives per call, from `type_param_name_atom` — the same
+            // helper the narrow surfaces read, so `type_name::<T>()` and `v.as<T>()` agree on `T`.
+            Expr::TypeName { ty, span } => match self.type_param_name_atom(ty, span, out) {
+                Some(atom) => Ok(atom),
+                None => Ok(Atom::Const(Const::Str(self.reflection_head_name(ty)))),
+            },
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
             // magnitude's bit pattern is the runtime i64 word (a `u64` with the high bit set boxes as
@@ -2314,6 +2368,9 @@ impl Lowerer<'_> {
                     // `supplied` still indexes the value parameters.
                     let type_args = self.type_arg_atoms(span);
                     let reflect = self.sites.construction_sites.get(span).cloned();
+                    // …and its dynamic twin: a generic type's fresh constructor whose instantiation
+                    // is the enclosing self-less member's own type parameter, delivered on a slot.
+                    let reflect_slot = self.reflect_slot_atom(span);
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -2325,6 +2382,7 @@ impl Lowerer<'_> {
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
                             reflect,
+                            reflect_slot,
                             type_args,
                             supplied,
                             span: *span,
@@ -2739,13 +2797,19 @@ impl Lowerer<'_> {
                 });
                 Ok(Atom::Temp(dst))
             }
+            // A narrow is a head-constructor match on the target's runtime NAME, so a target that is
+            // an enclosing generic's type parameter needs exactly what `type_name::<T>()` reads and
+            // nothing more — the same helper supplies it, and the backends match on that string
+            // instead of the erased letter `T` (which nothing is ever registered under).
             Expr::As { expr, ty, span } => {
                 let operand = self.lower_expr(expr, out)?;
+                let dynamic = self.type_param_name_atom(ty, span, out);
                 Ok(self.emit(
                     out,
                     Rvalue::As {
                         operand,
                         ty: self.resolve_type_aliases(ty),
+                        dynamic,
                         span: *span,
                     },
                     *span,
@@ -2753,11 +2817,13 @@ impl Lowerer<'_> {
             }
             Expr::TypeTest { expr, ty, span } => {
                 let operand = self.lower_expr(expr, out)?;
+                let dynamic = self.type_param_name_atom(ty, span, out);
                 Ok(self.emit(
                     out,
                     Rvalue::TypeTest {
                         operand,
                         ty: self.resolve_type_aliases(ty),
+                        dynamic,
                         span: *span,
                     },
                     *span,
@@ -3126,6 +3192,9 @@ impl Lowerer<'_> {
                     let (arg_atoms, supplied) = self.permute_args(arg_atoms, *span);
                     let type_args = self.type_arg_atoms(span);
                     let reflect = self.sites.construction_sites.get(span).cloned();
+                    // …and its dynamic twin: a generic type's fresh constructor whose instantiation
+                    // is the enclosing self-less member's own type parameter, delivered on a slot.
+                    let reflect_slot = self.reflect_slot_atom(span);
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -3137,6 +3206,7 @@ impl Lowerer<'_> {
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
                             reflect,
+                            reflect_slot,
                             type_args,
                             supplied,
                             span: *span,
@@ -3174,6 +3244,7 @@ impl Lowerer<'_> {
                 let receiver = self.lower_expr(receiver, out)?;
                 let type_args = self.type_arg_atoms(span);
                 let reflect = self.sites.construction_sites.get(span).cloned();
+                let reflect_slot = self.reflect_slot_atom(span);
                 Ok(self.emit(
                     out,
                     Rvalue::Method {
@@ -3183,6 +3254,7 @@ impl Lowerer<'_> {
                         args: vec![left_atom],
                         reuse: false,
                         reflect,
+                        reflect_slot,
                         type_args,
                         // A bare callee takes the piped value and nothing else, so there is no
                         // argument list to rebind.

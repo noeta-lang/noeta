@@ -1,0 +1,39 @@
+// The other side of `generic_in_generic_unrecordable`: the guard that keeps its E0058 honest.
+//
+// `Quiet<T>` never asks what `T` is — no member reflects on it — so it does not care whether its
+// instances carry a type tag, and an instance built at an unrecoverable instantiation is *not* a
+// failure waiting to happen. Erroring here would reject a working program, which is why the
+// diagnostic is gated on the constructed type actually reading one of its own parameters.
+//
+// `grow` is the same shape the other case errors on: an INSTANCE method (it reads `self`) building a
+// `Quiet<T>` at a `T` no channel can deliver. It runs, and answers.
+// expect: stdout "todos/x"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+class Quiet<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Quiet<T> {
+        return Quiet { tbl: tbl };
+    }
+
+    fn label(): string {
+        return self.tbl;
+    }
+}
+class Live<T> {
+    q: Quiet<T>
+
+    fn new(tbl: string): Live<T> {
+        return Live { q: Quiet.new(tbl) };
+    }
+
+    fn grow(): string {
+        r: Quiet<T> = Quiet.new("x");
+        return self.q.label() ~ "/" ~ r.label();
+    }
+}
+l: Live<Todo> = Live.new("todos");
+echo l.grow();

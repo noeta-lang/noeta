@@ -1,0 +1,68 @@
+// A narrow over a generic type's parameter matches on the **qualified** identity, agreeing with what
+// the written `v.as<Todo>()` does at the same site.
+//
+// This is the property most at risk of rotting silently, and the one a single-file case cannot
+// observe. The narrow's target is not folded at compile time — one body serves every instantiation, so
+// the name is read at run time off the receiver's reflected type tag — while a *written* target is
+// reduced by the compiler from the linked `TypeRef`. Two different routes to one string: if the tag
+// carried the bare `Todo` while the shape is registered as `demo.main.Todo` (or the reverse), the
+// narrow would answer `none` for a value of exactly the right type, with no diagnostic. The
+// `both agree` line is the oracle.
+//
+// A `main.noe` on purpose: the harness runs a single-file case straight from source text, with no
+// loader and therefore no qualification at all. The `noeta.toml` beside it is what makes this a
+// package and so what derives the entry's module path — delete it and nothing qualifies, silently.
+// expect: stdout "tag name  = todos:demo.main.Todo"
+// expect: stdout "written   = demo.main.Todo"
+// expect: stdout "via T     = some(Todo {id: 1})"
+// expect: stdout "via Todo  = some(Todo {id: 1})"
+// expect: stdout "both agree = true"
+// expect: stdout "wrong type = none"
+// expect: stdout "is T      = true"
+// expect: exit 0
+
+struct Todo {
+    id: int
+}
+struct Other {
+    id: int
+}
+
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    // The name the narrow below keys on, read off the same receiver tag.
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+
+    fn read(row: dyn): ?T {
+        if self.tbl == "" {
+            return none;
+        }
+        return row.as<T>();
+    }
+
+    fn holds(row: dyn): bool {
+        if self.tbl == "" {
+            return false;
+        }
+        return row is T;
+    }
+}
+
+todos: Repo<Todo> = Repo.new("todos");
+row: dyn = Todo { id: 1 };
+other: dyn = Other { id: 1 };
+
+echo "tag name  = " ~ todos.model();
+echo "written   = " ~ type_name::<Todo>();
+echo "via T     = " ~ "${todos.read(row)}";
+echo "via Todo  = " ~ "${row.as<Todo>()}";
+echo "both agree = " ~ "${"${todos.read(row)}" == "${row.as<Todo>()}"}";
+echo "wrong type = " ~ "${todos.read(other)}";
+echo "is T      = " ~ "${todos.holds(row)}";

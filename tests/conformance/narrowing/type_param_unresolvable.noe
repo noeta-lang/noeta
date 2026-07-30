@@ -1,0 +1,51 @@
+// The narrows over a type parameter that CANNOT be answered — each an `E0058` at check time rather
+// than a `none`/`false` at run time.
+//
+// Moving the failure to check time is the point. A narrow answering `none` forever is
+// indistinguishable from an honest miss: the program runs, exits 0, and reads back nothing. Every
+// shape below used to do exactly that, silently.
+//
+// Four distinct reasons, one code — a type argument that is well-formed and in scope but cannot serve
+// this application, which is what `E0058` means everywhere else too:
+//
+//   * a COMPOSITE target: the head match tests a parametrized target's reflected type arguments
+//     (R3), and a narrow resolves one name — the target's head — so `U` in an argument position has
+//     nowhere to be resolved into. (Positions the match *erases* are untouched and stay as
+//     permissive as their concrete spellings: `?U`, `(U, int)`, `fn(U)` all test only their head.)
+//   * a UNION member: each member's head is tested, so the same limit applies per member.
+//   * a NESTED `fn`'s own type parameter: it shadows the enclosing one, and a nested fn is not a
+//     forwarding candidate, so no per-call channel reaches it at all.
+//   * a `match` ARM's `is U`: the pattern shares the runtime matcher with the expression form but has
+//     no operand position to compute a name into (the IR reuses the AST `Pattern` verbatim). Rather
+//     than invent a third way to deliver a type argument, the arm points at the expression form —
+//     which does resolve, and is what the other cases in this directory pin.
+// expect: error E0058 at 32:17
+// expect: error E0058 at 36:17
+// expect: error E0058 at 41:21
+// expect: error E0058 at 48:12
+// expect: exit 1
+struct User {
+    id: int
+}
+
+fn composite<U>(v: dyn): ?List<U> {
+    return v.as<List<U>>();
+}
+
+fn unioned<U>(v: dyn): ?dyn {
+    return v.as<U | int>();
+}
+
+fn nested<U>(v: dyn): bool {
+    fn inner<U>(x: dyn): bool {
+        return x is U;
+    }
+    return inner(v);
+}
+
+fn arm<U>(v: dyn): int {
+    return match v {
+        is U => 1,
+        _ => 0,
+    };
+}

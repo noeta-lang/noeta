@@ -1,0 +1,88 @@
+// A narrow whose target is the enclosing generic **TYPE's** parameter resolves inside its members,
+// over the two channels `type_name::<T>()` already rides — and this is the shape that motivated it.
+//
+// A repository over a row is the case: `map_row` receives an untyped row and must hand back a `T`.
+// Because `v.as<T>()` matched the literal letter `T` and answered `none` for every value, the whole
+// read surface had to be typed `dyn`/`List<dyn>` and every caller wrote `.as<Todo>()` itself — a cast
+// per call site, to recover a type the receiver had recorded all along. Here `find`/`all` are `?T` and
+// `List<T>` with no cast anywhere outside the class, which is the payoff.
+//
+// Both channels appear, because a generic type has two:
+//
+//   * `map_row`/`find`/`all` read `self`, so they are INSTANCE methods and `T` comes off the
+//     receiver's reflected type tag, stamped at the construction site;
+//   * `coerce` is SELF-LESS, so it has no tag to read and `T` arrives on the hidden type-argument
+//     slot instead, resolved from the expected type at the call site.
+//
+// The `Repo<int>` rows matter: the same compiled body answers for a built-in instantiation, through
+// the same `BuiltinTy` funnel a written `v.as<int>()` uses.
+// expect: stdout "todos ok = some(Todo {id: 1, title: \"Ada\"})"
+// expect: stdout "todos no = none"
+// expect: stdout "todos all = [Todo {id: 1, title: \"Ada\"}, Todo {id: 2, title: \"Lin\"}]"
+// expect: stdout "counts ok = some(41)"
+// expect: stdout "counts no = none"
+// expect: stdout "counts all = [41, 42]"
+// expect: stdout "coerced = some(Todo {id: 9, title: \"Nine\"})"
+// expect: exit 0
+struct Todo {
+    id: int
+    title: string
+}
+
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    // The one place the untyped row becomes a `T`. An instance method (it reads `self`), so the
+    // narrow keys on the instantiation recorded on the receiver.
+    fn map_row(row: dyn): ?T {
+        if self.tbl == "" {
+            return none;
+        }
+        return row.as<T>();
+    }
+
+    // …and the read surface above it is plain `?T` / `List<T>` — no cast, no `dyn` leaking out.
+    fn find(row: dyn): ?T {
+        return self.map_row(row);
+    }
+
+    fn all(rows: List<dyn>): List<T> {
+        mut out: List<T> = [];
+        for row in rows {
+            out = match self.map_row(row) {
+                some(v) => out ~ [v],
+                none => out,
+            };
+        }
+        return out;
+    }
+
+    // Self-less: no receiver exists to read a tag off, so `T` rides the hidden slot the call site
+    // fills from the expected type. The narrow reads the slot's NAME, needing no recipe.
+    fn coerce(row: dyn): ?T {
+        return row.as<T>();
+    }
+}
+
+todos: Repo<Todo> = Repo.new("todos");
+counts: Repo<int> = Repo.new("counts");
+
+one: dyn = Todo { id: 1, title: "Ada" };
+two: dyn = Todo { id: 2, title: "Lin" };
+num: dyn = 41;
+txt: dyn = "not a row";
+
+echo "todos ok = " ~ "${todos.find(one)}";
+echo "todos no = " ~ "${todos.find(num)}";
+echo "todos all = " ~ "${todos.all([one, txt, two])}";
+echo "counts ok = " ~ "${counts.find(num)}";
+echo "counts no = " ~ "${counts.find(one)}";
+echo "counts all = " ~ "${counts.all([num, txt, 42])}";
+
+nine: dyn = Todo { id: 9, title: "Nine" };
+coerced: ?Todo = Repo.coerce(nine);
+echo "coerced = " ~ "${coerced}";
