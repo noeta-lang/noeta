@@ -815,7 +815,8 @@ impl Checker {
                     // A union member's head is itself tested, so a bare parameter there counts —
                     // unlike the whole target's head, which the caller resolves through a channel.
                     TypeRef::Named { name, args, .. }
-                        if args.is_empty() && self.coloring.type_params.contains_key(name.as_str()) =>
+                        if args.is_empty()
+                            && self.coloring.type_params.contains_key(name.as_str()) =>
                     {
                         Some(name.to_string())
                     }
@@ -828,7 +829,8 @@ impl Checker {
                 }
                 args.iter().find_map(|a| match a {
                     TypeRef::Named { name, args, .. }
-                        if args.is_empty() && self.coloring.type_params.contains_key(name.as_str()) =>
+                        if args.is_empty()
+                            && self.coloring.type_params.contains_key(name.as_str()) =>
                     {
                         Some(name.to_string())
                     }
