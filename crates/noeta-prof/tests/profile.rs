@@ -641,11 +641,7 @@ fn profiles_a_program_with_a_path_dependency() {
         "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        lib.join("api.noe"),
-        "pub fn answer(): int { return 42; }\n",
-    )
-    .unwrap();
+    std::fs::write(lib.join("api.noe"), "pub fn answer(): int { return 42; }\n").unwrap();
 
     let report = noeta_prof::profile(&app.join("main.noe"), noeta_prof::Mode::Summary);
     assert_eq!(

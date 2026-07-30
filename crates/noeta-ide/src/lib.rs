@@ -5146,11 +5146,7 @@ mod tests {
             "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
         )
         .unwrap();
-        std::fs::write(
-            lib.join("hello.noe"),
-            "pub struct Greeter { n: int }\n",
-        )
-        .unwrap();
+        std::fs::write(lib.join("hello.noe"), "pub struct Greeter { n: int }\n").unwrap();
 
         let entry_uri = path_to_uri(&app.join("main.noe"));
         // The dependency's modules are addressed by their canonical path (the walk canonicalizes a
