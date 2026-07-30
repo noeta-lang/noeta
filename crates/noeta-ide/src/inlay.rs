@@ -257,7 +257,9 @@ impl Walker<'_> {
                     self.expr(value);
                 }
             }
-            Expr::Member { receiver, .. } => self.expr(receiver),
+            Expr::Member { receiver, .. } | Expr::InstantiatedType { recv: receiver, .. } => {
+                self.expr(receiver)
+            }
             Expr::Index {
                 receiver, index, ..
             } => {

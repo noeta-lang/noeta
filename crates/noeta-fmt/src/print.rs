@@ -2371,6 +2371,22 @@ impl Printer<'_> {
                 parts.push(self.arg_list(args, anchor)?);
                 Doc::concat(parts)
             }
+            // `Repo::<Todo>` — a call-site class instantiation, printed as one unbreakable head
+            // (`receiver` handles any parenthesization the underlying type reference needs). The
+            // `.member` that must follow is printed by the enclosing `Expr::Member`.
+            Expr::InstantiatedType {
+                recv, type_args, ..
+            } => {
+                let mut parts = vec![self.receiver(recv)?, Doc::text("::<")];
+                for (i, t) in type_args.iter().enumerate() {
+                    if i > 0 {
+                        parts.push(Doc::text(", "));
+                    }
+                    parts.push(self.type_ref(t)?);
+                }
+                parts.push(Doc::text(">"));
+                Doc::concat(parts)
+            }
             Expr::RolesOf { ty: Some(ty), .. } => Doc::concat([
                 Doc::text("roles_of::<"),
                 self.type_ref(ty)?,
@@ -3060,7 +3076,8 @@ fn prec(e: &Expr) -> u8 {
         | Expr::Await { .. }
         | Expr::As { .. }
         | Expr::TypedModuleCall { .. }
-        | Expr::TypedMethodCall { .. } => 14,
+        | Expr::TypedMethodCall { .. }
+        | Expr::InstantiatedType { .. } => 14,
         // `receiver.field = value` — only ever a binding's RHS; parenthesize if it somehow nests.
         Expr::FieldSet { .. } => 0,
         // Atoms and self-delimiting forms never need parentheses as an operand.

@@ -2251,6 +2251,37 @@ impl Checker {
                 }
                 ret
             }
+            // `Repo::<Todo>` reaching SYNTHESIS means it did not land where it is meaningful. The
+            // one place that reads it is the `Type.assoc(args)` static-call arm, which peels it off
+            // the receiver before ever synthesizing it (see [`Expr::peel_instantiation`]); anything
+            // else — `Repo::<Todo>.new` as a bare handle, `Repo::<Todo>.tbl`, an instance method on
+            // a value — has no instantiation to consume and would otherwise type as whatever the
+            // underlying reference types as, silently discarding the type arguments.
+            Expr::InstantiatedType {
+                recv,
+                type_args,
+                span,
+            } => {
+                for t in type_args {
+                    self.check_type_ref(t);
+                }
+                let head = match recv.as_ref() {
+                    Expr::Ident { name, .. } => name.to_string(),
+                    other => format!("{:?}", other.span()),
+                };
+                self.error(
+                    DiagnosticCode::InvalidTypeArguments,
+                    *span,
+                    "a call-site type argument list must be followed by an associated call"
+                        .to_string(),
+                )
+                .help(format!(
+                    "write `{head}::<...>.method(args)`. The instantiation is consumed by the \
+                     call; a bare `{head}::<...>` is not a value, and neither an instance method \
+                     nor a field reads it (a value carries its own instantiation)"
+                ));
+                self.synth(recv, env)
+            }
             Expr::Invoke {
                 recv, name, args, ..
             } => {

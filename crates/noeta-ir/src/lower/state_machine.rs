@@ -1170,6 +1170,10 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32, vp: &Varia
             }
         }
         Expr::Member { receiver, .. } => hoist_in_expr(receiver, pre, ctr, vp),
+        // A call-site instantiation is a check-time carrier over a type reference; only its
+        // underlying reference can hold anything to hoist (in practice nothing, a type name being
+        // await-free — but recursing keeps the walk total rather than assuming that).
+        Expr::InstantiatedType { recv, .. } => hoist_in_expr(recv, pre, ctr, vp),
         Expr::Interp { parts, .. } => {
             for part in parts {
                 if let StrPart::Hole(h) = part {

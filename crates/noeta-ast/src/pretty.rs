@@ -1193,6 +1193,20 @@ impl Pretty for Expr {
                 }
                 out.push(')');
             }
+            Expr::InstantiatedType {
+                recv,
+                type_args,
+                span: s,
+            } => {
+                let tys: Vec<String> = type_args.iter().map(type_ref_str).collect();
+                out.push_str(&format!(
+                    "(instantiated-type <{}> {}\n",
+                    tys.join(", "),
+                    span(*s)
+                ));
+                recv.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::TypedMethodCall {
                 recv,
                 name,
