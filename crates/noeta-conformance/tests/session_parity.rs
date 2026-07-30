@@ -52,8 +52,10 @@ fn diagnostics(diags: &[Diagnostic]) -> &[Diagnostic] {
     diags
 }
 
-/// Drive an identical script through both sessions and assert every step agrees.
-fn assert_sessions_agree(script: &[Step]) {
+/// Drive an identical script through both sessions and assert every step agrees. Returns the agreed
+/// stdout of every step, concatenated — so a test can additionally assert *what* the two sessions
+/// agreed on, which parity alone cannot say (a regression that silently emptied both would agree).
+fn assert_sessions_agree(script: &[Step]) -> String {
     noeta_conformance::ensure_std_registry();
     let mut eval = EvalSession::new();
     let mut vm = VmSession::new(Box::new(|| {
@@ -63,6 +65,7 @@ fn assert_sessions_agree(script: &[Step]) {
         )
     }));
 
+    let mut agreed = String::new();
     for (i, step) in script.iter().enumerate() {
         let (e, v) = match step {
             Step::Eval(src) => {
@@ -81,6 +84,7 @@ fn assert_sessions_agree(script: &[Step]) {
         };
 
         assert_eq!(e.stdout, v.stdout, "step {i}: stdout differs");
+        agreed.push_str(&e.stdout);
         assert_eq!(e.value, v.value, "step {i}: echoed value differs");
         assert_eq!(
             diagnostics(&e.diagnostics),
@@ -108,6 +112,7 @@ fn assert_sessions_agree(script: &[Step]) {
     }
 
     vm.teardown();
+    agreed
 }
 
 #[test]
@@ -202,6 +207,48 @@ fn prelude_enum_reflection_agrees_across_entries() {
         Step::Eval("mut unrelated = 1;"),
         Step::Eval("echo variants_of(\"Ordering\").map(fn(v) => v.name).join(\" \");"),
     ]);
+}
+
+/// The **signature** index is seeded the same way the prelude enums are — a native callable belongs to
+/// an installed extension, not to the program, so the AST walk cannot find it — which means it has to
+/// survive every REPL entry on both backends too. The asymmetry that hid the extension attribute
+/// shapes from the tree-walker REPL for an entire arc was exactly this, and it is invisible without a
+/// parity test.
+#[test]
+fn seeded_native_signature_reflection_agrees_across_entries() {
+    let agreed = assert_sessions_agree(&[
+        // A native callable's signature, before the session declares anything at all.
+        Step::Eval("echo params_of(\"std.math.pow\").map(fn(p) => p.name).join(\" \");"),
+        Step::Eval("echo returns_of(\"std.math.sqrt\");"),
+        Step::Eval("struct Anything { n: int }"),
+        // Still seeded after an unrelated entry rebuilt the artifact.
+        Step::Eval("echo returns_of(\"std.math.sqrt\");"),
+        // A target that names nothing is still the `none` that says so — the whole reason the query
+        // answers an option, and what a shipped stdlib function used to answer.
+        Step::Eval("echo returns_of(\"std.math.nope\");"),
+    ]);
+    assert_eq!(
+        agreed,
+        "base exp\nsome(Type.Float)\nsome(Type.Float)\nnone\n"
+    );
+}
+
+/// The **prelude structs** are seeded like the prelude enums and must survive every entry the same
+/// way, shadowing included.
+#[test]
+fn seeded_prelude_struct_reflection_agrees_across_entries() {
+    let agreed = assert_sessions_agree(&[
+        // A prelude struct's field schema, and the pair rule on it (a struct has no variants).
+        Step::Eval("echo field_specs_of(\"FieldSpec\").map(fn(f) => f.name).join(\" \");"),
+        Step::Eval("echo variants_of(\"FieldSpec\").len();"),
+        // A user declaration of the same name shadows the prelude struct — in the declaring entry and
+        // after it, exactly as for a prelude enum.
+        Step::Eval("struct FieldSpec { only: int }"),
+        Step::Eval("echo field_specs_of(\"FieldSpec\").map(fn(f) => f.name).join(\" \");"),
+        Step::Eval("mut unrelated = 1;"),
+        Step::Eval("echo field_specs_of(\"FieldSpec\").map(fn(f) => f.name).join(\" \");"),
+    ]);
+    assert_eq!(agreed, "name type optional\n0\nonly\nonly\n");
 }
 
 #[test]

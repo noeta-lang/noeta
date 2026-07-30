@@ -323,7 +323,18 @@ struct P { a: int; b: string }
 echo fields_of(P { a: 1, b: "x" })[0] == FieldEntry { name: "a", value: 1 }   // true
 ```
 
-(`ParamInfo` and `FieldSpec` are the exception a literal cannot currently spell: their `type` field collides with the `type` keyword in struct-literal position. Reading `p.type` off one works.)
+(`ParamInfo` and `FieldSpec` are the exception a literal cannot currently spell: their `type` field collides with the `type` keyword in struct-literal position. Reading `p.type` off one works — and `construct("FieldSpec", …)` builds one, since it keys on the schema rather than on the literal syntax.)
+
+They reflect like ordinary structs too, which matters more than it sounds: `FieldSpec` and `VariantSpec` are the types you walk *while* reflecting, so a schema deriver that recurses into its own result type asks about them:
+
+```noeta
+for f in field_specs_of("FieldSpec") {
+    echo "${f.name}: ${f.type}"
+}
+// name: Type.String
+// type: Type.Named(Type, [])
+// optional: Type.Bool
+```
 
 Each shadows like any prelude name: declaring your own `enum Ordering` or `struct FieldEntry` replaces it for that program.
 
@@ -346,6 +357,33 @@ echo type_name::<Framing>()                                    // std.http.Frami
 ```
 
 A *dynamic* operand is still the literal string it spells, so `variants_of("Framing")` asks about the name `Framing` — reach for `type_name::<Framing>()`, or the name off a `Type`, when you need the key as data.
+
+A native **fielded** type — a value struct or a class an extension declares — is reflectable the same way, under the same qualified identity, and its schema is the one `construct` accepts:
+
+```noeta
+use std.http.{Frame}
+
+for f in field_specs_of::<Frame>() {
+    echo "${f.name}: ${f.type} optional=${f.optional}"
+}
+// event: Type.String optional=false
+// data: Type.String optional=false
+// id: Type.String optional=false
+// retry: Type.Option(Type.Int) optional=false
+```
+
+Every field of a native type is mandatory — the extension ABI gives a field no literal default — so a `construct` that omits one is refused (`missing required field …`) rather than silently filled. Supply the whole schema and you get the same value a literal builds:
+
+```noeta
+use std.http.{Frame}
+
+fields: List<dyn> = ["msg", "hello", "id-1", some(7)];
+same = match construct("std.http.Frame", fields) {
+    Ok(v) => v.as<Frame>() == some(Frame { event: "msg", data: "hello", id: "id-1", retry: some(7) }),
+    Err(e) => false,
+};
+echo same   // true
+```
 
 ### `params_of(name): List<ParamInfo>`
 
@@ -398,6 +436,22 @@ echo describe("UsersController.crate")   // no such callable  (a typo, not a voi
 The result is a `?Type`, and the option is the point. `params_of` answers an unknown target with the empty list because an empty parameter list is a legitimate answer — folding "unknown" into it loses nothing. A return type has no such spare value: `void` is a real answer (`some(Type.Unit)`), so an empty one would make a mistyped target indistinguishable from a `void` method — precisely the silently-vanishing route a reflection-driven framework has to be able to detect. Hence `none`, which you have to look at.
 
 The `Type` comes out of the same decoder `ParamInfo.type` goes through, so a signature's parameters and its return can never disagree about how a declared type spells — including the kind-agnostic `Type.Named(name, [])` a declared struct/class/enum annotation reflects as. A trait's abstract method signature is indexed too, under `Trait.method`. An `async fn f(): T` reports `T`, the type written in the declaration, not the `Future<T>` a call to it evaluates to — reflection reports declared types throughout.
+
+#### A native callable is indexed like any other
+
+The signature index covers **every** callable the language knows, not only the ones written in `.noe`: the standard library's functions and its types' methods are in it too, under the same identity the rest of reflection uses — a module function's root-qualified path, a method's `Type.method` on the type's qualified identity:
+
+```noeta
+for p in params_of("std.math.pow") {
+    echo "${p.name}: ${p.type}"          // base: Type.Float / exp: Type.Float
+}
+echo returns_of("std.math.pow")          // some(Type.Float)
+echo returns_of("std.id.Uuid.to_string") // some(Type.String)
+```
+
+This is the `returns_of` contract taken seriously. `none` means *no callable of that name exists*, so a shipped stdlib function answering `none` reported a real function as a typo — the one thing the option was introduced to make detectable. Parameter names are the declared ones, so a container that injects by name works against a native signature exactly as against yours, and a declared native type is named by its qualified identity (`std.id.Uuid`) — the same string `type_of` reports for one of its values, so matching a signature against runtime values does not miss on the native half.
+
+Two edges are worth knowing. A polymorphic native return is reported as precisely as the declaration allows and no further: `math.abs` returns `int` for an `int` and `float` otherwise, so it reflects `Type.Union([Type.Int, Type.Float])`, and a call-site-typed `json.try_parse::<T>` reflects its declared *wrapper* around a hole (`Type.Result(Type.Dyn, …)`), because `T` is named at the call site and a signature has no call site. And the target is the declaration's identity, not the spelling you call it by: after `use std.math`, you *write* `math.sqrt(2.0)`, but the callable is `std.math.sqrt` — a dynamic operand is the literal string it spells, the same rule `variants_of("Framing")` follows.
 
 ### `field_specs_of::<T>(): List<FieldSpec>` / `field_specs_of(name): List<FieldSpec>`
 

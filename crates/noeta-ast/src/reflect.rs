@@ -2621,12 +2621,12 @@ pub fn prelude_enums() -> Vec<PreludeEnum> {
     ]
 }
 
-/// Every prelude enum as a **reflectable [`TypeInfo`]** — the projection of [`prelude_enums`] that
-/// makes the language's own enums answer the type-level reflection queries (`variants_of`,
-/// `field_specs_of`) the way every other enum does.
+/// Every type **the language itself declares** as a reflectable [`TypeInfo`] — the projection of
+/// [`prelude_enums`] and [`prelude_structs`] that makes them answer the type-level reflection queries
+/// (`variants_of`, `field_specs_of`) the way every other declared type does.
 ///
-/// [`build`] walks a *program*, and these five are declared by the language, not by the program —
-/// so before this projection existed they were absent from the artifact entirely, and
+/// [`build`] walks a *program*, and these thirteen declarations belong to the language, not to the
+/// program — so before this projection existed they were absent from the artifact entirely, and
 /// `variants_of("Ordering")` / `field_specs_of("Ordering")` were **both** empty. By the pair rule
 /// those two queries are documented under (see [`ReflectionInfo::variant_specs`]), both-empty is
 /// the one honest "I know nothing about this name" — so reflection reported a type the language
@@ -2634,51 +2634,134 @@ pub fn prelude_enums() -> Vec<PreludeEnum> {
 /// `type_of` result saw `Type.Enum("Ordering", [])` and then got no cases for it, which is the same
 /// silently-wrong outcome `variants_of` was introduced to remove, one level up.
 ///
+/// The **structs** were invisible the same way, and one level worse: `FieldSpec` and `VariantSpec`
+/// are the types a reflection consumer walks *while* reflecting, so a schema deriver that recursed
+/// into its own result type got the both-empty answer about it. They are not symmetric with the enums
+/// — a prelude struct's field *types* used to be stated at the checker's registration sites, where
+/// neither reflection nor the backends could see them — so [`PreludeStruct`] carries them now
+/// ([`PreludeStructFieldTy`]) and each consumer projects that one statement onto its own vocabulary.
+/// Every field is mandatory and none carries a default: a prelude struct has no default syntax, and
+/// reporting a default the declaration does not have would misdescribe what `construct` requires.
+///
 /// Derived from the one shared table rather than re-listed, for the reason the table exists: the
 /// checker, both backends, and the compiler already read it, and reflection was the last consumer
 /// that did not. Seeded into the artifact by `noeta_check::extend_reflection`, which skips any name
-/// the program itself declares — so a user's own `enum Ordering` shadows the prelude one here
-/// exactly as it does everywhere else.
+/// the program itself declares — so a user's own `enum Ordering` or `struct FieldEntry` shadows the
+/// prelude one here exactly as it does everywhere else.
 pub fn prelude_type_infos() -> Vec<TypeInfo> {
-    prelude_enums()
-        .into_iter()
-        .map(|decl| TypeInfo {
-            name: decl.name.to_string(),
-            kind: TypeKind::Enum,
-            // An enum declares no fields; `field_specs_of` on one reports the empty list, and it is
-            // `variants_of` that carries the schema. The pair is what distinguishes it from a
-            // field-less struct.
-            fields: Vec::new(),
-            field_types: Vec::new(),
-            field_optional: Vec::new(),
-            field_defaults: Vec::new(),
-            variants: decl
-                .variants
-                .iter()
-                .map(|v| VariantInfo {
-                    name: v.name.clone(),
-                    fields: v.field_names(),
-                    field_types: v.field_reprs(decl.name),
-                    // No prelude enum is backed — their cases are their wire values, the same
-                    // statement `register_prelude_enums` makes on the checker side.
-                    backing: None,
-                })
-                .collect(),
-        })
-        .collect()
+    let enums = prelude_enums().into_iter().map(|decl| TypeInfo {
+        name: decl.name.to_string(),
+        kind: TypeKind::Enum,
+        // An enum declares no fields; `field_specs_of` on one reports the empty list, and it is
+        // `variants_of` that carries the schema. The pair is what distinguishes it from a
+        // field-less struct.
+        fields: Vec::new(),
+        field_types: Vec::new(),
+        field_optional: Vec::new(),
+        field_defaults: Vec::new(),
+        variants: decl
+            .variants
+            .iter()
+            .map(|v| VariantInfo {
+                name: v.name.clone(),
+                fields: v.field_names(),
+                field_types: v.field_reprs(decl.name),
+                // No prelude enum is backed — their cases are their wire values, the same
+                // statement `register_prelude_enums` makes on the checker side.
+                backing: None,
+            })
+            .collect(),
+    });
+    let structs = prelude_structs().into_iter().map(|decl| TypeInfo {
+        name: decl.name.to_string(),
+        kind: TypeKind::Struct,
+        field_types: decl.field_types.iter().map(|t| t.repr()).collect(),
+        // No prelude struct field declares a default, so none may be omitted at construction — the
+        // mandatory/no-default pair `plan_construct` enforces.
+        field_optional: decl.fields.iter().map(|_| false).collect(),
+        field_defaults: decl.fields.iter().map(|_| None).collect(),
+        fields: decl.fields,
+        // A struct declares no variants; `variants_of` on one reports the empty list, and the
+        // non-empty `field_specs_of` is what says "a struct, and here is its schema".
+        variants: Vec::new(),
+    });
+    enums.chain(structs).collect()
 }
 
 /// The `Attributed<T>` prelude struct's name — `{ target: string, value: T }`, the element type of
 /// `attributes_of::<T>()`'s result.
 pub const ATTRIBUTED: &str = "Attributed";
 
+/// The declared type of one prelude **struct** field — the closed vocabulary [`PreludeStruct`] needs
+/// to describe every prelude record's fields, and the struct twin of [`PreludeFieldTy`].
+///
+/// Deliberately tiny and closed, for the same reason its enum counterpart is: the prelude structs are
+/// eight fixed declarations, and this is exactly the set their fields use. A consumer that types
+/// fields (the checker) maps each arm onto its own lattice; reflection maps each onto a [`TypeRepr`]
+/// ([`PreludeStructFieldTy::repr`]). Recursion goes through `&'static` rather than `Box` so the whole
+/// vocabulary stays `Copy` and a declaration can be written as a `const`, matching how the extension
+/// ABI spells its own signature types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreludeStructFieldTy {
+    Str,
+    Bool,
+    /// The dynamic top — the honest type of a field that genuinely holds anything
+    /// (`FieldEntry.value` is one field's value, of whatever type that field has).
+    Dyn,
+    /// The prelude `Type` ADT ([`TYPE_ENUM`]) — a *reflected type as data*, which is what the `type`
+    /// field of `ParamInfo` / `FieldSpec` carries.
+    TypeAdt,
+    /// The abstract `Enum` **kind**: any enum, not one named enum. `RoleBinding.role` is this, because
+    /// a role binding's role may come from any `@semantic` enum. It reflects as [`TypeRepr::Dyn`],
+    /// which is not a hole invented here but the same answer the checker's own lattice→reflection
+    /// projection gives an abstract kind — the value in such a field carries its own concrete enum
+    /// tag, and the declaration genuinely names no single type.
+    EnumKind,
+    /// Another prelude struct, by name (`VariantSpec.payload` is a `List` of [`FIELD_SPEC`]).
+    Struct(&'static str),
+    /// This struct's own **type parameter** (`Attributed<T>.value`), by name — reflected as the
+    /// kind-agnostic `Named`, exactly as a `.noe` generic struct's `T`-typed field is.
+    Param(&'static str),
+    List(&'static PreludeStructFieldTy),
+    Option(&'static PreludeStructFieldTy),
+    /// `() -> void` — a first-class function value taking nothing and returning nothing
+    /// (`TierRoot.run`, the activated fn a tier runner calls).
+    VoidFn,
+}
+
+impl PreludeStructFieldTy {
+    /// This field's declared type as a reflection [`TypeRepr`] — the projection that lets
+    /// [`prelude_type_infos`] report a prelude struct's schema as precisely as a `.noe` struct's, and
+    /// the reflection twin of the checker's `prelude_struct_field_type`.
+    ///
+    /// A nominal reflects **kind-agnostically** ([`TypeRepr::Named`]), which is what a declared
+    /// struct/class/enum annotation reflects as everywhere else in a declared position — so one type
+    /// in a field's type slot reads the same whether the struct was declared by the language or by a
+    /// program.
+    pub fn repr(self) -> TypeRepr {
+        match self {
+            PreludeStructFieldTy::Str => TypeRepr::Str,
+            PreludeStructFieldTy::Bool => TypeRepr::Bool,
+            PreludeStructFieldTy::Dyn => TypeRepr::Dyn,
+            PreludeStructFieldTy::TypeAdt => TypeRepr::Named(TYPE_ENUM.to_string(), Vec::new()),
+            PreludeStructFieldTy::EnumKind => TypeRepr::Dyn,
+            PreludeStructFieldTy::Struct(n) => TypeRepr::Named(n.to_string(), Vec::new()),
+            PreludeStructFieldTy::Param(n) => TypeRepr::Named(n.to_string(), Vec::new()),
+            PreludeStructFieldTy::List(inner) => TypeRepr::List(Box::new(inner.repr())),
+            PreludeStructFieldTy::Option(inner) => TypeRepr::Option(Box::new(inner.repr())),
+            PreludeStructFieldTy::VoidFn => TypeRepr::Fn(Vec::new(), Box::new(TypeRepr::Unit)),
+        }
+    }
+}
+
 /// A **prelude struct**: one of the record types the language declares for you, and the *only*
-/// statement of its field list. Everything that builds or registers one reads it from here — the
-/// checker's records, both backends' `attributes_of` / `roles_of` / `params_of` / `fields_of` /
-/// `field_specs_of` materializations, and the type environments that make a source-written literal
-/// construct. Before the table those field lists were hand-copied at eight sites across two
-/// backends, and neither backend registered the types at all, so `FieldEntry { name: "a", value: 1
-/// }` type-checked and aborted with E0005 at run time — the struct half of the prelude-enum hole.
+/// statement of its field list and field types. Everything that builds or registers one reads it from
+/// here — the checker's records, both backends' `attributes_of` / `roles_of` / `params_of` /
+/// `fields_of` / `field_specs_of` materializations, and the type environments that make a
+/// source-written literal construct. Before the table those field lists were hand-copied at eight
+/// sites across two backends, and neither backend registered the types at all, so `FieldEntry { name:
+/// "a", value: 1 }` type-checked and aborted with E0005 at run time — the struct half of the
+/// prelude-enum hole.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreludeStruct {
     /// The struct's name, as a program spells it.
@@ -2687,6 +2770,19 @@ pub struct PreludeStruct {
     /// the order a shape interns them under, so a materialized value and a constructed one are the
     /// same value.
     pub fields: Vec<String>,
+    /// Each field's **declared type**, positionally parallel to [`Self::fields`].
+    ///
+    /// These lived at the checker's eight `register_prelude_struct` call sites — the field *names*
+    /// came from this shared table and the field *types* from the caller, because the checker's
+    /// lattice is not visible from `noeta-ast`. The consequence was that reflection, which can see
+    /// neither, had no field types to report at all: `field_specs_of("FieldSpec")` and
+    /// `variants_of("FieldSpec")` were **both** empty, the pair that means "I know nothing about this
+    /// name", about the very types a reflection consumer walks *while* reflecting. Carrying a closed
+    /// [`PreludeStructFieldTy`] vocabulary here instead lets each consumer project it onto its own
+    /// vocabulary (the checker onto its lattice, reflection onto [`TypeRepr`]) from one statement of
+    /// the declaration — the same move [`prelude_enums`] made for the enum half, and it deletes the
+    /// hand-written lists and the drift they invited.
+    pub field_types: Vec<PreludeStructFieldTy>,
 }
 
 /// Every prelude struct, in registration order. The counterpart of [`prelude_enums`].
@@ -2695,31 +2791,85 @@ pub struct PreludeStruct {
 /// currently spell them (their `type` field collides with the `type` keyword in struct-literal
 /// position): the registration is what makes their materialization read one field list rather than
 /// two, and the day the literal becomes spellable it constructs. `VariantSpec` has no such collision
-/// and is spellable today.
+/// and is spellable today. (`construct("ParamInfo", …)` reaches them regardless — it keys on the
+/// schema this table states, not on the literal syntax.)
+///
+/// Each field's type is stated here with the reasoning that used to sit at the checker's registration
+/// sites, because this is now the one place it is said:
+///
+/// * `Attributed<T> { target: string, value: T }` — the element type of `attributes_of::<T>()`. An
+///   ordinary generic struct, so `a.value`'s instantiation to `T` reuses the generic path.
+/// * `RoleBinding { target: string, role: Enum }` — the element type of `roles_of()`. `role` is the
+///   abstract `Enum` kind because a binding's role may be any `@semantic` enum, not a single type.
+/// * `ParamInfo { name: string, type: Type, optional: bool, attrs: List<dyn> }` — the element type of
+///   `params_of()`. `type` is the parameter's declared type as the same `Type` ADT `type_of` returns;
+///   `optional` is true when the parameter declared a default, so a signature-driven consumer can
+///   tell a required parameter from one a call may omit; `attrs` is `List<dyn>` because a parameter's
+///   attributes are heterogeneous (`#[Arg]` and `#[Sensitive]` are different structs), so there is no
+///   one element type to name — a consumer recovers the one it wants by narrowing.
+/// * `FieldEntry { name: string, value: dyn }` — the element type of `fields_of()`, a value-level
+///   view, so `value` is whatever the field holds.
+/// * `FieldSpec { name: string, type: Type, optional: bool }` — the element type of the TYPE-level
+///   `field_specs_of`. The type-level twin of `FieldEntry`: `type` is the field's declared type
+///   (precise, from the declaration — not a value's erased head).
+/// * `VariantSpec { name: string, payload: List<FieldSpec>, backing: ?dyn }` — the element type of
+///   `variants_of`, the enum twin of `FieldSpec`. `payload` reuses `FieldSpec` because a variant
+///   payload IS ordinary declared field data, so the two halves of the type-level surface share one
+///   member vocabulary; `backing` is `?dyn` because a backed enum's value may be a string or an int.
+/// * `TierRoot { name: string, run: () -> void }` — one activated fn per root: its name, and the fn
+///   itself as a first-class value the runner calls.
+/// * `TierText { target: string, text: string }` — its verbatim-body twin.
 pub fn prelude_structs() -> Vec<PreludeStruct> {
-    let s = |name: &'static str, fields: &[&str]| PreludeStruct {
+    use PreludeStructFieldTy as F;
+    let s = |name: &'static str, fields: &[(&str, PreludeStructFieldTy)]| PreludeStruct {
         name,
-        fields: fields.iter().map(|f| (*f).to_string()).collect(),
+        fields: fields.iter().map(|(n, _)| (*n).to_string()).collect(),
+        field_types: fields.iter().map(|(_, t)| *t).collect(),
     };
     vec![
-        s(ATTRIBUTED, &["target", "value"]),
-        s(ROLE_BINDING, &["target", "role"]),
-        s(PARAM_INFO, &["name", "type", "optional", "attrs"]),
-        s(FIELD_ENTRY, &["name", "value"]),
-        s(FIELD_SPEC, &["name", "type", "optional"]),
-        s(VARIANT_SPEC, &["name", "payload", "backing"]),
-        s(TIER_ROOT, &["name", "run"]),
-        s(TIER_TEXT, &["target", "text"]),
+        s(ATTRIBUTED, &[("target", F::Str), ("value", F::Param("T"))]),
+        s(ROLE_BINDING, &[("target", F::Str), ("role", F::EnumKind)]),
+        s(
+            PARAM_INFO,
+            &[
+                ("name", F::Str),
+                ("type", F::TypeAdt),
+                ("optional", F::Bool),
+                ("attrs", F::List(&F::Dyn)),
+            ],
+        ),
+        s(FIELD_ENTRY, &[("name", F::Str), ("value", F::Dyn)]),
+        s(
+            FIELD_SPEC,
+            &[
+                ("name", F::Str),
+                ("type", F::TypeAdt),
+                ("optional", F::Bool),
+            ],
+        ),
+        s(
+            VARIANT_SPEC,
+            &[
+                ("name", F::Str),
+                ("payload", F::List(&F::Struct(FIELD_SPEC))),
+                ("backing", F::Option(&F::Dyn)),
+            ],
+        ),
+        s(TIER_ROOT, &[("name", F::Str), ("run", F::VoidFn)]),
+        s(TIER_TEXT, &[("target", F::Str), ("text", F::Str)]),
     ]
+}
+
+/// The prelude struct of this name, or `None` when the name is not one.
+pub fn prelude_struct(name: &str) -> Option<PreludeStruct> {
+    prelude_structs().into_iter().find(|s| s.name == name)
 }
 
 /// The fields of the prelude struct `name`, in slot order — the lookup every materialization site
 /// uses instead of re-listing them. Panics for a name that is not a prelude struct: every call site
 /// passes one of the constants above, so a miss is a programming error, not a runtime condition.
 pub fn prelude_struct_fields(name: &str) -> Vec<String> {
-    prelude_structs()
-        .into_iter()
-        .find(|s| s.name == name)
+    prelude_struct(name)
         .unwrap_or_else(|| panic!("`{name}` is not a prelude struct"))
         .fields
 }
