@@ -292,8 +292,7 @@ fn run_file_benches(
 /// exactly `0.0`. That is not a measurement of zero, it is the absence of a measurement — and it is
 /// *routine*, not exceptional (a smoke bench at `iterations: 5` lands here most runs), which is why it
 /// is a note on the report line rather than a bench failure.
-const UNRESOLVED_NOTE: &str =
-    "no per-iteration cost resolved above the timer noise — raise `--iterations` or give the body \
+const UNRESOLVED_NOTE: &str = "no per-iteration cost resolved above the timer noise — raise `--iterations` or give the body \
      more work";
 
 /// Whether a per-iteration figure is a real measurement. Zero is the clamp's way of saying "the

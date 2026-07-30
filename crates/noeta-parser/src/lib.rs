@@ -1282,6 +1282,14 @@ const _: () = assert!(
     INLINE_CHAIN_BRANCHES * STACK_PER_TERNARY_CHAIN_BRANCH <= INLINE_PARSE_HEADROOM,
     "an inline parse at INLINE_CHAIN_BRANCHES must fit INLINE_PARSE_HEADROOM"
 );
+// The offload threshold must sit strictly below *both* limits, or some chain length the parser still
+// accepts is parsed inline — which is the window the conditional-expression form aborted in, and it
+// aborted non-monotonically, so no limit can stand in for the offload.
+const _: () = assert!(
+    INLINE_CHAIN_BRANCHES < MAX_TERNARY_CHAIN_BRANCHES
+        && INLINE_CHAIN_BRANCHES < MAX_ELSE_CHAIN_BRANCHES,
+    "every chain length the parser accepts must be past INLINE_CHAIN_BRANCHES"
+);
 // The deep worker has to hold the *parse* of the longest chain either limit admits, since that is
 // where a chain past INLINE_CHAIN_BRANCHES is sent.
 const _: () = assert!(
@@ -6553,7 +6561,10 @@ mod tests {
         assert_eq!(kinds, vec!["map", "map", "map", "expr"]);
 
         let Stmt::Expr { expr, .. } = &parsed.program.stmts[2] else {
-            panic!("expected an expression statement, got {:?}", parsed.program.stmts[2]);
+            panic!(
+                "expected an expression statement, got {:?}",
+                parsed.program.stmts[2]
+            );
         };
         let Expr::Match { arms, .. } = expr else {
             panic!("expected a match, got {expr:?}");
@@ -6822,7 +6833,10 @@ mod tests {
                 panic!("expected an if, got {stmt:?}");
             };
             seen += 1;
-            assert_eq!(span.end, outer_end, "branch {seen} should end with the chain");
+            assert_eq!(
+                span.end, outer_end,
+                "branch {seen} should end with the chain"
+            );
             match else_body.as_deref() {
                 Some([nested @ Stmt::If { .. }]) => stmt = nested,
                 // The trailing `else`'s block: `return -1`.
@@ -6879,7 +6893,6 @@ mod tests {
         // (non-monotonically) where the flattened statement chain never does. Pricing the two shapes
         // together at the cheaper cost is exactly how a chain at the statement limit still overflowed
         // after the statement chain had been bounded, so the pre-pass tells them apart by the `then`.
-        assert!(MAX_TERNARY_CHAIN_BRANCHES < MAX_ELSE_CHAIN_BRANCHES);
         let at_limit = parse_str(&ternary_chain(MAX_TERNARY_CHAIN_BRANCHES));
         assert!(
             at_limit.diagnostics.is_empty(),
@@ -6912,11 +6925,8 @@ mod tests {
         // to the worker however long it gets — which is why the conditional-expression form aborted
         // *inside the parser* at ~200 branches, on a caller that had passed the headroom check. That
         // cliff is non-monotone (the `stacker` red zone), so it cannot be bounded by a limit; the parse
-        // has to move. `INLINE_CHAIN_BRANCHES` is what moves it, and it must stay below both limits or
-        // some admissible chain is still parsed inline.
-        assert!(INLINE_CHAIN_BRANCHES < MAX_TERNARY_CHAIN_BRANCHES);
-        assert!(INLINE_CHAIN_BRANCHES < MAX_ELSE_CHAIN_BRANCHES);
-
+        // has to move. `INLINE_CHAIN_BRANCHES` is what moves it, and that it stays below both limits —
+        // so no admissible chain is still parsed inline — is a `const` assertion next to the constants.
         let src = ternary_chain(MAX_TERNARY_CHAIN_BRANCHES);
         let source = Source::new(SourceId::FIRST, "chain.noe", src);
         let lexed = noeta_lexer::lex(&source);
@@ -6935,7 +6945,9 @@ mod tests {
         let parsed = std::thread::scope(|scope| {
             std::thread::Builder::new()
                 .stack_size(INLINE_PARSE_HEADROOM + 512 * 1024)
-                .spawn_scoped(scope, || parse_str(&ternary_chain(MAX_TERNARY_CHAIN_BRANCHES)))
+                .spawn_scoped(scope, || {
+                    parse_str(&ternary_chain(MAX_TERNARY_CHAIN_BRANCHES))
+                })
                 .expect("spawn the just-over-the-headroom probe thread")
                 .join()
                 .expect("the just-over-the-headroom probe panicked")
