@@ -2063,10 +2063,24 @@ impl Printer<'_> {
             }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let p = binop_prec(*op);
-                // Source-directed: preserve a break the author put around the operator.
+                // Source-directed: preserve a break the author put around the operator. **Which side
+                // of the break the operator lands on is a parse question, not a taste one.** A
+                // newline ends the statement unless the next line's first token continues it
+                // ([`noeta_lexer::token_continues_line`]), so an operator that does *not* continue a
+                // line — `~`, `&`, `^`, `<<`, `>>` — must stay at the END of the first line, exactly
+                // where the author wrote it (`"a" ~⏎ "b"`). Emitting it at the start of the second
+                // line turned `x = "a" ~⏎ "b"` into `x = "a"⏎ ~ "b"`, which lexes as two statements
+                // (`x = "a"; ~ "b"`) — the printer bug `noeta fmt`'s re-parse safety check caught,
+                // refusing to write the file at all. The wrapping arm above only handles
+                // line-continuing operators, so this arm is the sole place either shape is chosen.
                 let sep = if self.broke_between(lhs.span().end, rhs.span().start) {
-                    Doc::concat([Doc::hardline(), Doc::text(format!("{} ", op.symbol()))])
-                        .nest(self.indent_step())
+                    if noeta_lexer::token_continues_line(binop_token(*op)) {
+                        Doc::concat([Doc::hardline(), Doc::text(format!("{} ", op.symbol()))])
+                            .nest(self.indent_step())
+                    } else {
+                        Doc::concat([Doc::text(format!(" {}", op.symbol())), Doc::hardline()])
+                            .nest(self.indent_step())
+                    }
                 } else {
                     Doc::text(format!(" {} ", op.symbol()))
                 };

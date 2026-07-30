@@ -946,6 +946,34 @@ mod tests {
     }
 
     #[test]
+    fn author_break_keeps_a_non_continuing_operator_trailing() {
+        // A newline ends a statement unless the *next* line's first token continues it, so `~` (and
+        // `&`/`^`/`<<`) can only ever sit at the END of the broken line. The printer used to move
+        // every operator to the head of the second line, turning `x = "a" ~⏎"b"` into
+        // `x = "a"⏎~ "b"` — which lexes as `x = "a"; ~ "b"` and does not re-parse, so `noeta fmt`
+        // refused the file outright ("printer bug"). Each of these must format, keep the author's
+        // break, and be idempotent; `fmt` itself enforces the re-parse (the safety gate).
+        for (src, want) in [
+            ("x = \"a\" ~\n    \"b\"", "x = \"a\" ~\n    \"b\"\n"),
+            ("m = 10 &\n    6", "m = 10 &\n    6\n"),
+            ("x = 6 ^\n    3", "x = 6 ^\n    3\n"),
+            ("s = 1 <<\n    4", "s = 1 <<\n    4\n"),
+            // A three-operand chain breaks at the author's break only, operator still trailing.
+            (
+                "t = \"a\" ~ \"b\" ~\n    \"c\"",
+                "t = \"a\" ~ \"b\" ~\n    \"c\"\n",
+            ),
+        ] {
+            let once = fmt(src).expect("formats and re-parses");
+            assert_eq!(once, want, "unexpected layout for {src:?}");
+            assert_eq!(fmt(&once).expect("re-formats"), once, "not idempotent");
+        }
+        // A line-continuing operator keeps the leading-operator layout it always had — `+` at the
+        // head of the second line joins the lines, so the break is preserved that way.
+        assert_eq!(fmt("n = 1 +\n    2").unwrap(), "n = 1\n    + 2\n");
+    }
+
+    #[test]
     fn wrap_keeps_precedence_parens_in_a_broken_chain() {
         // A tighter-binding operand (`bbbb * cccc`) stays a single grouped unit on its line rather
         // than being flattened into the `+` chain — precedence is preserved across the wrap.
