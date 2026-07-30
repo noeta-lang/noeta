@@ -36,9 +36,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
 > [!NOTE]
-> **Observability.** There is no telemetry subcommand or flag — production tracing rides `noeta run`
-> and the server, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` env var and off until you
-> set it. See [Observability](Observability). (The dev-time flamegraph tool is [`noeta profile`](Profiling).)
+> **Observability.** There is no telemetry subcommand or flag — production tracing rides `noeta run` and the server, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` env var and off until you set it. See [Observability](Observability). (The dev-time flamegraph tool is [`noeta profile`](Profiling).)
 
 > [!NOTE]
 > The language-conformance/differential harness that developers use is a *separate* dev binary (`noeta-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor tooling is on [Editor & AI Tooling](Editor-and-AI-Tooling); the debugger on [Debugging](Debugging).
@@ -231,91 +229,32 @@ Exit codes match `check`: **0** on success, **1** if any expansion failed (a hoo
 
 ## `noeta migrate`
 
-Applies a project's **schema migrations**. `migrate` is **not a core verb** — it is an
-extension-contributed command the **para/db package** provides (the `cargo clippy` model): it is
-available in a project whose manifest depends on `para/db` and binds the command
-([`[trust.commands]`](Manifest#trustcommands--contributed-subcommands) / `migrate = "para/db"` — the
-key is the name you type, so `undo = "para/db:rollback"` would make it `noeta undo`), dispatched
-through the app's composed toolchain like any other extension subcommand.
+Applies a project's **schema migrations**. `migrate` is **not a core verb** — it is an extension-contributed command the **para/db package** provides (the `cargo clippy` model): it is available in a project whose manifest depends on `para/db` and binds the command ([`[trust.commands]`](Manifest#trustcommands--contributed-subcommands) / `migrate = "para/db"` — the key is the name you type, so `undo = "para/db:rollback"` would make it `noeta undo`), dispatched through the app's composed toolchain like any other extension subcommand.
 
-Forward-only migrations apply from a `migrations/` directory in filename order, re-runnable seeds
-from `seeds/`, and the connection string resolves from `--db`, then `DATABASE_URL`, then the
-manifest's [`[db]` table](Manifest#db--database-connection). A migration's **extension picks its
-body language**, and both kinds share one ordering: a `.noe` migration is a Noeta program declaring
-`up(): List<Statement>`, whose returned statements are lowered to the connected driver's DDL, while
-a `.sql` migration runs verbatim — the escape hatch for whatever a backend spells its own way. The
-full command reference — every invocation, seed semantics, `--reset`, and exit codes — is on the
-[para/db](para-db) page.
+Forward-only migrations apply from a `migrations/` directory in filename order, re-runnable seeds from `seeds/`, and the connection string resolves from `--db`, then `DATABASE_URL`, then the manifest's [`[db]` table](Manifest#db--database-connection). A migration's **extension picks its body language**, and both kinds share one ordering: a `.noe` migration is a Noeta program declaring `up(): List<Statement>`, whose returned statements are lowered to the connected driver's DDL, while a `.sql` migration runs verbatim — the escape hatch for whatever a backend spells its own way. The full command reference — every invocation, seed semantics, `--reset`, and exit codes — is on the [para/db](para-db) page.
 
 ## `noeta serve` and `--watch`
 
-`noeta serve app.noe --port 8080` serves the file's top-level `fn fetch(req: Request): Response`
-handler (see [std.http](std-http));
-the app defines the handler and must **not** call `server.serve(...)` itself — the command runs
-the file's top-level setup, then drives the handler on the given port. `--host` sets the bind
-address (default `0.0.0.0`, all interfaces; pass `--host 127.0.0.1` for local-only). **Ctrl-C**
-drains gracefully: the server stops accepting, finishes the requests already in flight, closes
-the listener, and exits — a second Ctrl-C forces an immediate stop.
+`noeta serve app.noe --port 8080` serves the file's top-level `fn fetch(req: Request): Response` handler (see [std.http](std-http)); the app defines the handler and must **not** call `server.serve(...)` itself — the command runs the file's top-level setup, then drives the handler on the given port. `--host` sets the bind address (default `0.0.0.0`, all interfaces; pass `--host 127.0.0.1` for local-only). **Ctrl-C** drains gracefully: the server stops accepting, finishes the requests already in flight, closes the listener, and exits — a second Ctrl-C forces an immediate stop.
 
-`--parallel N` serves across **N worker isolates** for true multi-core throughput: the listener
-is bound once and each worker inherits a cloned handle to it, so the kernel load-balances
-connections across cores (no `SO_REUSEPORT`, no extra dependency). All workers share the process
-and drain together on Ctrl-C. `--parallel --watch` hot-reloads across the whole fleet — a swap
-**broadcasts** to every worker's live session, so all cores serve the new code without a restart.
-(Reactive/LiveView state is per-worker: signals and WebSocket subscribers live in the worker that
-handled the connection. That is a constraint on where an app's **source of truth** sits, not a bar
-on serving a LiveView across cores — an app backed by a database serves fine on all of them, since
-each worker opens its own connection and drains its own change notifications, while an app whose
-truth is an in-memory signal wants a single worker until session state is shared.)
+`--parallel N` serves across **N worker isolates** for true multi-core throughput: the listener is bound once and each worker inherits a cloned handle to it, so the kernel load-balances connections across cores (no `SO_REUSEPORT`, no extra dependency). All workers share the process and drain together on Ctrl-C. `--parallel --watch` hot-reloads across the whole fleet — a swap **broadcasts** to every worker's live session, so all cores serve the new code without a restart. (Reactive/LiveView state is per-worker: signals and WebSocket subscribers live in the worker that handled the connection. That is a constraint on where an app's **source of truth** sits, not a bar on serving a LiveView across cores — an app backed by a database serves fine on all of them, since each worker opens its own connection and drains its own change notifications, while an app whose truth is an in-memory signal wants a single worker until session state is shared.)
 
-`--watch` works on **any** command (`noeta run --watch`, `noeta test --watch`, …): a file watcher
-restarts the command on change — with the startup cache, a restart is a few milliseconds.
+`--watch` works on **any** command (`noeta run --watch`, `noeta test --watch`, …): a file watcher restarts the command on change — with the startup cache, a restart is a few milliseconds.
 
-For the tier runners the watch is **impact-filtered**: `noeta test --watch` (and `bench`) diffs
-each save against the previous run, walks the reverse call graph from the changed definitions,
-and reruns only the impacted tier fns (via the runners' repeatable `--name` filter) — edit a leaf
-function and exactly its caller-tests rerun; an inert edit (formatting between declarations, a
-comment) runs nothing. The filter is **project-wide**: editing an *imported module* narrows to the
-entry tests that transitively reach the change,
-and editing a module function nothing imports reruns nothing at all. Edits the engine cannot
-attribute — a signature/layout change, a changed top-level statement (fixtures live there), a
-new or deleted module, a manifest change, red code — degrade to a full rerun *with the reason
-printed*. The closure is static, so code reached only through dynamic dispatch is matched
-best-effort (method calls on untyped receivers over-approximate by name); run without the filter
-occasionally if you lean on reflection-driven dispatch.
+For the tier runners the watch is **impact-filtered**: `noeta test --watch` (and `bench`) diffs each save against the previous run, walks the reverse call graph from the changed definitions, and reruns only the impacted tier fns (via the runners' repeatable `--name` filter) — edit a leaf function and exactly its caller-tests rerun; an inert edit (formatting between declarations, a comment) runs nothing. The filter is **project-wide**: editing an *imported module* narrows to the entry tests that transitively reach the change, and editing a module function nothing imports reruns nothing at all. Edits the engine cannot attribute — a signature/layout change, a changed top-level statement (fixtures live there), a new or deleted module, a manifest change, red code — degrade to a full rerun *with the reason printed*. The closure is static, so code reached only through dynamic dispatch is matched best-effort (method calls on untyped receivers over-approximate by name); run without the filter occasionally if you lean on reflection-driven dispatch.
 
-`noeta serve --watch` upgrades from restarts to **in-process hot reload**. On each save of the
-entry file the watcher parses, type-checks (**transactionally** — red code never swaps; the old
-version keeps serving and the diagnostics go to the terminal *and* to connected LiveView clients
-as an error overlay), diffs against the running version, and swaps the changed definitions into
-the live server. The state rule is the language behavior to know:
+`noeta serve --watch` upgrades from restarts to **in-process hot reload**. On each save of the entry file the watcher parses, type-checks (**transactionally** — red code never swaps; the old version keeps serving and the diagnostics go to the terminal *and* to connected LiveView clients as an error overlay), diffs against the running version, and swaps the changed definitions into the live server. The state rule is the language behavior to know:
 
-- **Reactive state survives edits** — an unchanged `signal(...)`/`cell`/`synced_signal` binding
-  keeps its value across the swap; effects are disposed and re-created by the new version.
-- **Plain state re-initializes** — ordinary top-level bindings are re-run from the new source.
-  State that must survive belongs in a signal.
+- **Reactive state survives edits** — an unchanged `signal(...)`/`cell`/`synced_signal` binding keeps its value across the swap; effects are disposed and re-created by the new version.
+- **Plain state re-initializes** — ordinary top-level bindings are re-run from the new source. State that must survive belongs in a signal.
 
-Connected LiveView clients (the bundled `server.liveview_js()` shim) are told over their own
-websocket: a landed swap pushes `{"type":"reload"}` and closes the socket — the page reloads and
-its fresh session snapshots the *preserved* signal state, so the browser view carries the same
-counter through the edit; a rejected edit pushes `{"type":"error",…}`, which the shim renders as
-a full-screen diagnostics overlay, cleared by the next good frame. Swaps apply immediately even
-when the server is idle (the watcher wakes the blocked executor).
+Connected LiveView clients (the bundled `server.liveview_js()` shim) are told over their own websocket: a landed swap pushes `{"type":"reload"}` and closes the socket — the page reloads and its fresh session snapshots the *preserved* signal state, so the browser view carries the same counter through the edit; a rejected edit pushes `{"type":"error",…}`, which the shim renders as a full-screen diagnostics overlay, cleared by the next good frame. Swaps apply immediately even when the server is idle (the watcher wakes the blocked executor).
 
-Changes the live process cannot absorb — a type-layout or signature change, an edit to another
-project file, a namespaced entry — fall back to a **full restart**, automatically, with the
-reason printed (`[hot] restart needed: the layout of type \`P\` changed`). After a restart, an
-open browser page reconnects and re-syncs state but keeps its old markup until refreshed (the
-reload push needs a live server to send it).
+Changes the live process cannot absorb — a type-layout or signature change, an edit to another project file, a namespaced entry — fall back to a **full restart**, automatically, with the reason printed (`[hot] restart needed: the layout of type \`P\` changed`). After a restart, an open browser page reconnects and re-syncs state but keeps its old markup until refreshed (the reload push needs a live server to send it).
 
-**Memory during an edit marathon.** A long editing session costs memory proportional to the
-number of swaps, never correctness: each swap retains a bounded amount of superseded code and
-state (in-flight requests finish on the code they started on), all reclaimed when the process
-exits. The machinery behind this — what is retained and why — lives on the
-[architecture pages](Architecture-and-Pipeline).
+**Memory during an edit marathon.** A long editing session costs memory proportional to the number of swaps, never correctness: each swap retains a bounded amount of superseded code and state (in-flight requests finish on the code they started on), all reclaimed when the process exits. The machinery behind this — what is retained and why — lives on the [architecture pages](Architecture-and-Pipeline).
 
-The same unchanged `fetch` program also deploys to the edge as a `wasi:http` component — see
-[WebAssembly & the Edge](WebAssembly-and-the-Edge).
+The same unchanged `fetch` program also deploys to the edge as a `wasi:http` component — see [WebAssembly & the Edge](WebAssembly-and-the-Edge).
 
 ---
 
@@ -478,12 +417,7 @@ Dependencies are declared in `noeta.toml` (`[dependencies]`, with elevated grant
 
 ### The manifest: `[package]` and dependency forms
 
-The orientation you need for the verbs below: `[package]` gives the package its global
-`company/package` identity and SemVer version, and each `[dependencies]` key is the **import root**
-you address the package by (`use util.…`), decoupled from its registry identity. A dependency names
-exactly one source — a local `path`, a `git` URL (pinned `tag`, moving `branch`, or default-branch
-HEAD), or a registry `version` requirement — and **every** form resolves to an exact pin recorded
-in `noeta.lock`, which only [`noeta update`](#noeta-update) moves.
+The orientation you need for the verbs below: `[package]` gives the package its global `company/package` identity and SemVer version, and each `[dependencies]` key is the **import root** you address the package by (`use util.…`), decoupled from its registry identity. A dependency names exactly one source — a local `path`, a `git` URL (pinned `tag`, moving `branch`, or default-branch HEAD), or a registry `version` requirement — and **every** form resolves to an exact pin recorded in `noeta.lock`, which only [`noeta update`](#noeta-update) moves.
 
 ```toml
 [package]
@@ -496,11 +430,7 @@ http = { git = "https://github.com/acme/http", tag = "v1.2.0" }  # git, pinned t
 json = { version = "^1.2", package = "acme/json" }               # registry, by SemVer requirement
 ```
 
-[The `noeta.toml` Manifest](Manifest) is the complete reference — every table and key, the scope
-(array) dependency form, editions, and the exact rules the parser enforces. Developing a dependency
-*against* this app? A root-manifest [`[patch]` table](Manifest#patch--dev-time-path-overrides)
-re-points a package identity at a local tree for the whole graph — no `[dependencies]` edits, no
-lock churn, loud on every resolve.
+[The `noeta.toml` Manifest](Manifest) is the complete reference — every table and key, the scope (array) dependency form, editions, and the exact rules the parser enforces. Developing a dependency *against* this app? A root-manifest [`[patch]` table](Manifest#patch--dev-time-path-overrides) re-points a package identity at a local tree for the whole graph — no `[dependencies]` edits, no lock churn, loud on every resolve.
 
 ### `noeta add`
 
@@ -509,6 +439,8 @@ noeta add [KEY] (--path <DIR> | --git <URL> --tag <TAG> | --version <REQ> [--pac
 ```
 
 Adds a dependency to the nearest `noeta.toml` (a format-preserving edit — comments and ordering survive), then resolves the graph so `noeta.lock` reflects it. Exactly one source form: `--path`, `--git` + `--tag`, or `--version` (with `--package` naming the registry identity). The import-root `KEY` may be omitted where it can be derived — from `--package`'s package half, or a `--path` dependency's own `[package]` name; a key that differs from the package's declared root is a deliberate rename and warned about (`use <key>.…`, not `use <root>.…`). A key that would capture a built-in import root (`std`/`noeta`/`core`) is refused. After resolving, the **committer signal** flags a newly-pulled release whose history introduces committers new to that repo.
+
+Adding under a key that is **already in the manifest widens it into a [scope array](Manifest#dependencies--what-the-package-builds-against)** rather than refusing: the existing value and the new one become the first two members of `key = [ … ]`, and a key that is already an array gains a member. Only that one entry is rewritten, and the existing member's own text is reused verbatim, so member formatting and trailing comments survive. This is how `noeta add para --package para/aether` followed by `noeta add para --package para/db` binds both packages under one `para` root — the form a family published to be addressed as `scope.package.module` needs. Re-adding the *identical* source is still refused, since an array with two equal members would resolve one package twice under one root.
 
 ### `noeta update`
 

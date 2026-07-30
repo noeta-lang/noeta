@@ -2,10 +2,9 @@
 
 [![CI](https://github.com/noeta-lang/noeta/actions/workflows/ci.yml/badge.svg)](https://github.com/noeta-lang/noeta/actions/workflows/ci.yml)
 
-> **AI-native, human-first.**
-> A general-purpose language that makes machine-written code checkable and human-readable — strong static types, an agent-native toolchain, single-binary output.
+> **AI-native, human-first.** A general-purpose language that makes machine-written code checkable and human-readable — strong static types, an agent-native toolchain, single-binary output.
 
-Noeta is a new, general-purpose programming language built from scratch in Rust — currently **pre-alpha**. It reads cleanly and familiarly, but underneath it pairs an ML-grade type system with a runtime engineered for correctness and speed.
+Noeta is a new, general-purpose programming language built from scratch in Rust — currently **alpha**. It reads cleanly and familiarly, but underneath it pairs an ML-grade type system with a runtime engineered for correctness and speed.
 
 ```noeta
 enum OrderError { Empty; NegativePrice(index: int) }
@@ -37,7 +36,7 @@ echo match validate(cart) {
 - **Batteries and tooling.** A layered standard library and a toolchain that runs, checks, builds, formats, tests, benchmarks, profiles, and documents your code — `run`/`build`/`check`/`repl`, `test`/`bench`/`doc`, `fmt`/`profile`, plus `lsp`/`dap`/`mcp` editor & agent servers and a package manager.
 
 > [!NOTE]
-> **Status: alpha.** The **language core and tooling are complete and usable** — full syntax, the type system, traits/generics/derives, modules, the standard library, real host IO, concurrency, server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP server, native ahead-of-time builds (`noeta build --native`), WebAssembly builds and the browser playground (`noeta build --wasm`/`--serve`), a package manager, and the `noeta lsp` / `noeta dap` / `noeta mcp` editor & agent tooling all ship today. LiveView (server-driven UI over WebSockets) ships as the `para/html` package — the first-party `para` package family (html, api, cli, aether, aether_db, db, p2p) lives in its own repositories under the noeta-lang org and is published on the hosted registry at [registry.noeta.dev](https://registry.noeta.dev); still on the roadmap: desktop packaging. Until alpha, anything may change without notice — syntax, stdlib, and file formats included. The [docs](https://docs.noeta.dev) mark the plan-vs-reality boundary everywhere.
+> **Status: alpha.** The **language core and tooling are complete and usable** — full syntax, the type system, traits/generics/derives, modules, the standard library, real host IO, concurrency, server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP server, native ahead-of-time builds (`noeta build --native`), WebAssembly builds and the browser playground (`noeta build --wasm`/`--serve`), a package manager, and the `noeta lsp` / `noeta dap` / `noeta mcp` editor & agent tooling all ship today. LiveView (server-driven UI over WebSockets) ships as the `para/html` package — the first-party `para` package family (html, api, cli, aether, aether_db, db, p2p) lives in its own repositories under the noeta-lang org and is published on the hosted registry at [registry.noeta.dev](https://registry.noeta.dev); still on the roadmap: desktop packaging. Through alpha, anything may change without notice — syntax, stdlib, and file formats included. The [docs](https://docs.noeta.dev) mark the plan-vs-reality boundary everywhere.
 
 ## Try it
 
@@ -95,6 +94,4 @@ at your option.
 
 ### Contribution
 
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual licensed as above, without any additional terms or conditions.
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
