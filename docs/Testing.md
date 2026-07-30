@@ -11,9 +11,7 @@ running 2 tests on 8 threads
 2 passed, 0 failed, 2 total
 ```
 
-Bare `noeta test` runs **every** `.noe` file under the current directory — the command to reach for
-in a project, since an entry file does not carry its modules' tests. See the
-[command reference](#command-reference).
+Bare `noeta test` runs **every** `.noe` file under the current directory — the command to reach for in a project, since an entry file does not carry its modules' tests. See the [command reference](#command-reference).
 
 ## Writing tests
 
@@ -48,11 +46,7 @@ A test's return type is optional; both `fn adds()` and `fn adds(): void` work.
 
 ## Shared setup
 
-There is no fixture attribute — **shared setup is the file's top-level declarations**. A top-level
-binding is part of the setup every test runs on, and because each test gets a fresh isolate, the
-fixture is rebuilt per test: one test mutating it can never leak into another. Named functions do
-not see a top-level binding implicitly — capture it with a `use (…)` clause in the signature (see
-[Functions & Closures](Functions-and-Closures)), in test fns and helpers alike:
+There is no fixture attribute — **shared setup is the file's top-level declarations**. A top-level binding is part of the setup every test runs on, and because each test gets a fresh isolate, the fixture is rebuilt per test: one test mutating it can never leak into another. Named functions do not see a top-level binding implicitly — capture it with a `use (…)` clause in the signature (see [Functions & Closures](Functions-and-Closures)), in test fns and helpers alike:
 
 ```noeta
 users = ["ada", "grace"]                 // shared setup — rebuilt for every test
@@ -76,29 +70,23 @@ running 2 tests on 2 threads
 2 passed, 0 failed, 2 total
 ```
 
-The top-level `echo` above prints nothing under `noeta test`; everything that declares, binds, or
-does work that finishes stays live.
+The top-level `echo` above prints nothing under `noeta test`; everything that declares, binds, or does work that finishes stays live.
 
 ### What runs, and what does not
 
-A top-level statement is shared setup if it declares something, binds something, or performs an
-effect that **finishes**. The split is by what the statement *does*, not by its shape:
+A top-level statement is shared setup if it declares something, binds something, or performs an effect that **finishes**. The split is by what the statement *does*, not by its shape:
 
 | Kept — shared setup | Dropped |
 |---|---|
-| `use` imports, `namespace` | `echo …` |
+| `use` imports | `echo …` |
 | every declaration (`fn`, `class`, `struct`, `enum`, `trait`, `impl`, `@attribute`) | a call that **does not return**: `os.exit(…)`, `server.serve(…)`, `panic(…)` |
 | a binding or destructure: `x = …`, `mut x = …`, `(a, b) = …` | `while true { … }` with no `break` |
 | a statement-expression that returns: `conn.migrate(…)`, `log.push(…)` | `return` / `break` / `continue` |
 | `if` / `for` / `while`, and `concurrent { … }` | an `if` / `for` / `while` / `concurrent` whose body holds either of the two rows above — it could not finish either |
 
-Dropping the second column is what makes a file with a `main` runnable as a test suite at all: a CLI
-entry's top-level `os.exit(run())` and a server's `server.serve(…)` would otherwise exit the runner
-or block it forever.
+Dropping the second column is what makes a file with a `main` runnable as a test suite at all: a CLI entry's top-level `os.exit(run())` and a server's `server.serve(…)` would otherwise exit the runner or block it forever.
 
-The runner knows which calls those are because the language says so. A function that does not return
-declares its return type as [`never`](Type-System#never--the-bottom) — the bottom type — and `os.exit`, `server.serve`
-and `panic` all do. Nothing is inferred from a name or a statement shape:
+The runner knows which calls those are because the language says so. A function that does not return declares its return type as [`never`](Type-System#never--the-bottom) — the bottom type — and `os.exit`, `server.serve` and `panic` all do. Nothing is inferred from a name or a statement shape:
 
 ```noeta check
 conn = db.connect("sqlite::memory:")   // a binding — every test gets a live connection
@@ -107,35 +95,17 @@ conn.migrate("migrations")             // returns, so it RUNS — every test get
 server.serve(8080, fetch)              // declared `never` — dropped, or the runner would block
 ```
 
-> **When something is dropped that a test needs.** The runner does not stay quiet about it. If a
-> dropped statement writes to a top-level binding that a selected test `use (…)`-captures, the run
-> reports `E0071` naming the statement, the binding, and the test:
+> **When something is dropped that a test needs.** The runner does not stay quiet about it. If a dropped statement writes to a top-level binding that a selected test `use (…)`-captures, the run reports `E0071` naming the statement, the binding, and the test:
 >
-> ```console
-> [E0071] Warning: this statement is not part of the shared setup (`while true` with no `break`
-> never exits), but it writes to `tick`, which `sees_the_loop` captures — so that test will see it
-> unwritten
+> ```console [E0071] Warning: this statement is not part of the shared setup (`while true` with no `break` never exits), but it writes to `tick`, which `sees_the_loop` captures — so that test will see it unwritten
 > ```
->
-> The fix is to do the work **inside a binding** (`applied = conn.migrate("migrations")`) or in a
-> helper the tests call themselves. Note that a binding runs once **per test**, not once per file,
-> so it must be idempotent against any state that outlives the isolate (a file, a file-backed
-> database) — that is also why `sqlite::memory:` is the well-behaved choice here: each test gets its
-> own connection and therefore its own empty database to migrate.
+>The fix is to do the work **inside a binding** (`applied = conn.migrate("migrations")`) or in a helper the tests call themselves. Note that a binding runs once **per test**, not once per file, so it must be idempotent against any state that outlives the isolate (a file, a file-backed database) — that is also why `sqlite::memory:` is the well-behaved choice here: each test gets its own connection and therefore its own empty database to migrate.
 
-**What the runner still cannot see.** Divergence is *declared*, not inferred, so a call that reaches
-a non-returning function indirectly is not recognised — `fn boot(): void { os.exit(0) }` with a
-top-level `boot()` joins the setup and ends the run. Declare `fn boot(): never` and it is dropped
-like any other. Likewise a `for` over an endless generator, or a `while` whose condition never
-becomes false, are kept and would not finish.
+**What the runner still cannot see.** Divergence is *declared*, not inferred, so a call that reaches a non-returning function indirectly is not recognised — `fn boot(): void { os.exit(0) }` with a top-level `boot()` joins the setup and ends the run. Declare `fn boot(): never` and it is dropped like any other. Likewise a `for` over an endless generator, or a `while` whose condition never becomes false, are kept and would not finish.
 
 ## Metadata attributes
 
-Lead a test with any of these `std.test` attributes to change how it runs or is reported. They are
-not prelude — bring them in with `use std.test.{Skip, Name, Group, Data}` (or qualify one inline,
-`#[std.test.Skip]`). The `use` may sit at the top of the file or at the top of the `@test` block
-itself; both spellings resolve the same. A block-scoped one binds *inside that block only*, and is
-dropped with the block on an ordinary `noeta run`/`noeta build`:
+Lead a test with any of these `std.test` attributes to change how it runs or is reported. They are not prelude — bring them in with `use std.test.{Skip, Name, Group, Data}` (or qualify one inline, `#[std.test.Skip]`). The `use` may sit at the top of the file or at the top of the `@test` block itself; both spellings resolve the same. A block-scoped one binds *inside that block only*, and is dropped with the block on an ordinary `noeta run`/`noeta build`:
 
 | Attribute | Effect |
 |---|---|
@@ -174,18 +144,12 @@ noeta test [OPTIONS] [PATH]
 
 `PATH` (default `.`) is a file **or a directory**, exactly like [`noeta check`](The-CLI#noeta-check).
 
-- A **directory** is walked recursively and every `.noe` file runs as its own entry, with the
-  outcomes aggregated into one report and one exit code. Each test is labelled with the file it
-  came from (`src/util.noe::doubles`), so the same name in two modules stays distinguishable.
+- A **directory** is walked recursively and every `.noe` file runs as its own entry, with the outcomes aggregated into one report and one exit code. Each test is labelled with the file it came from (`src/util.noe::doubles`), so the same name in two modules stays distinguishable.
 - A **file** runs only that file's `@test` blocks.
 
-Run the whole project by default. Naming a single entry file tests *only that file*: linking merges
-a module's reachable declarations into its importer, never its `@test` blocks, so
-`noeta test src/main.noe` on a two-module project reports the entry's tests alone and the module's
-never run — silently, and looking like a green suite.
+Run the whole project by default. Naming a single entry file tests *only that file*: linking merges a module's reachable declarations into its importer, never its `@test` blocks, so `noeta test src/main.noe` on a two-module project reports the entry's tests alone and the module's never run — silently, and looking like a green suite.
 
-A file that fails to type-check renders its own diagnostic and fails the run, but does not stop the
-remaining files; the summary names how many were skipped that way.
+A file that fails to type-check renders its own diagnostic and fails the run, but does not stop the remaining files; the summary names how many were skipped that way.
 
 | Flag | Effect |
 |---|---|
@@ -210,8 +174,7 @@ running <N> tests on <J> threads[, <K> skipped]
 <p> passed, <f> failed[, <s> skipped][, <n> not run (stopped early)], <total> total
 ```
 
-A failure prints its message plus any stdout the test produced (prefixed `| `), and the run exits
-`1`:
+A failure prints its message plus any stdout the test produced (prefixed `| `), and the run exits `1`:
 
 ```console
 $ noeta test math.noe
@@ -230,8 +193,7 @@ running 2 tests on 2 threads
 
 ## Watch mode
 
-`noeta test --watch app.noe` keeps running and reruns on every save — narrowed to **only the
-impacted tests**, not everything:
+`noeta test --watch app.noe` keeps running and reruns on every save — narrowed to **only the impacted tests**, not everything:
 
 - Edit a leaf function and exactly the tests that transitively call it rerun — across module boundaries; edit one test's body and only that test reruns.
 - An **inert** edit — reformatting between declarations, a comment — runs nothing.

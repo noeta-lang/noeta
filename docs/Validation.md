@@ -1,18 +1,10 @@
 # Validation
 
-Noeta enforces **data-boundary invariants** with one small vocabulary: the `Validate` trait, its
-automatic enforcement at every typed-decode **door** — an entry point like `json.parse::<T>` or
-`from_bytes::<T>` that materializes typed values from raw input (see [Native
-Extensions](Native-Extensions) for the machinery) — and the `@validated` construction marker.
-Together they let a type guarantee that no value of it is ever ill-formed — whether it is built in
-code or decoded from an untrusted document.
+Noeta enforces **data-boundary invariants** with one small vocabulary: the `Validate` trait, its automatic enforcement at every typed-decode **door** — an entry point like `json.parse::<T>` or `from_bytes::<T>` that materializes typed values from raw input (see [Native Extensions](Native-Extensions) for the machinery) — and the `@validated` construction marker. Together they let a type guarantee that no value of it is ever ill-formed — whether it is built in code or decoded from an untrusted document.
 
 ## The `Validate` trait
 
-A type implements `Validate` by providing one method, `validate()`, which returns `Result<void, E>`:
-`Ok()` when the value is well-formed, `Err(e)` when an invariant is violated. The error `E` is either
-a plain `string` or any type that implements [`Error`](Generics-and-Traits#the-built-in-traits) — the
-principled form, since a validator's error then converts at `?` like any other error.
+A type implements `Validate` by providing one method, `validate()`, which returns `Result<void, E>`: `Ok()` when the value is well-formed, `Err(e)` when an invariant is violated. The error `E` is either a plain `string` or any type that implements [`Error`](Generics-and-Traits#the-built-in-traits) — the principled form, since a validator's error then converts at `?` like any other error.
 
 ```noeta
 struct Port {
@@ -39,32 +31,17 @@ echo match (Port { n: 70000 }).validate() {
 }
 ```
 
-`Validate` is **not derivable** — an invariant cannot be synthesized from a type's fields, so there is
-nothing for `@derive` to generate; you always write the one method. It is independent of `Display`:
-adopting `Validate` never changes how a value renders. Because `validate()` returns a `Result`, it
-composes with `?` — `x.validate()?` short-circuits like any fallible call, converting its error
-through `From` when the enclosing function's error type differs.
+`Validate` is **not derivable** — an invariant cannot be synthesized from a type's fields, so there is nothing for `@derive` to generate; you always write the one method. It is independent of `Display`: adopting `Validate` never changes how a value renders. Because `validate()` returns a `Result`, it composes with `?` — `x.validate()?` short-circuits like any fallible call, converting its error through `From` when the enclosing function's error type differs.
 
-Prefer `Validate` over ad-hoc checks in a constructor whenever the type can also arrive through a
-decode door: the invariant is then written once and guards both paths — construction in code and
-untrusted data at the boundary — instead of living only in the constructor a decoder never calls.
+Prefer `Validate` over ad-hoc checks in a constructor whenever the type can also arrive through a decode door: the invariant is then written once and guards both paths — construction in code and untrusted data at the boundary — instead of living only in the constructor a decoder never calls.
 
 ## Automatic enforcement at decode
 
-The point of `Validate` is that it runs **automatically** wherever untrusted data crosses into a typed
-value. When a decode door materializes a value whose type implements `Validate`, its `validate()` runs
-on the freshly-built value — you never call it by hand at the boundary.
+The point of `Validate` is that it runs **automatically** wherever untrusted data crosses into a typed value. When a decode door materializes a value whose type implements `Validate`, its `validate()` runs on the freshly-built value — you never call it by hand at the boundary.
 
-Enforcement is **bottom-up**: a type's fields are decoded and validated before the type's own
-`validate()` runs, so a container only ever validates already-valid fields, and a nested failure
-points at the innermost value. A JSON failure is a path-carrying [`JsonError`](std-json)
-reading `field[i]: <message>`.
+Enforcement is **bottom-up**: a type's fields are decoded and validated before the type's own `validate()` runs, so a container only ever validates already-valid fields, and a nested failure points at the innermost value. A JSON failure is a path-carrying [`JsonError`](std-json) reading `field[i]: <message>`.
 
-The rule is about *types*, not only structs: an [enum-typed field](Derives#enum-typed-fields)
-decodes through the same door, so an enum implementing `Validate` has its `validate()` run on the
-freshly selected case exactly as a struct does. A wire value that names no case at all never reaches
-a validator — it is refused by the decode itself, as a path-carrying `unknown_variant` error listing
-every accepted value.
+The rule is about *types*, not only structs: an [enum-typed field](Derives#enum-typed-fields) decodes through the same door, so an enum implementing `Validate` has its `validate()` run on the freshly selected case exactly as a struct does. A wire value that names no case at all never reaches a validator — it is refused by the decode itself, as a path-carrying `unknown_variant` error listing every accepted value.
 
 ```noeta ignore
 use std.json
@@ -107,12 +84,7 @@ A type with no validator pays nothing: the decode walk never re-enters for it.
 
 ## `@validated` — channeling construction
 
-Automatic decode-time validation guards the data boundary. To also guarantee that *code* cannot build
-an ill-formed value, mark the type `@validated`. Then literal construction (`T { ... }`, and the
-record-update spread `T { ...base, f: v }`) from **outside** the type's own `impl`/methods is a compile
-error (`E0060`, the code for a literal that bypasses a `@validated` type's constructors) — a value
-can only be built through a constructor the type provides, which runs `validate()` and returns a
-`Result`.
+Automatic decode-time validation guards the data boundary. To also guarantee that *code* cannot build an ill-formed value, mark the type `@validated`. Then literal construction (`T { ... }`, and the record-update spread `T { ...base, f: v }`) from **outside** the type's own `impl`/methods is a compile error (`E0060`, the code for a literal that bypasses a `@validated` type's constructors) — a value can only be built through a constructor the type provides, which runs `validate()` and returns a `Result`.
 
 ```noeta
 @validated
@@ -164,14 +136,6 @@ e = Email { addr: "x@y" }
 echo e.addr
 ```
 
-`@validated` is **purely static** — it changes no runtime behavior and no expression's type. It
-composes with [field privacy](Structs-Classes-and-Enums): both checks can fire on the same literal.
-And it does **not** restrict the recipe doors: a `@validated` type decoded from JSON or `from_bytes`
-is built directly and its `validate()` runs automatically — that is exactly the guarantee `@validated`
-completes, so a decode and a constructor both validate.
+`@validated` is **purely static** — it changes no runtime behavior and no expression's type. It composes with [field privacy](Structs-Classes-and-Enums): both checks can fire on the same literal. And it does **not** restrict the recipe doors: a `@validated` type decoded from JSON or `from_bytes` is built directly and its `validate()` runs automatically — that is exactly the guarantee `@validated` completes, so a decode and a constructor both validate.
 
-Because it is purely static, `@validated` has nothing of its own to say about a path with no source
-literal to reject — and reflective construction is such a path. That gap is closed on the *runtime*
-side rather than the static one, exactly as it is for the decode doors: `construct::<T>(fields)` builds
-the value and then runs its `validate()`, so the rejection arrives as the door's `Err` rather than as a
-compile error. See the note under the door table above.
+Because it is purely static, `@validated` has nothing of its own to say about a path with no source literal to reject — and reflective construction is such a path. That gap is closed on the *runtime* side rather than the static one, exactly as it is for the decode doors: `construct::<T>(fields)` builds the value and then runs its `validate()`, so the rejection arrives as the door's `Err` rather than as a compile error. See the note under the door table above.

@@ -76,22 +76,9 @@ A cooperative stall in the sandbox is a deterministic `E0010`. On the real (para
 
 ## Serving HTTP: inversion of control
 
-Every capability above is **program-initiated** — the program asks, the world answers. `server.serve`
-inverts that: the world initiates (a connection) and the program's handler responds. This reuses the
-async substrate wholesale. Accepting a connection is an **async leaf** (like `sleep` / `fs.read_async`)
-— a descriptor the executor drives (`TcpListener::accept().await` on the real host); the serve loop
-polls that accept future *alongside* the in-flight handler futures each round, spawning a handler task
-per connection into a **server-owned reaping set** and replying as each completes. So it is exactly
-the cooperative scheduling model: a slow async handler yields at its `await`s while the next connection
-is accepted and other handlers advance (the Node/Deno event-loop shape, on our executor). Both backends
-run the identical poll order, so the interleaving is deterministic and the differential agrees.
+Every capability above is **program-initiated** — the program asks, the world answers. `server.serve` inverts that: the world initiates (a connection) and the program's handler responds. This reuses the async substrate wholesale. Accepting a connection is an **async leaf** (like `sleep` / `fs.read_async`) — a descriptor the executor drives (`TcpListener::accept().await` on the real host); the serve loop polls that accept future *alongside* the in-flight handler futures each round, spawning a handler task per connection into a **server-owned reaping set** and replying as each completes. So it is exactly the cooperative scheduling model: a slow async handler yields at its `await`s while the next connection is accepted and other handlers advance (the Node/Deno event-loop shape, on our executor). Both backends run the identical poll order, so the interleaving is deterministic and the differential agrees.
 
-Determinism is the **inverse of the client's pure responder**: under the sandbox the accept leaf
-yields a fixed, documented **request script** and then reports the listener closed, so a served
-program drives a known sequence through the handler and *terminates* in-oracle — no socket. The real
-host binds a `TcpListener` and blocks. Multi-core serving (designed, not yet built) stays
-isolate-native: an acceptor isolate hands each accepted **fd (an int)** to worker isolates over a
-`Channel<int>` — intra-process fds are shared across threads, so no `SO_REUSEPORT`/`socket2` is needed.
+Determinism is the **inverse of the client's pure responder**: under the sandbox the accept leaf yields a fixed, documented **request script** and then reports the listener closed, so a served program drives a known sequence through the handler and *terminates* in-oracle — no socket. The real host binds a `TcpListener` and blocks. Multi-core serving (designed, not yet built) stays isolate-native: an acceptor isolate hands each accepted **fd (an int)** to worker isolates over a `Channel<int>` — intra-process fds are shared across threads, so no `SO_REUSEPORT`/`socket2` is needed.
 
 ## See also
 

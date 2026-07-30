@@ -65,8 +65,7 @@ xs[1] = 20             // sugar for  xs = xs.set(1, 20)  (needs a mut binding)
 | `enumerate` | `enumerate() -> List<(int, T)>` | `["a","b"].enumerate()` → `[(0, "a"), (1, "b")]` |
 | `iter` | `iter() -> Iterator<T>` | see [Iterators](#iterators) |
 
-**Eager collection methods** chain directly (each returns a plain value, unlike the lazy
-`iter()` adapters):
+**Eager collection methods** chain directly (each returns a plain value, unlike the lazy `iter()` adapters):
 
 ```noeta
 echo [1, 2, 3].len()                                // 3
@@ -75,8 +74,7 @@ echo [1,2,3,4].filter(fn(n) => n % 2 == 0)
               .sum()                                // 60
 ```
 
-- `xs.len()`, `xs.map(f)`, `xs.filter(pred)`, `xs.sum()` (int for `List<int>`, else float). To pass
-  one as a value, take an unbound method handle: `f = list.len`, `xss.map(list.len)`.
+- `xs.len()`, `xs.map(f)`, `xs.filter(pred)`, `xs.sum()` (int for `List<int>`, else float). To pass one as a value, take an unbound method handle: `f = list.len`, `xss.map(list.len)`.
 
 ## Map
 

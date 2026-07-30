@@ -11,22 +11,11 @@ Hardcoding native modules created four parallel seams that could drift: a `Nativ
 
 ## Two crates: `noeta-ext-abi` (the ABI) and `noeta-stdlib` (the batteries)
 
-The contract a native extension implements lives in its own lean crate, **`noeta-ext-abi`**: the
-[registry] vocabulary (`Extension`/`ExtModule`/`ExtType`/`ExtFn`/`SigType`/`RetTy`/`TypeArgWrap`/`TypeRecipe`,
-`NativeValue`/`NativeOut`/`Scalar`), the `Host` capability seam and its traits, the `ExternValue`
-contract (`ExternBox`), `MapKey`, the async `ExternIo`/`Executor` seam, and the dep-free Ring 1
-primitives. Its only dependencies are `compact_str`/`equivalent`/`hashbrown` — none of core's
-batteries (no crypto, uuid, JSON, or HTTP client). **`noeta-stdlib`** depends on it, re-exports it
-(`pub use noeta_ext_abi::*` — the `core`/`std` relationship), and layers the concrete `std` modules
-and their heavy deps on top. So a third-party extension (and internal mid-end crates like
-`noeta-ir`) links the lean ABI, not the whole standard library. This is the *consumed* boundary too:
-an out-of-tree entry crate depends on `noeta-ext-abi` alone, and the crates are versioned +
-git-tagged for the composed shim to pin (see [Writing a Native Package](Writing-Native-Packages)).
+The contract a native extension implements lives in its own lean crate, **`noeta-ext-abi`**: the [registry] vocabulary (`Extension`/`ExtModule`/`ExtType`/`ExtFn`/`SigType`/`RetTy`/`TypeArgWrap`/`TypeRecipe`, `NativeValue`/`NativeOut`/`Scalar`), the `Host` capability seam and its traits, the `ExternValue` contract (`ExternBox`), `MapKey`, the async `ExternIo`/`Executor` seam, and the dep-free Ring 1 primitives. Its only dependencies are `compact_str`/`equivalent`/`hashbrown` — none of core's batteries (no crypto, uuid, JSON, or HTTP client). **`noeta-stdlib`** depends on it, re-exports it (`pub use noeta_ext_abi::*` — the `core`/`std` relationship), and layers the concrete `std` modules and their heavy deps on top. So a third-party extension (and internal mid-end crates like `noeta-ir`) links the lean ABI, not the whole standard library. This is the *consumed* boundary too: an out-of-tree entry crate depends on `noeta-ext-abi` alone, and the crates are versioned + git-tagged for the composed shim to pin (see [Writing a Native Package](Writing-Native-Packages)).
 
 ## The seam
 
-The registry vocabulary (`noeta-ext-abi`, `registry.rs`; the concrete `std` registration and dispatch
-router are in `noeta-stdlib`) is built on a **neutral value-marshalling** layer:
+The registry vocabulary (`noeta-ext-abi`, `registry.rs`; the concrete `std` registration and dispatch router are in `noeta-stdlib`) is built on a **neutral value-marshalling** layer:
 
 - `NativeValue` — the argument view: `Scalar`, `Str`, `Bytes`, `Object { fields }`, `List`, and so on.
 - `NativeOut` — the result view, including the bulk `Scalars(ScalarVec)` form (one typed vector for a whole reduction result — the `Bytes` idea applied to primitive lists).
@@ -47,19 +36,7 @@ trait Extension {
 }
 ```
 
-**The registry is an assembled list of extension units.** Core's `std` is not one monolith but
-several in-tree `Extension` units sharing the `"std"` root — `CoreExtension` (always-on) plus one per
-capability with a separable identity (`HttpExtension`, `CryptoExtension`, `IdExtension`, the
-`vec`/`quat` `VecExtension`). Every lookup (`find_module`/`find_type`/`commands`)
-iterates the whole registry filtered by root, so the split is invisible to resolution — core `std`
-exercises exactly the multi-extension registry a package plugs into: a third-party package registers
-as another unit under its own root. The `para` namespace is the first first-party capability to take
-that exit for real — the p2p/local-first stack (`ParaP2pExtension`, root `para`) lives outside `std`
-as the non-default `para/p2p` package (github.com/noeta-lang/para-p2p), alongside the pure-Noeta
-`para.html` liveview package. Each `ExtModule` declares its `ring: Option<&str>` — the single
-source of truth for which Cargo feature gates its heavy native deps in a tailored `noeta build
---native` (`std.http.client` → `ring-http-client`, the ~3 MB reqwest/TLS tree; `None` = always-on
-core). The footprint scan reads it off the registry, so there's no hand-maintained module→ring table.
+**The registry is an assembled list of extension units.** Core's `std` is not one monolith but several in-tree `Extension` units sharing the `"std"` root — `CoreExtension` (always-on) plus one per capability with a separable identity (`HttpExtension`, `CryptoExtension`, `IdExtension`, the `vec`/`quat` `VecExtension`). Every lookup (`find_module`/`find_type`/`commands`) iterates the whole registry filtered by root, so the split is invisible to resolution — core `std` exercises exactly the multi-extension registry a package plugs into: a third-party package registers as another unit under its own root. The `para` namespace is the first first-party capability to take that exit for real — the p2p/local-first stack (`ParaP2pExtension`, root `para`) lives outside `std` as the non-default `para/p2p` package (github.com/noeta-lang/para-p2p), alongside the pure-Noeta `para.html` liveview package. Each `ExtModule` declares its `ring: Option<&str>` — the single source of truth for which Cargo feature gates its heavy native deps in a tailored `noeta build --native` (`std.http.client` → `ring-http-client`, the ~3 MB reqwest/TLS tree; `None` = always-on core). The footprint scan reads it off the registry, so there's no hand-maintained module→ring table.
 
 `params` and `ret` use `SigType`, a small signature vocabulary (noeta-stdlib cannot see the checker's `Type`); `noeta-check` maps each `SigType` to a real `Type`, so the registry is the single source of truth that *both* the checker and both backends read. A parameter wrapped in `SigType::Optional(&…)` is **trailing-optional** (`client.get(url, headers?)`): the checker derives the required-argument count from the first `Optional`, and the dispatch reads the slot with `args.get(i)`, supplying its own default when the call omits it — so optional params cost no backend change and no default-value machinery.
 
@@ -89,7 +66,9 @@ An extension implements an **async** function without ever seeing the executor: 
 
 ## Higher-order functions: the `NativeCtx` seam
 
-A plain dispatch is value-in/value-out — it cannot take a **closure argument**, call it back, poll futures, or drive the scheduler. Functions that need those register in a module's **ctx table** instead: the dispatch receives its arguments as opaque **slots** (indices into a per-call table of backend values it never sees) and re-enters the backend through one capability trait, `NativeCtx` — `call` a callable slot, `spawn_io`/`timer`/`poll`/`drive` futures, `advance_tasks`/`advance_clock` the scheduler, plus list access and argument probes. Each backend implements the trait once; the slot table owns the refcount discipline centrally (retain on insert, release on free/drop, arguments borrowed from the caller's registers), so a dispatch structurally cannot leak. The dispatch body stays a single shared `fn`, so the differential holds by construction — extended to orchestration code that was previously mirrored per backend as hardcoded `Builtin`s.
+A plain dispatch is value-in/value-out — it cannot take a **closure argument**, call it back, poll futures, or drive the scheduler. Functions that need those register in a module's **ctx table** instead: the dispatch receives its arguments as opaque **slots** (indices into a per-call table of backend values it never sees) and re-enters the backend through one capability trait, `NativeCtx` — `call` a callable slot, `call_method` a *named* method on a receiver, `spawn_io`/`timer`/`poll`/`drive` futures, `advance_tasks`/`advance_clock` the scheduler, `render` a value to its canonical display string, `bytes_of` a `bytes` slot, plus list access and argument probes. Each backend implements the trait once; the slot table owns the refcount discipline centrally (retain on insert, release on free/drop, arguments borrowed from the caller's registers), so a dispatch structurally cannot leak. The dispatch body stays a single shared `fn`, so the differential holds by construction — extended to orchestration code that was previously mirrored per backend as hardcoded `Builtin`s.
+
+Two of those capabilities exist because the obvious neighbouring one is deliberately lossy. `view`'s deep projection renders a `bytes` value as a **summary string** (`"<12 bytes>"`) so a display or JSON path can never choke on binary — right for that job, useless when a native genuinely needs the payload (a value's wire encoding, say), which is what **`bytes_of`** returns instead of asking anyone to parse the summary back. And where `call` takes a callable *value*, **`call_method`** takes a receiver plus a method name — what a native needs to reach a method a **user type** declared, with `Ok(None)` when the receiver declares no such method. The motivating case is a trait an extension declares and a user type implements: the extension holds the values and the name from its own contract, never a closure. Both backends already did exactly this internally to run a user `to_string` from `render`; the seam just exposes it.
 
 That whole former `Builtin` family now lives here as ordinary registered dispatches: `task.sleep`/`all`/`race`/`map_bounded` (drive loops over `call`/`poll`), `server.serve` (the accept→dispatch→reply loop, including the recover-from-abort pattern: a handler abort becomes a 500 and the loop continues), and all of `std.reactive`.
 
@@ -125,15 +104,7 @@ The element-wise *fallback* (a boxed, non-packed operand) is expressible in the 
 
 ## Method bundles: `impl vec.Kernels for Px {}`
 
-Raw-buffer kernels as free functions are structurally connected to the data (`vec.dot_all(xs, ys)`
-accepts any uniform numeric packed list) — invisible to the checker and the editor. A **method
-bundle** is the nominal binding on top, and it is not its own mechanism: a bundle is a
-fully-defaulted native **`ExtTrait`** (`Extension::traits()`) carrying a structural
-**`self_constraint`** (`PackedConstraint` — the field kinds and arity the implementing type's shape
-must satisfy), native-derived **`assoc_types`** (the element-relative return types,
-`Self::Wide`/`Self::Float`), and a shared **`dispatch`** answering every defaulted method. Each
-`ExtTraitMethod` marks its receiver `Element` — on a value of the bound type — or `Bulk` — on a
-`List<T>` of it — and a user type opts in explicitly:
+Raw-buffer kernels as free functions are structurally connected to the data (`vec.dot_all(xs, ys)` accepts any uniform numeric packed list) — invisible to the checker and the editor. A **method bundle** is the nominal binding on top, and it is not its own mechanism: a bundle is a fully-defaulted native **`ExtTrait`** (`Extension::traits()`) carrying a structural **`self_constraint`** (`PackedConstraint` — the field kinds and arity the implementing type's shape must satisfy), native-derived **`assoc_types`** (the element-relative return types, `Self::Wide`/`Self::Float`), and a shared **`dispatch`** answering every defaulted method. Each `ExtTraitMethod` marks its receiver `Element` — on a value of the bound type — or `Bulk` — on a `List<T>` of it — and a user type opts in explicitly:
 
 ```noe
 use std.{vec}
@@ -145,27 +116,9 @@ d  = xs.dot_all(ys)                 // Bulk: methods on List<Px> — same kernel
 v2 = v.normalize()                  // Element: methods on Px itself
 ```
 
-`@derive(vec.Kernels)` binds identically — a bundle is `impl`-ed or derived, never both (the
-checker dedups and flags a double binding). The binding is what makes the whole toolchain smart:
-the impl site validates the shape requirement (a mismatch is a compile-time diagnostic naming
-expected vs found — `vec.Kernels` itself accepts any uniform numeric `@packed` shape, every integer
-width plus `f32`/`f64`, via `ConstraintArity::Uniform`), method calls type nominally (`SameAsArg(0)`
-= the receiver's own type, so `xs.add_all(ys)[0].x` resolves statically), member completion lists
-the bound methods, and conflicts are rejected receiver-aware (an `Element` method against the
-type's own methods/fields, a `Bulk` method against built-in list methods). Dispatch is
-**call-site-resolved**: the checker bakes the `(module, trait)` route into the compiled call — zero
-runtime discovery, an empty list receiver works, and the method form measures at parity with the
-module-function form (`tests/bench/kernel-methods/`). The flip side: bundle methods are not
-reachable through a `dyn` receiver (`dyn` stays the escape hatch; a runtime binding table would be
-additive). `std.vec`'s `Kernels`/`SatKernels` are the first clients; a third-party bundle over the
-consumer's own packed type is proven through toolchain composition in the CLI e2e.
+`@derive(vec.Kernels)` binds identically — a bundle is `impl`-ed or derived, never both (the checker dedups and flags a double binding). The binding is what makes the whole toolchain smart: the impl site validates the shape requirement (a mismatch is a compile-time diagnostic naming expected vs found — `vec.Kernels` itself accepts any uniform numeric `@packed` shape, every integer width plus `f32`/`f64`, via `ConstraintArity::Uniform`), method calls type nominally (`SameAsArg(0)` = the receiver's own type, so `xs.add_all(ys)[0].x` resolves statically), member completion lists the bound methods, and conflicts are rejected receiver-aware (an `Element` method against the type's own methods/fields, a `Bulk` method against built-in list methods). Dispatch is **call-site-resolved**: the checker bakes the `(module, trait)` route into the compiled call — zero runtime discovery, an empty list receiver works, and the method form measures at parity with the module-function form (`tests/bench/kernel-methods/`). The flip side: bundle methods are not reachable through a `dyn` receiver (`dyn` stays the escape hatch; a runtime binding table would be additive). `std.vec`'s `Kernels`/`SatKernels` are the first clients; a third-party bundle over the consumer's own packed type is proven through toolchain composition in the CLI e2e.
 
-`ExtTrait` is not only the kernel-bundle mechanism, though — it is the general native-trait seam:
-a program `impl`s a plain native trait for its own types and binds on it
-(`fn f<T: NativeTrait>(x: T)`) exactly as for a `.noe` trait (an incomplete impl is E0015), and a
-native value laundered through `dyn NativeTrait` dispatches to its native method with no new runtime
-plumbing. `self_constraint` is what a kernel bundle adds on top — most native traits declare `None`
-and are shape-agnostic.
+`ExtTrait` is not only the kernel-bundle mechanism, though — it is the general native-trait seam: a program `impl`s a plain native trait for its own types and binds on it (`fn f<T: NativeTrait>(x: T)`) exactly as for a `.noe` trait (an incomplete impl is E0015), and a native value laundered through `dyn NativeTrait` dispatches to its native method with no new runtime plumbing. `self_constraint` is what a kernel bundle adds on top — most native traits declare `None` and are shape-agnostic.
 
 ## Composition: how a package's native code reaches the toolchain
 
