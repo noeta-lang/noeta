@@ -1099,6 +1099,105 @@ const STACK_PER_NESTING_LEVEL: usize = 512 * 1024;
 /// nests 8.
 const MAX_NESTING_DEPTH: usize = 128;
 
+/// Stack one `else if` continuation costs the **pipeline**, debug build, worst measured stage.
+///
+/// This is the companion to [`STACK_PER_NESTING_LEVEL`] for a shape that has no delimiter to count.
+/// An `else if` chain is *right-nested in the AST* — each `else` holds the next `if` — so every stage
+/// that walks the AST recurses once per branch, while the chain sits at a constant delimiter depth of
+/// **2** and never registers as nesting at all. The delimiter counter therefore waved a 725-branch
+/// chain (an ordinary generated dispatch) straight through to a stack overflow, with no diagnostic.
+///
+/// Measured by generating a chain of *b* branches and binary-searching the *b* at which the process
+/// aborts, per stage, on an 8 MiB main thread:
+///
+/// | stage                                       | aborts at | per branch |
+/// |---------------------------------------------|-----------|------------|
+/// | parse, with the old `recursive` `if`         | 725–730   | ~11.3 KiB  |
+/// | parse, with the iterative `if` below         | ≥ 8192    | ~0         |
+/// | check (`noeta check`)                        | 2000–5000 | ≤ 4 KiB    |
+/// | check + lower + run (`noeta run`)            | 740–800   | ~10.9 KiB  |
+/// | the conformance corpus runner (parse + eval) | 700–800   | ~10.9 KiB  |
+///
+/// So the recursive Core-IR pipeline is the binding stage once the parser stops recursing per branch,
+/// and 16 KiB is the worst measured cost rounded up (~45% above it). Both halves of the fix matter and
+/// neither is sufficient alone: flattening the grammar removes the *parser* as the binding constraint
+/// (it was the first wall, at 725), and the limit below is what keeps the stages downstream of it —
+/// which run on the caller's stack, with no worker to offload to — from aborting on legal input
+/// instead.
+const STACK_PER_ELSE_CHAIN_BRANCH: usize = 16 * 1024;
+
+/// The smallest stack a **whole pipeline** runs on: the CLI's main thread (the platform's 8 MiB
+/// default).
+///
+/// [`DEEP_PARSE_STACK`] bounds the *parser's* recursion and nothing else — check, IR lowering and the
+/// Core-IR interpreter all recurse over the AST on whatever stack their caller has. The servers give
+/// themselves [`SERVER_STACK_SIZE`] (16 MiB) precisely so they are not the smallest; `noeta run` on
+/// the main thread is, so it is the number a language limit protecting the whole pipeline has to be
+/// derived from.
+const MIN_PIPELINE_STACK: usize = 8 * 1024 * 1024;
+
+/// The longest `else if` chain the parser accepts. Past it, the chain is an ordinary
+/// [`DiagnosticCode::NestingTooDeep`] (E0032) — the same code deep delimiter nesting gets, because a
+/// chain *is* nesting, just without a delimiter to count.
+///
+/// Derived, not chosen: [`MIN_PIPELINE_STACK`] divided by [`STACK_PER_ELSE_CHAIN_BRANCH`]. That is
+/// 512, which the measurements above put a comfortable distance under the abort (~770 branches for
+/// the worst stage) and a very long way above anything real: the deepest chain anywhere in this
+/// repo's corpus of 1128 `.noe` files is **one** `else if`, and a generated dispatch that would want
+/// hundreds of branches is better served by a `match`. The accepting side is pinned end-to-end
+/// (`tests/conformance/diagnostics/else_chain_at_the_limit.noe`, generated from this constant by
+/// `scripts/gen-nesting-cases.py`) so a limit the pipeline cannot actually deliver is red rather than
+/// a process abort.
+pub const MAX_ELSE_CHAIN_BRANCHES: usize = MIN_PIPELINE_STACK / STACK_PER_ELSE_CHAIN_BRANCH;
+
+/// Stack one branch of the **conditional-expression** chain `if c then a else if c then b else …`
+/// costs. The same right-nesting as [`STACK_PER_ELSE_CHAIN_BRANCH`] at a much higher price: this form
+/// desugars to a nested `match` per branch ([`desugar_if_then_else`]), so a level of it is a
+/// match-with-two-arms rather than a bare `Stmt::If`, and both the parser (it recurses through the
+/// `sub` expression handle, which the flattening of the statement `if` does not touch) and the
+/// interpreter walk more per level.
+///
+/// Measured on an 8 MiB main thread. Two numbers, because the two halves have different remedies:
+///
+/// | stage                                  | aborts at        | per branch |
+/// |----------------------------------------|------------------|------------|
+/// | parse, **inline** on the caller's stack | ~200, NON-monotone | ~41 KiB |
+/// | parse, on the [`DEEP_PARSE_STACK`] worker | ≥ 8192         | —          |
+/// | everything downstream of the parse      | 300–400          | ~24 KiB    |
+///
+/// The inline parse cliff is non-monotone (200 and 210 abort, 215–230 survive, 250 aborts) — the
+/// signature of `chumsky`'s `recursive` combinator calling `stacker::maybe_grow` with a 64 KiB red
+/// zone that a debug frame of this size overruns, exactly as described on
+/// [`STACK_PER_NESTING_LEVEL`]. A cliff that is not monotone in the input cannot be bounded by a limit
+/// alone, so the parse of a long chain is **offloaded** ([`INLINE_CHAIN_BRANCHES`]) rather than priced;
+/// the limit below is then set by the stages downstream, which cannot be offloaded.
+///
+/// 64 KiB is the worse of the two measured costs rounded up, and the value the offload threshold is
+/// derived from as well.
+const STACK_PER_TERNARY_CHAIN_BRANCH: usize = 64 * 1024;
+
+/// The longest `if … then … else if …` conditional-expression chain the parser accepts — the same
+/// derivation as [`MAX_ELSE_CHAIN_BRANCHES`] over a per-branch price four times as high, which is why
+/// it is a quarter of it: **128**. Past it, E0032, exactly as for the statement chain.
+///
+/// 128 sits 2.5× under the measured downstream abort (300–400 branches), matches
+/// [`MAX_NESTING_DEPTH`] and `rustc`'s default recursion limit, and is two orders of magnitude past
+/// anything real — this repo's corpus has no `if … then … else if` chain longer than one branch.
+pub const MAX_TERNARY_CHAIN_BRANCHES: usize = MIN_PIPELINE_STACK / STACK_PER_TERNARY_CHAIN_BRANCH;
+
+/// Chain length up to which parsing *may* run inline on the caller's stack — [`INLINE_NESTING_DEPTH`]
+/// for chains, and for the same reason: a chain is flat in delimiters, so without this every chain
+/// however long would parse on whatever stack the caller happens to have. That is what made the
+/// conditional-expression chain abort inside the parser at ~200 branches while the statement chain
+/// (which no longer recurses per branch) was fine.
+///
+/// Derived: [`INLINE_PARSE_HEADROOM`] divided by the worse per-branch parse cost
+/// ([`STACK_PER_TERNARY_CHAIN_BRANCH`]). Past it the parse moves to the [`DEEP_PARSE_STACK`] worker,
+/// which holds thousands of branches — so the *parser* stops being the binding stage for either chain
+/// shape and the limits above are set by what comes after it. Real code never reaches this (the
+/// corpus's longest chain is one branch), so the thread spawn it costs is not on any real path.
+const INLINE_CHAIN_BRANCHES: usize = INLINE_PARSE_HEADROOM / STACK_PER_TERNARY_CHAIN_BRANCH;
+
 /// Nesting depth up to which parsing *may* run inline on the caller's stack. Beyond it, parsing
 /// moves to a worker thread with a large stack ([`DEEP_PARSE_STACK`]) so even input near
 /// [`MAX_NESTING_DEPTH`] cannot overflow whatever stack the caller happens to have.
@@ -1167,6 +1266,29 @@ const _: () = assert!(
     MAX_NESTING_DEPTH * STACK_PER_NESTING_LEVEL * DEEP_STACK_MARGIN <= DEEP_PARSE_STACK,
     "a parse at MAX_NESTING_DEPTH must fit DEEP_PARSE_STACK with DEEP_STACK_MARGIN to spare"
 );
+// The chain budgets are the same derivation over a different resource: a chain costs stack in every
+// stage that walks the AST, and only the *parse* can be moved to a bigger stack — so the limits are
+// pinned to the smallest stack a whole pipeline runs on ([`MIN_PIPELINE_STACK`]) rather than to the
+// deep worker's, while the offload threshold is pinned to the inline headroom.
+const _: () = assert!(
+    MAX_ELSE_CHAIN_BRANCHES * STACK_PER_ELSE_CHAIN_BRANCH <= MIN_PIPELINE_STACK,
+    "a chain at MAX_ELSE_CHAIN_BRANCHES must fit MIN_PIPELINE_STACK"
+);
+const _: () = assert!(
+    MAX_TERNARY_CHAIN_BRANCHES * STACK_PER_TERNARY_CHAIN_BRANCH <= MIN_PIPELINE_STACK,
+    "a chain at MAX_TERNARY_CHAIN_BRANCHES must fit MIN_PIPELINE_STACK"
+);
+const _: () = assert!(
+    INLINE_CHAIN_BRANCHES * STACK_PER_TERNARY_CHAIN_BRANCH <= INLINE_PARSE_HEADROOM,
+    "an inline parse at INLINE_CHAIN_BRANCHES must fit INLINE_PARSE_HEADROOM"
+);
+// The deep worker has to hold the *parse* of the longest chain either limit admits, since that is
+// where a chain past INLINE_CHAIN_BRANCHES is sent.
+const _: () = assert!(
+    MAX_ELSE_CHAIN_BRANCHES * STACK_PER_TERNARY_CHAIN_BRANCH * DEEP_STACK_MARGIN
+        <= DEEP_PARSE_STACK,
+    "parsing the longest admissible chain must fit DEEP_PARSE_STACK with DEEP_STACK_MARGIN to spare"
+);
 
 /// Stack size a long-lived server should give the threads it runs the compiler front end on — the
 /// LSP/DAP/MCP runtimes, whose platform default (tokio's 2 MiB) is *below* what a parse of an
@@ -1206,8 +1328,12 @@ pub fn parse_in(
     edition: Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Parsed {
-    let (max_depth, overflow_span) = nesting_depth(tokens);
-    if let Some(span) = overflow_span {
+    let Prescan {
+        max_depth,
+        max_chain,
+        overflow,
+    } = recursion_prescan(tokens);
+    if let Some((span, message)) = overflow {
         // Stop before invoking the recursive parser: deeper than the stack can safely hold.
         return Parsed {
             program: Program {
@@ -1217,16 +1343,19 @@ pub fn parse_in(
             diagnostics: vec![Diagnostic::error(
                 DiagnosticCode::NestingTooDeep,
                 span,
-                format!("nesting is too deep (the limit is {MAX_NESTING_DEPTH} levels)"),
+                message,
             )],
         };
     }
-    // Two independent reasons to leave the caller's thread: the input is deeper than an inline
-    // parse is sized for, or the caller's stack is too small to hold an inline parse at all. The
-    // second is what a *server* hits — its runtime threads are 2 MiB whatever the input looks like
-    // — and asking the stack directly is what makes the guarantee independent of who is calling.
+    // Three independent reasons to leave the caller's thread: the input is deeper than an inline
+    // parse is sized for, it carries a longer `if`/`else if` chain than an inline parse is sized for
+    // (the parser recurses per branch on the conditional-expression form, and a chain is invisible to
+    // the depth test — it stays at delimiter depth 2 however long it gets), or the caller's stack is
+    // too small to hold an inline parse at all. The last is what a *server* hits — its runtime
+    // threads are 2 MiB whatever the input looks like — and asking the stack directly is what makes
+    // the guarantee independent of who is calling.
     let short_on_stack = stacker::remaining_stack().is_none_or(|left| left < INLINE_PARSE_HEADROOM);
-    if max_depth > INLINE_NESTING_DEPTH || short_on_stack {
+    if max_depth > INLINE_NESTING_DEPTH || max_chain > INLINE_CHAIN_BRANCHES || short_on_stack {
         // Deep but legal, or a caller too near its own limit: parse on a worker thread whose stack
         // is large enough that the depth limit above — not the caller's stack — is what bounds
         // recursion. A scoped thread lets the closure borrow `source`/`tokens` directly; the owned
@@ -1244,27 +1373,124 @@ pub fn parse_in(
     }
 }
 
-/// Maximum delimiter nesting depth (`(`/`[`/`{`) over the token stream, paired with the span of the
-/// token at which [`MAX_NESTING_DEPTH`] is first exceeded (if any). A cheap O(n) pre-pass over the
-/// tokens — no grammar, no recursion — so it is safe to run on any stack before the real parser.
-fn nesting_depth(tokens: &[Token]) -> (usize, Option<Span>) {
+/// What the pre-parse recursion scan found: how much stack the recursive stages are going to want, and
+/// whether any of it is past a limit.
+struct Prescan {
+    /// Maximum delimiter nesting depth (`(`/`[`/`{`) — what the recursive-descent grammar spends stack
+    /// proportionally to, and the inline-vs-worker test.
+    max_depth: usize,
+    /// Longest `if`/`else if` chain, in branches, over all delimiter depths. Also an inline-vs-worker
+    /// test, and one the depth cannot stand in for: a chain is flat in delimiters.
+    max_chain: usize,
+    /// The first limit violation: the span of the token that crossed it, and the message naming it.
+    overflow: Option<(Span, String)>,
+}
+
+/// The **recursion pre-pass**. A cheap O(n) scan over the tokens — no grammar, no recursion — so it is
+/// safe to run on any stack before the real parser, and the only place a limit can be enforced without
+/// having already spent the stack it is protecting.
+///
+/// Three budgets, because the pipeline recurses on three shapes while only one of them has a delimiter
+/// to count:
+///
+/// * **delimiter nesting**, against [`MAX_NESTING_DEPTH`].
+/// * **statement chain length** (`if … else if …`), against [`MAX_ELSE_CHAIN_BRANCHES`].
+/// * **conditional-expression chain length** (`if … then … else if …`), against the stricter
+///   [`MAX_TERNARY_CHAIN_BRANCHES`] — it desugars to a nested `match` per branch and costs about four
+///   times as much. A chain is recognized as the expression form by a `then` appearing while it is
+///   open.
+///
+/// Both chain forms are right-nested in the AST (each `else` holds the next `if`) and flat in
+/// delimiters — a chain sits at depth 2 however long it gets, which is exactly how a 725-branch chain
+/// used to reach a stack overflow with no diagnostic at all.
+///
+/// A chain is counted per delimiter depth, so sibling chains in one block never sum: a `{`/`(`/`[`
+/// starts a fresh count at the depth it opens, and an `if` that is **not** immediately preceded by
+/// `else` starts a fresh chain at the current depth. Only `else` directly followed by `if` extends
+/// one. Comments are trivia and never reach the token stream, so that adjacency is exact.
+fn recursion_prescan(tokens: &[Token]) -> Prescan {
+    /// The chain currently open at one delimiter depth: how many branches it has (1 for a bare `if`,
+    /// +1 per `else if`; 0 when no chain is open) and whether it is the conditional-expression form.
+    #[derive(Clone, Copy, Default)]
+    struct Chain {
+        branches: usize,
+        ternary: bool,
+    }
+    impl Chain {
+        /// The limit this chain's form is held to, and the name to report it under.
+        fn limit(self) -> (usize, &'static str) {
+            if self.ternary {
+                (MAX_TERNARY_CHAIN_BRANCHES, "`if … then … else` chain")
+            } else {
+                (MAX_ELSE_CHAIN_BRANCHES, "`else if` chain")
+            }
+        }
+    }
+
     let mut depth: usize = 0;
-    let mut max = 0;
-    let mut overflow: Option<Span> = None;
+    let mut max_depth = 0;
+    let mut max_chain = 0;
+    let mut overflow: Option<(Span, String)> = None;
+    // Indices past `MAX_NESTING_DEPTH` share the last slot: that input is already rejected by the
+    // depth limit, so a chain count there cannot matter, and clamping keeps a pathologically deep
+    // file from sizing this array by its own nesting.
+    const CHAIN_SLOTS: usize = MAX_NESTING_DEPTH + 2;
+    let mut chains = [Chain::default(); CHAIN_SLOTS];
+    let mut prev: Option<T> = None;
     for token in tokens {
+        let slot = depth.min(CHAIN_SLOTS - 1);
         match token.kind {
             T::LParen | T::LBracket | T::LBrace => {
                 depth += 1;
-                max = max.max(depth);
+                max_depth = max_depth.max(depth);
+                // A fresh scope opens with no chain in it.
+                chains[depth.min(CHAIN_SLOTS - 1)] = Chain::default();
                 if depth > MAX_NESTING_DEPTH && overflow.is_none() {
-                    overflow = Some(token.span);
+                    overflow = Some((
+                        token.span,
+                        format!("nesting is too deep (the limit is {MAX_NESTING_DEPTH} levels)"),
+                    ));
                 }
             }
             T::RParen | T::RBracket | T::RBrace => depth = depth.saturating_sub(1),
+            T::IfKw => {
+                if prev == Some(T::ElseKw) {
+                    // An `else if` extends the chain open at this depth by one branch, keeping the
+                    // form already established (a chain cannot be half statement, half expression:
+                    // a statement `if` demands a block, a ternary's `else` demands an expression).
+                    chains[slot].branches += 1;
+                } else {
+                    // A bare `if` — a fresh statement, the head of a conditional expression, or a
+                    // match-arm guard — starts a new chain of one branch at this depth.
+                    chains[slot] = Chain {
+                        branches: 1,
+                        ternary: false,
+                    };
+                }
+            }
+            // The marker that makes this chain the expression form, seen on its *first* branch — so
+            // the count is still 1 when the stricter limit takes effect. (A `then` from a ternary
+            // nested inside a statement chain's condition lands here too and holds the outer chain to
+            // the stricter limit; that is the conservative direction and needs no special case.)
+            T::ThenKw if chains[slot].branches > 0 => chains[slot].ternary = true,
             _ => {}
         }
+        let chain = chains[depth.min(CHAIN_SLOTS - 1)];
+        max_chain = max_chain.max(chain.branches);
+        let (limit, what) = chain.limit();
+        if chain.branches > limit && overflow.is_none() {
+            overflow = Some((
+                token.span,
+                format!("this {what} is too long (the limit is {limit} branches)"),
+            ));
+        }
+        prev = Some(token.kind);
     }
-    (max, overflow)
+    Prescan {
+        max_depth,
+        max_chain,
+        overflow,
+    }
 }
 
 fn parse_inner(
@@ -3521,25 +3747,60 @@ where
                     span: ctx.to_span(e.span()),
                 });
 
-        // `else if` is an `else` whose body is a single nested `if`.
+        // `if c { … } (else if c { … })* (else { … })?`.
+        //
+        // The AST keeps `else if` right-nested — an `else` whose body is a single nested `if` — but the
+        // *grammar* is iterative: the continuations are collected with `repeated()` and folded, rather
+        // than parsed by a `recursive` handle that descends once per branch. A chain is flat in
+        // delimiters, so it never registered as nesting; a `recursive` `if` therefore spent stack per
+        // branch with nothing bounding it, and ~725 branches (an ordinary generated dispatch) overflowed
+        // the main thread with no diagnostic. Iterating here makes the parser cost of a chain O(1) in
+        // stack, and [`MAX_ELSE_CHAIN_BRANCHES`] bounds what the *later* stages spend walking the nesting.
+        //
+        // Spans are preserved exactly: each branch records where its own `if` keyword starts, and the
+        // fold gives branch *i* the span `start_i .. end of the whole chain` — which is what the
+        // recursive grammar produced, since a nested `if` consumed everything after it.
         let if_expr = head_expr.clone();
         let if_block = block.clone();
-        let if_ = recursive(move |if_| {
-            just(T::IfKw)
-                .ignore_then(if_expr.clone())
-                .then(if_block.clone())
-                .then(
-                    just(T::ElseKw)
-                        .ignore_then(if_.map(|nested| vec![nested]).or(if_block.clone()))
-                        .or_not(),
-                )
-                .map_with(move |((cond, then_body), else_body), e| Stmt::If {
+        let if_branch = just(T::IfKw)
+            .ignore_then(if_expr.clone())
+            .then(if_block.clone())
+            .map_with(move |(cond, then_body), e| {
+                let span: SimpleSpan = e.span();
+                (cond, then_body, span.start)
+            });
+        let if_ = if_branch
+            .clone()
+            .then(
+                just(T::ElseKw)
+                    .ignore_then(if_branch)
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .then(just(T::ElseKw).ignore_then(if_block.clone()).or_not())
+            .map_with(move |((head, tail), trailing_else), e| {
+                let whole: SimpleSpan = e.span();
+                let end = whole.end;
+                // Fold from the innermost branch outwards: the trailing `else` is the deepest
+                // `else_body`, each `else if` wraps what is below it, and the head branch is the
+                // statement returned.
+                let mut else_body = trailing_else;
+                for (cond, then_body, start) in tail.into_iter().rev() {
+                    else_body = Some(vec![Stmt::If {
+                        cond,
+                        then_body,
+                        else_body,
+                        span: ctx.to_span((start..end).into()),
+                    }]);
+                }
+                let (cond, then_body, start) = head;
+                Stmt::If {
                     cond,
                     then_body,
                     else_body,
-                    span: ctx.to_span(e.span()),
-                })
-        });
+                    span: ctx.to_span((start..end).into()),
+                }
+            });
 
         // Optional generic type parameters on a declaration: `<T>`, `<A, B>`, `<T: Comparable>`,
         // `<T: Comparable + Display>`, `<T: Keyed<int>>`. Bounds name built-in or user traits,
@@ -6364,7 +6625,7 @@ mod tests {
         let source = Source::new(SourceId::FIRST, "deep.noe", src);
         let lexed = noeta_lexer::lex(&source);
         assert_eq!(
-            nesting_depth(&lexed.tokens).0,
+            recursion_prescan(&lexed.tokens).max_depth,
             MAX_NESTING_DEPTH,
             "the probe must sit exactly on the limit, or it is measuring the wrong depth"
         );
@@ -6414,6 +6675,236 @@ mod tests {
         assert_eq!(
             past_limit.diagnostics[0].code,
             DiagnosticCode::NestingTooDeep
+        );
+    }
+
+    /// Source for a dispatch function whose body is one `else if` chain of `branches` branches (the
+    /// first `if` plus `branches - 1` continuations), plus a trailing `else`. Its delimiter depth is
+    /// **2** at every length, which is the whole reason the depth limit never saw it.
+    fn else_if_chain(branches: usize) -> String {
+        let mut src = String::from("fn dispatch(a: int): int {\n  if a == 0 {\n    return 0\n");
+        for i in 1..branches {
+            src.push_str(&format!("  }} else if a == {i} {{\n    return {i}\n"));
+        }
+        src.push_str("  } else {\n    return -1\n  }\n}\n");
+        src
+    }
+
+    #[test]
+    fn an_else_if_chain_is_flat_in_delimiters_and_right_nested_in_the_ast() {
+        // The two halves of the bug in one assertion. The pre-pass sees delimiter depth 2 no matter
+        // how long the chain gets — so the depth limit cannot bound it, which is why the chain has
+        // its own budget — while the AST is one `Stmt::If` per branch, each in the previous one's
+        // `else_body`, which is why every stage downstream recurses per branch.
+        let src = else_if_chain(4);
+        let source = Source::new(SourceId::FIRST, "chain.noe", src.clone());
+        let lexed = noeta_lexer::lex(&source);
+        assert_eq!(
+            recursion_prescan(&lexed.tokens).max_depth,
+            2,
+            "a chain must stay at delimiter depth 2 — if it does not, the depth limit would cover it"
+        );
+
+        let parsed = parse_str(&src);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Fn(decl) = &parsed.program.stmts[0] else {
+            panic!("expected a fn");
+        };
+        // Walk the chain: 4 `If`s, the last holding the trailing `else`'s block, and every span
+        // ending where the outermost one does (a nested `if` consumes the rest of the chain).
+        let mut stmt = &decl.body[0];
+        let mut seen = 0;
+        let outer_end = match stmt {
+            Stmt::If { span, .. } => span.end,
+            other => panic!("expected an if, got {other:?}"),
+        };
+        loop {
+            let Stmt::If {
+                else_body, span, ..
+            } = stmt
+            else {
+                panic!("expected an if, got {stmt:?}");
+            };
+            seen += 1;
+            assert_eq!(span.end, outer_end, "branch {seen} should end with the chain");
+            match else_body.as_deref() {
+                Some([nested @ Stmt::If { .. }]) => stmt = nested,
+                // The trailing `else`'s block: `return -1`.
+                Some([Stmt::Return { .. }]) => break,
+                other => panic!("unexpected else body: {other:?}"),
+            }
+        }
+        assert_eq!(seen, 4, "one `Stmt::If` per branch");
+    }
+
+    #[test]
+    fn a_chain_at_the_limit_parses_and_one_branch_longer_diagnoses() {
+        // The boundary, through the real `parse` entry point. The accepting side is the one that
+        // matters most: before the `if` grammar was flattened this shape aborted the process at ~725
+        // branches with no diagnostic, so a limit of `MAX_ELSE_CHAIN_BRANCHES` the parser could not
+        // actually deliver would be the same crash under a different name.
+        let at_limit = parse_str(&else_if_chain(MAX_ELSE_CHAIN_BRANCHES));
+        assert!(
+            at_limit.diagnostics.is_empty(),
+            "a chain at the limit should parse: {:?}",
+            at_limit.diagnostics
+        );
+        let past_limit = parse_str(&else_if_chain(MAX_ELSE_CHAIN_BRANCHES + 1));
+        assert_eq!(past_limit.diagnostics.len(), 1);
+        assert_eq!(
+            past_limit.diagnostics[0].code,
+            DiagnosticCode::NestingTooDeep
+        );
+        assert!(
+            past_limit.diagnostics[0].message.contains("else if"),
+            "the diagnostic should name the chain, not delimiter depth: {}",
+            past_limit.diagnostics[0].message
+        );
+        assert!(past_limit.program.stmts.is_empty());
+    }
+
+    /// `x = if a == 0 then 0 else if a == 1 then 1 else … else -1;` — the conditional-*expression*
+    /// chain of `branches` branches. Same right-nesting, a different price per branch, so a
+    /// different limit.
+    fn ternary_chain(branches: usize) -> String {
+        let mut src = String::from("a = 3;\nx = ");
+        for i in 0..branches {
+            src.push_str(&format!("if a == {i} then {i} else "));
+        }
+        src.push_str("-1;\n");
+        src
+    }
+
+    #[test]
+    fn the_conditional_expression_chain_has_its_own_stricter_limit() {
+        // The expression form desugars to a nested `match` per branch, which costs about four times
+        // what a statement branch does — measured, the pipeline aborted between 300 and 400 branches
+        // where the statement chain reached ~770, and the *inline* parse aborted around 200
+        // (non-monotonically) where the flattened statement chain never does. Pricing the two shapes
+        // together at the cheaper cost is exactly how a chain at the statement limit still overflowed
+        // after the statement chain had been bounded, so the pre-pass tells them apart by the `then`.
+        assert!(MAX_TERNARY_CHAIN_BRANCHES < MAX_ELSE_CHAIN_BRANCHES);
+        let at_limit = parse_str(&ternary_chain(MAX_TERNARY_CHAIN_BRANCHES));
+        assert!(
+            at_limit.diagnostics.is_empty(),
+            "a ternary chain at its limit should parse: {:?}",
+            at_limit.diagnostics
+        );
+        let past_limit = parse_str(&ternary_chain(MAX_TERNARY_CHAIN_BRANCHES + 1));
+        assert_eq!(past_limit.diagnostics.len(), 1);
+        assert_eq!(
+            past_limit.diagnostics[0].code,
+            DiagnosticCode::NestingTooDeep
+        );
+        assert!(
+            past_limit.diagnostics[0].message.contains("then"),
+            "the diagnostic should name the expression form: {}",
+            past_limit.diagnostics[0].message
+        );
+        // And the *statement* chain keeps its own, more generous limit — the stricter price must not
+        // leak across the two shapes.
+        assert!(
+            parse_str(&else_if_chain(MAX_TERNARY_CHAIN_BRANCHES + 1))
+                .diagnostics
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_long_chain_is_parsed_on_the_worker_however_shallow_it_is() {
+        // The offload half. A chain is flat in delimiters, so `INLINE_NESTING_DEPTH` can never send one
+        // to the worker however long it gets — which is why the conditional-expression form aborted
+        // *inside the parser* at ~200 branches, on a caller that had passed the headroom check. That
+        // cliff is non-monotone (the `stacker` red zone), so it cannot be bounded by a limit; the parse
+        // has to move. `INLINE_CHAIN_BRANCHES` is what moves it, and it must stay below both limits or
+        // some admissible chain is still parsed inline.
+        assert!(INLINE_CHAIN_BRANCHES < MAX_TERNARY_CHAIN_BRANCHES);
+        assert!(INLINE_CHAIN_BRANCHES < MAX_ELSE_CHAIN_BRANCHES);
+
+        let src = ternary_chain(MAX_TERNARY_CHAIN_BRANCHES);
+        let source = Source::new(SourceId::FIRST, "chain.noe", src);
+        let lexed = noeta_lexer::lex(&source);
+        let scan = recursion_prescan(&lexed.tokens);
+        assert!(
+            scan.max_depth <= INLINE_NESTING_DEPTH,
+            "the depth test must NOT be what offloads this — that is the whole bug"
+        );
+        assert!(
+            scan.max_chain > INLINE_CHAIN_BRANCHES,
+            "the chain test must be what offloads it"
+        );
+
+        // And it parses on a caller that clears the headroom, so the offload is not merely
+        // `short_on_stack` doing the work by accident.
+        let parsed = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(INLINE_PARSE_HEADROOM + 512 * 1024)
+                .spawn_scoped(scope, || parse_str(&ternary_chain(MAX_TERNARY_CHAIN_BRANCHES)))
+                .expect("spawn the just-over-the-headroom probe thread")
+                .join()
+                .expect("the just-over-the-headroom probe panicked")
+        });
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    }
+
+    #[test]
+    fn sibling_else_if_chains_are_counted_separately() {
+        // The over-counting hazard the per-depth reset exists to avoid: many *sibling* chains in one
+        // block must not sum into one budget, or ordinary code with a lot of `if`/`else if` in a row
+        // would be rejected. Enough chains here that a naive `else`-counter would be well past the
+        // limit.
+        let chains = (MAX_ELSE_CHAIN_BRANCHES / 2) + 1;
+        let mut src = String::from("fn f(a: int): int {\n");
+        for i in 0..chains {
+            src.push_str(&format!(
+                "  if a == {i} {{\n    return {i}\n  }} else if a == -{} {{\n    return 1\n  }}\n",
+                i + 1
+            ));
+        }
+        src.push_str("  return -1\n}\n");
+        let parsed = parse_str(&src);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{chains} two-branch chains should parse: {:?}",
+            parsed.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_chain_at_the_limit_parses_on_the_smallest_pipeline_stack() {
+        // `MAX_ELSE_CHAIN_BRANCHES` is derived from `MIN_PIPELINE_STACK`, so the parser's share of
+        // that budget has to fit inside it with the rest left over for the stages that follow. This
+        // is the parse half, on exactly that stack, through `parse_inner` so the thread under test
+        // *is* the stack under test (`parse_in` would offload a short-on-stack caller and measure
+        // nothing). The pipeline half — check, lower, run — is pinned end-to-end by
+        // `tests/conformance/diagnostics/else_chain_at_the_limit.noe`.
+        //
+        // It fails the way a stack overflow fails: by aborting the test process. If that happens, the
+        // `if` grammar has started recursing per branch again (or a chain got much more expensive per
+        // branch); re-measure `STACK_PER_ELSE_CHAIN_BRANCH` rather than enlarging this thread.
+        let src = else_if_chain(MAX_ELSE_CHAIN_BRANCHES);
+        let source = Source::new(SourceId::FIRST, "chain.noe", src);
+        let lexed = noeta_lexer::lex(&source);
+        let parsed = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(MIN_PIPELINE_STACK)
+                .spawn_scoped(scope, || {
+                    parse_inner(
+                        &source,
+                        &lexed.tokens,
+                        Edition::DEFAULT,
+                        &noeta_lexer::TextTiers::default(),
+                    )
+                })
+                .expect("spawn the pipeline-stack probe thread")
+                .join()
+                .expect("the pipeline-stack probe panicked")
+        });
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "a chain at the limit should parse on {} MiB: {:?}",
+            MIN_PIPELINE_STACK / (1024 * 1024),
+            parsed.diagnostics
         );
     }
 
