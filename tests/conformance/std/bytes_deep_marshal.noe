@@ -1,0 +1,33 @@
+// The **deep** value projection (`to_native_deep`) carries a `bytes` buffer as a real byte buffer,
+// not as its `<N bytes>` display summary. `json.stringify` is the observable door onto that
+// projection (the `json` module is `deep_marshal`), and JSON has no byte type, so a buffer
+// serializes as a lossless array of its byte values — an out-of-band convention like base64 would
+// have to be agreed with the reader, and the old summary string was simply a wrong value on the wire.
+// The last two lines pin the reverse direction: `base64.decode` and `crypto.sha256` are natives that
+// RETURN `bytes`, and the bytes they hand back are the exact ones — including bytes that are not
+// valid UTF-8 (0, 1, 2), which no string-shaped projection could carry.
+// expect: stdout "[104,105]"
+// expect: stdout "[104,195,169]"
+// expect: stdout "<2 bytes>"
+// expect: stdout "["k",[1,2]]"
+// expect: stdout "[0,1,2]"
+// expect: stdout "32"
+// expect: exit 0
+use std.json
+use std.base64
+use std.crypto
+
+echo json.stringify("hi".to_bytes())
+echo json.stringify("hé".to_bytes())
+
+// `echo` is unaffected: the *display* form of a buffer stays the opaque length summary. Only the
+// value projection changed.
+echo "hi".to_bytes()
+
+// A buffer nested inside a container travels the same way — this is exactly the shape the bug was
+// reported in: a `bytes` element inside a `List<dyn>` argument (a SQL driver's bind parameters).
+params: List<dyn> = ["k", base64.decode("AQI=")?]
+echo json.stringify(params)
+
+echo json.stringify(base64.decode("AAEC")?)
+echo crypto.sha256("noeta").len()

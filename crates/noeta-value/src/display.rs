@@ -180,7 +180,8 @@ impl Value {
     /// (`noeta-eval/src/lib.rs`) — per-representation glue, mirrored by design (see
     /// `plans/backend-mirror.md`); divergence is caught by `std/json_encoder_one_engine.noe` and
     /// the differential. Numbers become scalars; strings, enum variants, and the opaque
-    /// length/`<fn>`/`<module …>` summaries become [`NativeValue::Str`]; lists/tuples/sets become a
+    /// `<fn>`/`<module …>` summaries become [`NativeValue::Str`]; a `bytes` buffer becomes
+    /// [`NativeValue::Bytes`]; lists/tuples/sets become a
     /// [`NativeValue::List`]; maps and objects a [`NativeValue::Map`]. Read-only — it never changes a
     /// refcount (a packed list materializes a temporary that is released here).
     pub fn to_native_deep(self) -> noeta_ext_abi::NativeValue {
@@ -203,9 +204,14 @@ impl Value {
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => NativeValue::Str(s.as_str().to_owned()),
-                // A byte buffer has no JSON representation (it is the *binary* alternative): a length
-                // summary string, so `json.stringify` never panics.
-                Payload::Bytes(b) => NativeValue::Str(format!("<{} bytes>", b.len())),
+                // A byte buffer crosses as ITSELF, exactly as the shallow projection
+                // (`noeta_vm::values::marshal_native_arg`) sends it. It used to marshal to the human
+                // summary `"<N bytes>"` — the display form standing in for the value — so a `bytes`
+                // argument to any `deep_marshal` consumer (`http.client.post(url, body)`, a SQL bind
+                // parameter) silently arrived as that ASCII text instead of the buffer. JSON's lack
+                // of a byte type is the *serializer's* problem, not the projection's:
+                // `json_text::stringify` renders the buffer as an array of its byte values.
+                Payload::Bytes(b) => NativeValue::Bytes(b.to_vec()),
                 // An extern-type value marshals as itself; the shared serializer renders its
                 // display form as a JSON string (a `Uuid` is its canonical string).
                 Payload::Extern(e) => NativeValue::Extern(e.clone()),

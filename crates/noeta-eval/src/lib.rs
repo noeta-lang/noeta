@@ -7279,7 +7279,8 @@ fn value_to_json(value: &Value) -> String {
 
 /// Deeply marshal a tree-walker value into the neutral [`noeta_stdlib::NativeValue`] tree the shared
 /// JSON serializer consumes. Numbers become scalars; strings, enum variants, and the opaque
-/// length/`<fn>`/`<module …>` summaries become [`NativeValue::Str`]; lists/tuples/sets become a
+/// `<fn>`/`<module …>` summaries become [`NativeValue::Str`]; a `bytes` buffer becomes
+/// [`noeta_stdlib::NativeValue::Bytes`]; lists/tuples/sets become a
 /// [`NativeValue::List`]; maps and objects a [`NativeValue::Map`] (objects in declared field order).
 /// Mirrors the VM's [`noeta_value::Value::to_native_deep`] so both backends agree — per-
 /// representation glue, mirrored by design (see `plans/backend-mirror.md`); divergence is caught
@@ -7293,8 +7294,14 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         Value::Float(f) => NativeValue::Scalar(Scalar::Float(*f)),
         Value::F32(f) => NativeValue::Scalar(Scalar::F32(*f)),
         Value::Str(s) => NativeValue::Str(s.clone()),
-        // A byte buffer has no JSON representation (it is the binary alternative): a length summary.
-        Value::Bytes(b) => NativeValue::Str(format!("<{} bytes>", b.len())),
+        // A byte buffer crosses as ITSELF (`NativeValue::Bytes`), exactly as the shallow
+        // [`marshal_native_arg`] projects it. It used to marshal to the human summary
+        // `"<N bytes>"` — the display form standing in for the value — so a `bytes` argument to any
+        // `deep_marshal` consumer (`http.client.post(url, body)`, a SQL bind parameter) silently
+        // arrived as that 9-byte ASCII text instead of the buffer. JSON's lack of a byte type is the
+        // *serializer's* problem, not the projection's: `json_text::stringify` renders the buffer as
+        // an array of its byte values.
+        Value::Bytes(b) => NativeValue::Bytes((**b).clone()),
         // Lists, tuples, and sets all serialize as a JSON array.
         Value::List(repr) => {
             NativeValue::List(repr.to_rc_vec().iter().map(value_to_native_deep).collect())
