@@ -675,7 +675,14 @@ impl Checker {
         // `self_type_params` is non-empty exactly inside an instance method of a generic type, and
         // holds a blank in the slot of any parameter the method's own `<…>` shadows — so "in scope
         // on the type, but not reachable here" splits cleanly on it.
+        //
+        // A self-less member whose class parameter DOES reach it — through the hidden type-argument
+        // slot, which is that member's only channel — is excluded here and falls through to the
+        // blanket branch, whose help points at the route that is actually open
+        // (`field_specs_of(type_name::<T>())`). Saying "this member has no receiver" there would be
+        // true and useless: the parameter is reachable, just not as a compile-time key.
         if let Some(owner) = self.coloring.current_type.clone()
+            && !self.coloring.forwardable_params.iter().any(|p| p == name)
             && self
                 .symbols
                 .generic_types

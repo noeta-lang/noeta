@@ -1960,6 +1960,25 @@ impl Checker {
                             .is_none_or(|t| t.defers_to_runtime() || t.contains_unknown())
                     })
                 {
+                    // A parameter of the enclosing **type** (the leading `class_params` of the
+                    // composed list) cannot be spelled with a turbofish here — a method's `::<…>`
+                    // names the METHOD's own parameters, never its class's, which come from the
+                    // receiver's type arguments. So "supply it explicitly" is a dead end for one and
+                    // the fix for the other, and each says which it is.
+                    let class_param = generic
+                        .params
+                        .iter()
+                        .take(generic.class_params)
+                        .any(|(p, _)| *p == open);
+                    let help = if class_param {
+                        format!(
+                            "a self-less member reads `{open}` from the CALL's instantiation, and \
+                             nothing here determines one — annotate the position this call flows \
+                             into so its result type pins `{open}` (`x: Type<Something> = …`)"
+                        )
+                    } else {
+                        format!("supply it explicitly: `{name}::<...>(...)`")
+                    };
                     self.error(
                         DiagnosticCode::CannotInfer,
                         span,
@@ -1968,7 +1987,7 @@ impl Checker {
                              a call-site-typed result"
                         ),
                     )
-                    .help(format!("supply it explicitly: `{name}::<...>(...)`"));
+                    .help(help);
                     continue;
                 }
                 if self.mentions_in_scope_param(&sigma) {

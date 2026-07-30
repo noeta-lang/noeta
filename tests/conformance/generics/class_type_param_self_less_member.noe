@@ -1,0 +1,44 @@
+// A generic type's parameter is carried by the **instance**, so a self-less member of that type has
+// no receiver to read the reflected tag off. That used to be a hard E0058 whose help said to read
+// `self` — advice the one member that matters most cannot take: a constructor
+// `fn new(tbl: string): Repo<T>` is what BUILDS the instance, so there is no tag yet, and `T` is
+// known only to the caller.
+//
+// The instantiation now arrives on the **hidden type-argument slot** — the same channel a generic
+// `fn`'s forwarded parameter already rides (poly-values F2b), extended to a generic type's self-less
+// members rather than a second mechanism bolted beside it. The call site resolves the slot from its
+// own instantiation (`rt: Repo<Todo> = …` pins `T = Todo`) and the body reads the entry's name.
+//
+// Only a self-less member takes the slot. An INSTANCE method keeps the receiver channel — two
+// channels for one fact would let a call through a receiverless entry point (a `dyn` receiver, a
+// method handle, `invoke`) supply nothing and abort where the tag was right there — which is what
+// `model()` below pins: it reads `self`, so it still answers off the tag.
+// expect: stdout "building todos for Todo"
+// expect: stdout "building users for User"
+// expect: stdout "todos:Todo"
+// expect: stdout "users:User"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    // Self-less: no receiver exists yet. `T` rides the hidden slot the call site fills.
+    fn new(tbl: string): Repo<T> {
+        echo "building " ~ tbl ~ " for " ~ type_name::<T>();
+        return Repo { tbl: tbl };
+    }
+
+    // Reads `self`, so an INSTANCE method: `T` comes off the receiver's reflected tag, unchanged.
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+rt: Repo<Todo> = Repo.new("todos");
+ru: Repo<User> = Repo.new("users");
+echo rt.model();
+echo ru.model();
