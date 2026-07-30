@@ -182,6 +182,11 @@ impl ReflectionInfo {
                 name,
                 ty: info.field_types.get(i).unwrap_or(&TypeRepr::Dyn),
                 optional: info.field_optional.get(i).copied().unwrap_or(false),
+                // A `TypeInfo` written before `field_public` existed (or one assembled by a test
+                // fixture) carries no bit for this field; default to public, which is what every
+                // struct field and every `pub` class field is — so a missing bit widens nothing that
+                // was not already open, it just fails to close a private one.
+                public: info.field_public.get(i).copied().unwrap_or(true),
             })
             .collect()
     }
@@ -227,6 +232,9 @@ impl ReflectionInfo {
                         // `FieldSpec` the struct side uses rather than a payload-only element type:
                         // one vocabulary, and `optional` says the true thing about a payload.
                         optional: false,
+                        // A payload slot has no visibility syntax either: a variant is public with
+                        // its enum, so every payload field is settable wherever the case is.
+                        public: true,
                     })
                     .collect(),
                 backing: variant.backing.as_ref(),
@@ -482,6 +490,17 @@ pub struct TypeInfo {
     /// `field_defaults` below, which carries only the *literal* subset an attribute materializer can
     /// fold; this flag covers any default expression.
     pub field_optional: Vec<bool>,
+    /// Whether each field is **publicly settable**, parallel to `fields` (empty for enums). A value
+    /// `struct`'s fields are always public; a reference `class`'s default private with a per-field
+    /// `pub` opt-in (object-model slice 2d) — so this is the checker's `symbols.private_fields`
+    /// inverted, and a native fielded type's registry `ExtField::is_public`.
+    ///
+    /// Reflection carries it because the reflective construction door needs it. The checker enforces
+    /// privacy at a *literal* (E0035) off a symbol table no runtime door can see, so without this bit
+    /// `construct("Box", {"secret": 9})` set a field a source-written `Box { secret: 9 }` could not —
+    /// reflection minting a value the declaration forbids. Read by [`plan_construct`] /
+    /// [`plan_construct_named`], which refuse a private field by name.
+    pub field_public: Vec<bool>,
     /// Each field's **literal default** (object-model slice 6i), parallel to `fields`: `Some` when
     /// the field declared `name: T = <literal>`, `None` for a mandatory field or a non-literal
     /// default. Used to fill an omitted optional field when materializing an attribute instance, so
@@ -584,6 +603,7 @@ pub fn build(
                     fields: decl.fields.iter().map(|f| f.name.clone()).collect(),
                     field_types: field_types(&decl.fields),
                     field_optional: field_optional(&decl.fields),
+                    field_public: field_public(TypeKind::Struct, &decl.fields),
                     field_defaults: field_defaults(&decl.fields),
                     variants: Vec::new(),
                 });
@@ -609,6 +629,7 @@ pub fn build(
                     fields: decl.fields.iter().map(|f| f.name.clone()).collect(),
                     field_types: field_types(&decl.fields),
                     field_optional: field_optional(&decl.fields),
+                    field_public: field_public(TypeKind::Class, &decl.fields),
                     field_defaults: field_defaults(&decl.fields),
                     variants: Vec::new(),
                 });
@@ -677,6 +698,7 @@ pub fn build(
                     fields: Vec::new(),
                     field_types: Vec::new(),
                     field_optional: Vec::new(),
+                    field_public: Vec::new(),
                     field_defaults: Vec::new(),
                     variants: variant_infos(&decl.variants),
                 });
@@ -978,6 +1000,20 @@ fn field_optional(fields: &[FieldDecl]) -> Vec<bool> {
     fields.iter().map(|f| f.default.is_some()).collect()
 }
 
+/// Whether each field is publicly settable, parallel to the field list — the visibility
+/// [`TypeInfo::field_public`] carries, and the same rule the checker's `collect` pass applies to
+/// `symbols.private_fields`: a value **`struct`**'s fields are always public (there is nothing to
+/// opt into), a reference **`class`**'s default private with a per-field `pub` opt-in (object-model
+/// slice 2d). Keyed off `kind` rather than off `is_public` alone, because a struct's field carries
+/// `is_public: false` for want of the keyword and *is* public regardless — reading the raw bit would
+/// make `construct` refuse every struct field in the language.
+fn field_public(kind: TypeKind, fields: &[FieldDecl]) -> Vec<bool> {
+    match kind {
+        TypeKind::Class => fields.iter().map(|f| f.is_public).collect(),
+        TypeKind::Struct | TypeKind::Enum => fields.iter().map(|_| true).collect(),
+    }
+}
+
 /// Compute each field's literal default (object-model slice 6i), parallel to the field list: `Some`
 /// for a `name: T = <literal>` field whose default folds to a constant, `None` otherwise. Used to
 /// populate [`TypeInfo::field_defaults`].
@@ -1094,6 +1130,11 @@ pub struct FieldSpecData<'a> {
     pub name: &'a str,
     pub ty: &'a TypeRepr,
     pub optional: bool,
+    /// Whether the field may be set from outside its type — [`TypeInfo::field_public`] for this
+    /// field. Read by [`plan_construct`] / [`plan_construct_named`] and deliberately **not**
+    /// materialized into the prelude `FieldSpec`: the surface question a schema consumer asks is
+    /// "what shape is this type", and the construction door answers "may I set this" by refusing.
+    pub public: bool,
 }
 
 /// One variant of a type-level enum schema — the borrowed view [`ReflectionInfo::variant_specs`]
@@ -1301,6 +1342,8 @@ fn variant_payload_specs(variant: &VariantInfo) -> Vec<FieldSpecData<'_>> {
             ty: variant.field_types.get(i).unwrap_or(&TypeRepr::Dyn),
             // A payload field has no syntax for a default, so it can never be omitted.
             optional: false,
+            // Nor for visibility: a variant's payload is public with the case that carries it.
+            public: true,
         })
         .collect()
 }
@@ -1373,6 +1416,36 @@ fn check_field_value(
     Ok(())
 }
 
+/// Refuse setting a **private** field through a reflective construction — the E0035 rule the checker
+/// enforces at a source literal, applied at the reflective door that has the same effect.
+///
+/// A `class` field not declared `pub` (and a native fielded type's `is_public: false` field) is
+/// visible only inside the declaring type's own methods, so `Box { secret: 9 }` written outside the
+/// class is a compile error. `construct("Box", {"secret": 9})` is the same construction spelled
+/// reflectively, and it used to succeed — reflection minting a value the declaration forbids.
+///
+/// **Context-free, deliberately.** The checker's gate relaxes inside the declaring type's own
+/// methods and inside a dev-tier (`@test`) body; a runtime door knows neither its caller's type nor
+/// its tier, so it refuses everywhere. That is the conservative half of the asymmetry — the sites the
+/// checker exempts are exactly the sites where the *literal* is available, so nothing that was
+/// expressible becomes inexpressible.
+///
+/// Only a **supplied** field is refused. An omitted private field with a default is left to the
+/// construction path's own default thunk, which is precisely what a source literal outside the class
+/// does too (an omitted field is not in the literal, so E0035 never looks at it).
+///
+/// The wording is the checker's own (`Checker::report_private_field` with the `Set` verb) so the two
+/// doors do not describe one rule two ways.
+fn check_field_visible(type_name: &str, spec: &FieldSpecData<'_>) -> Result<(), String> {
+    if spec.public {
+        return Ok(());
+    }
+    Err(format!(
+        "cannot set private field `{}` of `{type_name}` from outside it",
+        spec.name
+    ))
+}
+
 /// The head **name** of a nominal type repr — a declared struct/class/enum, or the kind-agnostic
 /// `Named` a declaration site produces — and `None` for everything else (scalars, collections,
 /// `Option`, `dyn`, `dyn Trait`, a function type). The one place the two spellings of "a declared
@@ -1395,6 +1468,8 @@ fn nominal_name(ty: &TypeRepr) -> Option<&str> {
 /// struct-literal construction path — leaving every omitted-but-defaulted field for that path to
 /// fill from its default thunk. Errors (returned as a ready-to-surface message, no leading `error:`):
 ///   * more values than fields;
+///   * a value supplied for a **private** field (see [`check_field_visible`] — the E0035 rule the
+///     checker enforces at a literal, applied at the reflective door);
 ///   * a value whose runtime scalar kind disagrees with a concrete-scalar field type, or whose
 ///     nominal head disagrees with a declared struct/class/enum field type;
 ///   * a missing field that declared no default.
@@ -1416,6 +1491,9 @@ pub fn plan_construct<'a>(
     let mut fill: Vec<&str> = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
         if i < value_reprs.len() {
+            // Visibility before typing: whether a value of the right type may be supplied at all is
+            // the prior question, so a private field reads as private rather than as a type error.
+            check_field_visible(type_name, spec)?;
             check_field_value(type_name, spec, &value_reprs[i])?;
             fill.push(spec.name);
         } else if !spec.optional {
@@ -1435,6 +1513,7 @@ pub fn plan_construct<'a>(
 /// positional form there is no gap problem: a field is supplied or it is not, so a middle field can
 /// be omitted while a later one is supplied. Errors (ready-to-surface messages):
 ///   * a provided name that is not a field of the type;
+///   * a provided name that is a **private** field (see [`check_field_visible`]);
 ///   * a provided value whose runtime scalar kind disagrees with a concrete-scalar field type, or
 ///     whose nominal head disagrees with a declared struct/class/enum field type;
 ///   * a field that is neither provided nor defaulted.
@@ -1450,6 +1529,8 @@ pub fn plan_construct_named(
         let Some(spec) = specs.iter().find(|s| s.name == name) else {
             return Err(format!("`{type_name}` has no field `{name}`"));
         };
+        // Visibility before typing, as in the positional form.
+        check_field_visible(type_name, spec)?;
         check_field_value(type_name, spec, repr)?;
     }
     for spec in specs {
@@ -2658,6 +2739,7 @@ pub fn prelude_type_infos() -> Vec<TypeInfo> {
         fields: Vec::new(),
         field_types: Vec::new(),
         field_optional: Vec::new(),
+        field_public: Vec::new(),
         field_defaults: Vec::new(),
         variants: decl
             .variants
@@ -2679,6 +2761,10 @@ pub fn prelude_type_infos() -> Vec<TypeInfo> {
         // No prelude struct field declares a default, so none may be omitted at construction — the
         // mandatory/no-default pair `plan_construct` enforces.
         field_optional: decl.fields.iter().map(|_| false).collect(),
+        // A prelude struct is a value struct, so every field is public — the same statement
+        // `field_public` makes about a `.noe` struct, and what keeps `construct("FieldEntry", …)`
+        // (the prelude-structs-constructible surface) working through the visibility gate.
+        field_public: decl.fields.iter().map(|_| true).collect(),
         field_defaults: decl.fields.iter().map(|_| None).collect(),
         fields: decl.fields,
         // A struct declares no variants; `variants_of` on one reports the empty list, and the
@@ -3202,6 +3288,7 @@ mod tests {
                 fields: Vec::new(),
                 field_types: Vec::new(),
                 field_optional: Vec::new(),
+                field_public: Vec::new(),
                 field_defaults: Vec::new(),
                 variants: Vec::new(),
             }],
@@ -3216,6 +3303,7 @@ mod tests {
                 fields: Vec::new(),
                 field_types: Vec::new(),
                 field_optional: Vec::new(),
+                field_public: Vec::new(),
                 field_defaults: Vec::new(),
                 variants: Vec::new(),
             }],
@@ -3293,6 +3381,7 @@ mod tests {
                 fields: Vec::new(),
                 field_types: Vec::new(),
                 field_optional: Vec::new(),
+                field_public: Vec::new(),
                 field_defaults: Vec::new(),
                 variants: Vec::new(),
             }],

@@ -154,7 +154,15 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// line. The last is a wire break even though the *meaning* is identical: postcard writes an
 /// `Option`'s discriminant byte followed by the payload either way, but a niche-optimised `Option`
 /// is not guaranteed to encode as the plain one, and the two ops around it moved regardless.
-pub const FORMAT_VERSION: u8 = 13;
+///
+/// Bumped to 14 by the construct-guards arc: `reflect::TypeInfo` (in `Module::reflection`) gained a
+/// `field_public: Vec<bool>` parallel to `fields`, between `field_optional` and `field_defaults` — the
+/// per-field visibility the reflective construction door reads to refuse setting a private field (the
+/// E0035 rule the checker enforces at a literal). Same non-self-describing-encoding reasoning as
+/// version 8, which added the two `Vec`s beside it: postcard writes the sequence's length prefix
+/// where a version-13 reader expects `field_defaults`, so the whole manifest desynchronises from that
+/// field on rather than failing cleanly.
+pub const FORMAT_VERSION: u8 = 14;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

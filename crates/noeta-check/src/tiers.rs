@@ -572,6 +572,10 @@ pub fn extension_attribute_types() -> Vec<noeta_ast::reflect::TypeInfo> {
             .collect(),
         // Optional iff the field carries a literal default (`Skip.reason = ""`).
         field_optional: attr.fields.iter().map(|f| f.default.is_some()).collect(),
+        // A data-only attribute's fields ARE its arguments, so every one is public: an `ExtAttribute`
+        // field carries no visibility channel, and the E0009 application-site check already requires
+        // each mandatory one to be supplied by name.
+        field_public: attr.fields.iter().map(|_| true).collect(),
         field_defaults: attr
             .fields
             .iter()
@@ -660,6 +664,12 @@ fn fielded_type_info(f: &noeta_ext_abi::registry::ExtFielded) -> noeta_ast::refl
             .map(|field| sig_type_to_repr(&field.ty))
             .collect(),
         field_optional: f.fields.iter().map(|_| false).collect(),
+        // Visibility straight off the declaration's own [`ExtField::is_public`] — the identical read
+        // `seed_ext_fielded` performs to populate `symbols.private_fields`, and deliberately NOT
+        // kind-adjusted the way a `.noe` type's is: a native fielded type states each field's
+        // visibility explicitly (a native *struct*'s non-`pub` field is private too, per that
+        // seeder), so the reflective construction door and the E0035 gate read one statement.
+        field_public: f.fields.iter().map(|field| field.is_public).collect(),
         field_defaults: f.fields.iter().map(|_| None).collect(),
         variants: Vec::new(),
     }
@@ -787,6 +797,7 @@ pub fn extension_enum_types() -> Vec<noeta_ast::reflect::TypeInfo> {
             fields: Vec::new(),
             field_types: Vec::new(),
             field_optional: Vec::new(),
+            field_public: Vec::new(),
             field_defaults: Vec::new(),
             variants: en
                 .variants
