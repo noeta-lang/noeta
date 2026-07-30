@@ -3527,7 +3527,8 @@ fn cookie_method_dispatch(
     }
 }
 
-/// The `Request` instance methods (http-server S2): all pure reads over the wrapped inbound request.
+/// The `Request` instance methods (http-server S2): pure reads over the wrapped inbound request,
+/// plus the `with_*` copy-modify builders a middleware layer rewrites a request through.
 const REQUEST_METHODS: &[ExtFn] = &[
     ExtFn {
         param_names: &[],
@@ -5637,13 +5638,29 @@ const FILE_HANDLE_DOCS: &[(&str, &str)] = &[
 const REQUEST_DOCS: &[(&str, &str)] = &[
     ("method", "The HTTP method (`\"GET\"`, `\"POST\"`, …)."),
     ("path", "The request path."),
-    ("query", "The raw query string."),
+    (
+        "query",
+        "The value of query parameter `name`, or none. Percent-decoded: `?q=caf%C3%A9` reads as \
+         `café` and `?title=buy+milk` as `buy milk`, since a query string is percent-encoded by \
+         definition and every caller would otherwise hand-roll the same decoder.",
+    ),
+    ("url", "The full request URL, as received."),
     (
         "header",
-        "The value of request header `name`, or empty if absent.",
+        "The value of request header `name`, or none if absent.",
     ),
     ("body", "The request body as a string."),
     ("body_bytes", "The request body as raw `bytes`."),
+    (
+        "form",
+        "The value of `application/x-www-form-urlencoded` body field `name`, or none — the same \
+         wire format `query` parses, read from the body instead of the URL.",
+    ),
+    (
+        "form_all",
+        "Every decoded form field, by name. `form(name)`/`form_all()` mirror `cookie`/`cookies`: \
+         the single lookup is the common case, the map is there when you want to iterate.",
+    ),
     (
         "cookies",
         "Every cookie the client sent, by name. Empty when the request carries no `Cookie` \
@@ -5654,6 +5671,16 @@ const REQUEST_DOCS: &[(&str, &str)] = &[
         "cookie",
         "The value of the cookie named `name`, or none. Cookie names are case-sensitive, unlike \
          header names.",
+    ),
+    (
+        "with_header",
+        "A copy of the request with header `name` set to `value`. The `Response.with_header` \
+         shape: a middleware layer above std rewrites a request before passing it on, so \
+         `Request` carries builders and not only accessors.",
+    ),
+    (
+        "with_url",
+        "A copy of the request pointed at `url` — the rewrite half of the same builder pair.",
     ),
 ];
 const KEYRING_DOCS: &[(&str, &str)] = &[];
@@ -5838,6 +5865,20 @@ const SOCKET_DOCS: &[(&str, &str)] = &[
     (
         "recv",
         "Await the next message; `none` when the socket closes.",
+    ),
+    (
+        "recv_timeout",
+        "Await the next message for at most `ms` milliseconds; `none` if none arrived in time. \
+         This is the door to a session that acts on its own schedule — push a periodic update, \
+         poll a server-side source — instead of only when the client speaks. The deadline lives \
+         *inside* the read rather than racing `recv` against a timer, because a race cancels the \
+         losing `recv` and loses any message it had already consumed. Pair it with `closed()` to \
+         tell the two `none`s apart.",
+    ),
+    (
+        "closed",
+        "Whether the peer has closed the connection — so a `none` from `recv_timeout` reads as \
+         \"nothing yet\" rather than \"we are done\".",
     ),
     ("close", "Close the WebSocket connection."),
 ];
