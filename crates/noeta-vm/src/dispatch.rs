@@ -2616,10 +2616,13 @@ impl<'m> Vm<'m> {
                         dst,
                         src,
                         target,
+                        dynamic,
                         some_shape,
                         none_shape,
                     } => {
                         let v = regs[fbase + *src as usize];
+                        let dyn_target = runtime_narrow_target(regs, fbase, *dynamic);
+                        let target = dyn_target.as_ref().unwrap_or(target);
                         let result = if narrow_matches(v, target, &self.module.reflection) {
                             retain(v);
                             let shape = self.persist.shapes[*some_shape as usize];
@@ -2631,8 +2634,15 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
-                    Op::IsType { dst, src, target } => {
+                    Op::IsType {
+                        dst,
+                        src,
+                        target,
+                        dynamic,
+                    } => {
                         let v = regs[fbase + *src as usize];
+                        let dyn_target = runtime_narrow_target(regs, fbase, *dynamic);
+                        let target = dyn_target.as_ref().unwrap_or(target);
                         let result =
                             Value::bool(narrow_matches(v, target, &self.module.reflection));
                         set_reg(regs, fbase, *dst, result);
@@ -3955,6 +3965,27 @@ pub(crate) fn elem_bin_op(op: noeta_ast::BinaryOp) -> Option<noeta_stdlib::ElemB
         noeta_ast::BinaryOp::Mul => noeta_stdlib::ElemBinOp::Mul,
         _ => return None,
     })
+}
+
+/// The narrowing target a [`Op::Narrow`]/[`Op::IsType`] with a **dynamic** head-name register
+/// resolves to, or `None` when the op carries no such register (the ordinary statically-written
+/// target, which stays authoritative).
+///
+/// The register holds the instantiation's qualified name as a string — put there by the same
+/// `TypeArgName`/`TypeSlotName` that serves `type_name::<T>()` — and it resolves through
+/// [`NarrowTarget::from_runtime_name`], the funnel the compiler reduces a written type name through.
+/// That shared funnel is what makes `v.as<T>()` at `T = int` answer what `v.as<int>()` does, and it
+/// mirrors the tree-walker, which re-enters its own `runtime_matches` on the name for the same reason.
+///
+/// A non-string register cannot arise from a checked program (both producers write a string), and a
+/// narrow has no failure channel, so it degrades to the baked target rather than aborting.
+pub(crate) fn runtime_narrow_target(
+    regs: &[Value],
+    fbase: usize,
+    dynamic: Option<u16>,
+) -> Option<NarrowTarget> {
+    let reg = dynamic?;
+    regs[fbase + reg as usize].with_str(|name| NarrowTarget::from_runtime_name(name))
 }
 
 pub(crate) fn set_reg(regs: &mut [Value], base: usize, dst: u16, value: Value) {

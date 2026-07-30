@@ -487,12 +487,24 @@ pub enum Rvalue {
     As {
         operand: Atom,
         ty: TypeRef,
+        /// The target's head name as a **run-time string**, when `T` is a type parameter of an
+        /// enclosing generic (`v.as<T>()` inside `class Repo<T>` or `fn load<T>`): the atom is the
+        /// [`Rvalue::TypeArgName`]/[`Rvalue::TypeSlotName`] lowering already emits for
+        /// `type_name::<T>()`, so the narrow matches on exactly the name that surface answers with.
+        ///
+        /// `None` for every statically-written target, which keeps its baked `ty`. When `Some`, the
+        /// string replaces `ty`'s head — the checker only records the site for a *bare* parameter
+        /// target (a composite is E0058), so there is never a second name to place.
+        dynamic: Option<Atom>,
         span: Span,
     },
     /// `expr is T` — a `bool` head-constructor type test.
     TypeTest {
         operand: Atom,
         ty: TypeRef,
+        /// The run-time head name, exactly as [`Rvalue::As`] carries it — the two share the matcher,
+        /// so they share this channel.
+        dynamic: Option<Atom>,
         span: Span,
     },
     /// Wrap a step closure into a generator iterator (`IterState::Gen`) — the tail of a lowered

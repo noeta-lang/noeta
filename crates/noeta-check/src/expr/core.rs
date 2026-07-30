@@ -750,6 +750,211 @@ impl Checker {
         true
     }
 
+    /// Record the run-time channel that carries a **type parameter's instantiation NAME** into the
+    /// body being checked at `span`, and report whether one reaches it at all.
+    ///
+    /// Generics are erased — one compiled body serves every instantiation — so a parameter is only
+    /// *nameable* at run time where some channel delivers the instantiation per call. The language
+    /// has exactly two, and this is the single place that decides between them, so every
+    /// name-keyed surface over a parameter (`type_name::<T>()`, `v.as<T>()`, `v is T`) answers with
+    /// the same `T`:
+    ///
+    ///   * a parameter of the enclosing generic **TYPE**, inside one of its instance methods — it
+    ///     rides the receiver's reflected type tag, stamped at the construction site
+    ///     ([`SiteMaps::self_type_arg_sites`](crate::sites::SiteMaps));
+    ///   * a parameter of the enclosing generic **fn or method** — it rides the hidden
+    ///     type-argument slot that also carries `json.try_parse::<T>`'s decode recipe, of which
+    ///     this reads only the NAME ([`SiteMaps::forwarded_slot_sites`](crate::sites::SiteMaps)).
+    ///
+    /// The receiver is consulted **first**: inside an instance method of a generic type the class's
+    /// parameters deliberately take no hidden slot (two channels for one fact would let a call
+    /// through a receiverless entry point supply nothing where the tag was right there), so the tag
+    /// is the only one populated there and the slot list holds the *method's own* parameters.
+    ///
+    /// `false` means neither reaches this body — the caller reports it, because what to *say* about
+    /// it depends on the surface.
+    fn record_type_param_name(&mut self, name: &str, span: Span) -> bool {
+        if let Some(i) = self
+            .coloring
+            .self_type_params
+            .iter()
+            .position(|p| p == name)
+        {
+            let owner = self.coloring.current_type.clone().unwrap_or_default();
+            self.sites
+                .self_type_arg_sites
+                .insert(span, (owner, i as u32));
+            return true;
+        }
+        if let Some(idx) = self
+            .coloring
+            .current_forwarding
+            .iter()
+            .position(|t| matches!(t, Type::Named(p, a) if p == name && a.is_empty()))
+        {
+            self.sites.forwarded_slot_sites.insert(span, idx as u32);
+            return true;
+        }
+        false
+    }
+
+    /// The first type parameter a **narrow's** target mentions in a position the runtime match
+    /// actually *tests*, other than a bare head — the composite shapes a head-constructor match
+    /// cannot express.
+    ///
+    /// A narrow tests the head constructor and, for a parametrized target, its reflected type
+    /// arguments (R3) — recursing through a union, whose members are each tested. Every other
+    /// position is **erased** by the match and so cannot be wrong about a parameter: an
+    /// `?T`/`(T, int)`/`fn(T)` target checks only "is an `Option`" / "is a tuple" / "is callable",
+    /// exactly as it does for a concrete `?int`, and a `Self::Name` projection stays the permissive
+    /// top. Those are left alone; only a *tested* position is reported.
+    fn narrow_tested_param(&self, ty: &TypeRef) -> Option<String> {
+        match ty {
+            TypeRef::Union { members, .. } => members.iter().find_map(|m| {
+                match m {
+                    // A union member's head is itself tested, so a bare parameter there counts —
+                    // unlike the whole target's head, which the caller resolves through a channel.
+                    TypeRef::Named { name, args, .. }
+                        if args.is_empty()
+                            && self.coloring.type_params.contains_key(name.as_str()) =>
+                    {
+                        Some(name.to_string())
+                    }
+                    other => self.narrow_tested_param(other),
+                }
+            }),
+            TypeRef::Named { name, args, .. } => {
+                if !args.is_empty() && self.coloring.type_params.contains_key(name.as_str()) {
+                    return Some(name.to_string());
+                }
+                args.iter().find_map(|a| match a {
+                    TypeRef::Named { name, args, .. }
+                        if args.is_empty()
+                            && self.coloring.type_params.contains_key(name.as_str()) =>
+                    {
+                        Some(name.to_string())
+                    }
+                    other => self.narrow_tested_param(other),
+                })
+            }
+            // Erased by the head-constructor match — see the doc above.
+            _ => None,
+        }
+    }
+
+    /// Check a **narrowing target** (`x.as<T>()`, `x is T`) that names a type parameter, wiring the
+    /// site to the channel that carries the instantiation's name — or reporting `E0058` where none
+    /// can.
+    ///
+    /// A narrow is a head-constructor match on the target's runtime **name**
+    /// ([`noeta_ast::Expr::As`]), which is exactly what `type_name::<T>()` answers with, so a
+    /// parameter target needs no more than that surface already has and rides the very same two
+    /// channels ([`Self::record_type_param_name`]). Left unwired it matched the literal letter `T`,
+    /// which nothing is ever registered under, and `.as<T>()` answered `none` — and `x is T`
+    /// `false` — for every value, with no diagnostic. That silent wrong answer is why the
+    /// unresolvable cases below are errors rather than a permissive miss.
+    ///
+    /// Reported as `E0058` — a type argument that is well-formed and in scope but cannot serve this
+    /// application — the same code [`Self::reject_erased_type_param`] and the forwarding call sites
+    /// raise for the same situation.
+    /// `span` is the **whole narrowing expression's** span — the key lowering looks the site up
+    /// under, since that is the node it emits the name atom beside. The diagnostics point at the
+    /// target type instead, which is the part the author would change.
+    fn check_narrow_target(&mut self, ty: &TypeRef, span: Span, surface: &str) {
+        // The target's own head is the parameter: the resolvable shape, and the only one.
+        if let TypeRef::Named { name, args, .. } = ty
+            && args.is_empty()
+            && self.coloring.type_params.contains_key(name.as_str())
+        {
+            if self.record_type_param_name(name.as_str(), span) {
+                return;
+            }
+            let span = &ty.span();
+            let owner = self.coloring.current_type.clone();
+            let help = match &owner {
+                Some(owner) => format!(
+                    "an instance of a generic type records its type arguments at construction, so \
+                     `{surface}` over `{owner}`'s `{name}` resolves in a method that takes `self` \
+                     — read a field of `self`, or declare `{name}` as this member's own type \
+                     parameter so the call site supplies it"
+                ),
+                None => format!(
+                    "declare `{name}` as this function's own type parameter and spell the \
+                     turbofish at the call site — a nested `fn`'s own parameter has no per-call \
+                     channel, and neither does a parameter this body only inherited by name"
+                ),
+            };
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                *span,
+                format!(
+                    "`{surface}` cannot narrow to the type parameter `{name}` here: a narrow \
+                     matches the instantiation's runtime name, and no channel carries `{name}`'s \
+                     into this body"
+                ),
+            )
+            .help(help);
+            return;
+        }
+        // A parameter the match would TEST but cannot name: one narrow reads one name, so a
+        // composite has nowhere to put the rest. Refused rather than answered — the arguments are
+        // compared against the value's reflected tag, where a bare `T` matches nothing at all.
+        if let Some(param) = self.narrow_tested_param(ty) {
+            let target = from_ref_q(ty, &self.imports.extern_types);
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                ty.span(),
+                format!(
+                    "`{surface}` cannot narrow to `{target}`: the type parameter `{param}` sits in \
+                     a position the runtime match tests, and a narrow resolves one name — the \
+                     target's head"
+                ),
+            )
+            .help(format!(
+                "narrow to the head first and check the payload yourself — `{surface}` over the \
+                 bare `{param}` resolves per instantiation, an argument position does not"
+            ));
+        }
+    }
+
+    /// Refuse a **`match` arm's** `is T` whose target names a type parameter (`Pattern::IsType`).
+    ///
+    /// The pattern form shares the runtime matcher with the expression form but not its operand
+    /// plumbing, and cannot: a pattern is tested in place, and the IR reuses the *AST*
+    /// [`noeta_ast::Pattern`] verbatim, so there is no operand position an instantiation's name could
+    /// be computed into — the expression form carries exactly one such position (`Rvalue::As`'s
+    /// `dynamic`) and that is what makes it resolvable. Rather than invent a third way to deliver a
+    /// type argument, the arm says so and points at the form that works.
+    ///
+    /// Left alone it matched the letter `T`, so the arm was simply never taken — the same silent
+    /// wrong answer `.as<T>()` gave, and reported for the same reason.
+    pub(crate) fn reject_type_param_pattern(&mut self, ty: &TypeRef) {
+        let param = match ty {
+            TypeRef::Named { name, args, .. }
+                if args.is_empty() && self.coloring.type_params.contains_key(name.as_str()) =>
+            {
+                name.to_string()
+            }
+            other => match self.narrow_tested_param(other) {
+                Some(p) => p,
+                None => return,
+            },
+        };
+        let target = from_ref_q(ty, &self.imports.extern_types);
+        self.error(
+            DiagnosticCode::InvalidTypeArguments,
+            ty.span(),
+            format!(
+                "an `is {target}` arm cannot match the type parameter `{param}`: a pattern is \
+                 tested in place, so there is nowhere to resolve `{param}`'s instantiation into"
+            ),
+        )
+        .help(format!(
+            "use the expression form, which does resolve it: \
+             `match v.as<{param}>() {{ some(x) => …, none => … }}`"
+        ));
+    }
+
     /// Check a name-keyed reflection surface's type operand (`field_specs_of`, `construct`).
     ///
     /// The **turbofish** arm carries a real `TypeRef`, so it is resolved like any other type
@@ -1421,6 +1626,10 @@ impl Checker {
             Expr::As { expr, ty, span } => {
                 let src = self.synth(expr, env);
                 self.check_type_ref(ty);
+                // A **type parameter** target is answerable: the narrow keys on the instantiation's
+                // runtime name, and the same two channels `type_name::<T>()` rides deliver it.
+                // Unresolvable shapes are E0058 here rather than a silent `none` at run time.
+                self.check_narrow_target(ty, *span, ".as<…>()");
                 let target = from_ref_q(ty, &self.imports.extern_types);
                 // Narrowing is the explicit way *out* of an open type: the dynamic top `dyn`, an
                 // un-inferred hole (which defers), a **union** (a *closed* `dyn`), or an abstract
@@ -1443,7 +1652,7 @@ impl Checker {
                 }
                 Type::Option(Box::new(target))
             }
-            Expr::TypeTest { expr, ty, .. } => {
+            Expr::TypeTest { expr, ty, span } => {
                 // A type *test* is always well-formed on any source — even a concrete one (it is
                 // simply a constant `true`/`false`), unlike `.as<T>()` whose narrowing of a known
                 // concrete value is an `E0028`. We only validate the target type names something.
@@ -1456,6 +1665,9 @@ impl Checker {
                 let scrut = self.synth(expr, env);
                 let before = self.diags.len();
                 self.check_type_ref(ty);
+                // Same channels, same refusals as `.as<T>()` — the two surfaces share the runtime
+                // matcher, so they must share what a parameter target means.
+                self.check_narrow_target(ty, *span, "is");
                 // A test against a *reified container's* payload (`x is P` where `x: ?P`) is
                 // statically always false — the value's tag is `some`/`none`, never `P` (E0065,
                 // warning). Reported here; the narrowing sites (`if`, and a `match`'s `is T` arm)
@@ -1510,40 +1722,23 @@ impl Checker {
             //     type-argument slot that already carries `json.try_parse::<T>`'s decode recipe,
             //     and this surface needs only the slot's NAME, no recipe at all.
             Expr::TypeName { ty, span } => {
-                // Inside a generic type's INSTANCE method, a bare parameter of the enclosing type
-                // is not erased after all: the receiver carries the instantiation as a reflected
-                // type tag stamped at its construction site, so `type_name::<T>()` reads argument
-                // `i` off `self` at run time (generic constructor reflection, Gap B). Recorded as a
-                // site rather than folded to a constant — one compiled body serves every
+                // A bare parameter of an enclosing generic is not erased after all: one of the two
+                // per-instantiation channels carries its name (the receiver's reflected type tag
+                // inside a generic type's instance method — generic constructor reflection, Gap B —
+                // or the enclosing fn's hidden type-argument slot, poly-values F2b). Recorded as a
+                // site rather than folded to a constant: one compiled body serves every
                 // instantiation, so there is no constant to fold to.
+                //
+                // Checked only for a *bare* parameter — the head is what this surface answers with,
+                // and `type_name::<List<T>>()` heads at `List` whatever `T` is, so it stays the
+                // folded constant. The narrow surfaces (`.as<T>()`, `x is T`) read the same two
+                // channels through the same helper, which is what makes them agree about `T`.
                 if let TypeRef::Named { name, args, .. } = ty
                     && args.is_empty()
-                    && let Some(i) = self
-                        .coloring
-                        .self_type_params
-                        .iter()
-                        .position(|p| p == name.as_str())
+                    && (self.coloring.type_params.contains_key(name.as_str())
+                        || self.coloring.self_type_params.iter().any(|p| p == name))
+                    && self.record_type_param_name(name.as_str(), *span)
                 {
-                    let owner = self.coloring.current_type.clone().unwrap_or_default();
-                    self.sites
-                        .self_type_arg_sites
-                        .insert(*span, (owner, i as u32));
-                    return Type::String;
-                }
-                // A FORWARDED parameter of the enclosing top-level generic fn (poly-values F2b):
-                // the instantiation's name arrives per-call through the hidden slot, exactly as
-                // `attributes_of::<T>()`'s does. Checked only for a *bare* parameter — the head is
-                // what this surface answers with, and `type_name::<List<T>>()` heads at `List`
-                // whatever `T` is, so it stays the folded constant.
-                if let TypeRef::Named { name, args, .. } = ty
-                    && args.is_empty()
-                    && self.coloring.type_params.contains_key(name.as_str())
-                    && let Some(idx) =
-                        self.coloring.current_forwarding.iter().position(
-                            |t| matches!(t, Type::Named(p, a) if p == name && a.is_empty()),
-                        )
-                {
-                    self.sites.forwarded_slot_sites.insert(*span, idx as u32);
                     return Type::String;
                 }
                 if !self.reject_erased_type_param(ty, "type_name") {

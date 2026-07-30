@@ -155,14 +155,21 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// `Option`'s discriminant byte followed by the payload either way, but a niche-optimised `Option`
 /// is not guaranteed to encode as the plain one, and the two ops around it moved regardless.
 ///
-/// Bumped to 14 by generic-in-generic construction: `Module` gained `type_arg_reprs: Vec<Option<u32>>`
+/// Bumped to 14 by the narrow-over-a-type-parameter fix: `Op::Narrow` and `Op::IsType` each gained
+/// a `dynamic: Option<Reg>` — the register carrying the instantiation's runtime head name — placed
+/// after `target` and so before `Narrow`'s two shape indices. Same non-self-describing-encoding rule
+/// as every bump above: postcard writes the `Option`'s discriminant byte where a version-13 reader
+/// expects `some_shape`'s first byte, desynchronising the rest of the stream.
+///
+/// Bumped to 15 by generic-in-generic construction: `Module` gained `type_arg_reprs: Vec<Option<u32>>`
 /// — the reflection projection of `type_args`, so a construction whose instantiation arrives on a
 /// hidden slot can resolve the interned `TypeRepr` that slot names — and `Op` (in `Module::code`)
 /// gained a `RetagDynamic` variant, declared beside `Retag` rather than at the end. Both are wire
 /// breaks by the same non-self-describing-encoding rule as every bump above: the new module table's
-/// length prefix lands where a version-13 reader expects `names`, and the inserted `Op` variant shifts
-/// every discriminant after it.
-pub const FORMAT_VERSION: u8 = 14;
+/// length prefix lands where a version-14 reader expects `names`, and the inserted `Op` variant shifts
+/// every discriminant after it. This arrived alongside the 14 above rather than after it, so 15 is
+/// what rejects an artifact either change alone would have labelled 14.
+pub const FORMAT_VERSION: u8 = 15;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

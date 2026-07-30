@@ -2311,7 +2311,16 @@ impl Interpreter {
         if let Err(msg) = plan {
             return Ok(invoke_err(msg));
         }
-        let object = self.construct_object(&type_name, span, field_values, None, None, span)?;
+        // A **native** fielded target is the one case where the reflection key and the runtime
+        // identity differ: the artifact keys it on the qualified `std.http.Frame`, while a value of it
+        // carries the canonical short shape name and a *stamped* qualified reflected type — the pair a
+        // source literal `Frame { … }` produces. So stamp that same tag here (the `def` came from the
+        // registry via `construct_object`'s own fallback, so the runtime half already matches), and a
+        // constructed instance is indistinguishable from a literal one: `==` holds, `type_of` agrees,
+        // and it marshals into native code. Without the tag the tree-walker reported the short name
+        // where the VM reported the qualified one — a divergence the differential catches.
+        let reflect = native_fielded_repr(self.reg(), &type_name).map(Rc::new);
+        let object = self.construct_object(&type_name, span, field_values, None, reflect, span)?;
         Ok(builtin_enum("Result", "Ok", vec![object]))
     }
 
@@ -2398,6 +2407,15 @@ impl Interpreter {
         reflect: Option<Rc<TypeRepr>>,
         span: Span,
     ) -> Eval<Value> {
+        // A **native** fielded type reached by its qualified identity is never scope-bound — a `use
+        // std.http.{Frame}` binds only the short name `Frame` — so resolution falls through to the
+        // registry, building the same value-`TypeDef` a native import binds (fields in registry
+        // order, kind-selected semantics). Exactly the fallback `packed_type_def` makes, for the same
+        // reason: `construct("std.http.Frame", …)` names the type by the identity the *reflection
+        // artifact* keys it under, which is the qualified one, and the VM's own construct path
+        // rebuilds the shape from that artifact. Without this the two backends disagreed the moment
+        // native fielded types reached reflection — the VM built the object, the tree-walker aborted
+        // with "cannot find type in this scope".
         let def = match self.scope.lookup(type_name) {
             Some(Value::Type(def)) => def,
             Some(other) => {
@@ -2411,13 +2429,16 @@ impl Interpreter {
                     ),
                 ));
             }
-            None => {
-                return Err(self.runtime_error(
-                    DiagnosticCode::UnknownName,
-                    type_name_span,
-                    format!("cannot find type `{type_name}` in this scope"),
-                ));
-            }
+            None => match native_type_value(self.reg(), type_name) {
+                Some(Value::Type(def)) => def,
+                _ => {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::UnknownName,
+                        type_name_span,
+                        format!("cannot find type `{type_name}` in this scope"),
+                    ));
+                }
+            },
         };
 
         // An opaque `use`-import has no statically-known field set, so it cannot use the shared
@@ -6410,6 +6431,27 @@ fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
 /// `TypeDef` carries the type's **short** name whichever key it was bound under (the S1 identity
 /// note: that is the name a native-returned value stamps). A payload variant's field names are
 /// positional placeholders; only the count is load-bearing.
+/// The **reflected type** a value of the native fielded type `name` carries — `Type.Struct(…)` or
+/// `Type.Class(…)` under the type's qualified identity — or `None` when `name` names no native fielded
+/// type (a `.noe` declaration, whose declared name *is* its runtime identity, needs no stamp).
+///
+/// The one case where a type's reflection key and its runtime shape name differ: a native fielded
+/// type is registered in the artifact as `std.http.Frame` while its values carry the short shape name
+/// `Frame`, so a dynamically constructed instance needs the qualified identity stamped on it to report
+/// the same `type_of` a source literal of that type reports. The VM's construct path applies the
+/// identical rule off the identical registry lookup.
+fn native_fielded_repr(
+    reg: &'static noeta_stdlib::registry::Registry,
+    name: &str,
+) -> Option<TypeRepr> {
+    use noeta_stdlib::NominalType;
+    let cl = reg.resolve_fielded(name)?;
+    Some(match cl.kind {
+        noeta_stdlib::FieldedKind::Struct => TypeRepr::Struct(cl.qualified(), Vec::new()),
+        noeta_stdlib::FieldedKind::Class => TypeRepr::Class(cl.qualified(), Vec::new()),
+    })
+}
+
 fn native_type_value(
     reg: &'static noeta_stdlib::registry::Registry,
     qualified: &str,
