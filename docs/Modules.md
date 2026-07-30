@@ -110,7 +110,7 @@ The usual objection is PSR-4's cross-platform wound, and it does not apply here.
 
 ### `namespace` is redundant
 
-`namespace` is **retired syntax**. A file that declares one is **E0072**, whatever it says — the path is derived, so a declaration can only restate it or contradict it, and neither is worth a line of source:
+`namespace` is **retired syntax inside a package**. A file under a `noeta.toml` that declares one is **E0072**, whatever it says — its path is derived, so a declaration could only restate that or contradict it, and neither is worth a line of source:
 
 ```text
 [E0072] `namespace App.Models` — a module's path is derived from where its file sits, so it cannot be declared
@@ -120,6 +120,8 @@ The usual objection is PSR-4's cross-platform wound, and it does not apply here.
 
 Deleting the line is the whole migration: the path it named is the path the file already derives, as long as the file sits where the declaration said it did. If the two ever disagreed, the declaration was the wrong half — move the file.
 
+**One exception, and it is not a leftover.** A loose script with *no* manifest has no package, hence no prefix, hence nothing to derive a path from — so there a `namespace` declaration is still how a sibling module gets a name, and it is still accepted. Retirement is scoped to files whose path *can* be derived. If you want derived paths, that is what `noeta init` gives you: a manifest.
+
 ### Derivation needs a package
 
 A prefix comes from a manifest, so a file with **no `noeta.toml` above it** has nothing to derive from. A lone script run straight out of a directory is not silently made into a module of whatever tree it happens to stand in — nothing derives, and whatever the file declares stands. That is what keeps `noeta run scratch.noe` from swallowing the tree it happens to be sitting in, and it is why the single-file samples on these pages need no package to be valid programs.
@@ -128,7 +130,7 @@ A prefix comes from a manifest, so a file with **no `noeta.toml` above it** has 
 
 | Code | When | Fix |
 |---|---|---|
-| **E0072** | a file declares a `namespace` — retired syntax | delete the line; move the file if you meant to rename the module |
+| **E0072** | a file **in a package** declares a `namespace` — retired syntax | delete the line; move the file if you meant to rename the module |
 | **E0073** | two files derive the same module path | rename or move one — one path is one module |
 | **E0074** | a directory name or file stem is not a legal identifier segment | rename it to the spelling the help offers |
 

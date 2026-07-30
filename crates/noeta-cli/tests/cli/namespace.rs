@@ -69,11 +69,7 @@ fn noeta_add_derives_the_import_root() {
         "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        lib.join("m.noe"),
-        "namespace widgets.core;\npub fn v(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(lib.join("m.noe"), "pub fn v(): int { return 1; }\n").unwrap();
 
     // No positional key — derived from `acme/widgets` → `widgets`.
     lang()
@@ -119,11 +115,7 @@ fn binding_a_package_under_its_own_scope_is_not_a_rename() {
         "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        lib.join("m.noe"),
-        "namespace acme.widgets;\npub fn v(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(lib.join("m.noe"), "pub fn v(): int { return 1; }\n").unwrap();
 
     // Keyed by the scope — quiet.
     lang()
@@ -143,11 +135,7 @@ fn binding_a_package_under_its_own_scope_is_not_a_rename() {
         "[package]\nname = \"acme/gizmos\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        other.join("m.noe"),
-        "namespace acme.gizmos;\npub fn v(): int { return 2; }\n",
-    )
-    .unwrap();
+    std::fs::write(other.join("m.noe"), "pub fn v(): int { return 2; }\n").unwrap();
     lang()
         .current_dir(&app)
         .args(["add", "gadgets", "--path", "../gizmos"])
@@ -175,7 +163,7 @@ fn noeta_add_refuses_a_builtin_import_root() {
         "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(lib.join("m.noe"), "namespace lib.core;\n").unwrap();
+    std::fs::write(lib.join("m.noe"), "").unwrap();
 
     lang()
         .current_dir(&app)
@@ -232,7 +220,7 @@ fn noeta_add_warns_when_a_release_introduces_a_new_committer() {
     .unwrap();
     commit(
         "g.noe",
-        "namespace greetlib.g;\npub fn hi(): int { return 1; }\n",
+        "pub fn hi(): int { return 1; }\n",
         "Alice Maintainer",
         "alice@example.com",
     );
@@ -943,7 +931,7 @@ fn require_provenance_refuses_an_unsigned_registry_dependency() {
     .unwrap();
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"hi\"; }\n",
+        "pub fn greeting(): string { return \"hi\"; }\n",
     )
     .unwrap();
     git_in(&["add", "."], &repo);

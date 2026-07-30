@@ -4170,13 +4170,12 @@ where
                 })
             });
 
-        // `namespace App.Orders;` — **retired surface syntax.** A module's path is derived from
-        // where its file sits, so a declaration is redundant by construction and cannot disagree
-        // without one of the two being wrong. It is still *parsed*, and then rejected here with the
-        // rule, rather than dropped from the grammar: a bare "unexpected token `namespace`" would
-        // leave a reader of older code guessing, and this is the one place that knows why the line
-        // is gone. `Stmt::Namespace` itself lives on as the loader's internal carrier — it writes
-        // the derived path into the program under that node.
+        // `namespace App.Orders;` — **retired surface syntax**, refused by the *loader* rather
+        // than here (`apply_derived_paths`). The grammar keeps it for two reasons: `Stmt::Namespace`
+        // is the loader's internal carrier, so it must be constructible, and a checker/IR unit test
+        // that parses a fixture without a package on disk has no other way to say "this declaration
+        // is qualified" — deleting the production would take that seam with it. Every user-facing
+        // command routes through the loader, so no real file can declare one.
         let namespace_decl = just(T::NamespaceKw)
             .ignore_then(id.clone())
             .then(
@@ -4189,24 +4188,10 @@ where
             .map_with(move |((first, _), rest), e| {
                 let mut path = vec![first];
                 path.extend(rest.into_iter().map(|(name, _)| name));
-                let span = ctx.to_span(e.span());
-                ctx.diags.borrow_mut().push(
-                    Diagnostic::error(
-                        DiagnosticCode::ModulePathMismatch,
-                        span,
-                        format!(
-                            "`namespace {}` — a module's path is derived from where its file \
-                             sits, so it cannot be declared",
-                            path.join(".")
-                        ),
-                    )
-                    .with_help(
-                        "delete this line: the path is the package's import prefix plus the \
-                         file's path inside the package, so moving the file is how you rename \
-                         the module",
-                    ),
-                );
-                Stmt::Namespace { path, span }
+                Stmt::Namespace {
+                    path,
+                    span: ctx.to_span(e.span()),
+                }
             });
 
         // `use App.Models.User;` (single) or `use App.Billing.{Invoice, Receipt};` (grouped).

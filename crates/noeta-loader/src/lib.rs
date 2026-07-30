@@ -1718,9 +1718,36 @@ pub fn apply_derived_paths(units: Vec<DerivedUnit<'_>>) -> Vec<LoadDiagnostic> {
         }
         claimed.insert(derived.clone(), unit.source.name().to_string());
 
-        // Nothing to compare against: the parser refuses a `namespace` declaration outright now
-        // (its path is derived), so the only namespace node a program carries is the one written
-        // here. `module_namespace` stays the single identity seam every consumer downstream reads.
+        // `namespace` is retired surface syntax, and this is where it is refused: a module's path
+        // is derived from where its file sits, so a declaration can only restate the derivation or
+        // contradict it, and neither earns a line of source. The refusal lives here rather than in
+        // the parser because `Stmt::Namespace` is *also* this function's own output — it writes the
+        // derived path into the program under that node, which keeps `module_namespace` the single
+        // identity seam every consumer downstream reads. Every user-facing command routes through
+        // the loader, so no real file escapes this.
+        if let Some(span) = unit.program.stmts.iter().find_map(|stmt| match stmt {
+            Stmt::Namespace { path, span } => Some((path.join("."), *span)),
+            _ => None,
+        }) {
+            let (declared, span) = span;
+            diagnostics.push(LoadDiagnostic {
+                source: unit.source.clone(),
+                diagnostic: Diagnostic::error(
+                    DiagnosticCode::ModulePathMismatch,
+                    span,
+                    format!(
+                        "`namespace {declared}` — a module's path is derived from where its file \
+                         sits, so it cannot be declared"
+                    ),
+                )
+                .with_help(format!(
+                    "delete this line: this file's path derives as `{}`, and moving the file is \
+                     how you rename the module",
+                    derived.join(".")
+                )),
+            });
+            continue;
+        }
         unit.program.stmts.insert(
             0,
             Stmt::Namespace {

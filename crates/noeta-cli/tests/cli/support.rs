@@ -190,13 +190,13 @@ pub fn path_dep_project(name: &str) -> PathBuf {
     // cross-reference the consumer never names, which must still resolve (closed-unit linking).
     std::fs::write(
         lib.join("hello.noe"),
-        "namespace greet.hello;\nuse greet.util.punct;\n\
+        "use greet.util.punct;\n\
          pub fn greeting(): string { return punct(); }\n",
     )
     .unwrap();
     std::fs::write(
         lib.join("util.noe"),
-        "namespace greet.util;\npub fn punct(): string { return \"hi from the dependency\"; }\n",
+        "pub fn punct(): string { return \"hi from the dependency\"; }\n",
     )
     .unwrap();
     app.join("main.noe")

@@ -199,8 +199,7 @@ fn tier_dep_project(name: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         lib.join("tiers.noe"),
-        "namespace fuzz.tiers;\n\
-         @attribute(Function)\npub struct Fuzz { cases: int }\n\
+        "@attribute(Function)\npub struct Fuzz { cases: int }\n\
          @tier(fuzz, config: Fuzz)\n\
          pub fn run_fuzz(roots: List<TierRoot>): void {\n\
              echo \"fuzzkit: ${roots.len()} roots\"\n\
@@ -315,7 +314,7 @@ fn tests_in_a_dependency_using_program_run() {
     let lib = entry.parent().unwrap().parent().unwrap().join("fuzzkit");
     std::fs::write(
         lib.join("tiers.noe"),
-        "namespace fuzz.tiers;\npub fn helper_answer(): int { return 42 }\n",
+        "pub fn helper_answer(): int { return 42 }\n",
     )
     .unwrap();
     lang()
@@ -362,7 +361,7 @@ fn tier_collision_project(name: &str) -> PathBuf {
     std::fs::create_dir_all(&depb).expect("mk depb");
     // Each dependency ships the *same* tier name `fuzz` with a distinctly-named runner that prints
     // its own package, then runs each root — so the output alone proves which runner fired.
-    let dep = |dir: &PathBuf, pkg: &str, ns: &str, runner: &str, label: &str| {
+    let dep = |dir: &PathBuf, pkg: &str, runner: &str, label: &str| {
         std::fs::write(
             dir.join("noeta.toml"),
             format!("[package]\nname = \"{pkg}\"\nversion = \"1.0.0\"\n"),
@@ -371,8 +370,7 @@ fn tier_collision_project(name: &str) -> PathBuf {
         std::fs::write(
             dir.join("tiers.noe"),
             format!(
-                "namespace {ns}.tiers;\n\
-                 @tier(fuzz)\n\
+                "@tier(fuzz)\n\
                  pub fn {runner}(roots: List<TierRoot>): void {{\n\
                      echo \"{label}: ${{roots.len()}} roots\"\n\
                      for root in roots {{ run = root.run; run() }}\n\
@@ -383,8 +381,8 @@ fn tier_collision_project(name: &str) -> PathBuf {
     };
     // The namespace root matches the package-name root (`depa`/`depb`), which is also the dependency
     // import-root key, so `use depa.tiers.run_a` resolves through the loader's re-rooting.
-    dep(&depa, "acme/depa", "depa", "run_a", "depa fuzz");
-    dep(&depb, "acme/depb", "depb", "run_b", "depb fuzz");
+    dep(&depa, "acme/depa", "run_a", "depa fuzz");
+    dep(&depb, "acme/depb", "run_b", "depb fuzz");
     std::fs::write(
         app.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
@@ -462,8 +460,7 @@ fn text_tier_dep_project(name: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         lib.join("tiers.noe"),
-        "namespace spec.tiers;\n\
-         @tier(spec, text: \"xml\")\n\
+        "@tier(spec, text: \"xml\")\n\
          pub fn run_specs(roots: List<TierText>): void {\n\
              echo \"speckit: ${roots.len()} bodies\"\n\
              for root in roots {\n\
@@ -574,8 +571,7 @@ fn renamed_dep_text_tier_project(name: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         lib.join("tiers.noe"),
-        "namespace spec.tiers;\n\
-         @tier(spec, text: \"xml\")\n\
+        "@tier(spec, text: \"xml\")\n\
          pub fn run_specs(roots: List<TierText>): void {\n\
              echo \"speckit: ${roots.len()} bodies\"\n\
          }\n",
@@ -624,7 +620,7 @@ fn a_dependency_syntax_error_is_reported_against_the_dependency_file() {
         let lib = entry.parent().unwrap().parent().unwrap().join("greetlib");
         std::fs::write(
             lib.join("hello.noe"),
-            "namespace greet.hello;\npub fn greeting(): string {\n  let ] = ;\n}\n",
+            "pub fn greeting(): string {\n  let ] = ;\n}\n",
         )
         .unwrap();
         let assert = lang().arg(cmd).arg(&entry).assert().failure();
@@ -708,7 +704,7 @@ fn a_transitive_path_dependency_resolves_and_runs() {
     .unwrap();
     std::fs::write(
         mid.join("api.noe"),
-        "namespace mid.api;\nuse deep.base.leaf;\npub fn top(): string { return leaf(); }\n",
+        "use deep.base.leaf;\npub fn top(): string { return leaf(); }\n",
     )
     .unwrap();
     std::fs::write(
@@ -718,7 +714,7 @@ fn a_transitive_path_dependency_resolves_and_runs() {
     .unwrap();
     std::fs::write(
         low.join("base.noe"),
-        "namespace low.base;\npub fn leaf(): string { return \"deep transitive value\"; }\n",
+        "pub fn leaf(): string { return \"deep transitive value\"; }\n",
     )
     .unwrap();
 
@@ -758,42 +754,26 @@ fn a_version_conflict_is_reported() {
          [dependencies]\ns = { path = \"../c1\" }\n",
     )
     .unwrap();
-    std::fs::write(
-        a.join("a.noe"),
-        "namespace a.x;\npub fn f(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(a.join("a.noe"), "pub fn f(): int { return 1; }\n").unwrap();
     std::fs::write(
         b.join("noeta.toml"),
         "[package]\nname = \"acme/b\"\nversion = \"1.0.0\"\n\
          [dependencies]\ns = { path = \"../c2\" }\n",
     )
     .unwrap();
-    std::fs::write(
-        b.join("b.noe"),
-        "namespace b.x;\npub fn g(): int { return 2; }\n",
-    )
-    .unwrap();
+    std::fs::write(b.join("b.noe"), "pub fn g(): int { return 2; }\n").unwrap();
     std::fs::write(
         c1.join("noeta.toml"),
         "[package]\nname = \"acme/shared\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        c1.join("s.noe"),
-        "namespace shared.core;\npub fn h(): int { return 3; }\n",
-    )
-    .unwrap();
+    std::fs::write(c1.join("s.noe"), "pub fn h(): int { return 3; }\n").unwrap();
     std::fs::write(
         c2.join("noeta.toml"),
         "[package]\nname = \"acme/shared\"\nversion = \"2.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        c2.join("s.noe"),
-        "namespace shared.core;\npub fn h(): int { return 4; }\n",
-    )
-    .unwrap();
+    std::fs::write(c2.join("s.noe"), "pub fn h(): int { return 4; }\n").unwrap();
 
     lang()
         .arg("run")
@@ -825,7 +805,7 @@ fn a_published_package_resolves_as_a_registry_dependency() {
     .unwrap();
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"hello from the registry\"; }\n",
+        "pub fn greeting(): string { return \"hello from the registry\"; }\n",
     )
     .unwrap();
     git_in(&["add", "."], &repo);
@@ -894,7 +874,7 @@ fn the_lockfile_pins_registry_selection_and_bypasses_the_index() {
     .unwrap();
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"one point oh\"; }\n",
+        "pub fn greeting(): string { return \"one point oh\"; }\n",
     )
     .unwrap();
     git_in(&["add", "."], &repo);
@@ -944,7 +924,7 @@ fn the_lockfile_pins_registry_selection_and_bypasses_the_index() {
     // Upstream publishes v1.1.0 (still within ^1.0).
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"one point one\"; }\n",
+        "pub fn greeting(): string { return \"one point one\"; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -1033,7 +1013,7 @@ fn a_git_forge_registry_resolves_and_runs_a_package() {
     git_in(&["init", "-q", "-b", "main"], &repo);
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"hello from the org registry\"; }\n",
+        "pub fn greeting(): string { return \"hello from the org registry\"; }\n",
     )
     .unwrap();
     commit_version(
@@ -1090,7 +1070,7 @@ fn a_git_forge_resolve_tolerates_the_auth_token_override() {
     git_in(&["init", "-q", "-b", "main"], &repo);
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"hello (token path)\"; }\n",
+        "pub fn greeting(): string { return \"hello (token path)\"; }\n",
     )
     .unwrap();
     commit_version(
@@ -1224,7 +1204,7 @@ fn a_resolve_with_an_active_patch_is_loud_and_links_the_patched_tree() {
         .unwrap();
         std::fs::write(
             dir.join("api.noe"),
-            format!("namespace lib.api;\npub fn which(): string {{ return \"{marker}\"; }}\n"),
+            format!("pub fn which(): string {{ return \"{marker}\"; }}\n"),
         )
         .unwrap();
     }
@@ -1273,7 +1253,7 @@ fn a_target_scoped_dependency_links_only_under_its_target() {
     .unwrap();
     std::fs::write(
         lib.join("api.noe"),
-        "namespace devlib.api;\npub fn marker(): string { return \"dev tooling linked\"; }\n",
+        "pub fn marker(): string { return \"dev tooling linked\"; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -1374,11 +1354,7 @@ fn provenance_signs_verifies_and_pins_the_scope_key() {
         "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        repo.join("core.noe"),
-        "namespace greet.core;\npub fn v(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(repo.join("core.noe"), "pub fn v(): int { return 1; }\n").unwrap();
     git_in(&["add", "."], &repo);
     git_in(&["commit", "-q", "-m", "r"], &repo);
     git_in(&["tag", "v1.0.0"], &repo);
@@ -1477,11 +1453,7 @@ fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
         "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        repo.join("core.noe"),
-        "namespace greet.core;\npub fn v(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(repo.join("core.noe"), "pub fn v(): int { return 1; }\n").unwrap();
     git_in(&["add", "."], &repo);
     git_in(&["commit", "-q", "-m", "r"], &repo);
     git_in(&["tag", "v1.0.0"], &repo);
@@ -1608,11 +1580,7 @@ fn interactive_oob_publish_signs_keyless_end_to_end() {
         "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        repo.join("core.noe"),
-        "namespace greet.core;\npub fn v(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(repo.join("core.noe"), "pub fn v(): int { return 1; }\n").unwrap();
     git_in(&["add", "."], &repo);
     git_in(&["commit", "-q", "-m", "r"], &repo);
     git_in(&["tag", "v1.0.0"], &repo);
@@ -1774,11 +1742,7 @@ fn keyless_publish_verifies_pins_and_defends_end_to_end() {
         "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        repo.join("core.noe"),
-        "namespace greet.core;\npub fn v(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(repo.join("core.noe"), "pub fn v(): int { return 1; }\n").unwrap();
     git_in(&["add", "."], &repo);
     git_in(&["commit", "-q", "-m", "r"], &repo);
     git_in(&["tag", "v1.0.0"], &repo);
@@ -2032,7 +1996,7 @@ fn a_git_tag_dependency_is_fetched_and_run() {
     .unwrap();
     std::fs::write(
         dep_repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"hi from a git dep\"; }\n",
+        "pub fn greeting(): string { return \"hi from a git dep\"; }\n",
     )
     .unwrap();
     git_in(&["add", "."], &dep_repo);
@@ -2084,11 +2048,7 @@ fn noeta_add_edits_the_manifest_and_resolves() {
         "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        lib.join("core.noe"),
-        "namespace lib.core;\npub fn v(): int { return 42; }\n",
-    )
-    .unwrap();
+    std::fs::write(lib.join("core.noe"), "pub fn v(): int { return 42; }\n").unwrap();
 
     lang()
         .current_dir(&app)
@@ -2134,11 +2094,7 @@ fn noeta_update_rewrites_the_lock() {
         "[package]\nname = \"acme/up\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        dep_repo.join("core.noe"),
-        "namespace up.core;\npub fn v(): int { return 7; }\n",
-    )
-    .unwrap();
+    std::fs::write(dep_repo.join("core.noe"), "pub fn v(): int { return 7; }\n").unwrap();
     git_in(&["add", "."], &dep_repo);
     git_in(&["commit", "-q", "-m", "r"], &dep_repo);
     git_in(&["tag", "v1.0.0"], &dep_repo);
@@ -2182,7 +2138,7 @@ fn a_git_dependency_is_pinned_and_reproduces_offline() {
     .unwrap();
     std::fs::write(
         dep_repo.join("core.noe"),
-        "namespace pinned.core;\npub fn val(): string { return \"pinned offline value\"; }\n",
+        "pub fn val(): string { return \"pinned offline value\"; }\n",
     )
     .unwrap();
     git_in(&["add", "."], &dep_repo);
@@ -2251,8 +2207,7 @@ fn publish_docs_only_reuploads_docs_without_touching_the_index() {
     .unwrap();
     std::fs::write(
         pkg.join("lib.noe"),
-        "namespace greeter.lib;\n\
-         pub fn greet(who: string): string { return \"hello \" + who }\n",
+        "pub fn greet(who: string): string { return \"hello \" + who }\n",
     )
     .unwrap();
     git_in(&["init", "-q"], &pkg);
@@ -2291,8 +2246,7 @@ fn publish_docs_only_reuploads_docs_without_touching_the_index() {
     // The source grows a new function; the shelf docs are now stale.
     std::fs::write(
         pkg.join("lib.noe"),
-        "namespace greeter.lib;\n\
-         pub fn greet(who: string): string { return \"hello \" + who }\n\
+        "pub fn greet(who: string): string { return \"hello \" + who }\n\
          pub fn wave(): string { return \"o/\" }\n",
     )
     .unwrap();
@@ -2360,7 +2314,7 @@ fn orphan_project(name: &str, glue_module: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         base.join("a/speaks.noe"),
-        "namespace a.speaks;\npub trait Speaks { fn speak(): string }\n",
+        "pub trait Speaks { fn speak(): string }\n",
     )
     .unwrap();
     std::fs::write(
@@ -2370,7 +2324,7 @@ fn orphan_project(name: &str, glue_module: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         base.join("b/thing.noe"),
-        "namespace b.thing;\npub class Thing {\n  pub id: int\n  fn new(id: int): Thing { return Thing { id: id } }\n}\n",
+        "pub class Thing {\n  pub id: int\n  fn new(id: int): Thing { return Thing { id: id } }\n}\n",
     )
     .unwrap();
     std::fs::write(
@@ -2402,7 +2356,7 @@ fn a_cross_package_orphan_impl_is_rejected_naming_all_three_packages() {
     // author cannot tell whose impl this is or why it is refused.
     let entry = orphan_project(
         "pm_orphan_reject",
-        "namespace glue.impls;\nuse a.speaks.{Speaks};\nuse b.thing.{Thing};\n\
+        "use a.speaks.{Speaks};\nuse b.thing.{Thing};\n\
          impl Speaks for Thing { fn speak(): string { return \"glue\" } }\n",
     );
     let out = lang().arg("run").arg(&entry).assert().failure();
@@ -2433,7 +2387,7 @@ fn an_impl_in_the_traits_package_or_the_types_package_is_accepted() {
     let with_trait = orphan_project(
         "pm_orphan_ok_trait_side",
         // `glue` becomes irrelevant here; the impl moves into the trait's own package below.
-        "namespace glue.impls;\npub fn unused(): int { return 0 }\n",
+        "pub fn unused(): int { return 0 }\n",
     );
     let base = with_trait.parent().unwrap().parent().unwrap();
     std::fs::write(
@@ -2444,7 +2398,7 @@ fn an_impl_in_the_traits_package_or_the_types_package_is_accepted() {
     .unwrap();
     std::fs::write(
         base.join("a/speaks.noe"),
-        "namespace a.speaks;\nuse b.thing.{Thing};\npub trait Speaks { fn speak(): string }\n\
+        "use b.thing.{Thing};\npub trait Speaks { fn speak(): string }\n\
          impl Speaks for Thing { fn speak(): string { return \"a says ${self.id}\" } }\n",
     )
     .unwrap();
@@ -2464,7 +2418,7 @@ fn an_impl_in_the_traits_package_or_the_types_package_is_accepted() {
     // The mirror image: the impl lives with the TYPE and the trait is foreign.
     let with_type = orphan_project(
         "pm_orphan_ok_type_side",
-        "namespace glue.impls;\npub fn unused(): int { return 0 }\n",
+        "pub fn unused(): int { return 0 }\n",
     );
     let base = with_type.parent().unwrap().parent().unwrap();
     std::fs::write(
@@ -2475,7 +2429,7 @@ fn an_impl_in_the_traits_package_or_the_types_package_is_accepted() {
     .unwrap();
     std::fs::write(
         base.join("b/thing.noe"),
-        "namespace b.thing;\nuse a.speaks.{Speaks};\npub class Thing {\n  pub id: int\n  \
+        "use a.speaks.{Speaks};\npub class Thing {\n  pub id: int\n  \
          fn new(id: int): Thing { return Thing { id: id } }\n}\n\
          impl Speaks for Thing { fn speak(): string { return \"b says ${self.id}\" } }\n",
     )
