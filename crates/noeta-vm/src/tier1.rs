@@ -1089,8 +1089,23 @@ impl<'m> Vm<'m> {
     /// **One OSR per prototype.** If the prototype is already compiled we do nothing: the frame goes
     /// native at its next `'reload` anyway, and re-OSRing from tier 0 (after a native op bailed back)
     /// would risk bouncing tier-0↔tier-1 every iteration for a loop whose body native can't sustain.
+    ///
+    /// **A cancellable run declines OSR**, and this is the one place that decision belongs. Native
+    /// code carries no cancellation poll — the interpreter's two safepoints (a frame transfer, a
+    /// taken back-edge) are the only ones there are — so a loop running natively cannot be stopped.
+    /// Call-count promotion is harmless here: a prototype entered at pc 0 returns, and its caller's
+    /// next frame transfer *is* a safepoint. OSR is different by construction, because what got hot
+    /// is the **loop itself** — precisely the shape that may never come back. Measured before this
+    /// guard: a `while true { i = i + 1 }` `@test` case OSR'd into native code and could not be
+    /// stopped at all, while the same loop with one heap op in it (which bails every iteration)
+    /// stopped on request. Declining OSR costs a cancellable run tier-1 on its hot loops and nothing
+    /// else; every other run is untouched (`cancel_flag` is `None`, one predicted branch on a
+    /// path that already crossed a function call).
     #[cfg(feature = "jit")]
     pub(crate) fn jit_osr_backedge(&mut self, proto: usize) -> bool {
+        if self.isolates.cancel_flag.is_some() {
+            return false;
+        }
         if self.jit_entry(proto).is_some() {
             // Service mode: a back-edge-born compile just landed in the mirror — take the one
             // pending OSR entry now (a single long-running loop gets no other chance to go

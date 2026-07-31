@@ -688,14 +688,16 @@ impl<'m> Vm<'m> {
         isolate::WAKE.notify();
     }
 
-    /// **The worker-side cancellation poll** (isolate-cancel): has this isolate's parent asked it to
-    /// stop? A relaxed load — the flag only ever goes `false → true`, nothing is ordered against it,
-    /// and the worker's reaction (unwinding) is entirely local — so on x86-64 this is a plain load.
+    /// **The cancellation poll** (isolate-cancel): has whoever owns this run asked it to stop? A
+    /// relaxed load — the flag only ever goes `false → true`, nothing is ordered against it, and
+    /// the reaction (unwinding) is entirely local — so on x86-64 this is a plain load.
     ///
-    /// `cancel_flag` is `None` on the parent VM and on every non-isolate run, which is the case the
-    /// dispatch loop's safepoints must not pay for: it compiles to a null test on a field already in
-    /// cache, perfectly predicted. Measured cost on the tier-0 empty-loop floor: see the
-    /// `isolate-cancel` notes in `docs/Concurrency-Internals.md`.
+    /// The owner is the isolate's parent (`h.cancel()`) on a worker VM, or the embedder
+    /// ([`RunOptions::cancel`](crate::RunOptions::cancel)) on a cancellable top-level run — the
+    /// `noeta test` rail's overrunning case. `cancel_flag` is `None` on every *other* run, which is
+    /// the case the dispatch loop's safepoints must not pay for: it compiles to a null test on a
+    /// field already in cache, perfectly predicted. Measured cost on the tier-0 empty-loop floor:
+    /// see the `isolate-cancel` notes in `docs/Concurrency-Internals.md`.
     #[inline]
     pub(crate) fn cancel_requested(&self) -> bool {
         self.isolates
@@ -716,6 +718,14 @@ impl<'m> Vm<'m> {
     /// its very first frame transfer, silently, and a cancelled worker would skip the destructors a
     /// completed one runs. The request has been honored exactly once; `cancel_observed` remembers
     /// that, so nothing is lost by no longer asking.
+    ///
+    /// On a **top-level** cancellable run (the `noeta test` rail) there is no `IsolateOutcome` to
+    /// ship, so the latch has no reader and the abort simply unwinds into the ordinary teardown —
+    /// which is the whole point: the run frees its heap, runs its destructors, and joins any
+    /// isolates it spawned (`Vm::teardown`), so the thread ends cleanly instead of being abandoned.
+    /// The resulting [`RunResult`](noeta_backend::RunResult) carries no diagnostic and exit code
+    /// `0`; it describes a body that never finished and the caller that asked for the stop is
+    /// expected to discard it.
     pub(crate) fn observe_cancel(&mut self) -> Abort {
         self.isolates.cancel_observed = true;
         self.isolates.cancel_flag = None;

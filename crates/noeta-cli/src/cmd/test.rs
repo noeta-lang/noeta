@@ -104,9 +104,10 @@ impl Bound {
     }
 
     /// What a test that blew this bound should say. It names all three things a reader needs to
-    /// act: what the bound was, where it came from, and the exact spelling that raises it.
-    fn timeout_message(self, fn_name: &str) -> String {
-        match self {
+    /// act: what the bound was, where it came from, and the exact spelling that raises it — plus,
+    /// when the case could not be stopped, what that costs the rest of the run.
+    fn timeout_message(self, fn_name: &str, overrun: Overrun) -> String {
+        let bound = match self {
             // Unreachable in practice (an unbounded case cannot time out), but a total match beats
             // an `unwrap` in a reporting path.
             Bound::None => "did not finish, and had no deadline to exceed".to_string(),
@@ -118,6 +119,21 @@ impl Bound {
             Bound::Attribute(s) => format!(
                 "timed out: did not finish within {s}s (its own `#[Timeout({s})]`). Raise the \
                  number on `{fn_name}`, or write `#[Timeout(0)]` to remove the bound"
+            ),
+        };
+        match overrun {
+            // The ordinary ending: the case was asked to stop and did, so the report has nothing
+            // extra to warn about and stays as short as it always was.
+            Overrun::Stopped => bound,
+            // The residual class, and worth a sentence: a reader chasing a slow suite needs to know
+            // that this one is still running, and *why* asking did not work — it is the difference
+            // between "raise the bound" and "put a deadline on the call this test is stuck in".
+            Overrun::Abandoned => format!(
+                "{bound}. It was asked to stop and did not, so its thread was abandoned: it keeps \
+                 running — holding its isolate, its heap and any open files or sockets — until \
+                 this run exits. A test that will not stop is blocked inside a native call (a \
+                 socket or pipe read, a subprocess wait) that no safepoint can reach; put the \
+                 deadline on that operation rather than on the test around it"
             ),
         }
     }
@@ -783,6 +799,36 @@ pub(crate) fn run_tests(
     collected.into_iter().map(|(_, outcome)| outcome).collect()
 }
 
+/// How long a cancelled case is given to actually stop before the runner gives up on it and
+/// abandons its thread — the grace period in [`stop_overrun_case`].
+///
+/// It is a *grace*, not a second deadline. A case that observes the request at a safepoint unwinds
+/// immediately; what this number actually has to cover is the **teardown behind the unwind** —
+/// every live destructor, the final cycle collection, joining any isolates the case spawned — on a
+/// box already running the rest of the suite. Measured end to end (the moment the deadline expires
+/// to the moment the thread is joined): ~50 ms for an ordinary wedged case, and ~165 ms for one
+/// holding a 400 000-object heap at the moment it was asked. One second leaves roughly 6× headroom
+/// over that and is invisible next to the smallest bound anyone would set.
+///
+/// The trade runs both ways, which is why it is generous rather than tight: overshooting costs wall
+/// time on a run that has to abandon (the grace is waited out per worker, so it is paid once in
+/// parallel, not once per case — measured 2.07 s for a suite with seven wedged cases under a 1 s
+/// bound), while undershooting silently converts a clean stop into an abandonment and its leak.
+const CANCEL_GRACE: Duration = Duration::from_secs(1);
+
+/// What became of an overrunning case after the runner asked it to stop — the two genuinely
+/// different endings, kept apart because they cost the run different things.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Overrun {
+    /// The case observed the request at a safepoint, unwound, and tore its isolate down. Its thread
+    /// is joined and nothing is left behind.
+    Stopped,
+    /// The case did not stop within [`CANCEL_GRACE`], so its thread was abandoned and everything
+    /// its isolate owns is held until the process exits. In practice this means it is blocked
+    /// inside a native call, which no safepoint can reach.
+    Abandoned,
+}
+
 /// Run one case under its deadline, returning a `TimedOut` outcome if it does not finish in time.
 ///
 /// # The shape of the rail
@@ -790,22 +836,20 @@ pub(crate) fn run_tests(
 /// Two questions, kept apart on purpose:
 ///
 /// 1. **When has this case exceeded its bound, and what does the report say?** That is this
-///    function, and it is complete: the case runs on its own thread, the worker waits on a channel
-///    with a deadline, and on expiry it produces a `TimedOut` outcome naming the test, the bound and
-///    how to raise it. Every other case still runs, the report still prints, and the run still exits.
-/// 2. **What happens to the overrunning case itself?** That is [`stop_overrun_case`], and it is the
-///    one place to change when the runtime can genuinely stop a running test.
+///    function: the case runs on its own thread, the worker waits on a channel with a deadline, and
+///    on expiry it produces a `TimedOut` outcome naming the test, the bound and how to raise it.
+///    Every other case still runs, the report still prints, and the run still exits.
+/// 2. **What happens to the overrunning case itself?** That is [`stop_overrun_case`] — the one
+///    place that knows how a running test is actually stopped.
 ///
-/// Today (2) is *abandon it*, because `h.cancel()` on a real isolate does not stop anything — it
-/// sets a flag the OS-thread isolate never reads and reports `Err(Cancelled)` to the joiner while
-/// the isolate runs to completion, side effects and all. That is a **defect under repair** (the
-/// `isolate-cancel` branch), not a law of the runtime, which is exactly why the mechanism is one
-/// function and not a structure: no beacon files, no watchdog isolate, nothing to unpick when real
-/// cancellation lands.
+/// Keeping (1) separate is what makes the rail complete rather than best-effort: a test blocked
+/// inside a native call reaches no safepoint and cannot be stopped by anything, and for that class
+/// "stop waiting, report, and move on" is the whole answer rather than a stopgap.
 ///
-/// The split also means (1) is worth having on its own. Even with perfect cancellation there is a
-/// residual class — a thread blocked inside a native call — that no safepoint can interrupt, and for
-/// that class "stop waiting, report, and move on" is the whole answer rather than a stopgap.
+/// The case's run is armed with a **cancellation flag** it polls at its own safepoints; the runner
+/// stores through it once the deadline expires. A cancelled case still sends its (meaningless)
+/// outcome down the same channel, which is how the runner learns it stopped — the value is
+/// discarded, since the case was already reported as timed out.
 fn run_one_test_bounded(
     setup: &Arc<Vec<Stmt>>,
     opts: &Arc<noeta_check::CheckOptions>,
@@ -814,20 +858,24 @@ fn run_one_test_bounded(
 ) -> TestOutcome {
     let Some(deadline) = case.bound.duration() else {
         // Unbounded (`--timeout 0` / `#[Timeout(0)]`): run it right here, exactly as before this
-        // rail existed. No detached thread, no channel, nothing to leak.
-        return run_one_test(setup, opts, case, span);
+        // rail existed. No detached thread, no channel, nothing to cancel and nothing to leak.
+        return run_one_test(setup, opts, case, span, None);
     };
     let (tx, rx) = mpsc::channel();
+    // The case's stop request. Armed before the run starts, so a deadline that expires while the
+    // case is still compiling is honored at the body's very first safepoint.
+    let cancel: noeta_vm::CancelFlag = Arc::new(AtomicBool::new(false));
     let spawned = {
         let (setup, opts, owned) = (Arc::clone(setup), Arc::clone(opts), case.clone());
-        // Name the thread after the case: a leaked thread is visible in a debugger and in `/proc`,
-        // and "which test is still spinning" should not need guessing.
+        let cancel = Arc::clone(&cancel);
+        // Name the thread after the case: an abandoned thread is visible in a debugger and in
+        // `/proc`, and "which test is still spinning" should not need guessing.
         thread::Builder::new()
             .name(format!("noeta-test:{}", case.display))
             .spawn(move || {
                 // The receiver is gone once the worker gives up; a failed send is the expected shape
                 // of "this test finished after we stopped listening", not an error.
-                let _ = tx.send(run_one_test(&setup, &opts, &owned, span));
+                let _ = tx.send(run_one_test(&setup, &opts, &owned, span, Some(cancel)));
             })
     };
     let handle = match spawned {
@@ -835,67 +883,110 @@ fn run_one_test_bounded(
         // The OS refused a thread (an `RLIMIT_NPROC`/memory ceiling under heavy parallelism). Run
         // the case inline rather than reporting a test failure the test did not cause; it is
         // unbounded, which is what the runner did for every test before this rail.
-        Err(_) => return run_one_test(setup, opts, case, span),
+        Err(_) => return run_one_test(setup, opts, case, span, None),
     };
-    let outcome = match rx.recv_timeout(deadline) {
-        Ok(outcome) => outcome,
-        Err(RecvTimeoutError::Timeout) => TestOutcome {
-            name: case.display.clone(),
-            outcome: Outcome::TimedOut,
-            message: Some(case.bound.timeout_message(&case.fn_name)),
-            // The isolate is still running, so its captured output is not ours to read — and even a
-            // finished isolate's buffers do not currently reach the parent's `RunResult` (a known
-            // gap in `run_isolate_worker`). Reporting an empty stdout is honest; reporting a
-            // partial one would not be.
-            stdout: String::new(),
-        },
+    match rx.recv_timeout(deadline) {
+        Ok(outcome) => {
+            // The case answered, so its thread has already returned; the join is immediate and
+            // reaps it rather than leaving a zombie behind.
+            let _ = handle.join();
+            outcome
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            let overrun = stop_overrun_case(handle, &rx, &cancel);
+            TestOutcome {
+                name: case.display.clone(),
+                outcome: Outcome::TimedOut,
+                message: Some(case.bound.timeout_message(&case.fn_name, overrun)),
+                // A stopped case tore its isolate down without producing a result, and an abandoned
+                // one is still running — either way there is nothing complete to read. (Even a
+                // finished isolate's buffers do not currently reach the parent's `RunResult` — a
+                // known gap in `run_isolate_worker`.) Reporting an empty stdout is honest;
+                // reporting a partial one would not be.
+                stdout: String::new(),
+            }
+        }
         // The sender was dropped without sending: the case's thread panicked (a bug in the
         // toolchain, not in the test). Before this rail that panic unwound through `thread::scope`
         // and took the whole run with it; now it is one failing test with the reason named.
-        Err(RecvTimeoutError::Disconnected) => TestOutcome {
-            name: case.display.clone(),
-            outcome: Outcome::Failed,
-            message: Some(format!(
-                "the test runner panicked while running `{}` (see stderr)",
-                case.fn_name
-            )),
-            stdout: String::new(),
-        },
-    };
-    if outcome.outcome == Outcome::TimedOut {
-        stop_overrun_case(handle, case);
-    } else {
-        // The case answered, so its thread has already returned; dropping the handle is free.
-        drop(handle);
+        Err(RecvTimeoutError::Disconnected) => {
+            let _ = handle.join();
+            TestOutcome {
+                name: case.display.clone(),
+                outcome: Outcome::Failed,
+                message: Some(format!(
+                    "the test runner panicked while running `{}` (see stderr)",
+                    case.fn_name
+                )),
+                stdout: String::new(),
+            }
+        }
     }
-    outcome
 }
 
 /// Deal with a case that blew its deadline — **the one seam** between "the runner decided this test
-/// is over" and however the runtime actually stops it.
+/// is over" and how the runtime actually stops it: **ask, join with a grace period, abandon only if
+/// that expires.**
 ///
-/// The current implementation **abandons** the thread: dropping a `JoinHandle` detaches it, and the
-/// join is precisely what a wedged test never returns from. Nothing else is available yet — a real
-/// isolate ignores `cancel` today — and there is no safe way to kill a native thread from outside in
-/// Rust regardless: `pthread_cancel` against a thread holding an allocator or runtime lock turns a
-/// hung test into a hung process.
+/// `cancel` is the flag the case's own run polls at its safepoints (the dispatch loop's frame
+/// transfers and taken loop back-edges, plus each scheduler round). Storing through it is a
+/// *request*; the case's arrival on `done` is the *report*, exactly the `cancel`/`join` split the
+/// language gives a task handle. `JoinHandle` has no timed join, so the grace is waited out on the
+/// result channel the case sends down when its run returns — receiving anything at all means the
+/// thread is about to end, and the join behind it is then immediate.
 ///
-/// **What abandoning leaks, precisely.** One OS thread per timed-out case and everything its isolate
-/// owns: the VM, its heap, its `tokio` runtime, and any descriptors or sockets it holds. A test that
-/// is spinning rather than parked also keeps burning a core for the rest of the run, so a suite with
-/// several wedged tests gets slower as it goes. Nothing is reclaimed until the process exits — which
-/// it does, normally and promptly: detached threads are not joined by `thread::scope`, by `main`'s
-/// return, or by the runtime's teardown, so the exit is not blocked by the very thing that hung.
+/// **The two classes, and why they end differently.**
 ///
-/// The trade is deliberate and it is not close: a leaked thread that lets the suite finish and name
-/// the culprit is worth far more than a tidy suite that never returns.
+/// - A case executing Noeta — the compute-bound `while true`, the runaway recursion — reaches a
+///   safepoint within an iteration, unwinds, and runs the ordinary teardown: its destructors fire,
+///   its heap returns to zero residency, and any isolates it spawned are cancelled and joined
+///   (`Vm::teardown`). Joining it here is what turns the old leak into no leak at all, and it is
+///   also the only ending under which the case's own resources are released rather than merely
+///   forgotten.
+/// - A case blocked **inside a native call** — a socket read, a pipe read with no writer — is not
+///   executing Noeta, so no safepoint comes around and the request cannot land. Nothing available
+///   in Rust can stop that thread from outside: `pthread_cancel` against a thread holding an
+///   allocator or runtime lock turns a hung test into a hung process. Abandoning it is the only
+///   option the rail has, and it is still the right one — a leaked thread that lets the suite finish
+///   and *name* the culprit beats a tidy suite that never returns.
 ///
-/// **When isolate cancellation lands, change this function and nothing else.** The shape it wants is
-/// "ask the case's isolate to stop, then join it with a short grace period, and abandon only if that
-/// grace expires" — which shrinks the leak to the genuinely uninterruptible class (blocked in a
-/// native call) instead of covering every overrun.
-fn stop_overrun_case(handle: thread::JoinHandle<()>, _case: &TestCase) {
-    drop(handle);
+/// **What abandoning leaks, precisely.** One OS thread and everything its isolate owns: the VM, its
+/// heap, its `tokio` runtime, and any descriptors or sockets it holds, until the process exits.
+///
+/// **Why abandoning is safe here, when abandoning a worker isolate was not.** A worker isolate
+/// borrows its arguments zero-copy out of the parent's shared region, so an abandoned worker races
+/// the parent's teardown freeing that region — measured as a reproducible segfault in the allocator,
+/// which is why a `concurrent` block waits for its members instead. A `@test` case shares no such
+/// graph: it is a whole program on its own thread with its own `Host`, its own executor and its own
+/// thread-local heap (`noeta-value`'s registry is per-thread — shared-nothing per isolate by
+/// construction), and *nothing in the runner ever frees it*. It is leaked, not freed-then-used, and
+/// a leak is not a race. Process exit is the same story: mimalloc's `mi_process_done` runs with
+/// `destroy_on_exit` off, so it collects the exiting thread's own heap and leaves a live thread's
+/// pages alone. Measured over 240 runs of the hostile shapes — a spinning case, six cases allocating
+/// flat out, and a case blocked in a FIFO read, alone and together — every run exited `1` cleanly and
+/// none died on a signal.
+fn stop_overrun_case(
+    handle: thread::JoinHandle<()>,
+    done: &mpsc::Receiver<TestOutcome>,
+    cancel: &noeta_vm::CancelFlag,
+) -> Overrun {
+    // Ask. Relaxed is enough: the flag only ever goes `false → true` and the case's reaction —
+    // unwinding its own frames — is entirely local to its thread.
+    cancel.store(true, Ordering::Relaxed);
+    match done.recv_timeout(CANCEL_GRACE) {
+        // It stopped when asked (or, harmlessly, finished on its own in the same instant). Join it:
+        // the send is the last thing its closure does, so this returns at once.
+        Ok(_) | Err(RecvTimeoutError::Disconnected) => {
+            let _ = handle.join();
+            Overrun::Stopped
+        }
+        // The grace expired — the case is blocked somewhere no safepoint can reach. Dropping the
+        // handle detaches the thread; the join is precisely what a wedged case never returns from.
+        Err(RecvTimeoutError::Timeout) => {
+            drop(handle);
+            Overrun::Abandoned
+        }
+    }
 }
 
 /// Run a single test case: synthesize `setup + <call the fn (with its data arg, if any)>`, run it in
@@ -904,11 +995,17 @@ fn stop_overrun_case(handle: thread::JoinHandle<()>, _case: &TestCase) {
 /// without running. The synthesized program is a subset of the already-checked activated program
 /// plus one call, so it cannot introduce new type errors; one is surfaced as a failure rather than
 /// panicking the worker.
+///
+/// `cancel`, when given, arms the case's run with the cooperative stop request the timeout rail
+/// stores through ([`stop_overrun_case`]). A cancelled run returns a `TestOutcome` describing a body
+/// that never finished — the rail discards it, having already reported the case as timed out — so
+/// this is `None` on every path that actually reads the outcome.
 pub(crate) fn run_one_test(
     setup: &[Stmt],
     opts: &noeta_check::CheckOptions,
     case: &TestCase,
     span: Span,
+    cancel: Option<noeta_vm::CancelFlag>,
 ) -> TestOutcome {
     let args = match &case.arg {
         CaseArg::None => Vec::new(),
@@ -948,7 +1045,7 @@ pub(crate) fn run_one_test(
     // `@test`/`@bench` compile a *separate* module per case (a different granularity than the
     // whole-file startup cache), so they don't participate in it — see `plans/startup-cache`. They
     // have no program pass-through args; a test sees the real process argv.
-    match execute_real_host(&program, &checked, std::env::args().collect(), false) {
+    match execute_real_host(&program, &checked, std::env::args().collect(), false, cancel) {
         // The `@test` runner reports the failing diagnostic; the trace is a `noeta run` affordance.
         Ok((result, _trace)) => {
             // An abort fails the case; an advisory diagnostic does not.

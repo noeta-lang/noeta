@@ -43,6 +43,16 @@ pub enum Tiering {
     Forced,
 }
 
+/// A **cooperative stop request** a run polls at its safepoints (isolate-cancel): the parent stores
+/// `true`, the runner notices at its next frame transfer / loop back-edge / scheduler round and
+/// unwinds, running the same teardown a completed run does.
+///
+/// It is the same `Arc<AtomicBool>` a real worker isolate carries — one mechanism, two callers.
+/// `h.cancel()` reaches a worker through its isolate slot; [`RunOptions::cancel`] arms the
+/// *top-level* run of a whole program with one, which is what lets `noeta test` ask an overrunning
+/// case to stop instead of only abandoning it.
+pub type CancelFlag = Arc<std::sync::atomic::AtomicBool>;
+
 /// Everything one VM run can vary, in one place (audit-1 finding 14 / the `CheckOptions`
 /// pattern) — instead of the `run_module_*` family growing a method per host × executor ×
 /// tiering × debugger × session × stats combination. The presets below cover the
@@ -81,6 +91,17 @@ pub struct RunOptions {
     /// Real OS-thread isolates (isolates I.4b): the module by `Arc` (worker threads own it)
     /// plus the fresh-VM factory. CLI-only / out-of-oracle.
     pub isolates: Option<(Arc<Module>, IsolateFactory)>,
+    /// A cooperative **stop request** for this whole run (test-timeout): the run polls it at the
+    /// same safepoints a worker isolate polls its own — the dispatch loop's frame transfers and
+    /// taken loop back-edges, plus each scheduler round — and unwinds when it is set, running the
+    /// ordinary teardown (destructors, cycle collection, joining any isolates it spawned).
+    ///
+    /// `None` on every ordinary run, which is the case the safepoints must not pay for: the poll
+    /// is then a null test on a cached field. The run's [`RunResult`] after an honored cancel is
+    /// **not meaningful** — the body did not finish, so there is no value and no diagnostic; the
+    /// caller asked for the stop and already knows what it means. `noeta test` is the one caller,
+    /// and it discards the result (it has already reported the case as timed out).
+    pub cancel: Option<CancelFlag>,
     /// Per-isolate profiling (`noeta profile` over a program with real isolates): each spawned
     /// worker gets its own hook from the factory and deposits it, named, in the sink at finish.
     /// Meaningful only alongside `isolates`.
@@ -107,7 +128,8 @@ impl std::fmt::Debug for RunOptions {
             .field("profiler", &self.profiler.is_some())
             .field("hot_mailbox", &self.hot_mailbox.is_some())
             .field("isolates", &self.isolates.is_some())
-            .field("isolate_profiler", &self.isolate_profiler.is_some());
+            .field("isolate_profiler", &self.isolate_profiler.is_some())
+            .field("cancel", &self.cancel.is_some());
         #[cfg(feature = "compile")]
         d.field("session", &self.session.is_some());
         #[cfg(feature = "jit")]
@@ -132,6 +154,7 @@ impl Default for RunOptions {
             hot_mailbox: None,
             isolates: None,
             isolate_profiler: None,
+            cancel: None,
             #[cfg(feature = "jit")]
             bail_histogram: false,
             #[cfg(feature = "jit")]
@@ -227,6 +250,11 @@ impl VmBackend {
             vm.isolates.isolate_factory = Some(factory);
             vm.isolates.profile_seam = opts.isolate_profiler;
         }
+        // Arm the top-level run's cancellation poll (test-timeout) — the identical field a worker
+        // isolate installs on its own VM, so one mechanism serves `h.cancel()` and `noeta test`'s
+        // "ask the case to stop" alike. Set *before* the run so a request that arrives during
+        // startup is honored at the body's first safepoint.
+        vm.isolates.cancel_flag = opts.cancel;
         match opts.tiering {
             Tiering::Off => {}
             // Without the `jit` feature both arms are no-ops: everything interprets.
@@ -499,6 +527,10 @@ impl VmBackend {
     /// real-host production run (hot-counter JIT, compiled off-thread); worker isolates load through
     /// `Vm::load` and stay tier-0 (the engine lives on the compile-service thread). The differential
     /// never calls this (it keeps the deterministic cooperative sandbox), so it stays out-of-oracle.
+    ///
+    /// `cancel` arms this run's own cooperative stop request (see [`RunOptions::cancel`]) — `None`
+    /// for an ordinary `noeta run`, `Some` for a `noeta test` case, which is how the timeout rail
+    /// asks an overrunning case to stop rather than only abandoning its thread.
     pub fn run_module_with_host_and_executor_parallel(
         &self,
         module: Arc<Module>,
@@ -506,6 +538,7 @@ impl VmBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         factory: IsolateFactory,
         jit_report: bool,
+        cancel: Option<CancelFlag>,
     ) -> (RunResult, Vec<TraceFrame>, Option<JitReport>) {
         let out = self.run_module_with(
             &Arc::clone(&module),
@@ -514,6 +547,7 @@ impl VmBackend {
                 executor,
                 isolates: Some((module, factory)),
                 tiering: Tiering::Hot,
+                cancel,
                 #[cfg(feature = "jit")]
                 bail_histogram: jit_report,
                 ..RunOptions::default()
