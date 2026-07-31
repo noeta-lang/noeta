@@ -309,11 +309,21 @@ pub enum DiagnosticCode {
     /// directive misbehaved. The position inside the generated source goes in the message, because
     /// that source is real and openable rather than a fiction the compiler made up.
     DirectiveExpansionFailed,
-    /// **Warning.** A bare-scalar type test `x is iN`/`x is f64` names a fixed-width numeric that is
-    /// *erased* to `int`/`float` on a scalar value — no scalar carries a width tag, so the test is
-    /// statically always false. `f32` is exempt (reified at runtime) and container targets like
-    /// `List<i32>` are exempt (packed element widths are distinct). The fix is to test the base type
-    /// (`x is int` / `x is float`). Advisory, not an error: the program still compiles.
+    /// **Warning.** A bare-scalar type test `x is iN`/`x is f64` that **cannot be answered**: the
+    /// target names a fixed width, and the scrutinee's static type does not fix one.
+    ///
+    /// A width is a property of *storage*, not of a value — every integer width is the same runtime
+    /// word, and an `f64` *is* a `float` bit for bit — so a value laundered through `dyn` (or held
+    /// as a union, or as an erased type parameter) no longer carries the width anywhere, and no
+    /// runtime test can recover it. The fix is to test the base type (`x is int` / `x is float`).
+    ///
+    /// Deliberately **not** reported when the scrutinee's static type settles the question:
+    /// `a: i32` then `a is i32` is answered by the checker and folded to `true`
+    /// (`noeta_check::Sites::folded_type_tests`), and `a is i64` to `false`. Those are decided
+    /// answers, not erasure — this code once fired on them too, which made it noise on exactly the
+    /// programs that were right. `f32` is exempt everywhere (reified at runtime, a real narrowing
+    /// head) and so are container targets like `List<i32>` (a packed element's width lives in the
+    /// buffer's schema). Advisory, not an error: the program still compiles.
     ErasedWidthNarrow,
     /// A string escape is malformed. Covers the numeric escapes added for control characters: a
     /// `\xHH` that lacks two hex digits, is non-hex, or exceeds `0x7F` (the ASCII range — a lone

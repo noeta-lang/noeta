@@ -183,11 +183,11 @@ impl DiagnosticCode {
             },
             DiagnosticCode::ErasedWidthNarrow => Explanation {
                 code: "E0063",
-                title: "erased-width type test",
+                title: "unanswerable width type test",
                 group: "Types, inference, and narrowing",
                 severity: Severity::Warning,
-                summary: "**Warning.** `x is i32`/`x is f64` on a scalar — those widths erase at runtime, so the test is always false. Test the base type.",
-                detail: "No scalar carries a width tag at runtime, so a bare `x is i32` / `x is f64` can never be true. Test the base type (`x is int`, `x is float`). `f32` is exempt — it is reified — and so is a container target like `List<i32>`, whose element widths are real storage slots.",
+                summary: "**Warning.** `x is i32`/`x is f64` where the scrutinee's static type does not fix the width — the width is not on the value, so the test cannot be answered. Test the base type.",
+                detail: "A width is a property of *storage*, not of a value: every integer width is the same runtime word, and an `f64` is a `float` bit for bit. So once a value is held as `dyn` (or as a union, or as an erased type parameter) its width is gone and no runtime test can recover it. This warns only in that case. Where the scrutinee's static type *does* name a width — `a: i32` then `a is i32` — the checker answers the test itself and folds the constant, with no warning. Test the base type (`x is int`, `x is float`) to ask the question the runtime can answer. `f32` never warns: it is reified, with its own runtime tag. Nor does a container target like `List<i32>`, whose element width lives in the buffer's schema.",
                 docs: "Fixed-Width-Integers",
             },
             DiagnosticCode::ImpossibleTypeTest => Explanation {

@@ -141,6 +141,22 @@ pub struct Sites {
     /// lowering wraps the op's result in `Rvalue::MaskWidth` to wrap the erased i64 into the width. A
     /// pure function of the program, like the other site maps — the masking is invisible to `RunResult`.
     pub width_sites: HashMap<Span, (bool, u8)>,
+    /// **Statically decided type tests**: `Expr::TypeTest` spans the checker answered itself → the
+    /// answer. Lowering emits the constant (after still evaluating the scrutinee for its effects)
+    /// instead of an `Rvalue::TypeTest`, so both backends agree by construction.
+    ///
+    /// Recorded for exactly one family today — a bare **erased-width** target (`x is iN` /
+    /// `x is f64`) whose scrutinee's static type settles the question. That is the family the
+    /// *runtime* cannot answer at all: no scalar value carries a width tag, so the runtime matcher
+    /// reaches no head for it and always says `false`. Where the checker knows the width
+    /// (`a: i32` → `a is i32`), `false` is simply the wrong answer, and folding is what makes the
+    /// two agree; where it does not (a `dyn` launder, a union, an erased type parameter), the test
+    /// stays unanswerable and E0063 says so rather than a fold happening silently.
+    ///
+    /// Deliberately *not* extended to tests the runtime already answers correctly (`x is int` on an
+    /// `int`): folding those would change no answer and would put the checker's subtyping opinion
+    /// where the shared runtime matcher is the single source of truth.
+    pub folded_type_tests: HashMap<Span, bool>,
     /// Unbound method-handle sites (`Type.method` in value position) → the resolved
     /// `(ty, method, associated)`. Lowering emits an [`Rvalue::MethodHandle`] at these spans.
     pub handle_sites: HashMap<Span, (String, String, bool)>,
@@ -369,6 +385,8 @@ pub(crate) struct SiteMaps {
     /// `IntN` → the result's `(signed, bits)`. Lowering reads this (via [`Checked::width_sites`]) to
     /// wrap the op's result in `Rvalue::MaskWidth`. Empty for programs with no fixed-width arithmetic.
     pub(crate) width_sites: HashMap<Span, (bool, u8)>,
+    /// Statically decided type tests — see [`Sites::folded_type_tests`].
+    pub(crate) folded_type_tests: HashMap<Span, bool>,
     /// Unbound method-handle sites: a `Type.method` member expression in value position → the
     /// resolved `(ty, method, associated)`. Lowering reads this (via [`Checked::handle_sites`]) to
     /// emit an [`Rvalue::MethodHandle`] instead of a field load. A pure function of the program.
@@ -435,6 +453,7 @@ impl SiteMaps {
             arg_orders: self.arg_orders,
             for_stream_sites: self.for_stream_sites,
             width_sites: self.width_sites,
+            folded_type_tests: self.folded_type_tests,
             handle_sites: self.handle_sites,
             bound_handle_sites: self.bound_handle_sites,
             field_call_sites: self.field_call_sites,

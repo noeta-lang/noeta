@@ -161,6 +161,11 @@ pub struct LoweringSites<'a> {
     /// Fixed-width arithmetic sites (Tier W) → the result's `(signed, bits)`, wrapping the op's result
     /// in [`Rvalue::MaskWidth`] so the erased i64 is masked back into the declared width.
     pub width_sites: &'a HashMap<Span, (bool, u8)>,
+    /// `Expr::TypeTest` spans the checker answered statically → the answer. The test lowers to that
+    /// constant (the scrutinee still evaluated, for its effects) instead of an [`Rvalue::TypeTest`],
+    /// so no runtime matcher is consulted for a question it cannot answer. See
+    /// `noeta_check::Sites::folded_type_tests` for which tests land here and why.
+    pub folded_type_tests: &'a HashMap<Span, bool>,
     /// Collection-construction sites → the resolved element [`noeta_ast::reflect::TypeRepr`] baked onto
     /// [`Rvalue::List`] so `type_of` recovers it after a `dyn` launder (R1 reflection).
     pub construction_sites: &'a HashMap<Span, noeta_ast::reflect::TypeRepr>,
@@ -250,6 +255,7 @@ impl LoweringSites<'static> {
         static SPANS: OnceLock<HashSet<Span>> = OnceLock::new();
         static RECIPES: OnceLock<HashMap<Span, noeta_ext_abi::TypeRecipe>> = OnceLock::new();
         static WIDTHS: OnceLock<HashMap<Span, (bool, u8)>> = OnceLock::new();
+        static FOLDED: OnceLock<HashMap<Span, bool>> = OnceLock::new();
         static REPRS: OnceLock<HashMap<Span, noeta_ast::reflect::TypeRepr>> = OnceLock::new();
         static HANDLES: OnceLock<HashMap<Span, (String, String, bool)>> = OnceLock::new();
         static PAIRS: OnceLock<HashMap<Span, (String, String)>> = OnceLock::new();
@@ -274,6 +280,7 @@ impl LoweringSites<'static> {
             decode_typed_sites: SPANS.get_or_init(HashSet::new),
             for_stream_sites: SPANS.get_or_init(HashSet::new),
             width_sites: WIDTHS.get_or_init(HashMap::new),
+            folded_type_tests: FOLDED.get_or_init(HashMap::new),
             construction_sites: REPRS.get_or_init(HashMap::new),
             inferred_object_types: NAMES.get_or_init(HashMap::new),
             variant_pattern_sites: VARIANT_PATTERNS.get_or_init(HashMap::new),
@@ -318,6 +325,7 @@ macro_rules! lowering_sites {
             decode_typed_sites: &$s.decode_typed_sites,
             for_stream_sites: &$s.for_stream_sites,
             width_sites: &$s.width_sites,
+            folded_type_tests: &$s.folded_type_tests,
             construction_sites: &$s.construction_sites,
             inferred_object_types: &$s.inferred_object_types,
             variant_pattern_sites: &$s.variant_pattern_sites,
@@ -2839,6 +2847,18 @@ impl Lowerer<'_> {
                 ))
             }
             Expr::TypeTest { expr, ty, span } => {
+                // A test the checker already answered (`Sites::folded_type_tests` — an erased-width
+                // target on a scrutinee whose static type fixes the width) becomes its constant.
+                // The scrutinee is still lowered: `f() is i32` must still call `f`. Its temp is
+                // released right here, exactly as a statement-position expression's is, since
+                // nothing downstream reads it.
+                if let Some(&answer) = self.sites.folded_type_tests.get(span) {
+                    let operand = self.lower_expr(expr, out)?;
+                    if let Atom::Temp(t) = operand {
+                        out.push(Stmt::Drop(t));
+                    }
+                    return Ok(Atom::Const(Const::Bool(answer)));
+                }
                 let operand = self.lower_expr(expr, out)?;
                 let dynamic = self.type_param_name_atom(ty, span, out);
                 Ok(self.emit(

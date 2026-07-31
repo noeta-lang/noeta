@@ -1687,23 +1687,46 @@ impl Checker {
                     )
                     .help(idiom);
                 }
-                // A bare-scalar test against an *erased* fixed width (`iN`/`f64`) is statically
-                // always false: a scalar carries no width tag, so `x is i32` can never hold (E0063,
-                // warning). `f32` is exempt (reified — a real narrowing head, Part A) and a
-                // container target (`List<i32>`) is exempt (packed element widths are distinct) —
+                // A bare-scalar test against an *erased* fixed width (`iN`/`f64`) is the one family
+                // the **runtime** cannot answer: no scalar value carries a width tag (every integer
+                // width is the same NaN-boxed word, and an `f64` *is* a `float` bit for bit), so the
+                // shared matcher reaches no head for it and the test comes back `false` whatever the
+                // value. The *checker* frequently can answer it, and where it can, `false` is simply
+                // the wrong answer — so the answer is decided here and folded at lowering
+                // (`Sites::folded_type_tests`), and only a scrutinee that leaves the width genuinely
+                // unrecoverable warns (E0063).
+                //
+                // `f32` is exempt (reified — a real narrowing head, Part A) and a container target
+                // (`List<i32>`) is exempt (packed element widths live in the buffer's schema) —
                 // both filtered by matching only a *bare* (`args.is_empty()`) erased-width name.
-                if let TypeRef::Named { name, args, span } = ty
+                if let TypeRef::Named {
+                    name,
+                    args,
+                    span: target_span,
+                } = ty
                     && args.is_empty()
                     && let Some(base) = erased_scalar_width_base(name.as_str())
                 {
-                    self.warn(
-                        DiagnosticCode::ErasedWidthNarrow,
-                        *span,
-                        format!(
-                            "`{name}` erases to `{base}` at runtime; `x is {name}` is always false"
-                        ),
-                    )
-                    .help(format!("did you mean `x is {base}`?"));
+                    match settled_width_answer(&scrut, &self.annot(ty)) {
+                        Some(answer) => {
+                            self.sites.folded_type_tests.insert(*span, answer);
+                        }
+                        None => {
+                            self.warn(
+                                DiagnosticCode::ErasedWidthNarrow,
+                                *target_span,
+                                format!(
+                                    "`{name}` shares one runtime representation with `{base}`, and \
+                                     this value's static type does not fix the width — so \
+                                     `x is {name}` cannot be answered"
+                                ),
+                            )
+                            .help(format!(
+                                "test the base type instead (`x is {base}`); a scrutinee whose \
+                                 static type names the width is answered statically"
+                            ));
+                        }
+                    }
                 }
                 Type::Bool
             }
@@ -2530,6 +2553,36 @@ fn erased_scalar_width_base(name: &str) -> Option<&'static str> {
         noeta_ast::BuiltinTy::IntN { .. } => Some("int"),
         noeta_ast::BuiltinTy::F64 => Some("float"),
         _ => None,
+    }
+}
+
+/// The answer to `<scrut> is <target>` when the scrutinee's **static type settles it**, for an
+/// erased-width `target` (`iN`/`f64` — the caller has already established that). `None` means the
+/// scrutinee does not settle it, which for these targets is the same as "nobody can": the width is
+/// not on the value, so if it is not in the static type it is gone.
+///
+/// A width has *identity-only* subtyping — `i32` is not an `i64`, and `f64` deliberately does not
+/// widen to or from `float` — so for a scrutinee that is a single concrete type, equality is the
+/// whole answer. The unsettled cases are exactly the open ones:
+///
+/// - `dyn` and an inference hole: the launder that erased the width in the first place;
+/// - a `dyn Trait`: open in the same way, over a smaller set;
+/// - a bare type parameter: erased, and its instantiation is not in this body;
+/// - a union (which is what `number` is): the checker knows a *set* of types, not which one — and
+///   the value cannot be asked, so no member of the set can be ruled in or out;
+/// - a kind-type (`Enum`/`Struct`/`Class`): abstract over declarations, not a single type.
+///
+/// [`Type::Never`] is *not* on that list: it is uninhabited, so the test is in unreachable code and
+/// the constant `false` is as true as anything else there.
+fn settled_width_answer(scrut: &Type, target: &Type) -> Option<bool> {
+    match scrut {
+        Type::Unknown
+        | Type::Dyn
+        | Type::DynTrait(_)
+        | Type::Param(_)
+        | Type::Union(_)
+        | Type::Kind(_) => None,
+        _ => Some(scrut == target),
     }
 }
 
