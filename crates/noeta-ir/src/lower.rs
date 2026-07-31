@@ -388,8 +388,18 @@ pub struct LowerOptions {
     pub ambient: ProgramFacts,
 }
 
-impl Default for LowerOptions {
-    fn default() -> Self {
+/// Deliberately **not** `Default`. The field that would default is [`Self::ambient`], and an empty
+/// ambient set is not a neutral choice — it means "the code I am lowering IS the whole program".
+/// That is right for a file compile and silently wrong for a fragment (a hot-swap install, a REPL
+/// entry), and the silence is where three shipped bugs came from: `@html` lowered to a panic,
+/// `x is Uuid` answered `false`, a swapped `async` body touching a module global panicked. A caller
+/// that has to write `ambient:` has to decide which case it is in; a caller reaching for
+/// `..Default::default()` never gets asked.
+impl LowerOptions {
+    /// The options a **whole-program** lowering wants: no enclosing program, cooperative isolates,
+    /// the process-global registry. Named rather than `Default` so the fragment case cannot be
+    /// reached by omission — see the note above.
+    pub fn whole_program() -> LowerOptions {
         LowerOptions {
             real_isolates: false,
             registry: noeta_ext_abi::registry::single_registry_process(),
@@ -454,7 +464,7 @@ pub fn lower_with_sites(
     program: &AstProgram,
     sites: LoweringSites,
 ) -> Result<Program, Unsupported> {
-    lower_with_sites_opts(program, sites, LowerOptions::default())
+    lower_with_sites_opts(program, sites, LowerOptions::whole_program())
 }
 
 /// Copy a standalone `impl Trait for T { methods }`'s method bodies onto the target type `T`'s own
