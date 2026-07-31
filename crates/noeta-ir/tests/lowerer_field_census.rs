@@ -531,14 +531,15 @@ fn every_program_fact_has_a_hot_swap_exerciser() {
 
 /// **The entry point.** Every construction of `LowerOptions` in the workspace must state `ambient`.
 ///
-/// `LowerOptions::default()` leaves `ambient` empty, which is right for a whole program and silently
-/// wrong for a fragment — the default is a hole a caller can fall into rather than a decision it
-/// makes. Removing the `Default` impl would force the answer at the type level, but it is a public
-/// API break for `noeta-compiler`; this gate buys the same property at the same commit, by
-/// requiring every caller to write the word down.
+/// An empty `ambient` is not a neutral choice: it means "the code I am lowering IS the whole
+/// program". That is right for a file compile and silently wrong for a fragment, so a *default* is a
+/// hole a caller falls into rather than a decision it makes.
 ///
-/// The one exemption is `lower_with_sites` in `lower.rs`, the documented **whole-program preset**
-/// that `LowerOptions::default()` exists to serve.
+/// The `Default` impl this gate was written to compensate for **is gone** — retired at integration,
+/// once the compiler refactor that shared the file had landed, in favour of the named
+/// `LowerOptions::whole_program()`. So the type level now forces the answer, and what remains here
+/// guards the ways it could quietly come back: a re-added `Default` impl, a literal completed with
+/// `..Default::default()`, or one that simply never names the field.
 #[test]
 fn every_lower_options_construction_states_its_enclosing_program() {
     let root = workspace_root();
@@ -580,9 +581,19 @@ fn every_lower_options_construction_states_its_enclosing_program() {
             }
         }
 
-        // The preset. Legal only where it is documented as one.
-        if src.contains("LowerOptions::default()") && !rel.ends_with("noeta-ir/src/lower.rs") {
-            offenders.push(format!("{rel}: `LowerOptions::default()`"));
+        // The hole, re-opened: a `Default` impl brings back exactly the empty-ambient default the
+        // named `whole_program()` preset replaced, and every `..Default::default()` that follows it.
+        if src.contains("impl Default for LowerOptions") {
+            offenders.push(format!(
+                "{rel}: a `Default` impl for `LowerOptions` — an empty `ambient` is a decision, not \
+                 a default; use the named `whole_program()` preset"
+            ));
+        }
+        if src.contains("LowerOptions::default()") {
+            offenders.push(format!(
+                "{rel}: `LowerOptions::default()` — the `Default` impl was retired; say \
+                 `whole_program()` or state `ambient` explicitly"
+            ));
         }
     }
 
