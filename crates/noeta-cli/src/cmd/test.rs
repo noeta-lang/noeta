@@ -59,7 +59,11 @@ impl Outcome {
 
 /// The outcome of running one `@test` fn: how it ended, the failure/timeout message (for a failure,
 /// the first diagnostic — typically the assertion or panic), and anything it wrote to stdout (shown
-/// on failure).
+/// on failure or timeout, hidden on a pass).
+///
+/// `stdout` is the case's whole `RunResult` stdout, which since the isolate-output fix includes
+/// what any real isolate the case spawned wrote — a worker's `echo` follows the same rule as the
+/// case's own, rather than inventing a third.
 pub(crate) struct TestOutcome {
     name: String,
     outcome: Outcome,
@@ -846,9 +850,11 @@ enum Overrun {
 /// "stop waiting, report, and move on" is the whole answer rather than a stopgap.
 ///
 /// The case's run is armed with a **cancellation flag** it polls at its own safepoints; the runner
-/// stores through it once the deadline expires. A cancelled case still sends its (meaningless)
-/// outcome down the same channel, which is how the runner learns it stopped — the value is
-/// discarded, since the case was already reported as timed out.
+/// stores through it once the deadline expires. A cancelled case still sends its outcome down the
+/// same channel, which is how the runner learns it stopped. Its *verdict* is discarded — the case
+/// was already reported as timed out — but its **stdout is kept**: a stopped case unwound and ran
+/// its ordinary teardown, so what it wrote before it stopped is complete, and it is the one piece
+/// of evidence a reader chasing a hang actually wants.
 fn run_one_test_bounded(
     setup: &Arc<Vec<Stmt>>,
     opts: &Arc<noeta_check::CheckOptions>,
@@ -892,17 +898,18 @@ fn run_one_test_bounded(
             outcome
         }
         Err(RecvTimeoutError::Timeout) => {
-            let overrun = stop_overrun_case(handle, &rx, &cancel);
+            let (overrun, stdout) = stop_overrun_case(handle, &rx, &cancel);
             TestOutcome {
                 name: case.display.clone(),
                 outcome: Outcome::TimedOut,
                 message: Some(case.bound.timeout_message(&case.fn_name, overrun)),
-                // A stopped case tore its isolate down without producing a result, and an abandoned
-                // one is still running — either way there is nothing complete to read. (Even a
-                // finished isolate's buffers do not currently reach the parent's `RunResult` — a
-                // known gap in `run_isolate_worker`.) Reporting an empty stdout is honest;
-                // reporting a partial one would not be.
-                stdout: String::new(),
+                // A **stopped** case unwound and ran its ordinary teardown, so it produced a real
+                // `RunResult` — everything it had written before it was asked to stop, its worker
+                // isolates' output included. That is the most useful thing a timed-out test can
+                // show (it is where the test got to), so it is reported. An **abandoned** case is
+                // still running and has produced nothing to read; its stdout is empty, and that is
+                // honest rather than partial.
+                stdout,
             }
         }
         // The sender was dropped without sending: the case's thread panicked (a bug in the
@@ -968,22 +975,31 @@ fn stop_overrun_case(
     handle: thread::JoinHandle<()>,
     done: &mpsc::Receiver<TestOutcome>,
     cancel: &noeta_vm::CancelFlag,
-) -> Overrun {
+) -> (Overrun, String) {
     // Ask. Relaxed is enough: the flag only ever goes `false → true` and the case's reaction —
     // unwinding its own frames — is entirely local to its thread.
     cancel.store(true, Ordering::Relaxed);
     match done.recv_timeout(CANCEL_GRACE) {
         // It stopped when asked (or, harmlessly, finished on its own in the same instant). Join it:
-        // the send is the last thing its closure does, so this returns at once.
-        Ok(_) | Err(RecvTimeoutError::Disconnected) => {
+        // the send is the last thing its closure does, so this returns at once. Its *verdict* is
+        // meaningless — the case was already reported as timed out — but its **stdout** is not: it
+        // is what the test managed to say before it was stopped, and it is kept.
+        Ok(outcome) => {
             let _ = handle.join();
-            Overrun::Stopped
+            (Overrun::Stopped, outcome.stdout)
+        }
+        // The case's thread died without sending (a panic in the runner). Stopped, with nothing to
+        // read.
+        Err(RecvTimeoutError::Disconnected) => {
+            let _ = handle.join();
+            (Overrun::Stopped, String::new())
         }
         // The grace expired — the case is blocked somewhere no safepoint can reach. Dropping the
         // handle detaches the thread; the join is precisely what a wedged case never returns from.
+        // It is still running, so there is no complete result to read: empty, honestly.
         Err(RecvTimeoutError::Timeout) => {
             drop(handle);
-            Overrun::Abandoned
+            (Overrun::Abandoned, String::new())
         }
     }
 }
@@ -997,8 +1013,9 @@ fn stop_overrun_case(
 ///
 /// `cancel`, when given, arms the case's run with the cooperative stop request the timeout rail
 /// stores through ([`stop_overrun_case`]). A cancelled run returns a `TestOutcome` describing a body
-/// that never finished — the rail discards it, having already reported the case as timed out — so
-/// this is `None` on every path that actually reads the outcome.
+/// that never finished — the rail discards its verdict, having already reported the case as timed
+/// out, and keeps only its captured stdout — so this is `None` on every path that actually reads the
+/// outcome's verdict.
 pub(crate) fn run_one_test(
     setup: &[Stmt],
     opts: &noeta_check::CheckOptions,

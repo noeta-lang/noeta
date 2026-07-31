@@ -2055,4 +2055,124 @@ fn t(): void {
         assert_eq!(out, annotated, "fmt moved a tier annotation's comment");
         assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
     }
+
+    /// A `match` written on one line stays on one line under the default config.
+    ///
+    /// It was exploded to one arm per line at any width, which `wrap = false` has no license to do:
+    /// that policy "keeps the author's line breaks", and there is no width in it to re-derive from.
+    /// The one-line `match` inside an `assert` is the commonest shape and the largest remaining
+    /// source of churn when formatting real packages.
+    #[test]
+    fn a_one_line_match_keeps_its_line() {
+        let src = "\
+fn ok(e: Outcome): bool {
+    return match e { Outcome.Refused(why) => true, _ => false }
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt exploded a one-line match");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// The decision is the author's whole node, not just the gap after the `{`: a `match` with a
+    /// newline anywhere inside it keeps the exploded, one-arm-per-line form — including the
+    /// partially-broken shape, whose breaks are the author's and must not be collapsed.
+    #[test]
+    fn a_broken_match_stays_exploded() {
+        let exploded = "\
+fn pick(e: int): int {
+    return match e {
+        0 => 1,
+        _ => 2,
+    }
+}
+";
+        assert_eq!(fmt(exploded).unwrap(), exploded, "fmt collapsed a match");
+
+        let partial = "fn pick(e: int): int {\n    return match e { 0 => 1,\n        _ => 2 }\n}\n";
+        assert_eq!(
+            fmt(partial).unwrap(),
+            exploded,
+            "a partially-broken match normalizes to the exploded form"
+        );
+        assert_eq!(
+            fmt(exploded).unwrap(),
+            exploded,
+            "and that is a fixed point"
+        );
+    }
+
+    /// A one-line `match` whose arm carries a construct that always breaks — a block body, a
+    /// `fn` closure, a multiline string — cannot stay flat, because the flat form would contain a
+    /// newline and the next run would then read it as author-broken and explode it. The printer
+    /// asserts flatness on the rendered arms rather than assuming it, so this stays a fixed point.
+    #[test]
+    fn a_one_line_match_with_a_breaking_arm_explodes_once_and_stays() {
+        let src = "fn pick(e: int): int {\n    return match e { 0 => { return 1 }, _ => 2 }\n}\n";
+        let out = fmt(src).unwrap();
+        assert!(out.contains("0 => {"), "the block arm survived: {out}");
+        assert_eq!(fmt(&out).unwrap(), out, "and the result is idempotent");
+    }
+
+    /// A comment inside a one-line `match` forces the exploded form: a `//` on a joined line would
+    /// swallow every arm after it, and the flat path does not interleave comments at all.
+    #[test]
+    fn a_comment_in_a_one_line_match_explodes_it() {
+        let src = "fn pick(e: int): int {\n    return match e { /* pick */ 0 => 1, _ => 2 }\n}\n";
+        let out = fmt(src).unwrap();
+        assert!(out.contains("/* pick */"), "the comment survived: {out}");
+        assert!(out.contains("0 => 1,\n"), "the match is exploded: {out}");
+        assert_eq!(fmt(&out).unwrap(), out, "and the result is idempotent");
+    }
+
+    /// `wrap = true` re-derives layout from the width and is untouched by the source-directed rule:
+    /// a one-line `match` still explodes there.
+    #[test]
+    fn wrapping_still_explodes_a_one_line_match() {
+        let src = "fn pick(e: int): int {\n    return match e { 0 => 1, _ => 2 }\n}\n";
+        let out = fmt_wrapped(src, 100).unwrap();
+        assert!(out.contains("0 => 1,\n"), "wrap = true kept it flat: {out}");
+        assert_eq!(
+            fmt_wrapped(&out, 100).unwrap(),
+            out,
+            "and it is still idempotent"
+        );
+    }
+
+    /// A comment written **between two links of a method chain** stays between them.
+    ///
+    /// The expression printer interleaved no comments at all, so one written inside a chain fell
+    /// through to the enclosing statement sequence and was re-emitted *after the whole statement* —
+    /// a note explaining `.retry(3)` landing below the binding it belongs to. The corpus placement
+    /// property did not catch it because the brace depth is identical on both sides; that is the
+    /// blind spot the next-token anchor closes.
+    #[test]
+    fn a_comment_between_two_chain_links_stays_there() {
+        let src = "\
+fn github(): Client {
+    api = client.new(\"https://api.github.com\")
+        .timeout(30000)
+        // Retries transient transport failures, backing off 250ms doubled per attempt.
+        .retry(3)
+    return api
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a method chain");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// A comment in a chain the author did *not* break still has to sit on its own line, so it pins
+    /// the chain open at exactly that link — the rest stays joined, as written.
+    #[test]
+    fn a_comment_breaks_an_otherwise_joined_chain() {
+        let src = "fn f(c: Client): Client {\n    return c.a().b() /* why */ .d()\n}\n";
+        let out = fmt(src).unwrap();
+        assert!(out.contains("c.a().b()\n"), "links stayed joined: {out}");
+        assert!(
+            out.contains("/* why */\n"),
+            "the comment owns its line: {out}"
+        );
+        assert_eq!(fmt(&out).unwrap(), out, "and it is idempotent");
+    }
 }

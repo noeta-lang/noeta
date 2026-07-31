@@ -11,6 +11,7 @@ The language is built almost entirely by AI agents over a multi-year effort. Wor
 - `roadmap.md` — where the project stands and what the good next picks are. Re-scan it at the start of every work session.
 - `backlog.md` — the single registry of everything open: deferred items, scope cuts, and design proposals, each with its source and a concrete trigger. Scan it when planning a new pass so nothing slips.
 - `backend-mirror.md` — the standing VM ↔ reference-interpreter mirror inventory & policy (which duplicated logic is irreducible vs liftable). A living reference, not a plan.
+- `parallel-path-audit.md` — the standing inventory of logic maintained in N places with nothing forcing the copies together, ranked by evidence of drift, each row with a proposed chokepoint. Also records what was audited and found clean, so the next pass does not re-walk it. A living reference, not a plan.
 - `<arc>/` — an active arc in flight gets its own directory: a `README.md` ledger (status header + slice table) and per-slice files as needed.
 
 **Completed work is deleted, not archived.** When an arc ships, strike its backlog rows, move any new deferrals into `backlog.md` in the same commit, and delete its directory — the slice ledgers and design rationale stay available in git history. `plans/` only ever describes work that is open. (What the *product* does belongs in the wiki and `ARCHITECTURE.md`, never here.)

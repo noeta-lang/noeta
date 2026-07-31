@@ -121,6 +121,29 @@ impl Doc {
             first => Doc::Concat(vec![first, other]),
         }
     }
+
+    /// Whether this doc renders to a **single line at every width** — it contains no break of any
+    /// kind and no multi-line [`Doc::RawText`].
+    ///
+    /// A layout rule that wants to keep a construct on one line has to know that its *contents*
+    /// will stay there too, and the contents are built by a recursive descent that may have emitted
+    /// a [`Doc::hardline`] of its own (a block-bodied `match` arm, a `fn() { … }` closure, a
+    /// multiline string). Choosing the flat form regardless would print a newline inside it — and
+    /// then the *next* format run would see the author's construct broken and explode it, so the
+    /// rule would not be a fixed point. This is the guard that makes "flat" mean flat.
+    ///
+    /// [`Doc::Line`]/[`Doc::SoftLine`]/[`Doc::IfBreak`] count as breakable: whether they break is
+    /// the renderer's decision, not one this predicate can make.
+    pub fn never_breaks(&self) -> bool {
+        match self {
+            Doc::Nil | Doc::Text(_) => true,
+            Doc::RawText(s) => !s.contains('\n'),
+            Doc::Line | Doc::SoftLine | Doc::HardLine => false,
+            Doc::Concat(docs) => docs.iter().all(Doc::never_breaks),
+            Doc::Nest(_, d) | Doc::Group(d) => d.never_breaks(),
+            Doc::IfBreak(_) => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

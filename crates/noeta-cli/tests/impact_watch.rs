@@ -3,7 +3,7 @@
 //! nothing.
 //!
 //! `#[ignore]`d for the real processes and fs events it needs, and run by name from ci.yml's `jit`
-//! job and `scripts/gate.sh`'s `serve` group (`tests/cli/automation.rs` keeps both honest). By hand:
+//! `scripts/hot-e2e.sh`, which both ci.yml and `scripts/gate.sh` run (`tests/cli/automation.rs` keeps that list honest). By hand:
 //! `cargo test -p noeta-cli --test impact_watch -- --ignored`.
 
 use std::io::Read;

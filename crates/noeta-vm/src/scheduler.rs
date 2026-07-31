@@ -70,7 +70,16 @@ impl<'m> Vm<'m> {
     /// worker panicked) re-raises at this `.await`, consistent with a task; `Empty` is pending.
     fn poll_isolate(&mut self, id: u32, span: Span) -> Result<Poll, Abort> {
         use std::sync::mpsc::TryRecvError;
-        match self.isolates.isolates[id as usize].result.try_recv() {
+        let received = self.isolates.isolates[id as usize].result.try_recv();
+        // **This is the harvest point, so this is where the worker's output block lands** — before
+        // the outcome is turned into a value, a cancellation or an abort, so a failing worker's
+        // `echo` still reaches the run's `RunResult` ahead of the error it raises here. See
+        // [`IsolateOutput`](crate::lifecycle::IsolateOutput) for the ordering contract.
+        let received = received.map(|report| {
+            self.merge_isolate_output(report.output);
+            report.outcome
+        });
+        match received {
             Ok(IsolateOutcome::Done(wire)) => {
                 self.finish_isolate(id);
                 Ok(Poll::Ready(isolate::rebuild(

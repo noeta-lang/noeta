@@ -2,7 +2,7 @@
 //! socket, the kernel load-balances connections, and a SIGINT drains every worker.
 //!
 //! `#[ignore]`d for the real port, threads and signal it needs, and run by name from ci.yml's `jit`
-//! job and `scripts/gate.sh`'s `serve` group (`tests/cli/automation.rs` keeps both honest). By hand:
+//! `scripts/hot-e2e.sh`, which both ci.yml and `scripts/gate.sh` run (`tests/cli/automation.rs` keeps that list honest). By hand:
 //! `cargo test -p noeta-cli --test parallel_serve -- --ignored`.
 
 use std::io::{Read, Write};

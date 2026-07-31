@@ -5,7 +5,7 @@
 //! frame — the overlay — and keeps the socket open.
 //!
 //! `#[ignore]`d for the real port, processes and fs events it needs, and run by name from ci.yml's
-//! `jit` job and `scripts/gate.sh`'s `serve` group (`tests/cli/automation.rs` keeps both honest).
+//! `scripts/hot-e2e.sh`, which both ci.yml and `scripts/gate.sh` run (`tests/cli/automation.rs` keeps that list honest).
 //! By hand: `cargo test -p noeta-cli --test hot_live -- --ignored`.
 
 mod common;

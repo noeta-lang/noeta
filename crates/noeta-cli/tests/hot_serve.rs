@@ -4,8 +4,8 @@
 //! headline behavior.
 //!
 //! `#[ignore]`d because it binds a real port and spawns real processes — not because it is optional.
-//! ci.yml's `jit` job and `scripts/gate.sh`'s `serve` group both name it explicitly; the census in
-//! `tests/cli/automation.rs` fails the build if they stop. Run it yourself with
+//! `scripts/hot-e2e.sh` lists it, and both ci.yml and `scripts/gate.sh` run that script; the census
+//! in `tests/cli/automation.rs` fails the build if the list drops it. Run it yourself with
 //! `cargo test -p noeta-cli --test hot_serve -- --ignored`.
 
 use std::io::{Read, Write};
