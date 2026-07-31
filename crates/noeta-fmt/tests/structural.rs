@@ -75,7 +75,7 @@ fn digits(s: &str) -> Option<usize> {
 }
 
 fn eat(s: &str, lit: &str) -> Option<usize> {
-    s.starts_with(lit).then(|| lit.len())
+    s.starts_with(lit).then_some(lit.len())
 }
 
 /// Collect every `.noe` file under the repository's source corpus.
