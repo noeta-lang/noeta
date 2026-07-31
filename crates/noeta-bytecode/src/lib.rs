@@ -1706,6 +1706,13 @@ pub struct Module {
     /// subtree and frees on the plain-release fast path; one that is present is walked
     /// container-first, releasing each child recursively so contained destructors fire in declared
     /// order. Includes every type with its own `destruct` (the fixpoint seeds with them).
+    ///
+    /// **Sorted**, and every producer owes that. The VM reads it straight back into a set and only
+    /// asks it `contains`, so the order is invisible to behaviour — which is exactly why it went
+    /// unnoticed that it used to be a `HashSet`'s iteration order, i.e. the hasher's random
+    /// per-process seed, i.e. *the same program encoding to different bytes on every run*. Anything
+    /// serialized into a module is part of the artifact's identity; a table filled from a hash
+    /// container has to be given an order before it lands here.
     pub destruct_reachable: Vec<String>,
     /// The number of inline-cache slots the program's cacheable call sites were assigned (one per
     /// `LoadField`/`CallMethod`). The VM allocates a per-run side array of this length, indexed by

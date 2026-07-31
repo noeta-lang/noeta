@@ -58,7 +58,7 @@
 //! only mutator, so `grep -rn 'qualify_to'` enumerates every place in the compiler where a name's
 //! meaning changes. Today that is the three sites in [`qualify_stmt_scoped`] and nowhere else.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use noeta_ast::{
     AttrValue, Attribute, CallArg, ClosureBody, Expr, FieldDecl, FnDecl, ImplBlock, ImplDecl, Name,
@@ -321,8 +321,17 @@ pub fn qualify_stmt_scoped(
 /// module's declared names and dedups the seed). The linker uses this to walk a module's
 /// same-module reference graph: an exported `fn` that calls an internal helper or names a
 /// module-local type drags those declarations into the merged program (cross-module linker fix).
-pub fn referenced_names(stmt: &Stmt) -> HashSet<String> {
-    let mut names = HashSet::new();
+///
+/// A **`BTreeSet`, and that is load-bearing**: the linker iterates this to decide the order it
+/// merges a module's declarations into the program, and the merged program's statement order is
+/// what the compiler turns into prototype indices, the method table, and the reflection registry —
+/// all serialized. Returned as a `HashSet`, this made a *cross-module* program compile to different
+/// bytes on every run, since the hasher's seed is fresh per process. The order is semantically
+/// inert (the merge is a fixpoint over a set of declarations, so only the resulting `Vec`'s order
+/// changes); it is the *stability* that is not. See `bound_value_names` below for the twin that is
+/// only ever asked `contains` and can stay hash-backed.
+pub fn referenced_names(stmt: &Stmt) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
     // The walk needs `&mut` (it is shared with the rewriter); clone so the source is untouched.
     let mut scratch = stmt.clone();
     walk_stmt(&mut scratch, &mut |name, _kind, _span| {
