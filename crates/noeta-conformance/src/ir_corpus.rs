@@ -105,14 +105,20 @@ fn run_single(text: &str, report: &mut IrCorpusReport) {
 
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
-    if !tokens.0.diagnostics.is_empty() || !parsed.0.diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(
+        tokens
+            .0
+            .diagnostics
+            .iter()
+            .chain(parsed.0.diagnostics.iter()),
+    ) {
         report.not_run.parse_failed += 1;
         return;
     }
     // A program the checker rejects never runs; its diagnostics are its whole result. Its own
     // reason, not "parse-failed" — that conflation made an unparseable program and a rejected one
     // indistinguishable in the summary.
-    if !noeta_db::checked(&db, src).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::checked(&db, src).diagnostics) {
         report.not_run.checker_rejected += 1;
         return;
     }
@@ -137,7 +143,7 @@ fn run_workspace(raw: &noeta_loader::RawWorkspace, report: &mut IrCorpusReport) 
             return;
         }
     };
-    if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::linked_checked(&db, ws).diagnostics) {
         report.not_run.checker_rejected += 1;
         return;
     }

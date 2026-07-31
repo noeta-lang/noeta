@@ -175,6 +175,10 @@ pub fn run_source_file(
 ) -> ExitCode {
     match compile::compile_whole_file(file, tiers, target, no_cache) {
         Ok(compiled) => {
+            // Any warning the compile produced goes out first — before the program's own output, so
+            // a compile-time fact is not mistaken for something the program said.
+            let _ = std::io::stderr()
+                .write_all(render_mapped(&compiled.sources, compiled.warnings.iter()).as_bytes());
             run_compiled_module(compiled.module, &compiled.sources, args, app_id, jit_stats)
         }
         Err(failure) => failure.report(),

@@ -66,8 +66,13 @@ pub(crate) fn repl_bootstrap(
 
     // Always checked (it is a file); the session flavor keeps the checker when the prompt wants it.
     let (checked, session_checker) = loaded.check_session();
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&loaded.sources, checked.diagnostics.iter());
+    // Report, then gate on errors only — the same rule the prompt's own `check_entry_gate` already
+    // applies to each typed entry, now applied to the file it bootstraps from.
+    emit_diagnostics_mapped(
+        &loaded.sources,
+        loaded.warnings.iter().chain(checked.diagnostics.iter()),
+    );
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return Err(ExitCode::FAILURE);
     }
     if checker.is_some() {
@@ -100,8 +105,10 @@ pub(crate) fn repl_bootstrap(
     eprint!("{}", out.stderr);
     let _ = io::stderr().flush();
     if !out.diagnostics.is_empty() {
-        // A bootstrap that aborts is a broken app context — fail fast, exactly like `noeta run`.
         emit_diagnostics_mapped(&loaded.sources, out.diagnostics.iter());
+    }
+    if noeta_diagnostics::has_errors(&out.diagnostics) {
+        // A bootstrap that aborts is a broken app context — fail fast, exactly like `noeta run`.
         emit_trace(&out.trace, &loaded.sources);
         return Err(ExitCode::FAILURE);
     }
@@ -334,6 +341,10 @@ pub(crate) fn repl_type(session: &mut VmSession, expr: &str, sources: &[Source])
     let map = SourceMap::new(map_sources);
     if !out.diagnostics.is_empty() {
         emit_diagnostics_mapped(&map, out.diagnostics.iter());
+    }
+    // The type still prints when the expression merely warned — only an abort leaves nothing to
+    // report a type for.
+    if noeta_diagnostics::has_errors(&out.diagnostics) {
         emit_trace(&out.trace, &map);
     } else if let Some(ty) = out.value {
         println!("{ty}");

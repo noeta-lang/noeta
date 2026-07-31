@@ -2507,8 +2507,9 @@ pub const PARAM_INFO: &str = "ParamInfo";
 /// The built-in **test-metadata attributes** (object-model slice 6h) — prelude `@attribute` structs
 /// the test runner reads off a `@test`/`@bench` fn: `#[Skip]` (zero fields, mark as skipped),
 /// `#[Name("…")]` (display name), `#[Group("…")]` (category for `--group` filtering), `#[Data([…])]`
-/// (parameterized rows). The single source of truth shared by the checker's prelude registration and
-/// the runner that interprets them.
+/// (parameterized rows), and `#[Timeout(seconds)]` (raise or disable this test's per-test deadline).
+/// The single source of truth shared by the checker's prelude registration and the runner that
+/// interprets them.
 // D2b — the tier attributes live under their tier's namespace (no global attribute namespace), so
 // these constants are the **qualified identity** every path shares: the loader rewrites a
 // user-written `#[Skip]` (after `use std.test.{Skip}`) to this FQN, the reflection manifest carries
@@ -2517,6 +2518,10 @@ pub const TEST_ATTR_SKIP: &str = "std.test.Skip";
 pub const TEST_ATTR_NAME: &str = "std.test.Name";
 pub const TEST_ATTR_GROUP: &str = "std.test.Group";
 pub const TEST_ATTR_DATA: &str = "std.test.Data";
+/// `#[Timeout(seconds)]` — the per-test deadline override. The runner bounds every test by a suite
+/// default (`noeta test --timeout`, else the runner's own); this attribute raises it for the one test
+/// that legitimately needs longer, and `#[Timeout(0)]` opts that test out of the bound entirely.
+pub const TEST_ATTR_TIMEOUT: &str = "std.test.Timeout";
 
 /// The **tier-knob attribute** of the `bench` tier: `#[Bench(iterations: N)]` on a bench fn sets its
 /// iteration count. A `@bench(iterations: N) { … }` block directive is distribution sugar — it

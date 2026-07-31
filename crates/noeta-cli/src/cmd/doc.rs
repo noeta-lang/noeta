@@ -357,7 +357,10 @@ fn render_docs(sources: &[noeta_span::Source]) -> String {
         );
         let lexed = noeta_lexer::lex(&local);
         let parsed = noeta_parser::parse(&local, &lexed.tokens);
-        if !lexed.diagnostics.is_empty() || !parsed.diagnostics.is_empty() {
+        // Only a real error means there is no tree to read docs out of; an advisory diagnostic
+        // still leaves one, and skipping the file would silently drop its documentation.
+        if noeta_diagnostics::has_errors(lexed.diagnostics.iter().chain(parsed.diagnostics.iter()))
+        {
             continue;
         }
         for doc in noeta_check::resolve_docs(&parsed.program) {

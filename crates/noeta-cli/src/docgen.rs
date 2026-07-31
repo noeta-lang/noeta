@@ -390,7 +390,10 @@ fn module_docs(source: &Source) -> Option<ModuleDocs> {
     let local = Source::new(SourceId::FIRST, source.name(), source.text().to_string());
     let lexed = noeta_lexer::lex(&local);
     let parsed = noeta_parser::parse(&local, &lexed.tokens);
-    if !lexed.diagnostics.is_empty() || !parsed.diagnostics.is_empty() {
+    // Only a real lex/parse **error** means there is no tree to document. An advisory diagnostic
+    // still leaves a well-formed program, and dropping a module's whole API reference over a lint
+    // would be a silent documentation hole.
+    if noeta_diagnostics::has_errors(lexed.diagnostics.iter().chain(parsed.diagnostics.iter())) {
         return None;
     }
     let program: &Program = &parsed.program;

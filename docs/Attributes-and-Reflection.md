@@ -34,7 +34,7 @@ fn admin_handler(): void { /* handle the request */ }
 - Arguments are a **constant literal tree** — scalars, lists, maps, sets, enum values, nested struct literals, and a type reference (which becomes a reflection `Type` value). A non-literal argument (e.g. `1 + 2`) is E0003.
 - A type-reference argument keeps its **generic arguments** at full fidelity — `#[Builds(target: List<int>)]` reflects as `Type.List(Type.Int)`, not an erased `Type.List(Type.Dyn)` — and is validated exactly like a type annotation anywhere else: an unknown name inside it is E0013, and a built-in constructor applied at the wrong arity (`List<int, string>`) is E0058.
 
-The `#[Skip]` / `#[Name]` / `#[Group]` / `#[Data]` attributes used by the [test runner](Testing) are exactly such `@attribute` structs. They are **not prelude** — they live in `std.test`, so bring them in with `use std.test.{Skip, Name, Group, Data}` at the top level or qualify one inline (`#[std.test.Skip]`). Without either, `#[Skip]` is the ordinary "`Skip` cannot be used as an attribute" error.
+The `#[Skip]` / `#[Name]` / `#[Group]` / `#[Data]` / `#[Timeout]` attributes used by the [test runner](Testing) are exactly such `@attribute` structs. They are **not prelude** — they live in `std.test`, so bring them in with `use std.test.{Skip, Name, Group, Data, Timeout}` at the top level or qualify one inline (`#[std.test.Skip]`). Without either, `#[Skip]` is the ordinary "`Skip` cannot be used as an attribute" error.
 
 ### `@role(Enum.Variant)` — a semantic role tag
 

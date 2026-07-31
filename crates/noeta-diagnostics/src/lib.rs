@@ -733,6 +733,12 @@ impl Diagnostic {
     /// so the program stops here with the error's own `message()`. Composed in the catalog rather
     /// than at either runtime because **both** backends raise it — the differential oracle compares
     /// diagnostics verbatim, so a single builder is what keeps the two from wording it differently.
+    /// Whether this diagnostic *blocks* — i.e. its severity is [`Severity::Error`]. A warning or a
+    /// note describes the program without condemning it, so it must never stop the pipeline.
+    pub fn is_error(&self) -> bool {
+        self.severity == Severity::Error
+    }
+
     pub fn unhandled_error(span: Span, message: &str) -> Diagnostic {
         Diagnostic::error(
             DiagnosticCode::UnhandledError,
@@ -745,6 +751,18 @@ impl Diagnostic {
              returns `Result<T, E>` and decide at its call site",
         )
     }
+}
+
+/// Whether any of `diagnostics` blocks — the **one** predicate every "may I proceed?" gate in the
+/// toolchain asks.
+///
+/// A `Vec<Diagnostic>` is a mixed bag of severities, so `!diagnostics.is_empty()` is not the
+/// question a gate means to ask: it makes a lone *warning* refuse to run a program that is
+/// perfectly well-formed, which turns every advisory lint into a hard stop and makes new warnings
+/// unsafe to add. Gates ask this instead; they still *render* every diagnostic they were handed,
+/// warnings included — proceeding must never mean going quiet.
+pub fn has_errors<'a>(diagnostics: impl IntoIterator<Item = &'a Diagnostic>) -> bool {
+    diagnostics.into_iter().any(Diagnostic::is_error)
 }
 
 /// The candidate most similar to `target`, if one is close enough to be a plausible typo — the

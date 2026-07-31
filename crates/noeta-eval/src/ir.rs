@@ -298,9 +298,11 @@ impl Interpreter {
         self.reap_object_cycles();
         // A deliberate `os.exit(code)` wins over the diagnostic-derived code (there are no
         // diagnostics on that path — the halt is clean).
+        // Derived from whether the run **aborted**, not from whether it said anything — and
+        // identically to the VM's `lifecycle`, since the differential compares the two verbatim.
         let exit_code = self
             .requested_exit
-            .unwrap_or(if self.diagnostics.is_empty() { 0 } else { 1 });
+            .unwrap_or(u8::from(noeta_diagnostics::has_errors(&self.diagnostics)).into());
         (
             RunResult {
                 stdout: self.stdout,
