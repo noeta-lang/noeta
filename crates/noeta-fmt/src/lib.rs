@@ -1485,4 +1485,101 @@ fn pick(x: ?int): string {
         assert_eq!(out, src, "fmt moved a comment out of a block body");
         assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
     }
+
+    #[test]
+    fn a_comment_between_object_fields_stays_between_them() {
+        // Mirrors test-p2p `parse_line`: a `//` comment written between two fields of an object
+        // literal must stay on its own line inside the `{ … }`, not migrate past the closing `}`.
+        let src = "\
+fn parse_line(parts: List<string>): Line {
+    return Line {
+        at: parts[0],
+        who: if parts.len() > 1 then parts[1] else \"?\",
+        // The text half may itself contain \"|\", which is why the split is capped at 3.
+        text: if parts.len() > 2 then parts[2] else \"\",
+    }
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of an object literal");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    #[test]
+    fn a_leading_and_dangling_comment_in_an_object_literal_stay_put() {
+        let src = "\
+p = Point {
+    // above the first field
+    x: 1,
+    y: 2,
+    // dangling before the close
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(
+            out, src,
+            "fmt moved a leading/dangling object-literal comment"
+        );
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    #[test]
+    fn a_trailing_comment_on_an_object_field_stays_trailing() {
+        let src = "\
+p = Point {
+    x: 1, // the abscissa
+    y: 2,
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(
+            out, src,
+            "fmt moved a trailing field comment onto its own line"
+        );
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    #[test]
+    fn a_comment_between_list_elements_stays_between_them() {
+        let src = "\
+xs = [
+    1,
+    // the middle one
+    2,
+    3,
+]
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a list literal");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    #[test]
+    fn a_comment_between_map_entries_stays_between_them() {
+        let src = "\
+m = {
+    \"a\": 1,
+    // the second entry
+    \"b\": 2,
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a map literal");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    #[test]
+    fn a_comment_between_set_elements_stays_between_them() {
+        let src = "\
+s = #{
+    1,
+    // the middle one
+    2,
+    3,
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a set literal");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
 }
