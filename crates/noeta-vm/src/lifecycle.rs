@@ -157,11 +157,18 @@ pub(crate) struct IsolateState {
 /// handle (taken to join at teardown), and the **cancellation flag** the parent sets from
 /// `h.cancel()` (isolate-cancel) and the worker polls at its safepoints.
 pub(crate) struct IsolateSlot {
-    pub(crate) result: std::sync::mpsc::Receiver<IsolateOutcome>,
+    pub(crate) result: std::sync::mpsc::Receiver<IsolateReport>,
     pub(crate) handle: Option<std::thread::JoinHandle<()>>,
     /// Set by the parent's `cancel_task` (isolate-cancel). The worker reads it with a relaxed load
     /// at every safepoint; nothing else writes it, so it only ever goes `false → true`.
     pub(crate) cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// The **wake half** of that request (interruptible-io): fired by the parent right after the
+    /// flag store, so a worker blocked *outside* the interpreter — parked in its executor's
+    /// real-time sleep for one long `sleep(ms)` — returns from that block and reaches the safepoint
+    /// that reads the flag. The worker registers its executor's hook on it at startup (before any
+    /// user code runs); a `CancelWake` with no hooks registered is inert, so this costs nothing on
+    /// a worker whose executor cannot block.
+    pub(crate) wake: Arc<noeta_stdlib::CancelWake>,
 }
 
 /// What a worker isolate ships home when its thread finishes (isolate-cancel). Three terminal
@@ -176,6 +183,65 @@ pub(crate) enum IsolateOutcome {
     Done(isolate::Wire),
     Cancelled,
     Failed(IsolateFailure),
+}
+
+/// Everything a worker isolate ships home: its terminal [`IsolateOutcome`] **and the program output
+/// it produced** ([`IsolateOutput`]). One message, because the two are inseparable — a worker's
+/// `echo` is as much a part of what it did as its return value, and there is no second channel a
+/// shared-nothing isolate could have used.
+pub(crate) struct IsolateReport {
+    pub(crate) output: IsolateOutput,
+    pub(crate) outcome: IsolateOutcome,
+}
+
+/// A worker isolate's captured program output, marshalled home with its outcome.
+///
+/// # Why it has to travel
+///
+/// A worker builds its **own** [`Vm`], with its own `Host`, its own executor and its own
+/// thread-local object registry — shared-nothing by construction, which is exactly what makes
+/// abandoning one a leak rather than a use-after-free. Nothing about the parent's `RunOutput` is
+/// reachable from the worker, so the buffers cannot be shared; they have to be handed back
+/// explicitly. They are plain `String`s, so they cross the thread boundary like every
+/// [`isolate::Wire`] value does.
+///
+/// # The ordering contract
+///
+/// **A worker's output arrives as one contiguous block, appended to the parent's buffers at the
+/// point the parent harvests that worker's outcome** — its `.await` / the structured scope's join.
+/// Two guarantees follow, and one deliberate non-guarantee:
+///
+/// - *Within* a block, the worker's own writes are in the worker's program order. That is the only
+///   order that is real, and it is preserved exactly.
+/// - A block lands at a point in the **parent's** program order (the harvest), so a parent that
+///   awaits its isolates in sequence gets a fully determined transcript.
+/// - Across isolates running *concurrently*, blocks appear in harvest order, which is completion
+///   order — and completion order is thread scheduling, so it is not reproducible.
+///
+/// Interleaving the two streams line-by-line was the alternative and is rejected: it needs a shared
+/// wall clock the deterministic sandbox does not have, it would make ordering depend on thread
+/// scheduling at *line* granularity rather than at block granularity, and it would shred a worker's
+/// own transcript for a total order that never existed. Grouping keeps the one true order and is
+/// honest about the one that is not.
+///
+/// # Live runs
+///
+/// On a run whose host streams output ([`noeta_stdlib::Console::streams_output`] — `noeta run`,
+/// `noeta serve`), a worker's completed lines have already left its buffer for the terminal, so
+/// only the unterminated tail travels. Nothing is printed twice, and nothing that was streamed is
+/// re-captured.
+#[derive(Default)]
+pub(crate) struct IsolateOutput {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+}
+
+impl IsolateOutput {
+    /// Whether there is anything to merge — the common case is `true` for a worker that echoed and
+    /// `false` for one that did not, and the parent skips the merge entirely when it is empty.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.stdout.is_empty() && self.stderr.is_empty()
+    }
 }
 
 /// A worker isolate's failure, shipped back across the thread boundary: the abort's message and the
@@ -447,6 +513,26 @@ impl<'m> Vm<'m> {
         self.out.stderr.push_str(text);
         if self.out.live {
             self.flush_live(noeta_stdlib::Stream::Stderr);
+        }
+    }
+
+    /// Merge a harvested worker isolate's program output into this run's buffers — the hand-back a
+    /// shared-nothing isolate needs, since the worker's `RunOutput` lives on its own thread and is
+    /// unreachable from here (see [`IsolateOutput`] for the ordering contract and why the block is
+    /// appended at *this* point rather than interleaved).
+    ///
+    /// Routed through `emit_*` rather than a raw `push_str` so a live parent streams the block just
+    /// like its own writes; on a batch run (`noeta test`, an embedder) the two entry points are the
+    /// same append.
+    pub(crate) fn merge_isolate_output(&mut self, output: IsolateOutput) {
+        if output.is_empty() {
+            return;
+        }
+        if !output.stdout.is_empty() {
+            self.emit_stdout(&output.stdout);
+        }
+        if !output.stderr.is_empty() {
+            self.emit_stderr(&output.stderr);
         }
     }
 
@@ -877,10 +963,17 @@ impl<'m> Vm<'m> {
         }
 
         // Join any isolate worker threads not already harvested (a structured scope harvests + joins its
-        // isolates at `}`, so this is normally empty — defensive against an early exit).
+        // isolates at `}`, so this is normally empty — defensive against an early exit). Their output
+        // still comes home: the join is this worker's harvest point, so its block is appended here,
+        // ahead of the `RunResult` this teardown builds. A worker whose outcome nobody will read
+        // still wrote what it wrote, and dropping it is the bug this path used to share.
         for slot in std::mem::take(&mut self.isolates.isolates) {
             if let Some(h) = slot.handle {
                 let _ = h.join();
+            }
+            // The thread has ended, so its report — if it sent one at all — is already queued.
+            if let Ok(report) = slot.result.try_recv() {
+                self.merge_isolate_output(report.output);
             }
         }
         // Drop any stall-registry worker slots not released by a harvest (isolates I.4c) — an early
@@ -936,6 +1029,11 @@ impl<'m> Vm<'m> {
 /// so the dispatch loop's safepoints and its scheduler rounds poll it, and unwinds to
 /// [`IsolateOutcome::Cancelled`] when it is set. Teardown runs either way, so a cancelled worker
 /// frees its heap exactly like a completed one.
+///
+/// The [`IsolateReport`] carries the worker's **program output** home alongside its outcome — read
+/// after the worker's teardown, so a destructor that echoes on the way out is included, and shipped
+/// on every arm (a cancelled or failed worker wrote what it wrote). See [`IsolateOutput`] for the
+/// ordering contract the parent merges it under.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_isolate_worker(
     module: &Arc<Module>,
@@ -949,10 +1047,18 @@ pub(crate) fn run_isolate_worker(
     registry: Option<&'static noeta_stdlib::registry::Registry>,
     stall_tracked: bool,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    cancel_wake: Arc<noeta_stdlib::CancelWake>,
     span: Span,
-) -> IsolateOutcome {
+) -> IsolateReport {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
-    let (host, executor) = factory();
+    let (host, mut executor) = factory();
+    // Arm the executor against this worker's cancellation (interruptible-io) *before* the VM is
+    // built, so the request can never land in the window between construction and the first
+    // suspension: a wake that already fired runs the hook at registration. The executor is built on
+    // THIS thread by the factory (a `RealExecutor` owns a tokio runtime, which is not `Send`), which
+    // is why the wake travels out to the parent through a shared handle rather than the executor
+    // travelling home.
+    executor.set_cancel_wake(cancel_wake);
     let mut wvm = Vm::load(module, host, executor);
     // Per-isolate profiling (injected by `noeta profile`): this worker gets its own collector, and
     // the seam propagates so isolates IT spawns are profiled too. The display name is the spawned
@@ -1048,7 +1154,7 @@ pub(crate) fn run_isolate_worker(
         let name = format!("isolate {fn_name} #{}", sink.len() + 1);
         sink.push((name, hook));
     }
-    let message = match outcome {
+    let outcome = match outcome {
         Ok(result) => {
             let marshalled = isolate::marshal(result, &wvm.persist.shapes, &wvm.persist.channels)
                 .map(IsolateOutcome::Done)
@@ -1139,7 +1245,17 @@ pub(crate) fn run_isolate_worker(
     // once. The main heap's teardown ends the same way.
     let garbage = collect_trace(&[]);
     wvm.reclaim_cycle_garbage(garbage);
-    message
+    // Take the worker's output **last** — after teardown — so a `__destruct` that echoes on the way
+    // out is part of the block the parent merges, exactly as it would be for the main program. On a
+    // live run the completed lines have already been streamed and drained, so what is left here is
+    // the unterminated tail and nothing else.
+    IsolateReport {
+        output: IsolateOutput {
+            stdout: std::mem::take(&mut wvm.out.stdout),
+            stderr: std::mem::take(&mut wvm.out.stderr),
+        },
+        outcome,
+    }
 }
 
 impl<'m> Vm<'m> {

@@ -7,7 +7,9 @@ name: CI
 #   - docs   : the documentation-sample gate — every ```noeta block in docs/ must run through the
 #              `noeta` binary exactly as tagged (untagged → exit 0, `error` → non-zero, `ignore` → skip).
 #   - jit    : the tier-0/tier-1 JIT differential (interpreter vs forced native code, byte-identical
-#              RunResult) and the leak-under-JIT check, behind the `jit` cargo feature.
+#              RunResult) and the leak-under-JIT check, behind the `jit` cargo feature — plus the
+#              `#[ignore]`d real-socket end-to-end suites (`scripts/hot-e2e.sh`), which drive a live
+#              `noeta serve --watch` through a hot swap in the shape the shipped binary is built in.
 #   - clippy : lints, denying warnings, for both the default build and the `jit` feature.
 #   - fmt    : `cargo fmt --check` — the tree is kept stable-rustfmt-clean.
 #   - miri   : the one place `unsafe` lives — the NaN-box value model and the cycle collector —
@@ -154,6 +156,20 @@ jobs:
       # exercise the production hot-counter JIT end-to-end (real-host `noeta run`/`test`). Gate that path.
       - name: JIT-enabled CLI (integration + doc samples)
         run: cargo test -p noeta-cli --locked
+      # The hot-reload / real-socket end-to-end suites. They are `#[ignore]`d — real port, real
+      # child processes, real file edits — so the step above BUILDS them and runs none of them, and
+      # until this step existed nothing ran them unless a human typed `-- --ignored`. That is not a
+      # theoretical cost: `hot_serve` and `hot_live` once sat failing on `main` for weeks, and every
+      # end-to-end hot-swap regression this project has shipped was in their blast radius. They run
+      # here, in the JIT-enabled job, because the shipped `noeta` binary is JIT-enabled by default —
+      # this is the shape a user meets a hot swap in. Cost is ~7s of test time on a build this job
+      # has already paid for. The script is shared verbatim with `scripts/gate.sh`, so the local
+      # merge gate runs exactly this; it also asserts how many tests ran, because `--ignored` with
+      # nothing to select exits 0 and would otherwise make a renamed test a silent green.
+      # Quoted: an unquoted `#` after a space opens a YAML comment, which silently truncated this
+      # step's name to "Hot-reload e2e (the" the first time it was written.
+      - name: "Hot-reload e2e (the #[ignore]d real-socket suites)"
+        run: bash scripts/hot-e2e.sh
       # The shipped examples are code users copy and the docs link to by path, so a language change
       # must not be able to invalidate them unnoticed — it twice did (the sealed-fn and no-shadowing
       # rules each broke a LiveView example, and both sat broken because the only tests referencing

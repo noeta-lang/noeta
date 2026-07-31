@@ -61,6 +61,7 @@ A language feature is added as a **vertical slice**, in this order:
 - **The JIT oracle** (`--jit-differential`, `jit` feature) — every corpus program through the interpreter and the forced-Tier-1 JIT: byte-identical `RunResult`, zero residency, zero anomalies. This is the gate for native-code refcount contracts that miri cannot see.
 - **miri** — covers the quarantined `unsafe` that can execute under it: `noeta-value`, `noeta-gc`, the `noeta-db` newtype, a `noeta-stdlib` reinterpret, and the test-only `noeta-alloc-probe`. The compiler and the default-feature interpreter paths are `unsafe`-free.
 - **What miri cannot see — the JIT oracle covers it.** The Tier-1 seam's `unsafe` (`noeta-jit`, the VM's `jit`-feature helpers) executes as generated native code, which miri can't run; the JIT oracle above is that code's gate for memory and refcount correctness.
+- **The hot-reload end-to-end suites** (`scripts/hot-e2e.sh`) — `hot_serve`, `hot_live`, `parallel_hot`, `live_serve`, `graceful_drain`, driven through the shipped binary against a real listening socket: edit a running handler and assert the new body serves, the signal state survives, the swap reaches every worker, and a live client is told to reload. They stay `#[ignore]`d because they bind ports and spawn processes, so nothing runs them implicitly; the script is the one place that does, called by both the `jit` CI job and the merge tier of `scripts/gate.sh`. Everything else about a hot swap is checked on the compile side — this is the only gate that watches one land in a server that is actually serving.
 - **Coverage** — measured with `cargo-llvm-cov` (never tarpaulin, which can't see the subprocess-driven CLI tests). `cargo llvm-cov --workspace --summary-only`.
 - **Benchmarks** — `cargo bench -p noeta-vm` runs the `criterion` benches over the VM hot paths; a VM-touching change should check for no regression.
 
@@ -70,7 +71,8 @@ A language feature is added as a **vertical slice**, in this order:
 
 ```sh
 scripts/gate.sh --quick   # fmt + both clippy splits                        (1m20s warm)
-scripts/gate.sh           # + the suite & oracles, doc samples, JIT gates   (~15 min warm, 35 cold)
+scripts/gate.sh           # + the suite & oracles, doc samples, JIT gates,
+                          #   and the real-socket hot-reload e2e suites     (~15 min warm, 35 cold)
 scripts/gate.sh --full    # + wasm portability, miri, editor tooling        (before a release tag)
 ```
 

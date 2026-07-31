@@ -53,6 +53,7 @@ The summary names the tiers it looked inside, so a green `noeta check` means the
 - The activated program is type-checked **once**, so a broken test is one compile error, not one per run.
 - Each test runs as `<shared setup> + <call the test fn>` in a **fresh real-host isolate**, so one test can never observe another's state. The shared setup is the file's declarations, globals, and every top-level effect that *finishes* — see [Shared setup](#shared-setup) below.
 - Tests run **in parallel** across worker threads (default: the machine's parallelism, capped at the test count). Results are gathered by declaration index and reported in **declaration order**, deterministically, regardless of finish order.
+- A test's stdout is **captured**: hidden when it passes, printed under the failure when it does not. That includes anything an [isolate](Concurrency#what-an-isolate-prints) the test spawned wrote — a worker's `echo` follows the same rule as the test's own, and lands where the test joined the worker.
 - By default all tests run even after a failure. `--fail-fast` stops after the first failure — or the first timeout — and drains the workers.
 - Every test is bounded by a **per-test deadline** (default 60 s). One test that never returns can no longer swallow the whole run: it is reported `TIME`, every other test still reports, and the run exits `1`. See [Timeouts](#timeouts).
 
@@ -213,7 +214,7 @@ Abandoning is still the right trade for that class by a wide margin: a leaked th
 
 Two more consequences to know about:
 
-- **A timed-out test reports no captured output**, stopped or abandoned. A stopped test produced no result to read from, and an abandoned one is still running. (Separately, a real isolate's output buffers do not currently reach the parent's result at all — so this is not the only place output goes missing under `noeta test`.)
+- **A stopped test reports what it managed to print; an abandoned one reports nothing.** A test that stops when asked unwinds and runs its ordinary teardown, so its captured output is complete as far as it got — and that is printed under the `TIME` line, because "it got this far and then wedged" is the most useful thing a timed-out test can tell you. An abandoned test is still running and has produced no result to read, so its output is empty rather than partial.
 - **The process still exits promptly.** Abandoned threads are detached, so neither the worker pool nor the runner's own teardown waits on them. The grace is waited out per worker rather than per test, so a suite with many wedged tests pays it once, in parallel.
 
 **A bounded test gives up nothing in speed.** Being stoppable means staying somewhere with safepoints, and for a while that ruled out the JIT: native code carried no cancellation check, so a run that could be cancelled had to decline on-stack replacement and leave its hot loops in tier 0 — measured, a 200-million-iteration counting loop took **6.53 s** under a bound against **0.64 s** without one, a 10× tax. That is gone. The JIT now emits a cancellation check at every loop header, in bodies compiled for a cancellable run only, and the same loop runs at **0.76 s bounded against 0.66 s unbounded** — the check costs about half a nanosecond per iteration, against the ten-fold penalty it replaced. A bounded test tiers up exactly like an unbounded one.

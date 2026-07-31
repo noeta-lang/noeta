@@ -70,7 +70,16 @@ impl<'m> Vm<'m> {
     /// worker panicked) re-raises at this `.await`, consistent with a task; `Empty` is pending.
     fn poll_isolate(&mut self, id: u32, span: Span) -> Result<Poll, Abort> {
         use std::sync::mpsc::TryRecvError;
-        match self.isolates.isolates[id as usize].result.try_recv() {
+        let received = self.isolates.isolates[id as usize].result.try_recv();
+        // **This is the harvest point, so this is where the worker's output block lands** — before
+        // the outcome is turned into a value, a cancellation or an abort, so a failing worker's
+        // `echo` still reaches the run's `RunResult` ahead of the error it raises here. See
+        // [`IsolateOutput`](crate::lifecycle::IsolateOutput) for the ordering contract.
+        let received = received.map(|report| {
+            self.merge_isolate_output(report.output);
+            report.outcome
+        });
+        match received {
             Ok(IsolateOutcome::Done(wire)) => {
                 self.finish_isolate(id);
                 Ok(Poll::Ready(isolate::rebuild(
@@ -681,10 +690,18 @@ impl<'m> Vm<'m> {
     /// reads at every safepoint. Idempotent (the flag only ever goes `false → true`) and cheap —
     /// the worker does the noticing. Also wakes any parked scheduler, so a parent already blocked in
     /// the stall wait re-polls promptly once the worker's outcome lands.
+    ///
+    /// The store is followed by the worker's [`CancelWake`](noeta_stdlib::CancelWake)
+    /// (interruptible-io), which rouses a worker that is blocked *outside* the interpreter and would
+    /// otherwise reach no safepoint until that block ended — today its executor's real-time sleep,
+    /// so one long `sleep(ms)` stops at once instead of when the sleep expires. The wake decides
+    /// nothing: it only ends the block, and the worker's own poll then honors the request. Ordered
+    /// flag-then-wake so the woken worker cannot fail to see what it was woken for.
     pub(crate) fn request_isolate_cancel(&mut self, id: u32) {
         self.isolates.isolates[id as usize]
             .cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.isolates.isolates[id as usize].wake.wake();
         isolate::WAKE.notify();
     }
 
@@ -1028,6 +1045,12 @@ impl<'m> Vm<'m> {
         // worker propagates to its children explicitly (see `observe_cancel`).
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
+        // The wake half of that request (interruptible-io): the worker registers its executor's
+        // wake on it at startup, and the parent fires it right after the flag store, so a worker
+        // blocked outside the interpreter (parked in one long `sleep`) is roused instead of
+        // observing the request when the sleep ends.
+        let cancel_wake = Arc::new(noeta_stdlib::CancelWake::new());
+        let worker_wake = Arc::clone(&cancel_wake);
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_handle = std::thread::spawn(move || {
             let msg = run_isolate_worker(
@@ -1042,6 +1065,7 @@ impl<'m> Vm<'m> {
                 registry,
                 stall_tracked,
                 worker_cancel,
+                worker_wake,
                 span,
             );
             let _ = tx.send(msg);
@@ -1054,6 +1078,7 @@ impl<'m> Vm<'m> {
             result: rx,
             handle: Some(thread_handle),
             cancel,
+            wake: cancel_wake,
         });
         self.isolates.inflight_isolates += 1;
         // A worker that has *already* been cancelled must not leave a freshly spawned child running

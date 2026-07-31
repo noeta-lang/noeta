@@ -185,9 +185,9 @@ concurrent {
 
 - **It does not undo work already done.** A cancelled task keeps every file it wrote, every message it sent, every row it inserted. `Err(Cancelled)` means "this produced no value", not "this never happened" — a caller that needs the effects reverted has to revert them.
 - **A request that arrives too late is not a cancellation.** If the body finished before the request was noticed, `join` reports `Ok(v)`. It never claims work that ran to completion was cancelled.
-- **It cannot preempt a native call.** An isolate blocked inside the host — a pipe read, a socket read, a blocking syscall — is not executing Noeta, so it reaches no safepoint and does not stop until that call returns. This is the one case where a cancel can leave you waiting indefinitely, and the fix is a deadline on the operation itself rather than a cancel around it.
+- **It cannot preempt a native call.** An isolate blocked inside the host — a pipe read, a socket read, a blocking syscall — is not executing Noeta, so it reaches no safepoint and does not stop until that call returns. This is the one case where a cancel can leave you waiting indefinitely, and the fix is a deadline on the operation itself rather than a cancel around it. It applies to the `_async` twins too: awaiting `fs.read_async` or `p.read_line_async()` frees the *scheduler* to run your other tasks, but the read itself still has to return before the isolate can finish stopping.
 
-**One `sleep` is not a safepoint.** A worker parked in `sleep(3000).await` is not running either, and its clock advance is a single real sleep — so it observes a cancel when that sleep *ends*, not when it is issued (measured: cancelled 200 ms in, it stopped 2.8 s later). Sleep in slices when you want a bound: the same watcher written as `while w < ms { sleep(5).await; w = w + 5 }` stops within a millisecond, because each slice returns to the scheduler and the scheduler checks. This costs nothing on the ordinary path — it only matters for a task you intend to cancel.
+**A long `sleep` is cancellable.** A worker parked in `sleep(3000).await` is not running Noeta either — its clock advance is a single real sleep — so the request is delivered with a **wake** that ends that sleep, and the worker stops at the round it wakes into: measured, a 3 s sleep cancelled 200 ms in ends the run at 0.21 s, where before the wake existed it ran on for the remaining 2.8 s. Nothing is asked of your code — the old advice to "sleep in slices when you intend to cancel" is retired, and `while w < ms { sleep(5).await; w = w + 5 }` and `sleep(ms).await` now stop alike.
 
 **Cancellation and the closing brace.** A `concurrent` block joins everything it spawned, and a cancelled member is no exception: the block waits for it to actually stop before returning. This is the load-bearing half of structured concurrency, and it is why a cancelled isolate is joined rather than abandoned — the alternative is a thread that outlives its scope, still holding its heap and its handles, still writing to the world the program thinks it has finished with.
 
@@ -207,6 +207,35 @@ Only `Send` values may cross an isolate boundary, and the **value/reference axis
 Sending a `!Send` value across an isolate is E0042.
 
 The rule also covers **globals**, not just a call's arguments and result: an isolate runs in a fresh heap and snapshots the module's value-type globals by copy, but a reference `class` global has identity and cannot be copied across — so it is **not** shared. A worker that reads such a global fails at that use naming the global, its type, and the fix (make it a value `struct`, or pass the value-type data it holds as arguments) rather than silently observing a stale duplicate. A `class` global an isolate never reads is fine — only a read triggers the error.
+
+### What an isolate prints
+
+An isolate's `echo` and `io.out`/`io.errln` are part of the program's output like anything else — an isolate is shared-nothing, not silent. Because it has its own heap and its own output buffers, what it writes is **handed back with its result**, and that fixes where it appears:
+
+> **An isolate's output arrives as one contiguous block, at the point the awaiting code joins it.**
+
+Three consequences, and they are the whole contract:
+
+- **Within a block, the isolate's own order is exact.** Two `echo`s in a worker are two adjacent lines, in the order the worker wrote them. Nothing else can appear between them.
+- **The block lands where you joined it** — at the `.await`, in the *awaiting* code's order. So a program that starts and joins its isolates one at a time has a completely determined transcript, and it reads top to bottom:
+
+```noeta
+async fn work(name: string): int { echo "worker " ~ name; return 1 }
+
+async fn both(): int {
+    mut n = 0
+    echo "before"
+    concurrent { a = isolate work("a"); n = n + a.await }
+    echo "between"                                          // "worker a" has already appeared
+    concurrent { b = isolate work("b"); n = n + b.await }
+    echo "after"
+    return n
+}
+```
+
+- **Isolates running at the same time have no order between them,** and none is invented. Two workers joined out of one `concurrent` block appear in the order they finish, which is thread scheduling — reproducible only if you make it so. Interleaving their lines by timestamp was the alternative and is deliberately not what happens: it would need a wall clock the deterministic sandbox does not have, and it would shred each worker's own transcript to fabricate a global order that never existed. Grouping keeps the order that is real and declines to invent the one that is not.
+
+On a live run (`noeta run`, `noeta serve`) output streams as it is produced, so a worker's completed lines reach the terminal immediately rather than waiting for the join; only an unterminated last line waits. Where output is *collected* rather than streamed — `noeta test`, `--json`, an embedder reading the run's result — the block rule above is what you get.
 
 ## Channels
 
