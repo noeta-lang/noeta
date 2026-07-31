@@ -22,6 +22,10 @@ noeta-ext-abi = { workspace = true }
 # units before linking (a dev-dep never re-enters the library build graph, so stdlib body edits
 # still skip this crate's lib).
 noeta-stdlib = { workspace = true }
+# Scratch projects for the linking tests, private to each process: this crate links an entry's
+# sibling files as modules, so a fixture in the shared system temp dir would sweep in whatever
+# `.noe` files another process left there.
+noeta-test-temp = { workspace = true }
 
 [lints]
 workspace = true

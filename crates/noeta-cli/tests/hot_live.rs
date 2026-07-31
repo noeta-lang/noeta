@@ -55,8 +55,7 @@ fn app(double_factor: &str) -> String {
 #[test]
 #[ignore = "spawns the CLI, binds a real socket, and writes real files; run explicitly"]
 fn a_live_client_gets_reload_on_swap_and_error_on_red_check() {
-    let dir = std::env::temp_dir().join(format!("noeta-hot-live-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = noeta_test_temp::TempDir::new("hot-live");
     let app_path = dir.join("app.noe");
     std::fs::write(&app_path, app("2")).unwrap();
 

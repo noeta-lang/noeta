@@ -45,6 +45,8 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 serde_json = { workspace = true }
 noeta-alloc-probe = { workspace = true }
+# Per-process fixture directories for the tests that link a real on-disk project.
+noeta-test-temp = { workspace = true }
 
 [lints]
 workspace = true

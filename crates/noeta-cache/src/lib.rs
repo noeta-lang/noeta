@@ -408,14 +408,11 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// A cache root of this process's own, unique per call. `Cache::open_at` takes ownership of
+    /// the directory, so there is nowhere to keep a guard — `unique_path` gives the isolation
+    /// without one, and the crate's dead-root prune collects what a killed run leaves behind.
     fn temp_dir(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let d =
-            std::env::temp_dir().join(format!("noeta-cache-test-{}-{tag}-{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        d
+        noeta_test_temp::unique_path(&format!("cache-{tag}"))
     }
 
     /// A representative key: two sources + version + binary id + one tier.

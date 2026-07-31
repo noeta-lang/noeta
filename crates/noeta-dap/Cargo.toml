@@ -29,5 +29,10 @@ noeta-host-real = { workspace = true }
 # framing + request/response/event envelopes mirror the LSP's stdio loop, minus the tower-lsp machinery).
 serde_json = { workspace = true }
 
+[dev-dependencies]
+# Debuggee fixtures live in per-process directories: the debugger loads a real program, and the
+# loader links the entry's siblings, so the shared system temp dir is not a safe place to put one.
+noeta-test-temp = { workspace = true }
+
 [lints]
 workspace = true

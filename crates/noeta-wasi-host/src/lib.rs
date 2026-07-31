@@ -699,7 +699,9 @@ mod tests {
 
     #[test]
     fn fs_round_trips_on_the_real_filesystem() {
-        let dir = std::env::temp_dir().join(format!("noeta-wasi-host-test-{}", std::process::id()));
+        let fixture = noeta_test_temp::TempDir::new("wasi-host");
+        // `fs_mkdir` must create it, so name a child of the fixture rather than the fixture itself.
+        let dir = fixture.join("fs");
         let dir_s = dir.to_string_lossy().into_owned();
         let mut host = WasiHost::new();
         host.fs_mkdir(&dir_s).expect("mkdir");
@@ -723,7 +725,6 @@ mod tests {
 
         assert!(host.fs_remove(&path).expect("remove"));
         assert!(!host.fs_remove(&path).expect("remove missing"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

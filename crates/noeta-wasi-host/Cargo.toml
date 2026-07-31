@@ -14,5 +14,10 @@ compact_str = { workspace = true }
 # this crate targets wasip1, where getrandom works out of the box.
 getrandom = { workspace = true }
 
+[dev-dependencies]
+# The filesystem round-trip test writes into a per-process fixture directory, not the shared
+# system temp dir (where it asserted on a directory listing anyone could add to).
+noeta-test-temp = { workspace = true }
+
 [lints]
 workspace = true

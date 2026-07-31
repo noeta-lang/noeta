@@ -26,8 +26,7 @@ fn get(addr: &str) -> Result<String, String> {
 #[test]
 #[ignore = "spawns the CLI, binds a real socket, and writes real files; run explicitly"]
 fn a_hot_swap_preserves_signal_state_across_a_handler_edit() {
-    let dir = std::env::temp_dir().join(format!("noeta-hot-serve-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = noeta_test_temp::TempDir::new("hot-serve");
     let app = dir.join("app.noe");
     let v = |tag: &str| {
         format!(
@@ -131,7 +130,7 @@ fn a_hot_swap_preserves_signal_state_across_a_handler_edit() {
 #[test]
 #[ignore = "spawns the CLI, binds a real socket, and writes real files; run explicitly"]
 fn a_hot_swap_lands_inside_a_package_where_the_entry_is_qualified() {
-    let dir = std::env::temp_dir().join(format!("noeta-hot-pkg-{}", std::process::id()));
+    let dir = noeta_test_temp::TempDir::new("hot-pkg");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("noeta.toml"),

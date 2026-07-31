@@ -41,8 +41,7 @@ fn slow_request(addr: String) -> std::thread::JoinHandle<Result<String, String>>
 #[test]
 #[ignore = "binds a real socket and sends SIGINT; run explicitly"]
 fn sigint_drains_in_flight_requests_and_host_binds_local_only() {
-    let dir = std::env::temp_dir().join(format!("noeta-drain-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = noeta_test_temp::TempDir::new("drain");
     let app_path = dir.join("app.noe");
     std::fs::write(&app_path, app()).unwrap();
 

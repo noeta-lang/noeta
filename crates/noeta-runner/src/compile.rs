@@ -599,8 +599,7 @@ mod tests {
         // audit-5 F2: a caller (compose::maybe_delegate) that already resolved the DEFAULT
         // selection hands its deps in; resolve_front_with must adopt them verbatim instead of
         // resolving again…
-        let dir = std::env::temp_dir().join(format!("noeta-resolve-once-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = noeta_test_temp::TempDir::new("resolve-once");
         let entry = dir.join("main.noe");
         std::fs::write(&entry, "echo 1\n").unwrap();
         let facts = resolve_front_with(&entry, &[], &None, Some(a_reused()))

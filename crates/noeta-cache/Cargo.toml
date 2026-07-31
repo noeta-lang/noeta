@@ -12,5 +12,10 @@ rust-version.workspace = true
 # or the bytecode format — so it stays off the compile DAG entirely.
 sha2 = { workspace = true }
 
+[dev-dependencies]
+# Cache roots for the tests: one per process and per call, under the build directory rather than
+# the shared system temp dir, so two test binaries never open the same cache.
+noeta-test-temp = { workspace = true }
+
 [lints]
 workspace = true
