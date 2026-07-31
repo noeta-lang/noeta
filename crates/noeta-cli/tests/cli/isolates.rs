@@ -791,3 +791,43 @@ fn run_real_isolate_cancel_reaches_a_worker_parked_on_timers() {
          remaining 4.8s; took {elapsed:?}"
     );
 }
+
+// --- a worker's output on the live path (isolate-output) ---------------------------
+
+/// `noeta run` streams program output as it is produced, and each worker isolate's host inherits
+/// that choice — so a worker's **completed lines** go straight to the terminal and must not be
+/// captured a second time. What a streaming host cannot deliver is an **unterminated tail**: it
+/// stays in the worker's buffer, and before the fix that buffer was dropped when the thread ended,
+/// so a worker's last partial line vanished.
+///
+/// Both halves are asserted here against one exact transcript: each line appears exactly once (no
+/// double print from merging what was already streamed), and the tail arrives at the parent's
+/// harvest, ahead of everything the parent writes after the `.await`.
+#[test]
+fn run_real_isolate_output_appears_once_and_its_tail_is_not_dropped() {
+    let file = temp_program(
+        "isolate_output_live",
+        "use std.io\n\
+         async fn work(n: int): int {\n\
+         echo \"worker line\"\n\
+         io.out(\"tail=\")\n\
+         return n\n\
+         }\n\
+         async fn run(): int {\n\
+         mut r = 0\n\
+         concurrent { h = isolate work(7); r = h.await }\n\
+         return r\n\
+         }\n\
+         echo \"before\"\n\
+         echo run().await\n\
+         echo \"after\"",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        // `tail=` is the worker's unterminated write; it lands at the harvest, so it prefixes the
+        // parent's `echo` of the result rather than being lost.
+        .stdout("before\nworker line\ntail=7\nafter\n");
+}
