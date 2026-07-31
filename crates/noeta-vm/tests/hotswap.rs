@@ -881,6 +881,49 @@ fn the_plan_records_changed_added_and_removed() {
     );
 }
 
+/// The plan's reported name lists are **sorted**, not discovery-ordered. They are filled by walking
+/// hash-keyed indexes of the two versions, so their natural order is whatever the process's hash
+/// seed produced — and they are what a developer reads (`[hot] swapped: …`) and what a driver logs.
+/// Names chosen so source order, discovery order, and sorted order are three different orders:
+/// unsorted, one unchanged edit reports its definitions differently from run to run.
+#[test]
+fn the_plans_reported_lists_are_sorted() {
+    let body = |n: &str, v: i32| format!("fn {n}(): int {{ return {v}; }}\n");
+    let names = ["zeta", "alpha", "mu", "beta", "kappa"];
+    let v1: String = names
+        .iter()
+        .map(|n| body(n, 1))
+        .collect::<Vec<_>>()
+        .join("")
+        + &body("dropped_zz", 1)
+        + &body("dropped_aa", 1);
+    let v2: String = names
+        .iter()
+        .map(|n| body(n, 2))
+        .collect::<Vec<_>>()
+        .join("")
+        + &body("new_zz", 1)
+        + &body("new_aa", 1);
+    // Repeated within one process as well: each `diff_programs` builds fresh hash indexes, so a
+    // discovery-ordered list would also disagree with itself here.
+    for _ in 0..8 {
+        let SwapDiff::Swap(plan) = verdict(&v1, &v2) else {
+            panic!("body-level changes must produce a plan");
+        };
+        assert_eq!(
+            plan.changed,
+            vec!["alpha", "beta", "kappa", "mu", "zeta"],
+            "changed is sorted"
+        );
+        assert_eq!(plan.added, vec!["new_aa", "new_zz"], "added is sorted");
+        assert_eq!(
+            plan.removed,
+            vec!["dropped_aa", "dropped_zz"],
+            "removed is sorted"
+        );
+    }
+}
+
 // ---------------------------------------------------------------- semantic pins
 
 #[test]
