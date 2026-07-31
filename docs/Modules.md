@@ -79,7 +79,7 @@ Two segments are *not* rewritten, which is what you want in both cases: a `use s
 
 ### Naming a file
 
-**Convention:** a lowercase, single-word stem — `models.noe`, `query.noe`, `middleware.noe` — which is what every module in the standard library and the first-party packages uses. The compiler does not enforce it, and neither does a lint; it is what makes an import path read like the rest of the language.
+**Convention:** a lowercase, single-word stem — `models.noe`, `query.noe`, `middleware.noe` — which is what every module in the standard library and the first-party packages uses. The compiler does not enforce it, and neither does a lint; it is what makes an import path read like the rest of the language. It sits alongside the rest of the ecosystem's naming in [Conventions](Conventions).
 
 **Rule:** every segment — each directory name and the file stem — has to lex as exactly one identifier, because every one of them is spelled out in somebody's `use`. A stem that cannot be is **E0074**, reported against the file with the rename to make:
 

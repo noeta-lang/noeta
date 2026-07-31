@@ -3,6 +3,7 @@
 **Onboarding**
 - [Getting Started](Getting-Started)
 - [Language Tour](Language-Tour)
+- [Conventions](Conventions)
 - [Package Quickstart](Quickstart-Packages)
 - [Using Packages](Using-Packages)
 
