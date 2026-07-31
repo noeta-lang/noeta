@@ -341,6 +341,10 @@ pub(crate) fn repl_type(session: &mut VmSession, expr: &str, sources: &[Source])
     let map = SourceMap::new(map_sources);
     if !out.diagnostics.is_empty() {
         emit_diagnostics_mapped(&map, out.diagnostics.iter());
+    }
+    // The type still prints when the expression merely warned — only an abort leaves nothing to
+    // report a type for.
+    if noeta_diagnostics::has_errors(&out.diagnostics) {
         emit_trace(&out.trace, &map);
     } else if let Some(ty) = out.value {
         println!("{ty}");
