@@ -733,7 +733,7 @@ impl Checker {
             || self.imports.modules.contains_key(name)
             || self.symbols.types.contains(name)
             || self.symbols.enums.contains_key(name)
-            || RESERVED_PRELUDE.contains(&name)
+            || is_reserved_prelude(name)
             // Built-in namable types/enums (`Ordering`, `Type`, `Semantic`, iterator types, …)
             // are legitimate bare references — `Ordering.Less` names the prelude enum's variant.
             || PRELUDE_TYPES.contains(&name)

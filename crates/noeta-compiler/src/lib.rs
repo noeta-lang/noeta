@@ -46,7 +46,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use noeta_ast::{BinaryOp, Program, TypeRef};
-use noeta_builtins::PRELUDE_NAMES;
+use noeta_builtins::is_prelude_name;
 use noeta_bytecode::{
     BoolSide, Builtin, CaptureFrom, Chunk, Const, GlobalId, LineEntry, LocalDebug, MethodEntry,
     Module, NameId, NarrowTarget, Op, Reg, ReuseCheck, StrPart,
@@ -2350,7 +2350,7 @@ impl<'m> FnCompiler<'m> {
         if self.is_main && self.globals.contains_key(name) {
             return Resolved::Global;
         }
-        if PRELUDE_NAMES.contains(&name) {
+        if is_prelude_name(name) {
             return Resolved::Prelude;
         }
         // Unknown in `main` (→ runtime E0005), or a forward/global reference inside a function.

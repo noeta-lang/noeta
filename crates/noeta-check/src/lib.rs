@@ -1567,7 +1567,7 @@ impl Checker {
     }
 
     fn check_reserved_name(&mut self, name: &str, span: Span) {
-        if RESERVED_PRELUDE.contains(&name) {
+        if is_reserved_prelude(name) {
             self.error(
                 DiagnosticCode::ReservedName,
                 span,
