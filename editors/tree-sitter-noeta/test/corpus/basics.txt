@@ -304,3 +304,32 @@ r = match s {
       (match_arm
         (wildcard_pattern)
         (integer_literal)))))
+
+================================================================================
+Call-site class instantiation
+================================================================================
+
+r = Repo::<Todo>.new("todos")
+p = Pair::<int, string>.of(1, "x")
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (assignment_statement
+    (identifier)
+    (instantiated_call_expression
+      (identifier)
+      (identifier)
+      (identifier)
+      (arguments
+        (string_literal))))
+  (assignment_statement
+    (identifier)
+    (instantiated_call_expression
+      (identifier)
+      (primitive_type)
+      (primitive_type)
+      (identifier)
+      (arguments
+        (integer_literal)
+        (string_literal)))))

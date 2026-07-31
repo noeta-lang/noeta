@@ -269,6 +269,8 @@ Turbofish only — a `type_name(s)` taking a runtime string would be the identit
 
 An unresolvable type is `E0013`, exactly as in any other annotation. A **type parameter** resolves wherever the instantiation actually reaches the site — a top-level generic function's parameter and a generic type's parameter in an instance method both do — and is `E0058` where neither channel does; see below.
 
+A generic type's parameter reaches an instance method off the **value's recorded instantiation**, so the value has to have been built at one the checker could see. Four positions supply it from an expected type (an annotated binding, a declared return, a field's declared type, a parameter's), and the call site can now state it itself — `Repo::<Todo>.new("todos")`, see [Instantiating a generic *type* at the call site](Generics-and-Traits#instantiating-a-generic-type-at-the-call-site). A construction none of them reaches is `E0058` at the construction, not a clean check and a run-time abort at the first `type_name::<T>()`.
+
 ### Reflection over a type parameter
 
 `field_specs_of::<T>()`, `variants_of::<T>()` and `construct::<T>(…)` are keyed on a type **name**, and their turbofish arm is a *compile-time* key — resolved like an annotation, folded to a constant. One compiled body serves every instantiation, so inside `fn f<T>()` there is no constant to fold to. That is `E0058`.

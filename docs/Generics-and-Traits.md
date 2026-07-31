@@ -34,6 +34,69 @@ echo pick::<string>("x", "y", false)
 
 The expected type at an annotated binding can carry the instantiation too — `r: List<int> = empty()` infers `T = int` from the **return position** (the bidirectional checker seeds `T` from the expectation, and the arguments fill only what it leaves open). Inference flows through `?` and `??` as well: `o: Order = load(text)?` seeds `T = Order` by inverting the `Result` wrapper at the checked `Try`, and `o: Order = load(text) ?? fallback` through the coalesce — no turbofish needed.
 
+### Instantiating a generic *type* at the call site
+
+The turbofish above instantiates a **function**. A generic **type** takes one too, on the receiver of an associated call:
+
+```noeta
+struct Todo { id: int }
+
+class Repo<T> {
+    pub tbl: string
+    fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }
+    fn model(): string { return self.tbl ~ ":" ~ type_name::<T>() }
+}
+
+r = Repo::<Todo>.new("todos")       // Repo<Todo> — the call says so itself
+echo r.model()                      // todos:Todo
+```
+
+`Type::<Args>.method(args)` works for **any** associated function, not just one called `new` — Noeta has no constructor concept, so `Repo::<Todo>.open(dsn)` and `Repo::<Todo>.from_dsn(dsn)` read the same way. The type arguments bind to the type's declared parameters in order, arity-checked (E0058, as is a turbofish on a non-generic type). They are the *class's* parameters; a method's own `<U>` is still instantiated on the method (`Repo::<Todo>.load::<Order>(text)` is not spelled — see [Generic methods](#generic-methods)).
+
+The `::` is required: `Repo<Todo>.new(…)` is a parse error, because a bare `<` after an identifier is ambiguous with less-than in expression position. That is the same reason every other type argument in the language is written with a turbofish.
+
+**When to reach for it.** Prefer an annotation or a declared type where the position already has one — it documents the value where the reader looks for it, and inference is the language's declared direction. Four positions supply the instantiation that way, and all of them work:
+
+```noeta
+struct Todo { id: int }
+struct User { id: int }
+struct Note { id: int }
+struct Tag { id: int }
+
+class Repo<T> {
+    pub tbl: string
+    fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }
+}
+class Holder {
+    inner: Repo<Note>
+    fn new(i: Repo<Note>): Holder { return Holder { inner: i } }
+}
+fn users(): Repo<User> { return Repo.new("users") }         // a declared return
+fn describe(r: Repo<Tag>): string { return r.tbl }           // a parameter's type
+
+rt: Repo<Todo> = Repo.new("todos")                           // an annotated binding
+h = Holder.new(Repo.new("notes"))                            // a field's declared type
+echo describe(Repo.new("tags"))
+```
+
+Reach for the call-site turbofish when **none** of them does — the value is echoed straight out, passed to a `dyn` parameter, or simply bound with no annotation you want to write. Before it existed such a call had no instantiation to record, and reading `T` back off the value aborted at run time; now it is a check-time E0058 whose help names this spelling.
+
+If an annotation and a call-site turbofish **disagree**, the turbofish wins the instantiation and the disagreement is an ordinary assignability error at the binding:
+
+```noeta error
+struct Todo { id: int }
+struct User { id: int }
+
+class Repo<T> {
+    pub tbl: string
+    fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }
+}
+
+r: Repo<User> = Repo::<Todo>.new("todos")   // E0007 — a Repo<Todo> is not a Repo<User>
+```
+
+That is not a special rule. `Repo::<Todo>.new("todos")` is a self-sufficient expression of type `Repo<Todo>`, exactly as `5` is an `int`, so the mismatch is reported by the same rule and at the same span as `n: int = "s"`.
+
 ## Generic methods
 
 A method may declare **its own** type parameters, instantiated per call — independently of the class's parameters, which the receiver pins. `Box<T>` fixes `T` from the value; a method `pick<U>(...)` adds `U` on top, and both substitutions compose (`Box<int>` with `pick::<string>(...)` binds `T = int`, `U = string`).
