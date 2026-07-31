@@ -217,15 +217,15 @@ This project is currently pre-alpha and not public, so you don't need to worry a
 > [!IMPORTANT]
 > **Run `scripts/gate.sh`, green, before you merge to `main`.** `main` is never pushed, so `.github/workflows/ci.yml` never actually executes — the gates it defines are real and nothing runs them. That is not a theoretical gap: `main` has twice sat red under `clippy -D warnings` (a `too_many_arguments`, an `unnecessary_lazy_evaluations`), each time discovered by accident by an agent doing unrelated work, and one of those was merged after a local check *reported a pass* because clippy had been piped through `tail`.
 >
-> `scripts/gate.sh` runs the CI jobs in CI's own split, reads every exit code directly, never pipes a gated command, runs every step even after one fails, and prints a per-step PASS/FAIL/SKIP table (a SKIP is never a PASS). Three tiers, measured warm on a 20-core box:
+> `scripts/gate.sh` runs the CI jobs in CI's own split, reads every exit code directly, never pipes a gated command, runs every step even after one fails, and prints a per-step PASS/FAIL/SKIP table (a SKIP is never a PASS). Three tiers, measured on a 20-core box with `CARGO_BUILD_JOBS=8`:
 >
-> | | What it runs | Warm |
-> |---|---|---|
-> | `scripts/gate.sh --quick` | `cargo fmt --all --check` + both `clippy -D warnings` splits | ~1 min |
-> | `scripts/gate.sh` | + workspace suite & oracles, lean-CLI + feature shapes, doc samples, JIT differentials | ~15 min |
-> | `scripts/gate.sh --full` | + wasm portability/differential, miri, editor tooling | ~1 h |
+> | | What it runs | Warm | Cold |
+> |---|---|---|---|
+> | `scripts/gate.sh --quick` | `cargo fmt --all --check` + both `clippy -D warnings` splits | 1m20s | 2m10s |
+> | `scripts/gate.sh` | + workspace suite & oracles, lean-CLI + feature shapes, doc samples, JIT differentials | ~15 min | 35 min |
+> | `scripts/gate.sh --full` | + wasm portability/differential, miri, editor tooling | +2 min and up | — |
 >
-> `--quick` is the inner loop, the default is the merge gate, `--full` is for a release tag. Useful flags: `--list` (print the plan), `--only <substring>` (one group), `--install-hook` (opt-in `pre-push` hook running `--quick` — never installed for you, and **not recommended here**: hooks live in the *common* git dir, so installing one changes every worktree of this repo including other agents', and no hook fires on the fast-forward merge into `main` that is the moment we actually care about). Honor `CARGO_TARGET_DIR`/`CARGO_BUILD_JOBS` as everywhere else — the script respects them and sets neither.
+> `--quick` is the inner loop, the default is the merge gate, `--full` is for a release tag. `--full`'s miri and editor legs are cheap (1m12s and 4s); its wasm legs SKIP without `wasmtime` on PATH and without the wasm targets installed *for the gating toolchain*, and are the expensive part when they do run. Useful flags: `--list` (print the plan), `--only <substring>` (one group), `--install-hook` (opt-in `pre-push` hook running `--quick` — never installed for you, and **not recommended here**: hooks live in the *common* git dir, so installing one changes every worktree of this repo including other agents', and no hook fires on the fast-forward merge into `main` that is the moment we actually care about). Honor `CARGO_TARGET_DIR`/`CARGO_BUILD_JOBS` as everywhere else — the script respects them and sets neither.
 
 - Verify zero compiler warnings (`cargo build` should produce no `warning:` lines).
 - If you added new functionality, add tests for it.

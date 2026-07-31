@@ -13,14 +13,20 @@
 # table with the overall verdict at the bottom. `set -e` is deliberately OFF — one red step must not
 # hide the state of the rest; everything runs, then the script exits non-zero.
 #
-#   scripts/gate.sh --quick     the inner loop  — fmt + both clippy splits          (~1 min warm)
-#   scripts/gate.sh             the merge gate  — + tests, doc samples, JIT oracles (~14 min warm)
-#   scripts/gate.sh --full      full CI parity  — + wasm, miri, editors, e2e        (~1 h+, cold)
+#   scripts/gate.sh --quick     the inner loop  — fmt + both clippy splits           1m20s / 2m10s
+#   scripts/gate.sh             the merge gate  — + tests, doc samples, JIT oracles    ~15m / 35m
+#   scripts/gate.sh --full      full CI parity  — + wasm, miri, editor tooling         +2m and up
 #
-# Those timings are MEASURED on a 20-core box with a warm CARGO_TARGET_DIR, except `--full`, whose
-# wasm/miri legs build against targets and a toolchain a normal dev loop never warms — budget an
-# hour and a lot of disk the first time. A cold target dir adds ~10-20 min to any tier. If the cost
-# surprises you, you will skip the gate, and a skipped gate is exactly what we already have.
+# Those are MEASURED wall times on a 20-core box, `warm target dir / cold target dir`, with
+# CARGO_BUILD_JOBS=8. The two long poles in the merge gate are `cargo test --workspace` (4m50s warm,
+# 9m53s cold) and the lean-CLI build (8m warm, 9m cold — it is a second, Cranelift-free link of the
+# whole CLI); the JIT group adds 13m cold and a few minutes warm. `--full` adds miri (1m12s, 63
+# tests) and the editor tooling (4s) — cheap. Its wasm legs were NOT measured here: they SKIP
+# without `wasmtime` on PATH and without the wasm targets installed *for the gating toolchain*, and
+# the runner/playground/component builds behind them are the expensive part when they do run.
+#
+# Budget accordingly, and do not be surprised: a gate whose cost is a surprise gets skipped, and a
+# skipped gate is exactly what we already have.
 #
 # Options:
 #   --quick / --full        pick a tier (default: the merge gate, in between)

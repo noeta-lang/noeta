@@ -15,8 +15,8 @@ This is a pre-alpha, not-yet-public language implementation built primarily thro
 2. Implement it as a **vertical slice** through the pipeline (grammar/AST → eval op → conformance cases → snapshots). Prefer end-to-end feature slices over diffuse refactors.
 3. **Every feature or fix lands with a conformance corpus entry** (`tests/conformance/**.noe` with `// expect:` headers). This is the iron rule.
 4. Keep it green and clean with `scripts/gate.sh`, which runs what `.github/workflows/ci.yml` runs and prints a per-step PASS/FAIL summary:
-   - `scripts/gate.sh --quick` — `cargo fmt --all --check` + both `clippy -D warnings` splits (~1 min warm). Run it as you go.
-   - `scripts/gate.sh` — the merge gate: adds the workspace suite, the lean-CLI and feature-shape builds, the doc samples, and the JIT oracles (~15 min warm). **Run it, green, before merging to `main`.**
+   - `scripts/gate.sh --quick` — `cargo fmt --all --check` + both `clippy -D warnings` splits (1m20s warm). Run it as you go.
+   - `scripts/gate.sh` — the merge gate: adds the workspace suite, the lean-CLI and feature-shape builds, the doc samples, and the JIT oracles (~15 min warm, 35 min cold). **Run it, green, before merging to `main`.**
    - `scripts/gate.sh --full` — adds the wasm, miri, and editor-tooling jobs. Before a release tag.
 5. Review snapshot changes deliberately (`cargo insta review`) — never blind-accept.
 6. Strike the backlog row (or update the arc ledger; delete the arc directory when it ships) and commit code + task file together.
