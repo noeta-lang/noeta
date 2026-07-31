@@ -148,6 +148,25 @@ pub struct Jit<M: ClifModule = JITModule> {
     /// reallocation would move inline slots and dangle every baked pointer.
     #[allow(clippy::vec_box)]
     site_slots: Vec<Box<CallSiteCache>>,
+    /// The run's **cancellation flag**, when it has one ([`Jit::new`]'s `cancel`) — the same
+    /// `Arc<AtomicBool>` the interpreter polls at its own safepoints. Its address is baked into
+    /// every loop header this engine compiles (see [`emit_cancel_poll`]); `None` — every ordinary
+    /// run — emits no poll at all, so an uncancellable program's generated code is byte-identical
+    /// to the pre-poll JIT.
+    ///
+    /// **This clone is the lifetime guarantee, and it is why the flag is stored rather than only
+    /// read.** Generated code holds the `AtomicBool`'s address as a bare immediate; that address
+    /// must stay valid for as long as any instruction that loads it can execute. Owning a strong
+    /// reference here ties the flag to the very object that owns the code pages: the field is
+    /// declared *after* `module`, so on drop the pages go first and this reference is released
+    /// second — the flag strictly outlives every instruction that reads it, whatever the VM-side
+    /// owners (a worker's parent, `RunOptions::cancel`) do with their own clones. In particular
+    /// `Vm::observe_cancel` drops the VM's clone the instant a request is honored, and native code
+    /// still running out of an older frame keeps polling a live flag.
+    cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// [`Jit::cancel_flag`]'s address, or `0` for "no poll" — the immediate the codegen bakes.
+    /// Derived once at construction so no compile has to reach through the `Option`.
+    cancel_addr: u64,
     /// How many prototypes were compiled to *real* native code (vs a bail stub) — the coverage stat.
     native_count: usize,
     /// P-AOT L3.1 **dev oracle knob** (`NOETA_JIT_AOT=1`): make the *runtime* JIT emit its bodies in
@@ -296,6 +315,9 @@ impl<M: ClifModule> Jit<M> {
             layout,
             frame_template,
             site_slots: Vec::new(),
+            // Armed by `Jit::new` when the run carries one; the AOT object path never does.
+            cancel_flag: None,
+            cancel_addr: 0,
             native_count: 0,
             compile_ns_total: 0,
             compile_ns_max: 0,
@@ -491,6 +513,22 @@ impl<M: ClifModule> Jit<M> {
             }
         }
         let frame_template_addr = self.frame_template as u64;
+        // The cancellation poll's two codegen inputs (isolate-cancel / JIT half). An AOT body
+        // never polls: the flag is a per-process heap address that cannot be baked into a
+        // relocatable object — the same reason the inline-cache slots are null there (L3.1) — and
+        // an ahead-of-time binary has no cancellable run to poll for anyway.
+        let cancel_addr = if aot { 0 } else { self.cancel_addr };
+        let loop_header = if cancel_addr == 0 {
+            Vec::new()
+        } else {
+            let mut h = vec![false; n];
+            for (pc, op) in chunk.code.iter().enumerate() {
+                if let Some(t) = backward_target(op, pc) {
+                    h[t] = true;
+                }
+            }
+            h
+        };
         let layout = self.layout;
         // Precompute the ABI signature (also imported for the direct-call `call_indirect`) before the
         // builder borrows `self.ctx.func`, so it doesn't also need to borrow `self`.
@@ -633,6 +671,8 @@ impl<M: ClifModule> Jit<M> {
                 layout,
                 site_addrs,
                 frame_template_addr,
+                cancel_addr,
+                loop_header,
                 aot,
                 note_bound_ref,
                 retain_ref,
@@ -794,6 +834,13 @@ impl<M: ClifModule> Jit<M> {
                     cg.ret_bail_isolated(pc);
                     continue;
                 }
+                // The cancellation safepoint (isolate-cancel, JIT half): a loop header is entered
+                // once per iteration, so a poll here is the native analogue of the interpreter's
+                // taken-back-edge poll. Emitted only when the run carries a flag; otherwise
+                // `cancel_addr == 0` and not a byte of this reaches the body.
+                if cg.cancel_addr != 0 && cg.loop_header[pc] {
+                    emit_cancel_poll(&mut cg, pc);
+                }
                 emit_op(&mut cg, &chunk.consts, op, pc, &op_blocks);
             }
 
@@ -864,10 +911,19 @@ impl Jit<JITModule> {
     ///
     /// Returns [`JitDecline`] if the host ISA is unavailable or Cranelift rejects the flags —
     /// the VM treats that as "JIT unavailable, stay tier 0".
+    ///
+    /// `cancel` is the run's cancellation flag, or `None`. It is a **codegen input**, not a
+    /// runtime switch: an engine built with one emits a cancellation poll at every loop header it
+    /// compiles, an engine built without one emits none. That is deliberate — the flag is armed
+    /// before the run starts (`RunOptions::cancel`, or a worker's inherited flag), so an engine
+    /// never has to change its mind mid-run, and an ordinary program's native code is not merely
+    /// *fast* but literally the same bytes as before the poll existed. See [`Jit::cancel_flag`]
+    /// for the lifetime argument.
     pub fn new(
         helpers: &[(&str, *const u8)],
         layout: FrameLayout,
         frame_template: *const u8,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Jit<JITModule>, JitDecline> {
         let isa = Self::make_isa(false).map_err(|_| JitDecline)?;
         let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
@@ -875,7 +931,13 @@ impl Jit<JITModule> {
             builder.symbol(*name, *ptr);
         }
         let module = JITModule::new(builder);
-        Self::from_module(module, layout, frame_template).map_err(|_| JitDecline)
+        let mut jit = Self::from_module(module, layout, frame_template).map_err(|_| JitDecline)?;
+        jit.cancel_addr = cancel
+            .as_ref()
+            .map(|f| std::sync::Arc::as_ptr(f) as u64)
+            .unwrap_or(0);
+        jit.cancel_flag = cancel;
+        Ok(jit)
     }
 
     /// Compile prototype `proto` of `module` and cache its entry point, returning it. A J1-eligible
@@ -1519,6 +1581,14 @@ struct Codegen<'a, 'b> {
     /// The empty-`Frame` template's address (S4.2) — the native push copies it, then patches
     /// `proto`/`base`/`ret_dst`.
     frame_template_addr: u64,
+    /// The run's cancellation-flag address, or `0` for "this run cannot be cancelled" — see
+    /// [`Jit::cancel_flag`]. Nonzero makes [`emit_cancel_poll`] fire at every loop header;
+    /// zero emits nothing, which is every ordinary run.
+    cancel_addr: u64,
+    /// Per-pc: is this pc a **loop header** (the target of some backward branch, i.e. an OSR
+    /// entry — [`backward_target`])? The cancellation poll's placement, computed once per body.
+    /// Empty when `cancel_addr == 0`, so a non-cancellable compile does not even build it.
+    loop_header: Vec<bool>,
     /// P-AOT L3.1: emit for an ahead-of-time object (`true`) instead of the runtime JIT (`false`).
     /// The only codegen difference is at call sites: the JIT bakes each site's inline-cache slot as
     /// an absolute address (`site_addrs`), which is meaningless in a relocatable object. An AOT body
@@ -3167,6 +3237,41 @@ fn box_float_and_store(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_blo
     let boxed = cg.b.ins().select(is_nan, cg.pool.nan_canon, raw);
     cg.store_reg(dst, boxed);
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
+}
+
+/// Emit the **cancellation poll** at loop header `pc` (isolate-cancel, JIT half): load the run's
+/// flag and, if it is set, bail to the interpreter at `pc`.
+///
+/// **The poll decides nothing.** It does not unwind, does not touch the abort path, and does not
+/// consult the flag's meaning — it deopts, and the interpreter (which is about to re-execute this
+/// very pc) makes the call at its own back-edge safepoint. That keeps every rule about *when* a
+/// cancellation may be honored in one place: notably `Vm::run_destructor` lifts the flag for the
+/// duration of a destructor, and because native code only ever bails, the JIT cannot truncate a
+/// destructor no matter what the flag says while one is running. It also means the poll needs no
+/// deopt contract of its own: bailing at a pc is the mechanism every guard in this file already
+/// uses, and it shares that pc's bail block.
+///
+/// **Placement.** A loop header — the target of a backward branch ([`backward_target`]) — is
+/// entered exactly once per iteration, so this is the native analogue of the interpreter's
+/// `osr_backedge!` poll. Polling the header rather than the branch also means the *entry* into a
+/// loop polls, and one poll covers every back-edge of a multi-`continue` loop.
+///
+/// **The load is an `atomic_load`, not a plain load, and that is load-bearing** rather than
+/// pedantic: the flag is written by another thread, and `atomic_load` carries
+/// `other_side_effects`, so Cranelift's mid-end (running at `opt_level=speed`) can neither hoist
+/// it out of the loop nor fold two iterations' polls together. A plain load would be free to do
+/// both, and the failure mode is exactly the bug this whole slice exists to remove — a loop that
+/// checks once and then never again. On x86-64 an `atomic_load` of `I8` lowers to a single
+/// `movzbl`; the interpreter's own poll is a `Relaxed` load of the same byte.
+fn emit_cancel_poll(cg: &mut Codegen, pc: usize) {
+    let addr = cg.b.ins().iconst(types::I64, cg.cancel_addr as i64);
+    let flag =
+        cg.b.ins()
+            .atomic_load(types::I8, MemFlagsData::trusted(), addr);
+    // Keep going iff the flag is still clear (`AtomicBool` is one byte, `false == 0`).
+    let keep_going = cg.b.ins().icmp_imm(IntCC::Equal, flag, 0);
+    let cont = cg.b.create_block();
+    guard(cg, keep_going, cont, pc);
 }
 
 /// Emit a fast-path guard: `brif cond -> cont else bail(pc)` and leave the builder positioned in

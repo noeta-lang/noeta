@@ -2656,3 +2656,100 @@ fn a_cancelled_top_level_run_stops_and_frees_its_heap() {
         "a cancelled run tears its heap down exactly like a completed one (residency 0)"
     );
 }
+
+/// isolate-cancel (JIT half): **native code observes a cancellation request too.**
+///
+/// The interpreter's two safepoints — a frame transfer and a taken loop back-edge — are worth
+/// nothing to a loop that is running as machine code, and a counting loop is precisely the shape
+/// the JIT sustains end to end. Before the loop-header poll, a cancellable run had to decline
+/// on-stack replacement to stay stoppable, which cost measured 8.5× on such a loop. The poll
+/// replaces that: `noeta_jit` emits an `atomic_load` of the run's flag at every loop header when —
+/// and only when — the run carries one, and a set flag bails to the interpreter, whose own
+/// back-edge safepoint then unwinds.
+///
+/// `Tiering::Forced` compiles every prototype up front, so the loop is native from its first
+/// iteration and there is no interpreted window to stop in by luck. The flag is armed from another
+/// thread *after* the run starts, because arming it beforehand would be honored at the run's very
+/// first frame transfer without native code ever executing — a green test that proves nothing.
+///
+/// The assertion is that the run **returns at all**: `while true` has no other exit. It is driven
+/// on a worker thread behind a `recv_timeout` so a regression fails the suite instead of wedging
+/// it — this gate runs on other people's machines.
+#[cfg(feature = "jit")]
+#[test]
+fn native_code_observes_a_cancellation_request_at_a_loop_header() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let flag = Arc::new(AtomicBool::new(false));
+    let armer = Arc::clone(&flag);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        noeta_stdlib::registry::default_seeded();
+        let src = "mut i = 0\nwhile true { i = i + 1 }\necho i\n";
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("in subset");
+        // Ask for the stop once the loop is definitely running natively.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            armer.store(true, Ordering::Relaxed);
+        });
+        let out = VmBackend::new().run_module_with(
+            &module,
+            RunOptions {
+                tiering: Tiering::Forced,
+                cancel: Some(flag),
+                ..RunOptions::default()
+            },
+        );
+        let _ = tx.send(out.result.stdout);
+    });
+
+    let stdout = rx.recv_timeout(Duration::from_secs(30)).expect(
+        "a JIT-compiled `while true` never returned: the loop-header cancellation poll did not \
+         fire (or was not emitted for this cancellable run)",
+    );
+    assert_eq!(
+        stdout, "",
+        "the body never reached its `echo`: it bailed at the loop header and unwound"
+    );
+}
+
+/// isolate-cancel (JIT half), the other half of the contract: **an uncancellable run gets no poll.**
+///
+/// The whole reason the poll is a codegen input rather than a runtime check is that an ordinary
+/// program must pay nothing — not one branch, not one load. This pins the mechanism that delivers
+/// that: the engine's flag is `None`, so `Jit` bakes address `0`, so `emit_cancel_poll` is never
+/// reached and the generated bodies are the same bytes as before the poll existed. A run whose
+/// results this asserts would still pass with a poll emitted, so the real assertion is the
+/// `cancel_addr == 0` guard in `compile_chunk` — what this test protects is that the *default* run
+/// arrives at that guard with no flag, which is the thing a future refactor could quietly break.
+#[cfg(feature = "jit")]
+#[test]
+fn an_ordinary_run_arms_no_cancellation_flag() {
+    noeta_stdlib::registry::default_seeded();
+    let src = "mut i = 0\nwhile i < 10 { i = i + 1 }\necho i\n";
+    let source = Source::new(SourceId::FIRST, "test.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let module = compile(&parsed.program).expect("in subset");
+    let mut vm = Vm::load(
+        &module,
+        Box::new(noeta_stdlib::SandboxHost::new()),
+        Box::new(noeta_stdlib::SandboxExecutor::new()),
+    );
+    assert!(
+        vm.isolates.cancel_flag.is_none(),
+        "a plainly-loaded VM must carry no cancellation flag — that `None` is what makes the JIT \
+         emit no loop-header poll"
+    );
+    vm.tier1.force_jit = true;
+    vm.init_jit();
+    assert!(
+        vm.tier1.jit_entries.iter().any(Option::is_some) || vm.tier1.jit.is_none(),
+        "expected the forced engine to compile something (or to be unavailable on this host)"
+    );
+}

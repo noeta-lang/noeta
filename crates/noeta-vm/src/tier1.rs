@@ -776,7 +776,11 @@ impl<'m> Vm<'m> {
             .jit_frame_template
             .get_or_insert_with(fresh_frame_template);
         let template_ptr = template.as_ref() as *const Frame as *const u8;
-        match noeta_jit::Jit::new(&helpers, frame_layout(), template_ptr) {
+        // The run's cancellation flag (isolate-cancel, JIT half), armed *before* this by
+        // `run_module_with`, so the engine knows at construction whether its bodies need a
+        // loop-header poll. `None` on every ordinary run → byte-identical codegen.
+        let cancel = self.isolates.cancel_flag.clone();
+        match noeta_jit::Jit::new(&helpers, frame_layout(), template_ptr, cancel) {
             Ok(mut jit) => {
                 if self.tier1.force_jit {
                     for p in 0..self.module.protos.len() {
@@ -809,8 +813,13 @@ impl<'m> Vm<'m> {
             .jit_frame_template
             .get_or_insert_with(fresh_frame_template);
         let template_addr = template.as_ref() as *const Frame as usize;
+        // The cancellation flag travels as the `Arc` itself, not as an address: it is `Send` +
+        // `Sync`, the compile thread's engine takes a strong reference, and that reference is what
+        // keeps the flag alive for as long as the code pages it baked the address into. See
+        // `noeta_jit::Jit::cancel_flag`.
+        let cancel = self.isolates.cancel_flag.clone();
         self.tier1.jit_service =
-            jit_service::JitService::spawn(module, helpers, frame_layout(), template_addr);
+            jit_service::JitService::spawn(module, helpers, frame_layout(), template_addr, cancel);
     }
 
     /// Bind a linked AOT dispatch table into the mirror tables (P-AOT L3.2b) — see
@@ -1090,29 +1099,15 @@ impl<'m> Vm<'m> {
     /// native at its next `'reload` anyway, and re-OSRing from tier 0 (after a native op bailed back)
     /// would risk bouncing tier-0↔tier-1 every iteration for a loop whose body native can't sustain.
     ///
-    /// **A cancellable run declines OSR**, and this is the one place that decision belongs. Native
-    /// code carries no cancellation poll — the interpreter's two safepoints (a frame transfer, a
-    /// taken back-edge) are the only ones there are — so a loop running natively cannot be stopped.
-    /// Call-count promotion is harmless here: a prototype entered at pc 0 returns, and its caller's
-    /// next frame transfer *is* a safepoint. OSR is different by construction, because what got hot
-    /// is the **loop itself** — precisely the shape that may never come back. Measured before this
-    /// guard: a `while true { i = i + 1 }` `@test` case OSR'd into native code and could not be
-    /// stopped at all, while the same loop with one heap op in it (which bails every iteration)
-    /// stopped on request. Every other run is untouched — `cancel_flag` is `None`, so this is one
-    /// predicted branch on a path that already crossed a function call.
-    ///
-    /// **What it costs, and why the cost falls in the right place.** Only a loop the JIT can sustain
-    /// end to end is affected; one whose body touches the heap or calls out bails every iteration
-    /// and was never running natively anyway. Measured under `noeta test`: a 200M-iteration counting
-    /// loop takes 7.0 s bounded and 0.83 s unbounded (`#[Timeout(0)]`), while a 60M-iteration loop
-    /// with an accumulator — which carries one bail site — is 4.25 s against 4.04 s. The tax
-    /// therefore lands exactly on the loops that have no safepoint in them, which are exactly the
-    /// loops a timeout could otherwise do nothing about.
+    /// **A cancellable run takes OSR like any other**, and used not to. Until the JIT grew a
+    /// cancellation poll, native code carried no safepoint at all — the interpreter's frame
+    /// transfer and taken back-edge were the only ones there were — so a run that might need to
+    /// stop declined OSR here rather than risk a loop it could never reach again. That guard is
+    /// gone: `noeta_jit` now emits a poll at every loop header **when the run carries a
+    /// cancellation flag**, which puts a safepoint inside exactly the shape the decline was
+    /// protecting against. Nothing about promotion is cancellation-aware any more.
     #[cfg(feature = "jit")]
     pub(crate) fn jit_osr_backedge(&mut self, proto: usize) -> bool {
-        if self.isolates.cancel_flag.is_some() {
-            return false;
-        }
         if self.jit_entry(proto).is_some() {
             // Service mode: a back-edge-born compile just landed in the mirror — take the one
             // pending OSR entry now (a single long-running loop gets no other chance to go
