@@ -91,12 +91,22 @@ pub struct RealHost {
     readers: HashMap<u64, BufReader<File>>,
     /// Monotonic id source for `readers`.
     next_reader_id: u64,
-    /// The real HTTP client for the `Network` capability (http arc H1). Cheap to clone (an inner
-    /// `Arc`), holds the connection pool; built once per host. Requests are driven on `runtime`.
-    /// Present only under `ring-http-client` (DCE Axis B): a binary that never imports `std.http` links
-    /// without reqwest, so this field — and the TLS stack behind it — is gated out.
+    /// The real HTTP client for the **synchronous** `Network` calls (http arc H1) — and *only* those,
+    /// which is a correctness rule rather than tidiness. See [`new_http_client`]: a client is a
+    /// connection pool, a pooled connection's hyper driver task lives on whichever runtime opened it,
+    /// and reusing it from a different runtime hangs silently. Everything here is driven inside
+    /// `self.runtime.block_on`, so every connection in this pool belongs to `runtime`.
+    ///
+    /// Cheap to clone (an inner `Arc`); built once per host. Present only under `ring-http-client`
+    /// (DCE Axis B): a binary that never imports `std.http` links without reqwest, so this field —
+    /// and the TLS stack behind it — is gated out.
     #[cfg(feature = "ring-http-client")]
     http: reqwest::Client,
+    /// The client for `http.*_async` ([`Network::net_spawn`]), whose futures are polled on the
+    /// **executor's** runtime rather than this host's. A separate pool for a separate runtime — the
+    /// rule stated on `http` above.
+    #[cfg(feature = "ring-http-client")]
+    http_async: reqwest::Client,
     /// Inbound listeners (http-server S1), keyed by the id `net_listen` hands out. Each holds a
     /// bound socket; the tokio listener is created lazily on the executor's runtime at first accept
     /// (so all server socket IO stays on the runtime that drives the accept future, never this
@@ -161,6 +171,15 @@ pub struct RealHost {
     /// and surfaces it (with "real networking permitted") through [`P2pProvider::real_p2p`], so the
     /// extension can build the node.
     p2p_app_id: Option<String>,
+    /// Whether this host streams program output to the real terminal as it is produced
+    /// ([`Console::streams_output`]), instead of letting it batch until the run ends.
+    ///
+    /// **Off by default, and deliberately so.** Batch-capturing is right for anything that reads
+    /// the finished [`noeta_stdlib::RunResult`]: the `@test` runner hides a passing test's stdout
+    /// and shows a failing one's, `noeta test --json` puts it in the report, and the differential
+    /// oracle compares it. It is wrong for a program a human is watching — `noeta run`, `noeta
+    /// serve` — which is why those drivers turn it on with [`RealHost::with_live_output`].
+    live_output: bool,
 }
 
 /// `RealHost`'s telemetry state. In-flight spans are tracked even with the `telemetry` feature off
@@ -244,7 +263,9 @@ impl RealHost {
             readers: HashMap::new(),
             next_reader_id: 0,
             #[cfg(feature = "ring-http-client")]
-            http: reqwest::Client::new(),
+            http: new_http_client(),
+            #[cfg(feature = "ring-http-client")]
+            http_async: new_http_client(),
             servers: HashMap::new(),
             next_listener: 0,
             prebound: None,
@@ -262,7 +283,16 @@ impl RealHost {
             next_proc: 1,
             tel: RealTelemetry::new(),
             p2p_app_id: None,
+            live_output: false,
         })
+    }
+
+    /// Stream this host's program output to the real terminal as it is produced (see
+    /// [`RealHost::live_output`]). Builder style, so the per-isolate factory can hand every isolate
+    /// the driver's choice.
+    pub fn with_live_output(mut self, live: bool) -> RealHost {
+        self.live_output = live;
+        self
     }
 
     /// Seed a **pre-bound listener** (server-hmr S1): the multi-core `noeta serve --parallel`
@@ -310,6 +340,39 @@ impl RealHost {
             Ok(names)
         })
     }
+}
+
+/// Build one HTTP client — **for exactly one tokio runtime**.
+///
+/// The rule this function exists to name: a `reqwest::Client` is a connection *pool*, and a pooled
+/// connection is inseparable from the runtime that opened it, because hyper's driver task for that
+/// connection lives there and nothing else will poll it. Cloning the client is cheap and shares the
+/// pool, so cloning it *across runtimes* is how a connection ends up being written to by a runtime
+/// that is not running. There is no error and no timeout when that happens — the request future
+/// simply never resolves.
+///
+/// It has happened here: one ordinary `client.get(…)` (host runtime) followed by a `client.stream(…)`
+/// to the same origin (its own pump runtime) hung forever, with the socket showing only the first
+/// call's bytes. See `stream.rs`'s module header for the measurement.
+///
+/// So each runtime that performs requests gets its own client: [`RealHost::http`] for the
+/// synchronous calls on the host's runtime, [`RealHost::http_async`] for `http.*_async` on the
+/// executor's, one per stream pump thread, and one per OTLP exporter thread. Never clone one across
+/// that boundary.
+#[cfg(feature = "ring-http-client")]
+fn new_http_client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
+/// The same one-runtime rule as [`new_http_client`], for a client that must not wait forever: the
+/// OTLP exporter's, whose final flush runs at teardown and would otherwise wedge it on a collector
+/// that stopped answering. Telemetry is best-effort by contract, so a deadline is the honest shape.
+#[cfg(all(feature = "ring-http-client", feature = "telemetry"))]
+fn new_http_client_with_timeout(timeout: std::time::Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 /// Build an `ErrorKind::Io` (`E0021`) error from a real-disk failure.
@@ -573,9 +636,10 @@ fn connect_cause(error: &reqwest::Error) -> Option<NetErrorKind> {
 #[derive(Debug)]
 struct HttpIo {
     request: NetRequest,
-    /// Cloned from `RealHost::http` — a reqwest `Client` is a cheap `Arc` handle, used across the
-    /// executor's runtime here (reqwest is runtime-agnostic; connections bind lazily to whichever
-    /// runtime drives the future).
+    /// Cloned from [`RealHost::http_async`] — the pool reserved for the executor's runtime, which is
+    /// what polls this descriptor's body. Deliberately **not** `RealHost::http`: a connection binds
+    /// to the runtime that opened it, so sharing that pool with the synchronous path is how a
+    /// request ends up on a connection nobody is driving (see [`new_http_client`]).
     client: reqwest::Client,
 }
 
@@ -583,14 +647,20 @@ struct HttpIo {
 impl ExternIo for HttpIo {
     fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
         // Only reached if some executor lacks a real body path; the real executor uses `run_real`
-        // and the sandbox uses the default `NetFetchIo`. Perform it on a throwaway runtime.
+        // and the sandbox uses the default `NetFetchIo`. Perform it on a throwaway runtime — with a
+        // throwaway client to match, since a runtime that exists for one call must not be handed
+        // (or leave behind) a connection from anyone else's pool (see `new_http_client`).
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| io_error(format!("cannot start a runtime for the request: {e}")))?;
-        Ok(noeta_stdlib::net::fetch_outcome(rt.block_on(
-            reqwest_fetch(&self.client, self.request.clone()),
-        )))
+        let client = {
+            let _enter = rt.enter();
+            new_http_client()
+        };
+        Ok(noeta_stdlib::net::fetch_outcome(
+            rt.block_on(reqwest_fetch(&client, self.request.clone())),
+        ))
     }
 
     fn run_real(&mut self) -> Option<RealBody> {
@@ -634,7 +704,7 @@ impl Network for RealHost {
     fn net_spawn(&self, request: NetRequest) -> Box<dyn ExternIo> {
         Box::new(HttpIo {
             request,
-            client: self.http.clone(),
+            client: self.http_async.clone(),
         })
     }
 
@@ -756,7 +826,9 @@ impl Network for RealHost {
         request: NetRequest,
         framing: noeta_stdlib::stream::Framing,
     ) -> Result<noeta_stdlib::stream::StreamHead, NetError> {
-        let (opened, head) = stream::open(self.http.clone(), request, framing)?;
+        // No client is passed in: the stream builds its own on its pump thread, so it can never be
+        // handed a pooled connection whose driver lives on this host's runtime (see `stream.rs`).
+        let (opened, head) = stream::open(request, framing)?;
         let id = self.next_stream;
         self.next_stream += 1;
         self.streams.lock().unwrap().insert(id, opened);
@@ -2033,6 +2105,10 @@ impl Console for RealHost {
         }
         true
     }
+
+    fn streams_output(&self) -> bool {
+        self.live_output
+    }
 }
 
 impl Tracing for RealHost {
@@ -2349,11 +2425,11 @@ impl RealHost {
         };
         self.tel.metric_exporter = Some(spawn_metric_exporter(
             Arc::clone(&self.tel.metrics),
-            self.http.clone(),
             endpoint,
             headers,
             service_name,
             metric_export_interval(),
+            METRIC_EXPORT_TIMEOUT,
         ));
     }
 
@@ -2384,6 +2460,12 @@ impl Drop for RealHost {
         self.tel.metric_exporter.take();
     }
 }
+
+/// How long one metrics export may take before it is abandoned. Bounded because the *final* export
+/// runs at host teardown and joins the reader thread: an unreachable collector must cost a program's
+/// exit a few seconds, not its termination. Matches the OTel default export timeout.
+#[cfg(feature = "telemetry")]
+const METRIC_EXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The metrics export interval from `OTEL_METRIC_EXPORT_INTERVAL` (milliseconds, OTel spec), default
 /// 60s. A non-positive / unparseable value falls back to the default.
@@ -2425,17 +2507,20 @@ impl Drop for MetricExporter {
 }
 
 /// Spawn the periodic-export reader thread. It owns its own current-thread tokio runtime (the
-/// interpreter's runtime belongs to the interpreter thread and cannot be driven here); the `reqwest`
-/// client is cheaply cloneable and runtime-agnostic. Best-effort throughout — an export failure, or
-/// a failure to build the runtime, never affects the program.
+/// interpreter's runtime belongs to the interpreter thread and cannot be driven here) **and its own
+/// HTTP client**: a `reqwest::Client` is cheap to clone but its pooled connections are not
+/// runtime-agnostic, so a client shared with the host would eventually hand this thread a connection
+/// only the host's runtime can drive, and the export would hang instead of failing (see
+/// [`new_http_client`]). Best-effort throughout — an export failure, or a failure to build the
+/// runtime, never affects the program.
 #[cfg(feature = "telemetry")]
 fn spawn_metric_exporter(
     store: Arc<Mutex<MetricStore>>,
-    http: reqwest::Client,
     endpoint: String,
     headers: Vec<(String, String)>,
     service_name: String,
     interval: std::time::Duration,
+    export_timeout: std::time::Duration,
 ) -> MetricExporter {
     use std::sync::mpsc::{self, RecvTimeoutError};
     let (shutdown, rx) = mpsc::channel::<()>();
@@ -2447,6 +2532,10 @@ fn spawn_metric_exporter(
                 .build()
             else {
                 return;
+            };
+            let http = {
+                let _enter = rt.enter();
+                new_http_client_with_timeout(export_timeout)
             };
             loop {
                 // Wake on the interval (a periodic export) or on shutdown (the final export).
@@ -2504,17 +2593,15 @@ mod tests {
             s.observe(id, MetricValue::Int(5), Vec::new(), 1_000);
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(500))
-            .build()
-            .unwrap();
         let exporter = spawn_metric_exporter(
             Arc::clone(&store),
-            client,
             endpoint,
             Vec::new(),
             "svc".to_string(),
             std::time::Duration::from_millis(50),
+            // A short export deadline keeps the shutdown/final export from blocking on the
+            // unaccepted connection, so dropping the reader below is prompt.
+            std::time::Duration::from_millis(500),
         );
 
         // Accept the first periodic tick's POST and read its request.
@@ -2538,6 +2625,67 @@ mod tests {
             request.contains("\"asInt\":\"5\""),
             "carries the aggregated counter value"
         );
+    }
+
+    /// **A one-shot request must not poison the stream that follows it.** The regression test for a
+    /// hang that presented as "the model never answers": one `net_fetch` leaves an idle connection
+    /// in a pool, and if the stream pump is handed that pool it gets a connection whose hyper driver
+    /// lives on this host's `current_thread` runtime — which is not running — so the request bytes
+    /// are never written and `send()` never resolves. No error, no timeout, forever.
+    ///
+    /// Hermetic: a two-line loopback HTTP server, answering both requests. The assertion is simply
+    /// that the second one *finishes*; the timeout is the test.
+    #[cfg(feature = "ring-http-client")]
+    #[test]
+    fn a_stream_after_a_one_shot_request_to_the_same_origin_still_opens() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
+        // Answers exactly two requests, keeping the connection alive after the first — which is
+        // what puts a reusable connection in the pool and arms the bug.
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 6\r\n\r\nhello\n",
+                );
+                let _ = sock.flush();
+            }
+        });
+
+        let url = format!("http://{addr}/");
+        let request = move || NetRequest {
+            method: "GET".to_string(),
+            url: url.clone(),
+            headers: vec![],
+            body: vec![],
+            timeout_ms: Some(5_000),
+        };
+
+        let mut host = RealHost::new().unwrap();
+        // 1. The one-shot call, on the host's runtime. This is what pools the connection.
+        let first = host
+            .net_fetch(request())
+            .expect("the one-shot request answers");
+        assert_eq!(first.status, 200);
+
+        // 2. The stream, on its own pump thread. Before the fix this never returned.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let opened = host.net_stream_open(request(), noeta_stdlib::stream::Framing::Lines);
+            let _ = tx.send(opened.map(|head| head.status));
+        });
+        let opened = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the stream must open — a pooled connection from the one-shot call is driven by a runtime that is not running, so this used to hang forever");
+        assert_eq!(opened.expect("the stream opens"), 200);
+
+        let _ = server.join();
     }
 
     /// The real `Network` capability against a live endpoint. `#[ignore]` so CI stays hermetic —

@@ -16,6 +16,22 @@
 //! backpressure instead of buffering a whole model response in memory. One thread per open stream
 //! is the cost; a stream is long-lived and few, which is the case that pays for it.
 //!
+//! **And it gets its own `reqwest::Client`, which is the other half of the same constraint.** A
+//! client is a connection *pool*, and a pooled connection carries its hyper driver task with it —
+//! so handing this thread the host's client hands it connections belonging to the host's runtime,
+//! and the rule above is broken by reuse rather than by construction. That is not hypothetical: a
+//! program that made one ordinary `client.get(...)` and then opened a stream **to the same origin**
+//! hung forever with nothing on the wire. reqwest handed the pump the idle connection from the
+//! first call, whose driver lives on the host's `current_thread` runtime; that runtime is only
+//! driven inside `net_fetch`'s `block_on`, so nobody polled it, the request bytes were never
+//! written, and `send()` never resolved — no error, no timeout, no data. The one-shot request came
+//! first, so the *stream* looked like the broken half. Measured on the socket: 62 bytes out, 984
+//! in, both from the earlier `GET`, and nothing since.
+//!
+//! A per-stream client costs a TLS root store per open. A stream is long-lived and few (the same
+//! trade the thread already makes), and no amount of pooling is worth a hang that presents as a
+//! silent hang in someone else's code.
+//!
 //! Dropping the receiving end (an explicit `close()`, or host teardown) makes the pump's next send
 //! fail, so the thread exits and the connection is released — real reclamation, not a leak waiting
 //! for the process to end.
@@ -113,7 +129,6 @@ mod read {
     /// that ends early is exactly what a truncated body looks like to a reader. A non-2xx **status**
     /// is not a failure at either point: it opens successfully and the caller reads `status()`.
     pub(crate) fn open(
-        client: reqwest::Client,
         request: NetRequest,
         framing: Framing,
     ) -> Result<(RealStream, ResponseHead), NetError> {
@@ -140,6 +155,12 @@ mod read {
                         return;
                     }
                 };
+                // Built INSIDE the runtime context (see the module header): every connection this
+                // client opens is then driven by the runtime that is about to block on it, and no
+                // connection from any other runtime's pool can be handed to it.
+                let _enter = runtime.enter();
+                let client = reqwest::Client::new();
+                drop(_enter);
                 runtime.block_on(pump(client, request, framing, head_tx, frame_tx));
             })
             .map_err(|e| {
