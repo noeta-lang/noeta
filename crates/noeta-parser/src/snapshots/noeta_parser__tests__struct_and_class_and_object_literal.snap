@@ -3,9 +3,9 @@ source: crates/noeta-parser/src/lib.rs
 expression: "pretty(\"struct Item { price: float qty: int } class Box { id: int mut tag: string fn new(id: int): Box { return Box { id: id, tag: \\\"x\\\" }; } } b = Box { id: 1, ...base };\")"
 ---
 (program @0..161
-  (struct Item [price qty] @0..37)
-  (class Box [id mut tag] @38..133
-    (fn new [id] @74..131
+  (struct Item [price: float qty: int] @0..37)
+  (class Box [id: int mut tag: string] @38..133
+    (fn new [id: int]: Box @74..131
       (return @97..129
         (object Box @104..128
           (field id @110..116

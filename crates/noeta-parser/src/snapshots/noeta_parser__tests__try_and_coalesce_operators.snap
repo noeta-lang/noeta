@@ -3,7 +3,7 @@ source: crates/noeta-parser/src/lib.rs
 expression: "pretty(\"fn place(items): int { validate(items)?; user = find(1) ?? guest(); return Ok(user); }\")"
 ---
 (program @0..86
-  (fn place [items] @0..86
+  (fn place [items]: int @0..86
     (expr-stmt @23..40
       (try @23..39
         (call @23..38

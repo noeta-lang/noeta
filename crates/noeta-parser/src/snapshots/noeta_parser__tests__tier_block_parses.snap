@@ -10,6 +10,6 @@ expression: "pretty(\"@test { fn adds() { return add(1, 2); } } @derive(Comparab
           (ident add @27..30)
           (int 1 @31..32)
           (int 2 @34..35)))))
-  (struct @derive(Comparable) P [x] @62..81)
+  (struct @derive(Comparable) P [x: int] @62..81)
   (echo @82..89
     (int 1 @87..88)))
