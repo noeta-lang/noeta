@@ -438,6 +438,203 @@ fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
 }
 
 #[test]
+fn noeta_audit_fails_loudly_when_the_advisory_feed_does_not_verify() {
+    // audit row 4a: a feed that does not VERIFY used to print `not checked — {err}` on *stdout* and
+    // exit 0 — so an advisory-format drift between the client and the registry (which makes every
+    // per-advisory signature fail) looked exactly like a clean audit in CI, with the graph never
+    // checked against the feed at all. It must now be reported on stderr and exit non-zero.
+    //
+    // The fixture is the drift itself: the advisory is signed, then its `summary` is altered on the
+    // wire. The head is signed over the *served* advisory, so the feed digest and head both verify —
+    // the only thing that fails is the per-advisory signature over canonical bytes, exactly the shape
+    // a canonical-bytes divergence between the Rust and TypeScript halves produces.
+    use ed25519_dalek::{Signer, SigningKey};
+    use noeta_pm::advisory::{self, Advisory};
+
+    let to_hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let sk = SigningKey::from_bytes(&[3u8; 32]);
+    let pub_hex = to_hex(sk.verifying_key().as_bytes());
+
+    let mut adv = Advisory {
+        id: "NOETA-2026-0009".to_string(),
+        package: "acme/greet".to_string(),
+        ranges: ">=1.0.0, <2.0.0".to_string(),
+        patched: Some("2.0.0".to_string()),
+        severity: "critical".to_string(),
+        summary: "remote code execution in the greeting parser".to_string(),
+        details: String::new(),
+        url: String::new(),
+        withdrawn: false,
+        seq: 0,
+        signature: String::new(),
+        log_index: None,
+        tier: advisory::AdvisoryTier::Operator,
+        bundle: None,
+        upstream_id: None,
+        upstream_url: None,
+        cvss: None,
+    };
+    // Sign the real advisory, then serve a DIFFERENT summary under that signature.
+    adv.signature = to_hex(&sk.sign(&adv.canonical_bytes()).to_bytes());
+    let served_summary = "remote code execution in the greeting parser (tampered)";
+    let tampered = Advisory {
+        summary: served_summary.to_string(),
+        ..adv.clone()
+    };
+    // The signed head attests to exactly what is served, so the head and digest checks both pass.
+    let digest = advisory::feed_digest(std::slice::from_ref(&tampered));
+    let head_sig = to_hex(&sk.sign(&advisory::feed_head_bytes(1, &digest)).to_bytes());
+
+    let advisory_json = format!(
+        r#"{{"id":"{}","package":"{}","ranges":"{}","patched":"2.0.0","severity":"{}","summary":"{served_summary}","details":"","url":"","withdrawn":false,"seq":0,"signature":"{}"}}"#,
+        adv.id, adv.package, adv.ranges, adv.severity, adv.signature,
+    );
+    let feed = format!(r#"{{"advisories":[{advisory_json}]}}"#);
+    let key_json = format!(r#"{{"public_key":"{pub_hex}"}}"#);
+    let checkpoint = format!(r#"{{"count":1,"digest":"{digest}","signature":"{head_sig}"}}"#);
+
+    let base = mock_http(move |_method, path, _body| match path {
+        "/v1/advisories" => (200, feed.clone()),
+        "/v1/advisories/key" => (200, key_json.clone()),
+        "/v1/advisories/checkpoint" => (200, checkpoint.clone()),
+        _ => (404, r#"{"error":"not found"}"#.to_string()),
+    });
+
+    let entry = path_dep_project("pm_audit_feed_tampered");
+    let app_dir = entry.parent().unwrap();
+    let assert = lang()
+        .arg("audit")
+        .arg(app_dir)
+        .env("NOETA_REGISTRY_URL", &base)
+        .assert()
+        // Non-zero, and specifically the failure exit — not a usage/setup 2.
+        .code(1);
+    let out = assert.get_output();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        stderr.contains("the advisory feed did not verify"),
+        "the verification failure belongs on stderr:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("NOT checked against the advisory feed"),
+        "the audit must say the graph went unchecked:\nstderr:\n{stderr}"
+    );
+    // The old silent shape must be gone: no lowercase stdout note, and above all no claim of a clean
+    // advisory result for a feed that was never read.
+    assert!(
+        !stdout.contains("not checked — "),
+        "the failure must not be a grey stdout note:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("no advisories affect"),
+        "a feed that did not verify must never read as clean:\n{stdout}"
+    );
+    // And nothing from an unverified feed is pinned as trusted.
+    let lock = std::fs::read_to_string(app_dir.join("noeta.lock")).unwrap_or_default();
+    assert!(
+        !lock.contains("[advisory]"),
+        "an unverified feed head must not be pinned:\n{lock}"
+    );
+}
+
+#[test]
+fn noeta_audit_stays_clean_when_the_advisory_feed_verifies_or_is_simply_absent() {
+    // The other half of audit row 4a: making a verification failure loud must not make the *routine*
+    // outcomes loud. Three runs against a hosted registry, all exit 0 — a feed that verifies and
+    // matches nothing, a registry that runs no advisory feed at all, and a registry that cannot be
+    // reached (offline is evidence of nothing; this section is best-effort by contract).
+    use ed25519_dalek::{Signer, SigningKey};
+    use noeta_pm::advisory::{self, Advisory};
+
+    let to_hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let sk = SigningKey::from_bytes(&[7u8; 32]);
+    let pub_hex = to_hex(sk.verifying_key().as_bytes());
+
+    // A real, correctly signed advisory — against a package that is not in this graph.
+    let mut adv = Advisory {
+        id: "NOETA-2026-0011".to_string(),
+        package: "other/unrelated".to_string(),
+        ranges: ">=1.0.0".to_string(),
+        patched: None,
+        severity: "medium".to_string(),
+        summary: "unrelated package, unrelated problem".to_string(),
+        details: String::new(),
+        url: String::new(),
+        withdrawn: false,
+        seq: 0,
+        signature: String::new(),
+        log_index: None,
+        tier: advisory::AdvisoryTier::Operator,
+        bundle: None,
+        upstream_id: None,
+        upstream_url: None,
+        cvss: None,
+    };
+    adv.signature = to_hex(&sk.sign(&adv.canonical_bytes()).to_bytes());
+    let digest = advisory::feed_digest(std::slice::from_ref(&adv));
+    let head_sig = to_hex(&sk.sign(&advisory::feed_head_bytes(1, &digest)).to_bytes());
+    let advisory_json = format!(
+        r#"{{"id":"{}","package":"{}","ranges":"{}","severity":"{}","summary":"{}","details":"","url":"","withdrawn":false,"seq":0,"signature":"{}"}}"#,
+        adv.id, adv.package, adv.ranges, adv.severity, adv.summary, adv.signature,
+    );
+    let feed = format!(r#"{{"advisories":[{advisory_json}]}}"#);
+    let key_json = format!(r#"{{"public_key":"{pub_hex}"}}"#);
+    let checkpoint = format!(r#"{{"count":1,"digest":"{digest}","signature":"{head_sig}"}}"#);
+
+    let base = mock_http(move |_method, path, _body| match path {
+        "/v1/advisories" => (200, feed.clone()),
+        "/v1/advisories/key" => (200, key_json.clone()),
+        "/v1/advisories/checkpoint" => (200, checkpoint.clone()),
+        _ => (404, r#"{"error":"not found"}"#.to_string()),
+    });
+
+    let entry = path_dep_project("pm_audit_feed_clean");
+    let app_dir = entry.parent().unwrap();
+    lang()
+        .arg("audit")
+        .arg(app_dir)
+        .env("NOETA_REGISTRY_URL", &base)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no advisories affect"));
+    // The verified head is pinned, so the clean run really did read and verify the feed.
+    let lock = std::fs::read_to_string(app_dir.join("noeta.lock")).unwrap();
+    assert!(
+        lock.contains("[advisory]"),
+        "clean run pins the head:\n{lock}"
+    );
+
+    // A registry with no advisory feed at all (404 on the feed key): a note, not a failure — a
+    // self-hosted or private registry that runs no feed must not fail everyone's CI.
+    let bare = mock_http(|_method, _path, _body| (404, r#"{"error":"not found"}"#.to_string()));
+    let entry = path_dep_project("pm_audit_feed_absent");
+    lang()
+        .arg("audit")
+        .arg(entry.parent().unwrap())
+        .env("NOETA_REGISTRY_URL", &bare)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("serves no advisory feed"));
+
+    // An unreachable registry: the fetch fails with a transient error and stays a note.
+    let dead = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        drop(l); // nothing listens on this port
+        format!("http://{addr}")
+    };
+    let entry = path_dep_project("pm_audit_feed_offline");
+    lang()
+        .arg("audit")
+        .arg(entry.parent().unwrap())
+        .env("NOETA_REGISTRY_URL", &dead)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not checked — "));
+}
+
+#[test]
 fn noeta_claim_by_domain_posts_the_domain_proof() {
     // namespace-protection #1 (domain proof): `noeta claim <scope> --domain <domain>` skips the GitHub
     // path and posts a `domain` proof to the registry (which then verifies the well-known file server

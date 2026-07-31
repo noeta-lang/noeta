@@ -311,6 +311,14 @@ step 2 test "cargo test --workspace (Cranelift-free)" -- \
     "${CARGO[@]}" test --workspace --exclude noeta-jit --exclude noeta-cli --locked
 step 2 test "lean CLI build (--no-default-features)" -- \
     "${CARGO[@]}" test -p noeta-cli --no-default-features --locked
+# `noeta-pm` declares no `default` feature and gates every crypto/trust module, so the workspace run
+# above builds it BARE — 57 of its 250 tests never executed here or in ci.yml (audit row 4b). Among
+# them: the `test_data/wire` fixture pin that keeps this repo byte-compatible with the noeta-registry
+# Worker, the advisory-feed and transparency-log chain verification, and the attestation goldens.
+# `--all-features` rather than a feature list on purpose: a list is a second place to forget when a
+# feature is added, which is the failure this audit is about.
+step 2 test "cargo test -p noeta-pm --all-features (registry wire fixtures + trust chain)" -- \
+    "${CARGO[@]}" test -p noeta-pm --all-features --locked
 # The lean feature SHAPES the AOT/native-size/p2p stories depend on. ci.yml runs these as one
 # step; split here so a failure names the shape instead of a line number in a shell block.
 step 2 test "shape: noeta-vm aot" -- \
