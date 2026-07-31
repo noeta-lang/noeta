@@ -421,10 +421,14 @@ impl Checker {
         }
         let rec = |t: &Type| self.open_only_by_erasure(t);
         match ty {
-            Type::Named(n, args) => {
-                !self.mentions_in_scope_param(&Type::Named(n.clone(), Vec::new()))
-                    && args.iter().all(rec)
-            }
+            // A parameter that is IN SCOPE here is open by the parameter, not by erasure — that is
+            // the sibling function's case, and the caller picks a different (more precise)
+            // diagnostic for it. This arm was implicit while a parameter was a `Named` and the head
+            // was tested against the in-scope name set; without it a `Type::Param` falls into the
+            // `_ => true` below and every such construction reports "records no type argument"
+            // instead of "`T` is a type parameter of the enclosing member".
+            Type::Param(p) => !self.param_in_scope(p),
+            Type::Named(_, args) => args.iter().all(rec),
             Type::Tuple(args) | Type::Union(args) => args.iter().all(rec),
             Type::List(e) | Type::Set(e) | Type::Option(e) => rec(e),
             Type::Map(k, v) | Type::Result(k, v) => rec(k) && rec(v),

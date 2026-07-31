@@ -3831,3 +3831,54 @@ fn a_bare_none_on_a_non_option_scrutinee_is_still_a_binding() {
         helps(src)
     );
 }
+
+/// The rendered diagnostic MESSAGES, for a rule whose identity lives in its wording rather than
+/// only in its code — two diagnostics may share a code and mean different things.
+fn messages(text: &str) -> Vec<String> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
+    check(&parsed.program)
+        .iter()
+        .map(|d| d.message.clone())
+        .collect()
+}
+
+/// **Which** E0058 a structurally-unrecordable construction gets.
+///
+/// Two diagnostics share the code and say opposite things about the cause: "records no type
+/// argument … nothing supplies an instantiation" (the type was *erased*, no instantiation reached
+/// the call at all) and "`T` is a type parameter of the enclosing declaration" (an instantiation
+/// exists, it just cannot travel to this position). Which one fires turns on
+/// `open_only_by_erasure`, whose parameter case was spelled as "a `Named` head in the in-scope name
+/// set" — a trigger that stopped firing the moment a parameter became its own lattice variant, and
+/// silently downgraded every such site to the wrong explanation.
+///
+/// `generics/generic_in_generic_unrecordable.noe` covers this case in the corpus but pins only the
+/// CODE and the span, so it stayed green through the regression. This is the test that would not
+/// have.
+#[test]
+fn an_unrecordable_construction_names_the_type_parameter_not_erasure() {
+    let src = "\
+struct Todo { id: int }
+class Repository<T> {
+  pub tbl: string
+  fn new(tbl: string): Repository<T> { return Repository { tbl: tbl }; }
+  fn label(): string { return \"${self.tbl}\" ~ type_name::<T>(); }
+  fn rebuild(): string {
+    r: Repository<T> = Repository.new(self.tbl ~ \"2\");
+    return r.label();
+  }
+}
+r: Repository<Todo> = Repository::<Todo>.new(\"todos\");
+echo r.rebuild();
+";
+    assert_eq!(codes(src), vec!["E0058"], "{:?}", codes(src));
+    let m = &messages(src)[0];
+    assert!(
+        m.contains("is a type parameter of the enclosing declaration"),
+        "an in-scope parameter is open BY THE PARAMETER, not by erasure — got: {m}"
+    );
+}
