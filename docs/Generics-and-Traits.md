@@ -51,7 +51,7 @@ r = Repo::<Todo>.new("todos")       // Repo<Todo> — the call says so itself
 echo r.model()                      // todos:Todo
 ```
 
-`Type::<Args>.method(args)` works for **any** associated function, not just one called `new` — Noeta has no constructor concept, so `Repo::<Todo>.open(dsn)` and `Repo::<Todo>.from_dsn(dsn)` read the same way. The type arguments bind to the type's declared parameters in order, arity-checked (E0058, as is a turbofish on a non-generic type). They are the *class's* parameters; a method's own `<U>` is still instantiated on the method (`Repo::<Todo>.load::<Order>(text)` is not spelled — see [Generic methods](#generic-methods)).
+`Type::<Args>.method(args)` works for **any** associated function, not just one called `new` — Noeta has no constructor concept, so `Repo::<Todo>.open(dsn)` and `Repo::<Todo>.from_dsn(dsn)` read the same way. The type arguments bind to the type's declared parameters in order, arity-checked (E0058, as is a turbofish on a non-generic type). They are the *class's* parameters, and only those: a method's own `<U>` is instantiated on the method, so `Repo.new::<Todo>` is an error (`new` declares no type parameters of its own). Where both are generic, both are spelled — see [Both at once](#both-at-once).
 
 The `::` is required: `Repo<Todo>.new(…)` is a parse error, because a bare `<` after an identifier is ambiguous with less-than in expression position. That is the same reason every other type argument in the language is written with a turbofish.
 
@@ -116,6 +116,24 @@ p = b.paired::<string>("hi")        // Pair<int, string> — T from b, U from th
 All three instantiation paths a free function has apply, consistent with them: **argument inference** (`b.choose(99, true)` infers `U = int`), the **member turbofish** `recv.m::<U>(args)` (the class's parameter never appears among these — only the method's own, arity-checked E0058), and **expected-type seeding** (`xs: List<int> = b.collect()` seeds a return-only `U` from the annotation). Bounds on a method parameter ride the ordinary trait machinery (`fn bigger<U: Comparable>(...)`; a non-`Comparable` argument is E0025). The parameters are erased like every generic — one compiled method serves every instantiation.
 
 A method's own parameter **forwards** into a call-site-typed position exactly as a free function's does — `json.try_parse::<U>` inside a method body is fine (see [Forwarding `T`](#forwarding-t) for the one thing to know about it). One boundary still holds statically: a **trait's** required-method set stays monomorphic — a per-method `<U>` on a trait method is E0058, since the trait is dispatched dynamically and each `impl` would have to agree on the parameter; put the generic method on a concrete type, or make the whole trait generic (`trait T<U> { ... }`).
+
+### Both at once
+
+A **self-less** member of a generic class carrying its own uninferable parameter needs both turbofishes on one call, and takes them:
+
+```noeta
+struct Todo { id: int }
+
+class Repo<T> {
+    fn blank<U>(): string { return type_name::<T>() ~ "/" ~ type_name::<U>() }
+}
+
+echo Repo::<Todo>.blank::<int>()    // Todo/int
+```
+
+Every other combination has a shorter spelling, which is why this one is the case worth naming. `blank` never reads `self`, so it must be called on the type and the class's `T` can only come from the receiver; its own `U` appears only in the return, so no argument and no annotation can pin it either. With an argument to infer from you write `Repo::<Todo>.describe(1)`; on an instance you write `r.blank::<int>()`, because a value carries its own instantiation already — a receiver turbofish on one is E0058.
+
+The two remain separate concepts checked against separate parameter lists: the turbofish before the `.` is arity-checked against the class's parameters, the one after the member against the method's own. One consequence is worth knowing: a method parameter that **reuses** a class parameter's name does not shadow it — the class's binding wins, and the method's parameter of that name is unreachable. Give it a different name (`fn blank<U>()`, not `fn blank<T>()`) and there is nothing to trip over.
 
 ## Forwarding `T`
 

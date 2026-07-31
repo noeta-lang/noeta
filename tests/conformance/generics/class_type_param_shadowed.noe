@@ -8,6 +8,11 @@
 // indistinguishable at run time, so answering either would have been a guess. Shadowing is now an
 // ordinary scoping question with an ordinary answer, and the sibling case that still refuses —
 // a parameter no call can infer — is `reflection/type_name_diagnostics.noe`.
+//
+// One thing this case cannot show, because both `K`s are `A` here: the reused name does not
+// actually SHADOW. The class's argument binds it first and wins, so passing a `B` to a `Pair<A,
+// int>` is `E0007`, `argument of type B is not assignable to A` — the method's own `K` is
+// unreachable, not merely inner. `generic_methods/both_turbofishes_name_collision.noe` pins that.
 // expect: stdout "1A"
 // expect: exit 0
 struct A {
