@@ -247,6 +247,10 @@ pub(crate) fn erase_type_params(ty: Type, params: &ParamSet) -> Type {
         Type::Map(k, v) => Type::Map(Box::new(erase(*k)), Box::new(erase(*v))),
         Type::Option(t) => Type::Option(Box::new(erase(*t))),
         Type::Result(t, e) => Type::Result(Box::new(erase(*t)), Box::new(erase(*e))),
+        Type::Tuple(es) => Type::Tuple(es.into_iter().map(erase).collect()),
+        // A union re-normalizes through the smart constructor, so an erased member collapses the
+        // way the lattice says it must: `T | string` erases to `dyn | string`, which **is** `dyn`.
+        Type::Union(es) => Type::union(es.into_iter().map(erase)),
         Type::Fn { params: ps, ret } => Type::Fn {
             params: ps.into_iter().map(erase).collect(),
             ret: Box::new(erase(*ret)),
@@ -283,6 +287,18 @@ pub(crate) fn bind_type_params(raw: &Type, arg: &Type, params: &ParamSet, subst:
             bind_type_params(rt, at, params, subst);
             bind_type_params(re, ae, params, subst);
         }
+        // A tuple binds position-wise, like every other structural container: `(T, int)` matched
+        // against `(int, int)` pins `T = int`. `zip` stops at the shorter one, so a mismatched
+        // arity simply binds what lines up and leaves the rest to the arity check.
+        (Type::Tuple(rs), Type::Tuple(as_)) => {
+            for (r, a) in rs.iter().zip(as_) {
+                bind_type_params(r, a, params, subst);
+            }
+        }
+        // A **union** deliberately binds nothing. `T | string` matched against `int` could mean
+        // `T = int` only if the value is known not to be the other member, and nothing here knows
+        // that — so the parameter stays unbound and the caller's `dyn` fallback takes over, which
+        // accepts the argument without inventing an instantiation.
         (
             Type::Fn {
                 params: rp,
@@ -416,6 +432,10 @@ pub(crate) fn apply_subst(ty: &Type, subst: &Subst) -> Type {
             Box::new(apply_subst(t, subst)),
             Box::new(apply_subst(e, subst)),
         ),
+        Type::Tuple(es) => Type::Tuple(es.iter().map(|e| apply_subst(e, subst)).collect()),
+        // Through the smart constructor: substituting can make two members equal (`T | string` with
+        // `T = string`), and a union carrying a duplicate is not a type the lattice produces.
+        Type::Union(es) => Type::union(es.iter().map(|e| apply_subst(e, subst))),
         Type::Fn { params, ret } => Type::Fn {
             params: params.iter().map(|p| apply_subst(p, subst)).collect(),
             ret: Box::new(apply_subst(ret, subst)),

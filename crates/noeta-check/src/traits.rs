@@ -1920,7 +1920,7 @@ impl Checker {
             }
             let arg = args[i].clone();
             bind_type_params(raw, &arg, &tps, &mut subst);
-            let expected = apply_subst(raw, &subst);
+            let expected = subst_or_dyn(raw, &subst, &tps);
             let arg = &arg;
             // A bare literal adapts into a fixed-width parameter here too (P-NUM-SYM) — whether the
             // parameter is a concrete `u8`/`f32`/`f64` or a type variable already bound to one

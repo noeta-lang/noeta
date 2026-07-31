@@ -3882,3 +3882,127 @@ echo r.rebuild();
         "an in-scope parameter is open BY THE PARAMETER, not by erasure — got: {m}"
     );
 }
+
+/// **The type walkers must be total over the lattice.** `erase_type_params`, `apply_subst` and
+/// `bind_type_params` descended into every container the language has EXCEPT `Tuple` and `Union`,
+/// so a parameter written inside one was neither erased nor instantiated — it survived as a
+/// `Type::Param`, and a parameter is a subtype of nothing, so the argument check rejected a
+/// perfectly ordinary call: `f((1, 2))` against `fn f<T>(p: (T, int))` reported *"argument of type
+/// `(int, int)` is not assignable to `(T, int)`"*, naming a parameter the caller cannot even spell.
+#[test]
+fn a_type_parameter_inside_a_tuple_erases_like_one_inside_a_list() {
+    let src = "fn f<T>(p: (T, int)): int { return 1; }\necho \"${f((1, 2))}\";\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// The other half: a tuple element **instantiates** from the argument, so the call's result is the
+/// caller's type and not a leaked parameter. The un-erased form escaped all the way into a
+/// caller-visible type — `p = mk(3)` was `(T, int)` in a scope where `T` means nothing.
+#[test]
+fn a_type_parameter_inside_a_tuple_substitutes_from_the_argument() {
+    let src = "fn mk<T>(v: T): (T, int) { return (v, 1); }\np = mk(3);\ns: string = p;\necho s;\n";
+    assert_eq!(codes(src), ["E0007"], "{:?}", messages(src));
+    assert!(
+        messages(src)[0].contains("found `(int, int)`"),
+        "the tuple element must be the instantiated `int`, not a leaked `T`: {:?}",
+        messages(src)
+    );
+}
+
+/// A union member is the same gap. `T | string` erases to `dyn | string` — which **is** `dyn`, so
+/// the parameter accepts any argument, the honest answer when nothing determines `T`. It used to
+/// stay `T | string` and reject every argument that was not already a `string`.
+#[test]
+fn a_type_parameter_inside_a_union_erases_to_dyn() {
+    let src = "fn h<T>(x: T | string): int { return 1; }\necho \"${h(1)}\";\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// And a union member instantiates like any other: a bound `T` is substituted inside the union, so
+/// the returned type names the caller's `int` rather than the callee's parameter.
+#[test]
+fn a_type_parameter_inside_a_union_substitutes() {
+    let src = "fn k<T>(v: T): T | string { return \"s\"; }\ns: string = k(1);\necho s;\n";
+    assert_eq!(codes(src), ["E0007"], "{:?}", messages(src));
+    assert!(
+        messages(src)[0].contains("found `int | string`"),
+        "the union member must be the instantiated `int`, not a leaked `T`: {:?}",
+        messages(src)
+    );
+}
+
+/// A **declaration-position** consequence of the same gap: a default value is checked against its
+/// declared type with the enclosing parameters erased, so `(T, int) = (0, 0)` was rejected at the
+/// declaration itself — no call site involved.
+#[test]
+fn a_tuple_typed_default_is_checked_against_the_erased_type() {
+    let src =
+        "struct Holder<T> {\n  pair: (T, int) = (0, 0)\n}\nh = Holder { };\necho \"${h.pair}\";\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// **A method's `<T>` inside a `class Repo<T>` warns (E0075).** The shadowing is sound — the two
+/// are different parameters and the inner one wins — but a reader of `Repo::<Todo>.label::<User>()`
+/// cannot tell which `T` the body means, so the compiler says so and keeps going.
+#[test]
+fn a_method_type_parameter_that_shadows_its_class_warns() {
+    let src = "class Repo<T> {\n  fn label<T>(): string { return \"x\"; }\n}\n";
+    assert_eq!(codes(src), ["E0075"], "{:?}", messages(src));
+    let d = &diagnostics(src)[0];
+    assert_eq!(d.severity, noeta_diagnostics::Severity::Warning);
+    assert!(
+        d.message
+            .contains("`T` shadows the enclosing `T` of `Repo`"),
+        "the message must name both declarations: {}",
+        d.message
+    );
+    // The second label points at the CLASS's `<T>`, so "where the outer one is declared" is in the
+    // rendered report rather than left to the reader.
+    assert_eq!(d.labels.len(), 2, "primary + the outer declaration: {d:?}");
+    assert!(
+        d.labels[1].message.contains("declared here"),
+        "{:?}",
+        d.labels
+    );
+    let outer = src.find("<T>").expect("the class's own `<T>`") as u32 + 1;
+    assert_eq!(
+        (d.labels[1].span.start, d.labels[1].span.end),
+        (outer, outer + 1),
+        "the label must span the CLASS's `T`, not the method's"
+    );
+}
+
+/// It does not fire on a **different name** — the ordinary generic method, which reaches both
+/// parameters and is exactly what the warning tells you to write.
+#[test]
+fn a_method_type_parameter_with_its_own_name_is_silent() {
+    let src = "class Repo<T> {\n  fn label<U>(): string { return \"x\"; }\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// It does not fire on a **nominal type** of the same name. `struct T { }` beside a `class Repo<T>`
+/// is legitimate — the parameter's author does not control what somebody named a type — and the
+/// scope the check consults holds parameters only, so there is nothing there to hide.
+#[test]
+fn a_type_parameter_that_shares_a_name_with_a_declared_type_is_silent() {
+    let src =
+        "struct T {\n  id: int\n}\nclass Repo<T> {\n  fn label(): string { return \"x\"; }\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// It does not fire across **sibling scopes**: two methods may each declare `<T>`, because neither
+/// is inside the other. The scope is saved and restored per declaration, so the second method's
+/// `<T>` is compared against the class's — a non-generic class here — and not the first method's.
+#[test]
+fn two_sibling_methods_may_each_declare_the_same_parameter_name() {
+    let src = "class Repo {\n  fn a<T>(x: T): string { return \"a\"; }\n  fn b<T>(x: T): string { return \"b\"; }\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// And a top-level generic `fn` beside a generic class is not nested in it, so a shared name is
+/// nobody's shadow.
+#[test]
+fn a_top_level_generic_fn_does_not_shadow_a_generic_class() {
+    let src = "class Repo<T> {\n  pub v: int\n}\nfn label<T>(x: T): string { return \"x\"; }\necho label(1);\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}

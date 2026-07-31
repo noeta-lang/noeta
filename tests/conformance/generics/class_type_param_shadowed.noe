@@ -14,6 +14,8 @@
 // indistinguishable at run time, so answering either would have been a guess. Shadowing is now an
 // ordinary scoping question with an ordinary answer, and the sibling case that still refuses —
 // a parameter no call can infer — is `reflection/type_name_diagnostics.noe`.
+// The shadowing itself is an E0075 warning — the rule is sound, the spelling is not legible.
+// expect: error E0075 at 36:17
 // expect: stdout "1B"
 // expect: stdout "1A"
 // expect: exit 0

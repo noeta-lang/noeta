@@ -433,6 +433,25 @@ pub enum DiagnosticCode {
     /// It is an error with a rename hint rather than a silent `-` → `_` mapping, which would give
     /// one module two spellings.
     IllegalModulePath,
+    /// **Warning.** A declaration's own `<T>` reuses the name of a type parameter the *enclosing*
+    /// declaration already introduced — a method's `<T>` inside a `class Repo<T>`.
+    ///
+    /// It is well-defined: the two are different parameters (identity is the declaration site, not
+    /// the spelling), and the inner one shadows the outer exactly as a local binding shadows a
+    /// global. So this is a **readability** judgement, not a correctness one, and it is a warning
+    /// rather than an error: the meaning is settled, it is just not legible. A reader looking at
+    /// `Repo::<Todo>.label::<User>()` cannot tell from the call which `T` the body means, and the
+    /// class's parameter is unreachable from that body under any spelling.
+    ///
+    /// The fix is to rename one of them. Rust lints this and C# rejects it outright; the language
+    /// takes the middle position, because the shadowing rule itself is worth keeping — it is what
+    /// makes a method's own parameter list mean what it says.
+    ///
+    /// Only shadowing of a *type parameter* is reported. A parameter that shares a name with a
+    /// nominal type (`struct T { }` beside a `class Repo<T>`) is silent: those live in one namespace
+    /// but the parameter is the ordinary, expected meaning inside its own declaration, and naming a
+    /// type `T` is a choice the parameter's author does not control.
+    ShadowedTypeParameter,
 }
 
 impl DiagnosticCode {
@@ -512,6 +531,7 @@ impl DiagnosticCode {
         DiagnosticCode::ModulePathMismatch,
         DiagnosticCode::ModulePathCollision,
         DiagnosticCode::IllegalModulePath,
+        DiagnosticCode::ShadowedTypeParameter,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -592,6 +612,7 @@ impl DiagnosticCode {
             DiagnosticCode::ModulePathMismatch => "E0072",
             DiagnosticCode::ModulePathCollision => "E0073",
             DiagnosticCode::IllegalModulePath => "E0074",
+            DiagnosticCode::ShadowedTypeParameter => "E0075",
         }
     }
 

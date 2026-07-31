@@ -6,6 +6,10 @@
 // Written as one file rather than five so a change that re-keys parameters on the name (a
 // `HashMap<String, Type>` substitution, a `HashSet<String>` of in-scope names, a `p.name ==`
 // comparison) fails here loudly, wherever it is reintroduced.
+// The two methods that re-spell the class's `T` are E0075 warnings — the identity rule makes the
+// shadowing sound, and the warning says it is still unreadable. Warnings do not stop the program.
+// expect: error E0075 at 49:14
+// expect: error E0075 at 55:23
 // expect: stdout "7Todo"
 // expect: stdout "7User"
 // expect: stdout "int"

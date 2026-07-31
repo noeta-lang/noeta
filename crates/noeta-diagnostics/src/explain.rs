@@ -451,6 +451,15 @@ impl DiagnosticCode {
                 detail: "Every directory name and file stem is spelled out in somebody's `use`, so each has to lex as exactly one identifier. Nothing is renamed silently: mapping `my-utils` to `my_utils` behind your back would give one module two spellings.",
                 docs: "Modules",
             },
+            DiagnosticCode::ShadowedTypeParameter => Explanation {
+                code: "E0075",
+                title: "shadowed type parameter",
+                group: "Traits, generics, and derives",
+                severity: Severity::Warning,
+                summary: "**Warning.** A method's own `<T>` reuses the name of its enclosing type's `<T>`, so the two cannot be told apart by a reader. Rename one.",
+                detail: "The two are different parameters — identity is the declaration site, not the spelling — and the inner one shadows the outer, so the program means what it says and still compiles. What it costs is legibility: inside that method `T` is the method's parameter, the enclosing one is unreachable under any spelling, and a call site like `Repo::<Todo>.label::<User>()` gives a reader no way to tell which is which. A parameter that merely shares a name with a declared type is not this warning.",
+                docs: "Generics-and-Traits",
+            },
             DiagnosticCode::InvalidAttribute => Explanation {
                 code: "E0017",
                 title: "invalid attribute",
