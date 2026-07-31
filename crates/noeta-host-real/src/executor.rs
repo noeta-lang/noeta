@@ -299,6 +299,26 @@ fn join_error(err: tokio::task::JoinError) -> StdError {
 mod tests {
     use super::*;
 
+    /// A descriptor whose real body just sleeps on the blocking pool — the shape every blocking
+    /// leaf (`fs.read_async`, a `Process` read) presents to the executor, with the IO replaced by a
+    /// known duration.
+    #[derive(Debug)]
+    struct SleepIo(Duration);
+
+    impl ExternIo for SleepIo {
+        fn run_sync(&mut self, _host: &mut dyn Host) -> Result<NativeOut, StdError> {
+            std::thread::sleep(self.0);
+            Ok(NativeOut::Unit)
+        }
+        fn run_real(&mut self) -> Option<RealBody> {
+            let wait = self.0;
+            Some(RealBody::Blocking(Box::new(move || {
+                std::thread::sleep(wait);
+                Ok(NativeOut::Unit)
+            })))
+        }
+    }
+
     #[test]
     fn now_advances_with_real_time() {
         let exec = RealExecutor::new().unwrap();
@@ -360,6 +380,82 @@ mod tests {
         assert!(
             exec.timers.contains(&60_000),
             "a not-yet-due timer stays pending across a wake"
+        );
+    }
+
+    #[test]
+    fn a_cancel_wake_ends_a_wait_on_pending_io_early() {
+        // The other place `advance` blocks: waiting on the `JoinSet` for whichever IO leaf finishes
+        // first. A worker awaiting `fs.read_async` or `p.read_line_async` is parked exactly here,
+        // and the same wake must return it — otherwise the cancellation reaches a worker on a timer
+        // and not one on IO, which is the arbitrary half-fix.
+        //
+        // The pending body sleeps 60 s, so an unwoken `advance` cannot pass by finishing early.
+        let mut exec = RealExecutor::new().unwrap();
+        let wake = std::sync::Arc::new(noeta_stdlib::CancelWake::new());
+        exec.set_cancel_wake(std::sync::Arc::clone(&wake));
+        let mut host = noeta_stdlib::SandboxHost::new();
+        exec.spawn_ext(&mut host, Box::new(SleepIo(Duration::from_secs(60))));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            wake.wake();
+        });
+        let start = Instant::now();
+        assert!(exec.advance().is_some(), "a woken advance reports progress");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the cancel wake must end the wait on a pending IO leaf; took {:?}",
+            start.elapsed()
+        );
+        // Nothing was harvested, so the ticket is still pending — the caller re-polls (and, on a
+        // real cancellation, unwinds at its next safepoint instead).
+        assert!(exec.poll_ext(0).is_none());
+        // Do not drop `exec` here with the body still running: see the test below for why that
+        // waits, and `forget` is the only way to end this test in bounded time.
+        std::mem::forget(exec);
+    }
+
+    #[test]
+    fn a_started_blocking_body_outlives_the_executor_it_was_spawned_on() {
+        // **The floor on interrupting a blocking leaf**, pinned because it is the part that is easy
+        // to assume away. Ending the *wait* is cheap — the test above does it — but the work itself
+        // is a `spawn_blocking` closure on the isolate's own tokio runtime, and dropping a runtime
+        // waits for every blocking task that has already started. So a worker that unwinds on a
+        // cancellation still cannot finish its teardown until the leaf returns, and a leaf that
+        // never returns (a FIFO read with no writer) holds the worker — and therefore the
+        // `concurrent` block joining it — indefinitely. Measured end to end at the CLI: that
+        // program hangs past 20 s, and unwedging the FIFO at 900 ms ends the run at 903 ms.
+        //
+        // Interrupting host IO for real therefore needs the leaf to *return* (an `Interrupted`
+        // outcome), not merely to be abandoned. See `plans/interruptible-host-io.md`.
+        //
+        // The sequence is the worker's: spawn the leaf, block in `advance` (which is where the
+        // descriptor's body actually *starts* — `spawn_ext` only queues an async task, so a body
+        // nobody polled has not begun and its runtime drops instantly), take the wake, then tear
+        // down. Both halves are asserted from that one run.
+        let mut exec = RealExecutor::new().unwrap();
+        let wake = std::sync::Arc::new(noeta_stdlib::CancelWake::new());
+        exec.set_cancel_wake(std::sync::Arc::clone(&wake));
+        let mut host = noeta_stdlib::SandboxHost::new();
+        exec.spawn_ext(&mut host, Box::new(SleepIo(Duration::from_secs(2))));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            wake.wake();
+        });
+        let start = Instant::now();
+        exec.advance();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "the wake returns the wait long before the 2s body finishes; took {:?}",
+            start.elapsed()
+        );
+        let teardown = Instant::now();
+        drop(exec);
+        assert!(
+            teardown.elapsed() >= Duration::from_millis(500),
+            "dropping the runtime waits for a started blocking body (took {:?}) — if this ever \
+             stops being true, the teardown half of interruptible host IO got easier",
+            teardown.elapsed()
         );
     }
 
