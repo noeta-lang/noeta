@@ -1639,7 +1639,10 @@ impl Lowerer<'_> {
         slots
             .iter()
             .map(|slot| match slot {
-                noeta_ext_abi::HiddenArg::Table(i) => Atom::Const(Const::Int(*i as i64)),
+                // The one place a `TypeArgIndex` becomes a runtime integer. Everything upstream of
+                // here carries the newtype, which is what lets `noeta_check::SITE_POLICIES` tell a
+                // table index from the slot ordinals that look just like one.
+                noeta_ext_abi::HiddenArg::Table(i) => Atom::Const(Const::Int(i.get() as i64)),
                 noeta_ext_abi::HiddenArg::Forward(j) => Atom::Var {
                     name: hidden_param_name(*j),
                     span: *span,
