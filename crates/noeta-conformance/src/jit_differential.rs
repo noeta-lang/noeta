@@ -159,7 +159,9 @@ fn compare_tiers(name: &str, text: &str, report: &mut JitDiffReport) {
 
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
-    if !tokens.0.diagnostics.is_empty() || !parsed.0.diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(
+        tokens.0.diagnostics.iter().chain(parsed.0.diagnostics.iter()),
+    ) {
         report.not_run.parse_failed += 1;
         return;
     }
@@ -168,7 +170,7 @@ fn compare_tiers(name: &str, text: &str, report: &mut JitDiffReport) {
     // coverage: counting it as matched (as this and the eval differential both used to) inflated
     // the headline and let a fixture that stopped compiling slip from one side of it to the other
     // without moving the number.
-    if !noeta_db::checked(&db, src).diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(&noeta_db::checked(&db, src).diagnostics) {
         report.not_run.checker_rejected += 1;
         note_rejection(name, text, report);
         return;
@@ -220,7 +222,7 @@ fn compare_tiers_workspace(
         report.not_run.link_failed += 1;
         return;
     }
-    if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(&noeta_db::linked_checked(&db, ws).diagnostics) {
         report.not_run.checker_rejected += 1;
         note_rejection(name, raw.entry.text(), report);
         return;

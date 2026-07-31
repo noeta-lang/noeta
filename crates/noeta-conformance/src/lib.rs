@@ -77,6 +77,13 @@ struct Outcome {
     errors: Vec<ErrorExpectation>,
 }
 
+/// The exit code a stage that stopped short reports: **1** if anything blocking was found, else 0.
+/// Blocking means an *error* — a warning describes a case that is still perfectly runnable, and a
+/// harness that treats one as a failure turns every new checker warning into a corpus-wide break.
+fn blocking_exit(diagnostics: &[Diagnostic]) -> i32 {
+    i32::from(noeta_diagnostics::has_errors(diagnostics))
+}
+
 /// Run a source string through the pipeline up to `stage` and capture its outcome.
 fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
     let source = Source::new(SourceId::FIRST, name, text);
@@ -107,7 +114,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
     let mut exit_code;
 
     if stage == Stage::Lexer {
-        exit_code = if diagnostics.is_empty() { 0 } else { 1 };
+        exit_code = blocking_exit(&diagnostics);
     } else {
         let parsed = noeta_parser::parse_in(
             &source,
@@ -124,7 +131,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // One `check_all` yields both the gate diagnostics and the site bundle the eval backend
         // needs, so the checker runs once per case instead of again inside the backend.
         let mut sites = noeta_check::Sites::default();
-        if stage == Stage::Eval && diagnostics.is_empty() {
+        if stage == Stage::Eval && !noeta_diagnostics::has_errors(&diagnostics) {
             let checked = noeta_check::check_all(&parsed.program);
             diagnostics.extend(checked.diagnostics);
             sites = checked.sites;
@@ -133,19 +140,22 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // Only evaluate a program that checked cleanly and only when asked to. The reference is the
         // Core-IR interpreter (the migration's Phase-4 reference semantics), so conformance pins the
         // same last-use destruction the VM produces.
-        if stage == Stage::Eval && diagnostics.is_empty() {
+        // A **warning** does not stop a case from running — a fixture that lints still has
+        // behavior to pin, and the alternative is that adding any warning to the checker silently
+        // converts conformance cases into compile failures.
+        if stage == Stage::Eval && !noeta_diagnostics::has_errors(&diagnostics) {
             let result = reference::reference_run(&parsed.program, sites);
             stdout = result.stdout;
             stderr = result.stderr;
             diagnostics.extend(result.diagnostics);
             exit_code = result.exit_code;
         } else {
-            exit_code = if diagnostics.is_empty() { 0 } else { 1 };
+            exit_code = blocking_exit(&diagnostics);
         }
     }
 
-    // A compile error always means a failing exit, even if a stage stopped early.
-    if !diagnostics.is_empty() && exit_code == 0 {
+    // A compile *error* always means a failing exit, even if a stage stopped early.
+    if noeta_diagnostics::has_errors(&diagnostics) && exit_code == 0 {
         exit_code = 1;
     }
 
@@ -480,7 +490,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
             ..noeta_check::CheckOptions::default()
         },
     );
-    if !checked.diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return Outcome {
             stdout: String::new(),
             stderr: String::new(),

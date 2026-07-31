@@ -826,15 +826,14 @@ impl<'m> Vm<'m> {
         }
 
         // A deliberate `os.exit(code)` wins over the diagnostic-derived code (there are no
-        // diagnostics on that path — the halt is clean).
-        let exit_code = self
-            .out
-            .requested_exit
-            .unwrap_or(if self.out.diagnostics.is_empty() {
-                0
-            } else {
-                1
-            });
+        // diagnostics on that path — the halt is clean). Otherwise the code is derived from whether
+        // the run **aborted** — an *error* — not from whether it said anything: a program's exit
+        // code is its own outcome, and an advisory diagnostic is not a failure. (Every runtime
+        // diagnostic is an abort today, so this is the same value; spelling it `is_empty()` is how
+        // the first advisory runtime diagnostic would silently start failing programs.)
+        let exit_code = self.out.requested_exit.unwrap_or(
+            u8::from(noeta_diagnostics::has_errors(&self.out.diagnostics)).into(),
+        );
         RunResult {
             stdout: std::mem::take(&mut self.out.stdout),
             stderr: std::mem::take(&mut self.out.stderr),

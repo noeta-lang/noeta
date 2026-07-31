@@ -181,7 +181,9 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     // the normal conformance harness's job (the lexer/parser stages). Exclude it here.
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
-    if !tokens.0.diagnostics.is_empty() || !parsed.0.diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(
+        tokens.0.diagnostics.iter().chain(parsed.0.diagnostics.iter()),
+    ) {
         report.not_run.parse_failed += 1;
         return;
     }
@@ -190,7 +192,7 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     // backend, and its diagnostics are the program's whole observable result — identical no
     // matter which backend would have run. So a type error is a guaranteed agreement, counted as
     // matched. (The corpus harness separately asserts the diagnostic's code+span.)
-    if !noeta_db::checked(&db, src).diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(&noeta_db::checked(&db, src).diagnostics) {
         report.not_run.checker_rejected += 1;
         note_rejection(name, text, report);
         return;
@@ -265,7 +267,7 @@ fn compare_backends_workspace(
             return;
         }
     };
-    if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(&noeta_db::linked_checked(&db, ws).diagnostics) {
         report.not_run.checker_rejected += 1;
         note_rejection(name, raw.entry.text(), report);
         return;
