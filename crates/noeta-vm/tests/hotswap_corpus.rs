@@ -52,8 +52,9 @@
 //! range, so it is an ordinary test — no `#[ignore]`, no flag to remember, no coverage that only
 //! exists when someone opts in.
 //!
-//! What it finds today is in [`KNOWN_DIVERGENCES`]: nine real hot-swap defects in three families,
-//! left unfixed here on purpose so this stays reviewable as a harness.
+//! What it finds today is in [`KNOWN_DIVERGENCES`]. It found nine, in three families; the first
+//! family — a swapped body skipping a destructor, three of the nine — is fixed and delisted,
+//! leaving six divergences in two families still standing.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -989,13 +990,18 @@ fn indent(text: &str) -> String {
 /// build, and anything on it that stops reproducing fails it too, which is what stops the list from
 /// quietly outliving the bugs.
 ///
-/// Three families, all of the shape the hand-written corpus was written to catch and did not:
+/// Three families, all of the shape the hand-written corpus was written to catch and did not. The
+/// first is **fixed**; its entries are gone from the list below, and that is the list working as
+/// intended.
 ///
-/// 1. **A fragment-compiled body skips a destructor.** `gc/self_update_own_destructor_no_reuse`
+/// 1. ~~**A fragment-compiled body skips a destructor.**~~ FIXED. `gc/self_update_own_destructor_no_reuse`
 ///    pins that `acc = Counter { ...acc, n: 1 }` must *not* reuse the allocation when the type has
-///    its own `destruct`, so the displaced value runs its destructor. Swapped, the reuse fires and
-///    `drop counter 0` never prints — a silent change to when destructors run, reported
-///    independently by three of the four generators.
+///    its own `destruct`, so the displaced value runs its destructor. Swapped, the reuse fired and
+///    `drop counter 0` never printed — reported independently by three of the four generators. The
+///    reuse pass read its own-destructor exclusion set off the class declarations in the IR it was
+///    handed, and a fragment carries none; the set now travels with the program
+///    (`noeta_ir::ProgramFacts::own_destructors`). Pinned targetedly by
+///    `hotswap.rs::a_swapped_self_update_still_destroys_the_value_it_displaces`.
 ///
 /// 2. **A swapped fn's `@role` binding is dropped from `roles_of()`.** `reflection/roles_of`,
 ///    `reflection/roles_of_scoped` and `reflection/prelude_enums_constructible` all lose exactly the
@@ -1009,19 +1015,7 @@ fn indent(text: &str) -> String {
 ///    re-registered one of the annotated declarations — enough to break the very conformance
 ///    expectations those files carry, which assert an ordered stdout.
 const KNOWN_DIVERGENCES: &[(&str, Generator)] = &[
-    // (1) destructor skipped by a fragment-compiled body.
-    (
-        "gc/self_update_own_destructor_no_reuse.noe",
-        Generator::CloneAppend,
-    ),
-    (
-        "gc/self_update_own_destructor_no_reuse.noe",
-        Generator::CloneChanged,
-    ),
-    (
-        "gc/self_update_own_destructor_no_reuse.noe",
-        Generator::RerunWithBodyEdit,
-    ),
+    // (1) destructor skipped by a fragment-compiled body — FIXED, entries removed.
     // (3) attribute manifest order.
     (
         "reflection/attributes_on_functions.noe",

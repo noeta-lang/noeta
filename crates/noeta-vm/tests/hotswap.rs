@@ -211,6 +211,60 @@ fn a_swapped_async_body_still_sees_the_module_globals() {
     oracle(&app("0"), &app("10"), "echo bump().await\necho count\n");
 }
 
+/// **A swap must not change when a destructor runs.** The in-place-reuse pass may only reuse a
+/// self-updated allocation (`acc = Counter { ...acc, n: 1 }`) when the type runs no `destruct`
+/// block of its own — reuse means the displaced value is never destroyed, while the copy-and-destroy
+/// baseline destroys it at the update (`gc/self_update_own_destructor_no_reuse` pins that on the
+/// cold path). The pass read that exclusion set off the class declarations in the IR it was handed,
+/// and a fragment carries the changed function and **not** the class: `Counter` looked
+/// destructor-free, the swapped body reused in place, and `drop counter 0` — the line a cold start
+/// of the identical source prints — was gone for the rest of the process's life.
+///
+/// Only the *middle* line disappears, which is the nasty part: the value is still reclaimed and its
+/// destructor still runs at scope exit for the survivor, so a session looks healthy while every
+/// superseded resource silently outlives the moment it was supposed to be released. `run` is called
+/// twice on purpose — a per-update release that goes missing is a leak that compounds per request,
+/// not a one-off.
+#[test]
+fn a_swapped_self_update_still_destroys_the_value_it_displaces() {
+    let app = |tag: &str| {
+        format!(
+            "class Counter {{\n\
+             \x20   pub n: int\n\
+             \x20   destruct {{ echo \"drop counter ${{self.n}}\" }}\n\
+             }}\n\
+             fn run(): void {{\n\
+             \x20   mut acc = Counter {{ n: 0 }}\n\
+             \x20   echo \"start {tag}\"\n\
+             \x20   acc = Counter {{ ...acc, n: 1 }}\n\
+             \x20   echo \"end\"\n\
+             }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "run()\nrun()\n");
+}
+
+/// The sibling that keeps the fix honest: a self-update of a type with **no** destructor anywhere in
+/// its subtree stays reuse-eligible after a swap. Reuse is observationally transparent for such a
+/// type, so this cannot be asserted through the oracle's stdout — what it pins is that the ambient
+/// own-destructor set is the *set of destructor-bearing classes* and not "every declared type", i.e.
+/// that the repair did not buy correctness by turning the optimization off inside every swapped
+/// body (which is how a swapped `acc ~= …` accumulator would quietly go quadratic).
+#[test]
+fn a_swapped_self_update_of_a_destructor_free_type_still_agrees_with_a_cold_start() {
+    let app = |tag: &str| {
+        format!(
+            "struct Tally {{ n: int }}\n\
+             fn run(): string {{\n\
+             \x20   mut acc = Tally {{ n: 0 }}\n\
+             \x20   for i in 0..4 {{ acc = Tally {{ ...acc, n: acc.n + i }} }}\n\
+             \x20   return \"{tag} ${{acc.n}}\"\n\
+             }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "echo run()");
+}
+
 #[test]
 fn an_unchanged_caller_dispatches_to_the_swapped_callee() {
     // THE HMR property: `describe` is byte-identical across versions (never recompiled), yet its

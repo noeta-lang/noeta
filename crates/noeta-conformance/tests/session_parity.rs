@@ -151,6 +151,30 @@ fn destructors_and_drop_agree_across_entries() {
     ]);
 }
 
+/// A self-update (`acc = Counter { ...acc, n: 1 }`) may only reuse the displaced allocation in place
+/// when the type runs no `destruct` block of its own — otherwise the value it displaces is never
+/// destroyed, where the copy-and-destroy baseline destroys it at the update
+/// (`gc/self_update_own_destructor_no_reuse` pins that for a whole program).
+///
+/// Both REPLs decided that by looking at the class declarations in *the entry being compiled*, and
+/// the entry that self-updates is virtually never the entry that declared the class. So a session
+/// silently stopped running a destructor a single-file run of the identical code runs — and parity
+/// alone could not see it, because both backends were wrong in the same direction. That is why this
+/// asserts the *content* rather than only that the two agree.
+#[test]
+fn a_self_update_of_a_class_declared_in_an_earlier_entry_still_destroys_what_it_displaces() {
+    let out = assert_sessions_agree(&[
+        Step::Eval(
+            "class Counter {\n  pub n: int\n  destruct { echo \"drop counter ${self.n}\"; }\n}",
+        ),
+        Step::Eval(
+            "fn run(): void {\n  mut acc = Counter { n: 0 };\n  echo \"start\";\n  acc = Counter { ...acc, n: 1 };\n  echo \"end\";\n}",
+        ),
+        Step::Eval("run();"),
+    ]);
+    assert_eq!(out, "start\ndrop counter 0\nend\ndrop counter 1\n");
+}
+
 #[test]
 fn a_mid_session_panic_traces_identically_and_the_session_survives() {
     assert_sessions_agree(&[

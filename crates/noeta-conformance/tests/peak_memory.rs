@@ -93,7 +93,7 @@ fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::R
         params: checked.sites.destructor_relevance.params.clone(),
     };
     let ir = noeta_ir_passes::insert_drops(&ir, Some(&relevance));
-    let ir = noeta_ir_passes::thread_reuse(&ir);
+    let ir = noeta_ir_passes::thread_reuse(&ir, &std::collections::HashSet::new());
     let packed_type_layouts = checked
         .sites
         .packed_type_layouts

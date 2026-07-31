@@ -54,8 +54,9 @@ pub fn reference_run_traced(
     );
     let ir = noeta_ir_passes::insert_drops(&ir, Some(&to_relevance(&sites.destructor_relevance)));
     // Thread reuse tokens identically to the bytecode pipeline so the reference and the VM consume
-    // the same annotated IR (Phase 5).
-    let ir = noeta_ir_passes::thread_reuse(&ir);
+    // the same annotated IR (Phase 5). A whole program, so the pass derives the own-destructor gate
+    // from the class declarations the IR carries and nothing is ambient to it.
+    let ir = noeta_ir_passes::thread_reuse(&ir, &std::collections::HashSet::new());
     let deserialize_recipes = sites.deserialize_recipes.iter().cloned().collect();
     let packed_type_layouts = packed_layouts_by_name(&sites);
     IrRefBackend::new().run_ir_traced(
@@ -96,7 +97,7 @@ pub fn reference_run_with_host(
          (gate: ir_lowering_is_total_over_the_corpus)",
     );
     let ir = noeta_ir_passes::insert_drops(&ir, Some(&to_relevance(&sites.destructor_relevance)));
-    let ir = noeta_ir_passes::thread_reuse(&ir);
+    let ir = noeta_ir_passes::thread_reuse(&ir, &std::collections::HashSet::new());
     let deserialize_recipes = sites.deserialize_recipes.iter().cloned().collect();
     let packed_type_layouts = packed_layouts_by_name(&sites);
     IrRefBackend::new().run_ir_with_host(

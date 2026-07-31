@@ -789,7 +789,7 @@ fn every_lowerer_field_is_named_by_the_census() {
     } = lowerer;
 }
 
-/// What lowering learns from **the whole program** instead of from the node it is lowering.
+/// What the IR pipeline learns from **the whole program** instead of from the node in hand.
 ///
 /// This exists because a lowering is not always given a whole program. A hot-swap fragment and a
 /// REPL entry are *pieces* of one — and every table here, derived by reading the program's
@@ -797,7 +797,15 @@ fn every_lowerer_field_is_named_by_the_census() {
 /// a bug: an `@html { … }` in a swapped body lowered to a panic because the `@tier` declaration is
 /// in the imported package; `x is Uuid` silently answered `false` because only a *changed* `use`
 /// rides in a fragment; a swapped `async` body that assigned a module global panicked because the
-/// state-machine desugar hoisted a global into a cell.
+/// state-machine desugar hoisted a global into a cell; and a self-update in a swapped body reused
+/// its allocation in place — skipping a destructor a cold start runs — because the class carrying
+/// the `destruct` block is declared outside the fragment ([`ProgramFacts::own_destructors`]).
+///
+/// That last one is read by a **pass over the lowered IR**
+/// ([`noeta_ir_passes::thread_reuse`](../../noeta_ir_passes/fn.thread_reuse.html)) rather than by
+/// the lowerer, and it still belongs here: the question it answers is the identical one — *what
+/// does a fragment see of the program it belongs to?* — and answering it anywhere else is how it
+/// went unasked for four passes running.
 ///
 /// So: this struct is the single home for that state. A new table lowering derives from the program
 /// belongs **here**, not beside it as another `Lowerer` field — landing here is what forces the
@@ -839,6 +847,21 @@ pub struct ProgramFacts {
     /// value). A global is never a capturable local, mirroring the compiler's free-variable
     /// analysis (which already filters globals out of captures).
     pub module_globals: HashSet<String>,
+    /// Every declared class name carrying its **own** `destruct { … }` block — the reuse pass's
+    /// semantic gate ([`noeta_ir_passes::thread_reuse`](../../noeta_ir_passes/fn.thread_reuse.html)).
+    ///
+    /// A self-update (`acc = T { ...acc, f: v }`) may only reuse the displaced allocation when `T`
+    /// runs no destructor of its own, because reuse means the displaced value is *never destroyed*
+    /// while the copy-and-destroy baseline destroys it on every update (spec §5). The pass derived
+    /// that set from the class declarations in the IR it was handed — which for a fragment is
+    /// **none of them**, so every self-update looked destructor-free and a hot-swapped body
+    /// silently stopped running a destructor its cold start runs. Deterministic destruction is not
+    /// something a swap may quietly change, so the fact travels with the program.
+    ///
+    /// Top-level declarations only, and that is complete: a class declared inside a function body
+    /// is nameable only there, so a self-update of it is in that same body — which is in the
+    /// fragment whenever it changed, and its own `ClassDef` is then in the IR in hand.
+    pub own_destructors: HashSet<String>,
 }
 
 impl ProgramFacts {
@@ -855,6 +878,7 @@ impl ProgramFacts {
                 .into_iter()
                 .collect(),
             module_globals: module_global_names(program),
+            own_destructors: own_destructor_class_names(program),
         }
     }
 
@@ -866,6 +890,9 @@ impl ProgramFacts {
     /// local name means the local one (a fragment that adds `use other.Uuid` means *that* `Uuid`).
     /// `module_globals` **unions**: a global is a global no matter which side of the program the
     /// lowering can see, and the set is only ever read as "is this name a global", never "whose".
+    /// `own_destructors` unions too, and deliberately errs *toward* membership: a stale entry (a
+    /// later version dropped the `destruct` block) only costs the in-place-reuse optimization,
+    /// which is observationally transparent, whereas a missing entry costs a destructor.
     pub fn under(
         mut self,
         program: &AstProgram,
@@ -876,6 +903,7 @@ impl ProgramFacts {
         self.native_type_imports.extend(own.native_type_imports);
         self.expr_tiers.extend(own.expr_tiers);
         self.module_globals.extend(own.module_globals);
+        self.own_destructors.extend(own.own_destructors);
         self
     }
 
@@ -886,7 +914,22 @@ impl ProgramFacts {
         self.native_type_imports.extend(other.native_type_imports);
         self.expr_tiers.extend(other.expr_tiers);
         self.module_globals.extend(other.module_globals);
+        self.own_destructors.extend(other.own_destructors);
     }
+}
+
+/// The top-level class names carrying their own `destruct { … }` block — see
+/// [`ProgramFacts::own_destructors`]. A struct is bodiless and never has one, so only classes are
+/// looked at.
+fn own_destructor_class_names(program: &AstProgram) -> HashSet<String> {
+    program
+        .stmts
+        .iter()
+        .filter_map(|stmt| match stmt {
+            AstStmt::Class(decl) if decl.destructor.is_some() => Some(decl.name.to_string()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The top-level binding and `fn` names of a program — the module globals a nested function
