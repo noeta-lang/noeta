@@ -27,7 +27,13 @@ use sha2::{Digest, Sha256};
 
 /// The env guard that marks a composed binary: set on delegation so the composed toolchain (which
 /// contains this same code) never re-composes, even though its graph still lists native crates.
-const COMPOSED_GUARD: &str = "NOETA_COMPOSED";
+///
+/// Its **value** is the composition manifest — the identities the delegated binary links
+/// ([`noeta_pm::composed::env_value`]). A one-shot verb never needs to read it back: it composed for
+/// the very project it is about to serve. A long-lived server does, because it answers about files
+/// its own working directory never named, so it must be able to tell whether the process it is
+/// running in can link the project in front of it (see [`noeta_pm::composed`]).
+const COMPOSED_GUARD: &str = noeta_pm::composed::COMPOSED_ENV;
 
 /// The conventional Cargo features a package uses to gate its **dev-kind** capabilities (dev-deps
 /// D5b) — a tier's formatter today (`fmt`, which drags in a parser like `malva`). A composed **dev
@@ -198,6 +204,93 @@ pub fn maybe_delegate_cwd() -> Option<ExitCode> {
     delegate_resolved(resolved).err()
 }
 
+/// Delegate a **long-lived server** (`noeta lsp` / `noeta mcp`) to the composed toolchain of the
+/// project it was launched in — but **only when that toolchain is already built**.
+///
+/// A server is not a CLI invocation, and this is where the two part company.
+///
+/// *Why delegate at all.* A package's native extension is statically linked Rust: the modules,
+/// types and directives it registers exist in a process only because that process **is** the
+/// composed toolchain. There is no in-process way to acquire them, so a server that does not
+/// delegate cannot link any project with a `[trust] native` dependency — every `use` of the
+/// package's namespace is an E0019 and the editor shows a working file as broken. `exec` is the
+/// right shape here precisely because a server has nothing to lose yet: this runs before the
+/// handshake, stdio is inherited untouched, and no request has been read.
+///
+/// *Why only on a cache hit.* Composing on a miss is a full `cargo` build of the shim and the
+/// toolchain — minutes. A one-shot `noeta check` can pay that and print a line saying so; a server
+/// cannot. An MCP client abandons a server that does not answer `initialize` inside its timeout, and
+/// an editor that gives up and restarts the server would start a *second* cargo build. So a miss is
+/// not built here — it is **reported**, per request, by whichever surface is about to answer
+/// ([`noeta_pm::composed::uncomposed`]). The composition is a cache: one `noeta check` in the
+/// project fills it, and every later server start hits it.
+///
+/// *Why the working directory.* It is the only project a server has before its first request. Both
+/// an editor and an agent host launch these servers with the project as the cwd, so the hit rate is
+/// high — and when it is wrong (a server asked about a project it did not compose for), the
+/// per-request check catches it, because it compares against what this process actually links rather
+/// than against what it was launched in.
+///
+/// Resolution is the **query** walk: starting a language server must not rewrite `noeta.lock`.
+/// Every failure — no manifest, an unresolvable graph, no cache dir — returns quietly and leaves the
+/// stock server running, which is correct: none of those is composable, and the per-request check
+/// still speaks for anything that needed a composition it did not get.
+pub fn delegate_server_if_composed() {
+    if std::env::var_os(COMPOSED_GUARD).is_some() {
+        return;
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    // The manifest is discovered from the directory, so probe with a synthetic child (see
+    // `maybe_delegate` — `resolve_graph` only uses the entry's parent).
+    let Ok(resolved) = graph::resolve_graph_query(&cwd.join("_.noe")) else {
+        return;
+    };
+    let crates = resolved.runtime_native_crates();
+    if crates.is_empty() {
+        return; // a pure-Noeta project: the stock server is already the whole truth
+    }
+    let Some(binary) = cached_toolchain(&crates, &resolved.command_bindings) else {
+        return; // cold: serve, and let each request say what it cannot see
+    };
+    // On unix this never returns; a failed exec falls through to the stock server, which will then
+    // report the missing composition per request rather than answering wrongly.
+    match exec(&binary, &crates) {
+        Ok(never) => match never {},
+        Err(err) => eprintln!("noeta: {err}"),
+    }
+}
+
+/// The composed toolchain binary for `crates`, **if it is already built** — no build, and no
+/// creation of the compose directory on a miss (a probe must not litter the cache with empty
+/// entries). On a hit the entry is stamped through [`compose_dir`] exactly as a building path would,
+/// so `noeta cache ls`/`clean` see a server's use as a use.
+fn cached_toolchain(
+    crates: &[NativeCrate],
+    command_bindings: &[ResolvedCommandBinding],
+) -> Option<PathBuf> {
+    let entries = resolve_entries(crates).ok()?;
+    let toolchain = toolchain_source().ok()?;
+    let key = compose_key(
+        &entries,
+        &toolchain,
+        command_bindings,
+        ShimKind::Toolchain,
+        &[],
+    );
+    let binary = noeta_cache::Cache::locate()?
+        .join("compose")
+        .join(&key)
+        .join("bin")
+        .join(BIN_NAME);
+    if !binary.is_file() {
+        return None;
+    }
+    let _ = compose_dir(&key);
+    Some(binary)
+}
+
 /// The uninhabited "success" of [`delegate`] — on unix `exec` replaces the process; elsewhere we
 /// exit with the child's status. Either way, control never comes back.
 enum Never {}
@@ -207,7 +300,7 @@ fn delegate(
     command_bindings: &[ResolvedCommandBinding],
 ) -> Result<Never, String> {
     let binary = compose_binary(crates, command_bindings, ShimKind::Toolchain)?;
-    exec(&binary)
+    exec(&binary, crates)
 }
 
 /// Build (or reuse the cached) **composed runner** for an app whose dependency graph carries native
@@ -1285,16 +1378,28 @@ fn toml_quote(s: &str) -> String {
     noeta_pm::toml_quote(s)
 }
 
-/// Hand the invocation to the composed binary: same argv, `NOETA_COMPOSED=1`. On unix this
-/// replaces the process (`exec`); elsewhere it waits and exits with the child's code.
-fn exec(binary: &Path) -> Result<Never, String> {
+/// Hand the invocation to the composed binary: same argv, [`COMPOSED_GUARD`] set to the identities
+/// it links. On unix this replaces the process (`exec`); elsewhere it waits and exits with the
+/// child's code.
+fn exec(binary: &Path, crates: &[NativeCrate]) -> Result<Never, String> {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // The guard doubles as the composition manifest: the runtime identities this binary links, so a
+    // server running *inside* it can tell whether a project it is asked about is one it can link.
+    // Dev-only crates are excluded — they contribute nothing a program can import, so naming them
+    // would claim a coverage the composition does not give.
+    let stamp = noeta_pm::composed::env_value(
+        &crates
+            .iter()
+            .filter(|nc| !nc.dev_only)
+            .map(|nc| nc.identity.clone())
+            .collect::<Vec<_>>(),
+    );
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         let err = std::process::Command::new(binary)
             .args(&args)
-            .env(COMPOSED_GUARD, "1")
+            .env(COMPOSED_GUARD, &stamp)
             .exec();
         Err(format!("exec `{}` failed: {err}", binary.display()))
     }
@@ -1302,7 +1407,7 @@ fn exec(binary: &Path) -> Result<Never, String> {
     {
         let status = std::process::Command::new(binary)
             .args(&args)
-            .env(COMPOSED_GUARD, "1")
+            .env(COMPOSED_GUARD, &stamp)
             .status()
             .map_err(|err| format!("running `{}` failed: {err}", binary.display()))?;
         std::process::exit(status.code().unwrap_or(1));

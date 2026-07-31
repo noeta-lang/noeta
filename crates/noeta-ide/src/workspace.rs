@@ -158,6 +158,13 @@ pub(crate) struct WorkspaceCache {
     /// succeeded or failed for a routine reason (no manifest, network/IO), where the quiet
     /// degrade is the right behavior.
     pub(crate) dep_error: Option<noeta_pm::PmError>,
+    /// The native packages this directory's program needs whose extensions **this editor process
+    /// does not carry** ([`noeta_pm::composed::uncomposed`]). Non-empty means the workspace cannot
+    /// be linked at all — the namespaces those packages register are absent — so every file in it
+    /// would light up with unresolved-import errors for code `noeta check` compiles cleanly. The
+    /// consumer reports the one real cause instead (see [`crate::DocumentStore::diagnostics`]).
+    /// Empty for every pure-Noeta project and inside a composed toolchain that carries them.
+    pub(crate) uncomposed: Vec<String>,
 }
 
 impl WorkspaceCache {
@@ -293,6 +300,9 @@ pub(crate) struct ResolvedDeps {
     pub(crate) package_uses: noeta_span::PackageUses,
     /// A hard resolution failure worth the user's attention (see [`WorkspaceCache::dep_error`]).
     pub(crate) error: Option<noeta_pm::PmError>,
+    /// The native packages this process cannot link (see [`WorkspaceCache::uncomposed`]) — read off
+    /// the same resolve that produced the modules, so it costs a vector scan.
+    pub(crate) uncomposed: Vec<String>,
     /// Previously-resolved dependency sources that vanished from this resolution (finding a): their
     /// resident content is reclaimed by the caller via [`noeta_db::release_source`]. Not pooled —
     /// dependency inputs carry a [`DepModule`] wrapper, so the member tombstone pool cannot reuse
@@ -405,6 +415,7 @@ pub(crate) fn sync(
             cache.dep_programs = deps.programs;
             cache.dep_modules = deps.modules;
             cache.dep_error = deps.error;
+            cache.uncomposed = deps.uncomposed;
             cache.tombstones = pool;
             cache
         }
@@ -421,6 +432,7 @@ pub(crate) fn sync(
             dep_programs: deps.programs,
             dep_modules: deps.modules,
             dep_error: deps.error,
+            uncomposed: deps.uncomposed,
             tombstones: pool,
         },
     };
@@ -483,6 +495,10 @@ fn resolve_dep_modules(
             return deps;
         }
     };
+    // What this process can actually link. The graph is already resolved, so this is a scan of its
+    // native-crate list, not a second resolve — and it is read here, on the one path that turns a
+    // directory into a program, so no editor feature can bypass it.
+    deps.uncomposed = noeta_pm::composed::uncomposed(&graph.native_crates);
     let packages = graph.packages;
     // The per-package `@name` tables travel onto the workspace even when the package has no linkable
     // modules (the root's own `[tiers]` bindings live here), so carry them before the module walk.
@@ -632,6 +648,20 @@ pub(crate) fn edition_of_uri(uri: &str) -> noeta_lexer::Edition {
         .unwrap_or_default()
 }
 
+/// The package directory the document at `uri` belongs to — what a message telling the user to run
+/// a command *in their project* has to name. Falls back to the document's own directory when it is
+/// in no package (which cannot happen on the path that uses this: a project with a native
+/// dependency has a manifest by construction), and to `.` for a directory-less URI.
+pub(crate) fn project_root(uri: &str) -> std::path::PathBuf {
+    let Some(path) = uri_to_path(uri) else {
+        return std::path::PathBuf::from(".");
+    };
+    noeta_pm::sources::package_root(&path)
+        .map(|root| root.dir)
+        .or_else(|| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
 /// The `file:` URI for a filesystem path — the inverse of [`uri_to_path`] for the paths it produces.
 pub(crate) fn path_to_uri(path: &Path) -> String {
     format!("file://{}", path.display())
@@ -711,6 +741,7 @@ mod tests {
             dep_modules,
             tombstones: Vec::new(),
             dep_error: None,
+            uncomposed: Vec::new(),
         }
     }
 

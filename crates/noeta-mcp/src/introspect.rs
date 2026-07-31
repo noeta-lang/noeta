@@ -581,4 +581,88 @@ enum Color { Red; Green }
         let out = crate::run_check(&resolved);
         assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
     }
+
+    /// A project whose dependency ships a **native extension** this process has not composed:
+    /// `acme/imgfx` registers `imgfx.raw` from Rust, and its own `.noe` module imports it.
+    fn native_dep_project(name: &str) -> noeta_test_temp::TempPath {
+        let root = noeta_test_temp::TempDir::new(&format!("mcp-{name}"));
+        let (app, dep) = (root.join("app"), root.join("imgfx"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(dep.join("native")).unwrap();
+        std::fs::write(
+            dep.join("noeta.toml"),
+            "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+        )
+        .unwrap();
+        // The crate need only exist: nothing here builds it, and resolution validates its presence.
+        std::fs::write(
+            dep.join("native").join("Cargo.toml"),
+            "[package]\nname = \"imgfx-native\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        // The package's Noeta half imports the namespace its Rust half registers — the shape every
+        // real native package has (para/api's `.noe` code imports `para.api.url`), and the reason an
+        // uncomposed toolchain reports an unresolved-import cascade rather than one error.
+        for module in ["fx", "util"] {
+            std::fs::write(
+                dep.join(format!("{module}.noe")),
+                "use imgfx.raw\npub fn one(): int { return raw.one(); }\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nimgfx = { path = \"../imgfx\" }\n\
+             [trust]\nnative = [\"acme/imgfx\"]\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "use imgfx.raw\necho raw.one();\n").unwrap();
+        root.into_child("app/main.noe")
+    }
+
+    /// `check` refuses — visibly — rather than reporting a program it cannot link.
+    ///
+    /// `noeta mcp` had no composition step at all, so in any project with a `[trust] native`
+    /// dependency the tool the generated `AGENTS.md` offers *as* `noeta check` answered with an
+    /// E0019 per file, on code the composed CLI compiles cleanly. The server now delegates to the
+    /// project's composed toolchain when one is built; when it is not — the case this test pins,
+    /// since no test process is composed — the answer must be one honest error naming the package
+    /// and the command that fixes it, never the cascade.
+    #[test]
+    fn check_refuses_a_program_whose_native_extension_is_not_composed() {
+        noeta_stdlib::registry::default_seeded();
+        let entry = native_dep_project("mcp_check_uncomposed");
+        let resolved =
+            crate::resolve_workspace(&None, &Some(entry.display().to_string())).expect("resolve");
+        assert_eq!(
+            resolved.uncomposed,
+            vec!["acme/imgfx".to_string()],
+            "a stock process carries no package's native extension"
+        );
+        let out = crate::run_check(&resolved);
+        assert!(!out.ok, "a refusal is not a pass");
+        assert_eq!(
+            out.diagnostics.len(),
+            1,
+            "the unresolved-import cascade is withheld: {:?}",
+            out.diagnostics
+        );
+        assert_eq!(out.uncomposed, vec!["acme/imgfx".to_string()]);
+        let message = &out.diagnostics[0].message;
+        assert!(message.contains("acme/imgfx"), "message: {message}");
+        assert!(message.contains("noeta check"), "message: {message}");
+    }
+
+    /// The control: a project with no native dependency is unaffected — nothing is withheld, and
+    /// the ordinary whole-program check still runs.
+    #[test]
+    fn a_pure_noeta_project_is_never_withheld() {
+        noeta_stdlib::registry::default_seeded();
+        let entry = dep_role_project("mcp_check_pure_noeta");
+        let resolved =
+            crate::resolve_workspace(&None, &Some(entry.display().to_string())).expect("resolve");
+        assert!(resolved.uncomposed.is_empty());
+        assert!(crate::run_check(&resolved).uncomposed.is_empty());
+    }
 }

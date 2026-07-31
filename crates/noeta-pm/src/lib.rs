@@ -16,6 +16,7 @@
 /// keeps resolving (the resolution-side arc introduced the type here; the compiler arc relocated it
 /// to a crate the front-end can also depend on).
 pub use noeta_edition as edition;
+pub mod composed;
 pub mod error;
 pub mod graph;
 pub mod lock;

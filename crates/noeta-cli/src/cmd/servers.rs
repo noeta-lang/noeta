@@ -5,7 +5,14 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 /// Start the Noeta language server over stdio, blocking until the editor client disconnects.
+///
+/// Delegates to the project's composed toolchain first when one is already built
+/// ([`crate::compose::delegate_server_if_composed`]) — without it the editor cannot link any project
+/// with a `[trust] native` dependency and shows a working file as broken. The delegation happens
+/// before the LSP handshake, so it is invisible to the client; it never *builds* a composition,
+/// because a language server may not disappear into a multi-minute cargo build at startup.
 pub(crate) fn cmd_lsp() -> ExitCode {
+    crate::compose::delegate_server_if_composed();
     noeta_lsp::run_stdio();
     ExitCode::SUCCESS
 }
@@ -17,7 +24,13 @@ pub(crate) fn cmd_dap() -> ExitCode {
 }
 
 /// Start the Noeta MCP server over stdio, blocking until the agent client disconnects.
+///
+/// Delegates to the project's composed toolchain first when one is already built (see
+/// [`cmd_lsp`]). The generated `AGENTS.md` offers the `check` tool *as* the equivalent of `noeta
+/// check`, so an agent working in a project with a native dependency was being handed a wall of
+/// unresolved-import errors by the one tool it was told to trust.
 pub(crate) fn cmd_mcp() -> ExitCode {
+    crate::compose::delegate_server_if_composed();
     noeta_mcp::run_stdio();
     ExitCode::SUCCESS
 }

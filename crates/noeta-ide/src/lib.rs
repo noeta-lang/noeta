@@ -58,7 +58,9 @@ use noeta_lexer::TokenKind;
 use noeta_span::{SourceId, Span};
 use salsa::Setter;
 
-use crate::workspace::{WorkspaceCache, disk_noe_uris, edition_of_uri, uri_to_path, workspace_key};
+use crate::workspace::{
+    WorkspaceCache, disk_noe_uris, edition_of_uri, project_root, uri_to_path, workspace_key,
+};
 
 pub use offsets::{Encoding, LineIndex, Position, Range};
 pub use semtokens::SemanticToken;
@@ -482,6 +484,22 @@ impl DocumentStore {
     pub fn diagnostics(&self, uri: &str) -> Option<(Vec<noeta_diagnostics::Diagnostic>, String)> {
         let (cache, doc, source) = self.doc_cache(uri)?;
         let db = &self.db;
+        // A project whose native extension this editor process does not carry cannot be linked at
+        // all: the modules, types and directives the extension registers are absent, so the checker
+        // reports an unresolved-import cascade across every file of a project `noeta check` compiles
+        // cleanly. One accurate sentence beats nineteen confident wrong squiggles, so the cascade is
+        // withheld and the cause reported in its place. (Recovered by starting the editor's server
+        // in a project whose composed toolchain is built — the delegation `noeta lsp` performs.)
+        if !cache.uncomposed.is_empty() {
+            return Some((
+                vec![noeta_diagnostics::Diagnostic::error(
+                    noeta_diagnostics::DiagnosticCode::UnresolvedImport,
+                    noeta_span::Span::new_in(source, 0, 0),
+                    noeta_pm::composed::explain(&cache.uncomposed, &project_root(uri)),
+                )],
+                doc.text(db).clone(),
+            ));
+        }
         let mut diags: Vec<noeta_diagnostics::Diagnostic> =
             noeta_db::linked_checked_ide_from(db, cache.workspace, doc)
                 .diagnostics
