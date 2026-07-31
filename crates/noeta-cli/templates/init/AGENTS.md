@@ -17,7 +17,7 @@ Use these constantly; they are fast:
 
 | Command | What it does |
 |---|---|
-| `noeta check .` | Type-check everything without running. **Run this before claiming code compiles.** `--format json` for machine-readable diagnostics. |
+| `noeta check .` | Type-check everything without running — including inside `@test`/`@bench`/`@debug` blocks, with no `--target`. **Run this before claiming code compiles.** `--format json` for machine-readable diagnostics. |
 | `noeta run src/main.noe` | Type-check and execute. Add `--target development` to compile `@debug` blocks in. |
 | `noeta test` | Run every file's `@test` blocks. **Run this before claiming a change works.** Naming one file (`noeta test src/main.noe`) tests only that file — an entry does not carry its modules' tests. |
 | `noeta fmt .` | Format to the canonical style. Run after editing. |
@@ -29,7 +29,7 @@ Use these constantly; they are fast:
 
 Exit codes: `0` success, `1` diagnostics/runtime failure, `2` unreadable input.
 
-Build targets (from `noeta.toml`): the **baseline** (no `--target`) ships no tiers and is the production shape; `--target development` layers the std dev tiers back in; `--target production` is an explicit name for the baseline.
+Build targets (from `noeta.toml`): the **baseline** (no `--target`) ships no tiers and is the production shape; `--target development` layers the std dev tiers back in; `--target production` is an explicit name for the baseline. Targets decide what a *build* contains — they are not a checking switch: `noeta check` covers every tier block regardless, and names in its summary which tiers it looked inside (`checked 3 files (tiers: test, debug): …`).
 
 ## The agent surface (`noeta mcp`)
 
@@ -62,7 +62,7 @@ The toolchain ships an MCP server — the same compiler queries the IDE uses, ex
 
 ## Ground rules
 
-1. **Never claim Noeta code compiles without running `noeta check`** (or the MCP `check` tool) on it.
+1. **Never claim Noeta code compiles without running `noeta check`** (or the MCP `check` tool) on it. It reads inside tier blocks too, so a `@test` body that does not compile is an error there, not a surprise at `noeta test`.
 2. **Verify behavior with `noeta test`** — add or extend a `@test` block beside the code you change.
 3. **Don't invent APIs.** Look them up: `stdlib_api`, `docs_search`, or SYNTAX.md.
 4. Run `noeta fmt .` before finishing; the formatter is safe and idempotent.

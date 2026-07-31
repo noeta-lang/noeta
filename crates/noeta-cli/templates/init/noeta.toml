@@ -31,7 +31,10 @@ debug = "std"
 # names above — a bare name turns a tier on, a `-name` turns one off (handy over `extends`).
 #
 #   noeta run src/main.noe --target development    # @debug blocks execute
-#   noeta check . --target development             # checks inside every tier block
+#
+# A target decides what a *build* contains, not what is checked: `noeta check` reads inside
+# every tier block with no `--target` at all, one tier at a time, and names them in its
+# summary (`checked 3 files (tiers: test, debug): …`).
 #
 # (`noeta test`/`bench`/`doc` always activate their own tier; under `--target` they run
 # only if that target makes their tier live. The equivalent boolean sub-table —

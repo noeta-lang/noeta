@@ -190,6 +190,22 @@ impl ResolvedTier<'_> {
             ResolvedTier::Declared(d) => d.expr.is_some(),
         }
     }
+
+    /// Whether the tier is a **text tier** (its `@name { … }` body is verbatim text in the named
+    /// language, captured by the lexer and never parsed as Noeta).
+    pub fn is_text(&self) -> bool {
+        match self {
+            ResolvedTier::Ext(t, _) => t.text.is_some(),
+            ResolvedTier::Declared(d) => d.text.is_some(),
+        }
+    }
+
+    /// Whether the tier is a **code tier** — its blocks hold Noeta statements that activation
+    /// inlines into the program, so activating it is what makes them reach the type checker.
+    /// The complement of [`Self::is_text`] and [`Self::is_expr`].
+    pub fn is_code(&self) -> bool {
+        !self.is_text() && !self.is_expr()
+    }
 }
 
 impl TierRegistry {
@@ -1328,6 +1344,123 @@ pub struct Activated {
 pub struct TierContext<'a> {
     pub uses: &'a noeta_span::PackageUses,
     pub packages: &'a noeta_span::PackageMap,
+}
+
+/// Every **code** tier `program`'s own `@<tier> { … }` blocks name, in first-appearance order — the
+/// shapes a tool can still build out of this source *besides* the stripped, shipping one.
+///
+/// This is what lets a checker cover a file the way `noeta test`/`noeta bench` will compile it. An
+/// inactive block is dropped before the checker ever sees it (that is the whole point of the strip),
+/// so without asking this question the only report a `@test` body's type error gets is the test run
+/// — a green `noeta check` followed by a `noeta test` that does not compile. Feed each name back
+/// through [`activate_tiers_with`], one tier at a time: a *single* pass with every tier live would
+/// inline blocks that no real build ever compiles together, and invent collisions between them.
+///
+/// Each name comes back in the **local** spelling its block used, which is what activation takes.
+/// Three filters keep the answer to shapes that are both real and the caller's to check:
+///
+/// - only blocks written in the **root** package count (a source with no recorded provenance — a lone
+///   file — counts as root), so a dependency's tiers never spawn a pass in its consumer;
+/// - a name resolving to nothing is skipped: it is already `E0036`, and activating it inlines nothing;
+/// - a **text** tier (`@doc`, `@css` — a body the lexer captured verbatim) and an **expression** tier
+///   carry no statements to type-check, so neither is a shape.
+pub fn code_tiers_in(program: &Program, ctx: &TierContext) -> Vec<String> {
+    let registry = TierRegistry::collect(program);
+    let mut out: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    visit_tier_blocks(&program.stmts, &mut |tier: &str, span: Span| {
+        // Provenance is per source: `None` is the lone-file case (no package map at all), which is
+        // the root by definition.
+        if !matches!(
+            ctx.packages.at(span),
+            None | Some(noeta_span::PackageOrigin::Root)
+        ) {
+            return;
+        }
+        let Some(resolved) = registry.resolve_at(tier, ctx.packages.at(span), ctx.uses) else {
+            return;
+        };
+        if resolved.is_code() && seen.insert(tier.to_string()) {
+            out.push(tier.to_string());
+        }
+    });
+    out
+}
+
+/// Walk every `@<tier> { … }` block in a statement list — top-level and nested in any body — calling
+/// `f` with the block's local tier name and its directive span.
+///
+/// The read-only twin of [`resolve_children`]'s descent, and deliberately the *same* descent: a block
+/// this reports is a block activation would inline, and vice versa. (Both therefore also share its one
+/// blind spot — neither descends into a `concurrent { … }` body — so this never promises a shape
+/// activation would not actually build.)
+fn visit_tier_blocks(stmts: &[Stmt], f: &mut impl FnMut(&str, Span)) {
+    for stmt in stmts {
+        if let Stmt::TierBlock {
+            tier,
+            tier_span,
+            items,
+            ..
+        } = stmt
+        {
+            f(tier, *tier_span);
+            visit_tier_blocks(items, f);
+            continue;
+        }
+        match stmt {
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                visit_tier_blocks(then_body, f);
+                if let Some(eb) = else_body {
+                    visit_tier_blocks(eb, f);
+                }
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } => visit_tier_blocks(body, f),
+            Stmt::Fn(decl) => visit_tier_blocks(&decl.body, f),
+            Stmt::Class(c) => {
+                for m in &c.methods {
+                    visit_tier_blocks(&m.body, f);
+                }
+                for im in &c.impls {
+                    for m in &im.methods {
+                        visit_tier_blocks(&m.body, f);
+                    }
+                }
+                if let Some(d) = &c.destructor {
+                    visit_tier_blocks(d, f);
+                }
+            }
+            Stmt::Struct(s) => {
+                for m in &s.methods {
+                    visit_tier_blocks(&m.body, f);
+                }
+                for im in &s.impls {
+                    for m in &im.methods {
+                        visit_tier_blocks(&m.body, f);
+                    }
+                }
+            }
+            Stmt::Enum(en) => {
+                for m in &en.methods {
+                    visit_tier_blocks(&m.body, f);
+                }
+                for im in &en.impls {
+                    for m in &im.methods {
+                        visit_tier_blocks(&m.body, f);
+                    }
+                }
+            }
+            Stmt::Impl(im) => {
+                for m in &im.methods {
+                    visit_tier_blocks(&m.body, f);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Resolve `program`'s `@<tier> { … }` blocks against `active` (the set of live tier *local names* from
@@ -3013,5 +3146,98 @@ mod tests {
         assert_eq!(echoes_in_fn(&active.program.stmts[0]), 2);
         // A nested `@debug` block produces no test roots, however many layers deep it sits.
         assert!(active.tests.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod code_tier_tests {
+    use super::*;
+    use noeta_span::{PackageMap, PackageOrigin, PackageUses, Source, SourceId};
+
+    fn parse_program(text: &str) -> Program {
+        let source = Source::new(SourceId::FIRST, "test.noe", text.to_string());
+        let lexed = noeta_lexer::lex(&source);
+        let parsed = noeta_parser::parse(&source, &lexed.tokens);
+        assert!(
+            lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty(),
+            "fixture must parse cleanly"
+        );
+        parsed.program
+    }
+
+    fn tiers_of(text: &str) -> Vec<String> {
+        noeta_stdlib::registry::default_seeded();
+        let program = parse_program(text);
+        let uses = PackageUses::new();
+        let packages = PackageMap::default();
+        code_tiers_in(
+            &program,
+            &TierContext {
+                uses: &uses,
+                packages: &packages,
+            },
+        )
+    }
+
+    /// The shapes a tool can still build: each code tier once, in first-appearance order, whether the
+    /// block stands at top level, wraps one declaration, or sits nested in a body.
+    #[test]
+    fn every_code_tier_a_block_names_is_a_shape() {
+        assert_eq!(
+            tiers_of(
+                "@test {\n    fn a(): void { assert(true) }\n}\n\
+                 @bench fn b(): void { echo 1 }\n\
+                 fn f(x: int): void {\n    @debug { echo x }\n}\n\
+                 @test {\n    fn c(): void { assert(true) }\n}\n"
+            ),
+            vec!["test".to_string(), "bench".to_string(), "debug".to_string()],
+            "first-appearance order, deduplicated"
+        );
+    }
+
+    /// A **text** tier's body is verbatim text the lexer captured, never Noeta statements, so
+    /// activating it adds nothing to type-check and it is not a shape.
+    #[test]
+    fn a_text_tier_is_not_a_shape() {
+        assert!(tiers_of("@doc {\n    Prose about the module.\n}\nfn f(): void {}\n").is_empty());
+    }
+
+    /// An unknown `@name` is already `E0036` and activating it inlines nothing, so it never spawns a
+    /// pass of its own.
+    #[test]
+    fn an_unknown_tier_is_not_a_shape() {
+        assert!(tiers_of("@tset {\n    fn a(): void { assert(true) }\n}\n").is_empty());
+    }
+
+    /// A file with no tier block asks for no extra pass at all — the common case stays one check.
+    #[test]
+    fn a_file_with_no_tier_block_has_no_shapes() {
+        assert!(
+            tiers_of("fn add(a: int, b: int): int { return a + b }\necho add(1, 2)\n").is_empty()
+        );
+    }
+
+    /// Only the root package's own blocks count: a dependency's tier content is its author's to
+    /// check, and a consumer must not be handed passes for it.
+    #[test]
+    fn a_dependencys_block_is_not_the_consumers_shape() {
+        noeta_stdlib::registry::default_seeded();
+        let program = parse_program("@test {\n    fn a(): void { assert(true) }\n}\n");
+        let uses = PackageUses::new();
+        let mut packages = PackageMap::default();
+        packages.set(
+            SourceId::FIRST,
+            PackageOrigin::Dependency("dep".to_string()),
+        );
+        assert!(
+            code_tiers_in(
+                &program,
+                &TierContext {
+                    uses: &uses,
+                    packages: &packages,
+                },
+            )
+            .is_empty()
+        );
     }
 }

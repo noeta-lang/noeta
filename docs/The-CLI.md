@@ -203,6 +203,15 @@ noeta check [PATH]
 
 Parses and type-checks without running or building — the CI/pre-commit gate (the `cargo check` / `tsc --noEmit` primitive). `PATH` defaults to the current directory, walked recursively for `.noe` files (resolving and deduping shared modules); a single file checks just that file with its sibling modules linked in. `--format json` emits a single machine-readable report on stdout for CI/editors/the MCP server; the default renders diagnostics for a terminal. Exits non-zero if any error-severity diagnostic is found (warnings print but do not fail).
 
+**It covers dev-tier blocks too, with no `--target`.** Each file is checked once as it ships (every `@test`/`@bench`/`@debug` block stripped) and then once per code tier its own blocks name — the exact shape `noeta test`/`noeta bench` compiles — so a green `noeta check` is never followed by a `noeta test` that fails to compile. The summary names what it looked inside, and the JSON report carries the same list as `tiers_checked`:
+
+```console
+$ noeta check .
+checked 3 files (tiers: test, debug): 0 error(s), 0 warning(s)
+```
+
+`--tier <NAME>`/`--target <NAME>` still select a shape explicitly, checked as one program the way that build would compile it; the per-tier sweep then covers whatever the selection left out. See [Dev Tiers](Dev-Tiers#checking-is-not-building) for why one tier at a time.
+
 ## `noeta explain`
 
 ```text

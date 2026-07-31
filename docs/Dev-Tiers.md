@@ -32,6 +32,21 @@ When a tier *is* active, its block's items are **inlined** into the top-level pr
 
 Each tool activates its own tier: `noeta test` activates `test`, `noeta bench` activates `bench`, `noeta doc` activates `doc`. The `debug` tier has no dedicated command — you activate it explicitly.
 
+### Checking is not building
+
+Stripping is a *build* decision, not a *checking* one: a stripped block is still source you wrote. So [`noeta check`](The-CLI#noeta-check) checks a file once as it ships — every block stripped — and then **once per code tier its own blocks name**, which is exactly the shape `noeta test`, `noeta bench`, or `noeta <tier>` compiles.
+
+```console
+$ noeta check .
+checked 3 files (tiers: test, debug): 0 error(s), 0 warning(s)
+```
+
+The `(tiers: …)` clause names what it looked inside, so a green `noeta check` means the tier bodies compile too, not that nobody looked. It needs no `--target`: a green check is never followed by a `noeta test` that fails to compile.
+
+One tier per pass, never all at once. No build ever compiles `@test` and `@bench` blocks together, so checking them jointly would invent collisions between them — two same-named helpers in two blocks are not a conflict, and must not be reported as one.
+
+Three kinds of block add no pass, because there is nothing extra to type-check: a **text** tier (`@doc`, and any `text: "<lang>"` tier — its body is verbatim text, not Noeta), an **expression** tier, and a block written by a *dependency* rather than by this file.
+
 ### A block's own imports
 
 A **top-level** tier block may open with its own `use`s, so a dependency only the tier needs is written where the tier is rather than at the top of the file:

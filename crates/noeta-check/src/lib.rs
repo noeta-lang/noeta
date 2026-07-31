@@ -101,8 +101,8 @@ mod traits;
 pub use setup::{SetupDrop, SetupWarning, dropped_setup_warnings, is_tier_setup, setup_drop};
 pub use tiers::{
     Activated, DeclaredTier, DocTarget, ResolvedProvider, ResolvedTier, TextBlock, TierContext,
-    TierFn, TierId, activate_tiers, activate_tiers_with, dedent_doc, extend_reflection,
-    resolve_docs, resolve_texts,
+    TierFn, TierId, activate_tiers, activate_tiers_with, code_tiers_in, dedent_doc,
+    extend_reflection, resolve_docs, resolve_texts,
 };
 
 use constructors::compute_fresh_constructors;
