@@ -421,28 +421,53 @@ fn run_real_isolate_channel_deadlock_errors_not_hangs() {
 // executing, and the process blocking on that thread at exit. These three cases pin what replaced
 // that: the request crosses the thread boundary, the worker honors it at its next **safepoint**, and
 // the reported outcome is what actually happened.
+//
+// **A house rule for everything below: a worker that is supposed to be cancelled must not be able to
+// finish.** Every one of these tests pairs a worker with a fixed `sleep(N)` in the parent, and where
+// the worker's body is a *quantity of work* that pairing is a race — the assertion holds only while
+// the work happens to outlast the sleep. Sizing the work up does not fix that; it widens odds that
+// contention narrows again, multiplicatively. An unbounded loop has no odds to lose: `cancelled` is
+// the only reachable outcome, a working cancel is the only way the program terminates, and a broken
+// one hangs into the harness timeout — loud, and pointing at the right thing.
+//
+// Three tests below deliberately do *not* follow it, because their worker is already unable to win
+// the race for a structural reason rather than a numerical one:
+//
+// - `..._cancel_after_completion_reports_ok` wants the opposite outcome (the request arriving too
+//   late), and its worker is a `return` — it cannot lose a 200 ms race.
+// - `..._cancel_reaches_a_worker_parked_on_timers` bounds its worker in *real time* (1000 × 5 ms
+//   sleeps), not in work, so no machine can finish it inside a 200 ms cancel. Its wall-clock ceiling
+//   is the real claim there and is kept.
+// - `..._cancel_does_not_preempt_a_native_call` blocks its worker in a FIFO read until an external
+//   thread unwedges it at 700 ms, long after the 300 ms cancel; the flag is already set when the
+//   worker resumes, so it stops at its first back-edge whatever the loop's size.
 
 #[test]
 fn run_real_isolate_cancel_stops_a_compute_bound_worker() {
     // The core claim: a compute-bound isolate — a loop with no suspension point at all — is
     // genuinely cancellable, because the worker's dispatch loop polls the cancellation flag at the
-    // same safepoints the GC uses (frame transfers and taken loop back-edges).
+    // same safepoints the GC uses (frame transfers and taken loop back-edges). A worker isolate is
+    // always tier 0 (the JIT is never armed on a worker thread), so those two sites are the whole
+    // mechanism here.
     //
-    // The loop is sized to take multiple seconds interpreted (a worker isolate is always tier 0 —
-    // the JIT is never armed on a worker thread), and the cancel lands 200 ms in. Measured before
-    // this change: the program took ~3.9 s of wall clock and ~3.7 s of CPU, all of it after the
-    // caller had been told the work was cancelled. The ceiling below is deliberately generous —
-    // roughly a third of the uncancelled runtime — so it fails on "the worker ran to the end" and
-    // not on a loaded machine.
+    // **The loop has no exit but cancellation**, which is what makes the claim structural rather
+    // than statistical. It used to count to 40 000 000 — about 3.9 s interpreted against a 200 ms
+    // cancel, a comfortable-looking 19× margin that is still a race, and the sibling test below had
+    // the same shape with a margin that went negative on a fast disk. A loop that cannot terminate
+    // on its own has no margin to lose: reaching the `cancelled` line at all proves the worker
+    // stopped, and a broken poll hangs into the 60 s timeout instead of quietly reporting `ok=`.
+    //
+    // The wall-clock ceiling is kept but no longer carries the claim, so it is set well clear of any
+    // plausible loaded-machine run rather than tuned against the uncancelled runtime (which no
+    // longer exists). It now only catches "stopped, but nowhere near the next safepoint".
     let file = temp_program(
         "isolate_cancel_compute",
         "use std.io\n\
          use std.task.{sleep}\n\
          async fn spin(): int {\n\
          mut n = 0\n\
-         mut acc = 0\n\
-         while n < 40000000 { n = n + 1; acc = acc + n }\n\
-         return acc\n\
+         while true { n = n + 1 }\n\
+         return n\n\
          }\n\
          async fn run(): int {\n\
          concurrent {\n\
@@ -465,9 +490,10 @@ fn run_real_isolate_cancel_stops_a_compute_bound_worker() {
         .stdout("cancelled\n0\n");
     let elapsed = start.elapsed();
     assert!(
-        elapsed < std::time::Duration::from_millis(1_400),
-        "a cancelled compute-bound isolate must stop at its next safepoint, not run to completion \
-         (~3.9s); took {elapsed:?}"
+        elapsed < std::time::Duration::from_secs(10),
+        "a cancelled compute-bound isolate must stop at its next safepoint; the loop is unbounded, \
+         so reaching this line at all proves it stopped — this only catches a stop that took \
+         absurdly long; took {elapsed:?}"
     );
 }
 
@@ -513,6 +539,24 @@ fn run_real_isolate_cancel_is_joined_before_the_block_closes() {
     // returned over a thread that was still running, which is the promise the docs make. Worse, the
     // abandoned worker then raced the parent's exit-time heap teardown: the same program segfaulted
     // in the allocator at process exit, reproducibly.
+    //
+    // **The worker cannot finish on its own, and that is the fix.** It used to count to 4000, which
+    // made the whole test a race between a fixed amount of work and a fixed 100 ms sleep — and on a
+    // fast disk the work won: 4000 real `fs.write`s completed inside the sleep, `join` honestly
+    // reported `Ok(4000)`, and the test failed with `cancelled` never printed. Measured 2-of-3 on an
+    // otherwise-green build, which is the worst thing a guard can do — this one guards a
+    // *memory-safety* fix, and a guard people learn to rerun is a guard nobody reads.
+    //
+    // Sizing the loop up would not have fixed it, only moved the odds: under contention the noise is
+    // multiplicative, so a bigger body buys margin at the cost of wall time and still loses
+    // eventually. `while true` removes the race instead of widening it. The worker now has no exit
+    // but cancellation, so `cancelled` is the only reachable outcome and a *working* cancel is the
+    // only way this program terminates at all. A broken one hangs and trips the 60 s timeout below,
+    // which is a loud, unambiguous failure rather than a confusing assertion mismatch.
+    //
+    // The `Ok(v)` arm stays because `join` returns `Result<T, Cancelled>` and the match must be
+    // exhaustive (E0011) — it is statically required and dynamically unreachable, which is exactly
+    // what it should be here.
     let dir = temp_root().join("noeta_cli_test_isolate_cancel_join");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -523,7 +567,7 @@ fn run_real_isolate_cancel_is_joined_before_the_block_closes() {
          use std.task.{{sleep}}\n\
          async fn busy(path: string): int {{\n\
          mut n = 0\n\
-         while n < 4000 {{ n = n + 1; fs.write(path, \"${{n}}\") }}\n\
+         while true {{ n = n + 1; fs.write(path, \"${{n}}\") }}\n\
          return n\n\
          }}\n\
          async fn run(path: string): int {{\n\
@@ -570,6 +614,12 @@ fn run_real_isolate_cancel_still_runs_the_workers_destructors() {
     // the worker path today — measured, and true of an uncancelled worker too, so it is a separate
     // pre-existing gap and not something to pin here.) Worker stdout never returns to the parent, so
     // the marker goes to real disk.
+    //
+    // The spin loop is unbounded for the same reason as its two siblings above: a bounded one races
+    // the parent's fixed sleep, and a worker that *completes* runs the same destructor once, so the
+    // marker assertion cannot tell the two apart — only the `cancelled` stdout can, and that is
+    // precisely the assertion the race breaks. With no exit but cancellation there is nothing to
+    // race.
     let dir = temp_root().join("noeta_cli_test_isolate_cancel_dtor");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -581,16 +631,16 @@ fn run_real_isolate_cancel_still_runs_the_workers_destructors() {
          class Res {{ pub tag: string\n\
          fn new(t: string): Res {{ return Res {{ tag: t }} }}\n\
          destruct {{ fs.append(\"{marker_path}\", \"x\\n\") }} }}\n\
-         fn spin(iters: int): int {{\n\
+         fn spin(): int {{\n\
          held = Res.new(\"held\")\n\
          mut n = 0\n\
-         while n < iters {{ n = n + 1 }}\n\
+         while true {{ n = n + 1 }}\n\
          return n + held.tag.len()\n\
          }}\n\
-         async fn work(iters: int): int {{ return spin(iters) }}\n\
+         async fn work(): int {{ return spin() }}\n\
          async fn run(): int {{\n\
          concurrent {{\n\
-         h = isolate work(40000000)\n\
+         h = isolate work()\n\
          sleep(200).await\n\
          h.cancel()\n\
          io.outln(match h.join() {{ Ok(v) => \"ok=\" ~ v, Err(_) => \"cancelled\" }})\n\
