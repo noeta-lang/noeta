@@ -11,9 +11,9 @@
 
 use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
-    FieldDecl, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, ObjectLit,
-    Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod, TypeOperand,
-    TypeParam, TypeRef, UseName, VariantDecl,
+    FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective,
+    ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod,
+    TypeOperand, TypeParam, TypeRef, UseName, VariantDecl,
 };
 use std::cell::Cell;
 
@@ -54,6 +54,22 @@ enum Member<'a> {
     Method(&'a FnDecl),
     Impl(&'a ImplBlock),
     Destructor(&'a [Stmt]),
+}
+
+/// One item of an object literal, unified so comments interleave across the named fields and the
+/// trailing record-update spread in source order.
+enum ObjItem<'a> {
+    Field(&'a FieldInit),
+    Spread(&'a Expr),
+}
+
+impl ObjItem<'_> {
+    fn span(&self) -> Span {
+        match self {
+            ObjItem::Field(f) => f.span,
+            ObjItem::Spread(e) => e.span(),
+        }
+    }
 }
 
 /// An enum body member, unified so comments interleave across variants, methods, and `impl` blocks.
@@ -2131,14 +2147,16 @@ impl Printer<'_> {
                 let items = self
                     .set_literal_items(callee, *span)
                     .expect("guard checked");
-                let mut ds = Vec::new();
-                for i in items {
-                    ds.push(self.expr(i)?);
-                }
-                let broke = items
-                    .first()
-                    .is_some_and(|f| self.seq_broke(span.start, f.span().start));
-                self.delimited("#{", ds, "}", false, broke)
+                self.delimited_seq(
+                    "#{",
+                    "}",
+                    false,
+                    items,
+                    span.start,
+                    span.end,
+                    |i: &Expr| i.span(),
+                    |i| self.expr(i),
+                )?
             }
             Expr::Call { callee, args, .. } => Doc::concat([
                 self.receiver(callee)?,
@@ -2158,36 +2176,36 @@ impl Printer<'_> {
                 self.expr(index)?,
                 Doc::text("]"),
             ]),
-            Expr::List { items, span } => {
-                let mut ds = Vec::new();
-                for i in items {
-                    ds.push(self.expr(i)?);
-                }
-                let broke = items
-                    .first()
-                    .is_some_and(|f| self.seq_broke(span.start, f.span().start));
-                self.delimited("[", ds, "]", false, broke)
-            }
-            Expr::Tuple { items, span } => {
-                let mut ds = Vec::new();
-                for i in items {
-                    ds.push(self.expr(i)?);
-                }
-                let broke = items
-                    .first()
-                    .is_some_and(|f| self.seq_broke(span.start, f.span().start));
-                self.delimited("(", ds, ")", false, broke)
-            }
-            Expr::Map { entries, span } => {
-                let mut ds = Vec::new();
-                for (k, v) in entries {
-                    ds.push(Doc::concat([self.expr(k)?, Doc::text(": "), self.expr(v)?]));
-                }
-                let broke = entries
-                    .first()
-                    .is_some_and(|(k, _)| self.seq_broke(span.start, k.span().start));
-                self.delimited("{", ds, "}", false, broke)
-            }
+            Expr::List { items, span } => self.delimited_seq(
+                "[",
+                "]",
+                false,
+                items,
+                span.start,
+                span.end,
+                |i: &Expr| i.span(),
+                |i| self.expr(i),
+            )?,
+            Expr::Tuple { items, span } => self.delimited_seq(
+                "(",
+                ")",
+                false,
+                items,
+                span.start,
+                span.end,
+                |i: &Expr| i.span(),
+                |i| self.expr(i),
+            )?,
+            Expr::Map { entries, span } => self.delimited_seq(
+                "{",
+                "}",
+                false,
+                entries,
+                span.start,
+                span.end,
+                |(k, v): &(Expr, Expr)| Span::new(k.span().start, v.span().end),
+                |(k, v)| Ok(Doc::concat([self.expr(k)?, Doc::text(": "), self.expr(v)?])),
+            )?,
             Expr::Range {
                 start,
                 end,
@@ -2495,6 +2513,73 @@ impl Printer<'_> {
                 Doc::concat([Doc::text(open), inner, Doc::text(close)])
             }
         }
+    }
+
+    /// A comma-delimited literal (`[…]`, `(…)`, `#{…}`, `{k: v}`, `T { … }`) that keeps a comment
+    /// written **between** its elements on its own line inside the literal, instead of letting it
+    /// migrate past the closing delimiter.
+    ///
+    /// `region_start` is the byte of the open delimiter and `region_end` the byte just past the
+    /// close, so a leading comment above the first element and a dangling one before the close both
+    /// attach here. `item_span` yields each element's span; `render_item` prints one element's body
+    /// (no trailing comma — this adds it).
+    ///
+    /// When no comment falls **between** elements (every comment in the region is nested inside an
+    /// element's own span, or there are none), this is exactly [`Self::delimited`] — identical
+    /// output, zero behavior change. Only a *structural* comment routes through
+    /// [`Self::interleave_comments`], which forces the broken layout (a comment cannot be flattened)
+    /// and emits every comment exactly once — own-line comments on their own line, a same-line
+    /// comment trailing its element.
+    #[allow(clippy::too_many_arguments)]
+    fn delimited_seq<T>(
+        &self,
+        open: &str,
+        close: &str,
+        spaced: bool,
+        items: &[T],
+        region_start: u32,
+        region_end: u32,
+        item_span: impl Fn(&T) -> Span,
+        render_item: impl Fn(&T) -> Result<Doc, FmtError>,
+    ) -> Result<Doc, FmtError> {
+        if items.is_empty() {
+            return Ok(Doc::text(format!("{open}{close}")));
+        }
+        let broke = self.seq_broke(region_start, item_span(&items[0]).start);
+
+        // A *structural* comment is one inside the region that is not nested inside any element's own
+        // span — i.e. between two elements, above the first, or before the close. Only these need the
+        // interleave treatment; a comment inside an element is consumed by that element's own
+        // recursion, so it stays in the `delimited` fast path (unchanged behavior).
+        let structural = self.comments.iter().any(|c| {
+            c.span.start >= region_start
+                && c.span.start < region_end
+                && !items.iter().any(|it| {
+                    let s = item_span(it);
+                    s.start <= c.span.start && c.span.end <= s.end
+                })
+        });
+
+        if !structural {
+            let mut ds = Vec::with_capacity(items.len());
+            for it in items {
+                ds.push(render_item(it)?);
+            }
+            return Ok(self.delimited(open, ds, close, spaced, broke));
+        }
+
+        // Force the broken layout and interleave. Every element carries its own trailing comma (the
+        // parser accepts a uniform trailing one) so a comment can slot in between elements on its own
+        // line, and `interleave_comments` keeps a same-line comment trailing its element.
+        let body = self.interleave_comments(items, region_start, region_end, &item_span, |it| {
+            Ok(Doc::concat([render_item(it)?, Doc::text(",")]))
+        })?;
+        Ok(Doc::concat([
+            Doc::text(open),
+            Doc::concat([Doc::hardline(), body]).nest(self.indent_step()),
+            Doc::hardline(),
+            Doc::text(close),
+        ]))
     }
 
     /// Whether the author broke a delimited sequence across lines — detected by a newline between the
@@ -2977,37 +3062,41 @@ impl Printer<'_> {
     }
 
     fn object(&self, obj: &ObjectLit) -> Result<Doc, FmtError> {
-        let mut ds = Vec::new();
-        for f in &obj.fields {
-            ds.push(Doc::concat([
-                Doc::text(format!("{}: ", f.name)),
-                self.expr(&f.value)?,
-            ]));
-        }
-        if let Some(spread) = &obj.spread {
-            ds.push(Doc::concat([Doc::text("..."), self.expr(spread)?]));
-        }
         // The head is either `Name ` (name, space, then the brace) or the target-typed `.` that
         // fuses straight into the brace — `.{` is one token, so a space would not round-trip.
         let head = match &obj.type_name {
             Some(name) => format!("{name} "),
             None => ".".to_string(),
         };
-        if ds.is_empty() {
+        if obj.fields.is_empty() && obj.spread.is_none() {
             return Ok(Doc::text(format!("{head}{{}}")));
         }
+        // The fields, then the record-update spread, in source order — so a comment written between
+        // any two of them interleaves onto its own line instead of migrating past `}`.
+        let mut items: Vec<ObjItem> = obj.fields.iter().map(ObjItem::Field).collect();
+        if let Some(spread) = &obj.spread {
+            items.push(ObjItem::Spread(spread));
+        }
         // The `{` sits just after the type name; a break before the first field (or spread) means the
-        // author wrote the literal across lines, so keep it broken.
-        let first = obj
-            .fields
-            .first()
-            .map(|f| f.span.start)
-            .or_else(|| obj.spread.as_ref().map(|s| s.span().start));
-        let broke = first.is_some_and(|f| self.seq_broke(obj.type_name_span.end, f));
-        Ok(Doc::concat([
-            Doc::text(head),
-            self.delimited("{", ds, "}", true, broke),
-        ]))
+        // author wrote the literal across lines. `type_name_span.end` is the source-directed break
+        // reference the previous form keyed off, kept verbatim.
+        let body = self.delimited_seq(
+            "{",
+            "}",
+            true,
+            &items,
+            obj.type_name_span.end,
+            obj.span.end,
+            ObjItem::span,
+            |it| match it {
+                ObjItem::Field(f) => Ok(Doc::concat([
+                    Doc::text(format!("{}: ", f.name)),
+                    self.expr(&f.value)?,
+                ])),
+                ObjItem::Spread(e) => Ok(Doc::concat([Doc::text("..."), self.expr(e)?])),
+            },
+        )?;
+        Ok(Doc::concat([Doc::text(head), body]))
     }
 
     fn pattern(&self, pat: &Pattern) -> Result<Doc, FmtError> {
