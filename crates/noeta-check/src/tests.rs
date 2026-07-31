@@ -3936,7 +3936,8 @@ fn a_type_parameter_inside_a_union_substitutes() {
 /// declaration itself — no call site involved.
 #[test]
 fn a_tuple_typed_default_is_checked_against_the_erased_type() {
-    let src = "struct Holder<T> {\n  pair: (T, int) = (0, 0)\n}\nh = Holder { };\necho \"${h.pair}\";\n";
+    let src =
+        "struct Holder<T> {\n  pair: (T, int) = (0, 0)\n}\nh = Holder { };\necho \"${h.pair}\";\n";
     assert!(codes(src).is_empty(), "{:?}", messages(src));
 }
 
@@ -3950,7 +3951,8 @@ fn a_method_type_parameter_that_shadows_its_class_warns() {
     let d = &diagnostics(src)[0];
     assert_eq!(d.severity, noeta_diagnostics::Severity::Warning);
     assert!(
-        d.message.contains("`T` shadows the enclosing `T` of `Repo`"),
+        d.message
+            .contains("`T` shadows the enclosing `T` of `Repo`"),
         "the message must name both declarations: {}",
         d.message
     );
@@ -3983,7 +3985,8 @@ fn a_method_type_parameter_with_its_own_name_is_silent() {
 /// scope the check consults holds parameters only, so there is nothing there to hide.
 #[test]
 fn a_type_parameter_that_shares_a_name_with_a_declared_type_is_silent() {
-    let src = "struct T {\n  id: int\n}\nclass Repo<T> {\n  fn label(): string { return \"x\"; }\n}\n";
+    let src =
+        "struct T {\n  id: int\n}\nclass Repo<T> {\n  fn label(): string { return \"x\"; }\n}\n";
     assert!(codes(src).is_empty(), "{:?}", messages(src));
 }
 

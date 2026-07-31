@@ -2533,7 +2533,12 @@ impl Checker {
     /// consults holds parameters only, so a nominal name is not in it to be hidden.
     fn warn_shadowed_type_params(&mut self, params: &[TypeParam], target: TargetKind) {
         for p in params {
-            let Some(outer) = self.coloring.type_params.get(&p.name).map(|s| s.param.clone()) else {
+            let Some(outer) = self
+                .coloring
+                .type_params
+                .get(&p.name)
+                .map(|s| s.param.clone())
+            else {
                 continue;
             };
             // The enclosing declaration, when it is nameable — a method's is the type it is
@@ -2554,7 +2559,10 @@ impl Checker {
             ));
             d.label(p.span, format!("this `{name}` hides the one below"));
             if let Some(outer_span) = outer.id.decl_span() {
-                d.label(outer_span, format!("the enclosing `{name}` is declared here"));
+                d.label(
+                    outer_span,
+                    format!("the enclosing `{name}` is declared here"),
+                );
             }
         }
     }
