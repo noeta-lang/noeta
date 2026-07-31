@@ -408,6 +408,18 @@ impl NativeCtx for VmCtx<'_, '_> {
                 Ok(Some(future))
             }
             Ok(Poll::Pending) => Ok(None),
+            // A real isolate that honored its cancellation request (isolate-cancel) reads exactly
+            // like the already-cancelled handle above: the combinator's future will never produce a
+            // value, so it fails loudly rather than spinning.
+            Ok(Poll::Cancelled) => {
+                self.vm.error(
+                    DiagnosticCode::AwaitCancelled,
+                    self.span,
+                    "cannot await a cancelled task; use `.join()` to observe the cancelled outcome"
+                        .to_string(),
+                );
+                Err(CtxError::Abort)
+            }
             Err(Abort) => Err(CtxError::Abort),
         }
     }

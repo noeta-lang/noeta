@@ -98,11 +98,78 @@ pub type ProfileHookFactory = Arc<dyn Fn(&str) -> Box<dyn ProfileHook> + Send + 
 /// lock at each isolate's start and end).
 pub type ProfileSink = Arc<std::sync::Mutex<Vec<(String, Box<dyn ProfileHook>)>>>;
 
-/// A spawned worker isolate (isolates I.4b): the channel its result (a marshalled [`isolate::Wire`], or
-/// a failure) arrives on, and the thread's join handle (taken to join at teardown).
+/// The real-OS-thread isolate state (isolates I.4b; audit-1 finding 3): spawn plumbing,
+/// in-flight worker slots, and the borrow-share promotion region. Inert in the sandbox.
+pub(crate) struct IsolateState {
+    /// Real OS-thread isolates (isolates I.4b), CLI-only / out-of-oracle. `parallel_isolates` selects
+    /// the real path in the `Op::SpawnIsolate` handler; `isolate_module` is an `Arc` clone of the
+    /// compiled module (`Send + Sync`) the entry point holds *alongside* the `&Module` borrow, so a
+    /// worker thread can own the module for its lifetime; `isolate_factory` builds a fresh host +
+    /// executor per worker (injected by the CLI so `noeta-vm` needs no `noeta-host-real`/tokio dependency);
+    /// `isolates` holds each spawned worker's result channel + join handle; `inflight_isolates` counts
+    /// workers whose result has not yet been harvested (so the scheduler treats a pending isolate as
+    /// progress, not a deadlock). All inert in the sandbox (`parallel_isolates` false).
+    pub(crate) parallel_isolates: bool,
+    pub(crate) isolate_module: Option<Arc<Module>>,
+    pub(crate) isolate_factory: Option<IsolateFactory>,
+    /// Per-isolate profiling (injected by `noeta profile`): build a hook for each spawned worker,
+    /// deposit it (named) in the sink when the worker finishes. `None` on ordinary runs.
+    pub(crate) profile_seam: Option<(ProfileHookFactory, ProfileSink)>,
+    pub(crate) isolates: Vec<IsolateSlot>,
+    pub(crate) inflight_isolates: usize,
+    /// The borrow-share region for real-isolate arguments (P-PAR S2): promotable argument graphs
+    /// are deep-copied into it **once** and every worker borrows zero-copy. `promote_memo` maps a
+    /// source object's bits → its promoted root across spawns (the fan-out promote-once memo);
+    /// each memoized source is retained into `promote_sources` so its address stays valid for the
+    /// memo's lifetime. All three are freed/cleared together when the last in-flight isolate is
+    /// joined (`finish_isolate`) and defensively at teardown. Always empty in the sandbox.
+    pub(crate) shared_region: noeta_value::SharedRegion,
+    pub(crate) promote_memo: HashMap<u64, Value>,
+    pub(crate) promote_sources: Vec<Value>,
+    /// Worker-side map of globals the parent could **not** ship into this isolate (isolates I.4b):
+    /// global slot → the unshippable value's type name (e.g. a `class`, which has reference identity
+    /// and cannot cross into a fresh heap). The slot is left unbound; if the worker body actually
+    /// *reads* it, `Op::LoadGlobal` raises a precise E0042 naming the global + its type + the fix,
+    /// instead of the confusing "cannot find `x`" an ordinary unbound slot yields. Empty on the
+    /// parent VM and whenever every global shipped.
+    pub(crate) unshippable_globals: HashMap<u32, String>,
+    /// **Worker-side cancellation flag** (isolate-cancel): the `Arc<AtomicBool>` this worker's
+    /// parent sets from `h.cancel()`. The worker polls it at its **safepoints** — the dispatch
+    /// loop's frame transfers and taken loop back-edges, plus each scheduler round — and unwinds
+    /// when it is set. `None` on the parent VM and on every cooperative task's VM (a cooperative
+    /// task is cancelled by the scheduler's own `Task::cancelled` flag, since it is already
+    /// parked), so the poll is a never-taken, perfectly-predicted branch outside a worker.
+    pub(crate) cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Set when this worker observed its [`cancel_flag`](Self::cancel_flag) at a safepoint and
+    /// unwound. Distinguishes the resulting `Abort` from a genuine runtime error, so
+    /// [`run_isolate_worker`](crate::lifecycle::run_isolate_worker) ships
+    /// [`IsolateOutcome::Cancelled`] rather than a failure.
+    pub(crate) cancel_observed: bool,
+}
+
+/// A spawned worker isolate (isolates I.4b): the channel its outcome arrives on, the thread's join
+/// handle (taken to join at teardown), and the **cancellation flag** the parent sets from
+/// `h.cancel()` (isolate-cancel) and the worker polls at its safepoints.
 pub(crate) struct IsolateSlot {
-    pub(crate) result: std::sync::mpsc::Receiver<Result<isolate::Wire, IsolateFailure>>,
+    pub(crate) result: std::sync::mpsc::Receiver<IsolateOutcome>,
     pub(crate) handle: Option<std::thread::JoinHandle<()>>,
+    /// Set by the parent's `cancel_task` (isolate-cancel). The worker reads it with a relaxed load
+    /// at every safepoint; nothing else writes it, so it only ever goes `false → true`.
+    pub(crate) cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// What a worker isolate ships home when its thread finishes (isolate-cancel). Three terminal
+/// states, kept distinct because the parent renders each differently: a completed body's marshalled
+/// result, a **cancellation the worker actually honored** at one of its safepoints, and a failure
+/// (a panic, or a result that would not marshal).
+///
+/// The `Cancelled` arm is what makes `h.join()` honest: before this existed the parent latched
+/// "cancelled" the instant it *asked*, so a worker that ran to completion anyway was still reported
+/// as cancelled. Now the parent only reports `Err(Cancelled)` once this arrives.
+pub(crate) enum IsolateOutcome {
+    Done(isolate::Wire),
+    Cancelled,
+    Failed(IsolateFailure),
 }
 
 /// A worker isolate's failure, shipped back across the thread boundary: the abort's message and the
@@ -204,10 +271,16 @@ pub(crate) struct TracedFuture {
     pub(crate) span: u64,
 }
 
-/// The outcome of polling a future once (Track A.3): ready with a value, or still pending.
+/// The outcome of polling a future once (Track A.3): ready with a value, still pending, or —
+/// for a real-isolate future whose worker honored a cancellation request (isolate-cancel) —
+/// terminally cancelled, which is neither a value nor a state further polling can leave.
 pub(crate) enum Poll {
     Ready(Value),
     Pending,
+    /// The polled future is a real-isolate future whose worker stopped at a safepoint because it
+    /// was cancelled. Terminal: the task will never produce a value, and the scheduler marks it
+    /// `cancelled` so the join reports `Err(Cancelled)`.
+    Cancelled,
 }
 
 /// How a value behaves under `?`/`??`: the unwrapped success payload, or the empty case.
@@ -582,6 +655,8 @@ impl<'m> Vm<'m> {
                 promote_memo: HashMap::new(),
                 promote_sources: Vec::new(),
                 unshippable_globals: HashMap::new(),
+                cancel_flag: None,
+                cancel_observed: false,
             },
             out: RunOutput {
                 stdout: String::new(),
@@ -848,8 +923,13 @@ impl<'m> Vm<'m> {
 /// its own heap (thread-local), host, and executor from `factory`, seeds globals from the parent's
 /// marshalled snapshot, rebuilds the arguments, calls `callee(args)` and drives the resulting future to
 /// completion, then marshals the result back to `Send` [`isolate::Wire`]. An abort inside the isolate
-/// (a panic) comes back as `Err(message)`, which the parent re-raises at the `.await`. The worker tears
-/// down its own globals/channels so its thread-local heap returns to zero residency.
+/// (a panic) comes back as [`IsolateOutcome::Failed`], which the parent re-raises at the `.await`. The
+/// worker tears down its own globals/channels so its thread-local heap returns to zero residency.
+///
+/// `cancel` is the parent's cancellation flag (isolate-cancel): the worker installs it on its own VM
+/// so the dispatch loop's safepoints and its scheduler rounds poll it, and unwinds to
+/// [`IsolateOutcome::Cancelled`] when it is set. Teardown runs either way, so a cancelled worker
+/// frees its heap exactly like a completed one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_isolate_worker(
     module: &Arc<Module>,
@@ -862,8 +942,9 @@ pub(crate) fn run_isolate_worker(
     trace: Option<noeta_stdlib::TraceContext>,
     registry: Option<&'static noeta_stdlib::registry::Registry>,
     stall_tracked: bool,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
     span: Span,
-) -> Result<isolate::Wire, IsolateFailure> {
+) -> IsolateOutcome {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
     let (host, executor) = factory();
     let mut wvm = Vm::load(module, host, executor);
@@ -898,6 +979,9 @@ pub(crate) fn run_isolate_worker(
     wvm.isolates.parallel_isolates = true;
     wvm.isolates.isolate_module = Some(Arc::clone(module));
     wvm.isolates.isolate_factory = Some(factory.clone());
+    // Install the parent's cancellation flag (isolate-cancel) *before* any user code runs, so a
+    // cancel that lands during startup is honored at the body's first safepoint.
+    wvm.isolates.cancel_flag = Some(cancel);
     // Seed the worker's globals from the parent's snapshot so the isolate body can call other
     // top-level functions (and read value-type constants). Slots match: parent and worker share the
     // same `Arc<Module>`, so a global's `GlobalId` is identical on both sides (P-VMT-GSLOT).
@@ -961,19 +1045,24 @@ pub(crate) fn run_isolate_worker(
     let message = match outcome {
         Ok(result) => {
             let marshalled = isolate::marshal(result, &wvm.persist.shapes, &wvm.persist.channels)
-                .map_err(|e| {
+                .map(IsolateOutcome::Done)
+                .unwrap_or_else(|e| {
                     // The body completed; only the result failed to ship — there is no abort stack.
-                    IsolateFailure {
+                    IsolateOutcome::Failed(IsolateFailure {
                         message: format!("isolate result is not shippable: {e}"),
                         trace: Vec::new(),
-                    }
+                    })
                 });
             wvm.release_value(result);
             marshalled
         }
+        // A safepoint cancellation unwinds as an ordinary abort but is **not** a failure
+        // (isolate-cancel): the worker was asked to stop and did. Reported before the failure arm so
+        // its (empty) diagnostics are never rendered as an error.
+        Err(_abort) if wvm.isolates.cancel_observed => IsolateOutcome::Cancelled,
         // Ship the worker's own abort traceback home with the message (plain data — it crosses the
         // boundary like any `Wire`), so the parent's rendered trace includes the worker's frames.
-        Err(_abort) => Err(IsolateFailure {
+        Err(_abort) => IsolateOutcome::Failed(IsolateFailure {
             message: wvm
                 .out
                 .diagnostics
@@ -1902,10 +1991,22 @@ impl<'m> Vm<'m> {
             ret_transform: RetTransform::None,
             upvalues: Vec::new(),
         });
+        // **A destructor is uninterruptible** (isolate-cancel): lift the worker's cancellation flag
+        // for the duration, so a cancel that lands mid-cleanup is observed at the next safepoint in
+        // ordinary code instead of truncating the cleanup. It has to be lifted rather than merely
+        // ignored, because the abort a cancellation raises is *discarded* right below — observing it
+        // here would end the destructor's body silently and then let the worker carry on as if
+        // nothing had been asked. `None` on every non-worker VM, so this is a pair of moves of a
+        // null pointer. Not restored once the request has been honored: `observe_cancel` clears the
+        // flag permanently, and the unwind behind it runs the remaining destructors through here.
+        let armed = self.isolates.cancel_flag.take();
         // A destructor returns unit (its body is run for its effects); discard it. An abort
         // inside a destructor has already recorded its diagnostic.
         if let Ok(v) = self.run(frames, regs) {
             release(v);
+        }
+        if !self.isolates.cancel_observed {
+            self.isolates.cancel_flag = armed;
         }
     }
 }

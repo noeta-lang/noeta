@@ -1,0 +1,26 @@
+// isolate-cancel — **the honest report.** `cancel` is a *request*; `join` reports what actually
+// happened. A request that arrives after the work is already done changes nothing, and `join` says
+// `Ok(v)` — never `Err(Cancelled)` for work that ran to completion.
+//
+// `quick` needs one round to finish, and the top-level `sleep(5).await` drives the scope's tasks,
+// so by the time `h.cancel()` runs the task has a stored result. Cancelling it is a no-op and the
+// join reports the value. (The same rule is what the real-thread isolate path had to be rebuilt to
+// obey: it used to latch "cancelled" the moment it asked, and reported that for a worker that then
+// ran to completion anyway — see `crates/noeta-cli/tests/cli/isolates.rs`.)
+// expect: stdout "quick ran"
+// expect: stdout "ok=7"
+// expect: exit 0
+use std.task.{sleep}
+async fn quick(): int {
+    echo "quick ran"
+    return 7
+}
+concurrent {
+    h = spawn quick()
+    sleep(5).await
+    h.cancel()
+    echo match h.join() {
+        Ok(v)  => "ok=" ~ v,
+        Err(_) => "cancelled",
+    }
+}

@@ -126,8 +126,10 @@ pub fn task_ctx_dispatch(
                 }
             }
         }
-        // `race(list)`: the first ready result returns; every other entry's task is cancelled
-        // (cooperative — a loser never resumes past its last suspension).
+        // `race(list)`: the first ready result returns; every other entry's task is cancelled.
+        // `race` itself does not wait for the losers to stop — it hands the winner back at once —
+        // but the enclosing `concurrent` block's closing brace does, which is where a real-isolate
+        // loser is joined after it honors the request at its next safepoint (isolate-cancel).
         "race" => {
             noeta_ext_abi::ctx_arity(func, args, 1)?;
             let n = expect_list(ctx, func, args[0], "a list of futures")?;
