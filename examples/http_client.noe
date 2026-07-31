@@ -44,7 +44,10 @@ fn stars(owner: string, repo: string): Result<int, HttpError> {
     }
     // Decode the body into your own type. Recoverable by construction: a server that changes shape
     // is a value you handle, never an abort.
-    return match resp.json::<Repo>() {
+    decoded = resp
+        // The turbofish IS the decode target — nothing else in the call could infer it.
+        .json::<Repo>()
+    return match decoded {
         Ok(r) => Ok(r.stargazers_count),
         Err(_) => Ok(0),
     }
