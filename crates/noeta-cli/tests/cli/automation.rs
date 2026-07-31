@@ -76,7 +76,8 @@ fn tests_dir() -> PathBuf {
 }
 
 fn hot_e2e_script() -> String {
-    std::fs::read_to_string(repo_root().join("scripts/hot-e2e.sh")).expect("read scripts/hot-e2e.sh")
+    std::fs::read_to_string(repo_root().join("scripts/hot-e2e.sh"))
+        .expect("read scripts/hot-e2e.sh")
 }
 
 /// Every `.rs` file under `dir`, recursively, in a stable order.
@@ -324,7 +325,9 @@ fn every_ignored_test_is_named_by_automation() {
             ));
             continue;
         }
-        let gate_exempt = GATE_EXEMPT.iter().any(|(prefix, _)| test.starts_with(prefix));
+        let gate_exempt = GATE_EXEMPT
+            .iter()
+            .any(|(prefix, _)| test.starts_with(prefix));
         if !gate_exempt && !filters_by_name(&gate_commands, test) {
             gaps.push(format!(
                 "  --test {target} :: {test} — run by ci.yml but not by scripts/gate.sh. Add it to \
@@ -384,7 +387,9 @@ fn both_ci_and_the_merge_gate_invoke_the_hot_e2e_script() {
          suites would run at merge cadence only"
     );
     assert!(
-        shell_commands(&gate).iter().any(|c| c.contains("hot-e2e.sh")),
+        shell_commands(&gate)
+            .iter()
+            .any(|c| c.contains("hot-e2e.sh")),
         "no command in scripts/gate.sh invokes scripts/hot-e2e.sh — the real-socket suites would \
          run at push cadence only, which is the gap gate.sh exists to close"
     );
@@ -397,7 +402,10 @@ fn every_exemption_still_matches_a_real_ignored_test() {
     let tests = ignored_tests(&tests_dir());
     let mut stale: Vec<&str> = Vec::new();
     for (prefix, why) in EXEMPT.iter().chain(GATE_EXEMPT) {
-        assert!(!why.is_empty(), "the exemption `{prefix}` must carry a reason");
+        assert!(
+            !why.is_empty(),
+            "the exemption `{prefix}` must carry a reason"
+        );
         if !tests.iter().any(|(_, name)| name.starts_with(prefix)) {
             stale.push(prefix);
         }
