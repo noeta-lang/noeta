@@ -52,6 +52,7 @@ use cmd::build::{cmd_build, cmd_dump};
 use cmd::cache::cmd_cache;
 use cmd::check::cmd_check;
 use cmd::expand::cmd_expand;
+use cmd::explain::cmd_explain;
 use cmd::fmt::cmd_fmt;
 use cmd::grammar::cmd_grammar_treesitter;
 use cmd::ide::cmd_ide;
@@ -347,6 +348,20 @@ enum Command {
         /// `.noe` files) — the same resolution `noeta check` uses.
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+    /// Explain a diagnostic code: what `E0xxx` means, how to fix it, and where the rule is
+    /// documented. The catalog every rendered diagnostic's code refers to — `noeta explain E0059`.
+    /// `--all` lists every code; `--format json` emits the machine-readable catalog.
+    Explain {
+        /// The code to explain, e.g. `E0059` (`e0059` and a bare `59` work too). Omit with `--all`.
+        code: Option<String>,
+        /// List every code in the catalog instead of explaining one.
+        #[arg(long)]
+        all: bool,
+        /// Output format. `json` emits the machine-readable catalog entry (or, with `--all`, the
+        /// whole schema-versioned catalog) — the seam the docs site renders its reference from.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
     },
     /// Start an interactive REPL. Entries type-check before running (an entry with a type error
     /// prints its `E0xxx` diagnostics and is skipped) — the default since session-checker C2/C5.
@@ -1215,6 +1230,7 @@ pub fn run_cli(
             format,
         } => cmd_check(&path, &tier, &target, format),
         Command::Expand { path } => cmd_expand(&path),
+        Command::Explain { code, all, format } => cmd_explain(code, all, format),
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),

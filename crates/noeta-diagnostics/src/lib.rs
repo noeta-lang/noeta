@@ -780,8 +780,10 @@ mod suggest_tests {
     }
 }
 
+mod explain;
 mod json;
 mod render;
+pub use explain::{Explanation, GROUPS};
 pub use json::{JsonDiagnostic, JsonLabel, JsonSpan, to_json};
 pub use render::{render, render_mapped};
 
@@ -827,27 +829,27 @@ mod all_list_guard {
         }
     }
 
-    /// The published catalog (`docs/Diagnostics.md`) is the only place a *user* can look a code
-    /// up — there is no `noeta explain`. A code added here but not documented there is a code
-    /// whose first appearance in someone's terminal is unsearchable, so the two are gated to
-    /// agree exactly.
+    /// Every code's explanation is well-formed. The `match` in `explain` is exhaustive, so a new
+    /// variant cannot compile without an entry — this guards the parts the compiler cannot: an
+    /// entry that exists but is blank, mis-keyed, or filed under a group nothing renders.
     #[test]
-    fn every_code_is_documented() {
-        let page = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/Diagnostics.md");
-        let Ok(text) = std::fs::read_to_string(page) else {
-            // The docs tree is not vendored into every consumer of this crate; skip rather than
-            // fail where it genuinely is not present.
-            return;
-        };
-        let missing: Vec<&str> = DiagnosticCode::ALL
-            .iter()
-            .map(|c| c.code())
-            .filter(|code| !text.contains(&format!("`{code}`")))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "docs/Diagnostics.md is missing {missing:?} — add a row for each, \
-             so the code is findable by whoever hits it"
-        );
+    fn every_explanation_is_well_formed() {
+        for c in DiagnosticCode::ALL {
+            let e = c.explain();
+            assert_eq!(e.code, c.code(), "explanation keyed to the wrong code");
+            assert!(!e.title.is_empty(), "{}: empty title", c.code());
+            assert!(!e.summary.is_empty(), "{}: empty summary", c.code());
+            assert!(
+                e.summary.trim_end().ends_with(['.', '!']),
+                "{}: summary should be a sentence",
+                c.code()
+            );
+            assert!(
+                crate::GROUPS.contains(&e.group),
+                "{}: group {:?} is not in GROUPS, so it would render nowhere",
+                c.code(),
+                e.group
+            );
+        }
     }
 }
