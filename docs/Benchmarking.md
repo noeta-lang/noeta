@@ -46,6 +46,7 @@ Under the hood the block directive is **distribution sugar**: `@bench(iterations
 - Benchmarks run **sequentially** — concurrency would corrupt the timings — unlike tests, which run in parallel.
 - Per-iteration cost is measured with a **two-point** method: the function is run in a counted loop of `N` and `2N` trips (in fresh isolates), and per-iter cost is `(t(2N) − t(N)) / N`. Subtracting cancels the fixed per-run overhead (runtime startup, setup evaluation, IR lowering — and the loop's JIT warm-up, which the loop form keeps identical at both points), isolating the body.
 - Each measurement is the **minimum of three runs**, a robust estimator that also discards the cold first run.
+- A subtraction that comes out at or below zero is a **spoiled sample**, not a result, and the whole two-point measurement is **retried up to three times**. The method assumes the fixed overhead is the same at both points, and a busy machine can break that assumption by handing the two points different amounts of CPU — which inverts the difference regardless of how much work the body does. Only if all three attempts fail is the run reported as having measured nothing.
 - IR lowering and bytecode generation happen **before the clock starts** — only execution is timed.
 
 The reported unit adapts to the magnitude: `ns`, `µs`, `ms`, or `s`.
@@ -64,10 +65,10 @@ Baselines stay keyed **per entry file**, so a directory run writes exactly the b
 |---|---|
 | `--iterations <N>` | Override the iteration count for every benchmark (disables calibration). |
 | `--name <FN>` | Run only the named bench fn (repeatable, exact match) — the single-benchmark seam editors use. |
-| `--json` | One machine-readable JSON object on stdout (`benches[].{name, iterations, perIterNs, message, baselineDeltaPct}`, plus `ran`/`failed`/`total`). |
+| `--json` | One machine-readable JSON object on stdout (`benches[].{name, iterations, perIterNs, unresolved, message, baselineDeltaPct, baselineNote}`, plus `ran`/`failed`/`regressed`/`ungated`/`total`). |
 | `--save-baseline <NAME>` | Save this run's measurements as a named baseline (per entry file, in the noeta cache — timings are machine-local, not project artifacts). |
 | `--baseline <NAME>` | Compare each result against the named baseline: the report gains `(+5.2% vs NAME)`, the JSON `baselineDeltaPct`. |
-| `--max-regress <PCT>` | The CI gate (requires `--baseline`): exit `1` when any bench regresses more than `PCT`% against the baseline, naming the offenders on stderr. Save a baseline on your main branch, gate PRs with `noeta bench app.noe --baseline main --max-regress 10 --json`. |
+| `--max-regress <PCT>` | The CI gate (requires `--baseline`): exit `1` when any bench regresses more than `PCT`% against the baseline, naming the offenders on stderr — and exit `2` when it could not judge a bench at all (see [when the gate cannot measure](#when-the-gate-cannot-measure)). Save a baseline on your main branch, gate PRs with `noeta bench app.noe --baseline main --max-regress 10 --json`. |
 | `--target <NAME>` | Only run when the `bench` tier is live in this `noeta.toml` build target; otherwise no-op with exit `0`. A target may also map `bench` to another **provider** (see [Extending Tiers](Extending-Tiers)). |
 
 ### Output and exit codes
@@ -80,7 +81,11 @@ running <N> benchmarks
 <ran> ran, <failed> failed, <N> total
 ```
 
-Exit `0` when nothing failed, `1` otherwise. `no benchmarks found` exits `0`.
+| Code | Meaning |
+|---|---|
+| `0` | Every benchmark ran, and — under `--max-regress` — every one of them was judged and passed. `no benchmarks found` also exits `0`. |
+| `1` | A benchmark failed, or `--max-regress` found a regression past the limit. |
+| `2` | The command could not do what was asked: an unknown `--baseline`, a baseline it refused to save — or a `--max-regress` gate it could not reach a verdict on. |
 
 With `--baseline`, each line gains the delta against the named baseline:
 
@@ -91,6 +96,26 @@ running 1 benchmark
 
 1 ran, 0 failed, 1 total
 ```
+
+### When the gate cannot measure
+
+A benchmark whose body costs less per iteration than the timer can resolve produces **no measurement** — every attempt at the two-point subtraction lands at or below zero, and the report says so:
+
+```console
+$ noeta bench app.noe --baseline main --max-regress 10
+running 1 benchmark
+  b                            0 ns/iter  (2000 iterations)  (no comparison vs main: this run measured nothing — no per-iteration cost resolved above the timer noise — raise `--iterations`, give the body more work, or measure on a less contended machine)
+
+1 ran, 0 failed, 1 total
+noeta: `b` was not compared, so `--max-regress` could not judge it: this run measured nothing — …
+noeta: the regression gate is inconclusive: 1 of 1 benchmark could not be compared, so a pass here would prove nothing (exit 2)
+```
+
+No measurement means no delta, and no delta means nothing can have regressed. `--max-regress` therefore **exits `2`** rather than `0`: *a gate that could not measure must not pass*. The distinction matters because a gate is consulted by exit code precisely so that nobody has to read stdout — and `0` there is indistinguishable from "measured, and fine", which turns an unmeasurable benchmark into a standing green tick over an unwatched regression window. The same verdict covers every other way a requested comparison does not happen: a benchmark the baseline has no entry for (added since it was saved), and a stored baseline entry of `0` that nothing can be compared against.
+
+The fix is one of the three the note prints. Raise `--iterations` or give the body more work — a benchmark has to be *measurable*, which is not the same as slow. Or measure somewhere less contended: on an oversubscribed machine the two points can be handed different amounts of CPU, and no amount of extra work in the body fixes that (measured: doubling the body's cost doubled the wall time and left the failure rate unchanged, which is why the retry above exists). Under `--json` the same fact is `ungated` (how many benchmarks the gate could not judge) alongside each bench's `unresolved` and `baselineNote`.
+
+A plain `--baseline` run without `--max-regress` is a **report**, not a gate, and stays exit `0` in all of these cases — it prints why each comparison did not happen, and a report that says so is not silent. The exit code changes only where the exit code is the product.
 
 > [!NOTE]
 > `noeta bench` measures *your program's* `@bench` blocks. It is unrelated to the `criterion` benches the compiler developers run against the VM itself (`cargo bench -p noeta-vm`) — those are covered in the [Contributing guide](Contributing).

@@ -76,7 +76,9 @@ enum FileBenches {
 /// per-iteration cost is estimated by a **two-point** measurement: the fn is invoked N and 2N times
 /// in fresh isolates and the per-iteration time is `(t(2N) − t(N)) / N`, which cancels the fixed
 /// per-run overhead (runtime startup, global/setup evaluation, IR lowering — all identical between
-/// the two runs). N comes from `--iterations`, else the per-bench `@bench(iterations: N)`
+/// the two runs, unless the machine is contended enough to break that premise — see
+/// [`measure_per_iter`], which retries a subtraction that does not resolve). N comes from
+/// `--iterations`, else the per-bench `@bench(iterations: N)`
 /// directive, else **calibration** (a two-run probe sizes N so one point takes
 /// [`BENCH_TARGET_POINT_NS`]). `--name` filters (exact fn-name match, repeatable); `--json`
 /// reports one machine-readable object; `--save-baseline`/`--baseline` persist and diff runs.
@@ -232,25 +234,20 @@ fn run_file_benches(
             .or_else(|| iterations_arg(bench))
             .map(|n| n.max(1))
             .unwrap_or_else(|| calibrate_iterations(&setup, &run.opts, bench));
-        let mut outcome = match (
-            measure_iterations(&setup, &run.opts, bench, n, 3),
-            measure_iterations(&setup, &run.opts, bench, n.saturating_mul(2), 3),
-        ) {
-            (Ok(t1), Ok(t2)) => BenchOutcome {
+        let mut outcome = match measure_per_iter(&setup, &run.opts, bench, n) {
+            Ok(per_iter_ns) => BenchOutcome {
                 name: bench.name.clone(),
                 iterations: n,
-                // Clamped at zero, and zero means **unresolved** rather than free: the clamp is what
-                // makes an unluckier N run than 2N run land on a number at all. Everything that could
-                // mistake it for a measurement now tests `resolved()` — the report line, the baseline
-                // comparison, and the baseline *save*, which refuses it outright.
-                per_iter_ns: Some(
-                    ((t2.as_nanos() as f64 - t1.as_nanos() as f64) / n as f64).max(0.0),
-                ),
+                // Zero here means **unresolved** rather than free — every attempt at the subtraction
+                // came out at or below zero. Everything that could mistake it for a measurement tests
+                // `resolved()`: the report line, the baseline comparison, the baseline *save*, and
+                // the `--max-regress` gate.
+                per_iter_ns: Some(per_iter_ns),
                 message: None,
                 baseline_delta_pct: None,
                 baseline_note: None,
             },
-            (Err(msg), _) | (_, Err(msg)) => BenchOutcome {
+            Err(msg) => BenchOutcome {
                 name: bench.name.clone(),
                 iterations: n,
                 per_iter_ns: None,
@@ -284,19 +281,72 @@ fn run_file_benches(
     FileBenches::Collected(outcomes)
 }
 
+/// How many independent two-point attempts a measurement gets before its non-resolution is reported.
+///
+/// A subtraction that lands at or below zero is not a fact about the program; it is a **spoiled
+/// sample**. The two-point method's premise is that the fixed per-run overhead is the same at N and
+/// 2N, and CPU contention breaks that premise directly: the N point can draw a luckier set of time
+/// slices than the 2N point and come out relatively slower, inverting a difference of any size.
+///
+/// Measured on a 20-core box under 3× oversubscription (24 spinning burners on top of the ambient
+/// load), 40 samples per body, one attempt each:
+///
+/// | body per point | unresolved | wall per measurement |
+/// |---------------:|-----------:|---------------------:|
+/// |         ~50 ms |       2/40 |                4.2 s |
+/// |        ~100 ms |       3/40 |                8.4 s |
+///
+/// **The rate does not fall as the body grows** — doubling the work doubled the wall time and moved
+/// nothing — which is what identifies the noise as multiplicative rather than additive, and is why
+/// "give the body more work" was never going to fix it. Repetition is the only lever that bites: three
+/// independent attempts take a few percent down to a few parts in ten thousand.
+///
+/// The cost is paid only where the first attempt fails, which for an honestly-too-fast body (a smoke
+/// bench at `iterations: 5`) means three attempts at a body that is nearly free anyway.
+const BENCH_MEASUREMENT_ATTEMPTS: u32 = 3;
+
+/// Estimate `bench`'s per-iteration cost: `(t(2N) − t(N)) / N`, retried up to
+/// [`BENCH_MEASUREMENT_ATTEMPTS`] times while the subtraction does not resolve.
+///
+/// Returns `0.0` — the absence of a measurement, see [`UNRESOLVED_NOTE`] — when every
+/// attempt lands at or below zero. A bench whose *body* fails is an `Err` on the first attempt and is
+/// never retried: that is a fact about the program, not a spoiled sample.
+fn measure_per_iter(
+    setup: &[Stmt],
+    opts: &noeta_check::CheckOptions,
+    bench: &TierFn,
+    n: u64,
+) -> Result<f64, String> {
+    for _ in 0..BENCH_MEASUREMENT_ATTEMPTS {
+        let t1 = measure_iterations(setup, opts, bench, n, 3)?;
+        let t2 = measure_iterations(setup, opts, bench, n.saturating_mul(2), 3)?;
+        let per_iter_ns = (t2.as_nanos() as f64 - t1.as_nanos() as f64) / n as f64;
+        if resolved(per_iter_ns) {
+            return Ok(per_iter_ns);
+        }
+    }
+    Ok(0.0)
+}
+
 /// What a per-iteration figure of `0.0` means, and what to do about it.
 ///
 /// The two-point subtraction is only meaningful when the 2N run actually took longer than the N run.
-/// It often does not: a body far cheaper than the ~46 ms of fixed per-run overhead is measured almost
-/// entirely in noise, so the difference lands at or below zero and the `.max(0.0)` clamp reports it as
-/// exactly `0.0`. That is not a measurement of zero, it is the absence of a measurement — and it is
-/// *routine*, not exceptional (a smoke bench at `iterations: 5` lands here most runs), which is why it
-/// is a note on the report line rather than a bench failure.
-const UNRESOLVED_NOTE: &str = "no per-iteration cost resolved above the timer noise — raise `--iterations` or give the body \
-     more work";
+/// It often does not, for either of two unrelated reasons: a body far cheaper than the fixed per-run
+/// overhead is measured almost entirely in noise, and a machine under contention can hand the two
+/// points different amounts of CPU. Both land the difference at or below zero, which
+/// [`measure_per_iter`] reports as exactly `0.0` once every attempt has come out that way. That is not
+/// a measurement of zero, it is the absence of a measurement — and it is *routine*, not exceptional
+/// (a smoke bench at `iterations: 5` lands here every run), which is why it is a note on the report
+/// line rather than a bench failure.
+///
+/// The advice names all three fixes, because by the time this note is printed
+/// [`BENCH_MEASUREMENT_ATTEMPTS`] independent attempts have already failed — at which point "your
+/// benchmark is too cheap" is a claim worth making, and so is "your machine is too busy".
+const UNRESOLVED_NOTE: &str = "no per-iteration cost resolved above the timer noise — raise `--iterations`, give the body \
+     more work, or measure on a less contended machine";
 
-/// Whether a per-iteration figure is a real measurement. Zero is the clamp's way of saying "the
-/// subtraction did not resolve" (see [`UNRESOLVED_NOTE`]); a genuine measurement is strictly positive,
+/// Whether a per-iteration figure is a real measurement. Zero is how a two-point measurement says
+/// "the subtraction did not resolve" (see [`UNRESOLVED_NOTE`]); a genuine measurement is strictly positive,
 /// since the smallest nonzero nanosecond difference divided by `n` still is.
 fn resolved(per_iter_ns: f64) -> bool {
     per_iter_ns > 0.0
@@ -337,6 +387,12 @@ fn compare_to_baseline(outcome: &mut BenchOutcome, base: &std::collections::Hash
     }
 }
 
+/// The exit code for a `--max-regress` run that could not be judged: the gate did not *fail*, it did
+/// not *run*. `1` already means "measured, and a benchmark regressed", and `2` is already this
+/// command's "could not do what you asked" (an unknown `--baseline`, an unwritable baseline file), so
+/// the two answers stay distinguishable by exit code alone — which is the whole point of a gate.
+const BENCH_GATE_INCONCLUSIVE: u8 = 2;
+
 /// Print the summary (human or `--json`) and decide the exit code. `broken` counts files whose
 /// prologue failed — they rendered their own diagnostics and fail the run.
 fn report_benches(outcomes: &[BenchOutcome], opts: &BenchOptions, broken: usize) -> u8 {
@@ -351,13 +407,31 @@ fn report_benches(outcomes: &[BenchOutcome], opts: &BenchOptions, broken: usize)
             .collect(),
         None => Vec::new(),
     };
+    // …and any bench the gate was asked about but could not judge. A gate exists so that nobody has
+    // to read stdout, so "no delta came out of the comparison" must not be reported as `0` — that is
+    // indistinguishable from "measured, and fine", and it is exactly what happened here: a body too
+    // cheap for the two-point subtraction to resolve produced no measurement, no delta, no regression,
+    // and a green gate. Ungated benches are named on stderr and the run exits
+    // [`BENCH_GATE_INCONCLUSIVE`].
+    //
+    // Note this is only the *gate's* rule. A plain `--baseline` run is a report, and a report that
+    // prints why a comparison did not happen (the `no comparison vs <name>: …` note) is not silent —
+    // it stays exit `0`. The exit code changes only where the exit code is the product.
+    let ungated: Vec<&BenchOutcome> = match opts.max_regress {
+        // A bench that failed outright is already counted in `failed`; its own message is the report.
+        Some(_) => outcomes
+            .iter()
+            .filter(|o| o.per_iter_ns.is_some() && o.baseline_delta_pct.is_none())
+            .collect(),
+        None => Vec::new(),
+    };
     if opts.json {
         let out = serde_json::json!({
             "benches": outcomes.iter().map(|o| serde_json::json!({
                 "name": o.name,
                 "iterations": o.iterations,
                 "perIterNs": o.per_iter_ns,
-                // Whether `perIterNs` is a measurement at all. `0` is the clamp's way of saying the
+                // Whether `perIterNs` is a measurement at all. `0` is how the runner says the
                 // two-point subtraction did not resolve, and a consumer charting the series has to be
                 // able to drop that point rather than plot a benchmark that got infinitely fast.
                 "unresolved": o.per_iter_ns.is_some_and(|ns| !resolved(ns)),
@@ -370,6 +444,9 @@ fn report_benches(outcomes: &[BenchOutcome], opts: &BenchOptions, broken: usize)
             "ran": total - failed,
             "failed": failed,
             "regressed": regressed.len(),
+            // How many benchmarks `--max-regress` could not judge. A gate consumer reading the JSON
+            // rather than the exit code needs the same fact the exit code carries.
+            "ungated": ungated.len(),
             "total": total,
         });
         println!("{out}");
@@ -385,6 +462,23 @@ fn report_benches(outcomes: &[BenchOutcome], opts: &BenchOptions, broken: usize)
             opts.max_regress.unwrap_or_default(),
         );
     }
+    for o in &ungated {
+        eprintln!(
+            "noeta: `{}` was not compared, so `--max-regress` could not judge it: {}",
+            o.name,
+            o.baseline_note
+                .as_deref()
+                .unwrap_or("no delta against the baseline"),
+        );
+    }
+    if !ungated.is_empty() {
+        eprintln!(
+            "noeta: the regression gate is inconclusive: {} of {total} benchmark{} could not be \
+             compared, so a pass here would prove nothing (exit {BENCH_GATE_INCONCLUSIVE})",
+            ungated.len(),
+            plural(total),
+        );
+    }
     if broken > 0 {
         eprintln!(
             "noeta: {broken} file{} failed to check; {} benchmarks did not run",
@@ -393,10 +487,14 @@ fn report_benches(outcomes: &[BenchOutcome], opts: &BenchOptions, broken: usize)
         );
     }
     let _ = io::stdout().flush();
-    if failed == 0 && regressed.is_empty() && broken == 0 {
+    // A found regression outranks an inconclusive one: `1` is the more actionable answer, and a run
+    // that saw a real regression *did* gate.
+    if failed > 0 || !regressed.is_empty() || broken > 0 {
+        1
+    } else if ungated.is_empty() {
         0
     } else {
-        1
+        BENCH_GATE_INCONCLUSIVE
     }
 }
 
@@ -415,32 +513,13 @@ pub(crate) fn print_bench_outcome(
         None => outcome.name.clone(),
     };
     match (outcome.per_iter_ns, &outcome.message) {
-        (Some(per_ns), _) => {
-            let delta = match (outcome.baseline_delta_pct, baseline) {
-                (Some(pct), Some(name)) => format!("  ({pct:+.1}% vs {name})"),
-                // No delta, but one was asked for: say which comparison did not happen and why,
-                // rather than printing a line that looks like an ordinary uncompared run.
-                (None, Some(name)) => match &outcome.baseline_note {
-                    Some(note) => format!("  (no comparison vs {name}: {note})"),
-                    None => String::new(),
-                },
-                _ => String::new(),
-            };
-            // `0 ns/iter` on its own reads as "immeasurably fast", which is the opposite of what it
-            // means. Say what it means. The line keeps its shape — the number, the unit and the
-            // iteration count — so this is a note, not a new report format.
-            let delta = if resolved(per_ns) {
-                delta
-            } else {
-                format!("{delta}  ({UNRESOLVED_NOTE})")
-            };
-            println!(
-                "  {:<28} {:>11}/iter  ({} iterations){delta}",
-                name,
-                fmt_per_iter(per_ns),
-                outcome.iterations,
-            );
-        }
+        (Some(per_ns), _) => println!(
+            "  {:<28} {:>11}/iter  ({} iterations){}",
+            name,
+            fmt_per_iter(per_ns),
+            outcome.iterations,
+            report_suffix(outcome, per_ns, baseline),
+        ),
         (None, msg) => {
             println!(
                 "  {:<28} FAILED: {}",
@@ -448,6 +527,32 @@ pub(crate) fn print_bench_outcome(
                 msg.as_deref().unwrap_or("unknown")
             );
         }
+    }
+}
+
+/// What follows the iteration count on a report line: the `--baseline` delta, the reason there is no
+/// delta, and — when the run resolved nothing — what that zero means.
+fn report_suffix(outcome: &BenchOutcome, per_ns: f64, baseline: Option<&str>) -> String {
+    let delta = match (outcome.baseline_delta_pct, baseline) {
+        (Some(pct), Some(name)) => format!("  ({pct:+.1}% vs {name})"),
+        // No delta, but one was asked for: say which comparison did not happen and why, rather than
+        // printing a line that looks like an ordinary uncompared run.
+        (None, Some(name)) => match &outcome.baseline_note {
+            Some(note) => format!("  (no comparison vs {name}: {note})"),
+            None => String::new(),
+        },
+        _ => String::new(),
+    };
+    // `0 ns/iter` on its own reads as "immeasurably fast", which is the opposite of what it means.
+    // Say what it means. The line keeps its shape — the number, the unit and the iteration count —
+    // so this is a note, not a new report format.
+    //
+    // Once, though: under `--baseline` the "this run measured nothing — …" note already carries this
+    // text, and appending it again printed the same sentence twice on one line.
+    if resolved(per_ns) || delta.contains(UNRESOLVED_NOTE) {
+        delta
+    } else {
+        format!("{delta}  ({UNRESOLVED_NOTE})")
     }
 }
 
@@ -502,8 +607,8 @@ pub(crate) fn bench_baseline_path(entry: &std::path::Path, name: &str) -> Result
 /// refuses — this is the one place an unresolved measurement is fatal rather than a note, because it is
 /// the only one that outlives the run.
 ///
-/// Two ways that used to happen quietly. A per-iteration cost of `0.0` — which the clamp produces
-/// whenever the two-point subtraction does not resolve (see [`UNRESOLVED_NOTE`]) — was stored without
+/// Two ways that used to happen quietly. A per-iteration cost of `0.0` — which a two-point
+/// subtraction that does not resolve produces (see [`UNRESOLVED_NOTE`]) — was stored without
 /// comment, and the next `--baseline <name>` then skipped the delta because `prev > 0.0` failed and
 /// said nothing about why: a plain report, no error, no warning, no comparison. And a baseline with no
 /// entries at all (every bench failed) is the same silence by a different route. Both surface days
@@ -700,6 +805,23 @@ mod tests {
 
     use super::*;
 
+    /// A `--baseline main [--max-regress <limit>]` run's options, borrowing the caller's owners.
+    fn gate<'a>(
+        baseline: &'a Option<String>,
+        none: &'a Option<String>,
+        limit: Option<f64>,
+    ) -> BenchOptions<'a> {
+        BenchOptions {
+            iterations_override: None,
+            names: &[],
+            json: false,
+            save_baseline: none,
+            baseline,
+            max_regress: limit,
+            target: none,
+        }
+    }
+
     /// An outcome with a given measurement, as the two-point path would produce it.
     fn measured(name: &str, per_iter_ns: Option<f64>) -> BenchOutcome {
         BenchOutcome {
@@ -714,7 +836,7 @@ mod tests {
 
     #[test]
     fn zero_is_the_absence_of_a_measurement_not_a_fast_one() {
-        // The whole bug turns on this distinction. `0.0` is what the `.max(0.0)` clamp produces when
+        // The whole bug turns on this distinction. `0.0` is what a two-point measurement reports when
         // the N run came out unluckier than the 2N run, which happens routinely for a body far cheaper
         // than the fixed per-run overhead — so it cannot be treated as a bench failure, and it must
         // not be treated as a number either.
@@ -806,5 +928,102 @@ mod tests {
         let mut failed = measured("good", None);
         compare_to_baseline(&mut failed, &base);
         assert!(failed.baseline_note.is_none());
+    }
+
+    /// An outcome that measured and compared cleanly, at `pct` against the baseline.
+    fn compared(name: &str, pct: f64) -> BenchOutcome {
+        let mut o = measured(name, Some(120.0));
+        o.baseline_delta_pct = Some(pct);
+        o
+    }
+
+    /// An outcome that measured but produced no delta — the shape every "cannot compare" path lands
+    /// in, whichever of them produced it.
+    fn uncompared(name: &str, note: &str) -> BenchOutcome {
+        let mut o = measured(name, Some(0.0));
+        o.baseline_note = Some(note.to_string());
+        o
+    }
+
+    #[test]
+    fn a_gate_that_could_not_compare_does_not_pass() {
+        // The defect this constant exists for: `--max-regress` returned `0` for a run that measured
+        // nothing. No measurement ⇒ no delta ⇒ nothing above the limit ⇒ a green gate, byte-identical
+        // by exit code to "measured, and fine". A gate is consulted precisely so nobody reads stdout,
+        // so the inconclusive case has to have its own code.
+        let baseline = Some("main".to_string());
+        let none = None;
+        let opts = gate(&baseline, &none, Some(10.0));
+
+        // Measured and inside the limit: the gate passes, as it always did.
+        assert_eq!(report_benches(&[compared("b", 3.0)], &opts, 0), 0);
+        // Measured and over it: still `1`, and still the more actionable answer when both are true.
+        assert_eq!(report_benches(&[compared("b", 40.0)], &opts, 0), 1);
+        assert_eq!(
+            report_benches(
+                &[compared("b", 40.0), uncompared("c", "measured nothing")],
+                &opts,
+                0
+            ),
+            1
+        );
+
+        // Measured nothing, so compared nothing. This used to be `0`.
+        assert_eq!(
+            report_benches(&[uncompared("b", "this run measured nothing")], &opts, 0),
+            BENCH_GATE_INCONCLUSIVE
+        );
+        // The neighbouring ways of not comparing are the same verdict: a bench the baseline never
+        // knew about, and a stored baseline of `0.0` that nothing can be compared against.
+        assert_eq!(
+            report_benches(&[uncompared("b", "no entry for this benchmark")], &opts, 0),
+            BENCH_GATE_INCONCLUSIVE
+        );
+        // A bench that failed outright is a failure, not an inconclusive gate — it already has a code.
+        assert_eq!(report_benches(&[measured("b", None)], &opts, 0), 1);
+    }
+
+    #[test]
+    fn the_unresolved_note_is_printed_once_per_line() {
+        // Under `--baseline` the "no comparison" note already spells out what the zero means, and the
+        // standalone note was appended on top of it — the same sentence twice on one report line.
+        let unresolved = uncompared(
+            "b",
+            &format!("this run measured nothing — {UNRESOLVED_NOTE}"),
+        );
+        let line = report_suffix(&unresolved, 0.0, Some("main"));
+        assert_eq!(
+            line.matches(UNRESOLVED_NOTE).count(),
+            1,
+            "the note is printed twice: {line}"
+        );
+        assert!(line.contains("no comparison vs main"), "{line}");
+
+        // Without `--baseline` there is no note to carry it, so the standalone one is what says it.
+        let bare = measured("b", Some(0.0));
+        let line = report_suffix(&bare, 0.0, None);
+        assert_eq!(line.matches(UNRESOLVED_NOTE).count(), 1, "{line}");
+
+        // A resolved run under `--baseline` is just the delta.
+        let good = compared("b", -5.2);
+        assert_eq!(
+            report_suffix(&good, 120.0, Some("main")),
+            "  (-5.2% vs main)"
+        );
+    }
+
+    #[test]
+    fn a_plain_baseline_run_is_a_report_not_a_gate() {
+        // Without `--max-regress` nothing is being gated, so an uncomparable bench stays exit `0`:
+        // the report already prints *why* it did not compare, and a report that says so is not
+        // silent. Only the gate's verdict is carried by the exit code.
+        let baseline = Some("main".to_string());
+        let none = None;
+        let opts = gate(&baseline, &none, None);
+        assert_eq!(
+            report_benches(&[uncompared("b", "this run measured nothing")], &opts, 0),
+            0
+        );
+        assert_eq!(report_benches(&[compared("b", 900.0)], &opts, 0), 0);
     }
 }

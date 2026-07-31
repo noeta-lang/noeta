@@ -204,7 +204,8 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         baseline: Option<String>,
         /// The CI regression gate: with `--baseline`, fail (exit 1) when any bench regresses more
-        /// than this percentage against it (e.g. `10` allows up to +10%).
+        /// than this percentage against it (e.g. `10` allows up to +10%). Exits 2 when it could
+        /// not judge a bench at all — a run that measured nothing must not pass a gate.
         #[arg(
             long,
             value_name = "PCT",
