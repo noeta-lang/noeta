@@ -496,11 +496,17 @@ module.exports = grammar({
     // generic TYPE, and the associated call that consumes it is part of the rule (the compiler
     // requires the trailing `.member`, and including it keeps this disjoint from `turbofish_call`,
     // which takes `(` where this takes `.`).
+    //
+    // The member may carry a turbofish of its OWN — `Repo::<Todo>.blank::<int>()` — naming the
+    // METHOD's type parameters where the leading one names the CLASS's. Optional here for the same
+    // reason it is optional in `method_call_expression`, and spelled the same way, because it is
+    // the same construct: only its receiver differs.
     instantiated_call_expression: $ => prec(PREC.call + 2, seq(
       field('type', $.identifier),
       '::', '<', commaSep1($._type), '>',
       '.',
       field('method', $.identifier),
+      optional(seq('::', '<', commaSep1($._type), '>')),
       field('arguments', $.arguments),
     )),
 

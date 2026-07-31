@@ -311,6 +311,7 @@ Call-site class instantiation
 
 r = Repo::<Todo>.new("todos")
 p = Pair::<int, string>.of(1, "x")
+b = Repo::<Todo>.blank::<int>()
 
 --------------------------------------------------------------------------------
 
@@ -332,4 +333,12 @@ p = Pair::<int, string>.of(1, "x")
       (identifier)
       (arguments
         (integer_literal)
-        (string_literal)))))
+        (string_literal))))
+  (assignment_statement
+    (identifier)
+    (instantiated_call_expression
+      (identifier)
+      (identifier)
+      (identifier)
+      (primitive_type)
+      (arguments))))
