@@ -395,14 +395,7 @@ pub fn compile_whole_file_with(
     let facts = resolve_front_with(file, tiers, target, reused)?;
 
     // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
-    let cache = open_startup_cache(
-        file,
-        &facts.active,
-        &facts.providers,
-        &facts.deps,
-        facts.edition,
-        no_cache,
-    );
+    let cache = open_startup_cache(file, &facts, no_cache);
     if let Some(slot) = &cache
         && let Some(blob) = slot.cache.load(&slot.key)
         && let Ok(module) = noeta_bundle::read(&blob)
@@ -462,21 +455,29 @@ pub fn compile_whole_file_with(
 }
 
 /// Build the startup-cache slot for a source run: open the cache and compute the content key from
-/// the raw workspace (entry + sibling module sources) + runtime version + binary identity + the
-/// active tier set. Returns `None` — meaning "run uncached" — when caching is disabled
+/// the raw workspace (entry + sibling module sources) + runtime version + binary identity + **every
+/// field of [`FrontFacts`]**. Returns `None` — meaning "run uncached" — when caching is disabled
 /// (`--no-cache` or `NOETA_NO_CACHE`), the running binary can't be identified, the entry can't be
 /// read, or the cache directory can't be opened.
-fn open_startup_cache(
-    file: &Path,
-    active: &[String],
-    providers: &BTreeMap<String, String>,
-    deps: &[noeta_loader::DepPackage],
-    edition: noeta_pm::edition::Edition,
-    no_cache: bool,
-) -> Option<CacheSlot> {
+///
+/// It takes the whole [`FrontFacts`] and **destructures it**, rather than the four or five fields a
+/// caller thinks are relevant. That is deliberate: the key is a hand-enumerated list of compilation
+/// inputs, and every past cache bug here was an input nobody added to it (`2495394f4` keyed the
+/// entry file; editions arc S2 keyed each dependency's edition; `package_uses` was unkeyed until
+/// this commit, so re-binding `[directives] openapi = …` in the root manifest served the previous
+/// provider's generated code back). With the destructuring, a sixth `FrontFacts` field does not
+/// compile until someone decides — here — whether it is key material.
+fn open_startup_cache(file: &Path, facts: &FrontFacts, no_cache: bool) -> Option<CacheSlot> {
     if no_cache || std::env::var_os("NOETA_NO_CACHE").is_some() {
         return None;
     }
+    let FrontFacts {
+        active,
+        providers,
+        deps,
+        package_uses,
+        edition,
+    } = facts;
     // The binary's build identity is mandatory: without it a same-version local toolchain rebuild
     // would reuse stale bytecode. If we can't obtain it, we must not cache.
     let binary = noeta_cache::binary_identity()?;
@@ -510,6 +511,20 @@ fn open_startup_cache(
     // Dependency packages are part of the compiled program: fold each dependency's identity, edition,
     // and sources into the key so any dependency change invalidates the cache.
     key_deps(&mut key, deps);
+    // The whole program's per-package `@`-name tables. These decide *which extension* a `@name`
+    // expands to, so two builds that agree on every source byte and every dependency can still be
+    // two different programs: re-point `[directives] openapi = "para"` at another provider and the
+    // generated code changes with nothing else moving. Unbinding a name is worse — that should be
+    // E0036, and a hit skips the front end that would report it. `PackageUses` walks a `HashMap`,
+    // so each binding is folded as its own order-independent `source` entry (the builder sorts) and
+    // never as a concatenation of an unordered walk, which is what the cross-process determinism
+    // gate exists to catch.
+    for (origin, local, use_) in package_uses.iter() {
+        key.source(
+            format!("<use {} @{local}>", package_origin_key(origin)),
+            package_use_key(use_).as_bytes(),
+        );
+    }
     // The **root** package's edition is part of the compilation identity (follow-on F1): a future
     // edition that changes what the front-end accepts or how it lowers must not reuse another
     // edition's cached bytecode, so the entry's effective edition is key material. (Each *dependency's*
@@ -559,29 +574,59 @@ fn module_path_key(path: &noeta_loader::ModulePath) -> String {
     }
 }
 
-/// Fold the dependency packages into the startup-cache key: each dependency's root→prefix binding
-/// (re-rooting changes the linked program even when the sources are byte-identical), its **edition**,
-/// its local dependency renames, and every module's source text.
+/// Fold the dependency packages into the startup-cache key — **every field** of each
+/// [`noeta_loader::DepPackage`]: its root→prefix binding (re-rooting changes the linked program even
+/// when the sources are byte-identical), its **edition**, its local dependency renames, its
+/// **native** flag, its **`@`-name bindings**, and every module's source text.
 ///
 /// A dependency's edition is key material for the same reason its sources are (editions arc S2): it
 /// changes how *that* package compiles, so a dep whose `noeta.toml` edition bumps must invalidate its
 /// cached bytecode even when the dep's source bytes are unchanged. Before S2 only the *root* package's
 /// edition was keyed, so a dependency-edition change could serve a stale artifact.
+///
+/// The `dep` binding is **destructured** for the same reason [`open_startup_cache`] destructures
+/// [`FrontFacts`]: an eighth `DepPackage` field must not silently default to "not key material".
 fn key_deps(key: &mut noeta_cache::KeyBuilder, deps: &[noeta_loader::DepPackage]) {
     for dep in deps {
+        let noeta_loader::DepPackage {
+            prefix: _,
+            root,
+            modules,
+            dep_renames,
+            native,
+            edition,
+            directives,
+        } = dep;
         // The whole derived prefix, not just the import key: a scope-array member derives (and
         // re-roots to) two segments, so keying the first alone would serve one member's cached
-        // bytecode for another.
+        // bytecode for another. (`prefix` is destructured as `_` because it is folded here, into
+        // every one of this dep's key names, rather than as a value of its own.)
         let prefix = dep.prefix.join(".");
-        key.source(format!("<dep {prefix}>"), dep.root.as_bytes());
+        key.source(format!("<dep {prefix}>"), root.as_bytes());
         key.source(
             format!("<dep-edition {prefix}>"),
-            dep.edition.as_str().as_bytes(),
+            edition.as_str().as_bytes(),
         );
-        for (local, global) in &dep.dep_renames {
+        // A native package's modules live in the composed toolchain's Rust extension, not in the
+        // link pool, so the loader *retains* rather than flags a `use` under its key: flipping the
+        // flag turns "unresolved import" into "provided by the extension" with no source change.
+        key.source(
+            format!("<dep-native {prefix}>"),
+            if *native { b"1" } else { b"0" },
+        );
+        for (local, global) in dep_renames {
             key.source(format!("<rename {prefix} {local}>"), global.as_bytes());
         }
-        for module in &dep.modules {
+        // This dep's own `[directives]`/`[tiers]` bindings — the same "which extension does `@name`
+        // mean" input the root's are, resolved in *its* dependency context. `HashMap`-backed, so
+        // each binding is its own key entry (the builder sorts) and never an unordered join.
+        for (local, use_) in directives {
+            key.source(
+                format!("<dep-use {prefix} @{local}>"),
+                package_use_key(use_).as_bytes(),
+            );
+        }
+        for module in modules {
             key.source(&module.name, module.text.as_bytes());
             // A dependency module's identity is its derived path too — a package that moves a file
             // ships a different API under identical bytes.
@@ -591,6 +636,26 @@ fn key_deps(key: &mut noeta_cache::KeyBuilder, deps: &[noeta_loader::DepPackage]
             );
         }
     }
+}
+
+/// A [`noeta_span::PackageOrigin`] as a cache-key name fragment. `Display` is prose for diagnostics
+/// ("the root package"); this is the stable identity, and the `<root>` marker cannot collide with a
+/// dependency key (which is a single namespace segment).
+fn package_origin_key(origin: &noeta_span::PackageOrigin) -> String {
+    match origin {
+        noeta_span::PackageOrigin::Root => "<root>".to_string(),
+        noeta_span::PackageOrigin::Dependency(key) => key.clone(),
+    }
+}
+
+/// One resolved `@`-name binding as cache-key bytes: the provider root segment(s) and the exported
+/// name, unit-separated. `\u{1f}` cannot occur in a namespace segment or a declared name, so no two
+/// distinct bindings render to the same bytes by concatenation.
+fn package_use_key(use_: &noeta_span::PackageUse) -> String {
+    let mut out = use_.provider_roots.join("\u{1f}");
+    out.push('\u{1e}');
+    out.push_str(&use_.exported);
+    out
 }
 
 #[cfg(test)]
@@ -719,6 +784,109 @@ mod tests {
             with_edition,
             without.finish().as_hex().to_string(),
             "key_deps must fold the dependency's edition into the cache key"
+        );
+    }
+
+    /// A `@name` binding is compilation input: **re-pointing one must change the key.**
+    ///
+    /// This is the unit-level half of a defect proven end to end. A project binding
+    /// `[tiers] dbg = "std:debug"` and rebound to `"std:doc"` changes no `.noe` byte, and the tier
+    /// *provider* map (`local → provider`, which the key already folded) says `dbg → std` for both
+    /// — the exported name lives only in `package_uses`. With it unkeyed, the second run was a
+    /// cache hit that re-ran the FIRST binding's program: `dbg 5 / out 5` where the truth (a `doc`
+    /// tier's body is text, never code) is `out 5`. A re-point to a provider that does not declare
+    /// the name at all is worse: it should be E0036, and a hit skips the front end that reports it.
+    #[test]
+    fn a_rebound_name_changes_the_startup_cache_key() {
+        let key_for = |exported: &str| {
+            let mut uses = noeta_span::PackageUses::new();
+            uses.set(
+                noeta_span::PackageOrigin::Root,
+                "dbg".to_string(),
+                noeta_span::PackageUse {
+                    provider_roots: vec!["std".to_string()],
+                    exported: exported.to_string(),
+                },
+            );
+            let mut key = noeta_cache::KeyBuilder::new();
+            for (origin, local, use_) in uses.iter() {
+                key.source(
+                    format!("<use {} @{local}>", package_origin_key(origin)),
+                    package_use_key(use_).as_bytes(),
+                );
+            }
+            key.finish().as_hex().to_string()
+        };
+        assert_ne!(
+            key_for("debug"),
+            key_for("doc"),
+            "re-pointing `@dbg` at another provider name must invalidate the cached bytecode"
+        );
+
+        // The same for the provider *root*: two dependencies exporting one directive name are the
+        // manifest-binding case the naming arc exists for, and they differ only here.
+        let root_key = |root: &str| {
+            let use_ = noeta_span::PackageUse {
+                provider_roots: vec![root.to_string()],
+                exported: "openapi".to_string(),
+            };
+            package_use_key(&use_)
+        };
+        assert_ne!(root_key("para"), root_key("other"));
+
+        // And the two `PackageOrigin` kinds key apart: the root's `@name` table and a dependency's
+        // are different inputs, and a dependency literally *named* `<root>` cannot exist (an origin
+        // key is a namespace segment).
+        assert_ne!(
+            package_origin_key(&noeta_span::PackageOrigin::Root),
+            package_origin_key(&noeta_span::PackageOrigin::Dependency("std".to_string()))
+        );
+    }
+
+    /// `key_deps` folds a dependency's `native` flag and its own `@name` bindings — the two
+    /// `DepPackage` fields the key did not see. `native` decides whether the loader *retains* or
+    /// flags a `use` under the package's key (its modules live in the composed toolchain, not the
+    /// link pool), and `directives` is the dependency's half of the same "which extension does
+    /// `@name` mean" input the root's is.
+    #[test]
+    fn key_deps_folds_the_native_flag_and_the_dependencys_own_bindings() {
+        let base = a_dep();
+        let plain = key_of(std::slice::from_ref(&base));
+
+        let mut native = a_dep();
+        native.native = true;
+        assert_ne!(
+            plain,
+            key_of(std::slice::from_ref(&native)),
+            "a dependency's `native` flag must be cache-key material"
+        );
+
+        let mut bound = a_dep();
+        bound.directives.insert(
+            "gen".to_string(),
+            noeta_span::PackageUse {
+                provider_roots: vec!["para".to_string()],
+                exported: "openapi".to_string(),
+            },
+        );
+        assert_ne!(
+            plain,
+            key_of(std::slice::from_ref(&bound)),
+            "a dependency's own `[directives]` bindings must be cache-key material"
+        );
+
+        let mut rebound = a_dep();
+        rebound.directives.insert(
+            "gen".to_string(),
+            noeta_span::PackageUse {
+                provider_roots: vec!["other".to_string()],
+                exported: "openapi".to_string(),
+            },
+        );
+        assert_ne!(
+            key_of(std::slice::from_ref(&bound)),
+            key_of(std::slice::from_ref(&rebound)),
+            "…and re-pointing one at another provider must too"
         );
     }
 }
