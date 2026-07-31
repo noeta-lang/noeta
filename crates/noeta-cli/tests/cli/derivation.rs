@@ -279,10 +279,7 @@ fn a_program_in_a_data_directory_is_run_without_deriving_a_module_path() {
                 "[package]\nname = \"local/app\"\nversion = \"0.1.0\"\n\
                  [db]\nmigrations = \"migrations\"\nseeds = \"seeds\"\n",
             ),
-            (
-                "main.noe",
-                "whom = \"app\"\necho \"hello ${whom}\"\n",
-            ),
+            ("main.noe", "whom = \"app\"\necho \"hello ${whom}\"\n"),
             (
                 "migrations/20260719000002_create_todos.noe",
                 "echo \"ran the migration program\"\n",
