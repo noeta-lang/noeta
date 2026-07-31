@@ -483,8 +483,8 @@ fn hot_watcher(
         // The transactional gate: red code never swaps; the old version keeps serving. The
         // rendered diagnostics also ride the channel's error slot to live LiveView clients
         // (the browser overlay, server-hmr L3) — waking the run thread to deliver promptly.
-        let new_unit = match relink_entry_unit(&entry, &tail) {
-            Ok(unit) => unit,
+        let (new_unit, sites) = match relink_entry_unit(&entry, &tail) {
+            Ok(checked) => checked,
             Err(err) => {
                 eprint!("{}", err.text());
                 // Red code: report, keep serving, and put the diagnostics under the browser's
@@ -514,11 +514,20 @@ fn hot_watcher(
             noeta_compiler::hotswap::SwapDiff::Swap(plan) => {
                 // Convert the compiler's `SwapPlan` into the VM's compiler-free `HotFragment` at the
                 // boundary (native-size slice 2): the watcher owns the compiler, the VM must not.
+                //
+                // The gate's own `Sites` ride along (server-hmr H5). The check above is of the
+                // WHOLE new program and the fragment's statements are clones of that program's,
+                // spans intact — so every worker draining this deposit compiles the swapped code
+                // with the same site-keyed codegen and precise destructor relevance a restart
+                // would give it, instead of the checkerless compile that degraded a long editing
+                // session relative to a cold start. The bundle crosses the VM core opaquely
+                // (`noeta_vm::FragmentSites`), which is why the core still names no checker.
                 let fragment = noeta_vm::HotFragment {
                     fragment: plan.fragment,
                     rerun_top_level: plan.rerun_top_level,
                     added: plan.added,
                     changed: plan.changed,
+                    sites: Some(std::sync::Arc::new(sites)),
                 };
                 match mailbox.plans.lock() {
                     Ok(mut plans) => plans.push(fragment),
@@ -604,8 +613,14 @@ impl RelinkError {
 }
 
 /// Re-link the project exactly as the serve boot linked it — dependency graph → loader (with the
-/// driver's `tail`) → whole-program check — and return the **entry unit**: the entry file's own
-/// statements, qualified.
+/// driver's `tail`) → whole-program check — and return the **entry unit** (the entry file's own
+/// statements, qualified) together with **that check's [`noeta_check::Sites`]**.
+///
+/// The bundle is not a by-product: it is the codegen half of the check the gate already runs. A
+/// swap installed without it compiles checkerless — no packed-list layouts, no `type_of` fidelity,
+/// no decode recipes, conservative destructor relevance — so a served program would drift away
+/// from its own cold start with every edit. It travels to the install with the plan
+/// ([`noeta_vm::HotFragment::sites`]).
 ///
 /// Linking is the point. A module's path derives from its file, so the entry's `fn fetch` is bound
 /// as `pkg.main.fetch` in the running module, and its call to a sibling module is α-renamed to that
@@ -617,7 +632,10 @@ impl RelinkError {
 /// Checking the whole program (not the entry alone) is the same trade the other way: package
 /// provenance, per-source editions, and every module's diagnostics are what the transactional gate
 /// is supposed to gate on.
-fn relink_entry_unit(entry: &Path, tail: &[noeta_ast::Stmt]) -> Result<EntryUnit, RelinkError> {
+fn relink_entry_unit(
+    entry: &Path,
+    tail: &[noeta_ast::Stmt],
+) -> Result<(EntryUnit, noeta_check::Sites), RelinkError> {
     let (deps, package_uses) = match noeta_pm::graph::resolve_graph(entry) {
         Ok(graph) => (graph.packages, graph.package_uses),
         Err(err) => return Err(RelinkError::Unreadable(format!("[hot] {err}\n"))),
@@ -662,7 +680,7 @@ fn relink_entry_unit(entry: &Path, tail: &[noeta_ast::Stmt]) -> Result<EntryUnit
             noeta_diagnostics::render_mapped(&loaded.sources, checked.diagnostics.iter())
         );
     }
-    Ok(EntryUnit::of(&loaded.program, &entry_source))
+    Ok((EntryUnit::of(&loaded.program, &entry_source), checked.sites))
 }
 
 #[cfg(test)]
@@ -745,8 +763,8 @@ mod tests {
         )
         .unwrap();
 
-        let unit = match relink_entry_unit(&entry, &fake_tail()) {
-            Ok(unit) => unit,
+        let (unit, _sites) = match relink_entry_unit(&entry, &fake_tail()) {
+            Ok(checked) => checked,
             Err(err) => panic!("the fixture should link green, got:\n{}", err.text()),
         };
         assert_eq!(
@@ -767,8 +785,8 @@ mod tests {
         let entry = dir.join("app.noe");
         std::fs::write(&entry, "fn body(): int {\n    return 1\n}\n").unwrap();
 
-        let unit = match relink_entry_unit(&entry, &fake_tail()) {
-            Ok(unit) => unit,
+        let (unit, _sites) = match relink_entry_unit(&entry, &fake_tail()) {
+            Ok(checked) => checked,
             Err(err) => panic!("the fixture should link green, got:\n{}", err.text()),
         };
         assert!(

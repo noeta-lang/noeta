@@ -21,13 +21,50 @@ pub trait FragmentCompiler: std::fmt::Debug {
     /// Compile `fragment` as a stable-prefix extension of the running program, returning the
     /// extended module (a superset — every index minted under an earlier module stays valid).
     /// `Err` is the rendered reason.
+    ///
+    /// **Checkerless**: no site-keyed codegen hints, and conservative destructor relevance. Sound
+    /// for any fragment, but a *degraded* compile of one the checker did see — prefer
+    /// [`FragmentCompiler::extend_checked`] when the caller holds that check's [`FragmentSites`].
     fn extend(&mut self, fragment: &Program) -> Result<Module, String>;
+    /// [`FragmentCompiler::extend`] with the **whole-program** site bundle of the check that
+    /// admitted this fragment: the same site-driven codegen a cold start runs — packed lists and
+    /// index-field fusion, `type_of` full fidelity, method handles, streaming `for`s, width
+    /// masking, `@derive(Deserialize<Json>)` decode recipes, call-site-typed native calls — and
+    /// PRECISE destructor relevance instead of the conservative "every value is relevant"
+    /// approximation.
+    ///
+    /// The bundle is opaque here by design (see [`FragmentSites`]); the implementor recovers its
+    /// own type from it. Only sound when the checker has seen every entry of the session — the
+    /// caller owns that gate (see [`HotFragment::sites`]).
+    fn extend_checked(
+        &mut self,
+        fragment: &Program,
+        sites: &dyn FragmentSites,
+    ) -> Result<Module, String>;
     /// The global slot a name currently binds, if any (used to collect re-bound top-level slots
     /// before a hot re-run).
     fn global_slot(&self, name: &str) -> Option<u32>;
     /// Declare a global into the session's name-space (a fragment's new/overwritten binding).
     fn declare_global(&mut self, name: &str, mutable: bool, overwrite: bool);
 }
+
+/// One type checker's **span-keyed site bundle**, in transit through the VM core (server-hmr H5).
+///
+/// The VM core cannot name `noeta_check::Sites`: the whole point of the [`FragmentCompiler`] seam
+/// (native-size slice 2) is that an AOT binary links no compiler and no checker at all, and a
+/// `HotFragment` field naming one would drag both into every build. So a bundle crosses the core as
+/// an opaque handle — deposited by the driver that ran the check, ferried by the mailbox, and
+/// downcast back to its real type by the *implementor*, which is the one place that owns it (the
+/// `compile`-gated `SessionCompiler` adapter). The core only moves it.
+///
+/// `Send + Sync` because the mailbox broadcasts one bundle to every `--parallel` worker isolate.
+pub trait FragmentSites: std::fmt::Debug + Send + Sync + std::any::Any {
+    /// The bundle as `Any`, so the implementor that produced it can recover its concrete type.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// A shared handle to one [`FragmentSites`] bundle: cloned per worker, borrowed per install.
+pub type HotSites = Arc<dyn FragmentSites>;
 
 /// The binding names a top-level statement (re)binds — the globals a re-running swap overwrites.
 /// A pure-AST helper shared by the live-VM hot path ([`Vm::apply_pending_hotswap`]) and the session
@@ -66,6 +103,22 @@ pub struct HotFragment {
     pub added: Vec<String>,
     /// Names changed by this edit (preferred over `added` in the report when non-empty).
     pub changed: Vec<String>,
+    /// The **whole-program** site bundle of the check that admitted this edit (server-hmr H5), so
+    /// every worker installs it through [`FragmentCompiler::extend_checked`] and the swapped code
+    /// is compiled exactly as a cold start would compile it. `None` falls back to the checkerless
+    /// compile — sound, but silently degraded (see [`FragmentCompiler::extend`]).
+    ///
+    /// The fragment's statements are cloned from the checked program **with their real spans**
+    /// (`diff_programs` clones them as-is), and a bundle is span-keyed, so the whole program's
+    /// sites apply to a fragment lowering directly — no re-keying, no per-fragment check.
+    ///
+    /// Depositing one asserts the soundness gate precise destructor relevance needs: *the checker
+    /// has seen every entry of this session*. The hot watcher earns it — it re-links and checks the
+    /// WHOLE new program before every deposit, and each change that could invalidate it (a removed
+    /// type, a changed signature, a changed layout) is a `SwapBlocker` that restarts instead of
+    /// swapping. A driver that also feeds the session *unchecked* entries (a REPL/console `eval`)
+    /// has not, and deposits `None`.
+    pub sites: Option<HotSites>,
 }
 
 /// The hot-reload mailbox (server-hmr W1): a watcher thread — which owns parsing, checking
@@ -152,7 +205,11 @@ impl<'m> Vm<'m> {
         if plan.rerun_top_level {
             self.hotswap_prepare(&rebound);
         }
-        let entry = match self.install_fragment(&plan.fragment) {
+        // Installed WITH the deposit's whole-program sites when it carries them (server-hmr H5):
+        // the swapped bodies then compile with the same site-keyed codegen and precise destructor
+        // relevance a cold start of this version gets, instead of degrading the running program
+        // one edit at a time.
+        let entry = match self.install_fragment(&plan.fragment, plan.sites.as_deref()) {
             Ok(entry) => entry,
             Err(msg) => {
                 eprintln!("[hot] swap failed to compile: {msg} — still serving the old version");
@@ -195,8 +252,11 @@ impl<'m> Vm<'m> {
     }
 
     /// Install a debug-console **fragment** into this running Vm (tooling-unification T4). The
-    /// fragment compiles through the adopted session compiler — checkerless, stable-prefix id
-    /// accumulation, exactly a REPL entry — and the Vm then:
+    /// fragment compiles through the adopted session compiler — stable-prefix id accumulation,
+    /// exactly a REPL entry; checkerless, or with `sites` through
+    /// [`FragmentCompiler::extend_checked`] when the caller holds the whole-program bundle of the
+    /// check that admitted it (server-hmr H5: a hot swap does, a console entry does not) — and the
+    /// Vm then:
     ///
     /// 1. **Relocates the fragment's entry chunk** to a fresh proto index at the end of the table.
     ///    `SessionCompiler::extend` rewrites proto 0 per entry, but proto 0 of the *running* module
@@ -216,7 +276,11 @@ impl<'m> Vm<'m> {
     ///
     /// Returns the relocated entry's proto index; the caller runs it via [`Vm::run_thunk`]. Debug
     /// runs keep the JIT unarmed (asserted): tier-1 mirror tables never see a swapped module.
-    pub(crate) fn install_fragment(&mut self, fragment: &Program) -> Result<u32, String> {
+    pub(crate) fn install_fragment(
+        &mut self,
+        fragment: &Program,
+        sites: Option<&dyn FragmentSites>,
+    ) -> Result<u32, String> {
         // Tier-1 across a swap (server-hmr H3): retire the armed engine (pages parked in the
         // graveyard so in-flight native frames stay executable), install the fragment against a
         // clean tier-0 world, then re-arm fresh against the swapped module and let tiering
@@ -236,15 +300,22 @@ impl<'m> Vm<'m> {
         // about to produce is memoized by the caller *after* we return, so it survives.
         session.memo.clear();
         let arena = session.arena;
-        let mut extended = session.compiler.extend(fragment)?;
+        let mut extended = match sites {
+            None => session.compiler.extend(fragment)?,
+            Some(sites) => session.compiler.extend_checked(fragment, sites)?,
+        };
         // (1) Relocate the entry; proto 0 stays the program's `main`.
         let entry = std::mem::replace(&mut extended.protos[0], self.module.protos[0].clone());
         extended.protos.push(entry);
         let entry_idx = (extended.protos.len() - 1) as u32;
-        // The checkerless snapshot carries no `map(...)`-packed pairs; keep the base compile's
-        // precise ones so the swapped module stays self-consistent (`vm.map_packed` already holds
-        // the resolved schemas either way).
-        extended.map_packed_sites = self.module.map_packed_sites.clone();
+        // A checkerless snapshot carries no `map(...)`-packed pairs of its own; keep the base
+        // compile's precise ones so the swapped module stays self-consistent (`vm.map_packed`
+        // already holds the resolved schemas either way). A CHECKED install interned this
+        // fragment's own pairs into the session accumulation, making its snapshot a superset —
+        // keep that instead, and resolve the fresh spans below.
+        if sites.is_none() {
+            extended.map_packed_sites = self.module.map_packed_sites.clone();
+        }
 
         // (2) Grow the derived tables from the snapshot's tails (all appends are prefix-stable).
         for shape in &extended.shapes[self.persist.shapes.len()..] {
@@ -282,6 +353,15 @@ impl<'m> Vm<'m> {
                     byte_size: def.byte_size as usize,
                     column: def.column,
                 }));
+        }
+        // A checked install's snapshot may carry `map(...)`-result packed sites the fragment
+        // introduced. The live `map_packed` table is built once at load (`Vm::load_with`), so
+        // without this the new span would resolve to nothing and the swapped `map(...)` would build
+        // a boxed list where a cold start builds a flat one. Idempotent for the spans already
+        // there — the accumulation re-arrives whole with every snapshot.
+        for (span, idx) in &extended.map_packed_sites {
+            let schema = self.persist.packed_schemas[*idx as usize];
+            self.map_packed.insert(*span, schema);
         }
         for repr in &extended.type_reprs[self.persist.type_reprs.len()..] {
             self.persist.type_reprs.push(Rc::new(repr.clone()));
@@ -633,7 +713,10 @@ impl<'m> Vm<'m> {
             }],
             span,
         };
-        let entry = self.install_fragment(&wrapper)?;
+        // Checkerless: a console/watch/hover entry is code the checker never saw, so there is no
+        // bundle to compile it against — and its conservative codegen is sound regardless of what
+        // the session accumulated.
+        let entry = self.install_fragment(&wrapper, None)?;
         if let (Some(key), Some(session)) = (memo_key, self.debug_session.as_mut()) {
             session.memo.insert(key, entry);
         }
