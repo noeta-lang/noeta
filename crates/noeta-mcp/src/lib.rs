@@ -97,6 +97,13 @@ pub struct CheckOutput {
     /// was looked inside: a tool that silently checks more is nearly as confusing as one that
     /// silently checks less.
     pub tiers_checked: Vec<String>,
+    /// The native packages this program needs whose extensions this `noeta` has **not** composed.
+    /// Non-empty means the whole result is a refusal, not a check: `diagnostics` carries the single
+    /// explanation and nothing else, because a program missing whole namespaces produces
+    /// unresolved-import errors for code that compiles. Empty in every ordinary case — pure-Noeta
+    /// programs, and native-dependency programs served by a composed toolchain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncomposed: Vec<String>,
 }
 
 /// Arguments to `check`: inline `source` OR a `file` path (exactly one).
@@ -1152,6 +1159,15 @@ pub(crate) struct ResolvedWorkspace {
     /// The module path each **member** source's location derives, index-aligned with the members.
     /// Empty for an inline source, which sits in no package and so derives nothing.
     pub paths: Vec<noeta_loader::ModulePath>,
+    /// The native packages this program needs whose extensions **this process does not carry**
+    /// ([`noeta_pm::composed::uncomposed`]). Non-empty means the workspace cannot be linked at all:
+    /// whole namespaces are absent, so every diagnostic derived from it is untrustworthy and the
+    /// tool says that instead of reporting them. Empty for every pure-Noeta program, for inline
+    /// source, and inside a composed toolchain that carries the packages.
+    pub uncomposed: Vec<String>,
+    /// The directory the composition would be built in — the project root the `uncomposed` message
+    /// names in the command that fixes it.
+    pub project: std::path::PathBuf,
 }
 
 impl ResolvedWorkspace {
@@ -1211,6 +1227,9 @@ pub(crate) fn resolve_workspace(
             package_uses: noeta_span::PackageUses::new(),
             edition: noeta_lexer::Edition::default(),
             paths: Vec::new(),
+            // Inline source sits in no package, so it depends on no native extension.
+            uncomposed: Vec::new(),
+            project: std::path::PathBuf::new(),
         }),
         (None, Some(path)) => {
             let path = Path::new(path);
@@ -1227,10 +1246,16 @@ pub(crate) fn resolve_workspace(
             // tables, so a renamed text tier lexes verbatim exactly as under the CLI and editor. A
             // resolution failure degrades to no dependencies and no bindings (empty tables), the same
             // quiet degrade the old `dependency_packages_query(...).unwrap_or_default()` gave.
-            let (packages, package_uses) = match noeta_pm::graph::resolve_graph_query(path) {
-                Ok(graph) => (graph.packages, graph.package_uses),
-                Err(_) => (Vec::new(), noeta_span::PackageUses::new()),
-            };
+            let (packages, package_uses, uncomposed) =
+                match noeta_pm::graph::resolve_graph_query(path) {
+                    Ok(graph) => {
+                        // What this process can actually link. The graph is already in hand, so this
+                        // is a vector scan, not a second resolve.
+                        let uncomposed = noeta_pm::composed::uncomposed(&graph.native_crates);
+                        (graph.packages, graph.package_uses, uncomposed)
+                    }
+                    Err(_) => (Vec::new(), noeta_span::PackageUses::new(), Vec::new()),
+                };
             // THE one ordering authority — the same `SourceId` assignment the CLI's
             // `link_with_deps` and the startup cache use, so a dependency module's span located
             // here names the same file the compiler would.
@@ -1261,6 +1286,10 @@ pub(crate) fn resolve_workspace(
                 package_uses,
                 edition: noeta_pm::manifest::root_edition(path),
                 paths: raw.paths,
+                uncomposed,
+                project: noeta_pm::sources::package_root(path)
+                    .map(|root| root.dir)
+                    .unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf()),
             })
         }
         (Some(_), Some(_)) => Err(ErrorData::invalid_params(
@@ -1290,6 +1319,15 @@ pub(crate) fn resolve_workspace(
 /// fold into one dedup map keyed on `(source, span, code)`, so a fault outside any tier block —
 /// which every pass reports — is returned once; `tiers_checked` names what was looked inside.
 fn run_check(resolved: &ResolvedWorkspace) -> CheckOutput {
+    // A program whose native extensions this process does not carry cannot be linked at all — the
+    // namespaces those extensions register are simply absent, so the checker reports an
+    // unresolved-import cascade over code the composed CLI compiles cleanly. Returning that cascade
+    // is the worst available answer: it is confident, detailed and wrong, and the generated
+    // `AGENTS.md` tells the agent to trust it. So the check is refused, in one sentence that names
+    // the missing packages and the command that fixes them.
+    if !resolved.uncomposed.is_empty() {
+        return uncomposed_check(resolved);
+    }
     let db = noeta_db::LangDatabase::default();
     let ws = resolved.workspace(&db);
     let checked = noeta_db::linked_checked(&db, ws);
@@ -1324,6 +1362,30 @@ fn run_check(resolved: &ResolvedWorkspace) -> CheckOutput {
         warnings,
         diagnostics,
         tiers_checked,
+        uncomposed: Vec::new(),
+    }
+}
+
+/// The refusal [`run_check`] returns when this process cannot link the program: one error-severity
+/// diagnostic on the entry, naming what is missing and how to get it, and `uncomposed` listing the
+/// packages so a caller can act on it structurally rather than by reading prose.
+///
+/// `ok` is false. A refusal is not a pass — an agent that read `ok: true` here would go on to claim
+/// the code compiles on the strength of a check that never ran.
+fn uncomposed_check(resolved: &ResolvedWorkspace) -> CheckOutput {
+    let source_map = SourceMap::new(resolved.sources.clone());
+    let diagnostic = noeta_diagnostics::Diagnostic::error(
+        DiagnosticCode::UnresolvedImport,
+        noeta_span::Span::new_in(SourceId::FIRST, 0, 0),
+        noeta_pm::composed::explain(&resolved.uncomposed, &resolved.project),
+    );
+    CheckOutput {
+        ok: false,
+        errors: 1,
+        warnings: 0,
+        diagnostics: vec![to_json(&source_map, &diagnostic)],
+        tiers_checked: Vec::new(),
+        uncomposed: resolved.uncomposed.clone(),
     }
 }
 
