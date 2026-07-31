@@ -127,6 +127,32 @@ fn a_changed_fn_body_swaps() {
     );
 }
 
+/// A swapped body containing an `@tier` **expression** block (`@html { … }`) must still resolve its
+/// handler. The declaration that makes the tier a value (`@tier(html, …, expr: Doc)`) lives outside
+/// the fragment — in a real app, inside the imported package — and lowering reads that table off the
+/// program in hand, so a fragment lowered alone found no handler and emitted a
+/// "`@html` is not an expression tier" panic *where the template should be*: a LiveView page that
+/// swapped cleanly and then failed every request. The session carries the table across entries.
+#[test]
+fn a_swapped_body_keeps_an_expression_tier_from_the_program_that_declared_it() {
+    let app = |tag: &str| {
+        format!(
+            "struct Doc {{ text: string }}\n\
+             @tier(html, text: \"html\", expr: Doc)\n\
+             fn render(statics: List<string>, holes: List<() -> string>): Doc {{\n\
+             \x20   mut out = \"\"\n\
+             \x20   for s in statics {{ out = out ~ s }}\n\
+             \x20   return Doc {{ text: out }}\n\
+             }}\n\
+             fn page(): string {{\n\
+             \x20   doc = @html {{ <h1>{tag}</h1> }}\n\
+             \x20   return doc.text\n\
+             }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "echo page();");
+}
+
 #[test]
 fn an_unchanged_caller_dispatches_to_the_swapped_callee() {
     // THE HMR property: `describe` is byte-identical across versions (never recompiled), yet its

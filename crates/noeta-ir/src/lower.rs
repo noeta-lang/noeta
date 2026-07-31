@@ -370,6 +370,18 @@ pub struct LowerOptions {
     /// default; an embed session threads its own assembled set, so a session's compile honors
     /// its extensions.
     pub registry: &'static noeta_ext_abi::registry::Registry,
+    /// Expression-tier handlers declared **outside** the program being lowered (tier name → handler
+    /// fn), for a lowering that is a *fragment* of a larger program: a hot-swapped definition, a
+    /// REPL entry in a session whose earlier entries declared the tier.
+    ///
+    /// `@html { … }` is a value only because some `@tier(html, …, expr: Html)` fn says so, and
+    /// [`expr_tier_handlers`](noeta_ast::desugar::expr_tier_handlers) reads that declaration off the
+    /// program in hand. A fragment does not contain it — the declaration lives in the package the
+    /// fragment imports — so lowering one in isolation resolved no handler and emitted the
+    /// "`@html` is not an expression tier" panic *in place of the template*: a hot swap that
+    /// compiled cleanly and then failed every request. The session carries the table forward
+    /// instead; the program's own declarations still win over it.
+    pub ambient_expr_tiers: HashMap<String, String>,
 }
 
 impl Default for LowerOptions {
@@ -377,6 +389,7 @@ impl Default for LowerOptions {
         LowerOptions {
             real_isolates: false,
             registry: noeta_ext_abi::registry::single_registry_process(),
+            ambient_expr_tiers: HashMap::new(),
         }
     }
 }
@@ -650,6 +663,7 @@ pub fn lower_with_sites_opts(
     let LowerOptions {
         real_isolates,
         registry,
+        mut ambient_expr_tiers,
     } = opts;
     // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) before lowering,
     // so `(type, method)` dispatch resolves them — against THIS lowering's registry, so an embed
@@ -665,9 +679,12 @@ pub fn lower_with_sites_opts(
         synth_step_captures: None,
         type_aliases: collect_type_aliases(program, registry),
         native_type_imports: collect_native_type_imports(program, registry),
-        expr_tiers: noeta_ast::desugar::expr_tier_handlers(program)
-            .into_iter()
-            .collect(),
+        expr_tiers: {
+            // The program's own declarations shadow the ambient ones (a fragment redeclaring a
+            // tier means its handler), and are the whole table for a whole-program lowering.
+            ambient_expr_tiers.extend(noeta_ast::desugar::expr_tier_handlers(program));
+            ambient_expr_tiers
+        },
         registry,
         module_globals: module_global_names(program),
     };
