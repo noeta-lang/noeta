@@ -2072,9 +2072,11 @@ pub(crate) fn closed_to_new_methods(ty: &Type) -> bool {
 /// Three kinds of `Type::Named` are excluded, and each would be a false positive rather than a
 /// missed one:
 ///
-///   * an in-scope **type parameter**, which is a `Named` like any other — a bound *licenses*
-///     methods rather than closing the world, and a method no bound declares is documented to defer
-///     to runtime dispatch. This is the separation the leniency was waiting on.
+///   * a **type parameter** — a bound *licenses* methods rather than closing the world, and a
+///     method no bound declares is documented to defer to runtime dispatch. It needs no test of its
+///     own now that it is its own lattice variant: it simply is not a `Named`, so the destructure
+///     below declines it. (It used to be a `Named` like any other, told apart by membership in the
+///     in-scope name table.)
 ///   * a **native/extern** type, whose members live in the extension registry under an identity the
 ///     checker resolves through `stdlib::method_return`; a miss there is not proof of absence.
 ///   * anything the program does not declare at all — an opaque imported stub, a name the linker
@@ -2083,9 +2085,6 @@ pub(crate) fn user_type_is_closed(checker: &crate::Checker, ty: &Type) -> bool {
     let Type::Named(n, _) = ty else {
         return false;
     };
-    if checker.coloring.type_params.contains_key(n.as_str()) {
-        return false;
-    }
     if checker.reg().resolve_type(n.as_str()).is_some() {
         return false;
     }

@@ -1233,12 +1233,14 @@ impl Checker {
     }
 
     /// Whether an error-position type is resolved enough for the `?` rule to judge: anything but a
-    /// `Named` head that is an in-scope generic type parameter (those defer to the instantiation).
+    /// generic type parameter (those defer to the instantiation).
+    ///
+    /// This asked the in-scope NAME table and matched `Type::Named`, which is exactly the
+    /// conflation this arc removes — and it was load-bearing: `fn f<E>(): Result<int, E>`
+    /// propagating a concrete `Err` deferred only because `"E"` was in that table. As a lattice
+    /// question the arm is direct, and the catch-all no longer silently swallows a parameter.
     fn concrete_error_type(&self, ty: &Type) -> bool {
-        match ty {
-            Type::Named(n, _) => !self.coloring.type_params.contains_key(n),
-            _ => true,
-        }
+        !matches!(ty, Type::Param(_))
     }
 
     /// Validate the `@derive(...)` directives on a declaration: every named trait must be a known

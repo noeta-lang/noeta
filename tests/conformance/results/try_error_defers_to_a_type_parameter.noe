@@ -1,0 +1,29 @@
+// A `?` whose enclosing function declares its error type as a **type parameter** defers: `E` is not
+// a concrete type, so there is nothing yet to demand a `From<string>` of, and the judgement belongs
+// to the instantiation site. (E0057 is what fires when both sides ARE concrete and disagree — see
+// `results/try_from_missing.noe`.)
+//
+// The deferral used to be spelled "a `Type::Named` head whose name is in the in-scope
+// type-parameter table". The moment a parameter got a lattice variant of its own it stopped
+// matching that arm and fell into the `_ => true` catch-all beneath it, and `outer` below reported
+// E0057 against `E`. A rule whose trigger can rot out from under it while every existing test still
+// passes is exactly what this case guards.
+// expect: stdout "1"
+// expect: exit 0
+fn inner(): Result<int, string> {
+    return Ok(1);
+}
+
+// The propagated error is concrete, the declared one is a parameter.
+fn outer<E>(): Result<int, E> {
+    v = inner()?;
+    return Ok(v);
+}
+
+// Both sides are the SAME parameter — the case that kept working, because equality caught it first.
+fn same<E>(): Result<int, E> {
+    v = outer::<E>()?;
+    return Ok(v);
+}
+
+echo match same::<string>() { Ok(n) => "${n}", Err(e) => "err ${e}" };
