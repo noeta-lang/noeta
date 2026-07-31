@@ -71,7 +71,7 @@ impl<'m> Vm<'m> {
     fn poll_isolate(&mut self, id: u32, span: Span) -> Result<Poll, Abort> {
         use std::sync::mpsc::TryRecvError;
         match self.isolates.isolates[id as usize].result.try_recv() {
-            Ok(Ok(wire)) => {
+            Ok(IsolateOutcome::Done(wire)) => {
                 self.finish_isolate(id);
                 Ok(Poll::Ready(isolate::rebuild(
                     &wire,
@@ -79,7 +79,14 @@ impl<'m> Vm<'m> {
                     &mut self.persist.channels,
                 )))
             }
-            Ok(Err(failure)) => {
+            // The worker honored a cancellation request at one of its safepoints (isolate-cancel):
+            // it produced no value and its thread has ended, so this is the *terminal* cancelled
+            // state — the only thing that lets the parent report `Err(Cancelled)` honestly.
+            Ok(IsolateOutcome::Cancelled) => {
+                self.finish_isolate(id);
+                Ok(Poll::Cancelled)
+            }
+            Ok(IsolateOutcome::Failed(failure)) => {
                 self.finish_isolate(id);
                 // Install the worker's shipped traceback (if any) before raising, so the abort that
                 // unwinds the parent renders the whole story: the worker's frames innermost, then the
@@ -249,7 +256,8 @@ impl<'m> Vm<'m> {
         {
             match &polled {
                 Ok(Poll::Pending) => self.sched.traced_futures[idx].context = ctx,
-                Ok(Poll::Ready(_)) | Err(_) => {
+                // `Cancelled` is terminal like `Ready` — the span ends, the future is reclaimed.
+                Ok(Poll::Ready(_)) | Ok(Poll::Cancelled) | Err(_) => {
                     let traced = self.sched.traced_futures.swap_remove(idx);
                     if polled.is_err() {
                         self.persist.host.tel_span_set_status(
@@ -579,24 +587,45 @@ impl<'m> Vm<'m> {
                     self.sched.scopes[si][ti].context =
                         std::mem::replace(&mut self.sched.ctx_current, saved);
                     self.sched.scopes[si][ti].polling = false;
-                    if let Poll::Ready(value) = polled? {
-                        // A worker-isolate root task finishing ends its strand (DAP worker
-                        // debugging): tell the debugger so it emits the `thread` exited event.
-                        if let Some(id) = self.sched.scopes[si][ti].isolate_strand
-                            && let Some(dbg) = self.debugger.as_mut()
-                        {
-                            dbg.on_strand_exited(id);
+                    match polled? {
+                        Poll::Pending => {}
+                        Poll::Ready(value) => {
+                            // A worker-isolate root task finishing ends its strand (DAP worker
+                            // debugging): tell the debugger so it emits the `thread` exited event.
+                            if let Some(id) = self.sched.scopes[si][ti].isolate_strand
+                                && let Some(dbg) = self.debugger.as_mut()
+                            {
+                                dbg.on_strand_exited(id);
+                            }
+                            self.sched.scopes[si][ti].result = Some(value);
+                            completed = true;
+                            // The task is done, so its **producer holds** end now — auto-closing any
+                            // channel whose last producer just completed, while the scope is still
+                            // open, so a sibling receiver drains then observes `none` instead of
+                            // deadlocking (isolates I.4c). The future itself is left for `ScopeEnd`
+                            // to reclaim, so captured-local destructors still fire at the join
+                            // (unchanged, both backends agree); only the producer accounting
+                            // resolves eagerly here.
+                            let mut holds = std::mem::take(&mut self.sched.scopes[si][ti].holds);
+                            self.release_task_holds(&mut holds);
                         }
-                        self.sched.scopes[si][ti].result = Some(value);
-                        completed = true;
-                        // The task is done, so its **producer holds** end now — auto-closing any
-                        // channel whose last producer just completed, while the scope is still open,
-                        // so a sibling receiver drains then observes `none` instead of deadlocking
-                        // (isolates I.4c). The future itself is left for `ScopeEnd` to reclaim, so
-                        // captured-local destructors still fire at the join (unchanged, both
-                        // backends agree); only the producer accounting resolves eagerly here.
-                        let mut holds = std::mem::take(&mut self.sched.scopes[si][ti].holds);
-                        self.release_task_holds(&mut holds);
+                        // A real isolate that honored its cancellation request (isolate-cancel).
+                        // Terminal, exactly like a completion — the worker's thread has ended — but
+                        // there is no value, so the task goes to the `cancelled` state the join
+                        // reads as `Err(Cancelled)`. Counts as progress so the scheduler does not
+                        // mistake this round for a stall, and releases the producer holds the
+                        // worker's `Sender`s were counted for, exactly as a completion does.
+                        Poll::Cancelled => {
+                            if let Some(id) = self.sched.scopes[si][ti].isolate_strand
+                                && let Some(dbg) = self.debugger.as_mut()
+                            {
+                                dbg.on_strand_exited(id);
+                            }
+                            self.sched.scopes[si][ti].cancelled = true;
+                            completed = true;
+                            let mut holds = std::mem::take(&mut self.sched.scopes[si][ti].holds);
+                            self.release_task_holds(&mut holds);
+                        }
                     }
                 }
                 ti += 1;
@@ -606,22 +635,115 @@ impl<'m> Vm<'m> {
         Ok(completed)
     }
 
-    /// Cancel the task a handle references (Track A.8) — a `race` loser. A task that has already
-    /// completed keeps its result; otherwise it is marked cancelled so the scheduler stops polling it
-    /// and the join treats it as done. Its future is *not* released here — `ScopeEnd` reclaims it with
-    /// the rest (so cancellation frees identically to a normal join, keeping both backends and the leak
-    /// oracle in agreement). Cooperative: the task never resumes past its last suspension.
+    /// Cancel the task a handle references (Track A.8) — a `race` loser, or a `h.cancel()`. A task
+    /// that has already completed keeps its result; otherwise cancellation is *requested*, and how
+    /// that request is honored depends on what kind of task it is:
+    ///
+    /// * A **cooperative task** is already parked between polls, so the request is exact and
+    ///   immediate: mark it cancelled, the scheduler stops polling it, and the join treats it as
+    ///   done. It never resumes past its last suspension. (Unchanged; this is the sandbox and
+    ///   differential path, and it was always honest.)
+    /// * A **real isolate** is an OS thread that is *running*, so the flag it needs is on the other
+    ///   side of the thread boundary (isolate-cancel). Set the worker's shared flag and leave the
+    ///   task live: the worker polls that flag at its safepoints and ships
+    ///   [`IsolateOutcome::Cancelled`] home, which is what turns the task terminally cancelled
+    ///   (`poll_isolate` → [`Poll::Cancelled`]). Until then the task is neither done nor cancelled,
+    ///   so `join` and the scope's closing brace both keep driving — which is exactly the point:
+    ///   marking it cancelled *here* is what used to let `join` report `Err(Cancelled)` for a
+    ///   worker that then ran to completion anyway.
+    ///
+    /// A task's future is *not* released here either way — `ScopeEnd` reclaims it with the rest (so
+    /// cancellation frees identically to a normal join, keeping both backends and the leak oracle in
+    /// agreement).
     pub(crate) fn cancel_task(&mut self, handle: Value) {
-        if let Some((si, ti)) = handle.handle_parts()
-            && let Some(task) = self
-                .sched
-                .scopes
-                .get_mut(si.index())
-                .and_then(|s| s.get_mut(ti.index()))
-            && task.result.is_none()
-        {
-            task.cancelled = true;
+        let Some((si, ti)) = handle.handle_parts() else {
+            return;
+        };
+        let Some(task) = self
+            .sched
+            .scopes
+            .get_mut(si.index())
+            .and_then(|s| s.get_mut(ti.index()))
+        else {
+            return;
+        };
+        if task.result.is_some() {
+            return; // already completed — a no-op, its result is preserved.
         }
+        if let Some(id) = task.future.isolate_future_id() {
+            self.request_isolate_cancel(id);
+            return;
+        }
+        task.cancelled = true;
+    }
+
+    /// Signal a real-isolate worker to stop (isolate-cancel): a relaxed store on the flag the worker
+    /// reads at every safepoint. Idempotent (the flag only ever goes `false → true`) and cheap —
+    /// the worker does the noticing. Also wakes any parked scheduler, so a parent already blocked in
+    /// the stall wait re-polls promptly once the worker's outcome lands.
+    pub(crate) fn request_isolate_cancel(&mut self, id: u32) {
+        self.isolates.isolates[id as usize]
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        isolate::WAKE.notify();
+    }
+
+    /// **The cancellation poll** (isolate-cancel): has whoever owns this run asked it to stop? A
+    /// relaxed load — the flag only ever goes `false → true`, nothing is ordered against it, and
+    /// the reaction (unwinding) is entirely local — so on x86-64 this is a plain load.
+    ///
+    /// The owner is the isolate's parent (`h.cancel()`) on a worker VM, or the embedder
+    /// ([`RunOptions::cancel`](crate::RunOptions::cancel)) on a cancellable top-level run — the
+    /// `noeta test` rail's overrunning case. `cancel_flag` is `None` on every *other* run, which is
+    /// the case the dispatch loop's safepoints must not pay for: it compiles to a null test on a
+    /// field already in cache, perfectly predicted. Measured cost on the tier-0 empty-loop floor:
+    /// see the `isolate-cancel` notes in `docs/Concurrency-Internals.md`.
+    #[inline]
+    pub(crate) fn cancel_requested(&self) -> bool {
+        self.isolates
+            .cancel_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Honor an observed cancellation request: latch it (so the worker's `Abort` is reported as
+    /// [`IsolateOutcome::Cancelled`] rather than a failure), propagate it to every isolate this
+    /// worker itself spawned — structured concurrency, downward: cancelling a subtree's root
+    /// cancels the subtree — and hand back the `Abort` that unwinds this worker's frames.
+    ///
+    /// **Disarms the poll on the way out**, which is load-bearing rather than tidy: the abort's
+    /// unwind and the teardown behind it both *run user code* — a frame local's `destruct`, then
+    /// every global's — on fresh frame stacks that re-enter the dispatch loop, and `run_destructor`
+    /// discards the `Abort` it gets back. A flag still set would therefore abort each destructor at
+    /// its very first frame transfer, silently, and a cancelled worker would skip the destructors a
+    /// completed one runs. The request has been honored exactly once; `cancel_observed` remembers
+    /// that, so nothing is lost by no longer asking.
+    ///
+    /// On a **top-level** cancellable run (the `noeta test` rail) there is no `IsolateOutcome` to
+    /// ship, so the latch has no reader and the abort simply unwinds into the ordinary teardown —
+    /// which is the whole point: the run frees its heap, runs its destructors, and joins any
+    /// isolates it spawned (`Vm::teardown`), so the thread ends cleanly instead of being abandoned.
+    /// The resulting [`RunResult`](noeta_backend::RunResult) carries no diagnostic and exit code
+    /// `0`; it describes a body that never finished and the caller that asked for the stop is
+    /// expected to discard it.
+    pub(crate) fn observe_cancel(&mut self) -> Abort {
+        self.isolates.cancel_observed = true;
+        self.isolates.cancel_flag = None;
+        for id in 0..self.isolates.isolates.len() as u32 {
+            self.request_isolate_cancel(id);
+        }
+        Abort
+    }
+
+    /// The safepoint form of [`Self::cancel_requested`]: unwind if this worker has been cancelled.
+    /// Called from the scheduler's driving loops (a worker parked on a timer, an async-IO leaf, or a
+    /// channel is *not* running bytecode, so the dispatch loop's safepoints never come around).
+    #[inline]
+    pub(crate) fn check_cancel(&mut self) -> Result<(), Abort> {
+        if self.cancel_requested() {
+            return Err(self.observe_cancel());
+        }
+        Ok(())
     }
 
     /// Spawn `isolate callee(args)` (isolates I.4b) and return its handle. Runs on a real OS thread
@@ -900,6 +1022,12 @@ impl<'m> Vm<'m> {
         // The worker participates in the stall registry iff this parent does (isolates I.4c); its
         // `active` slot is already registered above, on the parent thread.
         let stall_tracked = self.stall_active;
+        // This worker's cancellation flag (isolate-cancel): the parent stores through it from
+        // `h.cancel()`, the worker reads it at every safepoint. A fresh flag per worker, so a nested
+        // isolate is cancellable independently of the isolate that spawned it; a *cancelled* parent
+        // worker propagates to its children explicitly (see `observe_cancel`).
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_handle = std::thread::spawn(move || {
             let msg = run_isolate_worker(
@@ -913,6 +1041,7 @@ impl<'m> Vm<'m> {
                 trace,
                 registry,
                 stall_tracked,
+                worker_cancel,
                 span,
             );
             let _ = tx.send(msg);
@@ -924,8 +1053,15 @@ impl<'m> Vm<'m> {
         self.isolates.isolates.push(IsolateSlot {
             result: rx,
             handle: Some(thread_handle),
+            cancel,
         });
         self.isolates.inflight_isolates += 1;
+        // A worker that has *already* been cancelled must not leave a freshly spawned child running
+        // (isolate-cancel): the child inherits the request immediately. Normally false — one relaxed
+        // load per real spawn.
+        if self.cancel_requested() {
+            self.request_isolate_cancel(id);
+        }
         // Register the worker's stall slot up front, on this (parent) thread — before the worker's
         // own thread starts — so `active` never lags a starting worker (isolates I.4c false-positive
         // fix).
@@ -999,6 +1135,10 @@ impl<'m> Vm<'m> {
             {
                 self.maybe_safepoint_gc(frames, regs);
             }
+            // Cancellation poll (isolate-cancel): a worker isolate blocked here — joining its own
+            // `concurrent` block — runs no bytecode, so the dispatch loop's safepoints never come
+            // around. `None` outside a worker, so this is a predicted no-op on every other run.
+            self.check_cancel()?;
             // Snapshot the wake generation before polling (P-PAR S3): progress a worker makes
             // *during* this round then returns the stall wait immediately instead of parking.
             let wake_gen = isolate::WAKE.generation();
@@ -1078,10 +1218,18 @@ impl<'m> Vm<'m> {
             {
                 self.maybe_safepoint_gc(frames, regs);
             }
+            // Cancellation poll (isolate-cancel) — see `join_scope`. A worker parked on a timer, an
+            // async-IO leaf, or a channel is driving here, not dispatching bytecode.
+            self.check_cancel()?;
             let wake_gen = isolate::WAKE.generation();
             let before = self.persist.channel_progress;
-            if let Poll::Ready(value) = self.poll_once(future, span)? {
-                return Ok(Some(value));
+            match self.poll_once(future, span)? {
+                Poll::Ready(value) => return Ok(Some(value)),
+                // Driving a real-isolate future directly (a depth-0 worker drive, or an `.await`
+                // whose target *is* the isolate future) and the worker honored its cancellation:
+                // terminal, and there is no value.
+                Poll::Cancelled => return Ok(None),
+                Poll::Pending => {}
             }
             // A cancelled handle never becomes ready — report the cancelled outcome now rather than
             // spinning to a deadlock. Checked after the poll so a task cancelled by a sibling this

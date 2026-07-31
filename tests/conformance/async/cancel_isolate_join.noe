@@ -1,0 +1,26 @@
+// isolate-cancel — cancelling an `isolate` handle is the same surface as cancelling a `spawn`ed
+// task: `h.cancel()` requests the stop and `h.join()` reports the typed `Result<T, Cancelled>`
+// outcome. In the deterministic sandbox an isolate is observationally a cooperative task, so it is
+// already parked at its `sleep` when the cancel lands and the request is honored exactly there —
+// "work end" never prints. On the CLI's real path the same program cancels a genuine OS thread at
+// its next safepoint (see `crates/noeta-cli/tests/cli/isolates.rs`); what both paths guarantee, and
+// what this case pins, is that the *reported* outcome matches what actually happened.
+// expect: stdout "work start"
+// expect: stdout "cancelled"
+// expect: exit 0
+use std.task.{sleep}
+async fn work(): int {
+    echo "work start"
+    sleep(10).await
+    echo "work end"
+    return 5
+}
+concurrent {
+    h = isolate work()
+    sleep(1).await
+    h.cancel()
+    echo match h.join() {
+        Ok(v)  => "ok=" ~ v,
+        Err(_) => "cancelled",
+    }
+}

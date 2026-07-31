@@ -2441,10 +2441,15 @@ fn closure_default_reads_a_captured_cell() {
 /// `run_module_*` family) each defaulted their code into lib.rs and it regrew to 10,685. The
 /// 2026 re-split moved those into `hooks`/`backend`/`tier1`/`lifecycle`/`dispatch`/`hotswap`/
 /// `calls`/`tests`, leaving lib.rs at ~580 lines (crate docs, module decls + re-exports, the
-/// `Vm` struct + its grouped sub-structs (`SessionState`/`Tier1State`/`SchedState`/
-/// `IsolateState`/`RunOutput`), `Frame`/`RetTransform`/`Abort`, constants). The budget is that
-/// figure plus ~10% headroom for doc growth: a NEW SUBSYSTEM BELONGS IN ITS OWN MODULE, not here
-/// — if this fires, move the addition out rather than raising the budget.
+/// `Vm` struct + its grouped sub-structs, `Frame`/`RetTransform`/`Abort`, constants). The budget
+/// is that figure plus ~10% headroom for doc growth: a NEW SUBSYSTEM BELONGS IN ITS OWN MODULE,
+/// not here — if this fires, move the addition out rather than raising the budget.
+///
+/// The sub-structs have since been drifting out to the modules that own them, which is the same
+/// rule applied one level down and is what keeps the headroom from being spent on them: `SchedState`
+/// lives in `scheduler`, and `IsolateState` in `lifecycle` beside `IsolateSlot`/`IsolateOutcome`/
+/// `run_isolate_worker` (isolate-cancel — two more worker fields were what tipped the ratchet, and
+/// moving the struct was the fix the message asks for).
 #[test]
 fn lib_rs_stays_decomposed() {
     const BUDGET: usize = 640;
@@ -2510,9 +2515,15 @@ fn worker_teardown_reaps_stranded_reference_cycles() {
             None,
             None,
             false,
+            // Never cancelled here: this test is about the worker's teardown, and a cancelled
+            // worker's teardown is exercised end to end by the CLI isolate tests instead.
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
             noeta_span::Span::new(0, 0),
         );
-        assert!(result.is_ok(), "spin returns an int");
+        assert!(
+            matches!(result, crate::lifecycle::IsolateOutcome::Done(_)),
+            "spin returns an int"
+        );
         noeta_value::live_count() as i64 - before as i64
     })
     .join()
@@ -2520,5 +2531,128 @@ fn worker_teardown_reaps_stranded_reference_cycles() {
     assert_eq!(
         residual, 0,
         "the worker's own teardown must reap its stranded cycles (residency 0)"
+    );
+}
+
+/// isolate-cancel: a worker that observes its cancellation flag reports
+/// [`IsolateOutcome::Cancelled`] — not a failure, and not a value — and tears its own heap down to
+/// the same zero residency a completed worker leaves. Drives `run_isolate_worker` directly, the
+/// only in-crate way to reach the real worker path (real isolates are CLI / out-of-oracle, so the
+/// differential leak oracle never samples it).
+///
+/// The flag is set **before** the worker starts, so the stop is deterministic: the body's very first
+/// safepoint — the dispatch loop's entry frame transfer — sees it, with no timing to race. What that
+/// leaves untested here is *where* a mid-run cancel lands, which the CLI tests measure end to end
+/// (a 40M-iteration loop cancelled 200 ms in, stopping in milliseconds rather than seconds).
+#[test]
+fn a_cancelled_worker_reports_cancelled_and_frees_its_heap() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let _ = noeta_stdlib::registry::default_seeded();
+    let src = "class Node { pub mut next: ?Node\n\
+         fn new(): Node { return Node { next: none } } }\n\
+         fn spin(count: int): int {\n\
+         mut i = 0\n\
+         while i < count {\n\
+         a = Node.new()\n\
+         b = Node.new()\n\
+         a.next = some(b)\n\
+         b.next = some(a)\n\
+         i = i + 1\n\
+         }\n\
+         return i\n\
+         }\n";
+    let source = Source::new(SourceId::FIRST, "test.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let module = Arc::new(compile(&parsed.program).expect("in subset"));
+    let proto = module
+        .protos
+        .iter()
+        .position(|p| p.name.as_deref() == Some("spin"))
+        .expect("spin proto") as u32;
+    let factory: crate::IsolateFactory = Arc::new(|| {
+        (
+            Box::new(noeta_stdlib::SandboxHost::new()) as Box<dyn noeta_stdlib::Host>,
+            Box::new(noeta_stdlib::SandboxExecutor::new()) as Box<dyn noeta_stdlib::Executor>,
+        )
+    });
+    let cancel = Arc::new(AtomicBool::new(true));
+    let (outcome, residual) = std::thread::spawn(move || {
+        let before = noeta_value::live_count();
+        let outcome = crate::lifecycle::run_isolate_worker(
+            &module,
+            &factory,
+            None,
+            proto,
+            vec![crate::isolate::IsoArg::Copied(crate::isolate::Wire::Int(
+                1_000_000,
+            ))],
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            cancel,
+            noeta_span::Span::new(0, 0),
+        );
+        let residual = noeta_value::live_count() as i64 - before as i64;
+        (outcome, residual)
+    })
+    .join()
+    .unwrap();
+    assert!(
+        matches!(outcome, crate::lifecycle::IsolateOutcome::Cancelled),
+        "an honored cancellation is its own outcome, not a value and not a failure"
+    );
+    assert_eq!(
+        residual, 0,
+        "a cancelled worker tears its heap down exactly like a completed one (residency 0)"
+    );
+}
+
+/// test-timeout: a **top-level** run can be asked to stop too, through the identical flag.
+///
+/// A worker isolate is not the only thing that can wedge. `noeta test` runs each case as a whole
+/// program on its own thread, and the timeout rail asks that program to stop the same way a parent
+/// asks a worker — [`RunOptions::cancel`] installs the flag on the top-level VM's
+/// `IsolateState::cancel_flag`, and the dispatch loop's safepoints do the rest. Without it there is
+/// no way to reach a running case at all and abandoning its thread is the only option.
+///
+/// The proof is that a loop with no exit condition **returns**: `while true` never terminates on its
+/// own, so a `RunResult` at all means the safepoints observed the request and unwound. Residency
+/// back to zero says the unwind ran the ordinary teardown rather than leaving the heap stranded —
+/// which is exactly what makes joining the case's thread better than abandoning it.
+///
+/// The flag is set before the run starts, so the stop is deterministic (the body's first frame
+/// transfer sees it) and this test cannot hang even if the poll regresses to never firing... except
+/// that it would, which is the point: a `while true` with no cancellation is an infinite loop, and
+/// an honest hang beats an assertion that passes on a broken runner.
+#[test]
+fn a_cancelled_top_level_run_stops_and_frees_its_heap() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    noeta_stdlib::registry::default_seeded();
+    let src = "mut i = 0\nwhile true { i = i + 1 }\necho i\n";
+    let source = Source::new(SourceId::FIRST, "test.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let module = compile(&parsed.program).expect("in subset");
+    let before = noeta_value::live_count();
+    let out = VmBackend::new().run_module_with(
+        &module,
+        RunOptions {
+            cancel: Some(Arc::new(AtomicBool::new(true))),
+            ..RunOptions::default()
+        },
+    );
+    assert_eq!(
+        out.result.stdout, "",
+        "the body never reached its `echo`: it stopped at a safepoint inside the loop"
+    );
+    assert_eq!(
+        noeta_value::live_count(),
+        before,
+        "a cancelled run tears its heap down exactly like a completed one (residency 0)"
     );
 }

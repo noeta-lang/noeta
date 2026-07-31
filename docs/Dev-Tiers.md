@@ -97,11 +97,13 @@ result: 10
 
 ### The annotation form
 
-`@<tier> fn …` is exactly a one-item block — sugar for wrapping a single function:
+`@<tier> fn …` is a one-item block — sugar for wrapping a single function:
 
 ```noeta
 @test fn adds(): void { assert(add(1, 2) == 3) }
 ```
+
+The two forms activate, lower and run identically, but they are **not interchangeable**: an annotation *attaches* to the declaration it wraps and is therefore checked against the tier's declared attachment sites (**E0054**), while a block groups whatever is inside it and is not. `noeta fmt` prints back whichever form you wrote — it canonicalizes an annotation to the directive on its own line above the declaration, and it never turns a block you braced into an annotation.
 
 ### Directive arguments and diagnostics
 

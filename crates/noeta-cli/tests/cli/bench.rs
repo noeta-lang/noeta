@@ -2,6 +2,70 @@
 
 use crate::support::*;
 
+// --- measurable fixtures ------------------------------------------------------------
+//
+// Everything below that saves or compares a baseline needs a **measurement**, not merely a run.
+// `noeta bench` estimates per-iteration cost by subtracting two timed points, `(t(2N) − t(N)) / N`;
+// when the body is cheap relative to the run-to-run jitter of the fixed overhead, that subtraction
+// lands at or below zero and the tool reports *no measurement* — correctly, and loudly. A test that
+// then asserts on a delta has nothing to assert on.
+//
+// That is what made the whole `bench::` family flaky: it passed alone and failed inside the full
+// suite, on an arbitrary member each time. The old body — `work(500)` at 2000 iterations — measures
+// about **10 ms** of work per point, which is close enough to the noise floor that its worst ambient
+// sample was already a third of its median.
+//
+// **Sizing the body is not, on its own, the fix, and measuring said so.** On this box (20 cores),
+// release binary, 40 samples per body, under 3× oversubscription (24 spinning CPU burners on top of
+// an ambient load of ~15):
+//
+// | body           | work per point | unresolved | wall per measurement |
+// |----------------|---------------:|-----------:|---------------------:|
+// | `work(2500)`   |         ~50 ms |       2/40 |                4.2 s |
+// | `work(5000)`   |        ~100 ms |       3/40 |                8.4 s |
+//
+// Doubling the work doubled the wall time and moved the failure rate not at all — the noise is
+// *multiplicative*, so a bigger body scales the signal and the noise together. What fixed it is in
+// the tool, where it belongs: `noeta bench` now retries a two-point subtraction that does not
+// resolve (`BENCH_MEASUREMENT_ATTEMPTS`), because such a subtraction is a spoiled sample rather than
+// a fact about the program.
+//
+// So the fixture is sized only for what sizing *does* buy — clearing the additive floor an
+// idle machine still has — and no further, since past that point every extra millisecond is
+// wall time for nothing. Ambient medians, 15 samples: `work(500)` 5.4 µs/iter with samples down to
+// 1.9 µs (a 3× spread, right at the floor); `work(2000)` 21 µs/iter with samples down to 13 µs (a
+// 1.6× spread, clear of it). Hence ~42 ms per point, about 0.5 s per `noeta bench` invocation on an
+// idle box (a measurement is six runs: two points, minimum of three each, the far point double).
+
+/// Per-iteration work in a measured fixture — an `n`-trip integer sum. See the table above.
+const MEASURABLE_WORK: u64 = 2_000;
+
+/// The iteration count a measured fixture runs at.
+const MEASURABLE_ITERS: u64 = 2_000;
+
+/// The `work(n)` helper every measured fixture shares.
+const BENCH_WORK_FN: &str = "fn work(n: int): int {\n\
+                             mut t = 0\n\
+                             for i in 0..n { t = t + i }\n\
+                             return t\n\
+                             }\n";
+
+/// One `@bench` fn over [`BENCH_WORK_FN`], sized so its per-iteration cost resolves under load.
+fn measurable_bench(name: &str) -> String {
+    format!(
+        "@bench(iterations: {MEASURABLE_ITERS}) fn {name}(): void {{ work({MEASURABLE_WORK}) }}\n"
+    )
+}
+
+/// A whole one-file program: the shared `work` helper plus one measurable benchmark per name.
+fn measurable_program(names: &[&str]) -> String {
+    let mut src = BENCH_WORK_FN.to_string();
+    for name in names {
+        src.push_str(&measurable_bench(name));
+    }
+    src
+}
+
 // --- `bench` (object-model slice 6: the `@bench` runner) ---------------------------
 
 #[test]
@@ -117,17 +181,9 @@ fn bench_calibrates_without_an_iteration_count() {
 fn bench_baseline_saves_and_compares() {
     // `--save-baseline` persists a run (per entry file, in the cache dir); `--baseline` diffs
     // against it — the human report gains a delta, the JSON a `baselineDeltaPct`.
-    // Enough per-iteration work that the two-point measurement is reliably non-zero — a zero
-    // baseline has no defined delta.
-    let file = temp_program(
-        "bench_baseline",
-        "fn work(n: int): int {\n\
-             mut t = 0\n\
-             for i in 0..n { t = t + i }\n\
-             return t\n\
-         }\n\
-         @bench(iterations: 2000) fn b(): void { work(500) }\n",
-    );
+    // The body carries the measured margin (see `measurable_program`): a zero has no defined delta,
+    // and `--save-baseline` refuses to persist one.
+    let file = temp_program("bench_baseline", &measurable_program(&["b"]));
     // Persisting a baseline *is* exercising the cache, so this test owns its cache dir rather than
     // sharing the per-target one (`support::lang`'s convention). Isolation hardening: this test was
     // seen once to report no baseline comparison at all under a fully parallel suite, and did not
@@ -139,6 +195,9 @@ fn bench_baseline_saves_and_compares() {
     // which `--baseline` skipped the delta in silence and this assertion failed with no explanation.
     // The product no longer does that — the save is refused, with the reason on stderr — so if this
     // test goes red under load again it now says why rather than pointing at a missing substring.
+    // The remaining half of that story was the fixture, not the product: refusing to save an
+    // unresolved measurement turns a silent wrong answer into a red test, and only a body with real
+    // margin (above) stops the machine's load from deciding whether this test passes.
     let cache_dir = PathBuf::from(concat!(
         env!("CARGO_TARGET_TMPDIR"),
         "/bench-baseline-cache"
@@ -194,16 +253,12 @@ fn bench_baseline_says_when_it_cannot_compare() {
     // which is how a baseline of `0.0` (persisted by the old `.max(0.0)` clamp) made every later
     // comparison vacuous without anything saying so. Here the silent case is the ordinary one: a
     // benchmark added after the baseline was saved.
-    // A body with real margin over timer noise: `--save-baseline` now *refuses* an unresolved
-    // measurement, so a bench too cheap to resolve makes this test fail on the setup step rather than
-    // on what it is testing. (Which is the fix working — it caught exactly that while being written.)
-    let one = "fn work(n: int): int {\n\
-                   mut t = 0\n\
-                   for i in 0..n { t = t + i }\n\
-                   return t\n\
-               }\n\
-               @bench(iterations: 2000) fn kept(): void { work(2000) }\n";
-    let dir = temp_dir("bench_no_entry", &[("b.noe", one)]);
+    // Both benches carry the measured margin (see `measurable_program`). `--save-baseline` *refuses*
+    // an unresolved measurement, so a `kept` too cheap to resolve fails this test on the setup step
+    // rather than on what it is testing; and an `added` too cheap to resolve reports "this run
+    // measured nothing" instead of the missing-entry note this pins.
+    let one = measurable_program(&["kept"]);
+    let dir = temp_dir("bench_no_entry", &[("b.noe", &one)]);
     let file = dir.join("b.noe");
     // Owns its cache dir for the same reason as `bench_baseline_saves_and_compares` above.
     let cache_dir = dir.join("cache");
@@ -221,11 +276,8 @@ fn bench_baseline_says_when_it_cannot_compare() {
         .success();
 
     // A second benchmark the baseline knows nothing about.
-    std::fs::write(
-        &file,
-        format!("{one}@bench(iterations: 2000) fn added(): void {{ work(1500) }}\n"),
-    )
-    .expect("write the two-bench program");
+    std::fs::write(&file, format!("{one}{}", measurable_bench("added")))
+        .expect("write the two-bench program");
     bench()
         .arg("bench")
         .arg(&file)
@@ -268,15 +320,12 @@ fn bench_baseline_says_when_it_cannot_compare() {
 fn bench_max_regress_gates_ci() {
     // The CI gate: an absurdly permissive limit passes; an impossible limit (any measurement
     // "regresses" past -1000%) fails with the offending bench named on stderr.
-    let file = temp_program(
-        "bench_gate",
-        "fn work(n: int): int {\n\
-             mut t = 0\n\
-             for i in 0..n { t = t + i }\n\
-             return t\n\
-         }\n\
-         @bench(iterations: 2000) fn b(): void { work(500) }\n",
-    );
+    // The body carries the measured margin (see `measurable_program`). This is the test that named
+    // the whole flake: with a cheap body the impossible limit **passed** under load, because a run
+    // that measured nothing has no delta, and no delta cannot regress. The gate now exits 2 rather
+    // than 0 in that state, so a regression here is a red test either way — but the fixture is what
+    // keeps this assertion about the gate instead of about the machine's load.
+    let file = temp_program("bench_gate", &measurable_program(&["b"]));
     // Owns its cache dir for the same reason as `bench_baseline_saves_and_compares` above.
     let cache_dir = PathBuf::from(concat!(env!("CARGO_TARGET_TMPDIR"), "/bench-gate-cache"));
     let _ = std::fs::remove_dir_all(&cache_dir);
@@ -446,20 +495,11 @@ fn bench_on_a_directory_measures_every_files_benches() {
 fn bench_directory_baselines_stay_keyed_per_entry_file() {
     // A baseline is keyed by its entry file and by the bare fn name, so a directory run writes
     // exactly the files a per-file run writes — and a later single-file run diffs against it.
-    // Enough per-iteration work that the two-point measurement is reliably non-zero — a zero
-    // baseline has no defined delta, exactly as in `bench_baseline_saves_and_compares`.
-    let dir = temp_dir(
-        "bench_dir_baseline",
-        &[(
-            "src/main.noe",
-            "fn work(n: int): int {\n\
-                 mut t = 0\n\
-                 for i in 0..n { t = t + i }\n\
-                 return t\n\
-             }\n\
-             @bench(iterations: 2000) fn only_bench(): void { work(500) }\n",
-        )],
-    );
+    // The body carries the measured margin (see `measurable_program`), exactly as in
+    // `bench_baseline_saves_and_compares`: a zero baseline has no defined delta, and the save that
+    // opens this test refuses to persist one.
+    let program = measurable_program(&["only_bench"]);
+    let dir = temp_dir("bench_dir_baseline", &[("src/main.noe", &program)]);
     // Persisting a baseline *is* exercising the cache, so this test owns its cache dir.
     let cache = PathBuf::from(concat!(
         env!("CARGO_TARGET_TMPDIR"),
@@ -478,7 +518,88 @@ fn bench_directory_baselines_stay_keyed_per_entry_file() {
         .arg("bench")
         .arg(dir.join("src/main.noe"))
         .args(["--baseline", "gate"])
+        // `% vs gate`, not `vs gate`: the "no comparison vs gate: …" note contains the shorter
+        // substring, so the loose form passed on exactly the runs this test exists to catch.
         .assert()
         .success()
-        .stdout(predicate::str::contains("vs gate"));
+        .stdout(predicate::str::contains("% vs gate"));
+}
+
+#[test]
+fn bench_max_regress_cannot_pass_what_it_could_not_compare() {
+    // A gate that could not measure must not pass. `--max-regress` used to exit `0` whenever a bench
+    // produced no delta — no measurement, no comparison, nothing above the limit, green — which is
+    // byte-identical by exit code to "measured, and fine". A gate is read by exit code precisely so
+    // nobody has to read stdout, so the inconclusive state gets its own code (`2`, this command's
+    // existing "could not do what you asked").
+    //
+    // The uncomparable state here is the deterministic one — a benchmark the baseline has no entry
+    // for, added since it was saved — rather than a body deliberately too cheap to time, which is the
+    // same verdict reached by a route that depends on the machine's load.
+    let one = measurable_program(&["kept"]);
+    let dir = temp_dir("bench_gate_ungated", &[("b.noe", &one)]);
+    let file = dir.join("b.noe");
+    let cache_dir = dir.join("cache");
+    let bench = || {
+        let mut cmd = lang();
+        cmd.env("NOETA_CACHE_DIR", &cache_dir);
+        cmd
+    };
+    bench()
+        .arg("bench")
+        .arg(&file)
+        .args(["--save-baseline", "gate"])
+        .assert()
+        .success();
+    // The saved bench alone still gates, and passes: a comparison happened.
+    bench()
+        .arg("bench")
+        .arg(&file)
+        .args(["--baseline", "gate", "--max-regress", "100000"])
+        .assert()
+        .success();
+
+    // Add a benchmark the baseline knows nothing about. The limit is still absurdly permissive, so
+    // nothing "regressed" — and that is the point: the gate cannot vouch for `added` at all.
+    std::fs::write(&file, format!("{one}{}", measurable_bench("added")))
+        .expect("write the two-bench program");
+    bench()
+        .arg("bench")
+        .arg(&file)
+        .args(["--baseline", "gate", "--max-regress", "100000"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(
+            predicate::str::contains("`added` was not compared")
+                .and(predicate::str::contains("could not judge it"))
+                .and(predicate::str::contains("inconclusive"))
+                // `kept` compared fine; only the bench that did not is named.
+                .and(predicate::str::contains("`kept` was not compared").not()),
+        );
+    // The `--json` seam carries the same count, for a consumer reading the report rather than `$?`.
+    let out = bench()
+        .arg("bench")
+        .arg(&file)
+        .args(["--baseline", "gate", "--max-regress", "100000", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("valid JSON");
+    assert_eq!(json["ungated"], 1);
+    assert_eq!(json["regressed"], 0);
+    assert_eq!(json["failed"], 0);
+
+    // Without `--max-regress` the same run is a *report*, not a gate: it prints why the comparison
+    // did not happen and exits 0. The exit code changes only where the exit code is the product.
+    bench()
+        .arg("bench")
+        .arg(&file)
+        .args(["--baseline", "gate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "no comparison vs gate: this baseline has no entry for this benchmark",
+        ));
 }

@@ -37,7 +37,7 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
         return 1;
     }
 
-    match execute_real_host(&loaded.program, &checked, args, true) {
+    match execute_real_host(&loaded.program, &checked, args, true, None) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
@@ -77,17 +77,21 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
 /// `live_output` streams the program's output to the terminal as it is produced rather than
 /// batch-capturing it into the returned [`noeta_backend::RunResult`] — `true` for a foreground
 /// `noeta run`, `false` for the `@test` runner, whose report *is* the captured stdout.
+/// `cancel` arms the run's cooperative stop request (`noeta_vm::RunOptions::cancel`): `None` for an
+/// ordinary run, `Some` for a bounded `@test` case the runner may need to ask to stop.
 pub(crate) fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
     args: Vec<String>,
     live_output: bool,
+    cancel: Option<noeta_vm::CancelFlag>,
 ) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), noeta_compiler::Unsupported> {
     let (result, trace, _) = run_module_real_host(
         std::sync::Arc::new(compile_real(program, checked)?),
         args,
         false,
         live_output,
+        cancel,
     );
     Ok((result, trace))
 }
@@ -123,13 +127,14 @@ pub(crate) fn run_module_real_host(
     args: Vec<String>,
     jit_report: bool,
     live_output: bool,
+    cancel: Option<noeta_vm::CancelFlag>,
 ) -> (
     noeta_backend::RunResult,
     Vec<noeta_vm::TraceFrame>,
     Option<noeta_vm::JitReport>,
 ) {
     let app_id = p2p_app_namespace(&args);
-    noeta_runner::run_module_real_host(module, args, app_id, jit_report, live_output)
+    noeta_runner::run_module_real_host(module, args, app_id, jit_report, live_output, cancel)
 }
 
 /// P-AOT L2: detect and run a bundle stapled onto this executable (a `noeta build --exe` artifact),

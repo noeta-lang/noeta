@@ -89,6 +89,55 @@ impl EnumMember<'_> {
     }
 }
 
+/// A trait body member, unified so comments interleave across associated types and method
+/// signatures in source order.
+enum TraitMember<'a> {
+    AssocType(&'a noeta_ast::AssocTypeDecl),
+    Method(&'a TraitMethod),
+}
+
+impl TraitMember<'_> {
+    fn span(&self) -> Span {
+        match self {
+            TraitMember::AssocType(a) => a.span,
+            TraitMember::Method(m) => m.sig.span,
+        }
+    }
+}
+
+/// One decorator leading a function/method declaration — a `@<tier>` directive or a `#[…]` data
+/// attribute — unified so the two kinds print in source order with comments interleaved.
+enum FnLead<'a> {
+    Directive(&'a MethodDirective),
+    Attr(&'a Attribute),
+}
+
+impl FnLead<'_> {
+    fn span(&self) -> Span {
+        match self {
+            FnLead::Directive(d) => d.span,
+            FnLead::Attr(a) => a.span,
+        }
+    }
+}
+
+/// An `impl` body member, unified so comments interleave across associated-type bindings and
+/// methods in source order. A binding stores no span of its own, so it is ordered by its concrete
+/// type's — the only span it has, and enough to place a comment written above it.
+enum ImplMember<'a> {
+    AssocBinding(&'a str, &'a TypeRef),
+    Method(&'a FnDecl),
+}
+
+impl ImplMember<'_> {
+    fn span(&self) -> Span {
+        match self {
+            ImplMember::AssocBinding(_, ty) => ty.span(),
+            ImplMember::Method(m) => m.span,
+        }
+    }
+}
+
 impl Member<'_> {
     /// A span for source-ordering and comment attachment. The `destruct` block stores no span, so it
     /// is approximated from its statements (it always trails the other members), falling back to the
@@ -319,10 +368,18 @@ impl Printer<'_> {
 
         loop {
             // The next pending comment within the region, and the next un-rendered item.
+            //
+            // The region is bounded on **both** sides. Only the upper bound used to be checked, so a
+            // comment the enclosing scope had not yet emitted was claimed by the first nested region
+            // that happened to run — a method body's, say, whose region starts after the `fn`'s name
+            // — and re-emitted one level deeper than the author wrote it. A comment before
+            // `region_start` belongs to whatever encloses this region: leaving it pending returns it
+            // there (the enclosing region's own end is never smaller, so it is still emitted exactly
+            // once — the completeness invariant holds).
             let next_comment = self
                 .comments
                 .get(self.cursor.get())
-                .filter(|c| c.span.start < region_end);
+                .filter(|c| c.span.start >= region_start && c.span.start < region_end);
             let next_item = items.get(idx);
 
             // Take whichever begins first; a tie (impossible for distinct source tokens) and an item
@@ -500,12 +557,34 @@ impl Printer<'_> {
         false
     }
 
+    /// Whether a not-yet-emitted comment falls inside `[start, end)` — i.e. whether an *empty* body
+    /// spanning that region nonetheless holds something.
+    ///
+    /// A body with no members short-circuits to `{}`, which skips the interleave and leaves any
+    /// comment written between the braces for the enclosing scope to re-emit *outside* them. The
+    /// commonest shape is a deliberately-empty branch whose comment says why it is empty:
+    ///
+    /// ```text
+    /// } else if line.starts_with(":") {
+    ///     // A comment. std dispatches nothing for one, and neither does this.
+    /// } else if …
+    /// ```
+    ///
+    /// which formatted to `} else if line.starts_with(":") {} else if …` with the explanation moved
+    /// to the end of the enclosing loop, where it explains nothing.
+    fn holds_comment(&self, start: u32, end: u32) -> bool {
+        self.comments
+            .get(self.cursor.get())
+            .is_some_and(|c| c.span.start >= start && c.span.start < end)
+    }
+
     // ---- statements --------------------------------------------------------------------------
 
     /// A brace-delimited statement block: ` {` on the current line, body indented, `}` on its own
-    /// line. An empty body prints as `{}`.
+    /// line. An empty body prints as `{}` — unless a comment is the only thing in it, in which case
+    /// the braces open around the comment (see [`Printer::holds_comment`]).
     fn block(&self, body: &[Stmt], open: u32, close: u32) -> Result<Doc, FmtError> {
-        if body.is_empty() {
+        if body.is_empty() && !self.holds_comment(open, close) {
             return Ok(Doc::text("{}"));
         }
         let inner = self.stmt_seq(body, open, close)?;
@@ -729,6 +808,7 @@ impl Printer<'_> {
                 args,
                 items,
                 doc_text,
+                attached,
                 span,
                 ..
             } => {
@@ -769,14 +849,37 @@ impl Printer<'_> {
                         ]))
                     }
                     // A code tier (`@test`/`@bench`/`@debug`): its items are ordinary statements.
-                    // A single wrapped `fn` — the annotation form (`@test fn …` desugars to this) —
-                    // canonicalizes to the directive on its own line above the declaration, the
-                    // same shape a method's directive formats to; a block with several items (or a
-                    // test-only type) keeps its braces.
+                    //
+                    // The **annotation** form (`@test fn …`, which the parser desugars into a
+                    // one-item block) prints as the directive on its own line above the
+                    // declaration — the same shape a method's directive formats to. A block the
+                    // author actually braced keeps its braces, *including* a one-`fn` block.
+                    //
+                    // The two are not interchangeable, and `attached` — "there were no braces" — is
+                    // the AST's own record of which was written. Collapsing a braced block into the
+                    // annotation form flips that flag, and the checker reads it: only an `attached`
+                    // block is site-checked against the tier's declared `sites` (E0054), so the
+                    // rewrite can invent an error the author's source does not have. The safety gate
+                    // cannot catch it either — it compares the `Pretty` form, which prints
+                    // `TierBlock`'s tier, args, doc text and items but *not* `attached`, so the two
+                    // forms are indistinguishable to it. "Re-parses to the same AST" was really
+                    // "re-parses to the same pretty-printed AST", and this difference falls in the
+                    // gap. Add to that the comments: the collapse handed the block's comments to the
+                    // wrapped `fn`'s body region, one level deeper than they were written.
                     None => match items.as_slice() {
-                        [item @ Stmt::Fn(_)] => {
-                            Ok(Doc::concat([head, Doc::hardline(), self.stmt(item)?]))
-                        }
+                        [item @ Stmt::Fn(_)] if *attached => Ok(Doc::concat([
+                            head,
+                            Doc::hardline(),
+                            // Bounded by the block's own span so a comment written *between* the
+                            // directive and the declaration stays between them.
+                            self.interleave_comments(
+                                std::slice::from_ref(item),
+                                span.start,
+                                span.end,
+                                |s| s.span(),
+                                |s| self.stmt(s),
+                            )?,
+                        ])),
                         _ => Ok(Doc::concat([
                             head,
                             Doc::text(" "),
@@ -929,14 +1032,33 @@ impl Printer<'_> {
             parts.push(Doc::text(format!("@tier({})", args.join(", "))));
             parts.push(Doc::hardline());
         }
-        // Leading `@<tier>` method directives (`@test`, `@doc { … }`) — each on its own line above
-        // the header, in source order. Dropping one would silently discard a test root or doc block
-        // (the safety gate catches it via the pretty skeleton, but emitting them is the fix).
-        for dir in &decl.directives {
-            parts.push(self.method_directive(dir)?);
+        // Leading `@<tier>` method directives (`@test`, `@doc { … }`) and `#[…]` data attributes —
+        // each on its own line above the header, in source order. Dropping one would silently
+        // discard a test root or doc block (the safety gate catches it via the pretty skeleton, but
+        // emitting them is the fix).
+        //
+        // Interleaved, because a declaration's span *starts at its first decorator*: a comment
+        // written between two of them, or between the last one and the `fn` line, sits inside this
+        // item as far as the enclosing sequence is concerned, so nothing else can place it. The
+        // body's region begins after the name, so without this the comment fell through to the
+        // enclosing scope and re-emitted *after* the whole declaration.
+        let mut lead: Vec<FnLead> = Vec::new();
+        lead.extend(decl.directives.iter().map(FnLead::Directive));
+        lead.extend(decl.attrs.iter().map(FnLead::Attr));
+        lead.sort_by_key(|l| l.span().start);
+        if !lead.is_empty() {
+            parts.push(self.interleave_comments(
+                &lead,
+                decl.span.start,
+                decl.name_span.start,
+                |l| l.span(),
+                |l| match l {
+                    FnLead::Directive(d) => self.method_directive(d),
+                    FnLead::Attr(a) => self.attribute(a),
+                },
+            )?);
             parts.push(Doc::hardline());
         }
-        parts.extend(self.attrs(&decl.attrs)?);
         if decl.is_public {
             parts.push(Doc::text("pub "));
         }
@@ -1160,7 +1282,7 @@ impl Printer<'_> {
         }
         members.sort_by_key(|m| m.sort_key(span).start);
 
-        if members.is_empty() {
+        if members.is_empty() && !self.holds_comment(span.start, span.end) {
             return Ok(Doc::text("{}"));
         }
         let inner = self.interleave_comments(
@@ -1232,38 +1354,42 @@ impl Printer<'_> {
         ]))
     }
 
-    /// The brace-wrapped body of an impl block: its associated-type bindings first (each on its own
-    /// line), then its methods (blank-line separated), in that canonical order (slice 1a). `{}` when
-    /// the impl is empty.
+    /// The brace-wrapped body of an impl block: its associated-type bindings and methods in source
+    /// order, comments interleaved and author blank lines preserved. `{}` when the impl is empty.
+    ///
+    /// It used to print the two groups positionally — bindings joined by a hardline, then methods
+    /// forcibly blank-separated — with no comment handling, so a comment written above a method in
+    /// an `impl` block was claimed by nobody at this level. The first nested region to run then took
+    /// it: the method's *own body*, one level deeper than the author wrote it. Interleaving here is
+    /// what the struct/class/enum bodies already do, and it puts the comment back where it belongs.
     fn impl_body(
         &self,
         assoc_bindings: &[(String, TypeRef)],
         methods: &[FnDecl],
+        span: Span,
     ) -> Result<Doc, FmtError> {
-        let mut binds = Vec::new();
-        for (name, ty) in assoc_bindings {
-            binds.push(self.assoc_binding(name, ty)?);
-        }
-        let mut ms = Vec::new();
-        for m in methods {
-            ms.push(self.fn_decl(m)?);
-        }
-        if binds.is_empty() && ms.is_empty() {
+        let mut members: Vec<ImplMember> = Vec::new();
+        members.extend(
+            assoc_bindings
+                .iter()
+                .map(|(name, ty)| ImplMember::AssocBinding(name.as_str(), ty)),
+        );
+        members.extend(methods.iter().map(ImplMember::Method));
+        members.sort_by_key(|m| m.span().start);
+
+        if members.is_empty() && !self.holds_comment(span.start, span.end) {
             return Ok(Doc::text("{}"));
         }
-        // Bindings pack line-by-line; methods separate with a blank line; a blank line divides the
-        // two groups when both are present.
-        let mut groups = Vec::new();
-        if !binds.is_empty() {
-            groups.push(Doc::join(binds, Doc::hardline()));
-        }
-        if !ms.is_empty() {
-            groups.push(Doc::join(
-                ms,
-                Doc::concat([Doc::hardline(), Doc::hardline()]),
-            ));
-        }
-        let inner = Doc::join(groups, Doc::concat([Doc::hardline(), Doc::hardline()]));
+        let inner = self.interleave_comments(
+            &members,
+            span.start,
+            span.end,
+            |m| m.span(),
+            |m| match m {
+                ImplMember::AssocBinding(name, ty) => self.assoc_binding(name, ty),
+                ImplMember::Method(m) => self.fn_decl(m),
+            },
+        )?;
         Ok(Doc::concat([
             Doc::text("{"),
             Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
@@ -1278,7 +1404,7 @@ impl Printer<'_> {
             self.trait_args_doc(&b.trait_args)?,
             Doc::text(" "),
         ]);
-        let body = self.impl_body(&b.assoc_bindings, &b.methods)?;
+        let body = self.impl_body(&b.assoc_bindings, &b.methods, b.span)?;
         Ok(Doc::concat([head, body]))
     }
 
@@ -1288,7 +1414,7 @@ impl Printer<'_> {
             self.trait_args_doc(&d.trait_args)?,
             Doc::text(format!(" for {} ", d.target)),
         ]);
-        let body = self.impl_body(&d.assoc_bindings, &d.methods)?;
+        let body = self.impl_body(&d.assoc_bindings, &d.methods, d.span)?;
         Ok(Doc::concat([head, body]))
     }
 
@@ -1304,19 +1430,33 @@ impl Printer<'_> {
         parts.push(Doc::text(d.name.to_string()));
         parts.push(self.type_params(&d.type_params)?);
         parts.push(Doc::text(" "));
-        // The body lists associated types first (`type Name;` / `type Name = Default;`), then method
-        // signatures — the canonical order (slice 1a). Members separate with a single hardline.
-        let mut items = Vec::new();
-        for a in &d.assoc_types {
-            items.push(self.assoc_type_decl(a)?);
-        }
-        for m in &d.methods {
-            items.push(self.trait_method(m)?);
-        }
-        let body = if items.is_empty() {
+        // The body lists its associated types (`type Name;` / `type Name = Default;`) and method
+        // signatures in source order, interleaving their comments and preserving author blank lines
+        // — the same shape a struct/class/enum body uses.
+        //
+        // It used to `Doc::join` the members with no comment handling at all, so a comment written
+        // inside a trait body was claimed by nobody: it stayed pending past the closing brace and
+        // the *enclosing* statement sequence re-emitted it against whatever followed the trait. The
+        // corpus gates could not see it — the comment survived and the result was idempotent — but
+        // a note about `fn hi` ended up documenting the next declaration in the file.
+        let mut members: Vec<TraitMember> = Vec::new();
+        members.extend(d.assoc_types.iter().map(TraitMember::AssocType));
+        members.extend(d.methods.iter().map(TraitMember::Method));
+        members.sort_by_key(|m| m.span().start);
+
+        let body = if members.is_empty() && !self.holds_comment(d.span.start, d.span.end) {
             Doc::text("{}")
         } else {
-            let inner = Doc::join(items, Doc::hardline());
+            let inner = self.interleave_comments(
+                &members,
+                d.span.start,
+                d.span.end,
+                |m| m.span(),
+                |m| match m {
+                    TraitMember::AssocType(a) => self.assoc_type_decl(a),
+                    TraitMember::Method(m) => self.trait_method(m),
+                },
+            )?;
             Doc::concat([
                 Doc::text("{"),
                 Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
@@ -1391,7 +1531,7 @@ impl Printer<'_> {
         members.extend(d.impls.iter().map(EnumMember::Impl));
         members.sort_by_key(|m| m.span().start);
 
-        let body = if members.is_empty() {
+        let body = if members.is_empty() && !self.holds_comment(d.span.start, d.span.end) {
             Doc::text("{}")
         } else {
             let inner = self.interleave_comments(
@@ -2542,10 +2682,15 @@ impl Printer<'_> {
         item_span: impl Fn(&T) -> Span,
         render_item: impl Fn(&T) -> Result<Doc, FmtError>,
     ) -> Result<Doc, FmtError> {
-        if items.is_empty() {
+        // An empty sequence still has to interleave when a comment is the only thing between its
+        // delimiters, or the comment falls through to the enclosing scope and re-emits outside them
+        // (the same short-circuit that let a comment out of an empty block body).
+        if items.is_empty() && !self.holds_comment(region_start, region_end) {
             return Ok(Doc::text(format!("{open}{close}")));
         }
-        let broke = self.seq_broke(region_start, item_span(&items[0]).start);
+        let broke = items
+            .first()
+            .is_some_and(|first| self.seq_broke(region_start, item_span(first).start));
 
         // A *structural* comment is one inside the region that is not nested inside any element's own
         // span — i.e. between two elements, above the first, or before the close. Only these need the

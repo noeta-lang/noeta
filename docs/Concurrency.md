@@ -144,7 +144,7 @@ concurrent {
 | Combinator | Behavior |
 |---|---|
 | `all(list)` | Awaits every future concurrently; returns results in **input order**. |
-| `race(list)` | Returns the first result; losers are cancelled cooperatively. |
+| `race(list)` | Returns the first result at once; every loser is cancelled. The block's closing brace still joins the losers — see [Cancellation](#cancellation). |
 | `map_bounded(items, n, f)` | Applies async `f` to each item with at most `n` in flight; results in item order. |
 
 ### Nested `concurrent` interleaves
@@ -153,13 +153,13 @@ A `concurrent { … }` block opened **inside a spawned task's own body** does no
 
 ### Cancellation
 
-A task handle (what `spawn`/`isolate` return — itself a `Future<T>`) can be cancelled. Cancellation is exactly what a `race` loser gets: a **cooperative** stop at the task's next suspension point. The task is never polled again, its captured locals' destructors run when its future is reclaimed at the scope's close, and it counts as done for the join — so cancelling frees no differently than a normal join (residency stays 0).
+A task handle (what `spawn`/`isolate` return — itself a `Future<T>`) can be cancelled. `cancel` is a **request** and `join` is the **report**: you ask the work to stop, and the join tells you whether it actually did. That split is the whole contract, and it is what keeps cancellation honest for a `spawn`ed task and a real parallel isolate alike, even though they stop for completely different reasons.
 
 | Operation | Behavior |
 |---|---|
-| `h.cancel(): void` | Marks the task cancelled — idempotent, and a **no-op on an already-completed task** (its result is preserved). The task stops at its last suspension; the code past that point never runs. |
-| `h.join(): Result<T, Cancelled>` | Drives the task and reports its outcome: `Ok(v)` if it completed, `Err(Cancelled)` if it was cancelled. The explicit, cancel-aware way to await. |
-| `h.await: T` | Unchanged for the common case. On a **cancelled** task it fails loudly (`E0056`) — a cancelled task never produces a value, so awaiting one is a bug. Cancel-aware code uses `h.join()` instead. |
+| `h.cancel(): void` | Requests a stop — idempotent, and a **no-op on an already-completed task** (its result is preserved). It returns nothing because at the moment you ask, nothing is yet known; `join` is where you find out. |
+| `h.join(): Result<T, Cancelled>` | Drives the task to a terminal state and reports it: `Ok(v)` if the body produced a value, `Err(Cancelled)` if it stopped without producing one. The explicit, cancel-aware way to await. |
+| `h.await: T` | Unchanged for the common case. On a task that **did** stop cancelled it fails loudly (`E0056`) — that task never produces a value, so awaiting it is a bug. Cancel-aware code uses `h.join()` instead. |
 
 ```noeta
 use std.task.{sleep}
@@ -171,7 +171,7 @@ async fn work(): int {
 concurrent {
     h = spawn work()
     sleep(1).await                      // let `work` reach its suspension
-    h.cancel()                          // cooperative stop
+    h.cancel()                          // request the stop
     echo match h.join() {
         Ok(v)  => "done=" ~ v,
         Err(_) => "cancelled",          // ← taken
@@ -179,11 +179,21 @@ concurrent {
 }
 ```
 
-**The "stops at next suspension" contract.** Cancellation is cooperative and deterministic: it takes effect where the task is already parked (its last `.await`), never by interrupting running code. A task with no further suspension points that is already executing runs to its natural end.
+**Where the stop happens.** A **task** (`spawn`, or a `race` loser) is already parked between polls when the request lands, so it stops exactly there: its last `.await`, and the code past that point never runs. A **real isolate** is an OS thread that is genuinely running, so it stops at its next **safepoint** — a call, a return, a loop iteration, or a round of its own scheduler. Safepoints are dense enough that a compute-bound isolate with no suspension point anywhere in it is still cancellable; a 40-million-iteration arithmetic loop cancelled 200 ms in stops within milliseconds rather than running its remaining three-and-a-half seconds.
 
-**`join` vs `await`.** `join` is the pairing for cancellable work — it keeps the typed cancelled outcome in the language's ordinary `Result`/`match` vocabulary, while plain `await` stays `T` for the overwhelmingly-common uncancelled path and fails loudly (`E0056`) rather than silently if it ever meets a cancelled task (Noeta has no exceptions to catch, so a silent zero would be unsound). `cancel`/`join` are offered on every `Future<T>` because a handle *is* a `Future<T>`; on a bare (never-spawned) future `cancel` is a harmless no-op and `join` equals `Ok(future.await)`.
+**What cancellation does not promise.** Each of these is a deliberate limit, not an omission.
 
-The `Cancelled` marker is a payload-free prelude enum — matchable (`Err(Cancelled.Cancelled)`, or just `Err(_)`), and `Send`. Cancelling a producer task composes with channels: its `Sender` **producer hold** releases when its future is reclaimed at the scope's close, auto-closing the channel exactly as a completed producer's would.
+- **It does not undo work already done.** A cancelled task keeps every file it wrote, every message it sent, every row it inserted. `Err(Cancelled)` means "this produced no value", not "this never happened" — a caller that needs the effects reverted has to revert them.
+- **A request that arrives too late is not a cancellation.** If the body finished before the request was noticed, `join` reports `Ok(v)`. It never claims work that ran to completion was cancelled.
+- **It cannot preempt a native call.** An isolate blocked inside the host — a pipe read, a socket read, a blocking syscall — is not executing Noeta, so it reaches no safepoint and does not stop until that call returns. This is the one case where a cancel can leave you waiting indefinitely, and the fix is a deadline on the operation itself rather than a cancel around it.
+
+**One `sleep` is not a safepoint.** A worker parked in `sleep(3000).await` is not running either, and its clock advance is a single real sleep — so it observes a cancel when that sleep *ends*, not when it is issued (measured: cancelled 200 ms in, it stopped 2.8 s later). Sleep in slices when you want a bound: the same watcher written as `while w < ms { sleep(5).await; w = w + 5 }` stops within a millisecond, because each slice returns to the scheduler and the scheduler checks. This costs nothing on the ordinary path — it only matters for a task you intend to cancel.
+
+**Cancellation and the closing brace.** A `concurrent` block joins everything it spawned, and a cancelled member is no exception: the block waits for it to actually stop before returning. This is the load-bearing half of structured concurrency, and it is why a cancelled isolate is joined rather than abandoned — the alternative is a thread that outlives its scope, still holding its heap and its handles, still writing to the world the program thinks it has finished with.
+
+**`join` vs `await`.** `join` is the pairing for cancellable work — it keeps the typed cancelled outcome in the language's ordinary `Result`/`match` vocabulary, while plain `await` stays `T` for the overwhelmingly-common uncancelled path and fails loudly (`E0056`) rather than silently if it ever meets a task that stopped cancelled (Noeta has no exceptions to catch, so a silent zero would be unsound). `cancel`/`join` are offered on every `Future<T>` because a handle *is* a `Future<T>`; on a bare (never-spawned) future `cancel` is a harmless no-op and `join` equals `Ok(future.await)`.
+
+The `Cancelled` marker is a payload-free prelude enum — matchable (`Err(Cancelled.Cancelled)`, or just `Err(_)`), and `Send`. Cancelling a producer task composes with channels: its `Sender` **producer hold** releases when its future is reclaimed at the scope's close, auto-closing the channel exactly as a completed producer's would. Cancelling an isolate that itself spawned isolates cancels those too — a subtree stops together. Either way a cancelled task's captured locals' destructors run when its future is reclaimed at the scope's close, so cancelling frees no differently than a normal join (residency stays 0).
 
 ## Isolates and `Send`
 

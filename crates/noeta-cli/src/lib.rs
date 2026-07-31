@@ -204,7 +204,8 @@ enum Command {
         #[arg(long, value_name = "NAME")]
         baseline: Option<String>,
         /// The CI regression gate: with `--baseline`, fail (exit 1) when any bench regresses more
-        /// than this percentage against it (e.g. `10` allows up to +10%).
+        /// than this percentage against it (e.g. `10` allows up to +10%). Exits 2 when it could
+        /// not judge a bench at all — a run that measured nothing must not pass a gate.
         #[arg(
             long,
             value_name = "PCT",
@@ -1724,7 +1725,7 @@ pub(crate) fn run_declared_tier(
     if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
-    match execute_real_host(&program, &checked, std::env::args().collect(), true) {
+    match execute_real_host(&program, &checked, std::env::args().collect(), true, None) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
