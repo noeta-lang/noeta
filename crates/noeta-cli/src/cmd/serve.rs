@@ -346,7 +346,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         // Hot mode (server-hmr W1, armed by the `--watch` wrapper for `serve`): run through the
         // debug-session machinery with the hot-swap mailbox, so edits swap into the LIVE process.
         if std::env::var_os("NOETA_HOT").is_some() {
-            return run_program_hot(file, &loaded);
+            return run_program_hot(file, &loaded, tail);
         }
         // An entry call injected before compiling means the module differs from `run`'s for the
         // same source — a command run must never share the startup cache's `(source+tiers)` key,
@@ -454,6 +454,7 @@ pub(crate) fn serve_parallel_impl(
     if std::env::var_os("NOETA_HOT").is_some() {
         return serve_parallel_hot(
             file,
+            tail,
             &loaded.program,
             &checked,
             &loaded.sources,
@@ -561,6 +562,7 @@ pub(crate) fn run_worker(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn serve_parallel_hot(
     entry_path: &std::path::Path,
+    tail: Vec<Stmt>,
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
     sources: &SourceMap,
@@ -575,6 +577,7 @@ pub(crate) fn serve_parallel_hot(
     let wake = std::sync::Arc::new(noeta_host_real::Notify::new());
     watch::spawn_hot_watcher(
         entry_path.to_path_buf(),
+        tail,
         std::sync::Arc::clone(&mailbox),
         std::sync::Arc::clone(&wake),
     );
@@ -668,10 +671,14 @@ pub(crate) fn run_worker_hot(
 /// Run an entry-call program with **in-process hot reload** (server-hmr W1) — `noeta serve
 /// --watch`'s hot mode. The program compiles through the *session* compiler (kept alive for
 /// fragment installs) and runs on the real host with a [`noeta_vm::HotSwapMailbox`] armed; a
-/// watcher thread ([`watch::spawn_hot_watcher`]) parses/checks/diffs each edit of the entry file
+/// watcher thread ([`watch::spawn_hot_watcher`]) re-links/checks/diffs each edit of the entry file
 /// and deposits swappable plans (blockers or non-entry edits exit with the restart sentinel the
 /// `--watch` wrapper honors). JIT stays unarmed on this path (H3 lifts).
-pub(crate) fn run_program_hot(entry_path: &std::path::Path, loaded: &Loaded) -> u8 {
+pub(crate) fn run_program_hot(
+    entry_path: &std::path::Path,
+    loaded: &Loaded,
+    tail: Vec<Stmt>,
+) -> u8 {
     // `Loaded::check`: the editions ride structurally with the program they govern.
     let checked = loaded.check();
     if !checked.diagnostics.is_empty() {
@@ -701,6 +708,7 @@ pub(crate) fn run_program_hot(entry_path: &std::path::Path, loaded: &Loaded) -> 
     let wake = std::sync::Arc::new(noeta_host_real::Notify::new());
     watch::spawn_hot_watcher(
         entry_path.to_path_buf(),
+        tail,
         std::sync::Arc::clone(&mailbox),
         std::sync::Arc::clone(&wake),
     );

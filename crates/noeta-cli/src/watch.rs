@@ -387,22 +387,28 @@ fn relevant_path(path: &Path, reads: &[PathBuf]) -> bool {
 // ------------------------------------------------------------------ the in-process hot watcher
 
 /// Spawn the hot-reload watcher thread (server-hmr W1) inside a `NOETA_HOT` serve process. On an
-/// edit of `entry` it parses, checks (transactional: red code is reported and the old version
-/// keeps serving), diffs against the last version the VM consumed, and deposits swappable plans
-/// into `mailbox` — the run thread applies them at its next scheduler tick. Anything the live
-/// process cannot absorb — a [`SwapBlocker`], a change to any *other* project file, an entry file
-/// that declares a `namespace` (its definitions get qualified identity the raw parse won't match)
-/// — exits the process with [`HOT_RESTART_CODE`] so the `--watch` wrapper restarts it.
+/// edit of `entry` it **re-links the project** (the same load the boot did, `tail` and all),
+/// checks it (transactional: red code is reported and the old version keeps serving), diffs the
+/// entry unit against the last version the VM consumed, and deposits swappable plans into
+/// `mailbox` — the run thread applies them at its next scheduler tick. Anything the live process
+/// cannot absorb — a [`SwapBlocker`], a change to any *other* project file — exits the process
+/// with [`HOT_RESTART_CODE`] so the `--watch` wrapper restarts it.
+///
+/// `tail` is the driver's synthesized entry call (`server.serve(port, fetch, host)`), passed so
+/// the re-link is byte-for-byte the boot's: it goes through the loader, not onto the linked
+/// program, for the same reasons [`noeta_loader::load_with_deps_appending`] documents.
 pub(crate) fn spawn_hot_watcher(
     entry: std::path::PathBuf,
+    tail: Vec<noeta_ast::Stmt>,
     mailbox: noeta_vm::HotSwapMailbox,
     wake: std::sync::Arc<noeta_host_real::Notify>,
 ) {
-    std::thread::spawn(move || hot_watcher(entry, mailbox, wake));
+    std::thread::spawn(move || hot_watcher(entry, tail, mailbox, wake));
 }
 
 fn hot_watcher(
     entry: std::path::PathBuf,
+    tail: Vec<noeta_ast::Stmt>,
     mailbox: noeta_vm::HotSwapMailbox,
     wake: std::sync::Arc<noeta_host_real::Notify>,
 ) {
@@ -412,23 +418,19 @@ fn hot_watcher(
     // which means passing the event filter first. Computed once: the hot process is restarted
     // wholesale (and this recomputed) whenever the entry itself changes.
     let reads = noeta_ide::impact::spec_reads(&entry);
-    // The baseline: the source that is currently RUNNING (read back at spawn — the run thread
-    // just compiled exactly this file).
-    let Ok(mut applied_src) = std::fs::read_to_string(&entry) else {
-        eprintln!(
-            "[hot] cannot re-read {} — falling back to restarts",
-            entry.display()
-        );
-        return;
+    // The baseline: the program that is currently RUNNING, re-linked at spawn — the run thread just
+    // compiled exactly this project, so this reproduces its qualified identities.
+    let mut applied = match relink_entry_unit(&entry, &tail) {
+        Ok(unit) => unit,
+        Err(err) => {
+            eprint!("{}", err.text());
+            eprintln!(
+                "[hot] cannot re-link {} — falling back to restarts",
+                entry.display()
+            );
+            return;
+        }
     };
-    // A namespaced entry's definitions carry qualified identity through the linker; the raw
-    // per-file diff would rebind unqualified names. Restart-only until the differ learns
-    // qualification.
-    let hot_capable = parse_entry(&entry, &applied_src).is_some_and(|p| {
-        !p.stmts
-            .iter()
-            .any(|s| matches!(s, noeta_ast::Stmt::Namespace { .. }))
-    });
 
     let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
     let Ok(mut watcher) = notify::recommended_watcher(tx) else {
@@ -478,60 +480,40 @@ fn hot_watcher(
         let all_entry = paths
             .iter()
             .all(|p| p.canonicalize().map(|c| c == entry_canon).unwrap_or(false));
-        if !all_entry || !hot_capable {
+        if !all_entry {
             eprintln!("[hot] change outside the entry file — restarting");
             std::process::exit(HOT_RESTART_CODE);
         }
-        let Ok(new_src) = std::fs::read_to_string(&entry) else {
-            continue;
-        };
-        let Some(new_program) = parse_entry(&entry, &new_src) else {
-            eprintln!("[hot] parse error — still serving the old version");
-            continue;
-        };
         // The transactional gate: red code never swaps; the old version keeps serving. The
         // rendered diagnostics also ride the channel's error slot to live LiveView clients
         // (the browser overlay, server-hmr L3) — waking the run thread to deliver promptly.
-        // The hot-reparsed entry is one source (id 0), checked under the entry package's edition.
-        // It is the entry alone, with no dependency modules re-linked, so package provenance stays
-        // unknown here and the orphan rule stands down — the full link/check path judges it.
-        let mut editions = noeta_lexer::EditionMap::new();
-        editions.set(
-            noeta_span::SourceId::FIRST,
-            noeta_pm::manifest::root_edition(&entry),
-        );
-        let opts = noeta_check::CheckOptions {
-            editions,
-            ..noeta_check::CheckOptions::default()
+        let new_unit = match relink_entry_unit(&entry, &tail) {
+            Ok(unit) => unit,
+            Err(RelinkError::Unreadable(text)) => {
+                // A half-written file mid-save: no verdict to draw, and the next event will carry
+                // the finished text.
+                eprint!("{text}");
+                continue;
+            }
+            Err(RelinkError::Diagnostics(rendered)) => {
+                eprint!("{rendered}");
+                eprintln!("[hot] check failed — still serving the old version");
+                if let Ok(mut slot) = mailbox.error.lock() {
+                    *slot = Some(rendered);
+                }
+                wake_all(&wake);
+                continue;
+            }
         };
-        let checked = crate::context::check_under(&new_program, &opts);
-        if !checked.diagnostics.is_empty() {
-            let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "<entry>", &new_src);
-            let mut rendered = String::new();
-            for d in &checked.diagnostics {
-                let one = crate::render(&source, d);
-                eprint!("{one}");
-                rendered.push_str(&one);
-            }
-            eprintln!("[hot] check failed — still serving the old version");
-            if let Ok(mut slot) = mailbox.error.lock() {
-                *slot = Some(rendered);
-            }
-            wake_all(&wake);
-            continue;
-        }
         // Diff against the last version this watcher DEPOSITED (server-hmr F5). The watcher is the
-        // single depositor, so `applied_src` is the exact baseline of the append-only broadcast
+        // single depositor, so `applied` is the exact baseline of the append-only broadcast
         // queue: each plan is diffed against its predecessor, and every worker applies the queue
         // in order — no per-consumer reconciliation.
-        let Some(applied_program) = parse_entry(&entry, &applied_src) else {
-            std::process::exit(HOT_RESTART_CODE);
-        };
         match noeta_compiler::hotswap::diff_programs(
-            &applied_program,
-            &applied_src,
-            &new_program,
-            &new_src,
+            &applied.program,
+            &applied.src,
+            &new_unit.program,
+            &new_unit.src,
         ) {
             noeta_compiler::hotswap::SwapDiff::Unchanged => {}
             noeta_compiler::hotswap::SwapDiff::Swap(plan) => {
@@ -547,7 +529,7 @@ fn hot_watcher(
                     Ok(mut plans) => plans.push(fragment),
                     Err(_) => return,
                 }
-                applied_src = new_src;
+                applied = new_unit;
                 // A green deposit supersedes any pending red-check overlay, and the wake rouses
                 // every (possibly idle) worker to apply it now rather than at its next request.
                 if let Ok(mut err) = mailbox.error.lock() {
@@ -573,15 +555,107 @@ fn wake_all(wake: &noeta_host_real::Notify) {
     wake.notify_one();
 }
 
-fn parse_entry(entry: &Path, src: &str) -> Option<noeta_ast::Program> {
-    let source = noeta_span::Source::new(
-        noeta_span::SourceId::FIRST,
-        entry.display().to_string(),
-        src,
-    );
-    let lexed = noeta_lexer::lex(&source);
-    let parsed = noeta_parser::parse(&source, &lexed.tokens);
-    (lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty()).then_some(parsed.program)
+/// The entry file's own statements **as the linker qualified them**, with the text they were parsed
+/// from. The diff baseline and each candidate are both this, so a swap plan's declarations carry
+/// the identities the running module actually bound.
+struct EntryUnit {
+    program: noeta_ast::Program,
+    src: String,
+}
+
+/// Why a re-link produced no candidate to diff.
+enum RelinkError {
+    /// The project could not be read or its graph not resolved — no verdict, wait for the next edit.
+    Unreadable(String),
+    /// Rendered lex/parse/link/type diagnostics: red code, which never swaps.
+    Diagnostics(String),
+}
+
+impl RelinkError {
+    fn text(&self) -> &str {
+        match self {
+            RelinkError::Unreadable(text) | RelinkError::Diagnostics(text) => text,
+        }
+    }
+}
+
+/// Re-link the project exactly as the serve boot linked it — dependency graph → loader (with the
+/// driver's `tail`) → whole-program check — and return the **entry unit**: the entry file's own
+/// statements, qualified.
+///
+/// Linking is the point. A module's path derives from its file, so the entry's `fn fetch` is bound
+/// as `pkg.main.fetch` in the running module, and its call to a sibling module is α-renamed to that
+/// sibling's canonical name. A raw per-file *parse* of the entry sees neither: its plain `fetch`
+/// would install into a fresh global slot and the live handler would keep serving the old body —
+/// a swap that reports success and changes nothing. Qualification is the linker's job, so the hot
+/// path re-runs the linker rather than approximating it.
+///
+/// Checking the whole program (not the entry alone) is the same trade the other way: package
+/// provenance, per-source editions, and every module's diagnostics are what the transactional gate
+/// is supposed to gate on.
+fn relink_entry_unit(entry: &Path, tail: &[noeta_ast::Stmt]) -> Result<EntryUnit, RelinkError> {
+    let (deps, package_uses) = match noeta_pm::graph::resolve_graph(entry) {
+        Ok(graph) => (graph.packages, graph.package_uses),
+        Err(err) => return Err(RelinkError::Unreadable(format!("[hot] {err}\n"))),
+    };
+    let linked = match noeta_loader::load_with_deps_appending(
+        entry,
+        noeta_pm::manifest::root_edition(entry),
+        &deps,
+        &package_uses,
+        noeta_pm::sources::package_root(entry).as_ref(),
+        tail,
+    ) {
+        Err(err) => {
+            return Err(RelinkError::Unreadable(format!(
+                "[hot] cannot read {}: {err}\n",
+                entry.display()
+            )));
+        }
+        Ok(Err(load_diagnostics)) => {
+            let mut rendered = String::new();
+            for ld in &load_diagnostics {
+                rendered.push_str(&crate::render(&ld.source, &ld.diagnostic));
+            }
+            return Err(RelinkError::Diagnostics(rendered));
+        }
+        Ok(Ok(linked)) => linked,
+    };
+    let entry_source = linked.entry.clone();
+    let loaded = crate::context::loaded(linked);
+    let checked = loaded.check();
+    if !checked.diagnostics.is_empty() {
+        return Err(RelinkError::Diagnostics(noeta_diagnostics::render_mapped(
+            &loaded.sources,
+            checked.diagnostics.iter(),
+        )));
+    }
+    Ok(EntryUnit {
+        program: entry_unit(&loaded.program, &entry_source),
+        src: entry_source.text().to_string(),
+    })
+}
+
+/// The entry file's statements, sliced out of the linked program by `SourceId`.
+///
+/// The linked program is every module's declarations merged; only the entry's belong in a diff
+/// whose two sides are two versions of that one file. Statements with an **empty** span are the
+/// driver's synthesized `tail` (`server.serve(port, fetch, host)`, stamped at offset 0 of the entry
+/// source): they are not in the file the user edits, they have no text to fingerprint, and a
+/// re-running swap that replayed them would start a second server.
+fn entry_unit(program: &noeta_ast::Program, entry: &noeta_span::Source) -> noeta_ast::Program {
+    noeta_ast::Program {
+        stmts: program
+            .stmts
+            .iter()
+            .filter(|stmt| {
+                let span = stmt.span();
+                span.source == entry.id() && !span.is_empty()
+            })
+            .cloned()
+            .collect(),
+        span: program.span,
+    }
 }
 
 #[cfg(test)]
@@ -613,6 +687,109 @@ mod tests {
     fn relative_prefixes_do_not_count_as_hidden() {
         assert!(relevant_path(Path::new("./src/main.noe"), NO_READS));
         assert!(relevant_path(Path::new("../sibling/app.noe"), NO_READS));
+    }
+
+    /// A driver's synthesized entry call: one statement stamped at offset 0 of the entry source,
+    /// exactly as `serve`'s `entry_tail` builds it.
+    fn fake_tail() -> Vec<noeta_ast::Stmt> {
+        vec![noeta_ast::Stmt::Echo {
+            value: noeta_ast::Expr::Int {
+                value: 7,
+                span: noeta_span::Span::empty_at(0),
+            },
+            span: noeta_span::Span::empty_at(0),
+        }]
+    }
+
+    fn fn_names(program: &noeta_ast::Program) -> Vec<String> {
+        program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                noeta_ast::Stmt::Fn(decl) => Some(decl.name.as_str().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The defect this whole path exists to prevent: inside a package, a module's path derives from
+    /// its file, so the running module binds the entry's `fn fetch` as `hotpkg.main.fetch`. A swap
+    /// fragment carrying a *plain* `fetch` installs into a fresh slot — the live handler keeps
+    /// serving the old body while the watcher reports success. The entry unit must therefore come
+    /// back qualified, and its call to a sibling module α-renamed the same way.
+    #[test]
+    fn a_packaged_entry_relinks_to_the_qualified_names_the_running_module_bound() {
+        let dir = noeta_test_temp::TempDir::new("hot-relink-package");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("noeta.toml"),
+            "[package]\nname = \"local/hotpkg\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/greet.noe"),
+            "pub fn greet(): string {\n    return \"hello\"\n}\n",
+        )
+        .unwrap();
+        let entry = dir.join("src/main.noe");
+        std::fs::write(
+            &entry,
+            "use hotpkg.greet.greet\n\nfn body(): string {\n    return greet()\n}\n",
+        )
+        .unwrap();
+
+        let unit = match relink_entry_unit(&entry, &fake_tail()) {
+            Ok(unit) => unit,
+            Err(err) => panic!("the fixture should link green, got:\n{}", err.text()),
+        };
+        assert_eq!(
+            fn_names(&unit.program),
+            vec!["hotpkg.main.body".to_string()]
+        );
+        // The sibling module's declaration belongs to the linked program, not to the unit being
+        // diffed: only the edited file's statements are two versions of one text.
+        assert!(!unit.src.contains("hello"));
+        assert!(unit.src.contains("fn body"));
+    }
+
+    /// The synthesized entry call is not in the file the user edits: it has no text to fingerprint,
+    /// and a re-running swap that replayed it would start a second server.
+    #[test]
+    fn the_drivers_synthesized_entry_call_is_not_part_of_the_unit() {
+        let dir = noeta_test_temp::TempDir::new("hot-relink-tail");
+        let entry = dir.join("app.noe");
+        std::fs::write(&entry, "fn body(): int {\n    return 1\n}\n").unwrap();
+
+        let unit = match relink_entry_unit(&entry, &fake_tail()) {
+            Ok(unit) => unit,
+            Err(err) => panic!("the fixture should link green, got:\n{}", err.text()),
+        };
+        assert!(
+            !unit
+                .program
+                .stmts
+                .iter()
+                .any(|s| matches!(s, noeta_ast::Stmt::Echo { .. })),
+            "the tail leaked into the diffed unit: {:?}",
+            unit.program.stmts
+        );
+        // A bare entry (no manifest) is nobody's module: its names stay unqualified, as the
+        // running module binds them.
+        assert_eq!(fn_names(&unit.program), vec!["body".to_string()]);
+    }
+
+    /// Red code never reaches the differ — the transactional gate reports and keeps serving.
+    #[test]
+    fn a_red_entry_comes_back_as_diagnostics_not_a_unit() {
+        let dir = noeta_test_temp::TempDir::new("hot-relink-red");
+        let entry = dir.join("app.noe");
+        std::fs::write(&entry, "fn body(): int {\n    return nope\n}\n").unwrap();
+
+        match relink_entry_unit(&entry, &[]) {
+            Err(RelinkError::Diagnostics(rendered)) => assert!(rendered.contains("nope")),
+            Err(RelinkError::Unreadable(text)) => panic!("expected diagnostics, got: {text}"),
+            Ok(_) => panic!("red code linked green"),
+        }
     }
 
     #[test]
