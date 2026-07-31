@@ -129,7 +129,7 @@ pub use ctx::{
     Cap, CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, FutureTracing, HotReload, NativeCtx,
     PackedField, PackedView, Retained, Slot, TaskContext, capabilities, capability, ctx_arity,
 };
-pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
+pub use executor::{CancelWake, Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use host::{
     Clock, Console, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
