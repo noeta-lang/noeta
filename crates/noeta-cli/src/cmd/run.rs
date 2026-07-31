@@ -28,7 +28,7 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
         return 1;
     }
 
-    match execute_real_host(&loaded.program, &checked, args) {
+    match execute_real_host(&loaded.program, &checked, args, true) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
@@ -65,15 +65,20 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
 /// (I.4b) build on. The conformance differential still runs *both* backends over the deterministic
 /// sandbox, so this real-host path is never compared backend-to-backend. Shared by `noeta run` and the
 /// `@test` runner so both execute a program identically.
+/// `live_output` streams the program's output to the terminal as it is produced rather than
+/// batch-capturing it into the returned [`noeta_backend::RunResult`] — `true` for a foreground
+/// `noeta run`, `false` for the `@test` runner, whose report *is* the captured stdout.
 pub(crate) fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
     args: Vec<String>,
+    live_output: bool,
 ) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), noeta_compiler::Unsupported> {
     let (result, trace, _) = run_module_real_host(
         std::sync::Arc::new(compile_real(program, checked)?),
         args,
         false,
+        live_output,
     );
     Ok((result, trace))
 }
@@ -108,13 +113,14 @@ pub(crate) fn run_module_real_host(
     module: std::sync::Arc<noeta_bytecode::Module>,
     args: Vec<String>,
     jit_report: bool,
+    live_output: bool,
 ) -> (
     noeta_backend::RunResult,
     Vec<noeta_vm::TraceFrame>,
     Option<noeta_vm::JitReport>,
 ) {
     let app_id = p2p_app_namespace(&args);
-    noeta_runner::run_module_real_host(module, args, app_id, jit_report)
+    noeta_runner::run_module_real_host(module, args, app_id, jit_report, live_output)
 }
 
 /// P-AOT L2: detect and run a bundle stapled onto this executable (a `noeta build --exe` artifact),

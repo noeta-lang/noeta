@@ -336,7 +336,70 @@ pub(crate) fn narrow_matches(
     v.type_name() == kind
 }
 
+/// How much unterminated output may accumulate before a live run flushes it anyway.
+///
+/// Live output is **line**-oriented (one write syscall per line, not per `echo`), which is both the
+/// cheap shape and the one a terminal already expects. This bound is the escape hatch for a program
+/// that writes a great deal without ever emitting a newline: it still appears, in chunks, instead of
+/// growing a buffer nobody sees.
+const LIVE_OUTPUT_CHUNK: usize = 8 * 1024;
+
 impl<'m> Vm<'m> {
+    /// Append to the program's stdout buffer, then stream it if this run is live.
+    pub(crate) fn emit_stdout(&mut self, text: &str) {
+        self.out.stdout.push_str(text);
+        if self.out.live {
+            self.flush_live(noeta_stdlib::Stream::Stdout);
+        }
+    }
+
+    /// Append `text` and a newline — `Op::Echo`'s shape, kept as its own entry point so the hot path
+    /// still appends straight into the buffer rather than growing the rendered string first.
+    pub(crate) fn emit_stdout_line(&mut self, text: &str) {
+        self.out.stdout.push_str(text);
+        self.out.stdout.push('\n');
+        if self.out.live {
+            self.flush_live(noeta_stdlib::Stream::Stdout);
+        }
+    }
+
+    /// Append to the program's stderr buffer, then stream it if this run is live.
+    pub(crate) fn emit_stderr(&mut self, text: &str) {
+        self.out.stderr.push_str(text);
+        if self.out.live {
+            self.flush_live(noeta_stdlib::Stream::Stderr);
+        }
+    }
+
+    /// Hand every **completed line** in `stream`'s batch buffer to the host's live-output door,
+    /// removing exactly what was written.
+    ///
+    /// Only whole lines leave, so a `io.out("Total: ")` followed by `io.outln(n)` still reaches the
+    /// terminal as one line rather than two writes — with [`LIVE_OUTPUT_CHUNK`] as the bound for a
+    /// program that never terminates a line at all. A host that unexpectedly declines the write
+    /// (`stream_output` → `false`) gets its text put back and the run reverts to batch capture, so
+    /// no output can be lost between the two policies.
+    fn flush_live(&mut self, stream: noeta_stdlib::Stream) {
+        let buffer = match stream {
+            noeta_stdlib::Stream::Stderr => &mut self.out.stderr,
+            _ => &mut self.out.stdout,
+        };
+        let cut = match buffer.rfind('\n') {
+            Some(at) => at + 1,
+            None if buffer.len() >= LIVE_OUTPUT_CHUNK => buffer.len(),
+            None => return,
+        };
+        let text: String = buffer.drain(..cut).collect();
+        if !self.persist.host.stream_output(stream, &text) {
+            let buffer = match stream {
+                noeta_stdlib::Stream::Stderr => &mut self.out.stderr,
+                _ => &mut self.out.stdout,
+            };
+            buffer.insert_str(0, &text);
+            self.out.live = false;
+        }
+    }
+
     /// Build a VM ready to run `module` — resolving every derived table (shapes, packed schemas,
     /// methods, destructors, defaults, derives) but **without running `main`** (isolates I.4b). The
     /// normal entry points run `main` right after; a worker isolate instead seeds its globals from the
@@ -423,6 +486,9 @@ impl<'m> Vm<'m> {
     pub(crate) fn load_with(module: &'m Module, persist: SessionState) -> Vm<'m> {
         // Cached: fixed per host (see the `tel_on` field).
         let tel_on = persist.host.tel_enabled();
+        // Likewise fixed per host: whether program output streams to the terminal as it is produced
+        // (`noeta run`) or batches until teardown (the `@test` runner, the differential's sandbox).
+        let host_streams_output = persist.host.streams_output();
         let mut methods: HashMap<String, HashMap<String, u32>> = HashMap::new();
         for m in &module.methods {
             methods
@@ -520,6 +586,9 @@ impl<'m> Vm<'m> {
             out: RunOutput {
                 stdout: String::new(),
                 stderr: String::new(),
+                // Asked of the host once, here: whether it streams cannot change mid-run, and the
+                // write path must not pay a virtual call per `echo` to re-ask.
+                live: host_streams_output,
                 diagnostics: Vec::new(),
                 requested_exit: None,
                 abort_trace: Vec::new(),

@@ -175,12 +175,13 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn write_stdout(&mut self, text: &str) {
-        // The same buffer `Op::Echo` appends to — an `io.out` and an `echo` interleave in order.
-        self.vm.out.stdout.push_str(text);
+        // The same buffer `Op::Echo` appends to — an `io.out` and an `echo` interleave in order —
+        // and the same live-output drain, so the two also *appear* in order under `noeta run`.
+        self.vm.emit_stdout(text);
     }
 
     fn write_stderr(&mut self, text: &str) {
-        self.vm.out.stderr.push_str(text);
+        self.vm.emit_stderr(text);
     }
 
     fn flush_output(&mut self) {

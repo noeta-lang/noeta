@@ -437,6 +437,18 @@ pub trait Console {
     fn stream_output(&mut self, _stream: Stream, _text: &str) -> bool {
         false
     }
+
+    /// Whether [`stream_output`](Self::stream_output) would actually write — the cheap predicate a
+    /// backend reads *before* deciding to drain its batch buffer, so a host that does not stream
+    /// costs one bool per write instead of a take-then-restore of the whole buffer.
+    ///
+    /// `false` (the default, and what the sandbox does) means every write stays in the compared
+    /// batch buffer. `RealHost` reports it only when the driver asked for live output — `noeta run`
+    /// does, and the `@test` runner deliberately does not, because a passing test's stdout is
+    /// captured and shown only when it fails.
+    fn streams_output(&self) -> bool {
+        false
+    }
 }
 
 /// **Operating system** capability (stdlib-gaps) — process execution and system introspection,

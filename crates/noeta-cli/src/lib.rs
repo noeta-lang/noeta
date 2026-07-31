@@ -1695,7 +1695,7 @@ pub(crate) fn run_declared_tier(
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return 1;
     }
-    match execute_real_host(&program, &checked, std::env::args().collect()) {
+    match execute_real_host(&program, &checked, std::env::args().collect(), true) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();

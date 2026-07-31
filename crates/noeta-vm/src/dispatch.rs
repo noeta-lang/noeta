@@ -3641,8 +3641,7 @@ impl<'m> Vm<'m> {
                     }
                     Op::Echo { reg } => {
                         let text = regs[fbase + *reg as usize].display();
-                        self.out.stdout.push_str(&text);
-                        self.out.stdout.push('\n');
+                        self.emit_stdout_line(&text);
                         pc += 1;
                     }
                     Op::Stringify { dst, src, span } => {
