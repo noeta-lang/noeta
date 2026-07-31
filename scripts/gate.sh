@@ -579,6 +579,25 @@ done
 echo "--------------------------------------------------------------------------------"
 printf ' %d passed, %d failed, %d skipped\n' "$n_pass" "$n_fail" "$n_skip"
 
+# A run that executed NOTHING is not a pass. `--only wasm` against the default tier matches no step
+# (the wasm steps live in --full), and this printed `GATE PASSED`, exit 0 — a green light for a run
+# that gated nothing, which is the exact failure mode the rest of this script is built to avoid.
+# Found by using it: I typed that command to verify the wasm tier and was told everything was fine.
+if ((n_pass + n_fail + n_skip == 0)); then
+    echo
+    if [[ -n "$ONLY" ]]; then
+        printf ' \033[31mNO STEP MATCHED --only %s in tier %s.\033[0m\n' "$ONLY" \
+            "$([[ $TIER == 1 ]] && echo quick || { [[ $TIER == 3 ]] && echo full || echo merge; })"
+        echo '  Nothing ran, so nothing is known. `--list` prints this tier'"'"'s steps; a step may'
+        echo '  live in a wider tier (the wasm and miri steps are --full).'
+    else
+        printf ' \033[31mNO STEPS RAN.\033[0m The plan for this tier is empty — that is a bug in the gate.\n'
+    fi
+    echo
+    echo ' GATE FAILED — it tested nothing.'
+    exit 1
+fi
+
 if ((n_fail)); then
     echo
     echo ' Reproduce the failures:'
