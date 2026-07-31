@@ -3882,3 +3882,60 @@ echo r.rebuild();
         "an in-scope parameter is open BY THE PARAMETER, not by erasure — got: {m}"
     );
 }
+
+/// **The type walkers must be total over the lattice.** `erase_type_params`, `apply_subst` and
+/// `bind_type_params` descended into every container the language has EXCEPT `Tuple` and `Union`,
+/// so a parameter written inside one was neither erased nor instantiated — it survived as a
+/// `Type::Param`, and a parameter is a subtype of nothing, so the argument check rejected a
+/// perfectly ordinary call: `f((1, 2))` against `fn f<T>(p: (T, int))` reported *"argument of type
+/// `(int, int)` is not assignable to `(T, int)`"*, naming a parameter the caller cannot even spell.
+#[test]
+fn a_type_parameter_inside_a_tuple_erases_like_one_inside_a_list() {
+    let src = "fn f<T>(p: (T, int)): int { return 1; }\necho \"${f((1, 2))}\";\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// The other half: a tuple element **instantiates** from the argument, so the call's result is the
+/// caller's type and not a leaked parameter. The un-erased form escaped all the way into a
+/// caller-visible type — `p = mk(3)` was `(T, int)` in a scope where `T` means nothing.
+#[test]
+fn a_type_parameter_inside_a_tuple_substitutes_from_the_argument() {
+    let src = "fn mk<T>(v: T): (T, int) { return (v, 1); }\np = mk(3);\ns: string = p;\necho s;\n";
+    assert_eq!(codes(src), ["E0007"], "{:?}", messages(src));
+    assert!(
+        messages(src)[0].contains("found `(int, int)`"),
+        "the tuple element must be the instantiated `int`, not a leaked `T`: {:?}",
+        messages(src)
+    );
+}
+
+/// A union member is the same gap. `T | string` erases to `dyn | string` — which **is** `dyn`, so
+/// the parameter accepts any argument, the honest answer when nothing determines `T`. It used to
+/// stay `T | string` and reject every argument that was not already a `string`.
+#[test]
+fn a_type_parameter_inside_a_union_erases_to_dyn() {
+    let src = "fn h<T>(x: T | string): int { return 1; }\necho \"${h(1)}\";\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// And a union member instantiates like any other: a bound `T` is substituted inside the union, so
+/// the returned type names the caller's `int` rather than the callee's parameter.
+#[test]
+fn a_type_parameter_inside_a_union_substitutes() {
+    let src = "fn k<T>(v: T): T | string { return \"s\"; }\ns: string = k(1);\necho s;\n";
+    assert_eq!(codes(src), ["E0007"], "{:?}", messages(src));
+    assert!(
+        messages(src)[0].contains("found `int | string`"),
+        "the union member must be the instantiated `int`, not a leaked `T`: {:?}",
+        messages(src)
+    );
+}
+
+/// A **declaration-position** consequence of the same gap: a default value is checked against its
+/// declared type with the enclosing parameters erased, so `(T, int) = (0, 0)` was rejected at the
+/// declaration itself — no call site involved.
+#[test]
+fn a_tuple_typed_default_is_checked_against_the_erased_type() {
+    let src = "struct Holder<T> {\n  pair: (T, int) = (0, 0)\n}\nh = Holder { };\necho \"${h.pair}\";\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
