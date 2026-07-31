@@ -133,19 +133,24 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // Only evaluate a program that checked cleanly and only when asked to. The reference is the
         // Core-IR interpreter (the migration's Phase-4 reference semantics), so conformance pins the
         // same last-use destruction the VM produces.
-        if stage == Stage::Eval && diagnostics.is_empty() {
+        //
+        // "Cleanly" means **no errors**, not "no diagnostics": a warning says the program is
+        // well-formed and compiles, so a case that trips one still runs and still exits 0. Gating on
+        // emptiness made every warning a silent hard stop with no output at all, which is the one
+        // thing a warning must not be.
+        if stage == Stage::Eval && !has_error(&diagnostics) {
             let result = reference::reference_run(&parsed.program, sites);
             stdout = result.stdout;
             stderr = result.stderr;
             diagnostics.extend(result.diagnostics);
             exit_code = result.exit_code;
         } else {
-            exit_code = if diagnostics.is_empty() { 0 } else { 1 };
+            exit_code = if has_error(&diagnostics) { 1 } else { 0 };
         }
     }
 
     // A compile error always means a failing exit, even if a stage stopped early.
-    if !diagnostics.is_empty() && exit_code == 0 {
+    if has_error(&diagnostics) && exit_code == 0 {
         exit_code = 1;
     }
 
@@ -155,6 +160,18 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         exit_code,
         errors: errors_of(&source, &diagnostics),
     }
+}
+
+/// Whether any diagnostic is an **error** — the gate on running a program and on a failing exit.
+///
+/// A [`Severity::Warning`](noeta_diagnostics::Severity::Warning) is by definition compatible with
+/// running: it says the program is well-formed and something in it is worth a second look. It is
+/// still reported (a case asserts it with the same `// expect: error <CODE> at …` header — the
+/// header names a diagnostic, whatever its severity), it simply does not stop the program.
+pub(crate) fn has_error(diagnostics: &[Diagnostic]) -> bool {
+    diagnostics
+        .iter()
+        .any(|d| d.severity == noeta_diagnostics::Severity::Error)
 }
 
 /// Map each diagnostic to its `(code, line, col)` expectation, resolved against `source`.
@@ -480,7 +497,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
             ..noeta_check::CheckOptions::default()
         },
     );
-    if !checked.diagnostics.is_empty() {
+    if has_error(&checked.diagnostics) {
         return Outcome {
             stdout: String::new(),
             stderr: String::new(),
@@ -488,9 +505,13 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
             errors: errors_of_mapped(&linked.sources, &checked.diagnostics),
         };
     }
+    // A check that produced only warnings runs — and the warnings stay in the reported list, ahead
+    // of anything the run itself reports, so a case can assert one and its output in one header.
+    let mut diagnostics = checked.diagnostics;
     let result = reference::reference_run(&linked.program, checked.sites);
+    diagnostics.extend(result.diagnostics);
     Outcome {
-        errors: errors_of_mapped(&linked.sources, &result.diagnostics),
+        errors: errors_of_mapped(&linked.sources, &diagnostics),
         stdout: result.stdout,
         stderr: result.stderr,
         exit_code: result.exit_code,

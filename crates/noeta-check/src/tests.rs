@@ -3939,3 +3939,67 @@ fn a_tuple_typed_default_is_checked_against_the_erased_type() {
     let src = "struct Holder<T> {\n  pair: (T, int) = (0, 0)\n}\nh = Holder { };\necho \"${h.pair}\";\n";
     assert!(codes(src).is_empty(), "{:?}", messages(src));
 }
+
+/// **A method's `<T>` inside a `class Repo<T>` warns (E0075).** The shadowing is sound — the two
+/// are different parameters and the inner one wins — but a reader of `Repo::<Todo>.label::<User>()`
+/// cannot tell which `T` the body means, so the compiler says so and keeps going.
+#[test]
+fn a_method_type_parameter_that_shadows_its_class_warns() {
+    let src = "class Repo<T> {\n  fn label<T>(): string { return \"x\"; }\n}\n";
+    assert_eq!(codes(src), ["E0075"], "{:?}", messages(src));
+    let d = &diagnostics(src)[0];
+    assert_eq!(d.severity, noeta_diagnostics::Severity::Warning);
+    assert!(
+        d.message.contains("`T` shadows the enclosing `T` of `Repo`"),
+        "the message must name both declarations: {}",
+        d.message
+    );
+    // The second label points at the CLASS's `<T>`, so "where the outer one is declared" is in the
+    // rendered report rather than left to the reader.
+    assert_eq!(d.labels.len(), 2, "primary + the outer declaration: {d:?}");
+    assert!(
+        d.labels[1].message.contains("declared here"),
+        "{:?}",
+        d.labels
+    );
+    let outer = src.find("<T>").expect("the class's own `<T>`") as u32 + 1;
+    assert_eq!(
+        (d.labels[1].span.start, d.labels[1].span.end),
+        (outer, outer + 1),
+        "the label must span the CLASS's `T`, not the method's"
+    );
+}
+
+/// It does not fire on a **different name** — the ordinary generic method, which reaches both
+/// parameters and is exactly what the warning tells you to write.
+#[test]
+fn a_method_type_parameter_with_its_own_name_is_silent() {
+    let src = "class Repo<T> {\n  fn label<U>(): string { return \"x\"; }\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// It does not fire on a **nominal type** of the same name. `struct T { }` beside a `class Repo<T>`
+/// is legitimate — the parameter's author does not control what somebody named a type — and the
+/// scope the check consults holds parameters only, so there is nothing there to hide.
+#[test]
+fn a_type_parameter_that_shares_a_name_with_a_declared_type_is_silent() {
+    let src = "struct T {\n  id: int\n}\nclass Repo<T> {\n  fn label(): string { return \"x\"; }\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// It does not fire across **sibling scopes**: two methods may each declare `<T>`, because neither
+/// is inside the other. The scope is saved and restored per declaration, so the second method's
+/// `<T>` is compared against the class's — a non-generic class here — and not the first method's.
+#[test]
+fn two_sibling_methods_may_each_declare_the_same_parameter_name() {
+    let src = "class Repo {\n  fn a<T>(x: T): string { return \"a\"; }\n  fn b<T>(x: T): string { return \"b\"; }\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// And a top-level generic `fn` beside a generic class is not nested in it, so a shared name is
+/// nobody's shadow.
+#[test]
+fn a_top_level_generic_fn_does_not_shadow_a_generic_class() {
+    let src = "class Repo<T> {\n  pub v: int\n}\nfn label<T>(x: T): string { return \"x\"; }\necho label(1);\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}

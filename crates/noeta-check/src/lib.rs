@@ -2510,6 +2510,55 @@ impl Checker {
         }
     }
 
+    /// A declaration's own `<T>` that reuses a name the enclosing declaration's `<…>` already
+    /// bound — **E0075, a warning**.
+    ///
+    /// The rule it reports is [`extend_param_scope`]'s: layering is by replacement, so the inner
+    /// `<T>` overwrites the outer entry and every reference in the body resolves to the inner
+    /// parameter. That overwrite *is* the shadowing, which is why the condition is read here, off
+    /// the scope as it stands before the layering — after it, the outer parameter is gone and
+    /// nothing is left to compare against. (It is read here rather than inside `extend_param_scope`
+    /// itself for two reasons: that function is a pure scope builder with no diagnostic sink, and
+    /// it runs four times per declaration — collection, forwarding, and body checking — so a
+    /// warning raised there would be reported up to four times. `check_fn` is the one place every
+    /// body funnels through exactly once.)
+    ///
+    /// A **warning** and not an error: the two are different parameters, the inner one shadows, and
+    /// the program means exactly what it says. What it costs is legibility — a reader of
+    /// `Repo::<Todo>.label::<User>()` cannot tell which `T` the body means — so this reports a
+    /// readability judgement, not a correctness one.
+    ///
+    /// Scoped to *type parameters against type parameters*. A parameter that merely shares a name
+    /// with a declared type (`struct T { }` beside a `class Repo<T>`) is silent: the scope this
+    /// consults holds parameters only, so a nominal name is not in it to be hidden.
+    fn warn_shadowed_type_params(&mut self, params: &[TypeParam], target: TargetKind) {
+        for p in params {
+            let Some(outer) = self.coloring.type_params.get(&p.name).map(|s| s.param.clone()) else {
+                continue;
+            };
+            // The enclosing declaration, when it is nameable — a method's is the type it is
+            // declared in. A hit with no name to give still reports; the label says where.
+            let owner = match (target, &self.coloring.current_type) {
+                (TargetKind::Method, Some(ty)) => format!(" of `{ty}`"),
+                _ => String::new(),
+            };
+            let name = &p.name;
+            let d = self.warn(
+                DiagnosticCode::ShadowedTypeParameter,
+                p.span,
+                format!("type parameter `{name}` shadows the enclosing `{name}`{owner}"),
+            );
+            d.help(format!(
+                "they are two different parameters, so `{name}` here never means the enclosing one \
+                 — rename one of them"
+            ));
+            d.label(p.span, format!("this `{name}` hides the one below"));
+            if let Some(outer_span) = outer.id.decl_span() {
+                d.label(outer_span, format!("the enclosing `{name}` is declared here"));
+            }
+        }
+    }
+
     /// Check a function (or method) body. `extra` seeds the body scope with additional bindings
     /// (a class's fields, when checking a method).
     pub(crate) fn check_fn(
@@ -2690,6 +2739,9 @@ impl Checker {
                 .collect();
         }
         let saved_type_params = self.coloring.type_params.clone();
+        // Read the shadowing off the scope BEFORE it is layered over (E0075, warning): the entry a
+        // parameter is about to replace is the one it hides.
+        self.warn_shadowed_type_params(&decl.type_params, target);
         // Layered over the enclosing declaration's, so a method's `<T>` inside a class `<T>` makes
         // `T` mean the method's — the shadowing rule, stated once.
         self.coloring.type_params = extend_param_scope(

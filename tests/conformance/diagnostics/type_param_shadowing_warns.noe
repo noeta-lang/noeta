@@ -1,0 +1,61 @@
+// **A shadowing type parameter is a warning, not an error** (E0075).
+//
+// A method's own `<T>` inside a `class Repo<T>` is a *different* parameter — identity is the
+// declaration site, not the spelling — and it shadows the class's, exactly as a local binding
+// shadows a global. That is sound and the program means what it says, so this cannot be an error:
+// the case below runs, prints, and exits 0 with the warning on the record.
+//
+// What it costs is legibility, which is what the warning is for. Reading
+// `Repo::<Todo>.label::<User>()`, nothing tells you which `T` the body means, and the class's `T`
+// is unreachable from that body under any spelling. Rust lints this; C# rejects it outright; here
+// it is reported and the program keeps going.
+//
+// The file also carries the three shapes that must stay **silent**, so a future over-eager version
+// of the rule shows up as three extra diagnostics rather than as nothing: a method parameter with a
+// different name, a type parameter that merely shares a name with a declared type, and two sibling
+// declarations that each spell `T`. (Their gate is `noeta-check`'s unit tests, which assert the
+// diagnostic list is *empty*; this corpus header can only assert that expected diagnostics are
+// present.)
+// expect: error E0075 at 40:14
+// expect: stdout "User"
+// expect: stdout "Todo"
+// expect: stdout "ok"
+// expect: exit 0
+
+// Silent: a nominal type may be named `T`. The parameter below does not hide it — a parameter and
+// a declared type are different kinds of name, and nobody's `<T>` should have to know what types
+// exist elsewhere in the file.
+struct T {
+    id: int
+}
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+
+class Repo<T> {
+    // Warned: this `T` hides the class's, and the two are indistinguishable at any call site.
+    fn label<T>(): string {
+        return type_name::<T>();
+    }
+
+    // Silent: a name of its own, which reaches BOTH parameters — the fix the warning asks for.
+    fn distinct<U>(): string {
+        return type_name::<T>();
+    }
+}
+
+// Silent: two sibling declarations may each spell `T`, because neither is inside the other.
+fn one<T>(x: T): string {
+    return "ok";
+}
+
+fn two<T>(x: T): string {
+    return "ok";
+}
+
+echo Repo::<Todo>.label::<User>();
+echo Repo::<Todo>.distinct::<User>();
+echo one(1);

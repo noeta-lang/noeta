@@ -16,6 +16,10 @@
 // changing it looked like it meant changing the seed for every generic call; it did not — it meant
 // giving a parameter an identity (`Type::Param`, keyed on its declaration site), after which the
 // seed's two entries are simply two different keys and `or_insert` means only what it says.
+// Both `<T>`-over-`<T>` methods are also E0075 warnings — sound, but unreadable, which is what
+// the warning says. The program still runs and still exits 0; that is what makes it a warning.
+// expect: error E0075 at 35:16
+// expect: error E0075 at 46:14
 // expect: stdout "User"
 // expect: stdout "Todo/User"
 // expect: stdout "User"
