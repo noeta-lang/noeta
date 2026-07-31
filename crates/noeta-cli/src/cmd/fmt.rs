@@ -46,6 +46,19 @@ pub(crate) fn cmd_fmt(
         return ExitCode::FAILURE;
     }
 
+    // Tier-body formatters are a dev-only capability a package brings via `package.dev-native`. If
+    // this app's dependency graph carries any native crate (dev-only formatters INCLUDED, unlike a
+    // `run`/`check` delegation), compose and re-exec the dev toolchain so those formatters are
+    // present — otherwise `@html` bodies from a package that provides an HTML formatter would be
+    // left verbatim by a stock binary. On a successful compose this `exec`s and never returns; a
+    // compose failure is surfaced rather than silently formatting without the formatter. A composed
+    // binary (the `NOETA_COMPOSED` guard) skips this and formats with its own linked-in extensions.
+    if let Err(err) = crate::compose::maybe_delegate_fmt(&paths[0]) {
+        eprintln!("noeta fmt: cannot compose the toolchain for this app's formatters:");
+        eprintln!("{err}");
+        return ExitCode::FAILURE;
+    }
+
     // Expand any directory argument into the `.noe` files beneath it.
     let mut files = Vec::new();
     for path in paths {

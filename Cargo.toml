@@ -57,8 +57,6 @@ noeta-stdlib = { path = "crates/noeta-stdlib" }
 # Native-extension ABI (P-NATIVE): the contract + dep-free primitives, split out of noeta-stdlib so
 # the batteries (crypto/uuid/json) don't ride the ABI. noeta-stdlib re-exports it (core/std-style).
 noeta-ext-abi = { path = "crates/noeta-ext-abi" }
-noeta-html = { path = "crates/noeta-html" }
-noeta-css = { path = "crates/noeta-css" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
 noeta-host-real = { path = "crates/noeta-host-real" }
 # Lean production runtime (dev-deps D3): the app-execution core (VM+Host+compile front-end, no dev

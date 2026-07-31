@@ -873,6 +873,86 @@ impl std::fmt::Debug for CommandBinding {
     }
 }
 
+/// An extension wrapper that exposes ONLY its inner unit's **tier-body formatters** — its `name()`,
+/// `root()`, and `body_formatters()` forward; every other surface (modules, types, enums, classes,
+/// structs, traits, commands, tiers, tier runners, attributes, directives, derives, capabilities)
+/// returns empty. This is the mechanism that makes a package's tier-body formatter a **trust-free,
+/// dev-only** capability: a `package.dev-native` crate is admitted untrusted and composed into the
+/// dev toolchain wrapped in this, so it can contribute a `noeta fmt` formatter and *nothing that
+/// runs* — no runtime module, command, or tier ever reaches the toolchain from it. Constructed via
+/// [`formatter_only`]; the composed shim wraps each of a dev-only crate's units before `run_cli`.
+///
+/// Every runtime method is overridden explicitly (never left to a trait default) so that adding a
+/// new capability method to [`Extension`](noeta_stdlib::Extension) surfaces here as a compile note
+/// to decide it, rather than silently leaking the inner unit's default through an untrusted wrapper.
+struct FormatterOnly {
+    inner: &'static (dyn noeta_stdlib::Extension + Sync),
+}
+
+impl noeta_stdlib::Extension for FormatterOnly {
+    // --- forwarded: identity + the one capability a dev-native crate may contribute ---
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn root(&self) -> &'static str {
+        self.inner.root()
+    }
+    fn body_formatters(&self) -> &'static [noeta_stdlib::registry::BodyFormatter] {
+        self.inner.body_formatters()
+    }
+    // --- stripped: every runtime surface returns empty (explicit, not a trait default) ---
+    fn modules(&self) -> &'static [noeta_stdlib::ExtModule] {
+        &[]
+    }
+    fn types(&self) -> &'static [noeta_stdlib::ExtType] {
+        &[]
+    }
+    fn enums(&self) -> &'static [noeta_stdlib::ExtEnum] {
+        &[]
+    }
+    fn classes(&self) -> &'static [noeta_stdlib::ExtClass] {
+        &[]
+    }
+    fn structs(&self) -> &'static [noeta_stdlib::ExtStruct] {
+        &[]
+    }
+    fn traits(&self) -> &'static [noeta_stdlib::ExtTrait] {
+        &[]
+    }
+    fn commands(&self) -> &'static [noeta_stdlib::ExtCommand] {
+        &[]
+    }
+    fn tiers(&self) -> &'static [noeta_stdlib::ExtTier] {
+        &[]
+    }
+    fn tier_runners(&self) -> &'static [noeta_stdlib::ExtTierRunner] {
+        &[]
+    }
+    fn attributes(&self) -> &'static [noeta_stdlib::registry::ExtAttribute] {
+        &[]
+    }
+    fn directives(&self) -> &'static [noeta_stdlib::registry::ExtDirective] {
+        &[]
+    }
+    fn derives(&self) -> &'static [noeta_stdlib::registry::ExtDerive] {
+        &[]
+    }
+    fn capabilities(&self) -> &'static [noeta_stdlib::ExtCapability] {
+        &[]
+    }
+}
+
+/// Wrap a native extension so only its tier-body formatters are visible to the toolchain (see
+/// [`FormatterOnly`]). Used by the composed dev toolchain to admit a `package.dev-native` crate's
+/// units as **formatter-only**: trust-free (nothing that runs is exposed) and reached only at
+/// `noeta fmt`. Leaks the wrapper for the `'static` the extension registry requires — like every
+/// other unit, it lives for the process.
+pub fn formatter_only(
+    inner: &'static (dyn noeta_stdlib::Extension + Sync),
+) -> &'static (dyn noeta_stdlib::Extension + Sync) {
+    Box::leak(Box::new(FormatterOnly { inner }))
+}
+
 /// The whole toolchain as a library entry (package-manager Phase 3, N3.0): the stock binary calls
 /// this with no extras; a **composed** binary (an app whose dependency graph carries native
 /// extension crates) calls it with the extra units, which register alongside the std units before
@@ -883,18 +963,16 @@ pub fn run_cli(
     extra: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
     command_bindings: &[CommandBinding],
 ) -> ExitCode {
-    // First-party toolchain extensions that ship with every binary (stock or composed), in their own
-    // namespaces — the HTML body formatter (`noeta-html`) which reflows `@html` bodies under
-    // `noeta fmt`, and the CSS formatter (`noeta-css`) it delegates `<style>` blocks to. Prepended to
+    // The CLI-layer unit that registers std's native dev-tier runners (registry-dispatched tier
+    // runners, Part B): `test`/`bench`/`doc` are `std` tiers whose runners live here, above stdlib,
+    // so they attach to the `std` root from this crate rather than from `noeta-stdlib`. Prepended to
     // the caller's `extra` (a composed app's dependency units) so all are installed before any lookup.
-    // …plus the CLI-layer unit that registers std's native dev-tier runners (registry-dispatched
-    // tier runners, Part B): `test`/`bench`/`doc` are `std` tiers whose runners live here, above
-    // stdlib, so they attach to the `std` root from this crate rather than from `noeta-stdlib`.
-    let mut units: Vec<&'static (dyn noeta_stdlib::Extension + Sync)> = vec![
-        &noeta_html::HTML_EXTENSION,
-        &noeta_css::CSS_EXTENSION,
-        &tier_runner::STD_TIER_RUNNERS_UNIT,
-    ];
+    //
+    // Tier-body **formatters** for `noeta fmt` (`@html`/`<style>`) are no longer hardcoded here: a
+    // formatter is a dev-only capability a package brings via `package.dev-native`, composed
+    // formatter-only and reached only through `noeta fmt` (see `compose::maybe_delegate_fmt`).
+    let mut units: Vec<&'static (dyn noeta_stdlib::Extension + Sync)> =
+        vec![&tier_runner::STD_TIER_RUNNERS_UNIT];
     units.extend_from_slice(extra);
     noeta_stdlib::registry::install_with_extras(&units);
     // Phase 4: std's own commands (root `"std"`) are always available under their own names. A
@@ -1674,5 +1752,81 @@ fn is_executable(path: &std::path::Path) -> bool {
     #[cfg(not(unix))]
     {
         path.is_file()
+    }
+}
+
+#[cfg(test)]
+mod formatter_only_tests {
+    use super::*;
+    use noeta_stdlib::ExtCommand;
+    use noeta_stdlib::Extension;
+    use noeta_stdlib::registry::{BodyFormatter, ExtModule, SubFormat};
+
+    fn passthrough(_lang: &str, body: &str, _sub: &SubFormat) -> Option<String> {
+        Some(body.to_string())
+    }
+
+    /// A deliberately "fat" extension: non-empty modules, commands, and body formatters. It stands
+    /// in for a `package.dev-native` crate whose native code declares far more than a formatter — the
+    /// `FormatterOnly` wrapper must strip everything but the formatters.
+    struct Fat;
+    impl Extension for Fat {
+        fn name(&self) -> &'static str {
+            "acme.fat"
+        }
+        fn root(&self) -> &'static str {
+            "acme"
+        }
+        fn modules(&self) -> &'static [ExtModule] {
+            static M: &[ExtModule] = &[ExtModule {
+                name: "widgets",
+                ..ExtModule::DEFAULTS
+            }];
+            M
+        }
+        fn commands(&self) -> &'static [ExtCommand] {
+            static C: &[ExtCommand] = &[ExtCommand {
+                name: "do-it",
+                about: "",
+                run: |_, _| 0,
+                ..ExtCommand::DEFAULTS
+            }];
+            C
+        }
+        fn body_formatters(&self) -> &'static [BodyFormatter] {
+            static B: &[BodyFormatter] = &[("html", passthrough)];
+            B
+        }
+    }
+
+    #[test]
+    fn formatter_only_strips_runtime_surface_but_keeps_formatters() {
+        static FAT: Fat = Fat;
+        let inner: &'static (dyn Extension + Sync) = &FAT;
+        // The inner really does expose a runtime surface — otherwise the test proves nothing.
+        assert_eq!(inner.modules().len(), 1);
+        assert_eq!(inner.commands().len(), 1);
+        assert_eq!(inner.body_formatters().len(), 1);
+
+        let wrapped = formatter_only(inner);
+        // Identity + the one allowed capability forward.
+        assert_eq!(wrapped.name(), "acme.fat");
+        assert_eq!(wrapped.root(), "acme");
+        assert_eq!(wrapped.body_formatters().len(), 1, "formatters preserved");
+        assert_eq!(wrapped.body_formatters()[0].0, "html");
+        // Every runtime surface is stripped to empty.
+        assert!(wrapped.modules().is_empty(), "modules stripped");
+        assert!(wrapped.commands().is_empty(), "commands stripped");
+        assert!(wrapped.types().is_empty());
+        assert!(wrapped.enums().is_empty());
+        assert!(wrapped.classes().is_empty());
+        assert!(wrapped.structs().is_empty());
+        assert!(wrapped.traits().is_empty());
+        assert!(wrapped.tiers().is_empty());
+        assert!(wrapped.tier_runners().is_empty());
+        assert!(wrapped.attributes().is_empty());
+        assert!(wrapped.directives().is_empty());
+        assert!(wrapped.derives().is_empty());
+        assert!(wrapped.capabilities().is_empty());
     }
 }
