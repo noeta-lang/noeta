@@ -513,11 +513,13 @@ fn native_enum_backing_type(reg: &registry::Registry, n: &str) -> Option<Type> {
 }
 
 /// A task handle `Future<T>` (Track A.8) — the cancellation surface a `spawn`/`isolate` handle
-/// exposes. `cancel()` marks the task cancelled (idempotent, `void`); `join()` drives it and reports
-/// its outcome as a typed `Result<T, Cancelled>` (`Ok(v)` on completion, `Err(Cancelled)` if
-/// cancelled) — the explicit, cancel-aware counterpart to plain `.await: T` (which errors E0056 on a
-/// cancelled task). Every `Future<T>` advertises them, since a spawn handle is itself a `Future<T>`;
-/// on a bare (never-spawned) future `cancel` is a harmless no-op and `join` equals `Ok(future.await)`.
+/// exposes. `cancel()` *requests* a stop (idempotent, `void` — at the moment you ask, nothing is yet
+/// known); `join()` drives the task to a terminal state and *reports* it as a typed
+/// `Result<T, Cancelled>` (`Ok(v)` if the body produced a value, including when the request arrived
+/// too late to stop anything, `Err(Cancelled)` if it stopped without producing one) — the explicit,
+/// cancel-aware counterpart to plain `.await: T` (which errors E0056 on a task that did stop
+/// cancelled). Every `Future<T>` advertises them, since a spawn handle is itself a `Future<T>`; on a
+/// bare (never-spawned) future `cancel` is a harmless no-op and `join` equals `Ok(future.await)`.
 fn future_method(name: &str, elem: &Type) -> Option<Type> {
     Some(match name {
         "cancel" => Type::Unit,

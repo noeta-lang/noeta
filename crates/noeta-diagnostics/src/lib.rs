@@ -247,10 +247,12 @@ pub enum DiagnosticCode {
     /// side effects.
     MatchArmNotValue,
     /// A `.await` (either the top-level driver or the async state machine's poll) reached a task
-    /// that was **cancelled** (`h.cancel()`, or a `race` loser exposed to user code). A cancelled
-    /// task never produces a value — awaiting one would otherwise hang or yield a silent zero — so
-    /// the await fails loudly. Cancel-aware code uses `h.join(): Result<T, Cancelled>` to observe
-    /// the cancelled outcome instead.
+    /// that **stopped cancelled** — a `race` loser exposed to user code, a cooperative task that
+    /// stopped at its suspension, or a real isolate that honored a `h.cancel()` at one of its
+    /// safepoints. Such a task never produces a value — awaiting one would otherwise hang or yield a
+    /// silent zero — so the await fails loudly. Cancel-aware code uses `h.join(): Result<T,
+    /// Cancelled>` to observe the outcome instead. (A cancel that arrived too late to stop anything
+    /// is *not* this: the task completed, and both `.await` and `join` hand back its value.)
     AwaitCancelled,
     /// A `?` would propagate an `Err` payload whose type neither matches the enclosing function's
     /// declared error type nor has a declared conversion into it. `?` auto-converts the error
