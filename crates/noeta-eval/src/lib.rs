@@ -7596,8 +7596,22 @@ fn match_pattern(
                     return None;
                 }
             }
-            if &enum_value.variant != variant || bindings.len() != enum_value.data.len() {
+            if &enum_value.variant != variant {
                 return None;
+            }
+            // A payload-less `Ok()` — what a `Result<void, E>` returns — reached through a
+            // one-binding pattern binds `unit`, the whole of a `void` payload. The `?`
+            // operator already reads it that way (`eval_try_ir`/`try_classify`), so a `match` that
+            // did not would make `x?` and `match x { Ok(v) => … }` disagree about the same value.
+            // Only for `Result`: for a declared enum, `Case` and `Case(x)` are the author's own
+            // distinction and a lenient match there would hide a real bug, and `Option` cannot
+            // reach this state because a payload-less `some()` is refused where it is written.
+            let builtin_carrier = enum_value.enum_name.as_str() == "Result";
+            if bindings.len() != enum_value.data.len() {
+                if !(builtin_carrier && enum_value.data.is_empty() && bindings.len() == 1) {
+                    return None;
+                }
+                return match_pattern(&bindings[0], &Value::Unit, reflection, native_names);
             }
             let mut all = Vec::new();
             for (sub, data) in bindings.iter().zip(&enum_value.data) {

@@ -1,0 +1,5 @@
+# A package, so every declaration derives a dotted module path — which is exactly the shape that
+# used to turn the statics half of E0059 off.
+[package]
+name = "local/desk"
+version = "0.1.0"

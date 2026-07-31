@@ -1,0 +1,18 @@
+// A generic bound may name its trait by a **qualified path**, exactly as every other type position
+// does (`x: pkg.lib.Person`, `dyn pkg.lib.Greets`, `impl vec.Kernels for T`). A bound used to be the
+// one place that took a bare identifier only, so the parser answered a qualified one with
+// `found '.' expected '+', ',', '<', or '>'` — a syntax error in the generics rather than the
+// missing feature it was.
+//
+// The bound still has to resolve: it is checked against the same trait table a bare one is, so it
+// needs its `use` (without it the bound is E0014, unknown trait) and a receiver that does not
+// implement it is still E0025.
+// expect: stdout "hi ada"
+// expect: exit 0
+use pkg.lib
+
+fn shout<T: pkg.lib.Greets>(x: T): string {
+    return x.hi();
+}
+
+echo shout(pkg.lib.Person { name: "ada" });

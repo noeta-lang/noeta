@@ -1,0 +1,7 @@
+// A sibling module declaring a `total` of its own. Nothing here is imported by `main.noe`, so it is
+// NOT a name a binding there shadows: E0059 is per scope, and a module the file never names is not
+// in this file's scope. The merged program flattens both modules into one symbol table, which is
+// precisely why the check has to be asked per source rather than of that flat table.
+pub fn total(): int {
+    return 1
+}

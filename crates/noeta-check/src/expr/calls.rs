@@ -1128,6 +1128,35 @@ impl Checker {
                     self.note_constructor_call(tn.as_str(), name, &ret, call_span);
                     return ret;
                 }
+                // `Type.assoc(args)` where the type declares no such associated function. The
+                // instance path below reports this for a value receiver; without it here, a typo'd
+                // constructor (`Ollama.new()` where the type spells it `local`) type-checked clean
+                // and the *first* report was a run-time `cannot find <Type> in this scope` — which
+                // blames the type rather than the member, so it reads as a missing import.
+                //
+                // Structs and classes only. An enum's `Type.Case(payload)` is a *construction* that
+                // arrives here as a call on a type name and resolves through the variant table, not
+                // through `symbols.methods`; flagging it would refuse every payload-carrying enum
+                // literal in the language.
+                if let Expr::Ident { name: tn, .. } = receiver.as_ref()
+                    && lookup(env, tn.as_str()).is_none()
+                    && self.symbols.records.contains_key(tn.as_str())
+                    && !self
+                        .symbols
+                        .methods
+                        .contains_key(&(tn.to_string(), name.to_string()))
+                    && user_type_is_closed(self, &Type::Named(tn.to_string(), Vec::new()))
+                {
+                    // Rendered through `Type` so the name reads exactly as the instance-path
+                    // message does — short, not the linker's qualified key.
+                    let shown = Type::Named(tn.to_string(), Vec::new());
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("type `{shown}` has no associated function `{name}`"),
+                    );
+                    return Type::Unknown;
+                }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
                 let recv = self.synth(receiver, env);
@@ -1318,7 +1347,9 @@ impl Checker {
                 // string") on a program the checker called clean — the editor shows nothing and
                 // Run fails, which is exactly how the playground's `client.get(url)` (a `Result`,
                 // missing its `?`) reached production looking correct.
-                if matches!(ret, Type::Unknown) && closed_to_new_methods(&recv) {
+                if matches!(ret, Type::Unknown)
+                    && (closed_to_new_methods(&recv) || user_type_is_closed(self, &recv))
+                {
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         span,
@@ -1979,8 +2010,9 @@ impl Checker {
 /// theirs are found too.
 ///
 /// Deliberately excluded, and why:
-/// - [`Type::Named`] — a declared or imported type, whose method may still arrive through a trait
-///   impl or a runtime dispatch this pass cannot see. Lenient by design.
+/// - [`Type::Named`] — a type parameter, a native type, or a declared one. The declared half is
+///   closed too, but by a different question: see [`user_type_is_closed`], which this predicate's
+///   two call sites ask alongside it.
 /// - [`Type::Dyn`], [`Type::Unknown`] and the other gradual holes — they never reach here, because
 ///   `method_call_return` answers them with the deferred type rather than `Unknown`.
 /// - [`Type::DynTrait`] — resolved against the trait's declared methods, but a trait object's
@@ -2003,6 +2035,39 @@ pub(crate) fn closed_to_new_methods(ty: &Type) -> bool {
             | Type::Option(_)
             | Type::Result(_, _)
     )
+}
+
+/// Whether the receiver's member set is known **in full** here: the builtins that
+/// [`closed_to_new_methods`] covers, plus a nominal type this program itself declares.
+///
+/// The second half is what makes `Ollama.local()` a typo the checker catches. Reflection is
+/// whole-program and so is checking: a `struct`/`class`/`enum` written in the program (or in one of
+/// its packages) has exactly the members its declaration and its `impl` blocks give it, so a call to
+/// one that is not there cannot resolve at run time either — it aborts with E0005, which used to be
+/// the *first* report of a name nothing in the program ever spelled.
+///
+/// Three kinds of `Type::Named` are excluded, and each would be a false positive rather than a
+/// missed one:
+///
+///   * an in-scope **type parameter**, which is a `Named` like any other — a bound *licenses*
+///     methods rather than closing the world, and a method no bound declares is documented to defer
+///     to runtime dispatch. This is the separation the leniency was waiting on.
+///   * a **native/extern** type, whose members live in the extension registry under an identity the
+///     checker resolves through `stdlib::method_return`; a miss there is not proof of absence.
+///   * anything the program does not declare at all — an opaque imported stub, a name the linker
+///     left unresolved. Nothing is known about those, and "nothing known" is not "does not exist".
+pub(crate) fn user_type_is_closed(checker: &crate::Checker, ty: &Type) -> bool {
+    let Type::Named(n, _) = ty else {
+        return false;
+    };
+    if checker.coloring.type_params.contains_key(n.as_str()) {
+        return false;
+    }
+    if checker.reg().resolve_type(n.as_str()).is_some() {
+        return false;
+    }
+    checker.symbols.records.contains_key(n.as_str())
+        || checker.symbols.enums.contains_key(n.as_str())
 }
 
 /// A compact human label for a **computed callee** — the expression standing in for a name in an

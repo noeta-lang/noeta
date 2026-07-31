@@ -1,0 +1,15 @@
+// A binding may not reuse the name of a top-level function declared in its OWN file (E0059) — even
+// though every declaration in a package carries a derived, dotted module path. Inferring "merged in
+// from another module" from the dot silently turned this check off for all packaged code: the
+// binding was swallowed, `count` kept meaning the function, and nothing said so.
+//
+// The sibling `desk.tools.total` is not reported: it is another module's name, and this file never
+// imports it.
+// expect: error E0059 at 14:1
+// expect: exit 1
+fn count(): int {
+    return 99
+}
+
+count = 5;
+echo count;

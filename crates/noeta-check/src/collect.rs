@@ -13,12 +13,26 @@ impl Checker {
     /// and **user-type** imports (everything else → [`Self::types`]). The extern-type case is tried
     /// before the selective-function case: `use std.id.Uuid` names a *type* in the `id` unit, not a
     /// function, so it must not fall into the "module has no function" error.
+    /// Record `local` as a name bindings in `span`'s own source may not shadow (E0059), described by
+    /// `what` — see [`Symbols::source_statics`] for why the index is per-source.
+    fn note_static(&mut self, span: Span, local: &str, what: &'static str) {
+        self.symbols
+            .source_statics
+            .entry(span.source)
+            .or_default()
+            .insert(local.to_string(), what);
+    }
+
     pub(crate) fn collect_imports(&mut self, program: &Program) {
         use noeta_ext_abi::registry::UseKind;
         for stmt in &program.stmts {
-            let Stmt::Use { path, names, .. } = stmt else {
+            let Stmt::Use {
+                path, names, span, ..
+            } = stmt
+            else {
                 continue;
             };
+            let use_span = *span;
             for name in names {
                 let local = name.local().to_string();
                 // One shared classifier decides what every `use` target binds — so the checker, the
@@ -26,7 +40,21 @@ impl Checker {
                 // namespace group, a member function, a type, or an error (the check/run divergence
                 // this closes). `UnknownUnderRoot` stays lenient in this slice (except the existing
                 // member-function-miss diagnostic); slice 2 tightens it to a hard E0019.
-                match self.reg().classify_use(path, &name.name) {
+                let kind = self.reg().classify_use(path, &name.name);
+                // Every `use` binds its local name **in this file**, so a later binding of the same
+                // name there is E0059 — and a binding of that name in some *other* module of the
+                // merged program is not this import's business. See `Symbols::source_statics`.
+                match &kind {
+                    UseKind::UnknownUnderRoot => {}
+                    UseKind::Module(_) | UseKind::Namespace(_) => {
+                        self.note_static(use_span, &local, "an imported module")
+                    }
+                    UseKind::MemberFn { .. } => {
+                        self.note_static(use_span, &local, "a top-level function")
+                    }
+                    _ => self.note_static(use_span, &local, "an imported type"),
+                }
+                match kind {
                     UseKind::Module(qualified) => {
                         // Expose the module's own extern types under the bound name, exactly as the
                         // namespace arm below does for a group. Without this, `use para.db` +
@@ -254,6 +282,22 @@ impl Checker {
         // bodies. Walk each top-level fn/method body for `Stmt::Fn` at any depth.
         for stmt in &program.stmts {
             collect_nested_fn_names(stmt, true, &mut self.symbols.nested_fn_names);
+        }
+        // Every top-level declaration, as a name bindings **in its own file** may not shadow
+        // (E0059). Under its *local* spelling: the loader qualifies a package module's declarations
+        // (`desk.tools.find_order`), and what a binding could collide with is the last segment, which
+        // is how the source spells it. Recorded after the imports pass so a declaration's own word
+        // wins over an import's for the same name.
+        for stmt in &program.stmts {
+            let (name, span, what) = match stmt {
+                Stmt::Fn(d) => (d.name.as_str(), d.span, "a top-level function"),
+                Stmt::Struct(d) => (d.name.as_str(), d.span, "a type"),
+                Stmt::Class(d) => (d.name.as_str(), d.span, "a type"),
+                Stmt::Enum(d) => (d.name.as_str(), d.span, "a type"),
+                _ => continue,
+            };
+            let local = name.rsplit('.').next().unwrap_or(name).to_string();
+            self.note_static(span, &local, what);
         }
         for stmt in &program.stmts {
             match stmt {
