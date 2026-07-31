@@ -12,8 +12,9 @@
 //! The reading test is the one that would catch a body that only works when it arrives all at
 //! once — it deliberately splits a frame across two writes, and splits one CRLF down the middle.
 //!
-//! `#[ignore]` so CI stays hermetic (real ports, real processes) — run explicitly:
-//! `cargo test -p noeta-cli --test live_stream -- --ignored`.
+//! `#[ignore]`d for the real ports and processes these need, and listed in `scripts/hot-e2e.sh`,
+//! which both ci.yml and `scripts/gate.sh` run (`tests/cli/automation.rs` keeps that list honest).
+//! By hand: `cargo test -p noeta-cli --test live_stream -- --ignored`.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

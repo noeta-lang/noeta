@@ -5,7 +5,8 @@
 //! drifted: the sealed-fn rule (a named `fn` no longer sees the file's top-level bindings) and the
 //! no-shadowing rule (E0059) each invalidated a LiveView example, and both sat broken in the tree.
 //! The tests that *did* reference an example were `#[ignore]`d — they bind real sockets — so CI
-//! never touched them.
+//! never touched them. (They still are, and still bind sockets, but they no longer go unrun: ci.yml
+//! and `scripts/gate.sh` name them, and `tests/cli/automation.rs` fails the build if that lapses.)
 //!
 //! These gates drive the **real `noeta` binary**, like the doc-sample gate does, because that is
 //! what fidelity requires here: an example runs exactly as a user standing in its directory would
