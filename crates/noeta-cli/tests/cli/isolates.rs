@@ -410,3 +410,145 @@ fn run_real_isolate_channel_deadlock_errors_not_hangs() {
         .stderr(predicate::str::contains("E0010"))
         .stderr(predicate::str::contains("deadlock"));
 }
+
+// --- real-path cancellation (isolate-cancel) ----------------------------------------
+//
+// The deterministic sandbox cancels a *cooperative* task, which is already parked between polls, so
+// the request is honored exactly where it lands and the report is trivially honest. A real isolate
+// is an OS thread that is running, and it used to be neither: `h.cancel()` reached nothing but the
+// parent's own bookkeeping, so `join` reported `Err(Cancelled)` while the worker ran to completion
+// on its own thread — every side effect landing, the `concurrent` block closing over a thread still
+// executing, and the process blocking on that thread at exit. These three cases pin what replaced
+// that: the request crosses the thread boundary, the worker honors it at its next **safepoint**, and
+// the reported outcome is what actually happened.
+
+#[test]
+fn run_real_isolate_cancel_stops_a_compute_bound_worker() {
+    // The core claim: a compute-bound isolate — a loop with no suspension point at all — is
+    // genuinely cancellable, because the worker's dispatch loop polls the cancellation flag at the
+    // same safepoints the GC uses (frame transfers and taken loop back-edges).
+    //
+    // The loop is sized to take multiple seconds interpreted (a worker isolate is always tier 0 —
+    // the JIT is never armed on a worker thread), and the cancel lands 200 ms in. Measured before
+    // this change: the program took ~3.9 s of wall clock and ~3.7 s of CPU, all of it after the
+    // caller had been told the work was cancelled. The ceiling below is deliberately generous —
+    // roughly a third of the uncancelled runtime — so it fails on "the worker ran to the end" and
+    // not on a loaded machine.
+    let file = temp_program(
+        "isolate_cancel_compute",
+        "use std.io\n\
+         use std.task.{sleep}\n\
+         async fn spin(): int {\n\
+         mut n = 0\n\
+         mut acc = 0\n\
+         while n < 40000000 { n = n + 1; acc = acc + n }\n\
+         return acc\n\
+         }\n\
+         async fn run(): int {\n\
+         concurrent {\n\
+         h = isolate spin()\n\
+         sleep(200).await\n\
+         h.cancel()\n\
+         io.outln(match h.join() { Ok(v) => \"ok=\" ~ v, Err(_) => \"cancelled\" })\n\
+         }\n\
+         return 0\n\
+         }\n\
+         echo run().await",
+    );
+    let start = std::time::Instant::now();
+    lang()
+        .arg("run")
+        .arg(&file)
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .stdout("cancelled\n0\n");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(1_400),
+        "a cancelled compute-bound isolate must stop at its next safepoint, not run to completion \
+         (~3.9s); took {elapsed:?}"
+    );
+}
+
+#[test]
+fn run_real_isolate_cancel_after_completion_reports_ok() {
+    // **The honest report.** `cancel` is a request; `join` reports what happened. `quick` finishes
+    // in microseconds, long before the 200 ms sleep returns, so the cancel arrives too late to stop
+    // anything — and `join` must say `Ok(7)`. Before this change it said `Err(Cancelled)`: the
+    // parent latched "cancelled" the instant it *asked*, without ever consulting the worker.
+    let file = temp_program(
+        "isolate_cancel_too_late",
+        "use std.io\n\
+         use std.task.{sleep}\n\
+         async fn quick(): int { return 7 }\n\
+         async fn run(): int {\n\
+         concurrent {\n\
+         h = isolate quick()\n\
+         sleep(200).await\n\
+         h.cancel()\n\
+         io.outln(match h.join() { Ok(v) => \"ok=\" ~ v, Err(_) => \"cancelled\" })\n\
+         }\n\
+         return 0\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .stdout("ok=7\n0\n");
+}
+
+#[test]
+fn run_real_isolate_cancel_is_joined_before_the_block_closes() {
+    // Structured concurrency, kept: a `concurrent` block joins everything it spawned — *including*
+    // a member it cancelled. The worker counts into a file on real disk; the parent cancels, joins,
+    // reads the count at the closing brace, waits, and reads it again. The two reads must be equal:
+    // no work happens after the block closes.
+    //
+    // Before this change the second read was strictly larger (measured 1787 → 3542) — the block
+    // returned over a thread that was still running, which is the promise the docs make. Worse, the
+    // abandoned worker then raced the parent's exit-time heap teardown: the same program segfaulted
+    // in the allocator at process exit, reproducibly.
+    let dir = temp_root().join("noeta_cli_test_isolate_cancel_join");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let ticks = dir.join("ticks.txt");
+    let ticks_path = ticks.to_str().expect("utf-8 path");
+    let src = format!(
+        "use std.{{io, fs}}\n\
+         use std.task.{{sleep}}\n\
+         async fn busy(path: string): int {{\n\
+         mut n = 0\n\
+         while n < 4000 {{ n = n + 1; fs.write(path, \"${{n}}\") }}\n\
+         return n\n\
+         }}\n\
+         async fn run(path: string): int {{\n\
+         concurrent {{\n\
+         h = isolate busy(path)\n\
+         sleep(100).await\n\
+         h.cancel()\n\
+         io.outln(match h.join() {{ Ok(v) => \"ok=\" ~ v, Err(_) => \"cancelled\" }})\n\
+         }}\n\
+         at_close = fs.read(path)\n\
+         sleep(300).await\n\
+         io.outln(if at_close == fs.read(path) then \"stopped\" else \"still running\")\n\
+         return 0\n\
+         }}\n\
+         echo run(\"{ticks_path}\").await"
+    );
+    let file = dir.join("main.noe");
+    std::fs::write(&file, "0").ok();
+    std::fs::write(&ticks, "0").expect("seed the tick file");
+    std::fs::write(&file, &src).expect("write program");
+    lang()
+        .arg("run")
+        .arg(&file)
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .stdout("cancelled\nstopped\n0\n");
+}

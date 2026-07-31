@@ -1,0 +1,35 @@
+// isolate-cancel, the **negative** contract — what cancellation does *not* promise.
+//
+// `cancel` stops future work; it does not undo work already done, and it does not roll anything
+// back. `work` writes two files before it suspends; the cancel lands at that suspension, so the
+// third write never happens — but the first two files are still there afterwards, and nothing about
+// them is reverted. This is the whole reason `join` reports `Err(Cancelled)` rather than "nothing
+// happened": a cancelled task can have left arbitrary observable effects behind, and a caller that
+// needs them undone has to undo them itself.
+// expect: stdout "wrote a"
+// expect: stdout "wrote b"
+// expect: stdout "cancelled"
+// expect: stdout "a=1 b=2 c=missing"
+// expect: exit 0
+use std.{fs}
+use std.task.{sleep}
+async fn work(): int {
+    fs.write("a.txt", "1")
+    echo "wrote a"
+    fs.write("b.txt", "2")
+    echo "wrote b"
+    sleep(10).await
+    fs.write("c.txt", "3")
+    return 5
+}
+concurrent {
+    h = spawn work()
+    sleep(1).await
+    h.cancel()
+    echo match h.join() {
+        Ok(v)  => "ok=" ~ v,
+        Err(_) => "cancelled",
+    }
+}
+c = if fs.exists("c.txt") then fs.read("c.txt") else "missing"
+echo "a=" ~ fs.read("a.txt") ~ " b=" ~ fs.read("b.txt") ~ " c=" ~ c

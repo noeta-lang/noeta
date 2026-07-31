@@ -176,6 +176,17 @@ impl<'m> Vm<'m> {
             if noeta_value::safepoint_gc_pending() {
                 self.maybe_safepoint_gc(frames, regs);
             }
+            // **Cancellation poll at the frame transfer** (isolate-cancel), paired with the
+            // back-edge poll in `osr_backedge!` below: together they mean every path a worker
+            // isolate can take through bytecode — a call, a return, a loop — reaches a
+            // cancellation check, so a compute-bound isolate is genuinely cancellable rather than
+            // merely reported as such. A frame transfer is already a safe point by construction
+            // (see the GC poll above); unwinding from here releases every live register exactly as
+            // any other abort does. Costs one null test on a cached field outside a worker, where
+            // `cancel_flag` is `None`.
+            if self.cancel_requested() {
+                return Err(self.observe_cancel());
+            }
             // Re-read the module each frame transfer, NOT once per dispatch: a debug-console
             // fragment install ([`Vm::install_fragment`], tooling-unification T4) swaps
             // `self.module` to an extended snapshot mid-run, and the next frame must resolve
@@ -263,6 +274,15 @@ impl<'m> Vm<'m> {
                     // thread-local-bool read when idle.
                     if ($target as usize) <= pc && noeta_value::safepoint_gc_pending() {
                         self.maybe_safepoint_gc(&*frames, &*regs);
+                    }
+                    // Cancellation poll at the taken loop back-edge (isolate-cancel): the other
+                    // half of the placement (see the `'reload` poll above), so a worker isolate
+                    // spinning in a loop that never calls still reaches a cancellation check every
+                    // iteration. Outside a worker `cancel_flag` is `None` and this is one predicted
+                    // null test.
+                    if ($target as usize) <= pc && self.cancel_requested() {
+                        frames[top].pc = pc;
+                        return Err(self.observe_cancel());
                     }
                     #[cfg(feature = "jit")]
                     {
@@ -2700,6 +2720,18 @@ impl<'m> Vm<'m> {
                             // A cancelled handle awaited inside an `async fn` body would otherwise
                             // suspend forever on a `none`; fail loudly (Track A.8, E0056) instead —
                             // the same contract top-level `.await` (`drive_future`) enforces.
+                            // A real isolate that honored its cancellation request (isolate-cancel)
+                            // reads exactly like the cancelled handle below: the awaited work will
+                            // never produce a value, so `.await` is the wrong tool for it.
+                            Poll::Cancelled => {
+                                return Err(self.error(
+                                    DiagnosticCode::AwaitCancelled,
+                                    *span,
+                                    "cannot await a cancelled task; use `.join()` to observe the \
+                                     cancelled outcome"
+                                        .to_string(),
+                                ));
+                            }
                             Poll::Pending if self.handle_cancelled(future) => {
                                 return Err(self.error(
                                     DiagnosticCode::AwaitCancelled,

@@ -279,6 +279,18 @@ struct IsolateState {
     /// instead of the confusing "cannot find `x`" an ordinary unbound slot yields. Empty on the
     /// parent VM and whenever every global shipped.
     unshippable_globals: HashMap<u32, String>,
+    /// **Worker-side cancellation flag** (isolate-cancel): the `Arc<AtomicBool>` this worker's
+    /// parent sets from `h.cancel()`. The worker polls it at its **safepoints** — the dispatch
+    /// loop's frame transfers and taken loop back-edges, plus each scheduler round — and unwinds
+    /// when it is set. `None` on the parent VM and on every cooperative task's VM (a cooperative
+    /// task is cancelled by the scheduler's own `Task::cancelled` flag, since it is already
+    /// parked), so the poll is a never-taken, perfectly-predicted branch outside a worker.
+    cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Set when this worker observed its [`cancel_flag`](Self::cancel_flag) at a safepoint and
+    /// unwound. Distinguishes the resulting `Abort` from a genuine runtime error, so
+    /// [`run_isolate_worker`](crate::lifecycle::run_isolate_worker) ships
+    /// [`IsolateOutcome::Cancelled`] rather than a failure.
+    cancel_observed: bool,
 }
 
 /// The run's captured output (audit-1 finding 3): stdout, diagnostics, a deliberate
