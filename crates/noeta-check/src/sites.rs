@@ -153,11 +153,23 @@ pub struct Sites {
     /// call of a forwarding generic fn resolved, interned by structural equality. Lowering embeds
     /// it into the IR `Program` (and the VM `Module`), and a hidden call argument indexes it at
     /// runtime. A pure function of the program, like the other site maps.
+    ///
+    /// **Numbered per check run.** A fresh whole-program check numbers this table from zero in its
+    /// own discovery order, so the indices are meaningful only *together with the bundle that
+    /// produced them*. A LIVE session (the REPL, a hot swap) whose runtime values already hold
+    /// indices into an earlier table must therefore ABSORB this one by content rather than adopt it
+    /// — `noeta_compiler::SessionCompiler::absorb_type_args` does exactly that, merging on the same
+    /// dedup key this table is interned with and remapping [`Sites::hidden_arg_sites`] to match.
     pub type_arg_table: Vec<noeta_ext_abi::TypeArgInfo>,
     /// Call spans of **forwarding-generic** calls → the hidden type-argument slots the call must
     /// supply, in the callee's forwarding order (`Table(i)` = a concrete instantiation's table
     /// index; `Forward(j)` = pass the enclosing fn's own hidden slot `j` through). Lowering
     /// prepends the matching atoms to the call's arguments.
+    ///
+    /// The ONLY field of this bundle carrying a [`Sites::type_arg_table`] **index** — the `u32`s in
+    /// `dynamic_recipe_sites` / `dynamic_attr_sites`, like `Forward(j)` here, are per-fn hidden
+    /// SLOT ordinals, resolved through the slot's runtime value. So a session absorbing a fresh
+    /// table remaps this map and nothing else.
     pub hidden_arg_sites: HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
     /// `Expr::TypedModuleCall` spans whose turbofish is a FORWARDED type parameter → the enclosing
     /// fn's hidden slot index holding the instantiation's table entry. Lowering emits a dynamic

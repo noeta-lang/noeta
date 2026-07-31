@@ -639,6 +639,88 @@ impl SessionCompiler {
         self.extend_impl(entry, Some(sites))
     }
 
+    /// The session's live **type-argument table** (poly-values F2b) — the one
+    /// [`Module::type_args`] every snapshot carries. Exposed for the hot-swap install path and its
+    /// tests: the table's indices are held by LIVE runtime values, so a caller that wants to prove
+    /// prefix stability across an install reads it here before and after.
+    pub fn type_args(&self) -> &[noeta_ext_abi::TypeArgInfo] {
+        &self.mc.type_args
+    }
+
+    /// **Absorb** a freshly-checked type-argument table into the session's persistent one, by
+    /// CONTENT, and return `sites` with every table index rewritten into session space.
+    ///
+    /// The session's [`Module::type_args`] is addressed **by index** from live runtime values (a
+    /// hidden call argument is an `int` const that indexes it; `Op::RetagDynamic`,
+    /// `Op::TypeSlotName` and the dynamic `Op::TypedModuleCall` resolve through it), so — exactly
+    /// like protos, shapes and global slots — the table may only ever GROW: entry `i` must mean
+    /// the same instantiation for the whole life of the session. A REPL's session checker
+    /// accumulates its table append-only across entries, so a wholesale replace happened to be
+    /// index-stable there; a **hot swap of an edited file** re-checks the whole program from
+    /// scratch, and a fresh check numbers its table from zero in its own discovery order. Replacing
+    /// the session's table with that one would silently re-point every already-emitted hidden
+    /// argument at a *different* type — a wrong-type bug with no crash to notice it.
+    ///
+    /// So: merge on the checker's own dedup key (the whole [`noeta_ext_abi::TypeArgInfo`] — name
+    /// plus recipe — which is what `Checker`'s interner compares), keep every existing entry at its
+    /// existing index, append only genuinely new ones, and remap the incoming
+    /// [`Sites::hidden_arg_sites`] `Table(i)` atoms through `fresh index → session index` BEFORE
+    /// lowering, so the code this entry emits carries session-space indices.
+    ///
+    /// `HiddenArg::Forward(j)` is a per-fn hidden **slot** ordinal, not a table index, and is left
+    /// alone — as are `dynamic_recipe_sites` / `dynamic_attr_sites`, whose `u32`s are the same
+    /// kind of slot ordinal (the table lookup happens at run time, through the slot's value).
+    /// `hidden_arg_sites` is the only `Sites` field that carries a type-arg TABLE index.
+    ///
+    /// Borrowed back unchanged when the remap is the identity (the append-only REPL case, and any
+    /// re-absorption of an already-absorbed bundle — the operation is idempotent), so the common
+    /// path pays a scan and no clone.
+    pub fn absorb_type_args<'s>(&mut self, sites: &'s Sites) -> std::borrow::Cow<'s, Sites> {
+        let remap = self.merge_type_args(&sites.type_arg_table);
+        // Identity ⟺ the session table gained nothing AND every fresh entry sits at its own index;
+        // then the incoming bundle already speaks session space and needs no rewrite.
+        if self.mc.type_args.len() == sites.type_arg_table.len()
+            && remap.iter().enumerate().all(|(i, to)| *to == i as u32)
+        {
+            return std::borrow::Cow::Borrowed(sites);
+        }
+        let mut owned = sites.clone();
+        // Lowering embeds this verbatim as `Program::type_args` → `Module::type_args`; it must be
+        // the merged SUPERSET, not the fresh table, or the snapshot would shrink out from under
+        // indices older code still holds.
+        owned.type_arg_table = self.mc.type_args.clone();
+        for slots in owned.hidden_arg_sites.values_mut() {
+            for slot in slots.iter_mut() {
+                if let noeta_ext_abi::HiddenArg::Table(i) = slot
+                    && let Some(&to) = remap.get(*i as usize)
+                {
+                    *slot = noeta_ext_abi::HiddenArg::Table(to);
+                }
+            }
+        }
+        std::borrow::Cow::Owned(owned)
+    }
+
+    /// Merge `fresh` into the session's type-argument table by content, returning the remap
+    /// (`fresh index → session index`). An entry already present keeps its session index; a new one
+    /// appends at the end. Linear scans over a table that holds one entry per *distinct forwarded
+    /// instantiation in the program* — the same shape (and cost) as the checker's own interner and
+    /// [`ModuleCompiler::intern_type_repr`].
+    fn merge_type_args(&mut self, fresh: &[noeta_ext_abi::TypeArgInfo]) -> Vec<u32> {
+        fresh
+            .iter()
+            .map(
+                |info| match self.mc.type_args.iter().position(|e| e == info) {
+                    Some(i) => i as u32,
+                    None => {
+                        self.mc.type_args.push(info.clone());
+                        (self.mc.type_args.len() - 1) as u32
+                    }
+                },
+            )
+            .collect()
+    }
+
     fn extend_impl(
         &mut self,
         entry: &Program,
@@ -650,6 +732,14 @@ impl SessionCompiler {
         // edit must materialize the same native derive recipes the initial compile did.
         let hoisted = noeta_ir::hoist_impl_methods_with_registry(entry, Some(self.mc.registry));
         let entry: &Program = hoisted.as_ref().unwrap_or(entry);
+        // ABSORB the incoming type-argument table into the session's before anything lowers: the
+        // table is index-addressed by live values, so it may only grow, and a caller who checked
+        // the whole program afresh (a hot swap of an edited file) hands us a table numbered from
+        // zero in its own order. `absorb_type_args` merges by content and hands back the bundle
+        // with its `hidden_arg_sites` rewritten into session space — see its doc. Identity remap
+        // (the append-only REPL case) borrows straight back, so nothing is cloned.
+        let absorbed = sites.map(|s| self.absorb_type_args(s));
+        let sites: Option<&Sites> = absorbed.as_deref();
         // Checkerless lowering (matches the tree-walker `Session`) unless the caller supplied the
         // checker's bundle: then the SAME lowering the file pipeline runs, sites and all. The
         // conservative path's `insert_drops(_, None)` marks every value destructor-relevant;
@@ -694,10 +784,16 @@ impl SessionCompiler {
             // derive a recipe (and does not recognize `decode_typed` at all), so this is a checked-session
             // capability by construction.
             self.mc.deserialize_recipes = sites.deserialize_recipes.clone();
-            // The forwarding type-argument table (F2b): the session checker accumulates it across
-            // entries (indexes are append-only), so the lowered snapshot is cumulative and a
-            // wholesale replace stays index-stable.
-            self.mc.type_args = ir.type_args.clone();
+            // The forwarding type-argument table (F2b) is ALREADY the session's: `absorb_type_args`
+            // merged this bundle's entries into `mc.type_args` by content above and handed lowering
+            // the merged superset, so `ir.type_args` is that same table by construction. Asserted
+            // rather than re-assigned — a wholesale replace here is exactly the index-instability
+            // the absorption exists to prevent, and this pins the two ends together.
+            debug_assert_eq!(
+                self.mc.type_args, ir.type_args,
+                "the lowered type-argument table must be the session's merged one — a replace \
+                 would re-point live hidden arguments at different types"
+            );
         }
 
         // Register this entry's globals/types/methods into the persistent tables (all additive:
@@ -5337,5 +5433,232 @@ mod tests {
         assert_eq!(color.variants.len(), 2);
         assert_eq!(color.variants[1].name, "Rgb");
         assert_eq!(color.variants[1].fields, vec!["r".to_string()]);
+    }
+
+    // ---- Type-argument table absorption (`SessionCompiler::absorb_type_args`) ----
+    //
+    // `Module::type_args` is addressed BY INDEX from live runtime values (a forwarding call passes
+    // its entry's index as a hidden `int` argument), so the session's table may only ever grow with
+    // a stable prefix — the same invariant protos, shapes and global slots keep across a hot swap.
+    // A whole-program re-check (what an edited file produces) numbers its table from zero in its own
+    // discovery order, so the session must ABSORB it by content, not adopt it wholesale.
+
+    use super::{SessionCompiler, Sites, Span};
+    use noeta_ext_abi::{HiddenArg, TypeArgInfo};
+    use std::borrow::Cow;
+
+    /// A table entry named `name`. The merge's key is the whole [`TypeArgInfo`] — exactly the
+    /// checker's own interning key — so a distinct name is a distinct entry.
+    fn ta(name: &str) -> TypeArgInfo {
+        TypeArgInfo {
+            name: name.to_string(),
+            recipe: None,
+        }
+    }
+
+    fn ta_names(table: &[TypeArgInfo]) -> Vec<&str> {
+        table.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// The span keying call site `i` in a synthetic bundle.
+    fn call_span(i: u32) -> Span {
+        Span::new(i, i + 1)
+    }
+
+    /// A synthetic checker bundle: a type-argument table plus one hidden-argument call site per
+    /// entry of `calls`, keyed by [`call_span`].
+    fn ta_sites(table: &[&str], calls: &[Vec<HiddenArg>]) -> Sites {
+        Sites {
+            type_arg_table: table.iter().map(|n| ta(n)).collect(),
+            hidden_arg_sites: calls
+                .iter()
+                .enumerate()
+                .map(|(i, slots)| (call_span(i as u32), slots.clone()))
+                .collect(),
+            ..Sites::default()
+        }
+    }
+
+    /// The absorption's oracle: a remap may renumber, but it may never re-MEAN. Every `Table(i)`
+    /// of the fresh bundle must, after the remap, name the very same instantiation through the
+    /// merged table — and a `Forward(j)` (a per-fn hidden SLOT ordinal, not a table index) must
+    /// pass through untouched.
+    fn assert_meaning_preserved(fresh: &Sites, absorbed: &Sites) {
+        for (span, before) in &fresh.hidden_arg_sites {
+            let after = absorbed
+                .hidden_arg_sites
+                .get(span)
+                .expect("every call site survives the remap");
+            assert_eq!(before.len(), after.len(), "slot count is preserved");
+            for (b, a) in before.iter().zip(after) {
+                match (b, a) {
+                    (HiddenArg::Table(i), HiddenArg::Table(j)) => assert_eq!(
+                        fresh.type_arg_table[*i as usize], absorbed.type_arg_table[*j as usize],
+                        "remapped table index {j} must mean what fresh index {i} meant"
+                    ),
+                    (b, a) => {
+                        assert_eq!(b, a, "a `Forward` slot ordinal is not a table index")
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absorbing_a_fresh_type_arg_table_keeps_old_indices_meaning_the_same() {
+        let mut session = SessionCompiler::new();
+        // Entry 1 — the running program's table: [A, B].
+        let first = ta_sites(
+            &["A", "B"],
+            &[
+                vec![HiddenArg::Table(0)],
+                vec![HiddenArg::Table(1), HiddenArg::Forward(3)],
+            ],
+        );
+        let absorbed = session.absorb_type_args(&first);
+        // A virgin session adopts the initial table verbatim: identity remap, no clone.
+        assert!(matches!(absorbed, Cow::Borrowed(_)));
+        assert_eq!(ta_names(session.type_args()), ["A", "B"]);
+
+        // The swap: a FRESH whole-program check whose table is [B, C] — numbered from zero in its
+        // own order. Live values still hold session index 0 = A and 1 = B.
+        let fresh = ta_sites(
+            &["B", "C"],
+            &[
+                vec![HiddenArg::Table(0)],
+                vec![HiddenArg::Table(1), HiddenArg::Forward(3)],
+            ],
+        );
+        let absorbed = session.absorb_type_args(&fresh);
+        // A and B keep their indices; only the genuinely new C appends.
+        assert_eq!(ta_names(session.type_args()), ["A", "B", "C"]);
+        // The bundle lowering will see carries the merged SUPERSET, not the fresh table.
+        assert_eq!(ta_names(&absorbed.type_arg_table), ["A", "B", "C"]);
+        // Fresh 0 (B) → session 1; fresh 1 (C) → the appended 2. `Forward(3)` is untouched.
+        assert_eq!(
+            absorbed.hidden_arg_sites[&call_span(0)],
+            vec![HiddenArg::Table(1)]
+        );
+        assert_eq!(
+            absorbed.hidden_arg_sites[&call_span(1)],
+            vec![HiddenArg::Table(2), HiddenArg::Forward(3)]
+        );
+        assert_meaning_preserved(&fresh, &absorbed);
+    }
+
+    #[test]
+    fn a_permuted_fresh_type_arg_table_adds_no_entries() {
+        let mut session = SessionCompiler::new();
+        let first = ta_sites(
+            &["A", "B", "C"],
+            &[vec![
+                HiddenArg::Table(0),
+                HiddenArg::Table(1),
+                HiddenArg::Table(2),
+            ]],
+        );
+        session.absorb_type_args(&first);
+        assert_eq!(ta_names(session.type_args()), ["A", "B", "C"]);
+
+        // The same three instantiations, discovered in a different order by a fresh check: pure
+        // remap, not one new entry — the table must not grow on every swap of an unchanged program.
+        let permuted = ta_sites(
+            &["C", "A", "B"],
+            &[vec![
+                HiddenArg::Table(0),
+                HiddenArg::Table(1),
+                HiddenArg::Table(2),
+            ]],
+        );
+        let absorbed = session.absorb_type_args(&permuted);
+        assert_eq!(
+            session.type_args().len(),
+            3,
+            "a permutation appends nothing"
+        );
+        assert_eq!(ta_names(session.type_args()), ["A", "B", "C"]);
+        assert_eq!(
+            absorbed.hidden_arg_sites[&call_span(0)],
+            vec![
+                HiddenArg::Table(2),
+                HiddenArg::Table(0),
+                HiddenArg::Table(1)
+            ]
+        );
+        assert_meaning_preserved(&permuted, &absorbed);
+
+        // Idempotent: re-absorbing an already-absorbed bundle is the identity, so a caller who
+        // absorbs explicitly and then hands the result to `extend_checked` pays nothing twice.
+        let again = session.absorb_type_args(&absorbed);
+        assert!(matches!(again, Cow::Borrowed(_)));
+        assert_eq!(session.type_args().len(), 3);
+    }
+
+    /// Parse + check `src` as `file.noe` (always the same [`SourceId`] — a hot swap re-checks the
+    /// *same* file), asserting it is clean, and return the program with the checker's bundle.
+    fn parse_and_check(src: &str) -> (noeta_ast::Program, Sites) {
+        let source = Source::new(SourceId::FIRST, "file.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "must parse cleanly: {:?}",
+            parsed.diagnostics
+        );
+        let checked = noeta_check::check_all(&parsed.program);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "must check cleanly: {:?}",
+            checked.diagnostics
+        );
+        (parsed.program, checked.sites)
+    }
+
+    #[test]
+    fn a_rechecked_edit_absorbs_into_the_session_type_arg_table() {
+        // End-to-end through the real checker: `load<T>` forwards `T` into `json.try_parse::<T>`,
+        // so every instantiation interns a table entry and every call carries its index.
+        let decls = "use std.json\n\
+                     use std.json.JsonError\n\
+                     struct Order { id: int }\n\
+                     struct User { name: string }\n\
+                     struct Item { sku: string }\n\
+                     fn load<T>(text: string): Result<T, JsonError> {\n\
+                     \x20 return json.try_parse::<T>(text)\n\
+                     }\n";
+        let call = |ty: &str| {
+            format!("echo match load::<{ty}>(\"{{}}\") {{ Ok(v) => \"ok\", Err(e) => \"err\", }}\n")
+        };
+
+        // v1: Order first, then User → table [Order, User].
+        let (p1, s1) = parse_and_check(&format!("{decls}{}{}", call("Order"), call("User")));
+        let mut session = SessionCompiler::new();
+        let m1 = session.extend_checked(&p1, &s1).expect("v1 compiles");
+        assert_eq!(ta_names(&m1.type_args), ["Order", "User"]);
+
+        // v2 — the edited file, re-checked WHOLE from scratch: User first, then Order, then a new
+        // Item. Its own table is [User, Order, Item], numbered from zero in its own order.
+        let (p2, s2) = parse_and_check(&format!(
+            "{decls}{}{}{}",
+            call("User"),
+            call("Order"),
+            call("Item")
+        ));
+        assert_eq!(ta_names(&s2.type_arg_table), ["User", "Order", "Item"]);
+        let m2 = session.extend_checked(&p2, &s2).expect("v2 compiles");
+        // The session's table is a stable-prefix SUPERSET: index 0 still means Order, 1 still
+        // means User — the meanings live values already hold — and only Item appends.
+        assert_eq!(ta_names(&m2.type_args), ["Order", "User", "Item"]);
+        assert_eq!(m1.type_args, m2.type_args[..m1.type_args.len()]);
+
+        // …and the code v2 emitted indexes that session table, not its own: re-absorbing the same
+        // bundle (idempotent) exposes the remap the install used.
+        let absorbed = session.absorb_type_args(&s2);
+        assert_meaning_preserved(&s2, &absorbed);
+        assert_eq!(
+            ta_names(&absorbed.type_arg_table),
+            ["Order", "User", "Item"]
+        );
+        assert_eq!(session.type_args().len(), 3, "re-absorbing appends nothing");
     }
 }
