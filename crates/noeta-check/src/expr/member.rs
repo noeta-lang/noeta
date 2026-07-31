@@ -411,6 +411,22 @@ impl Checker {
         {
             return ret;
         }
+        // `@derive(Serialize<Json>)` synthesizes a structural `to_json(): string`, and it is the one
+        // derive-provided member with no entry anywhere else here: `BuiltinTrait::Serialize` has no
+        // `required_method` (its whole body is synthesized rather than written), so the trait table
+        // says the type serializes without saying what that gives it. Typed here rather than left
+        // `Unknown` for two reasons — `x.to_json().len()` should check like the `string` it is, and
+        // the closed-user-type guard reads a `Unknown` return as proof the member does not exist.
+        if let Type::Named(n, _) = recv
+            && name == "to_json"
+            && self
+                .symbols
+                .trait_impls
+                .get(n.as_str())
+                .is_some_and(|ts| ts.contains(&noeta_types::BuiltinTrait::Serialize))
+        {
+            return Type::String;
+        }
         if recv.defers_to_runtime() {
             return recv.clone();
         }
@@ -780,7 +796,7 @@ impl Checker {
         // time with E0005 — precisely the check-vs-run divergence the call-path guard was added to
         // close, reached through the one spelling it did not cover. `Named`/`dyn`/holes stay
         // lenient for the reasons documented on `closed_to_new_methods`.
-        if closed_to_new_methods(&recv) {
+        if closed_to_new_methods(&recv) || crate::expr::calls::user_type_is_closed(self, &recv) {
             let diag = self.error(
                 DiagnosticCode::TypeMismatch,
                 name_span,

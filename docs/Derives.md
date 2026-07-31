@@ -24,7 +24,12 @@ class Point {
 echo Point.new(1, 2) < Point.new(1, 3)   // true
 
 @derive(Serialize<Json>)
-class User { name: string  id: int  active: bool }
+class User {
+    name: string
+    id: int
+    active: bool
+    fn new(name: string, id: int, active: bool): User { return User { name: name, id: id, active: active } }
+}
 echo User.new("Ada", 7, true).to_json()  // {"name":"Ada","id":7,"active":true}
 ```
 
