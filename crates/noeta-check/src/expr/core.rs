@@ -2559,10 +2559,7 @@ impl Checker {
         ) {
             return None;
         }
-        if let Type::Named(p, args) = &target
-            && args.is_empty()
-            && self.coloring.type_params.contains_key(p)
-        {
+        if matches!(target, Type::Param(_)) {
             return None;
         }
         match scrut {

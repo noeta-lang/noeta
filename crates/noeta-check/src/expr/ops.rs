@@ -28,11 +28,8 @@ impl Checker {
             (false, true) if concrete(lt) => (rt, lt),
             _ => return,
         };
-        // A bare type parameter is erased and may instantiate to the container itself.
-        if let Type::Named(p, args) = other
-            && args.is_empty()
-            && self.coloring.type_params.contains_key(p)
-        {
+        // A type parameter is erased and may instantiate to the container itself.
+        if matches!(other, Type::Param(_)) {
             return;
         }
         let sym = if op == BinaryOp::Eq { "==" } else { "!=" };
