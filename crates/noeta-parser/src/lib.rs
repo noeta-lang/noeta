@@ -1573,7 +1573,13 @@ fn parse_inner(
         .into_iter()
         .map(|err| {
             let diag = rich_to_diag(ctx, err);
-            let specific = custom_reason(&diag.message).is_some();
+            // A reserved-word report ([`reserved_name_diag`]) is specific by the same standard: it
+            // is raised only after the rule has identified what the token *is* and why the grammar
+            // could not take it, not from an expected-vs-found set. It does not go through
+            // `custom_reason` because it carries a per-word message and help rather than a
+            // constant pair, so it is recognized by its catalog entry instead.
+            let specific =
+                custom_reason(&diag.message).is_some() || diag.code == DiagnosticCode::ReservedName;
             (diag, specific)
         })
         .collect();
@@ -1706,6 +1712,20 @@ const MAP_ENTRY_NEEDS_VALUE: &str =
 const TURBOFISH_NEEDS_A_CALL: &str =
     "a `::<...>` type argument list must be followed by the call it instantiates";
 
+/// The reason a statement carries when a **reserved word stands where a fresh binding's name
+/// belongs** — `type_name = 1`, `match = 1`. Same arrangement as [`MAP_ENTRY_NEEDS_VALUE`], with
+/// one difference: [`rich_to_diag`] recovers the offending word from the error's *span* rather
+/// than from the reason text, because the message names the word and the reason is a constant.
+///
+/// This position needs a rule of its own because it is the one binder whose failure does not
+/// surface at the name. Everywhere else — a parameter, a `for` variable, a field, a type name —
+/// the grammar is asking for an identifier at exactly that token, so the expected set names it and
+/// [`rich_to_diag`] can reclassify generically. A bare `name = value` has no leading keyword, so
+/// the reserved word instead starts an *expression* statement and the parse dies one token later,
+/// at the `=` (`` found `=` expected `::` ``) — a message about a token the writer did type, in a
+/// place they were not thinking about, that never mentions the name at all.
+const RESERVED_WORD_AS_BINDING: &str = "a binding's name may not be a reserved word";
+
 /// The catalog entry a parser-stage [`Rich::custom`] reason declares for itself, if it is one this
 /// module raises deliberately. A rule that matched a token and then rejected it on its own terms
 /// knows better than the generic expected-vs-found classifier what it is complaining about, so it
@@ -1732,9 +1752,41 @@ fn custom_reason(reason: &str) -> Option<(DiagnosticCode, Option<&'static str>)>
     }
 }
 
+/// A reserved word written where a **name** belongs (E0046).
+///
+/// Lives in the parser, not the checker, and could not live anywhere else: the checker is handed
+/// an AST, and there is no AST here — the parser refused the token, so no binder, no field and no
+/// declaration was ever built for the checker to rule on. Only the parser knows both halves of
+/// what happened, that the token it just rejected is a *word* the writer plausibly meant as a
+/// name, and that a name is what the grammar wanted there.
+///
+/// It shares E0046 with the checker's prelude rule ([`noeta_check`] rejects a binding named `Ok`
+/// or `panic`) because it is the same rule at a different stage: this name is spoken for, pick
+/// another. One code means a reader who has met one of them recognizes the other.
+fn reserved_name_diag(reserved: noeta_lexer::ReservedWord, span: Span) -> Diagnostic {
+    let noeta_lexer::ReservedWord { word, role } = reserved;
+    let mut diag = Diagnostic::error(
+        DiagnosticCode::ReservedName,
+        span,
+        format!(
+            "`{word}` cannot be used as a name — it is {}, reserved by the language so it means \
+             one thing everywhere it appears",
+            role.describe()
+        ),
+    );
+    // A short caret label: without one the renderer repeats the whole headline under the span, and
+    // this headline is a sentence long.
+    diag.label(span, format!("`{word}` is reserved"));
+    diag.help(format!("rename it to `{word}_`"));
+    diag
+}
+
 /// Map a chumsky [`Rich`] structural error onto the central diagnostic catalog.
 fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
     let span = ctx.to_span(*err.span());
+    // Captured before `map_token` erases the token: the reclassification below needs the *word*,
+    // and `describe()` only yields its rendering.
+    let found_reserved = err.found().and_then(|t| t.reserved_word());
     // Render `found`/`expected` via the human-facing token descriptions. The expected set is
     // rebuilt by hand with a SORTED alternative list: chumsky's own Display iterates its
     // internal set in an order that is not stable across builds, which made every pinned
@@ -1744,14 +1796,28 @@ fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
     // would stack chumsky's own quoting on top (twice, in 1.0.0-alpha.8).
     let err = err.map_token(|t| t.describe());
     let mut expected: Vec<String> = err.expected().map(pattern_text).collect();
+    expected.sort_unstable();
+    expected.dedup();
+    // A reserved word found where the grammar wanted an identifier. Reported as "this name is
+    // taken" rather than as chumsky's expected-vs-found, which names the one thing that is not the
+    // problem: `` found `type_name` expected … an identifier `` tells a reader their *syntax* is
+    // wrong, so they go looking at the punctuation instead of at the name.
+    //
+    // Keyed off the expected set rather than off each binder site, and deliberately: a parameter,
+    // a `mut` binding, a `for` variable, a closure parameter, a pattern binding, a field, a type
+    // name and a generic parameter all reach the same leaf (`just(T::Ident)`), so one rule here
+    // covers every one of them — and covers whatever binder is added next, for free.
+    if let Some(reserved) = found_reserved
+        && expected.iter().any(|e| e == T::Ident.describe())
+    {
+        return reserved_name_diag(reserved, span);
+    }
     // An empty alternative set means a labelled/custom reason rather than chumsky's own
     // expected-vs-found.
     let message = if expected.is_empty() {
         // chumsky's own rendering is already deterministic for these.
         err.to_string()
     } else {
-        expected.sort_unstable();
-        expected.dedup();
         let found = match err.found() {
             Some(d) => format!("found {d} "),
             None => "found end of input ".to_string(),
@@ -1766,6 +1832,13 @@ fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
         };
         format!("{found}expected {list}")
     };
+    // The bare-binding rule below raises this at the reserved word's own span, so the word is the
+    // source text under it — the reason itself stays a constant, like every other custom reason.
+    if message == RESERVED_WORD_AS_BINDING
+        && let Some(reserved) = noeta_lexer::ReservedWord::from_spelling(ctx.source.slice(span))
+    {
+        return reserved_name_diag(reserved, span);
+    }
     // A custom reason declares its own catalog entry; everything else is classified by whether
     // there was a token to be surprised by.
     let (code, help) = match custom_reason(&message) {
@@ -5343,6 +5416,42 @@ where
                 item
             });
 
+        // A reserved word standing where a fresh binding's name belongs — `type_name = 1`, or the
+        // annotated `type_name: string = "x"`. See [`RESERVED_WORD_AS_BINDING`] for why this one
+        // binder needs a rule of its own while every other one is handled generically.
+        //
+        // **Last** in the statement `choice`, so it only ever runs on input every real statement
+        // form has already refused — it can take nothing away from a program that parses. And it
+        // *recovers* rather than failing: binding the word as though it were a name lets the rest
+        // of the file parse, so a writer sees their remaining errors in the same pass instead of
+        // one per rebuild.
+        //
+        // The entry guard is a `filter`, deliberately not a `try_map` raising a custom reason: a
+        // custom reason is a *claim about what is wrong*, and this one would be a lie everywhere
+        // the rule simply does not apply — which is every statement in every correct program. It
+        // outranked the real error in an unrelated failing statement the first time it was written
+        // that way. A `filter`'s rejection contributes an empty expected set instead, so it merges
+        // into whatever the other alternatives already said and can never speak over them.
+        let reserved_binding = any()
+            .filter(|tok: &T| tok.reserved_word().is_some())
+            .map_with(|_, e| -> SimpleSpan { e.span() })
+            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then_ignore(just(T::Eq))
+            .then(expr.clone())
+            .then_ignore(stmt_terminator(ctx))
+            .validate(move |((word_span, ty), value), e, emitter| {
+                emitter.emit(Rich::custom(word_span, RESERVED_WORD_AS_BINDING));
+                let name_span = ctx.to_span(word_span);
+                Stmt::Binding {
+                    mut_decl: false,
+                    name: ctx.source.slice(name_span).to_string(),
+                    name_span,
+                    ty,
+                    value,
+                    span: ctx.to_span(e.span()),
+                }
+            });
+
         choice((
             echo,
             mut_binding,
@@ -5364,6 +5473,7 @@ where
             namespace_decl,
             use_decl,
             assign_or_expr,
+            reserved_binding,
         ))
         .boxed()
     })
@@ -6668,6 +6778,109 @@ mod tests {
         );
         assert!(custom_reason(&parsed.diagnostics[0].message).is_none());
         assert_eq!(parsed.diagnostics[1].message, MAP_ENTRY_NEEDS_VALUE);
+    }
+
+    /// Every binder position a user can write a name in reports a reserved word *as* a reserved
+    /// word (E0046), rather than as chumsky's `` found `type_name` expected … an identifier `` —
+    /// which names the one thing that is not the problem and sends the reader to check their
+    /// punctuation. One case per position the language has.
+    #[test]
+    fn a_reserved_word_in_a_binder_position_is_reported_as_reserved() {
+        for (label, src) in [
+            (
+                "parameter",
+                "fn look(type_name: string): string {\n  return 1\n}",
+            ),
+            ("closure parameter", "f = fn(type_name: int) => 1"),
+            ("plain binding", "type_name = 1"),
+            ("annotated binding", "type_name: int = 1"),
+            ("mut binding", "mut type_name = 1"),
+            ("for variable", "for type_name in [1] {\n  echo 1\n}"),
+            (
+                "for tuple variable",
+                "for (type_name, b) in [1] {\n  echo 1\n}",
+            ),
+            ("match binding", "match x {\n  type_name => echo 1,\n}"),
+            ("field", "struct S {\n  type_name: string\n}"),
+            ("type name", "struct type_name {\n  a: int\n}"),
+            ("enum variant", "enum E {\n  type_name\n}"),
+            (
+                "generic parameter",
+                "fn id<type_name>(x: int): int {\n  return x\n}",
+            ),
+            ("function name", "fn type_name(): int {\n  return 1\n}"),
+            (
+                "method name",
+                "class C {\n  a: int\n  fn type_name(): int { return 1 }\n}",
+            ),
+        ] {
+            let parsed = parse_str(src);
+            let found = parsed
+                .diagnostics
+                .iter()
+                .find(|d| d.code == DiagnosticCode::ReservedName)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no E0046 for a reserved word in {label} position: {:?}",
+                        parsed.diagnostics
+                    )
+                });
+            assert!(
+                found
+                    .message
+                    .contains("`type_name` cannot be used as a name")
+                    && found.message.contains("one of the reflection primitives"),
+                "{label}: {}",
+                found.message
+            );
+            assert_eq!(found.help.as_deref(), Some("rename it to `type_name_`"));
+        }
+    }
+
+    /// The role travels with the word: a grammar keyword and a boolean literal are not described as
+    /// reflection primitives just because they land in the same rule.
+    #[test]
+    fn a_reserved_words_role_is_named_in_the_message() {
+        let parsed = parse_str("fn look(match: string): string {\n  return 1\n}");
+        let d = parsed
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::ReservedName)
+            .expect("E0046");
+        assert!(
+            d.message.contains("a keyword of the grammar"),
+            "{}",
+            d.message
+        );
+    }
+
+    /// The bare-binding rule is last in the statement `choice`, so it can only ever fire where no
+    /// real statement form parsed. Programs that do parse are untouched.
+    #[test]
+    fn the_reserved_binding_rule_does_not_claim_a_valid_statement() {
+        for src in [
+            "x = 1",
+            "mut x = 1",
+            "x: int = 1",
+            "match x {\n  _ => echo 1,\n}",
+            "if x {\n  echo 1\n}",
+            "for x in [1] {\n  echo 1\n}",
+            "fn f(): int {\n  return 1\n}",
+            "use std.fs",
+            "x.await = 1",
+            "echo type_of(1)",
+            "echo type_name::<int>()",
+        ] {
+            let parsed = parse_str(src);
+            assert!(
+                parsed
+                    .diagnostics
+                    .iter()
+                    .all(|d| d.code != DiagnosticCode::ReservedName),
+                "`{src}` was wrongly flagged: {:?}",
+                parsed.diagnostics
+            );
+        }
     }
 
     #[test]

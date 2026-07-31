@@ -1,0 +1,6 @@
+// A `for` variable is a binder like any other.
+// expect: error E0046 at 4:5
+// expect: exit 1
+for type_name in [1, 2] {
+    echo 1
+}

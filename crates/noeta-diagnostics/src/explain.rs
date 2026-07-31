@@ -96,9 +96,9 @@ impl DiagnosticCode {
                 title: "reserved name",
                 group: "Names and scope",
                 severity: Severity::Error,
-                summary: "A declaration binds a reserved prelude name — `Ok`, `Err`, `some`, `none`, `panic`, `assert`.",
-                detail: "",
-                docs: "",
+                summary: "A name is already spoken for — a reserved word, or one of the prelude names `Ok`, `Err`, `some`, `none`, `panic`, `assert`.",
+                detail: "Three families are reserved: the grammar's keywords, the boolean literals `true`/`false`, and the reflection primitives (`type_name`, `params_of`, `construct`, and the rest). A reserved word is refused wherever a name is bound — a parameter, a binding, a field, a `for` variable, a type or its variants, a generic parameter — because the word has to mean one thing everywhere it appears. Rename the binder; the prelude names are refused for the same reason and shadow nothing.",
+                docs: "Syntax-Basics",
             },
             DiagnosticCode::ReservedTypeName => Explanation {
                 code: "E0049",

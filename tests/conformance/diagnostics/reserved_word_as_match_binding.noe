@@ -1,0 +1,9 @@
+// A match pattern's payload binding is a binder too — the expected set there admits literals and
+// `is` as well as an identifier, and a reserved word is still reported as a reserved name.
+// expect: error E0046 at 8:9
+// expect: exit 1
+enum E { A(int) }
+x = E.A(1)
+match x {
+    E.A(type_name) => echo 1,
+}

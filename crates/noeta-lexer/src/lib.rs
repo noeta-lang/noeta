@@ -646,6 +646,111 @@ impl TokenKind {
             TokenKind::LineComment => "`//`",
         }
     }
+
+    /// This token as a [`ReservedWord`] — `None` unless its spelling is identifier-shaped.
+    ///
+    /// A reserved word is the one class of token a user can write *by accident*: it looks exactly
+    /// like a name, so `fn look(type_name: string)` reads as a perfectly ordinary parameter until
+    /// the parser refuses it. Whoever reports that refusal needs to know two things this token
+    /// alone can answer — how the word is spelled, and what the language holds it back for.
+    ///
+    /// The spelling is **derived** from [`TokenKind::describe`] rather than restated: every
+    /// keyword's `describe` is its own source text in backticks, so a keyword added to the token
+    /// table is covered here the moment it is added. A second hand-written list would be a list to
+    /// forget.
+    pub fn reserved_word(self) -> Option<ReservedWord> {
+        let word = self.describe().strip_prefix('`')?.strip_suffix('`')?;
+        let mut chars = word.chars();
+        let head_ok = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        if !head_ok || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return None;
+        }
+        Some(ReservedWord {
+            word,
+            role: self.reserved_role(),
+        })
+    }
+
+    /// What the language reserves this word for. The two special families are closed sets, so the
+    /// wildcard is the right default rather than a 46-arm list: a *new* reserved word is a keyword
+    /// of the grammar unless it is deliberately one of the other two.
+    fn reserved_role(self) -> ReservedRole {
+        match self {
+            TokenKind::TrueKw | TokenKind::FalseKw => ReservedRole::BooleanLiteral,
+            TokenKind::AttributesOfKw
+            | TokenKind::TypeOfKw
+            | TokenKind::TypeNameKw
+            | TokenKind::FieldsOfKw
+            | TokenKind::TraitsOfKw
+            | TokenKind::FromBytesKw
+            | TokenKind::RolesOfKw
+            | TokenKind::ParamsOfKw
+            | TokenKind::ReturnsOfKw
+            | TokenKind::InvokeKw
+            | TokenKind::FieldSpecsOfKw
+            | TokenKind::VariantsOfKw
+            | TokenKind::ConstructKw => ReservedRole::Reflection,
+            _ => ReservedRole::Keyword,
+        }
+    }
+}
+
+/// What the language reserves a word for.
+///
+/// Held here rather than as an ad-hoc string at the reporting site because the *role* is the
+/// interesting half of the answer: "`type_name` is reserved" leaves a reader guessing, while
+/// "`type_name` is one of the reflection primitives" tells them both that the name is taken and
+/// which surface took it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservedRole {
+    /// A keyword of the core grammar — `fn`, `for`, `match`, `mut`, `struct`, `use`, …
+    Keyword,
+    /// One of the reflection primitives — `type_of`, `type_name`, `field_specs_of`, …. These are
+    /// keywords for a specific reason: each has a turbofish or by-name call form that a *user*
+    /// function of the same name would be indistinguishable from, so the name cannot be shared.
+    Reflection,
+    /// A boolean literal — `true`/`false`. Not a keyword so much as a value that happens to be
+    /// spelled with letters.
+    BooleanLiteral,
+}
+
+impl ReservedRole {
+    /// The role as a noun phrase, completing "`x` is …".
+    pub fn describe(self) -> &'static str {
+        match self {
+            ReservedRole::Keyword => "a keyword of the grammar",
+            ReservedRole::Reflection => "one of the reflection primitives",
+            ReservedRole::BooleanLiteral => "a boolean literal",
+        }
+    }
+}
+
+/// A word the lexer holds back: spelled like an identifier, so a user could plausibly have meant
+/// it as a name, but claimed by the language for something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReservedWord {
+    /// The spelling, exactly as it must be written (`type_name`).
+    pub word: &'static str,
+    /// What the language claims it for.
+    pub role: ReservedRole,
+}
+
+impl ReservedWord {
+    /// The reserved word a piece of source text spells, if any. Goes through the lexer itself, so
+    /// the answer can never disagree with what the lexer actually produces for that text — the
+    /// caller is typically holding a span, not a token.
+    pub fn from_spelling(text: &str) -> Option<ReservedWord> {
+        let mut lexer = TokenKind::lexer(text);
+        let kind = lexer.next()?.ok()?;
+        // The token has to be the *whole* text: `type_names` starts with a keyword match under a
+        // shorter-munch lexer, and a partial match is not the word.
+        if lexer.span() != (0..text.len()) || lexer.next().is_some() {
+            return None;
+        }
+        kind.reserved_word()
+    }
 }
 
 /// A token: its kind and where it sits in the source.
@@ -1486,6 +1591,105 @@ mod tests {
         let source = Source::new(SourceId::FIRST, "test.noe", text);
         let lexed = lex(&source);
         (source, lexed)
+    }
+
+    /// Every word the lexer holds back, with the role the diagnostic names it by. Written out in
+    /// full — this is the census the "a name is reserved" diagnostic speaks for, and a keyword
+    /// that silently joins or leaves the language should show up as a failure here rather than as
+    /// a message nobody notices went missing.
+    const RESERVED_WORDS: &[(&str, ReservedRole)] = &[
+        ("echo", ReservedRole::Keyword),
+        ("mut", ReservedRole::Keyword),
+        ("true", ReservedRole::BooleanLiteral),
+        ("false", ReservedRole::BooleanLiteral),
+        ("fn", ReservedRole::Keyword),
+        ("return", ReservedRole::Keyword),
+        ("yield", ReservedRole::Keyword),
+        ("async", ReservedRole::Keyword),
+        ("await", ReservedRole::Keyword),
+        ("concurrent", ReservedRole::Keyword),
+        ("spawn", ReservedRole::Keyword),
+        ("isolate", ReservedRole::Keyword),
+        ("if", ReservedRole::Keyword),
+        ("then", ReservedRole::Keyword),
+        ("else", ReservedRole::Keyword),
+        ("for", ReservedRole::Keyword),
+        ("while", ReservedRole::Keyword),
+        ("break", ReservedRole::Keyword),
+        ("continue", ReservedRole::Keyword),
+        ("in", ReservedRole::Keyword),
+        ("enum", ReservedRole::Keyword),
+        ("match", ReservedRole::Keyword),
+        ("struct", ReservedRole::Keyword),
+        ("type", ReservedRole::Keyword),
+        ("class", ReservedRole::Keyword),
+        ("destruct", ReservedRole::Keyword),
+        ("impl", ReservedRole::Keyword),
+        ("trait", ReservedRole::Keyword),
+        ("namespace", ReservedRole::Keyword),
+        ("use", ReservedRole::Keyword),
+        ("pub", ReservedRole::Keyword),
+        ("as", ReservedRole::Keyword),
+        ("is", ReservedRole::Keyword),
+        ("attributes_of", ReservedRole::Reflection),
+        ("type_of", ReservedRole::Reflection),
+        ("type_name", ReservedRole::Reflection),
+        ("fields_of", ReservedRole::Reflection),
+        ("traits_of", ReservedRole::Reflection),
+        ("from_bytes", ReservedRole::Reflection),
+        ("roles_of", ReservedRole::Reflection),
+        ("params_of", ReservedRole::Reflection),
+        ("returns_of", ReservedRole::Reflection),
+        ("invoke", ReservedRole::Reflection),
+        ("field_specs_of", ReservedRole::Reflection),
+        ("variants_of", ReservedRole::Reflection),
+        ("construct", ReservedRole::Reflection),
+    ];
+
+    /// Each census word round-trips: the lexer produces one token for it, that token reports
+    /// itself as a reserved word, and the spelling it reports back is the text that was lexed.
+    #[test]
+    fn every_reserved_word_round_trips() {
+        for (word, role) in RESERVED_WORDS {
+            let (_, lexed) = lex_str(word);
+            assert_eq!(
+                lexed.tokens.len(),
+                1,
+                "`{word}` lexed to more than one token"
+            );
+            let reserved = lexed.tokens[0]
+                .kind
+                .reserved_word()
+                .unwrap_or_else(|| panic!("`{word}` is not reported as a reserved word"));
+            assert_eq!(reserved.word, *word);
+            assert_eq!(reserved.role, *role, "`{word}` has the wrong role");
+            assert_eq!(ReservedWord::from_spelling(word), Some(reserved));
+        }
+    }
+
+    /// Nothing that is not a word is a reserved *word*: operators, literal classes, and plain
+    /// identifiers all report `None`, so a diagnostic keyed off this never fires on `,` or on a
+    /// name the user is perfectly entitled to.
+    #[test]
+    fn non_words_are_not_reserved_words() {
+        for kind in [
+            TokenKind::Ident,
+            TokenKind::IntLit,
+            TokenKind::StringLit,
+            TokenKind::Semicolon,
+            TokenKind::ColonColon,
+            TokenKind::FatArrow,
+            TokenKind::DotLBrace,
+        ] {
+            assert_eq!(kind.reserved_word(), None, "{kind:?}");
+        }
+        for text in ["type_names", "my_type_name", "x", "", "42", "for x", "for;"] {
+            assert_eq!(
+                ReservedWord::from_spelling(text),
+                None,
+                "{text:?} is not a reserved word"
+            );
+        }
     }
 
     /// Opt-in throughput check (F1): confirm that lexing comments as dropped tokens did not regress

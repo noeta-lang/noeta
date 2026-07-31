@@ -1,0 +1,8 @@
+// A bare `name = value` binding is the one binder whose failure does not surface at the name: with
+// no leading keyword, the reserved word starts an EXPRESSION statement and the parse dies a token
+// later, at the `=`. The parser carries a rule of its own for this position so the report still
+// lands on the name — and recovers, binding the word as written, so the rest of the file parses.
+// expect: error E0046 at 7:1
+// expect: exit 1
+type_name = 1
+echo 1
