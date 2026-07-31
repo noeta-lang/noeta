@@ -403,6 +403,114 @@ fn a_swapped_body_masks_fixed_width_arithmetic() {
     oracle(&app("v1"), &app("v2"), "echo wrapmul();");
 }
 
+/// **The role index survives a swap.** A `@role(Enum.Variant)` tag rides on the *attribute*
+/// declaration (`struct Page`), and the `(declaration, role)` binding is a **join** between the
+/// attribute manifest and those tags. The join used to be computed per fragment and then stored as
+/// if it were primary data: a fragment carrying only `fn renderHome` re-declared the manifest entry
+/// `renderHome → Page` while the tag `Page → WebRole.Controller` stayed behind in the unchanged
+/// `struct Page`, so `accumulate`'s purge dropped the old binding and the fragment's join produced
+/// nothing to replace it. `roles_of()` silently lost exactly the declaration the swap touched.
+#[test]
+fn a_swapped_declaration_keeps_the_role_its_unchanged_attribute_confers() {
+    let app = |tag: &str| {
+        format!(
+            "@semantic\n\
+             enum WebRole {{ Controller; }}\n\
+             @attribute(Function)\n\
+             @role(Semantic.EntryPoint)\n\
+             struct Route {{ path: string }}\n\
+             @attribute(Function)\n\
+             @role(WebRole.Controller)\n\
+             struct Page {{ path: string }}\n\
+             #[Route(\"/users\")]\n\
+             fn handleUsers(): int {{ return 1; }}\n\
+             #[Page(\"/\")]\n\
+             fn renderHome(): string {{ return \"{tag}\"; }}\n\
+             echo renderHome()\n"
+        )
+    };
+    oracle(
+        &app("v1"),
+        &app("v2"),
+        "for b in roles_of() { echo \"${b.target}=${b.role}\" }",
+    );
+}
+
+/// The same defect where it stops being silent: a program that *indexes* the role list aborts with
+/// E0016 after a swap that emptied it, where a cold start of the same version finishes. Same root
+/// cause as the query above — pinned separately because a vanishing binding and a vanishing program
+/// are not the same bug report, and only one of them would have been noticed.
+#[test]
+fn a_swapped_declarations_role_binding_is_still_indexable() {
+    let app = |tag: &str| {
+        format!(
+            "@attribute(Function)\n\
+             @role(Semantic.Sink)\n\
+             struct Drain {{ name: string }}\n\
+             #[Drain(\"out\")]\n\
+             fn run_me(): string {{ return \"{tag}\"; }}\n\
+             echo run_me()\n"
+        )
+    };
+    oracle(
+        &app("v1"),
+        &app("v2"),
+        "echo \"roles eq: ${roles_of()[0] == RoleBinding { target: \"run_me\", role: Semantic.Sink }}\"",
+    );
+}
+
+/// **The attribute manifest keeps declaration order across a swap.** `attributes_of::<T>()` hands
+/// back the manifest in source order, and corpus programs pin that order in stdout. `accumulate`
+/// purged a re-declared target's records and *appended* the fragment's — so swapping the body of
+/// the FIRST annotated declaration moved it behind the ones the fragment never touched, and an
+/// ordered listing came out permuted. Superseding a declaration is not the same as re-declaring it
+/// last.
+#[test]
+fn a_swapped_declaration_keeps_its_place_in_the_attribute_manifest() {
+    let app = |tag: &str| {
+        format!(
+            "@attribute\n\
+             struct Route {{ method: string }}\n\
+             #[Route(\"GET\")]\n\
+             fn greet(): string {{ return \"{tag}\"; }}\n\
+             class Api {{\n\
+             \x20   id: int\n\
+             \x20   #[Route(\"POST\")]\n\
+             \x20   fn list(): string {{ return \"[]\"; }}\n\
+             }}\n\
+             echo greet()\n"
+        )
+    };
+    oracle(
+        &app("v1"),
+        &app("v2"),
+        "for r in attributes_of::<Route>() { echo \"${r.target}=${r.value.method}\" }",
+    );
+}
+
+/// The parameter-keyed half of the same ordering rule: a callable's `callable#param` rows are
+/// purged and re-added as a group when its body swaps, so they must land back where the callable
+/// was declared — not after a later callable's rows.
+#[test]
+fn a_swapped_callables_parameter_attributes_keep_their_place() {
+    let app = |tag: &str| {
+        format!(
+            "@attribute(Param)\n\
+             struct Arg {{ help: string }}\n\
+             fn build(#[Arg(help: \"target triple\")] target: string): string {{ return \"{tag}\"; }}\n\
+             class Tools {{\n\
+             \x20   fn run(#[Arg(help: \"the command\")] cmd: string): string {{ return cmd }}\n\
+             }}\n\
+             echo build(\"x\")\n"
+        )
+    };
+    oracle(
+        &app("v1"),
+        &app("v2"),
+        "for a in attributes_of::<Arg>() { echo \"${a.target} -> ${a.value.help}\" }",
+    );
+}
+
 /// The **live-VM** half of H5, end to end through the mailbox the CLI actually uses: a deposit
 /// carrying its sites is drained at a scheduler tick and installed via `Vm::install_fragment` →
 /// `FragmentCompiler::extend_checked`. Same named-argument probe as above, so a checkerless install
