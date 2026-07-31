@@ -58,7 +58,8 @@ echo "wasi:http serve e2e: an unchanged http.serve program answered over real HT
 
 # --- Outbound (W4 follow-up): the handler proxies a real upstream through the platform's
 # wasi:http/outgoing-handler client. ---
-python3 -c "
+start_upstream() {
+  python3 -c "
 import http.server, threading, time
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -70,8 +71,24 @@ s = http.server.ThreadingHTTPServer(('127.0.0.1', 8916), H)
 threading.Thread(target=s.serve_forever, daemon=True).start()
 time.sleep(120)
 " &
-UPSTREAM_PID=$!
-sleep 0.5
+  UPSTREAM_PID=$!
+  for _ in $(seq 1 100); do
+    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:8916/data" && return 0
+    sleep 0.2
+  done
+  fail "the e2e's own upstream never came up on 127.0.0.1:8916"
+}
+stop_upstream() {
+  # `|| true`: an already-dead upstream must not take the script down under `set -e`.
+  [ -n "$UPSTREAM_PID" ] && kill "$UPSTREAM_PID" 2>/dev/null || true
+  UPSTREAM_PID=""
+  for _ in $(seq 1 50); do
+    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:8916/data" || return 0
+    sleep 0.2
+  done
+  fail "the e2e's own upstream never went down on 127.0.0.1:8916"
+}
+start_upstream
 
 cat > "$SCRATCH/proxy.noe" <<'NOE'
 use std.http.server
@@ -79,8 +96,10 @@ use std.http.client
 use std.http.{Request, Response}
 
 fn handle(req: Request): Response {
-    upstream = client.get("http://127.0.0.1:8916/data")?
-    return server.response(200, "edge proxied: ${upstream.body()}")
+    return match client.get("http://127.0.0.1:8916/data") {
+        Ok(upstream) => server.response(200, "edge proxied: ${upstream.body()}"),
+        Err(e) => server.response(502, "upstream unreachable: ${e.kind()}"),
+    }
 }
 
 server.serve(8080, handle)
@@ -94,13 +113,30 @@ for _ in $(seq 1 100); do
 done
 BODY=$(curl -s "http://$ADDR/go")
 [ "$BODY" = "edge proxied: 42 from upstream" ] || fail "unexpected proxy body: $BODY"
-kill "$SERVE_PID" 2>/dev/null; SERVE_PID=""
 echo "wasi:http outbound e2e: the handler proxied a real upstream through outgoing-handler ✓"
+
+# The failure half of the same call. The handler must answer a Response either way, so it
+# `match`es the client's `Result` — and that `Err` arm is only proven live if an outbound
+# failure actually reaches it. Kill the upstream and ask again: a 502 of the handler's own
+# wording means the platform's outgoing-handler surfaced a real `HttpError` into guest code.
+# The generic 500 "Internal Server Error" here would mean the opposite — an abort recovered by
+# `http.serve`, i.e. the failure never became a value the handler could see.
+stop_upstream
+DOWN_STATUS=$(curl -s -o /dev/null -w '%{http_code}' "http://$ADDR/go")
+DOWN_BODY=$(curl -s "http://$ADDR/go")
+[ "$DOWN_STATUS" = "502" ] || fail "unexpected status with the upstream down: $DOWN_STATUS (body: $DOWN_BODY)"
+case "$DOWN_BODY" in
+  "upstream unreachable: "*) ;;
+  *) fail "unexpected body with the upstream down: $DOWN_BODY" ;;
+esac
+kill "$SERVE_PID" 2>/dev/null; SERVE_PID=""
+echo "wasi:http outbound failure e2e: a dead upstream became an HttpError the handler answered 502 for ✓"
 
 # --- Second engine (hosted-platform proof): the same artifacts under Spin, the runtime the
 # Spin-class edge clouds host. Optional — runs when `spin` is on PATH, skips loudly otherwise
 # (the wasmtime legs above are the required gate). ---
 if command -v spin > /dev/null 2>&1; then
+  start_upstream  # the failure leg above took it down; Spin proxies the success path
   cat > "$SCRATCH/spin.toml" <<EOF
 spin_manifest_version = 2
 
