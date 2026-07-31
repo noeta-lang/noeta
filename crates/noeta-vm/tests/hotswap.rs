@@ -448,7 +448,7 @@ fn a_mailbox_deposit_installs_the_fragment_with_its_sites() {
         new_checked.diagnostics
     );
     let mailbox: HotSwapMailbox = std::sync::Arc::new(HotChannel::default());
-    mailbox.plans.lock().unwrap().push(noeta_vm::HotFragment {
+    mailbox.deposit(noeta_vm::HotFragment {
         fragment: plan.fragment,
         rerun_top_level: plan.rerun_top_level,
         added: plan.added,
@@ -559,7 +559,7 @@ fn a_swap_lands_under_a_live_force_jit_engine() {
     // VM only the applied-swap payload, mirroring `noeta_cli::watch`'s deposit — the gate's own
     // whole-program sites included (H5).
     let new_checked = noeta_check::check_all(&parse(&v2));
-    mailbox.plans.lock().unwrap().push(noeta_vm::HotFragment {
+    mailbox.deposit(noeta_vm::HotFragment {
         fragment: plan.fragment,
         rerun_top_level: plan.rerun_top_level,
         added: plan.added,
@@ -970,5 +970,178 @@ fn residency_returns_to_baseline_across_rerunning_swaps_with_reactivity() {
         noeta_value::live_count(),
         before,
         "teardown after re-running swap churn returns residency to baseline"
+    );
+}
+
+// ------------------------------------------- broadcast-queue retention (server-hmr H5 retention)
+
+/// The versions the two retention tests below swap through: one function body, one distinct tag
+/// each. `probe`'s await is the scheduler tick the drain happens at, so the second echo reports
+/// whatever the fleet installed.
+fn tagged(tag: usize) -> String {
+    format!(
+        "use std.task.{{sleep, all}}\n\
+         fn f(): string {{ return \"v{tag}\" }}\n\
+         async fn probe(): string {{\n\
+         \x20   sleep(1).await\n\
+         \x20   return f()\n\
+         }}\n\
+         echo f()\n\
+         results = all([probe()])\n\
+         echo results[0]\n"
+    )
+}
+
+/// Deposit the `generation` → `generation + 1` body edit exactly as the watcher does — the swappable plan plus the
+/// whole-program `Sites` of the check that admitted it — and hand back a `Weak` on that bundle, so a
+/// caller can observe its real liveness rather than the queue's opinion of it.
+fn deposit_edit(
+    mailbox: &noeta_vm::HotSwapMailbox,
+    generation: usize,
+) -> std::sync::Weak<noeta_compiler::Sites> {
+    let (old, new) = (tagged(generation), tagged(generation + 1));
+    let SwapDiff::Swap(plan) = verdict(&old, &new) else {
+        panic!("a body edit must be swappable");
+    };
+    let checked = noeta_check::check_all(&parse(&new));
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let sites = std::sync::Arc::new(checked.sites);
+    let weak = std::sync::Arc::downgrade(&sites);
+    mailbox.deposit(noeta_vm::HotFragment {
+        fragment: plan.fragment,
+        rerun_top_level: plan.rerun_top_level,
+        added: plan.added,
+        changed: plan.changed,
+        sites: Some(sites),
+    });
+    weak
+}
+
+/// Run one hot worker isolate over `mailbox` from the v1 baseline: its own compile, its own
+/// session, its own cursor on the shared queue — what `serve_parallel_hot` spawns per core.
+fn run_hot_worker(mailbox: &noeta_vm::HotSwapMailbox) -> noeta_vm::RunResult {
+    let program = parse(&tagged(1));
+    let checked = noeta_check::check_all(&program);
+    let (module, compiler) =
+        noeta_compiler::compile_with_sites_session(&program, checked.sites, false, false)
+            .expect("compiles");
+    let (result, trace) = noeta_vm::VmBackend::new().run_module_hot(
+        &module,
+        compiler,
+        Box::new(noeta_stdlib::SandboxHost::new()),
+        Box::new(noeta_stdlib::SandboxExecutor::new()),
+        std::sync::Arc::clone(mailbox),
+    );
+    assert!(trace.is_empty(), "no abort across the swaps: {trace:?}");
+    result
+}
+
+/// **A deposit's payload is reclaimed once — and only once — every worker has installed it.**
+///
+/// The queue is append-only and a `--parallel N` fleet drains it by N independent cursors, so
+/// nothing may be dropped until the slowest worker has passed it. Since H5 made each deposit carry
+/// the whole-program `Sites` of the check that admitted it, "when the process exits" stopped being
+/// an acceptable answer: measured on a 293 KB app, that bundle is 204 KiB against 14 KiB for the
+/// one-function fragment beside it, and it scales with the PROGRAM where the fragment scales with
+/// the EDIT. A day of saves would retain hundreds of MB of superseded site maps.
+///
+/// This drives the real path — `HotChannel::deposit` from the watcher's side, `Vm::apply_pending_hotswap`
+/// → `HotChannel::drain` → `Vm::install_fragment` from each worker's — with a three-consumer channel
+/// and three real hot VMs, and pins both directions at each step:
+///
+/// * after one and after two workers, all `N` plans are still resident and every `Sites` bundle is
+///   still reachable — a worker that has not drained cannot lose a swap;
+/// * after the third, residency is zero and every bundle has actually been *freed*, asserted through
+///   `Weak` handles to the deposited `Arc`s rather than through the queue's own bookkeeping.
+///
+/// The workers run in sequence rather than concurrently: the cursor arithmetic is identical (the
+/// queue serializes either way) and the frontier then moves deterministically. Retirement
+/// deliberately does not collect, so a queue that only shrank at teardown would fail the middle
+/// assertions instead of passing this test by accident. The concurrent fleet is covered by
+/// `noeta-cli`'s `parallel_hot` integration test.
+#[test]
+fn a_deposited_plan_is_reclaimed_when_the_last_worker_has_installed_it() {
+    const WORKERS: usize = 3;
+    const DEPOSITS: usize = 6;
+
+    noeta_stdlib::registry::default_seeded();
+    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(noeta_vm::HotChannel::new(WORKERS));
+    let bundles: Vec<std::sync::Weak<noeta_compiler::Sites>> = (1..=DEPOSITS)
+        .map(|generation| deposit_edit(&mailbox, generation))
+        .collect();
+    assert_eq!(mailbox.deposited(), DEPOSITS);
+    assert_eq!(mailbox.resident_plans(), DEPOSITS, "nothing drained yet");
+
+    let live = |bundles: &[std::sync::Weak<noeta_compiler::Sites>]| {
+        bundles.iter().filter(|w| w.upgrade().is_some()).count()
+    };
+
+    for worker in 1..=WORKERS {
+        let result = run_hot_worker(&mailbox);
+        assert_eq!(
+            result.stdout,
+            format!("v1\nv{}\n", DEPOSITS + 1),
+            "worker {worker} drains the whole queue at its tick and ends on the last deposit"
+        );
+        // The generation numbering is untouched by reclamation: index IS the generation, the queue
+        // never shifts — only a passed plan's payload is released out of its slot.
+        assert_eq!(mailbox.deposited(), DEPOSITS);
+        if worker < WORKERS {
+            assert_eq!(
+                mailbox.resident_plans(),
+                DEPOSITS,
+                "worker {worker} of {WORKERS} has drained, but the rest have not — nothing may be \
+                 dropped while a consumer could still need it"
+            );
+            assert_eq!(
+                live(&bundles),
+                DEPOSITS,
+                "every whole-program `Sites` bundle is still reachable after worker {worker}"
+            );
+        }
+    }
+    assert_eq!(
+        mailbox.resident_plans(),
+        0,
+        "every worker has installed every deposit — the queue holds no plan payloads, so an \
+         editing session costs O(1) in bundles, not O(saves x program size)"
+    );
+    assert_eq!(
+        live(&bundles),
+        0,
+        "and the bundles are actually freed, not merely unreferenced by the queue"
+    );
+    assert_eq!(
+        mailbox.deposited(),
+        DEPOSITS,
+        "generation = index survives reclamation"
+    );
+}
+
+/// The negative half, isolated: a **declared consumer that never registers** — a worker still
+/// compiling its session when the first edit lands — holds the whole queue back. The fleet size is
+/// declared at `HotChannel::new` and an unclaimed cursor sits at generation 0, so reclamation cannot
+/// begin before every worker has armed. Without that gate a fast worker's drain would tombstone
+/// plans the slow one has never seen, and it would serve a program missing swaps.
+#[test]
+fn an_unregistered_consumer_holds_the_whole_queue() {
+    noeta_stdlib::registry::default_seeded();
+    // Two workers declared; only one ever runs.
+    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(noeta_vm::HotChannel::new(2));
+    let bundle = deposit_edit(&mailbox, 1);
+
+    let result = run_hot_worker(&mailbox);
+    assert_eq!(
+        result.stdout, "v1\nv2\n",
+        "the one live worker did install it"
+    );
+    assert_eq!(
+        mailbox.resident_plans(),
+        1,
+        "the second declared worker has not drained — the plan stays"
+    );
+    assert!(
+        bundle.upgrade().is_some(),
+        "and its `Sites` bundle stays with it"
     );
 }

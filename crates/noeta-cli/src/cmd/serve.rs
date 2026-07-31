@@ -587,7 +587,10 @@ pub(crate) fn serve_parallel_hot(
     addr: &str,
 ) -> u8 {
     let _ = sources;
-    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(noeta_vm::HotChannel::default());
+    // One consumer per worker isolate: the queue reclaims a deposited plan (its fragment AST and
+    // its whole-program `Sites` bundle) only once ALL of them have installed it, so a worker still
+    // compiling its session below — or parked mid-request — cannot lose a swap.
+    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(noeta_vm::HotChannel::new(workers));
     let wake = std::sync::Arc::new(noeta_host_real::Notify::new());
     watch::spawn_hot_watcher(
         entry_path.to_path_buf(),

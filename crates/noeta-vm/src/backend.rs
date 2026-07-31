@@ -216,7 +216,13 @@ impl VmBackend {
                 stop_generation: 0,
             });
         }
-        vm.hot_mailbox = opts.hot_mailbox;
+        // Claim this VM's consumer cursor before the run can drain (server-hmr H5 retention): the
+        // channel reclaims a plan's payload only once every declared consumer has passed it, so a
+        // worker still arming here holds the prefix back rather than losing a swap.
+        vm.hot_mailbox = opts.hot_mailbox.map(|mailbox| {
+            let slot = mailbox.register();
+            crate::hotswap::HotConsumer { mailbox, slot }
+        });
         // The isolate module `Arc` doubles as the hot tier's module handle below, saving the
         // `module.clone()` when a parallel run arms the JIT service.
         #[cfg(feature = "jit")]
@@ -251,6 +257,11 @@ impl VmBackend {
             vm.tier1.jit_drain_at_exit = true;
         }
         let result = run_and_teardown(&mut vm, opts.collector);
+        // This consumer is done: release the prefix it was holding back, so a worker that exits
+        // (or panics its way out of the fleet) cannot pin the queue for the rest of the session.
+        if let Some(consumer) = &vm.hot_mailbox {
+            consumer.mailbox.retire(consumer.slot);
+        }
         let trace = std::mem::take(&mut vm.out.abort_trace);
         let profiler = vm.profiler.take();
         // Report before stats: assembling the report consumes the service's parked final

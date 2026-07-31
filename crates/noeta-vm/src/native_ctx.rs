@@ -894,7 +894,7 @@ impl noeta_stdlib::HotReload for VmCtx<'_, '_> {
         self.vm
             .hot_mailbox
             .as_ref()
-            .and_then(|m| m.error.lock().ok().and_then(|mut e| e.take()))
+            .and_then(|c| c.mailbox.error.lock().ok().and_then(|mut e| e.take()))
     }
 }
 
