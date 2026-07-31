@@ -633,7 +633,9 @@ mod tests {
     fn top_level_tier_annotation_canonicalizes_to_directive_above() {
         // A single-fn tier annotation — same-line (`@test fn …`) or already directive-above —
         // formats to the directive on its OWN LINE above the declaration, the same shape a
-        // method's directive takes (no wrapping braces). A multi-item block keeps its braces.
+        // method's directive takes (no wrapping braces). A *block* keeps its braces, whether it
+        // holds one item or several: the two forms are distinct in the AST (`TierBlock::attached`)
+        // and the checker judges them differently, so fmt prints back the one that was written.
         let same_line = "@test fn t(): void { assert(true, \"ok\") }\necho 1\n";
         let out = fmt(same_line).unwrap();
         assert!(out.starts_with("@test\nfn t(): void {"), "got:\n{out}");
@@ -651,9 +653,14 @@ mod tests {
             "got:\n{out}"
         );
 
-        // Grouping braces are for grouping: several items keep the block form.
+        // Braces are the author's: a block keeps the block form.
         let block = "@test {\n    fn a(): void { assert(true, \"a\") }\n    fn b(): void { assert(true, \"b\") }\n}\necho 1\n";
         let out = fmt(block).unwrap();
+        assert!(out.starts_with("@test {"), "got:\n{out}");
+
+        // Including a one-item one — collapsing it would flip `TierBlock::attached`.
+        let one = "@test {\n    fn a(): void { assert(true, \"a\") }\n}\necho 1\n";
+        let out = fmt(one).unwrap();
         assert!(out.starts_with("@test {"), "got:\n{out}");
     }
 
@@ -1580,6 +1587,91 @@ s = #{
 ";
         let out = fmt(src).unwrap();
         assert_eq!(out, src, "fmt moved a comment out of a set literal");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// A comment written inside a **declaration body** stays inside it.
+    ///
+    /// The third of the family. A trait body and an `impl` body printed their members with a plain
+    /// `Doc::join` and no comment handling at all, so a comment inside either was claimed by nobody
+    /// at that level: the trait's fell out past the closing brace and reattached to whatever
+    /// followed the trait, and the `impl`'s was swallowed by the first nested region to run — the
+    /// method's own body, one level deeper than it was written. Both are idempotent and
+    /// comment-complete, so neither corpus property could see them.
+    #[test]
+    fn a_comment_inside_a_declaration_body_stays_inside_it() {
+        let src = "\
+pub trait Greets {
+    // above an associated type
+    type Out;
+
+    // above a required signature
+    fn hi(): string
+
+    // above a defaulted method
+    fn bye(): string {
+        // and inside its body
+        return \"bye\"
+    }
+}
+
+struct P {
+    n: int
+}
+
+impl Greets for P {
+    // above an associated-type binding
+    type Out = string
+
+    // above the first method
+    fn hi(): string {
+        return \"hi\"
+    }
+
+    // above the second method
+    fn bye(): string {
+        return \"bye\"
+    }
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a declaration body");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// A `@<tier>` block the author **braced** keeps its braces, and its comments stay inside them.
+    ///
+    /// A one-`fn` block used to collapse to the annotation form (`@test fn …`). That is not a
+    /// cosmetic resugar: the parser records which form was written in `TierBlock::attached`, and the
+    /// checker site-checks (E0054) only the attached one — so the collapse can invent an error the
+    /// author's source does not have. The safety gate compares the `Pretty` form, which does not
+    /// print `attached`, so it never saw the flip. The comments went with it, into the wrapped fn's
+    /// body.
+    #[test]
+    fn a_braced_tier_block_keeps_its_braces_and_its_comments() {
+        let src = "\
+@test {
+    // inside the tier block
+    fn t(): void {
+        assert(true, \"ok\")
+    }
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt restructured a braced tier block");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+
+        // The annotation form still canonicalizes to the directive above the declaration, and a
+        // comment written between the two stays between them.
+        let annotated = "\
+@test
+// why this test exists
+fn t(): void {
+    assert(true, \"ok\")
+}
+";
+        let out = fmt(annotated).unwrap();
+        assert_eq!(out, annotated, "fmt moved a tier annotation's comment");
         assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
     }
 }
