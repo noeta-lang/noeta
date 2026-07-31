@@ -391,9 +391,13 @@ impl Builder {
             Some(reg) => noeta_check::check_all_with_registry(&program, reg),
             None => noeta_check::check_all(&program),
         };
-        if !checked.diagnostics.is_empty() {
+        // Errors only. A warning describes a program that loads and runs perfectly well; failing
+        // the host's `load` over one would make every advisory lint a breaking change for every
+        // embedder. The messages are kept on the session instead (`Session::warnings`).
+        if noeta_diagnostics::has_errors(&checked.diagnostics) {
             return Err(Error::Check(render_all(source, &checked.diagnostics)));
         }
+        let warnings = render_all(source, &checked.diagnostics);
         let (module, compiler) = match registry {
             Some(reg) => noeta_compiler::compile_with_sites_session_with_registry(
                 &program,
@@ -430,6 +434,7 @@ impl Builder {
             source: source.to_string(),
             stdout: out.stdout,
             registry,
+            warnings,
         })
     }
 }
@@ -448,6 +453,10 @@ pub struct Session {
     /// registry the session type-checked and runs under, not the process-global default.
     /// `None` ⇒ the default registry.
     registry: Option<&'static noeta_stdlib::registry::Registry>,
+    /// The advisory diagnostics the loaded source produced (refreshed by each accepted
+    /// [`hot_swap`](Session::hot_swap)). Held rather than dropped: a warning must not fail a load,
+    /// but the host still has to be able to see it — see [`Session::warnings`].
+    warnings: Vec<String>,
 }
 
 impl Session {
@@ -459,6 +468,13 @@ impl Session {
     /// Configure a session (host world) before loading.
     pub fn builder() -> Builder {
         Builder::default()
+    }
+
+    /// The advisory diagnostics the currently-loaded source produced — warnings, which never fail a
+    /// load or a swap. A host that wants to surface them (a log line, an editor gutter) reads them
+    /// here; ignoring them is also a valid choice, which is exactly why they are not an `Err`.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Call the top-level function `name` with `args`, returning its result. The session's state
@@ -516,9 +532,10 @@ impl Session {
             Some(reg) => noeta_check::check_all_with_registry(&new_program, reg),
             None => noeta_check::check_all(&new_program),
         };
-        if !checked.diagnostics.is_empty() {
+        if noeta_diagnostics::has_errors(&checked.diagnostics) {
             return Err(Error::Check(render_all(new_source, &checked.diagnostics)));
         }
+        self.warnings = render_all(new_source, &checked.diagnostics);
         match diff_programs(&old_program, &self.source, &new_program, new_source) {
             SwapDiff::Unchanged => {
                 self.source = new_source.to_string();
