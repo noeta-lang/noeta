@@ -788,8 +788,8 @@ fn test_setup_warns_when_a_dropped_statement_writes_a_captured_binding() {
 fn a_warning_does_not_fail_the_suite_and_is_reported_once() {
     let file = temp_program(
         "test_warning_does_not_block",
-        "a: i32 = 5\n\
-         echo \"is i32 -> ${a is i32}\"\n\
+        "fn erased(x: dyn): bool { return x is i32 }\n\
+         echo \"is i32 -> ${erased(5)}\"\n\
          @test {\n\
              fn adds(): void { assert(1 + 1 == 2); }\n\
              fn also_adds(): void { assert(2 + 2 == 4); }\n\
