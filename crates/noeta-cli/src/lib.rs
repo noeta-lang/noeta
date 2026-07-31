@@ -1599,8 +1599,10 @@ pub(crate) fn run_declared_tier(
     activated: noeta_check::Activated,
     tier: noeta_check::DeclaredTier,
 ) -> u8 {
-    if !activated.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+    // Report, then gate on errors only: a warning inside a tier's blocks is advisory, exactly as it
+    // is in ordinary code, and must not stop the tier's runner.
+    emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+    if noeta_diagnostics::has_errors(&activated.diagnostics) {
         return 1;
     }
     // An expression tier has no runner semantics — its blocks are expressions in ordinary code,
@@ -1710,8 +1712,8 @@ pub(crate) fn run_declared_tier(
         ..noeta_check::CheckOptions::default()
     };
     let checked = context::check_under(&program, &opts);
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+    emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
     match execute_real_host(&program, &checked, std::env::args().collect(), true) {

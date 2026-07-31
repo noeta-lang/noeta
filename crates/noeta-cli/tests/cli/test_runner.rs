@@ -779,3 +779,32 @@ fn test_setup_warns_when_a_dropped_statement_writes_a_captured_binding() {
                 .and(predicate::str::contains("`sees_the_loop`")),
         );
 }
+
+/// A **warning** in the file under test does not fail the suite — it is reported once and the tests
+/// run. The runner used to gate on "any diagnostic", so one advisory lint anywhere in the file made
+/// every test in it unrunnable while reporting a compile failure; and because the per-case programs
+/// re-check the same source, a naive fix would repeat the warning once per test.
+#[test]
+fn a_warning_does_not_fail_the_suite_and_is_reported_once() {
+    let file = temp_program(
+        "test_warning_does_not_block",
+        "a: i32 = 5\n\
+         echo \"is i32 -> ${a is i32}\"\n\
+         @test {\n\
+             fn adds(): void { assert(1 + 1 == 2); }\n\
+             fn also_adds(): void { assert(2 + 2 == 4); }\n\
+         }\n",
+    );
+    let out = lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 passed, 0 failed, 2 total"));
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert_eq!(
+        stderr.matches("[E0063]").count(),
+        1,
+        "the warning is reported exactly once, not once per test case:\n{stderr}"
+    );
+}

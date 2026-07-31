@@ -209,7 +209,9 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
     // The summary goes to stderr, as `check`'s does, so it never contaminates the source on stdout.
     // "No expansions" is stated rather than left as silence: an empty stdout is also what a broken
     // invocation produces, and the difference matters to whoever is debugging a hook.
-    let errors = diags.len();
+    // Count what the exit code actually claims: *errors*. Every load diagnostic is one today, but
+    // spelling it as `diags.len()` is how "a warning refuses to proceed" gets reintroduced.
+    let errors = diags.values().filter(|(_, d)| d.is_error()).count();
     if expansions.is_empty() {
         eprintln!("no directive expansions");
     } else {
