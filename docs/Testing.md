@@ -195,16 +195,28 @@ The deadline is **wall clock**, and it counts the time a test spends waiting for
 
 ### What the runner can and cannot do to a test that overruns
 
-The runner **stops waiting** for an overrunning test. It does not stop the test.
+When the deadline expires the runner **asks the test to stop**, waits a one-second grace for it to actually stop, and abandons it only if that grace expires. The report is written either way, and the rest of the suite runs either way — that half never depended on the test cooperating.
 
-When the deadline expires the runner reports the timeout and moves on to the next case, and the overrunning test is abandoned where it stands — it keeps running, on its own thread, until the process exits. That is a real cost and worth stating plainly: a test abandoned mid-spin keeps burning a core for the rest of the run, and everything its isolate owns (its heap, its runtime, its open files and sockets) is held until the process ends. It is still the right trade by a wide margin: a leaked thread that lets the suite finish and *name* the culprit beats a tidy suite that never returns.
+Almost every overrunning test stops. A test that is *running* — spinning in a loop, recursing, grinding through work — reaches a safepoint within an iteration, unwinds from there, and tears its isolate down exactly as a finished test does: its destructors run, its heap goes back to zero, and anything it spawned is cancelled and joined with it. Its thread is then joined, so nothing is left behind at all. Two things follow that are worth knowing:
 
-Two consequences to know about:
+- **A stopped test's cleanup really runs.** If your test holds something with a `destruct`, that `destruct` fires on the way out. A test that overruns is not a test whose cleanup is skipped.
+- **It costs the run nothing.** No leaked thread, no core burning for the rest of the suite, no held files or sockets.
 
-- **A timed-out test reports no captured output.** Its isolate is still running, so there is nothing complete to read. (Separately, a real isolate's output buffers do not currently reach the parent's result at all — so this is not the only place output goes missing under `noeta test`.)
-- **The process still exits promptly.** The abandoned threads are detached, so neither the worker pool nor the runner's own teardown waits on them.
+One class cannot be stopped: **a test blocked inside a native call** — a socket read, a pipe read with no writer, a subprocess wait. That thread is not executing Noeta, so no safepoint comes around and the request cannot land. Its thread is abandoned, it keeps running until the process exits, and everything its isolate owns is held until then. The report says so explicitly rather than leaving you to guess, because it changes what you do about it: the fix is a deadline on the *operation* — the read's own timeout — not a bigger bound on the test around it.
 
-The reason the runner cannot do better today is a defect, not a law: cancelling a running isolate reports `Err(Cancelled)` to the joiner while the isolate itself runs to completion. That is being fixed. Even once it is, one class remains genuinely unbounded — **a test blocked inside a native call** cannot be interrupted from outside at all, and for that class "stop waiting, report it, and move on" is the whole answer rather than a stopgap. The timeout rail is written so that the *reporting* half is complete either way.
+```console
+  TIME  streams_a_large_body
+        timed out: did not finish within 60s (the suite deadline). … It was asked to stop and did not, so its thread was abandoned: it keeps running — holding its isolate, its heap and any open files or sockets — until this run exits. A test that will not stop is blocked inside a native call (a socket or pipe read, a subprocess wait) that no safepoint can reach; put the deadline on that operation rather than on the test around it
+```
+
+Abandoning is still the right trade for that class by a wide margin: a leaked thread that lets the suite finish and *name* the culprit beats a tidy suite that never returns. And it is safe to leave behind, because a `@test` case is a whole program on its own thread with its own heap — nothing in the runner ever frees what it is still using, so it is leaked rather than freed-out-from-under, and the process exit does not touch it.
+
+Two more consequences to know about:
+
+- **A timed-out test reports no captured output**, stopped or abandoned. A stopped test produced no result to read from, and an abandoned one is still running. (Separately, a real isolate's output buffers do not currently reach the parent's result at all — so this is not the only place output goes missing under `noeta test`.)
+- **The process still exits promptly.** Abandoned threads are detached, so neither the worker pool nor the runner's own teardown waits on them. The grace is waited out per worker rather than per test, so a suite with many wedged tests pays it once, in parallel.
+
+**One thing a bounded test gives up:** its hot *loops* stay in tier 0. Being stoppable means staying somewhere with safepoints, and JIT-compiled native code has none — so a run that can be cancelled declines on-stack replacement (the promotion path that takes over a loop mid-flight) while keeping ordinary call-count promotion. In practice that costs a compute-heavy test some speed and nothing else; `#[Timeout(0)]` opts a test out of the bound and back into full tiering if it needs it.
 
 ## Command reference
 

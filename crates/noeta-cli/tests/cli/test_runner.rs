@@ -1020,3 +1020,133 @@ fn test_fail_fast_stops_on_a_timeout() {
                 .and(predicate::str::contains("1 not run (stopped early)")),
         );
 }
+
+// --- ask, join with a grace, abandon only if that expires ---------------------------
+
+/// The compute-bound class is **stopped and joined**, not abandoned — proven by its destructors.
+///
+/// This is the assertion that a wall-clock or exit-code check cannot make. A case asked to stop
+/// unwinds through the same path a panic takes, running every live frame local's `destruct` and
+/// tearing its heap down; an abandoned one runs nothing ever again. So the marker file is written
+/// exactly once iff the runner really did ask, and really did wait for the answer. The negative half
+/// matters as much: the report must *not* carry the abandonment warning, because a case that stopped
+/// costs the rest of the run nothing.
+///
+/// Three loop shapes, because the tier boundary is what makes this subtle. `spins` is pure integer
+/// arithmetic (a loop the JIT can sustain end to end), `allocates` puts a heap op in the body (which
+/// bails to the interpreter every iteration), and `calls` calls a fn. Before a cancellable run
+/// declined OSR, the first and third went native at the loop header and could not be stopped at all
+/// while the second could — so testing only one shape would have proven nothing about the others.
+#[test]
+fn test_a_wedged_test_is_asked_to_stop_and_its_destructors_run() {
+    let dir = temp_root().join("noeta_cli_test_timeout_stops");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let marker = dir.join("stopped.log");
+    let marker_path = marker.to_str().expect("utf-8 path");
+    // A timed-out case reports no captured stdout (its run produced no result), so the evidence has
+    // to reach real disk.
+    let src = format!(
+        "use std.fs\n\
+         class Res {{ pub tag: string\n\
+           fn new(t: string): Res {{ return Res {{ tag: t }} }}\n\
+           destruct {{ fs.append(\"{marker_path}\", \"stopped\\n\") }} }}\n\
+         @test {{\n\
+           fn spins(): void {{ held = Res.new(\"a\")\n\
+             mut i = 0\n\
+             while true {{ i = i + 1 }}\n\
+             assert(i > held.tag.len()) }}\n\
+           fn allocates(): void {{ held = Res.new(\"b\")\n\
+             mut i = 0\n\
+             mut s = \"\"\n\
+             while true {{ s = \"x\" ~ \"y\"\n\
+               i = i + 1 }}\n\
+             assert(i > held.tag.len()) }}\n\
+           fn calls(): void {{ held = Res.new(\"c\")\n\
+             mut i = 0\n\
+             while true {{ i = bump(i) }}\n\
+             assert(i > held.tag.len()) }}\n\
+         }}\n\
+         fn bump(n: int): int {{ return n + 1 }}\n"
+    );
+    let file = dir.join("main.noe");
+    std::fs::write(&file, &src).expect("write program");
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "2"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("TIME  spins")
+                .and(predicate::str::contains("TIME  allocates"))
+                .and(predicate::str::contains("TIME  calls"))
+                .and(predicate::str::contains(
+                    "0 passed, 0 failed, 3 timed out, 3 total",
+                ))
+                // A case that stopped when asked leaves nothing behind, so the report says nothing
+                // about abandonment.
+                .and(predicate::str::contains("its thread was abandoned").not()),
+        );
+    let markers = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(
+        markers.lines().count(),
+        3,
+        "each wedged case must have been asked to stop, stopped, and run its live local's \
+         destructor on the way out; got: {markers:?}"
+    );
+}
+
+/// **The named limit, and the constraint the whole rail exists for.** A case blocked inside a native
+/// call — here a `fs.read` on a FIFO with no writer — reaches no safepoint, so the request cannot
+/// land and the grace expires. Abandoning it is the only option left, and the rail must still do
+/// everything it always did: report the case, run the others, exit `1`, and *terminate*.
+///
+/// The report now says the thread was abandoned, which is the actionable half: "raise the bound" is
+/// the wrong advice for a test stuck in a read, and the message says so.
+#[cfg(unix)]
+#[test]
+fn test_a_test_blocked_in_a_native_call_is_abandoned_and_the_run_still_ends() {
+    let dir = temp_root().join("noeta_cli_test_timeout_native");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let fifo = dir.join("fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !made {
+        return; // no `mkfifo` on this box — nothing to pin, and nothing to fail either
+    }
+    let fifo_path = fifo.to_str().expect("utf-8 path");
+    let src = format!(
+        "use std.fs\n\
+         @test {{\n\
+           fn first_passes(): void {{ assert(1 + 1 == 2) }}\n\
+           fn blocked_in_a_native_read(): void {{ assert(fs.read(\"{fifo_path}\").len() > 0) }}\n\
+           fn second_passes(): void {{ assert(2 + 2 == 4) }}\n\
+         }}\n"
+    );
+    let file = dir.join("main.noe");
+    std::fs::write(&file, &src).expect("write program");
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "1"])
+        // `assert_cmd`'s default is no timeout; a rail that regressed into waiting on the blocked
+        // read would hang here, which is the honest failure mode.
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("TIME  blocked_in_a_native_read")
+                .and(predicate::str::contains("its thread was abandoned"))
+                .and(predicate::str::contains("ok    first_passes"))
+                .and(predicate::str::contains("ok    second_passes"))
+                .and(predicate::str::contains(
+                    "2 passed, 0 failed, 1 timed out, 3 total",
+                )),
+        );
+}

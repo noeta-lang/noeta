@@ -1044,7 +1044,13 @@ pub(crate) fn run_one_test(
     // `@test`/`@bench` compile a *separate* module per case (a different granularity than the
     // whole-file startup cache), so they don't participate in it — see `plans/startup-cache`. They
     // have no program pass-through args; a test sees the real process argv.
-    match execute_real_host(&program, &checked, std::env::args().collect(), false, cancel) {
+    match execute_real_host(
+        &program,
+        &checked,
+        std::env::args().collect(),
+        false,
+        cancel,
+    ) {
         // The `@test` runner reports the failing diagnostic; the trace is a `noeta run` affordance.
         Ok((result, _trace)) => {
             // An abort fails the case; an advisory diagnostic does not.
