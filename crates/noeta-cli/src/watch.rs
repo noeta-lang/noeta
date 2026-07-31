@@ -522,17 +522,18 @@ fn hot_watcher(
                 // would give it, instead of the checkerless compile that degraded a long editing
                 // session relative to a cold start. The bundle crosses the VM core opaquely
                 // (`noeta_vm::FragmentSites`), which is why the core still names no checker.
-                let fragment = noeta_vm::HotFragment {
+                //
+                // The bundle is program-sized (measured: ~0.7 B per source byte — 204 KiB for a
+                // 293 KB app, against 14 KiB for the one-function fragment beside it), so the queue
+                // reclaims each plan's payload as soon as the last worker has installed it; the
+                // generation slot stays, the bundle does not (see `noeta_vm::HotChannel`).
+                mailbox.deposit(noeta_vm::HotFragment {
                     fragment: plan.fragment,
                     rerun_top_level: plan.rerun_top_level,
                     added: plan.added,
                     changed: plan.changed,
                     sites: Some(std::sync::Arc::new(sites)),
-                };
-                match mailbox.plans.lock() {
-                    Ok(mut plans) => plans.push(fragment),
-                    Err(_) => return,
-                }
+                });
                 applied = new_unit;
                 // A green deposit supersedes any pending red-check overlay, and the wake rouses
                 // every (possibly idle) worker to apply it now rather than at its next request.

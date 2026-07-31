@@ -66,6 +66,16 @@ pub trait FragmentSites: std::fmt::Debug + Send + Sync + std::any::Any {
 /// A shared handle to one [`FragmentSites`] bundle: cloned per worker, borrowed per install.
 pub type HotSites = Arc<dyn FragmentSites>;
 
+/// One VM's **seat** on a shared [`HotChannel`] (server-hmr F5 + H5 retention): the mailbox plus the
+/// consumer slot it claimed when the mailbox was armed. The channel tracks each consumer's drain
+/// cursor under that slot, which is both how a worker resumes where it left off and how the queue
+/// knows when a deposited plan has reached everyone and its program-sized `Sites` bundle can go.
+#[derive(Debug)]
+pub(crate) struct HotConsumer {
+    pub(crate) mailbox: HotSwapMailbox,
+    pub(crate) slot: usize,
+}
+
 /// The binding names a top-level statement (re)binds — the globals a re-running swap overwrites.
 /// A pure-AST helper shared by the live-VM hot path ([`Vm::apply_pending_hotswap`]) and the session
 /// module; lives here (not in the feature-gated `session`) so the compiler-free hot apply can use it.
@@ -131,23 +141,183 @@ pub type HotSwapMailbox = Arc<HotChannel>;
 /// The hot-reload channel shared by the watcher thread, the VM, and (through the [`NativeCtx`]
 /// accessors) the serve loop (server-hmr L3).
 ///
-/// - `plan` — the swap mailbox (see [`HotSwapMailbox`]).
+/// - the plan queue — the swap mailbox (see [`HotSwapMailbox`] and [`PlanQueue`]), deposited into
+///   by [`HotChannel::deposit`] and drained per consumer by [`HotChannel::drain`].
 /// - `error` — the last **rejected** edit's rendered diagnostics: the watcher deposits on a red
 ///   check (replacing an older error; a green deposit clears it), the serve loop takes it and
 ///   pushes an `error` frame to live LiveView clients for the browser overlay.
-/// - `swaps` — the swap **generation**: incremented after each successfully applied swap, so the
-///   serve loop can detect "a swap landed since my last iteration" and push `reload` to clients.
+///
+/// The swap **generation** is the plan's index in the queue; each VM tracks its own applied count
+/// (`Vm::applied_swaps`), which is how the serve loop detects "a swap landed since my last
+/// iteration" and pushes `reload` to *its* clients.
 ///
 /// [`NativeCtx`]: noeta_stdlib::NativeCtx
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct HotChannel {
-    /// The **append-only queue** of swap plans, generation = index (server-hmr F5). A single
-    /// depositor (the watcher) pushes; every consuming VM drains the tail it has not yet applied,
-    /// so a swap **broadcasts** to every worker isolate (`serve --parallel --watch`) rather than
-    /// being taken by one. Each plan is diffed against the previous *deposited* version, so
-    /// applying them in order keeps each worker's session in lockstep.
-    pub plans: std::sync::Mutex<Vec<HotFragment>>,
+    queue: std::sync::Mutex<PlanQueue>,
     pub error: std::sync::Mutex<Option<String>>,
+}
+
+impl Default for HotChannel {
+    /// A channel for **one** consumer — the single-worker `noeta serve --watch` shape. A
+    /// `--parallel N` fleet must say so: [`HotChannel::new`].
+    fn default() -> Self {
+        HotChannel::new(1)
+    }
+}
+
+/// The broadcast queue behind a [`HotChannel`] (server-hmr F5), plus the per-consumer cursors that
+/// let it **reclaim** what everyone has already installed (server-hmr H5 retention).
+///
+/// **Generation = index, still.** `plans` is append-only in its *indices*: a deposit pushes, and an
+/// index once minted is never reused or shifted. What is reclaimed is a passed plan's *payload* —
+/// the slot is tombstoned to `None` in place, so the whole-program [`FragmentSites`] bundle and the
+/// fragment AST are freed while the generation numbering the drain cursors and
+/// `NativeCtx::hot_swap_count` are keyed on stays literally true. The residue of a swap the fleet
+/// has fully absorbed is one empty `Option` slot (~a hundred bytes), not a program-sized bundle.
+///
+/// **Nothing is reclaimed that a consumer has not passed.** `cursors` holds one entry per consumer
+/// declared at [`HotChannel::new`], and reclamation only ever covers the prefix *below the minimum*
+/// cursor. A declared-but-not-yet-registered consumer sits at 0, so reclamation cannot start before
+/// the whole fleet has armed — which is what makes a worker still compiling its session (or parked
+/// mid-request) unable to lose a plan it has not applied.
+#[derive(Debug)]
+struct PlanQueue {
+    /// Generation → the plan, or `None` once every consumer has drained past it.
+    plans: Vec<Option<HotFragment>>,
+    /// One cursor per declared consumer: the generation it drains from next. [`RETIRED`] once its
+    /// VM has finished running, so a dead worker cannot pin the prefix for the rest of the session.
+    cursors: Vec<usize>,
+    /// How many cursors [`HotChannel::register`] has handed out.
+    claimed: usize,
+    /// Generations `..reclaimed` are tombstoned — the frontier, and the cursor a consumer
+    /// registering beyond the declared count starts at (so it can never read a hole).
+    reclaimed: usize,
+}
+
+/// A cursor value meaning "this consumer is gone" — it holds nothing back.
+const RETIRED: usize = usize::MAX;
+
+impl HotChannel {
+    /// A channel broadcasting to exactly `consumers` VMs — one per worker isolate of the
+    /// `serve --parallel N --watch` fleet, or 1 for single-worker hot serve. The count is what
+    /// reclamation is gated on, so it must match the number of VMs that will arm this mailbox.
+    pub fn new(consumers: usize) -> HotChannel {
+        HotChannel {
+            queue: std::sync::Mutex::new(PlanQueue {
+                plans: Vec::new(),
+                cursors: vec![0; consumers.max(1)],
+                claimed: 0,
+                reclaimed: 0,
+            }),
+            error: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Deposit one ready-to-apply plan (the watcher thread's half). Blocks on the queue lock: a
+    /// deposit is rare and must not be dropped, unlike a consumer's opportunistic drain.
+    pub fn deposit(&self, plan: HotFragment) {
+        if let Ok(mut q) = self.queue.lock() {
+            q.plans.push(Some(plan));
+        }
+    }
+
+    /// How many generations have been deposited — the queue's length, tombstones included, i.e. the
+    /// next generation number. Unaffected by reclamation.
+    pub fn deposited(&self) -> usize {
+        self.queue.lock().map(|q| q.plans.len()).unwrap_or(0)
+    }
+
+    /// How many deposited plans **still hold their payload** (fragment + [`FragmentSites`]). This is
+    /// the retention an editing session pays: it rises with each deposit and falls back as the fleet
+    /// installs, rather than tracking [`HotChannel::deposited`] forever.
+    pub fn resident_plans(&self) -> usize {
+        self.queue
+            .lock()
+            .map(|q| q.plans.iter().filter(|p| p.is_some()).count())
+            .unwrap_or(0)
+    }
+
+    /// Claim this VM's consumer cursor. Called once per mailbox-armed VM, before it can drain.
+    pub(crate) fn register(&self) -> usize {
+        let Ok(mut q) = self.queue.lock() else {
+            return 0;
+        };
+        if q.claimed < q.cursors.len() {
+            let slot = q.claimed;
+            q.claimed += 1;
+            return slot;
+        }
+        // More VMs armed this mailbox than were declared — a driver bug. Rather than hand back a
+        // cursor that may point into an already-tombstoned prefix, start the extra consumer at the
+        // frontier: it misses only swaps the whole declared fleet had already installed.
+        debug_assert!(
+            false,
+            "more consumers registered than the {} declared at HotChannel::new",
+            q.cursors.len()
+        );
+        let frontier = q.reclaimed;
+        q.cursors.push(frontier);
+        q.claimed += 1;
+        q.cursors.len() - 1
+    }
+
+    /// This consumer's VM has finished: stop holding the prefix back, so a worker that exits (or
+    /// panics its way out of the fleet) cannot pin the queue for the rest of the session.
+    /// Idempotent, and deliberately **does not itself collect** — reclamation is the drain's job, so
+    /// a queue that only ever shrinks at teardown is a visible regression rather than a passing
+    /// test. The next live consumer's drain picks the released prefix up.
+    pub(crate) fn retire(&self, slot: usize) {
+        if let Ok(mut q) = self.queue.lock()
+            && let Some(cursor) = q.cursors.get_mut(slot)
+        {
+            *cursor = RETIRED;
+        }
+    }
+
+    /// Take everything consumer `slot` has not yet drained, advance its cursor past them, and
+    /// reclaim the payload of every generation the whole fleet has now passed.
+    ///
+    /// `None` when there is nothing pending **or** the queue is momentarily contended: this runs at
+    /// a scheduler safepoint inside a serving program, so it never blocks — the next tick retries,
+    /// and the cursor makes the retry lossless.
+    pub(crate) fn drain(&self, slot: usize) -> Option<Vec<HotFragment>> {
+        let mut q = self.queue.try_lock().ok()?;
+        let from = *q.cursors.get(slot)?;
+        if from >= q.plans.len() {
+            return None;
+        }
+        let pending: Vec<HotFragment> = q.plans[from..]
+            .iter()
+            .map(|plan| {
+                plan.clone().expect(
+                    "a generation a live consumer has not passed is never reclaimed — see PlanQueue",
+                )
+            })
+            .collect();
+        q.cursors[slot] = q.plans.len();
+        q.collect();
+        Some(pending)
+    }
+}
+
+impl PlanQueue {
+    /// Tombstone every generation below the slowest consumer's cursor. The caller holds the lock.
+    fn collect(&mut self) {
+        let frontier = self
+            .cursors
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(0)
+            .min(self.plans.len());
+        for slot in &mut self.plans[self.reclaimed..frontier] {
+            // Drops the fragment AST and the last local reference to this check's whole-program
+            // `Sites` bundle — the retention this whole mechanism exists for.
+            *slot = None;
+        }
+        self.reclaimed = self.reclaimed.max(frontier);
+    }
 }
 
 impl<'m> Vm<'m> {
@@ -165,15 +335,15 @@ impl<'m> Vm<'m> {
     /// watcher thread already gated on parse/check, so a failure here is compile-internal (or the
     /// fragment's own top-level code erroring at run time, e.g. a re-run initializer panicking).
     pub(crate) fn apply_pending_hotswap(&mut self) {
-        let Some(mailbox) = &self.hot_mailbox else {
+        let Some(HotConsumer { mailbox, slot }) = &self.hot_mailbox else {
             return;
         };
-        // Drain the broadcast queue from this VM's own generation (server-hmr F5): clone the
-        // plans it has not applied yet (the lock is held only for the clone, never across the
-        // apply), then apply each in order. N workers each drain the same queue independently.
-        let pending: Vec<HotFragment> = match mailbox.plans.try_lock() {
-            Ok(plans) if plans.len() > self.applied_swaps => plans[self.applied_swaps..].to_vec(),
-            _ => return,
+        // Drain the broadcast queue from this VM's own cursor (server-hmr F5): clone the plans it
+        // has not applied yet (the lock is held only for the clone, never across the apply), then
+        // apply each in order. N workers each drain the same queue independently, and the drain
+        // reclaims whatever the slowest of them has now passed (server-hmr H5 retention).
+        let Some(pending) = mailbox.drain(*slot) else {
+            return;
         };
         for plan in pending {
             self.apply_one_swap(plan);

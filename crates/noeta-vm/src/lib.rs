@@ -480,13 +480,13 @@ struct Vm<'m> {
     module: &'m Module,
     /// See [`DebugSession`]; `None` on every non-debug run.
     debug_session: Option<DebugSession<'m>>,
-    /// The hot-reload mailbox (server-hmr W1); `None` on every run but `noeta serve --watch`'s
-    /// in-process hot mode. A watcher thread deposits ready-to-apply [`SwapPlan`]s; the VM applies
-    /// the pending one at the scheduler tick ([`Vm::apply_pending_hotswap`] via `advance_tasks`) —
-    /// a safepoint every ctx-driven loop (the HTTP serve loop) passes through each iteration.
+    /// This VM's seat on the hot-reload mailbox — see [`HotConsumer`] (server-hmr W1); `None` on
+    /// every run but `noeta serve --watch`'s in-process hot mode. A watcher thread deposits
+    /// ready-to-apply [`SwapPlan`]s; the VM applies its pending ones at the scheduler tick
+    /// ([`Vm::apply_pending_hotswap`] via `advance_tasks`), a safepoint every ctx-driven loop passes.
     ///
     /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
-    hot_mailbox: Option<HotSwapMailbox>,
+    hot_mailbox: Option<HotConsumer>,
     /// How many swap plans this VM has applied from its [`HotChannel`] queue (server-hmr F5): the
     /// generation index it drains from, and — via [`NativeCtx::hot_swap_count`] — how the serve
     /// loop detects its own swaps to push `reload` to *its* clients. Per-VM, so N workers each
