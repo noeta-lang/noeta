@@ -65,8 +65,16 @@ pub struct Candidate {
     pub detail: Option<String>,
 }
 
-/// The Noeta surface keywords offered everywhere. Deliberately the *statement/expression* keywords a
-/// developer types; the reflection intrinsics (`type_of`, `attributes_of`, …) are omitted as niche.
+/// The Noeta surface keywords offered everywhere: **every word the lexer reserves except the
+/// reflection primitives** (`type_of`, `field_specs_of`, …), which are deliberately omitted as niche.
+///
+/// The rule is the whole list, and it is machine-checked in both directions by
+/// [`tests::the_keyword_list_is_the_lexers_own_reserved_words`] — the lexer's `#[token("…")]`
+/// declarations are the census, and [`noeta_lexer::ReservedWord::from_spelling`] supplies each
+/// word's role, so "which ones are reflection" is not a second hand list either. It had already
+/// drifted before that check existed: `isolate` was in the lexer, in `is_keyword`, and in both
+/// grammars, and the editor silently never offered it. This is the pattern `highlight.rs`'s
+/// `is_primitive_type_name` adopted after the same thing happened to `unit`.
 const KEYWORDS: &[&str] = &[
     "as",
     "async",
@@ -86,6 +94,7 @@ const KEYWORDS: &[&str] = &[
     "impl",
     "in",
     "is",
+    "isolate",
     "match",
     "mut",
     "namespace",
@@ -1381,6 +1390,80 @@ mod tests {
         );
         // A knob-less tier offers nothing (but the context still suppresses identifier noise).
         assert!(directive_arg_candidates(&arg_ctx("@test(").unwrap(), &program).is_empty());
+    }
+
+    /// **[`KEYWORDS`] is derived from the lexer, not maintained beside it.**
+    ///
+    /// The language's vocabulary is written out in seven places and the lexer's `#[token("…")]`
+    /// declarations are the only source of truth; every other list is a copy, and this copy had
+    /// drifted (it carried 32 of the 46 reserved words, and `isolate` — present in the lexer, in
+    /// `highlight::is_keyword`, in TextMate and in `highlights.scm` — was simply absent, so the
+    /// editor never offered it).
+    ///
+    /// The check is stated as the rule, in both directions: **every** reserved word is offered
+    /// **except** the reflection primitives. Neither half is a second hand list — the census comes
+    /// from the lexer's own source text (the technique `noeta-diagnostics`' `ALL` gate and
+    /// `pipeline_tables.rs` use), and the role of each word comes from
+    /// [`noeta_lexer::ReservedWord::from_spelling`], which answers *through the lexer itself*. So a
+    /// new keyword fails here until it is offered, a retired one fails until it is dropped, and a
+    /// new reflection intrinsic is excluded automatically by the role it declares.
+    #[test]
+    fn the_keyword_list_is_the_lexers_own_reserved_words() {
+        use noeta_lexer::{ReservedRole, ReservedWord};
+
+        let lexer_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .join("noeta-lexer/src/lib.rs");
+        let text = std::fs::read_to_string(&lexer_src)
+            .unwrap_or_else(|e| panic!("read {}: {e}", lexer_src.display()));
+
+        // Every `#[token("…")]` whose spelling is identifier-shaped — i.e. every word a user could
+        // have meant as a name. Operator tokens (`#[token("&&")]`) are not vocabulary.
+        let mut reserved: Vec<&str> = text
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("#[token(\"")?;
+                let word = rest.split('"').next()?;
+                let mut chars = word.chars();
+                let head = chars.next()?;
+                ((head.is_ascii_alphabetic() || head == '_')
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                .then_some(word)
+            })
+            .collect();
+        reserved.sort_unstable();
+        reserved.dedup();
+        assert!(
+            reserved.len() > 40,
+            "the census found only {} reserved words — the `#[token(\"…\")]` scrape has stopped \
+             matching the lexer's source, so this test is passing vacuously",
+            reserved.len()
+        );
+
+        let mut expected: Vec<&str> = Vec::new();
+        for word in &reserved {
+            let role = ReservedWord::from_spelling(word)
+                .unwrap_or_else(|| panic!("`{word}` is a `#[token]` the lexer does not reserve"))
+                .role;
+            // The one deliberate omission, and it is a *rule*, not a list: a reflection primitive
+            // is a niche turbofish/by-name call form, not something a developer types by reflex.
+            if role != ReservedRole::Reflection {
+                expected.push(word);
+            }
+        }
+
+        let mut offered: Vec<&str> = KEYWORDS.to_vec();
+        offered.sort_unstable();
+        assert_eq!(
+            offered, expected,
+            "the completion keyword list has drifted from the lexer: offer every reserved word \
+             except the reflection primitives"
+        );
+
+        // The drift that was live when this test was written, named so a regression reads as itself.
+        assert!(KEYWORDS.contains(&"isolate"));
+        assert!(!KEYWORDS.contains(&"type_of"));
     }
 
     #[test]

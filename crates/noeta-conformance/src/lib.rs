@@ -496,6 +496,10 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
         noeta_check::CheckOptions {
             editions: linked.editions.clone(),
             packages: linked.packages.clone(),
+            // Empty for every corpus case (no manifest, so nothing binds a `@name`) — but carried
+            // with the package map it is keyed by rather than defaulted, so a fixture that grows a
+            // manifest binding is checked the way `noeta run` checks it.
+            package_uses: linked.package_uses.clone(),
             ..noeta_check::CheckOptions::default()
         },
     );

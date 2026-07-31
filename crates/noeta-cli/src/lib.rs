@@ -1718,6 +1718,11 @@ pub(crate) fn run_declared_tier(
     let opts = noeta_check::CheckOptions {
         editions: linked.editions.clone(),
         packages: linked.packages.clone(),
+        // The `@name` tables belong with the package map they are keyed by: empty means "no package
+        // binds any extension `@name`", so a project that *renames* one (`[directives] gen =
+        // "para:openapi"`) would see it resolve to nothing here and report a spurious E0036 — on a
+        // declared-tier run of a project `noeta check` calls clean.
+        package_uses: linked.package_uses.clone(),
         ..noeta_check::CheckOptions::default()
     };
     let checked = context::check_under(&program, &opts);

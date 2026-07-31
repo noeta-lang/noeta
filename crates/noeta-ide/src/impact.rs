@@ -517,6 +517,13 @@ impl ImpactSession {
                 record_expr_types: true,
                 editions: noeta_db::workspace_editions(&self.db, cache.workspace),
                 packages: noeta_db::workspace_packages(&self.db, cache.workspace),
+                // …and the `@name` tables that go WITH that package map. An empty `package_uses`
+                // does not mean "unknown" the way an empty `packages` does — it means "no package
+                // binds any extension `@name`", so every `@directive` in the project resolves to
+                // nothing and the check reports a spurious E0036. Omitting it here made the
+                // watcher declare `Impact::All` ("the edit does not check") on a project that
+                // compiles, so every keystroke re-ran the whole suite.
+                package_uses: cache.workspace.package_uses(&self.db).0.clone(),
                 ..noeta_check::CheckOptions::default()
             },
         );
