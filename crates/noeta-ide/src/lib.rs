@@ -2903,20 +2903,41 @@ impl StoreDocEnv<'_> {
 fn describe_dep(dep: &noeta_pm::manifest::Dependency) -> String {
     use noeta_pm::manifest::Dependency;
     match dep {
-        Dependency::Path { path } => format!("path {}", path.display()),
-        Dependency::Git { url, git_ref } => {
+        // A path/git dep may also *claim* an identity (`package = "para/ai"`, the scope-array
+        // member form) — show it, since on a row like `path ../..` the claim is the only thing
+        // saying which package this is.
+        Dependency::Path { path, package } => {
+            format!("path {}{}", path.display(), claimed_suffix(package))
+        }
+        Dependency::Git {
+            url,
+            git_ref,
+            package,
+        } => {
             let name = url
                 .rsplit('/')
                 .next()
                 .unwrap_or(url)
                 .trim_end_matches(".git");
-            format!("git {name}@{}", git_ref.describe())
+            format!(
+                "git {name}@{}{}",
+                git_ref.describe(),
+                claimed_suffix(package)
+            )
         }
         Dependency::Registry { package, req } => match package {
             Some(p) => format!("{}/{} {req}", p.company, p.package),
             None => req.to_string(),
         },
         Dependency::Scope(members) => format!("scope · {} packages", members.len()),
+    }
+}
+
+/// ` · company/pkg` for a path/git dependency that names the identity it claims, else empty.
+fn claimed_suffix(package: &Option<noeta_pm::manifest::PackageName>) -> String {
+    match package {
+        Some(p) => format!(" · {p}"),
+        None => String::new(),
     }
 }
 

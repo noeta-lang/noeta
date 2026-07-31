@@ -151,6 +151,20 @@ impl ReflectionInfo {
         self.manifest.iter().filter(|a| a.target == key).collect()
     }
 
+    /// The data attributes attached to one **field** of `type_name`, in source order — the field twin
+    /// of [`param_attributes_for`](Self::param_attributes_for), and the join that makes
+    /// `FieldSpec.attrs` a *view* of the attribute manifest rather than a second copy of it.
+    ///
+    /// `field_specs_of` materializes each field's attributes through here, and `attributes_of::<T>()`
+    /// reads the very same rows off the same table; both reach the key through
+    /// [`field_attr_target`], so the two surfaces cannot disagree about which attribute belongs to
+    /// which field. A field carrying no attribute answers the empty list, exactly as an unannotated
+    /// parameter does — an absence is reported as an empty list, never as a missing descriptor.
+    pub fn field_attributes_for(&self, type_name: &str, field: &str) -> Vec<&AttributeRecord> {
+        let key = field_attr_target(type_name, field);
+        self.manifest.iter().filter(|a| a.target == key).collect()
+    }
+
     /// The data attributes attached to `target`, in source order — the manifest query tooling and
     /// `attributes_of` use to discover, e.g., every type tagged `#[Entity]`.
     pub fn attributes_for<'a>(
@@ -451,6 +465,18 @@ pub const PARAM_ATTR_SEP: char = '#';
 /// callable's key rather than being spelled independently of it.
 pub fn param_attr_target(callable: &str, param: &str) -> String {
     format!("{callable}{PARAM_ATTR_SEP}{param}")
+}
+
+/// The attribute-manifest key of one **field** of `type_name` — the qualified `Type.field` spelling,
+/// mirroring the `Type.method` and `Enum.Variant` conventions, so a `#[Column(…)]` on a property
+/// surfaces distinctly per owner.
+///
+/// Unlike a parameter's key this needs no separator of its own: a field name cannot collide with a
+/// method name on the same type, so the dotted member spelling is already unambiguous — which is why
+/// it is the key `attributes_of::<T>()` has always reported for a field, and why the
+/// `FieldSpec.attrs` join reads the same rows a consumer used to re-join by hand.
+pub fn field_attr_target(type_name: &str, field: &str) -> String {
+    format!("{type_name}.{field}")
 }
 
 /// Split a manifest target back into `(callable, parameter)`, or `None` if it does not name a
@@ -1124,7 +1150,14 @@ pub fn materialize_args(
 }
 
 /// One field of a type-level schema — the borrowed view [`ReflectionInfo::field_specs`] returns,
-/// which both backends materialize into a prelude `FieldSpec { name, type, optional }` value.
+/// which both backends materialize into a prelude `FieldSpec { name, type, optional, attrs }` value.
+///
+/// The `attrs` slot is **not** carried here, and deliberately so: a field's attributes live in the
+/// manifest, keyed by [`field_attr_target`], and both backends join them at materialization through
+/// [`ReflectionInfo::field_attributes_for`] — the same shape the parameter half takes, where
+/// [`ParamSig`] likewise carries no attributes and `params_of` joins them. Keeping the join out of
+/// the borrowed view is what makes `FieldSpec.attrs` a *view* of the manifest rather than a second
+/// copy of it, so `attributes_of::<T>()` and `field_specs_of` cannot come to disagree.
 #[derive(Debug)]
 pub struct FieldSpecData<'a> {
     pub name: &'a str,
@@ -1141,12 +1174,13 @@ pub struct FieldSpecData<'a> {
 /// returns, which both backends materialize into a prelude `VariantSpec { name, payload, backing }`
 /// value.
 ///
-/// The variant's own `#[…]` attributes are deliberately **absent**, exactly as they are from
-/// [`FieldSpecData`]: a member's attributes are already keyed in the manifest under its qualified
-/// `Enum.Variant` target — the same `Type.field` convention the struct side uses — so
-/// `attributes_of::<T>()` is the one answer to "what is annotated on this member" for fields,
-/// methods, parameters and variants alike. Carrying them here would make the enum half of one
-/// surface answer a question the struct half does not.
+/// The variant's own `#[…]` attributes are deliberately **absent**: they are already keyed in the
+/// manifest under the qualified `Enum.Variant` target, and `attributes_of::<T>()` answers "what is
+/// annotated on this variant" for every consumer. What the struct half gained (`FieldSpec.attrs`)
+/// does not apply here, because a variant is not walked as a *member of a signature* — it is the
+/// field and parameter descriptors that a schema deriver walks side by side, and those two are the
+/// pair that had to agree. A variant **payload** slot materializes an empty `attrs` list, which is
+/// the true answer: a payload slot has no attribute syntax to carry one.
 #[derive(Debug)]
 pub struct VariantSpecData<'a> {
     pub name: &'a str,
@@ -2540,6 +2574,16 @@ pub const FIELD_ENTRY: &str = "FieldEntry";
 /// field's declared type — **precise**, not the runtime-erased head `type_of` yields on a value —
 /// and `optional` reports whether the field declared a default (so a dynamic constructor knows it
 /// may omit it). Registered like `ParamInfo`; both backends materialize the matching shape.
+///
+/// `attrs` is the exact counterpart of [`PARAM_INFO`]'s, for the exact reason that one exists: a
+/// schema-deriving library walks a callable's parameters with `params_of` and a type's fields with
+/// `field_specs_of`, and the two are meant to be **the same walk producing the same bytes**. While
+/// only the parameter descriptor carried its annotation they could not be — the field door had to
+/// re-join `attributes_of::<T>()`'s `"<Type>.<field>"` targets by hand, once per field, and every
+/// such consumer re-implemented the key format. It is a view, not a second table: the values come
+/// from the same manifest rows `attributes_of` returns, via
+/// [`ReflectionInfo::field_attributes_for`], and an unannotated field reports an empty list rather
+/// than an absence.
 pub const FIELD_SPEC: &str = "FieldSpec";
 
 /// The prelude `VariantSpec` struct — the element type of the **type-level** enum query
@@ -2922,9 +2966,11 @@ pub struct PreludeStruct {
 ///   one element type to name — a consumer recovers the one it wants by narrowing.
 /// * `FieldEntry { name: string, value: dyn }` — the element type of `fields_of()`, a value-level
 ///   view, so `value` is whatever the field holds.
-/// * `FieldSpec { name: string, type: Type, optional: bool }` — the element type of the TYPE-level
-///   `field_specs_of`. The type-level twin of `FieldEntry`: `type` is the field's declared type
-///   (precise, from the declaration — not a value's erased head).
+/// * `FieldSpec { name: string, type: Type, optional: bool, attrs: List<dyn> }` — the element type of
+///   the TYPE-level `field_specs_of`. The type-level twin of `FieldEntry`: `type` is the field's
+///   declared type (precise, from the declaration — not a value's erased head). `attrs` is the
+///   member half of what `ParamInfo.attrs` is for a parameter, `List<dyn>` for the same reason
+///   (a field's attributes are heterogeneous, so there is no one element type to name).
 /// * `VariantSpec { name: string, payload: List<FieldSpec>, backing: ?dyn }` — the element type of
 ///   `variants_of`, the enum twin of `FieldSpec`. `payload` reuses `FieldSpec` because a variant
 ///   payload IS ordinary declared field data, so the two halves of the type-level surface share one
@@ -2958,6 +3004,7 @@ pub fn prelude_structs() -> Vec<PreludeStruct> {
                 ("name", F::Str),
                 ("type", F::TypeAdt),
                 ("optional", F::Bool),
+                ("attrs", F::List(&F::Dyn)),
             ],
         ),
         s(
@@ -3013,7 +3060,7 @@ pub fn prelude_variant_field_names(enum_name: &str, variant: &str) -> Option<Vec
 /// `Type.method` convention), so a `#[Column(...)]` on a property surfaces distinctly per owner.
 fn push_field_attrs(manifest: &mut Vec<AttributeRecord>, type_name: &str, fields: &[FieldDecl]) {
     for field in fields {
-        let target = format!("{}.{}", type_name, field.name);
+        let target = field_attr_target(type_name, &field.name);
         push_attrs(manifest, &target, field.name_span, &field.attrs);
     }
 }

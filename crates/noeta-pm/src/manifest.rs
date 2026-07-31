@@ -504,6 +504,12 @@ impl PackageName {
     }
 }
 
+impl std::fmt::Display for PackageName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.company, self.package)
+    }
+}
+
 /// One `[dependencies]` entry's **source** (package-manager P2.0). The table *key* is the local import
 /// Which git reference a `git` dependency tracks. A **tag** is the release model (a published,
 /// immutable version); a **branch** or bare **HEAD** tracks a moving ref — for an in-development or
@@ -548,12 +554,23 @@ impl GitRef {
 /// root (an identifier), decoupled from the resolved package's global `company/package` identity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Dependency {
-    /// A local source tree — `dep = { path = "…" }`. Needs no network or resolver (P2.1).
-    Path { path: PathBuf },
+    /// A local source tree — `dep = { path = "…" }`. Needs no network or resolver (P2.1). An
+    /// optional `package = "company/pkg"` is a **checked claim** about the tree the path points at
+    /// (see [`Dependency::declared_package`]) — never a selector: the path alone says which tree,
+    /// and the tree's own `[package] name` alone says which package.
+    Path {
+        path: PathBuf,
+        package: Option<PackageName>,
+    },
     /// A git repository pinned to a [`GitRef`] — a `tag` (a released version), a `branch`, or the
     /// default-branch `HEAD` (`dep = { git = "…" }`, the tag-free in-dev/bundled case). The lockfile
-    /// pins the resolved SHA either way, so a build reproduces exactly.
-    Git { url: String, git_ref: GitRef },
+    /// pins the resolved SHA either way, so a build reproduces exactly. `package` is the same
+    /// **checked claim** it is on a path dependency.
+    Git {
+        url: String,
+        git_ref: GitRef,
+        package: Option<PackageName>,
+    },
     /// A registry dependency by SemVer requirement — `dep = "^1.2"` or
     /// `dep = { version = "^1.2", package = "company/pkg" }`. The registry index resolves
     /// name→git-coords (P2.5). `package` is the registry identity (decoupled from the import-root
@@ -572,6 +589,29 @@ pub enum Dependency {
     /// when the key already *is* the scope, the usual case; an alias otherwise). A member is any
     /// non-scope source (`path`/`git`/`version`); scopes do not nest.
     Scope(Vec<Dependency>),
+}
+
+impl Dependency {
+    /// The `company/package` identity this entry **names**, if any.
+    ///
+    /// For a [`Registry`][Dependency::Registry] dependency that identity is the *selector* — it is
+    /// what the index is queried for, and resolution fails without it. For a
+    /// [`Path`][Dependency::Path] or [`Git`][Dependency::Git] dependency the source already selects
+    /// the tree, so the identity is instead a **claim** about it: it says which package of a scope
+    /// this entry is, which a bare `{ path = "../.." }` does not, and the resolver verifies it
+    /// against the target's own `[package] name` (a mismatch is a manifest error). Kept rather than
+    /// dropped precisely so it can be checked — an unchecked claim is a comment that can lie.
+    ///
+    /// A [`Scope`][Dependency::Scope] has no identity of its own (its members each have one), so
+    /// this is `None` for it.
+    pub fn declared_package(&self) -> Option<&PackageName> {
+        match self {
+            Dependency::Path { package, .. }
+            | Dependency::Git { package, .. }
+            | Dependency::Registry { package, .. } => package.as_ref(),
+            Dependency::Scope(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2134,6 +2174,7 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
                 .ok_or_else(|| format!("dependency `{key}`: `path` must be a string"))?;
             Ok(Dependency::Path {
                 path: PathBuf::from(path),
+                package: parse_declared_package(key, table)?,
             })
         }
         (false, true, false) => {
@@ -2169,6 +2210,7 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
             Ok(Dependency::Git {
                 url: url.to_string(),
                 git_ref,
+                package: parse_declared_package(key, table)?,
             })
         }
         (false, false, true) => {
@@ -2179,19 +2221,10 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
                 format!("dependency `{key}` version requirement `{req}` is not valid SemVer: {err}")
             })?;
             // The registry identity (`company/package`) — decoupled from the import-root key.
-            let package = match table.get("package") {
-                None => None,
-                Some(v) => {
-                    let s = v
-                        .as_str()
-                        .ok_or_else(|| format!("dependency `{key}`: `package` must be a string"))?;
-                    Some(
-                        PackageName::parse(s)
-                            .map_err(|err| format!("dependency `{key}`: {err}"))?,
-                    )
-                }
-            };
-            Ok(Dependency::Registry { package, req })
+            Ok(Dependency::Registry {
+                package: parse_declared_package(key, table)?,
+                req,
+            })
         }
         (false, false, false) => Err(format!(
             "dependency `{key}` table must name a source: `path`, `git` (+ `tag`), or `version`"
@@ -2201,6 +2234,23 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
              or `version`"
         )),
     }
+}
+
+/// Parse the optional `package = "company/pkg"` key of a dependency table. It means the same thing —
+/// a `company/package` identity — on every source form: the *selector* for a `version` dependency,
+/// and a **claim** the resolver verifies for a `path`/`git` one (see
+/// [`Dependency::declared_package`]). One parser, so a malformed identity reads the same wherever it
+/// is written.
+fn parse_declared_package(key: &str, table: &toml::Table) -> Result<Option<PackageName>, String> {
+    let Some(value) = table.get("package") else {
+        return Ok(None);
+    };
+    let s = value
+        .as_str()
+        .ok_or_else(|| format!("dependency `{key}`: `package` must be a string"))?;
+    Ok(Some(
+        PackageName::parse(s).map_err(|err| format!("dependency `{key}`: {err}"))?,
+    ))
 }
 
 /// Whether `s` is a Noeta identifier (`[A-Za-z_][A-Za-z0-9_]*`) — the shape a package-name segment
@@ -2930,7 +2980,8 @@ mod tests {
         assert_eq!(
             deps["local"],
             Dependency::Path {
-                path: PathBuf::from("../local")
+                path: PathBuf::from("../local"),
+                package: None,
             }
         );
         assert_eq!(
@@ -2938,6 +2989,7 @@ mod tests {
             Dependency::Git {
                 url: "https://example.com/guzzle/http".to_string(),
                 git_ref: GitRef::Tag("v1.2.0".to_string()),
+                package: None,
             }
         );
         assert_eq!(
@@ -2957,11 +3009,46 @@ mod tests {
     }
 
     #[test]
+    fn a_path_or_git_dependency_keeps_its_package_claim() {
+        // The key used to be dropped at parse time for these two forms, so nothing downstream could
+        // check it — a manifest could name a package its path did not contain. It is kept now, and
+        // reads the same on every source form.
+        let m = Manifest::parse(
+            "[dependencies]\n\
+             ai = { path = \"../para-ai\", package = \"para/ai\" }\n\
+             api = { git = \"https://example.com/para/api\", tag = \"v1.0.0\", package = \"para/api\" }\n\
+             plain = { path = \"../plain\" }\n",
+        )
+        .expect("valid");
+        let deps = m.dependencies();
+        assert_eq!(
+            deps["ai"].declared_package().map(PackageName::to_string),
+            Some("para/ai".to_string())
+        );
+        assert_eq!(
+            deps["api"].declared_package().map(PackageName::to_string),
+            Some("para/api".to_string())
+        );
+        assert_eq!(deps["plain"].declared_package(), None);
+
+        // A malformed identity is refused wherever it is written, not only on a registry entry.
+        assert!(
+            Manifest::parse("[dependencies]\nx = { path = \"../x\", package = \"nope\" }\n")
+                .is_err(),
+            "`package` must still be `company/package`"
+        );
+        assert!(
+            Manifest::parse("[dependencies]\nx = { path = \"../x\", package = 7 }\n").is_err(),
+            "`package` must still be a string"
+        );
+    }
+
+    #[test]
     fn a_git_dependency_tracks_a_tag_a_branch_or_head() {
         fn git_ref_of(toml: &str) -> GitRef {
             let m = Manifest::parse(toml).expect("valid");
             match &m.dependencies()["x"] {
-                Dependency::Git { url, git_ref } => {
+                Dependency::Git { url, git_ref, .. } => {
                     assert_eq!(url, "https://x/y");
                     git_ref.clone()
                 }

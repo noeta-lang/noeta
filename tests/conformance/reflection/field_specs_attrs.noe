@@ -1,0 +1,106 @@
+// The field twin of `params_of_attrs`: a field's `#[...]` attributes ride on its own descriptor.
+// `field_specs_of(name)` yields `FieldSpec { name, type, optional, attrs }`, so a schema deriver that
+// walks a callable's parameters with `params_of` and a type's fields with `field_specs_of` performs
+// ONE walk over ONE shape — which is what "the two doors derive the same bytes" has to mean.
+//
+// Before this, only the parameter descriptor carried its annotation. A consumer wanting a field's had
+// to scan the whole-program `attributes_of::<T>()` and re-join its `"<Type>.<field>"` target strings
+// by hand, once per field: O(attributes) per field, and every such consumer re-implementing the key
+// format the reflection layer already knows.
+//
+// `attrs` is a VIEW of the attribute manifest, not a second table — the instances come from the same
+// rows `attributes_of::<Arg>()` returns, reached through the same key builder — so the two surfaces
+// cannot disagree about which attribute belongs to which field.
+//
+// A field may carry an attribute AND a default; the two are independent facts about it, and
+// `optional` keeps reporting the default while `attrs` reports the metadata.
+// expect: stdout "id: help=the order id short= optional=false"
+// expect: stdout "qty: help=how many short=q optional=true"
+// expect: stdout "note: help= short= optional=true"
+// expect: stdout "bare attrs=0"
+// expect: stdout "Account.balance: help=in cents short="
+// expect: stdout "the field door and the parameter door read alike: true"
+// expect: stdout "the descriptor and the manifest agree: true"
+// expect: stdout "a variant payload carries no attrs: 0"
+// expect: stdout "a prelude descriptor describes its own attrs: attrs Type.List(Type.Dyn)"
+// expect: exit 0
+@attribute(Param, Field)
+struct Arg {
+    help: string
+    short: string = ""
+}
+
+struct Order {
+    #[Arg(help: "the order id")] id: string
+    #[Arg(help: "how many", short: "q")] qty: int = 1
+    note: string = ""
+}
+
+class Account {
+    #[Arg(help: "in cents")]
+    balance: int
+    fn new(): Account { return Account { balance: 0 } }
+}
+
+enum Shape {
+    Circle(r: float)
+}
+
+// Narrowing recovers the attribute's own type off the heterogeneous `List<dyn>` — a field may carry
+// attributes of several different structs, so there is no single element type to name. Written once
+// against `List<dyn>` so the SAME body reads a field's list and a parameter's: that the two are
+// interchangeable at the consumer is the whole point.
+fn describe(attrs: List<dyn>): string {
+    for a in attrs {
+        if a is Arg {
+            return "help=${a.help} short=${a.short}";
+        }
+    }
+    return "help= short=";
+}
+
+for f in field_specs_of("Order") {
+    echo "${f.name}: ${describe(f.attrs)} optional=${f.optional}";
+}
+
+// An unannotated field reports the empty list, not a missing field — the same absence-as-empty-list
+// answer an unannotated parameter gives.
+bare = field_specs_of("Order").filter(fn(f) => f.name == "note");
+echo "bare attrs=${bare[0].attrs.len()}";
+
+// A class property is keyed and read exactly as a struct field is.
+for f in field_specs_of("Account") {
+    echo "Account.${f.name}: ${describe(f.attrs)}";
+}
+
+// --- the parity the two descriptors exist to have ----------------------------------------------
+// The same annotation on a parameter and on a field reaches the consumer through the same `attrs`
+// slot, so one function body serves both doors.
+fn place(#[Arg(help: "the order id")] id: string): void {
+    return;
+}
+
+field_side = field_specs_of("Order").filter(fn(f) => f.name == "id")[0];
+param_side = params_of("place").filter(fn(p) => p.name == "id")[0];
+echo "the field door and the parameter door read alike: ${describe(field_side.attrs) == describe(param_side.attrs)}";
+
+// --- the descriptor is a view of the manifest, not a copy of it --------------------------------
+// The instance off `FieldSpec.attrs` is the very value `attributes_of::<Arg>()` reports for the same
+// `"<Type>.<field>"` target — the lookup a consumer used to write by hand.
+mut from_manifest = "help= short=";
+for a in attributes_of::<Arg>() {
+    if a.target == "Order.qty" {
+        from_manifest = "help=${a.value.help} short=${a.value.short}";
+    }
+}
+qty = field_specs_of("Order").filter(fn(f) => f.name == "qty")[0];
+echo "the descriptor and the manifest agree: ${describe(qty.attrs) == from_manifest}";
+
+// A variant payload slot has no attribute syntax, so its `attrs` is empty — the true answer, and the
+// same empty list an unannotated struct field reports.
+echo "a variant payload carries no attrs: ${variants_of::<Shape>()[0].payload[0].attrs.len()}";
+
+// `FieldSpec` reflects like any struct, which is a query a schema deriver really makes on its own
+// result type — so the new slot has to show up there too.
+own = field_specs_of("FieldSpec").filter(fn(f) => f.name == "attrs")[0];
+echo "a prelude descriptor describes its own attrs: ${own.name} ${own.type}";

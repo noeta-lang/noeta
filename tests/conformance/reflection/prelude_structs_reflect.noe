@@ -12,7 +12,7 @@
 // vocabulary each consumer projects onto its own), so the reported types are the declared ones — not
 // `Type.Dyn` holes, which would have been worse than reporting nothing: a wrong type travels, an
 // absent one is caught.
-// expect: stdout "FieldSpec: name=Type.String type=Type.Named(Type, []) optional=Type.Bool"
+// expect: stdout "FieldSpec: name=Type.String type=Type.Named(Type, []) optional=Type.Bool attrs=Type.List(Type.Dyn)"
 // expect: stdout "ParamInfo: name=Type.String type=Type.Named(Type, []) optional=Type.Bool attrs=Type.List(Type.Dyn)"
 // expect: stdout "VariantSpec: name=Type.String payload=Type.List(Type.Named(FieldSpec, [])) backing=Type.Option(Type.Dyn)"
 // expect: stdout "FieldEntry: name=Type.String value=Type.Dyn"
@@ -20,7 +20,7 @@
 // expect: stdout "RoleBinding: target=Type.String role=Type.Dyn"
 // expect: stdout "TierRoot: name=Type.String run=Type.Fn([], Type.Unit)"
 // expect: stdout "TierText: target=Type.String text=Type.String"
-// expect: stdout "none is optional: false false false"
+// expect: stdout "none is optional: false false false false"
 // expect: stdout "a struct has no variants: 0"
 // expect: stdout "unknown is still unknown: 0 0"
 // expect: stdout "the reported schema is the schema you can build: true"
@@ -56,7 +56,8 @@ echo "unknown is still unknown: ${variants_of("NoSuchThing").len()} ${field_spec
 // same `FieldSpec` by name produces an equal value (structs compare structurally).
 struct P { label: string }
 
-payload: List<dyn> = ["label", Type.String, false];
+no_attrs: List<dyn> = [];
+payload: List<dyn> = ["label", Type.String, false, no_attrs];
 agrees = match construct("FieldSpec", payload) {
     Ok(v) => v.as<FieldSpec>() == some(field_specs_of("P")[0]),
     Err(e) => false,

@@ -248,7 +248,7 @@ fn seeded_prelude_struct_reflection_agrees_across_entries() {
         Step::Eval("mut unrelated = 1;"),
         Step::Eval("echo field_specs_of(\"FieldSpec\").map(fn(f) => f.name).join(\" \");"),
     ]);
-    assert_eq!(agreed, "name type optional\n0\nonly\nonly\n");
+    assert_eq!(agreed, "name type optional attrs\n0\nonly\nonly\n");
 }
 
 #[test]
