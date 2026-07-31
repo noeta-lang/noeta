@@ -14,11 +14,10 @@ This is a pre-alpha, not-yet-public language implementation built primarily thro
 1. Pick an *(active)* item from `plans/backlog.md` (or a backlog trigger that has fired); for multi-slice work, open a `plans/<arc>/` ledger.
 2. Implement it as a **vertical slice** through the pipeline (grammar/AST → eval op → conformance cases → snapshots). Prefer end-to-end feature slices over diffuse refactors.
 3. **Every feature or fix lands with a conformance corpus entry** (`tests/conformance/**.noe` with `// expect:` headers). This is the iron rule.
-4. Keep it green and clean:
-   - `cargo test` (unit + snapshot + conformance + property)
-   - `cargo fmt --all`
-   - `cargo clippy --all-targets -- -D warnings`
-   - `cargo build` with zero warnings
+4. Keep it green and clean with `scripts/gate.sh`, which runs what `.github/workflows/ci.yml` runs and prints a per-step PASS/FAIL summary:
+   - `scripts/gate.sh --quick` — `cargo fmt --all --check` + both `clippy -D warnings` splits (1m20s warm). Run it as you go.
+   - `scripts/gate.sh` — the merge gate: adds the workspace suite, the lean-CLI and feature-shape builds, the doc samples, and the JIT oracles (~15 min warm, 35 min cold). **Run it, green, before merging to `main`.**
+   - `scripts/gate.sh --full` — adds the wasm, miri, and editor-tooling jobs. Before a release tag.
 5. Review snapshot changes deliberately (`cargo insta review`) — never blind-accept.
 6. Strike the backlog row (or update the arc ledger; delete the arc directory when it ships) and commit code + task file together.
 
@@ -28,4 +27,5 @@ This is a pre-alpha, not-yet-public language implementation built primarily thro
 - American English in code, comments, and docs.
 - No hard line wrap in markdown.
 - Work on a branch / worktree to avoid conflicts with parallel agents.
+- `main` is never pushed, so GitHub Actions never runs. `scripts/gate.sh` is the only thing that executes the CI gates — treat a merge without it as an unreviewed merge.
 - Each crate has a `README.md` (one paragraph: what it takes in, what it emits).
