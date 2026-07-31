@@ -1639,6 +1639,36 @@ impl Greets for P {
         assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
     }
 
+    /// A comment that is the **only** thing in a body keeps the body open around it.
+    ///
+    /// An empty body short-circuits to `{}`, which skipped the comment interleave entirely — so the
+    /// comment fell through to the enclosing scope and was re-emitted outside the braces. The shape
+    /// that found this in the wild is a deliberately-empty branch whose comment says why it is
+    /// empty: it formatted to `} else if … {} else if …` with the explanation relocated to the end
+    /// of the enclosing loop, where it explains nothing.
+    #[test]
+    fn a_comment_alone_in_a_body_keeps_the_body_open() {
+        let src = "\
+fn classify(line: string): int {
+    if line == \"\" {
+        return 0
+    } else if line.starts_with(\":\") {
+        // A comment line dispatches nothing, and neither does this.
+    } else {
+        return 1
+    }
+    return 2
+}
+
+struct Marker {
+    // no fields yet
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of an empty body");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
     /// A `@<tier>` block the author **braced** keeps its braces, and its comments stay inside them.
     ///
     /// A one-`fn` block used to collapse to the annotation form (`@test fn …`). That is not a

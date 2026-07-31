@@ -557,12 +557,34 @@ impl Printer<'_> {
         false
     }
 
+    /// Whether a not-yet-emitted comment falls inside `[start, end)` — i.e. whether an *empty* body
+    /// spanning that region nonetheless holds something.
+    ///
+    /// A body with no members short-circuits to `{}`, which skips the interleave and leaves any
+    /// comment written between the braces for the enclosing scope to re-emit *outside* them. The
+    /// commonest shape is a deliberately-empty branch whose comment says why it is empty:
+    ///
+    /// ```text
+    /// } else if line.starts_with(":") {
+    ///     // A comment. std dispatches nothing for one, and neither does this.
+    /// } else if …
+    /// ```
+    ///
+    /// which formatted to `} else if line.starts_with(":") {} else if …` with the explanation moved
+    /// to the end of the enclosing loop, where it explains nothing.
+    fn holds_comment(&self, start: u32, end: u32) -> bool {
+        self.comments
+            .get(self.cursor.get())
+            .is_some_and(|c| c.span.start >= start && c.span.start < end)
+    }
+
     // ---- statements --------------------------------------------------------------------------
 
     /// A brace-delimited statement block: ` {` on the current line, body indented, `}` on its own
-    /// line. An empty body prints as `{}`.
+    /// line. An empty body prints as `{}` — unless a comment is the only thing in it, in which case
+    /// the braces open around the comment (see [`Printer::holds_comment`]).
     fn block(&self, body: &[Stmt], open: u32, close: u32) -> Result<Doc, FmtError> {
-        if body.is_empty() {
+        if body.is_empty() && !self.holds_comment(open, close) {
             return Ok(Doc::text("{}"));
         }
         let inner = self.stmt_seq(body, open, close)?;
@@ -1260,7 +1282,7 @@ impl Printer<'_> {
         }
         members.sort_by_key(|m| m.sort_key(span).start);
 
-        if members.is_empty() {
+        if members.is_empty() && !self.holds_comment(span.start, span.end) {
             return Ok(Doc::text("{}"));
         }
         let inner = self.interleave_comments(
@@ -1355,7 +1377,7 @@ impl Printer<'_> {
         members.extend(methods.iter().map(ImplMember::Method));
         members.sort_by_key(|m| m.span().start);
 
-        if members.is_empty() {
+        if members.is_empty() && !self.holds_comment(span.start, span.end) {
             return Ok(Doc::text("{}"));
         }
         let inner = self.interleave_comments(
@@ -1422,7 +1444,7 @@ impl Printer<'_> {
         members.extend(d.methods.iter().map(TraitMember::Method));
         members.sort_by_key(|m| m.span().start);
 
-        let body = if members.is_empty() {
+        let body = if members.is_empty() && !self.holds_comment(d.span.start, d.span.end) {
             Doc::text("{}")
         } else {
             let inner = self.interleave_comments(
@@ -1509,7 +1531,7 @@ impl Printer<'_> {
         members.extend(d.impls.iter().map(EnumMember::Impl));
         members.sort_by_key(|m| m.span().start);
 
-        let body = if members.is_empty() {
+        let body = if members.is_empty() && !self.holds_comment(d.span.start, d.span.end) {
             Doc::text("{}")
         } else {
             let inner = self.interleave_comments(
@@ -2660,10 +2682,15 @@ impl Printer<'_> {
         item_span: impl Fn(&T) -> Span,
         render_item: impl Fn(&T) -> Result<Doc, FmtError>,
     ) -> Result<Doc, FmtError> {
-        if items.is_empty() {
+        // An empty sequence still has to interleave when a comment is the only thing between its
+        // delimiters, or the comment falls through to the enclosing scope and re-emits outside them
+        // (the same short-circuit that let a comment out of an empty block body).
+        if items.is_empty() && !self.holds_comment(region_start, region_end) {
             return Ok(Doc::text(format!("{open}{close}")));
         }
-        let broke = self.seq_broke(region_start, item_span(&items[0]).start);
+        let broke = items
+            .first()
+            .is_some_and(|first| self.seq_broke(region_start, item_span(first).start));
 
         // A *structural* comment is one inside the region that is not nested inside any element's own
         // span — i.e. between two elements, above the first, or before the close. Only these need the
