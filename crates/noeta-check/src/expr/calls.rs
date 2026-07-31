@@ -1630,6 +1630,13 @@ impl Checker {
     /// bindings first, the turbofish's next, arguments filling only what those leave open).
     /// Misapplied turbofish — an unknown method, a non-generic one, or a type-argument arity
     /// mismatch against the method's own parameters — is E0058.
+    ///
+    /// The receiver may itself carry a **call-site class instantiation**, `Repo::<Todo>.m::<U>(…)`.
+    /// That is the only spelling for a self-less member of a generic class whose own parameter no
+    /// argument or expectation can infer, and it needs nothing new here: the class's arguments are
+    /// read off the receiver by the same [`Checker::call_site_class_args`] the non-turbofish static
+    /// path uses, and land in `recv_args` — the very channel a *value* receiver's arguments travel.
+    /// Both halves keep their own arity check against their own parameter list.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn synth_typed_method_call(
         &mut self,
@@ -1649,14 +1656,21 @@ impl Checker {
             .iter()
             .map(|t| from_ref_q(t, &self.imports.extern_types))
             .collect();
-        // Resolve the receiver: a bare unshadowed TYPE name is the associated form (no receiver
-        // instantiation); anything else synthesizes and must be a user type with methods.
-        let (type_name, recv_args, associated) = match recv {
+        // Resolve the receiver: a bare unshadowed TYPE name is the associated form — with the
+        // class's instantiation taken from a call-site turbofish if one is spelled
+        // (`Repo::<Todo>.m::<U>(…)`) and left to inference if not; anything else synthesizes and
+        // must be a user type with methods. Peeling first is mandatory, not cosmetic: an
+        // unpeeled `Expr::InstantiatedType` falls to the `_` arm, synthesizes as "a call-site type
+        // argument list must be followed by an associated call", and the static call it plainly is
+        // stops being recognized as one.
+        let (type_name, recv_args, associated) = match recv.peel_instantiation() {
             Expr::Ident { name: tn, .. }
                 if lookup(env, tn.as_str()).is_none()
                     && self.symbols.types.contains(tn.as_str()) =>
             {
-                (tn.to_string(), Vec::new(), true)
+                let tn = tn.to_string();
+                let class_args = self.call_site_class_args(recv, &tn);
+                (tn, class_args, true)
             }
             _ => match self.synth(recv, env) {
                 Type::Named(n, targs) => (n, targs, false),
@@ -1825,11 +1839,14 @@ impl Checker {
             // Its SPELLING, though, is what decides whether the syntactic pre-pass could have
             // registered a slot for it: a bare-name receiver (`s.load::<T>`, `self.load::<T>`,
             // `Store.load::<T>`) parses as the module-call atom the pre-pass marks; anything
-            // compound (`self.inner.load::<T>`, `f().load::<T>`) names its callee only here.
+            // compound (`self.inner.load::<T>`, `f().load::<T>`) names its callee only here. A
+            // call-site class instantiation (`Store::<T>.load::<U>`) is a bare name with types
+            // written on it, not a compound receiver — hence the peel, so the help it produces
+            // matches the one `Store.load::<U>` produces.
             Some((
                 span,
                 format!("{type_name}.{name}"),
-                if matches!(recv, Expr::Ident { .. }) {
+                if matches!(recv.peel_instantiation(), Expr::Ident { .. }) {
                     ForwardSpelling::Turbofish
                 } else {
                     ForwardSpelling::CompoundReceiver

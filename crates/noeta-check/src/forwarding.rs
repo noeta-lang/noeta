@@ -849,6 +849,26 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         // result, not a syntactic one. A site that needs it is refused at the call rather than
         // resolved wrongly. Receiver and arguments recurse like any call's.
         Expr::TypedMethodCall { recv, args, .. } => {
+            // `Repo::<T>.make::<U>(…)` — BOTH turbofishes. The class half is the same checked
+            // construction position the single-turbofish `Repo::<T>.new(…)` is (that one arrives
+            // as `Expr::Call { callee: Member { receiver: InstantiatedType } }`, this one as a
+            // `TypedMethodCall` whose `recv` is the `InstantiatedType`), so it feeds the same
+            // consumer with the same template. Without this the two spellings would disagree about
+            // whether a construction out of an enclosing parameter is recordable.
+            if let Expr::InstantiatedType {
+                recv: head,
+                type_args,
+                span,
+            } = recv.as_ref()
+                && let Expr::Ident { name, .. } = head.as_ref()
+            {
+                let position = TypeRef::Named {
+                    name: name.clone(),
+                    args: type_args.clone(),
+                    span: *span,
+                };
+                cx.mark_ctor_position(Some(&position), expr, mark);
+            }
             rec!(recv);
             for a in noeta_ast::CallArg::values(args) {
                 rec!(a);

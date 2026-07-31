@@ -62,21 +62,35 @@ enum DotKeyword {
 
 /// The member-access postfix family, folded into one pratt entry (the op-tuple is at its 26-entry
 /// cap): `.member`, its explicit method instantiation `.m::<U>(args)`, and the call-site class
-/// instantiation `::<T>.member`.
+/// instantiation `::<T>.member` — the last of which may itself carry a method instantiation,
+/// `Repo::<Todo>.blank::<int>(args)`.
 ///
-/// The last one is why the family is a `choice` rather than a single shape: `Repo::<Todo>.new(…)`
+/// The class form is why the family is a `choice` rather than a single shape: `Repo::<Todo>.new(…)`
 /// applies the turbofish to the *receiver* (the class's own parameters), not to the member, so it
 /// leads with `::` where the other two lead with `.`. Requiring the trailing `.member` is what keeps
 /// `Repo::<Todo>` from parsing as a value and keeps `x.m::<T>` (no argument list) reporting exactly
 /// the error it reported before.
+///
+/// The two turbofishes stay distinct concepts and are checked against distinct parameter lists —
+/// the one before the `.` names the CLASS's, the one after the member names the METHOD's OWN — but
+/// they compose on one call, because a self-less member of a generic class carrying its own
+/// uninferable parameter has no other spelling: it must be called on the type (so the class's
+/// arguments can only come from the receiver turbofish) and its own parameter appears only in the
+/// return (so no argument or annotation can pin it).
 #[derive(Clone)]
 enum MemberPostfix {
     /// `.name`, optionally `::<U, …>(args)` — a plain member access or an explicitly instantiated
     /// method call.
     Dot((String, Span), Option<(Vec<TypeRef>, Vec<CallArg>)>),
-    /// `::<T, …>.name` — the receiver is a type reference carrying an explicit instantiation. The
-    /// [`Span`] is the turbofish's, joined with the receiver's to span the type reference.
-    Instantiate(Vec<TypeRef>, Span, (String, Span)),
+    /// `::<T, …>.name`, optionally `::<U, …>(args)` — the receiver is a type reference carrying an
+    /// explicit CLASS instantiation, and the member may carry its own METHOD instantiation. The
+    /// [`Span`] is the receiver turbofish's, joined with the receiver's to span the type reference.
+    Instantiate(
+        Vec<TypeRef>,
+        Span,
+        (String, Span),
+        Option<(Vec<TypeRef>, Vec<CallArg>)>,
+    ),
 }
 
 /// A prefix operator, folded into one pratt entry: `-x`/`!x` and the Track-A `spawn e`. Kept together
@@ -1682,6 +1696,16 @@ fn weave_hard_semicolons(
 const MAP_ENTRY_NEEDS_VALUE: &str =
     "a map entry needs `: value`, or a bare field name for the shorthand";
 
+/// The reason carried by a `::<...>` type-argument list in expression position that no call
+/// follows. Same arrangement as [`MAP_ENTRY_NEEDS_VALUE`]: [`custom_reason`] keys code and help off
+/// this exact string.
+///
+/// Without it the failure renders as chumsky's expected-set (`` found `(` expected `.` ``), which
+/// names a token the writer never meant to type and says nothing about the actual rule — that a
+/// type argument list is part of a *call*, never an expression of its own.
+const TURBOFISH_NEEDS_A_CALL: &str =
+    "a `::<...>` type argument list must be followed by the call it instantiates";
+
 /// The catalog entry a parser-stage [`Rich::custom`] reason declares for itself, if it is one this
 /// module raises deliberately. A rule that matched a token and then rejected it on its own terms
 /// knows better than the generic expected-vs-found classifier what it is complaining about, so it
@@ -1694,6 +1718,14 @@ fn custom_reason(reason: &str) -> Option<(DiagnosticCode, Option<&'static str>)>
             Some(
                 "write `{\"key\": value}` for an explicit entry, or `{name}` to pun a variable \
                  into the key of the same name",
+            ),
+        )),
+        TURBOFISH_NEEDS_A_CALL => Some((
+            DiagnosticCode::UnexpectedToken,
+            Some(
+                "write `f::<T>(args)` for a function, `recv.method::<T>(args)` for a method, or \
+                 `Type::<T>.method(args)` to instantiate a generic type (both together where the \
+                 type AND the method are generic: `Type::<T>.method::<U>(args)`)",
             ),
         )),
         _ => None,
@@ -3347,7 +3379,11 @@ where
             //   * `::<T, ...>.member` — an explicit CLASS instantiation at the call site
             //     (`Repo::<Todo>.new("todos")`). The trailing `.member` is required, which is what
             //     keeps `Repo::<Todo>` from being an expression of its own and keeps `x.m::<T>`
-            //     (a method turbofish with no argument list) failing where it failed before.
+            //     (a method turbofish with no argument list) failing where it failed before;
+            //   * `::<T, ...>.member::<U, ...>(args)` — BOTH, on one call
+            //     (`Repo::<Todo>.blank::<int>()`). The trailing half is the same optional shape the
+            //     `.member` arm carries and commits on the same `(`, so this is one grammar rule
+            //     rather than a new pratt entry (the op-tuple is at its 26-entry cap).
             //
             // `Repo<Todo>.new(…)` stays a parse error on purpose: a bare `<` after an identifier is
             // genuinely ambiguous with less-than in expression position, and `::<>` is this
@@ -3381,10 +3417,51 @@ where
                                 .delimited_by(just(T::Lt), just(T::Gt))
                                 .map_with(move |tys, e| (tys, ctx.to_span(e.span()))),
                         )
-                        .then_ignore(just(T::Dot))
-                        .then(member_name)
-                        .map(|((tys, turbo_span), name)| {
-                            MemberPostfix::Instantiate(tys, turbo_span, name)
+                        .then(
+                            just(T::Dot)
+                                .ignore_then(member_name)
+                                // The METHOD's own turbofish, the same optional shape (and the
+                                // same commit on `(`) the `.member` arm carries — so
+                                // `Repo::<Todo>.new("todos")` keeps its exact parse and
+                                // `Repo::<Todo>.blank::<int>()` gains one.
+                                .then(
+                                    just(T::ColonColon)
+                                        .ignore_then(
+                                            type_parser(ctx)
+                                                .separated_by(just(T::Comma))
+                                                .at_least(1)
+                                                .allow_trailing()
+                                                .collect::<Vec<_>>()
+                                                .delimited_by(just(T::Lt), just(T::Gt)),
+                                        )
+                                        .then(member_call_args.clone())
+                                        .or_not(),
+                                )
+                                .or_not(),
+                        )
+                        // A turbofish with NOTHING to instantiate — `Repo::<Todo>;`,
+                        // `b.choose::<string>;`, `Repo::<Todo>blank()`, a bare `f::<T>` — is
+                        // rejected on its own terms rather than left to the expected-set wall.
+                        // Reaching here means the `::<...>` parsed and the call it belongs to did
+                        // not follow, which the generic report could only render as `found `;`
+                        // expected `(`, or `.`` — true, and no help at all in working out that a
+                        // type argument list is not an expression. `try_map` (not a diagnostic
+                        // push) because this is a speculative branch: a `::` that some *other*
+                        // alternative can still use must backtrack cleanly, exactly as the map
+                        // shorthand's rejection does.
+                        //
+                        // `try_map_with`, not `try_map`, and the difference is the whole reason
+                        // this reaches the reader: chumsky keeps ONE alternative error, the one
+                        // located FURTHEST into the input, and `try_map` locates its error where
+                        // its sub-parser *started* (at the `::`) while `try_map_with` locates it
+                        // where the sub-parser *stopped* (past the `>`). Located at the `::` this
+                        // loses to the enclosing statement rule's own rejection there — "expected
+                        // a statement terminator", pointing at the `::` and explaining nothing.
+                        .try_map_with(|((tys, turbo_span), tail), e| match tail {
+                            Some((name, turbo)) => {
+                                Ok(MemberPostfix::Instantiate(tys, turbo_span, name, turbo))
+                            }
+                            None => Err(Rich::custom(e.span(), TURBOFISH_NEEDS_A_CALL)),
                         }),
                 )),
                 move |receiver, op, e| match op {
@@ -3404,21 +3481,36 @@ where
                         name_span,
                         span: ctx.to_span(e.span()),
                     },
-                    MemberPostfix::Instantiate(type_args, turbo_span, (name, name_span)) => {
+                    MemberPostfix::Instantiate(
+                        class_args,
+                        turbo_span,
+                        (name, name_span),
+                        method_turbo,
+                    ) => {
                         let recv_span = receiver.span();
-                        Expr::Member {
-                            receiver: Box::new(Expr::InstantiatedType {
-                                recv: Box::new(receiver),
+                        let instantiated = Expr::InstantiatedType {
+                            recv: Box::new(receiver),
+                            type_args: class_args,
+                            span: Span::new_in(recv_span.source, recv_span.start, turbo_span.end),
+                        };
+                        match method_turbo {
+                            // BOTH turbofishes: the class's arguments ride the receiver (the
+                            // channel a value receiver's type arguments already use), the method's
+                            // own ride the call node — exactly as each does alone.
+                            Some((type_args, args)) => Expr::TypedMethodCall {
+                                recv: Box::new(instantiated),
+                                name,
+                                name_span,
                                 type_args,
-                                span: Span::new_in(
-                                    recv_span.source,
-                                    recv_span.start,
-                                    turbo_span.end,
-                                ),
-                            }),
-                            name,
-                            name_span,
-                            span: ctx.to_span(e.span()),
+                                args,
+                                span: ctx.to_span(e.span()),
+                            },
+                            None => Expr::Member {
+                                receiver: Box::new(instantiated),
+                                name,
+                                name_span,
+                                span: ctx.to_span(e.span()),
+                            },
                         }
                     }
                 },
