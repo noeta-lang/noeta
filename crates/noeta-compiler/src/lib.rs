@@ -860,7 +860,13 @@ impl SessionCompiler {
         // Thread in-place-reuse tokens (Phase 5) onto self-update constructors. A pure function of
         // the drop-annotated IR, run identically by the IR interpreter (`reference_run`), so both
         // backends reuse at the same points by construction.
-        let ir = noeta_ir_passes::thread_reuse(&ir);
+        //
+        // The own-destructor gate comes from `self.facts` — already absorbed above, so it holds this
+        // program's classes *and* every earlier install's. That is what a fragment needs: the class
+        // whose `destruct` block makes a self-update ineligible for reuse is declared in the program
+        // being swapped INTO, not in the fragment, and reusing there would silently stop running a
+        // destructor the cold start runs.
+        let ir = noeta_ir_passes::thread_reuse(&ir, &self.facts.own_destructors);
 
         // ── the tables (each exactly once; policies in `TABLE_POLICIES`) ────────────────────
         // `type_of_sites` — MergeByKey. The checker's full-fidelity map, span-keyed by this

@@ -46,9 +46,20 @@
 //! the displaced base (running its destructor) on every self-update (spec §5). So a self-update is
 //! only reuse-eligible when its type has **no own `destruct` block** — every struct qualifies (structs
 //! are bodiless), and a class qualifies iff it carries no destructor. The pass therefore excludes
-//! own-destructor types (derived from the IR's class declarations). The *changed* field's displaced
-//! value still has its destructor fired on overwrite, by both backends — keeping reuse observationally
-//! identical to copy-and-destroy, so the differential stays in agreement.
+//! own-destructor types. The *changed* field's displaced value still has its destructor fired on
+//! overwrite, by both backends — keeping reuse observationally identical to copy-and-destroy, so the
+//! differential stays in agreement.
+//!
+//! # Why the exclusion set is an argument
+//!
+//! That set used to be read off the IR's own class declarations, which is the whole story only when
+//! the IR *is* a whole program. A hot-swap fragment carries the changed function and nothing else,
+//! so a swapped body's `acc = Counter { ...acc, n: 1 }` found no `Counter` declaration, concluded
+//! "destructor-free", and reused in place — and the superseded `Counter`'s `destruct` block, which
+//! the very same source runs on a cold start, stopped running for the rest of the process's life.
+//! A silent change in *when a resource is released* is the sharpest edge this language has, so the
+//! ambient set now travels in explicitly ([`noeta_ir::ProgramFacts::own_destructors`]) instead of
+//! being re-derived from whatever the pass happened to be handed.
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -58,12 +69,20 @@ use noeta_ir::{
     Temp,
 };
 
-/// Thread reuse tokens through a program, returning the annotated IR. Pure function of the input
-/// (the only derived state is the set of own-destructor type names, computed from the program's
-/// class declarations), so every pipeline that runs it on the same lowered+drop-annotated IR gets
-/// identical tokens — the VM and the IR interpreter agree by construction.
-pub fn thread_reuse(program: &Program) -> Program {
-    let own_destructors = collect_own_destructors(&program.top);
+/// Thread reuse tokens through a program, returning the annotated IR. Pure function of its two
+/// inputs — the IR, and `ambient_own_destructors`, the own-destructor class names of the enclosing
+/// program (`noeta_ir::ProgramFacts::own_destructors`; empty when `program` *is* the whole program,
+/// which derives its own set from the class declarations it carries). So every pipeline that runs
+/// it on the same lowered+drop-annotated IR gets identical tokens — the VM and the IR interpreter
+/// agree by construction.
+///
+/// The two sets **union**: a class is destructor-bearing whether the IR in hand shows the
+/// declaration or the enclosing program does. Erring toward membership is the safe direction — a
+/// spurious entry costs only the in-place-reuse optimization (observationally transparent), while a
+/// missing one costs a destructor.
+pub fn thread_reuse(program: &Program, ambient_own_destructors: &HashSet<String>) -> Program {
+    let mut own_destructors = collect_own_destructors(&program.top);
+    own_destructors.extend(ambient_own_destructors.iter().cloned());
     Program {
         top: rewrite_block(&program.top, &own_destructors, &HashSet::new()),
         temp_count: program.temp_count,

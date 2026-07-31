@@ -52,9 +52,12 @@
 //! range, so it is an ordinary test — no `#[ignore]`, no flag to remember, no coverage that only
 //! exists when someone opts in.
 //!
-//! What it finds today is in [`KNOWN_DIVERGENCES`]. It reported nine real hot-swap defects in three
-//! families when it landed; six of them — the two reflection families — are fixed, and the list is
-//! enforced in both directions, so it cannot outlive the bugs it names.
+//! What it found is in [`KNOWN_DIVERGENCES`], and that list is now **empty**. It reported nine real
+//! hot-swap defects in three families when it landed — a fragment-compiled body skipping a
+//! destructor, a swapped declaration losing the `@role` its unchanged attribute confers, and the
+//! attribute manifest reordering. All nine are fixed. The list stays, and stays enforced in both
+//! directions, because an empty list is the state worth defending: the next divergence fails the
+//! build rather than joining a backlog.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -984,16 +987,28 @@ fn indent(text: &str) -> String {
 
 // ------------------------------------------------------------------ the open defects this found
 
-/// The divergences the corpus differential reports **today** — real hot-swap defects, listed here
-/// so the sweep can be an enforcing gate: anything *not* on this list fails the build, and anything
-/// on it that stops reproducing fails it too, which is what stops the list from quietly outliving
-/// the bugs.
+/// The divergences the corpus differential reports **today** — and it reports none.
 ///
-/// 1. **A fragment-compiled body skips a destructor.** `gc/self_update_own_destructor_no_reuse`
+/// Enforced in BOTH directions: a divergence the sweep finds that is *not* listed here fails the
+/// build, and an entry here that stops reproducing fails it too. The second half is what stops a
+/// list like this from outliving its bugs, and it is why this one emptied out instead of settling
+/// into a backlog — each fix had to delete its own rows to go green.
+///
+/// The nine it found are the arc's record: three from a fragment-compiled body skipping a
+/// destructor (`thread_reuse` built its own-destructor exclusion set from the IR in hand, which a
+/// fragment does not carry), three from `roles_of` losing a binding whose `@role` declaration is
+/// ambient to the fragment, one where that same defect escalated to an E0016 abort because the
+/// program indexed the list instead of scanning it, and two from the attribute manifest being
+/// appended to rather than superseded in place.
+///
+/// 1. ~~**A fragment-compiled body skips a destructor.**~~ FIXED. `gc/self_update_own_destructor_no_reuse`
 ///    pins that `acc = Counter { ...acc, n: 1 }` must *not* reuse the allocation when the type has
-///    its own `destruct`, so the displaced value runs its destructor. Swapped, the reuse fires and
-///    `drop counter 0` never prints — a silent change to when destructors run, reported
-///    independently by three of the four generators.
+///    its own `destruct`, so the displaced value runs its destructor. Swapped, the reuse fired and
+///    `drop counter 0` never printed — reported independently by three of the four generators. The
+///    reuse pass read its own-destructor exclusion set off the class declarations in the IR it was
+///    handed, and a fragment carries none; the set now travels with the program
+///    (`noeta_ir::ProgramFacts::own_destructors`). Pinned targetedly by
+///    `hotswap.rs::a_swapped_self_update_still_destroys_the_value_it_displaces`.
 ///
 /// Two further families the sweep found have since been **fixed**, both in
 /// `ReflectionInfo::accumulate`, and are pinned in the hand-written oracle (`hotswap.rs`) rather
@@ -1002,21 +1017,7 @@ fn indent(text: &str) -> String {
 /// E0016 abort in `prelude_structs_constructible`, which was the same defect escalating), and the
 /// attribute manifest reordering when a re-registered declaration was appended instead of
 /// superseded in place (`reflection/attributes_on_functions`, `attributes_on_params`).
-const KNOWN_DIVERGENCES: &[(&str, Generator)] = &[
-    // (1) destructor skipped by a fragment-compiled body.
-    (
-        "gc/self_update_own_destructor_no_reuse.noe",
-        Generator::CloneAppend,
-    ),
-    (
-        "gc/self_update_own_destructor_no_reuse.noe",
-        Generator::CloneChanged,
-    ),
-    (
-        "gc/self_update_own_destructor_no_reuse.noe",
-        Generator::RerunWithBodyEdit,
-    ),
-];
+const KNOWN_DIVERGENCES: &[(&str, Generator)] = &[];
 
 /// Compare what the sweep found against [`KNOWN_DIVERGENCES`], in both directions.
 fn assert_against_the_known_defects(tally: &Tally, exhaustive: bool) {

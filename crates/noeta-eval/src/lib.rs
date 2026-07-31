@@ -99,7 +99,9 @@ impl Backend for IrRefBackend {
             &ir,
             Some(&relevance_of(&checked.sites.destructor_relevance)),
         );
-        let ir = noeta_ir_passes::thread_reuse(&ir);
+        // A whole program: the IR carries every class declaration, so the pass derives the complete
+        // own-destructor set itself and there is nothing ambient to add.
+        let ir = noeta_ir_passes::thread_reuse(&ir, &HashSet::new());
         let deserialize_recipes = checked.sites.deserialize_recipes.iter().cloned().collect();
         let packed_type_layouts = checked
             .sites
@@ -137,6 +139,12 @@ pub struct Session {
     /// The binding names present in a fresh interpreter (the prelude — `len`, `map`, `Ok`, …), so
     /// `:bindings` can list only the *user's* bindings, not the built-ins.
     prelude: std::collections::HashSet<String>,
+    /// Own-destructor class names accumulated over every entry so far — the reuse pass's semantic
+    /// gate ([`noeta_ir_passes::thread_reuse`]). A REPL entry is a *piece* of a program: the entry
+    /// that self-updates a value (`acc = Counter { ...acc, n: 1 }`) is rarely the entry that
+    /// declared the class, and a pass that saw only the entry in hand concluded "destructor-free"
+    /// and reused the allocation in place — skipping the destructor a whole-program run fires.
+    own_destructors: HashSet<String>,
 }
 
 impl std::fmt::Debug for Session {
@@ -151,7 +159,11 @@ impl Session {
     pub fn new() -> Session {
         let interp = Interpreter::new();
         let prelude = interp.scope.names().into_iter().collect();
-        Session { interp, prelude }
+        Session {
+            interp,
+            prelude,
+            own_destructors: HashSet::new(),
+        }
     }
 
     /// Evaluate a program against the persistent scope. Returns just this batch's stdout
@@ -228,6 +240,7 @@ impl Session {
     pub fn reset(&mut self) {
         self.interp = Interpreter::new();
         self.prelude = self.interp.scope.names().into_iter().collect();
+        self.own_destructors.clear();
     }
 
     /// Lower, run the precise-RC drop + reuse passes, and execute one batch on the Core-IR
@@ -250,7 +263,12 @@ impl Session {
         // queries resolve for types declared in *earlier* entries too — the VM's `SessionCompiler`
         // accumulates identically, so the session differential stays green.
         let ir = noeta_ir_passes::insert_drops(&ir, None);
-        let ir = noeta_ir_passes::thread_reuse(&ir);
+        // The own-destructor gate accumulates across entries (see `Session::own_destructors`) —
+        // this entry's classes join the set before the pass reads it, so a self-update reuses in
+        // place only when the class it names is known destructor-free from *some* entry.
+        self.own_destructors
+            .extend(noeta_ir::ProgramFacts::of(&lowerable, self.interp.reg()).own_destructors);
+        let ir = noeta_ir_passes::thread_reuse(&ir, &self.own_destructors);
         let native_roles = self.interp.reg().native_roles();
         let native_traits = noeta_ir::native_trait_impls(self.interp.reg());
         self.interp.reflection.accumulate(noeta_ast::reflect::build(

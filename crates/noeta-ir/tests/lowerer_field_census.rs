@@ -243,6 +243,17 @@ const FACTS: &[Fact] = &[
             "fn a_swapped_async_body_still_sees_the_module_globals(",
         ),
     ),
+    // A swapped body self-updating a value whose class — declared in the unchanged part — carries
+    // its own `destruct`, which makes the update ineligible for in-place reuse. The one fact here
+    // that a *pass over the lowered IR* reads rather than the lowerer, and the one whose absence
+    // was not a panic or a wrong answer but a destructor that silently stopped running.
+    Fact(
+        "own_destructors",
+        Anchor(
+            HOTSWAP,
+            "fn a_swapped_self_update_still_destroys_the_value_it_displaces(",
+        ),
+    ),
 ];
 
 fn workspace_root() -> PathBuf {
