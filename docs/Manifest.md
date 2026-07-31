@@ -66,6 +66,8 @@ gfx   = { git = "https://github.com/acme/gfx", branch = "main" }
 draft = { git = "https://github.com/acme/draft" }
 # A registry dependency. `package` names the real identity when it differs from the key:
 codec = { version = "^1.0", package = "acme/imgcodec" }
+# A path dependency that also records which package that directory holds:
+ai    = { path = "../para-ai", package = "para/ai" }
 ```
 
 The source forms:
@@ -78,6 +80,10 @@ The source forms:
 
 A dependency table must name **exactly one** of `path`, `git`, or `version`.
 
+**`package` on a `path` or `git` dependency is a checked claim.** On a `version` dependency the identity *selects* the package — it is what the index is queried for. A `path` or `git` source has already selected its tree, so there the same key means something different: it records **which package that source holds**, and the resolver verifies it against that package's own `[package] name`. A claim that disagrees is a manifest error naming both identities and the path; a dependency that names no `package` at all is unchanged, and is still the ordinary spelling. Nothing is inferred from a claim — a wrong one cannot redirect a build, only fail it. (A dependency directory with no `[package]` table is already refused for a different reason: a path/git dependency's identity and namespace root both come from that table, so it is rejected as a missing table whether or not a claim was written.)
+
+Optional keys never carry their weight unless something reads them, and this one earns its place on a scope-array member, below — where the path alone cannot say which package of the scope you meant.
+
 **The key is the prefix its modules derive under.** A dependency's module paths are not declared by the dependency — they are derived from where its files sit, under the key *you* wrote (see [Modules](Modules#where-a-modules-path-comes-from)). So `codec = { … }` puts a `parse.noe` at `codec.parse`, and renaming the key renames every import path, with nothing inside the package able to override it.
 
 **A dependency's own internal imports are rewritten to match.** A package's files import each other by the `package` half of its identity (`use codec.parse` inside `acme/codec`), which is what they derive under when the package is built on its own; a consumer's build rewrites that leading segment to whatever prefix the package derives under here. So the key is free to be anything, and the package's author never writes it. If you are *writing* a package, see [importing your own package's modules](Modules#importing-your-own-packages-modules).
@@ -89,6 +95,16 @@ A dependency table must name **exactly one** of `path`, `git`, or `version`.
 acme = [
   { version = "^1.0", package = "acme/bytes" },
   { version = "^2.0", package = "acme/codec" },
+]
+```
+
+Members may be any source form, mixed freely. A member sourced from a `path` or `git` is where naming its `package` pays off: the members of a scope are siblings, and a bare `{ path = "../.." }` beside `{ path = "../../../para-api" }` says nothing about which package of the scope each one is. Write the identity and the manifest reads as what it is — checked, so it stays true:
+
+```toml
+[dependencies]
+para = [
+  { path = "../..", package = "para/ai" },
+  { path = "../../../para-api", package = "para/api" },
 ]
 ```
 
