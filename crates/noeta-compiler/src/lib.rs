@@ -437,6 +437,9 @@ pub fn compile_session_with(
         // carry them (session-checker C5).
         map_packed: map_packed_sites.clone(),
         reflection,
+        // Seeded from the launch program, which is where an imported package's `@tier` declaration
+        // is: a fragment swapped in later carries none of its own.
+        expr_tiers: noeta_ast::desugar::expr_tier_handlers(program),
     };
     let module = session.snapshot(map_packed_sites, destruct_reachable);
     Ok((module, session))
@@ -492,6 +495,8 @@ fn compile_to_mc(
         noeta_ir::LowerOptions {
             real_isolates,
             registry,
+            // A whole program carries its own tier declarations; nothing is ambient to it.
+            ambient_expr_tiers: HashMap::new(),
         },
     )
     .map_err(|u| Unsupported {
@@ -613,6 +618,12 @@ pub struct SessionCompiler {
     /// only see the current entry's declarations. The tree-walker `Session` accumulates identically,
     /// so the session differential stays green.
     reflection: noeta_ast::reflect::ReflectionInfo,
+    /// Expression-tier handlers (`@html` → the `@tier(html, …, expr: Html)` fn) accumulated across
+    /// the launch compile and every entry since — the ambient table a later fragment lowers
+    /// against. A hot-swapped definition contains no `@tier` declaration (it lives in the package
+    /// the program imports), so without this its `@html { … }` lowers to a panic instead of a
+    /// template. Accumulated latest-wins, like [`Self::reflection`].
+    expr_tiers: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for SessionCompiler {
@@ -670,6 +681,7 @@ impl SessionCompiler {
             mc,
             map_packed: Vec::new(),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
+            expr_tiers: HashMap::new(),
         }
     }
 
@@ -708,23 +720,30 @@ impl SessionCompiler {
         // edit must materialize the same native derive recipes the initial compile did.
         let hoisted = noeta_ir::hoist_impl_methods_with_registry(entry, Some(self.mc.registry));
         let entry: &Program = hoisted.as_ref().unwrap_or(entry);
+        // Expression tiers this entry declares join the session's table, and the whole table
+        // lowers with the entry — so a fragment's `@html { … }` resolves the handler its *program*
+        // declared, which is never in the fragment itself.
+        self.expr_tiers
+            .extend(noeta_ast::desugar::expr_tier_handlers(entry));
         // Checkerless lowering (matches the tree-walker `Session`) unless the caller supplied the
         // checker's bundle: then the SAME lowering the file pipeline runs, sites and all. The
         // conservative path's `insert_drops(_, None)` marks every value destructor-relevant;
         // `thread_reuse` runs identically either way (a pure function of the drop-annotated IR).
+        let opts = || noeta_ir::LowerOptions {
+            // The REPL keeps cooperative isolates, exactly like the checkerless path.
+            real_isolates: false,
+            // The session's own registry (instance-registry IR5) — the default for a REPL
+            // session, an embed session's own set when it installed one.
+            registry: self.mc.registry,
+            ambient_expr_tiers: self.expr_tiers.clone(),
+        };
         let ir = match sites {
-            None => noeta_ir::lower(entry),
-            Some(sites) => noeta_ir::lower_with_sites_opts(
-                entry,
-                noeta_ir::lowering_sites!(sites),
-                noeta_ir::LowerOptions {
-                    // The REPL keeps cooperative isolates, exactly like the checkerless path.
-                    real_isolates: false,
-                    // The session's own registry (instance-registry IR5) — the default for a REPL
-                    // session, an embed session's own set when it installed one.
-                    registry: self.mc.registry,
-                },
-            ),
+            None => {
+                noeta_ir::lower_with_sites_opts(entry, noeta_ir::LoweringSites::empty(), opts())
+            }
+            Some(sites) => {
+                noeta_ir::lower_with_sites_opts(entry, noeta_ir::lowering_sites!(sites), opts())
+            }
         }
         .map_err(|u| Unsupported {
             reason: format!("not yet lowered to the Core IR: {}", u.feature),
