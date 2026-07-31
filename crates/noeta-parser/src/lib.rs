@@ -1285,6 +1285,56 @@ const DEEP_PARSE_STACK: usize = 256 * 1024 * 1024;
 /// See [`DEEP_PARSE_STACK`] for why it is this large.
 const DEEP_STACK_MARGIN: usize = 4;
 
+/// Whether the [`DEEP_PARSE_STACK`] worker is a remedy this target actually has.
+///
+/// **False on every wasm target.** `wasm32-unknown-unknown` (the browser engine) and
+/// `wasm32-wasip1`/`wasip2` (the runner and the `wasi:http` component) have no threads: `std`'s
+/// spawn is `Err(Unsupported)` there, unconditionally and at every stack size. So the offload is
+/// not a conservative choice on wasm, it is a guaranteed abort — and it *was* one, because the two
+/// tests that select it both answer "offload" on wasm for reasons that have nothing to do with the
+/// input: `stacker`'s stack-limit backend is the `None`-returning fallback on any target that is
+/// not Linux/BSD/macOS/Windows, so [`remaining_stack`](stacker::remaining_stack) is always `None`
+/// and `short_on_stack` is always true. Every parse in the browser engine trapped on
+/// `unreachable` at the first `.expect("spawn parse worker")`, whatever the source said.
+///
+/// A wasm module runs its whole program on **one** stack, sized once at link time, so that is where
+/// the guarantee has to come from: the workspace links the wasm targets with
+/// `-z stack-size=`[`WASM_STACK_SIZE`] (see `.cargo/config.toml`), which holds a parse at
+/// [`MAX_NESTING_DEPTH`] with margin — the same budget [`DEEP_PARSE_STACK`] buys natively, bought
+/// from the linker instead. Nothing is silently degraded: on wasm the inline path *is* the
+/// deep-stack path.
+const HAS_DEEP_PARSE_WORKER: bool = !cfg!(target_family = "wasm");
+
+/// The stack the wasm targets are **linked** with — `.cargo/config.toml` passes this to `wasm-ld`
+/// as `-z stack-size=…`, and the two must move together (the constant is the derivation, the link
+/// arg is the delivery; `wasm_stack_size_matches_the_link_arg` is what keeps them equal).
+///
+/// It is [`MIN_PIPELINE_STACK`], and that is the whole derivation: a wasm module runs its *entire*
+/// program on this one stack, so it is not the parser's stack, it is the pipeline's — the same
+/// role `MIN_PIPELINE_STACK` names natively, and the constant [`MAX_ELSE_CHAIN_BRANCHES`] and
+/// [`MAX_TERNARY_CHAIN_BRANCHES`] are already derived from. A wasm module linked with less would
+/// accept input those limits promise and then trap on it.
+///
+/// Deliberately **not** [`DEEP_PARSE_STACK`], though it plays that role too
+/// ([`HAS_DEEP_PARSE_WORKER`]), because the two are not the same kind of thing: a thread stack is
+/// reserved address space that commits page by page, while this is linear memory the module pays
+/// for at instantiation — in a browser tab. Measured, that is what it buys:
+///
+/// | on a starved 128 KiB stack | check answers to | run answers to |
+/// |----------------------------|------------------|----------------|
+/// | `[[[…]]]` nesting          | ~80 levels       | ~60 levels     |
+/// | nested `fn` values (worst) | ~40 levels       | —              |
+///
+/// So the worst legal input — [`MAX_NESTING_DEPTH`] nested function values — costs ~410 KiB of
+/// *release wasm* stack to parse and about a third more to run, two orders under the debug-build
+/// [`STACK_PER_NESTING_LEVEL`] the native budgets are drawn on. 8 MiB clears it by ~14×, and costs
+/// 9 MiB of initial linear memory (the `.wasm` itself does not change). `browser_smoke.mjs` is
+/// where that measurement lives, because the real engine is the only place it can be taken.
+///
+/// wasm-ld's default is 1 MiB — over the parse but only ~2.5× over it, with the whole rest of the
+/// pipeline still to come out of the same stack.
+pub const WASM_STACK_SIZE: usize = MIN_PIPELINE_STACK;
+
 // The three budgets above are a derivation, not three independent numbers, and these assertions are
 // what keep them one. Raising `MAX_NESTING_DEPTH`, lowering `DEEP_PARSE_STACK`, or widening the
 // inline range without moving its headroom stops the build instead of reintroducing a process abort
@@ -1396,7 +1446,13 @@ pub fn parse_in(
     // threads are 2 MiB whatever the input looks like — and asking the stack directly is what makes
     // the guarantee independent of who is calling.
     let short_on_stack = stacker::remaining_stack().is_none_or(|left| left < INLINE_PARSE_HEADROOM);
-    if max_depth > INLINE_NESTING_DEPTH || max_chain > INLINE_CHAIN_BRANCHES || short_on_stack {
+    let wants_worker =
+        max_depth > INLINE_NESTING_DEPTH || max_chain > INLINE_CHAIN_BRANCHES || short_on_stack;
+    // …and one reason it cannot be done: a target with no threads has no worker to leave *for*
+    // ([`HAS_DEEP_PARSE_WORKER`]). There the inline parse is not a fallback, it is the whole
+    // design — the module's single link-time stack ([`WASM_STACK_SIZE`]) is what the deep worker's
+    // stack is elsewhere.
+    if wants_worker && HAS_DEEP_PARSE_WORKER {
         // Deep but legal, or a caller too near its own limit: parse on a worker thread whose stack
         // is large enough that the depth limit above — not the caller's stack — is what bounds
         // recursion. A scoped thread lets the closure borrow `source`/`tokens` directly; the owned
@@ -7169,6 +7225,51 @@ mod tests {
             parsed.diagnostics
         );
         assert_eq!(parsed.program.stmts.len(), 1);
+    }
+
+    #[test]
+    fn wasm_stack_size_matches_the_link_arg() {
+        // The wasm half of the same budget, and the only place it can be checked from Rust: on a
+        // thread-free target there is no deep-stack worker to offload to (`HAS_DEEP_PARSE_WORKER`),
+        // so `MAX_NESTING_DEPTH` is delivered by the stack `wasm-ld` is told to reserve — a number
+        // that lives in `.cargo/config.toml`, outside the compiler's sight. `WASM_STACK_SIZE` is
+        // the derivation and the link arg is the delivery; nothing but this test keeps them equal,
+        // and if they drift the symptom is a browser tab trapping on legal input.
+        //
+        // Every wasm target the workspace builds for must carry it: the browser engine and the two
+        // wasi artifacts run the same single-stack pipeline.
+        let config = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.cargo/config.toml"
+        ))
+        .expect("read the workspace .cargo/config.toml");
+        let expected = format!("link-arg=-zstack-size={WASM_STACK_SIZE}");
+        let mut target = None;
+        let mut seen = Vec::new();
+        for line in config.lines() {
+            let line = line.trim();
+            if let Some(rest) = line
+                .strip_prefix("[target.")
+                .and_then(|r| r.strip_suffix(']'))
+            {
+                target = Some(rest.to_owned());
+            } else if line.starts_with("rustflags")
+                && let Some(name) = target.as_deref()
+                && name.starts_with("wasm32-")
+            {
+                assert!(
+                    line.contains(&expected),
+                    "[target.{name}] rustflags must pass `{expected}` (WASM_STACK_SIZE), got: {line}"
+                );
+                seen.push(name.to_owned());
+            }
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            ["wasm32-unknown-unknown", "wasm32-wasip1", "wasm32-wasip2"],
+            "every wasm target the workspace builds must be linked with WASM_STACK_SIZE"
+        );
     }
 
     #[test]

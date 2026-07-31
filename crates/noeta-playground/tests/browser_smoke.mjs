@@ -141,6 +141,45 @@ assert.equal(run1.exit_code, 0);
 assert.match(run1.stdout, /^hello from the browser engine\n\d+\n$/);
 assert.equal(run1.stdout, run2.stdout, 'the sandbox is deterministic');
 
+// The parser's nesting limit, delivered on the browser's ONE stack. Natively a parse deeper than
+// `INLINE_NESTING_DEPTH` is offloaded to a `DEEP_PARSE_STACK` worker; wasm has no threads, so
+// there is nothing to offload to and the module's link-time stack (`WASM_STACK_SIZE`, passed to
+// wasm-ld from `.cargo/config.toml`) is what has to hold it. The parser used to ask for the worker
+// anyway — `stacker` cannot read a stack limit on wasm, so its "am I short on stack?" test said
+// yes unconditionally — and `spawn` on a thread-free target is `Err`, so EVERY parse in this
+// engine died on `.expect("spawn parse worker")`. These four are the worst shapes at exactly the
+// depths E0032 promises to accept: they are the measurement `WASM_STACK_SIZE` is sized from, and
+// they fail the only way a blown wasm stack can — by trapping the instance.
+const atLimit = {
+  // 128 nested delimiters — `MAX_NESTING_DEPTH`.
+  'nested delimiters': `x = ${'['.repeat(128)}1${']'.repeat(128)};\n`,
+  // The same depth in the most expensive shape measured (~3.2 KiB of wasm stack per level).
+  'nested function values': `x = ${'fn() { return '.repeat(128)}1${' }'.repeat(128)};\n`,
+  // 128 `if … then … else if` branches — `MAX_TERNARY_CHAIN_BRANCHES`. A chain is flat in
+  // delimiters, so the depth test above cannot stand in for it.
+  'conditional-expression chain':
+    `c = true;\nx = ${'if c then 1 else '.repeat(128)}0;\n`,
+  // 512 `else if` branches — `MAX_ELSE_CHAIN_BRANCHES`.
+  'else-if chain':
+    `c = true;\n${'if c { echo 1; } else '.repeat(512)}{ echo 0; }\n`,
+};
+for (const [shape, src] of Object.entries(atLimit)) {
+  const deep = call(noeta_check, src);
+  assert.deepEqual(deep.diagnostics, [], `${shape} at the limit must check clean, not E0032/trap`);
+}
+// One level past the limit is a diagnostic, not a trap — the pre-pass rejects before recursing.
+const tooDeep = call(noeta_check, `x = ${'['.repeat(129)}1${']'.repeat(129)};\n`).diagnostics;
+assert.equal(tooDeep[0]?.code, 'E0032', JSON.stringify(tooDeep));
+// And the whole pipeline, not just the parse, has to fit that one stack: IR lowering and the VM
+// recurse over the same shape and want MORE of it than the parse does. Measured at a deliberately
+// starved 128 KiB, `noeta_check` still answered at depth 64 while `noeta_run` on the same source
+// already trapped — which is why WASM_STACK_SIZE is sized on the pipeline (MIN_PIPELINE_STACK)
+// and not on the parse alone.
+const deepRun = call(noeta_run, `x = ${'['.repeat(128)}1${']'.repeat(128)};\necho "deep ok";\n`);
+assert.equal(deepRun.compiled, true, JSON.stringify(deepRun));
+assert.equal(deepRun.exit_code, 0, JSON.stringify(deepRun));
+assert.equal(deepRun.stdout, 'deep ok\n');
+
 // A type error surfaces as a stable JSON diagnostic with a real location.
 const typo = 'mut x = 1;\nx = "s";';
 const diags = call(noeta_check, typo).diagnostics;
