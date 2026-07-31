@@ -186,7 +186,7 @@ fn roundtrip_single(name: &str, text: &str, report: &mut BundleReport) {
         report.not_run.parse_failed += 1;
         return;
     }
-    if noeta_diagnostics::has_errors(&noeta_db::checked(&db, src).diagnostics) {
+    if crate::has_error(&noeta_db::checked(&db, src).diagnostics) {
         // A checker-rejected program produces no module — nothing to serialize, so it exercises no
         // round trip. Counting it matched (as this used to) inflated the headline with programs
         // that never produced bytes at all.
@@ -214,7 +214,7 @@ fn roundtrip_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mu
         report.not_run.link_failed += 1;
         return;
     }
-    if noeta_diagnostics::has_errors(&noeta_db::linked_checked(&db, ws).diagnostics) {
+    if crate::has_error(&noeta_db::linked_checked(&db, ws).diagnostics) {
         report.not_run.checker_rejected += 1;
         return;
     }

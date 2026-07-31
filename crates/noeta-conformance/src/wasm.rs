@@ -186,7 +186,7 @@ fn diff_single(name: &str, text: &str, tools: &WasmTools, report: &mut WasmDiffR
         report.not_run.parse_failed += 1;
         return;
     }
-    if noeta_diagnostics::has_errors(&noeta_db::checked(&db, src).diagnostics) {
+    if crate::has_error(&noeta_db::checked(&db, src).diagnostics) {
         // A checker-rejected program produces no bundle, so nothing ever reaches the wasm runner
         // — an exclusion, not a match. Its diagnostics are compile-time, out of this oracle's
         // scope, and the corpus harness asserts them.
@@ -219,7 +219,7 @@ fn diff_workspace(
         report.not_run.link_failed += 1;
         return;
     }
-    if noeta_diagnostics::has_errors(&noeta_db::linked_checked(&db, ws).diagnostics) {
+    if crate::has_error(&noeta_db::linked_checked(&db, ws).diagnostics) {
         report.not_run.checker_rejected += 1;
         return;
     }

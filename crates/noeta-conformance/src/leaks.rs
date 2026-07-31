@@ -145,7 +145,7 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
     }
     // A program the checker rejects never runs a backend — its diagnostics are its whole result.
     // Counted, not dropped: an uncounted exclusion is one the summary cannot report.
-    if noeta_diagnostics::has_errors(&noeta_db::checked(&db, src).diagnostics) {
+    if crate::has_error(&noeta_db::checked(&db, src).diagnostics) {
         report.not_run.checker_rejected += 1;
         return;
     }
@@ -198,7 +198,7 @@ fn measure_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut 
             return;
         }
     };
-    if noeta_diagnostics::has_errors(&noeta_db::linked_checked(&db, ws).diagnostics) {
+    if crate::has_error(&noeta_db::linked_checked(&db, ws).diagnostics) {
         report.not_run.checker_rejected += 1;
         return;
     }

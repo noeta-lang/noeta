@@ -124,7 +124,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // One `check_all` yields both the gate diagnostics and the site bundle the eval backend
         // needs, so the checker runs once per case instead of again inside the backend.
         let mut sites = noeta_check::Sites::default();
-        if stage == Stage::Eval && !noeta_diagnostics::has_errors(&diagnostics) {
+        if stage == Stage::Eval && !has_error(&diagnostics) {
             let checked = noeta_check::check_all(&parsed.program);
             diagnostics.extend(checked.diagnostics);
             sites = checked.sites;
