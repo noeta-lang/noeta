@@ -849,6 +849,120 @@ fn a_published_package_resolves_as_a_registry_dependency() {
         .stdout(predicate::str::contains("hello from the registry"));
 }
 
+/// A mis-published release: `noeta publish` takes the identity and version from the **local working
+/// tree** and pins whatever SHA the `--tag` resolves to, without ever reading that tag's own
+/// manifest — so a repository whose working copy has drifted from the tag being released publishes
+/// coordinates that do not hold what they say. Set one up: commit and tag `manifest`, then leave
+/// `working` uncommitted, and publish the tag.
+fn mis_publish(base: &std::path::Path, tag: &str, manifest: &str, working: &str) -> PathBuf {
+    let repo = base.join("repo");
+    let reg = base.join("registry");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("hello.noe"),
+        "pub fn greeting(): string { return \"hello\"; }\n",
+    )
+    .unwrap();
+    commit_version(&repo, tag, manifest);
+    std::fs::write(repo.join("noeta.toml"), working).unwrap();
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", tag])
+        .assert()
+        .success();
+    reg
+}
+
+/// A consumer of `acme/greet` — the identity the mis-published releases above all claim.
+fn greet_consumer(base: &std::path::Path) -> PathBuf {
+    let app = base.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use gc.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
+    app
+}
+
+#[test]
+fn a_served_tree_that_is_not_the_package_it_was_selected_as_is_refused() {
+    // On a registry dependency `package` is the SELECTOR — it is what the index was queried for —
+    // so a fetched tree whose own `[package] name` disagrees cannot be the author's typo: the
+    // coordinates that were resolved do not hold the package they were published under. The
+    // resolver refuses it as a trust failure rather than installing it under the name the tree
+    // chose, which is what the `[trust].native` gate, the lock's content-hash pin, and transparency
+    // enforcement are all keyed by.
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_served_identity");
+    let _ = std::fs::remove_dir_all(&base);
+    let reg = mis_publish(
+        &base,
+        "v1.2.0",
+        "[package]\nname = \"other/thing\"\nversion = \"1.2.0\"\n",
+        "[package]\nname = \"acme/greet\"\nversion = \"1.2.0\"\n",
+    );
+    let app = greet_consumer(&base);
+
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("acme/greet")
+                .and(predicate::str::contains("other/thing"))
+                .and(predicate::str::contains("selector")),
+        );
+}
+
+#[test]
+fn a_served_tree_at_another_version_is_refused() {
+    // The same rule one field over: a release is the `(identity, version, commit)` triple the
+    // publish attestation signs, so a tree declaring a version the index never served is the same
+    // disagreement — and unchecked it silently put that version into `noeta.lock`, pinning a release
+    // the registry cannot serve.
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_served_version");
+    let _ = std::fs::remove_dir_all(&base);
+    let reg = mis_publish(
+        &base,
+        "v1.1.0",
+        "[package]\nname = \"acme/greet\"\nversion = \"1.1.0\"\n",
+        "[package]\nname = \"acme/greet\"\nversion = \"1.2.0\"\n",
+    );
+    let app = greet_consumer(&base);
+
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("acme/greet")
+                .and(predicate::str::contains("1.2.0"))
+                .and(predicate::str::contains("1.1.0")),
+        );
+    assert!(
+        !app.join("noeta.lock").exists(),
+        "a refused resolve pins nothing"
+    );
+}
+
 #[test]
 fn the_lockfile_pins_registry_selection_and_bypasses_the_index() {
     // The lock fast path (audit F1): once `noeta.lock` pins a registry version, later builds
