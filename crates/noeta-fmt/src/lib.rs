@@ -2175,4 +2175,47 @@ fn github(): Client {
         );
         assert_eq!(fmt(&out).unwrap(), out, "and it is idempotent");
     }
+
+    /// A conditional **expression** the author broke across lines keeps its breaks.
+    ///
+    /// `if_then_else_form` printed the reconstructed surface form unconditionally flat, so a
+    /// three-line conditional became one line — 200 columns of it in para/ai's provider example.
+    /// This is the same defect the one-line `match` had, in the other direction: under `wrap = false`
+    /// there is no width to re-derive a layout from, so the author's break is the only signal.
+    #[test]
+    fn a_broken_if_then_else_keeps_its_breaks() {
+        let src = "\
+fn note(up: bool): string {
+    return if up
+        then \"a local Ollama is answering\"
+        else \"no local Ollama — the live checks will skip\"
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt collapsed a multi-line if…then…else");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// The one-line form is untouched, and a partially-broken one normalizes to the fully exploded
+    /// shape: both breaks are the author's layout, and one line of a three-part construct is
+    /// not a shape worth preserving.
+    #[test]
+    fn a_one_line_if_then_else_stays_on_its_line() {
+        let flat = "fn note(up: bool): string {\n    return if up then \"y\" else \"n\"\n}\n";
+        assert_eq!(fmt(flat).unwrap(), flat, "fmt broke a one-line conditional");
+
+        let partial =
+            "fn note(up: bool): string {\n    return if up then \"y\"\n        else \"n\"\n}\n";
+        let exploded = "fn note(up: bool): string {\n    return if up\n        then \"y\"\n        else \"n\"\n}\n";
+        assert_eq!(
+            fmt(partial).unwrap(),
+            exploded,
+            "a partially-broken conditional normalizes to the exploded form"
+        );
+        assert_eq!(
+            fmt(exploded).unwrap(),
+            exploded,
+            "and that is a fixed point"
+        );
+    }
 }

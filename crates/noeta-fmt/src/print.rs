@@ -3095,6 +3095,13 @@ impl Printer<'_> {
     /// the author wrote `if…then…else` (a literal `match` begins at `match`). The arm shape confirms
     /// it: `true`/`false` for a plain condition, or `is T`/`_` for a `cond is T` test (which prints
     /// back as `cond is T`). Returns `None` for a literal `match`; the caller then formats normally.
+    ///
+    /// Its **layout** is the author's, exactly as [`Self::match_expr`]'s is: this printed the
+    /// reconstructed form unconditionally flat, so a conditional written across three lines came back
+    /// as one — 200 columns of it in para/ai's provider example. Under `wrap = false` there is no
+    /// width to re-derive a layout from, so the author's break is the only signal there is; under
+    /// `wrap = true` there is, and the whole thing becomes one group for the renderer to decide.
+    /// See [`Self::conditional_broke`] for which source gaps carry the signal and why.
     fn if_then_else_form(
         &self,
         scrutinee: &Expr,
@@ -3108,15 +3115,21 @@ impl Printer<'_> {
         if arms.iter().any(|a| a.guard.is_some()) {
             return Ok(None);
         }
-        let cond = match (&arms[0].pattern, &arms[1].pattern) {
-            (Pattern::Bool { value: true, .. }, Pattern::Bool { value: false, .. }) => {
-                self.restricted_head(scrutinee, false)?
-            }
-            (Pattern::IsType { ty, .. }, Pattern::Wildcard { .. }) => Doc::concat([
+        // `cond_end` is the byte the condition's source ends at — the start of the ` then ` gap. The
+        // `is T` form's condition runs to the end of the *type*, not of the scrutinee.
+        let (cond, cond_end) = match (&arms[0].pattern, &arms[1].pattern) {
+            (Pattern::Bool { value: true, .. }, Pattern::Bool { value: false, .. }) => (
                 self.restricted_head(scrutinee, false)?,
-                Doc::text(" is "),
-                self.type_ref(ty)?,
-            ]),
+                scrutinee.span().end,
+            ),
+            (Pattern::IsType { ty, .. }, Pattern::Wildcard { .. }) => (
+                Doc::concat([
+                    self.restricted_head(scrutinee, false)?,
+                    Doc::text(" is "),
+                    self.type_ref(ty)?,
+                ]),
+                ty.span().end,
+            ),
             // The `if` keyword but not a desugar-shaped match — leave it to the normal `match` path.
             _ => return Ok(None),
         };
@@ -3124,14 +3137,72 @@ impl Printer<'_> {
         else {
             return Ok(None); // a block arm cannot be the parser's if-then-else desugar
         };
+        let broke = self.conditional_broke(cond_end, then_e, else_e);
+        let head = Doc::concat([Doc::text("if "), cond]);
+        // The branches are rendered once and laid out either way, in source order, so the comment
+        // cursor is walked exactly once however the layout falls out — no speculative render to undo.
+        let then_doc = Doc::concat([Doc::text("then "), self.expr(then_e)?]);
+        let else_doc = Doc::concat([Doc::text("else "), self.expr(else_e)?]);
+        // `wrap = true` re-derives layout from the width and does not consult the author's breaks, so
+        // the two branches become a group's break points — the same yield [`Self::dot_link`] and
+        // [`Self::breaks_at_author_gaps`] make.
+        if self.config.wrap {
+            return Ok(Some(
+                Doc::concat([
+                    head,
+                    Doc::concat([Doc::line(), then_doc, Doc::line(), else_doc])
+                        .nest(self.indent_step()),
+                ])
+                .group(),
+            ));
+        }
+        let flat = Doc::concat([
+            head.clone(),
+            Doc::text(" "),
+            then_doc.clone(),
+            Doc::text(" "),
+            else_doc.clone(),
+        ]);
+        // Flatness is asserted, not assumed: a branch may have dragged a hard break along (a
+        // multiline string, a chain with a comment in it, a broken call), and printing that as "flat"
+        // would put a newline inside the node — which the *next* run would read back as an author
+        // break in the `else` gap and explode, so the rule would not be a fixed point. Inside a
+        // tier-body hole no newline may be emitted at all, so flat is the only legal form there and
+        // the check does not apply (that is the pre-existing behavior of this node, unchanged).
+        if self.force_flat.get() || (!broke && flat.never_breaks()) {
+            return Ok(Some(flat));
+        }
         Ok(Some(Doc::concat([
-            Doc::text("if "),
-            cond,
-            Doc::text(" then "),
-            self.expr(then_e)?,
-            Doc::text(" else "),
-            self.expr(else_e)?,
+            head,
+            Doc::concat([Doc::hardline(), then_doc, Doc::hardline(), else_doc])
+                .nest(self.indent_step()),
         ])))
+    }
+
+    /// Whether the author broke a conditional **expression** across lines — a newline in the gap
+    /// before `then` or the one before `else`.
+    ///
+    /// Those two gaps, not the node as a whole, are the signal, and for the reason [`Self::gap_breaks`]
+    /// gives: a gap between two adjacent parts is exactly the keyword and the whitespace around it, so
+    /// a newline in it is unambiguously the author's. A newline anywhere in the *node* would also be
+    /// produced by a branch that merely spans lines on its own (`if c then f(⏎ a,⏎ b) else g()`), and
+    /// exploding on that would be this printer breaking a line the author had joined — the very thing
+    /// being fixed here, in the other direction. [`Self::match_stays_flat`] can afford the coarser
+    /// whole-node test because a leaked newline there yields the *pre-existing* exploded form; here it
+    /// would be a new regression.
+    ///
+    /// A conditional broken in only one of its two gaps normalizes to the fully exploded form, as a
+    /// partially-broken `match` normalizes to one arm per line: both breaks are the author's layout,
+    /// and one line of a three-part construct is not a shape worth preserving.
+    ///
+    /// Fixed point in both directions: the exploded form puts a newline in *both* gaps, so the next
+    /// pass reads `true` again; the flat form puts none in either — asserted via [`Doc::never_breaks`],
+    /// since a branch's own hard break would otherwise land in the `else` gap — so the next pass reads
+    /// `false`.
+    fn conditional_broke(&self, cond_end: u32, then_e: &Expr, else_e: &Expr) -> bool {
+        let then_span = then_e.span();
+        self.broke_between(cond_end, then_span.start)
+            || self.broke_between(then_span.end, else_e.span().start)
     }
 
     /// Whether the source at `span.start` begins with the `if` keyword as a whole token — so an
