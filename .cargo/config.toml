@@ -10,10 +10,42 @@
 # override — an explicit value wins over this one.)
 MIRIFLAGS = "-Zmiri-permissive-provenance"
 
+# ---------------------------------------------------------------------------------------------
+# The wasm targets' stack, `-z stack-size` to `wasm-ld`.
+#
+# A wasm module runs its whole program on ONE stack, sized here, once, at link time — there is no
+# thread to offload a deep recursion onto, because these targets have no threads at all (`std`'s
+# spawn is `Err(Unsupported)`). So this number is what `noeta_parser::DEEP_PARSE_STACK` is
+# natively: the budget that makes the parser's `MAX_NESTING_DEPTH` limit (E0032) a limit the
+# parser can actually *deliver*, instead of one the module traps on. It is
+# `noeta_parser::WASM_STACK_SIZE`, and `wasm_stack_size_matches_the_link_arg` fails the build if
+# the two ever drift apart — that test reads this file.
+#
+# It is `MIN_PIPELINE_STACK`, the constant the parser's chain limits are already derived from —
+# because on wasm this stack is the PIPELINE's, not the parser's: check, IR lowering and the VM
+# recurse over the same shapes and out of the same stack. Measured on a deliberately starved
+# 128 KiB build, `noeta_check` still answered at 64 levels of nesting where `noeta_run` on the same
+# source already trapped, so sizing this on the parse alone would be sizing it on the cheaper half.
+#
+# wasm-ld's default is 1 MiB: over the worst legal parse (~410 KiB in the release wasm build) by
+# only ~2.5x, with the whole rest of the pipeline still to come out of it. 8 MiB clears the worst
+# legal input by ~14x and costs 9 MiB of initial linear memory in the tab — the `.wasm` itself is
+# byte-for-byte the same size.
+# ---------------------------------------------------------------------------------------------
+
 # The browser wasm target (P-WASM W2): `getrandom` 0.3 refuses wasm32-unknown-unknown without an
 # explicit backend choice. `custom` — the `noeta-playground` cdylib defines the (unreachable)
 # hook: the only getrandom consumer in the tree is `bcrypt`'s dead salt path (salts arrive as
 # arguments from the Host `Entropy` capability), and the playground runs on the deterministic
 # `SandboxHost`. No `wasm_js`/wasm-bindgen creep into the dependency graph.
 [target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="custom"']
+rustflags = ['--cfg', 'getrandom_backend="custom"', '-C', 'link-arg=-zstack-size=8388608']
+
+# The wasi runner (`noeta-wasm-runner`) and the `wasi:http` serve component
+# (`noeta-wasm-serve`) run the same single-stack pipeline as the browser engine, on the same
+# thread-free targets, so they get the same stack.
+[target.wasm32-wasip1]
+rustflags = ['-C', 'link-arg=-zstack-size=8388608']
+
+[target.wasm32-wasip2]
+rustflags = ['-C', 'link-arg=-zstack-size=8388608']
