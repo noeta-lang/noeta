@@ -372,7 +372,9 @@ enum Color { Red; Green }
         // Attributes/directives print between the head and the name
         // (`(#[Route("/x")] fn handle [n]`, `(struct @attribute … Route [path]`),
         // so assert on head + name/params without anchoring `(head name` adjacency.
-        assert!(out.ast.contains("fn handle [n]"));
+        // A parameter renders with its type annotation: the fmt safety gate compares the dump
+        // field-for-field, so dropping `: int` would let two different signatures compare equal.
+        assert!(out.ast.contains("fn handle [n: int]"));
         assert!(out.ast.contains("#[Route"));
         assert!(out.ast.contains("(struct "));
         assert!(out.ast.contains("Route [path]"));
