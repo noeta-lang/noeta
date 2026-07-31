@@ -39,9 +39,127 @@
 //! therefore deferred until a benchmark justifies it; today `Type` is a plain owned tree.
 
 use noeta_ast::TypeRef;
+use noeta_span::{SourceId, Span};
 
 mod traits;
 pub use traits::{BUILTIN_TRAITS, BuiltinTrait, SERIALIZE_FORMATS, operator_trait};
+
+/// The **identity** of one generic type parameter: *where it was declared*.
+///
+/// A parameter is not its spelling. `class Repo<T>` and a method `fn label<T>()` inside it declare
+/// two different parameters that happen to share the letter `T`, and the inner one shadows the
+/// outer exactly as a local binding shadows a global. Keying identity on the name cannot express
+/// that — it makes the two the same thing, which is precisely how an explicit `Repo::<Todo>
+/// .label::<User>()` used to answer `Todo`: the class's argument occupied the key `"T"` and the
+/// method's own binding hit an `or_insert` on an occupied slot, silently discarding what the user
+/// wrote.
+///
+/// So identity is the parameter's own `<T>` declaration site — a fact carried as **data** from the
+/// declaration to every reference, never inferred from a spelling. Two parameters declared in
+/// different places are different parameters however they are spelled; two references that
+/// resolved to the same declaration are the same parameter even across modules, because the span
+/// travels with the collected signature.
+///
+/// Synthetic parameters (the prelude constructors `Ok`/`Err`/`some`, which have no source
+/// declaration) get reserved ids from [`ParamId::synthetic`] — a distinct [`SourceId`] no parser
+/// ever stamps, so they can never alias a real declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParamId(Span);
+
+/// Ordering exists only so a diagnostic can list parameters deterministically; it is source
+/// position, which is also declaration order within a file.
+impl Ord for ParamId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.0.source.0, self.0.start, self.0.end).cmp(&(
+            other.0.source.0,
+            other.0.start,
+            other.0.end,
+        ))
+    }
+}
+
+impl PartialOrd for ParamId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// The [`SourceId`] reserved for synthetic type parameters. `u32::MAX` is never assigned by the
+/// source map (ids are handed out from 0 upward), so a synthetic id cannot collide with the span
+/// of any real declaration.
+const SYNTHETIC_SOURCE: SourceId = SourceId(u32::MAX);
+
+impl ParamId {
+    /// The identity of a parameter declared at `span` — the span of its own `<T>` in the source.
+    pub fn at(span: Span) -> ParamId {
+        ParamId(span)
+    }
+
+    /// A reserved identity for a parameter with no source declaration (the prelude constructors'
+    /// `T`/`E`). Distinct per `index`, and distinct from every real declaration.
+    pub fn synthetic(index: u32) -> ParamId {
+        ParamId(Span::new_in(SYNTHETIC_SOURCE, index, index))
+    }
+
+    /// The declaration span, for a diagnostic that wants to point at the parameter itself.
+    /// [`None`] for a synthetic id, which points at no source.
+    pub fn decl_span(self) -> Option<Span> {
+        (self.0.source != SYNTHETIC_SOURCE).then_some(self.0)
+    }
+}
+
+/// A **reference to** a generic type parameter: its identity plus its spelling.
+///
+/// Equality, ordering and hashing consider **only** [`ParamId`]. The name is carried for display
+/// and diagnostics and is deliberately excluded — that exclusion is the invariant the whole
+/// representation exists to enforce, and making it a property of the type rather than a rule in a
+/// comment is what stops a future substitution map from quietly keying on the string again.
+#[derive(Debug, Clone, Eq)]
+pub struct ParamRef {
+    /// Identity — the *only* thing compared.
+    pub id: ParamId,
+    /// The spelling (`"T"`), for rendering and diagnostics only.
+    pub name: String,
+}
+
+impl ParamRef {
+    pub fn new(id: ParamId, name: impl Into<String>) -> ParamRef {
+        ParamRef {
+            id,
+            name: name.into(),
+        }
+    }
+}
+
+impl PartialEq for ParamRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl std::hash::Hash for ParamRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl PartialOrd for ParamRef {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ParamRef {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl std::fmt::Display for ParamRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
+}
 
 /// The kind of a declared nominal type — the discriminant of an abstract [`Type::Kind`] supertype.
 /// Mirrors the three declaration forms the language has.
@@ -148,6 +266,19 @@ pub enum Type {
     /// the arguments lets a generic container keep its element type through an instance (so
     /// `box.get()` is `int`, not `dyn`, and an instance method enforces the class's bounds).
     Named(String, Vec<Type>),
+    /// A **generic type parameter** in the scope of its declaration — the `T` of `class Repo<T>`
+    /// or of `fn label<T>()`, as written inside that declaration's own signatures and bodies.
+    ///
+    /// Its own variant rather than a [`Type::Named`] whose name happens to be in a side-table of
+    /// in-scope spellings, because a parameter *is* a different thing from a nominal type and the
+    /// two were indistinguishable while both were `Named`. Everything that must treat a parameter
+    /// specially — erasure to `dyn`, binding from an argument, substitution, bound enforcement,
+    /// forwarding-slot templates — now asks the lattice instead of consulting a `HashSet<String>`,
+    /// so the question "is this a parameter, and *which* one" has exactly one answer and the
+    /// compiler enumerates every site that asks it.
+    ///
+    /// Identity is [`ParamRef::id`] — the declaration site — never the spelling. See [`ParamId`].
+    Param(ParamRef),
     /// A function value.
     Fn {
         params: Vec<Type>,
@@ -204,6 +335,11 @@ impl Type {
     pub fn head_name(&self) -> String {
         match self {
             Type::Named(name, _) => name.clone(),
+            // A parameter's name-key is its spelling — what `type_name::<T>()` answered when a
+            // parameter was a `Named`, and what a *forwarded* parameter must keep answering so it
+            // agrees with the concrete turbofish it was instantiated from. This is the one place
+            // the spelling is legitimately load-bearing: it is the surface key, not the identity.
+            Type::Param(p) => p.name.clone(),
             Type::DynTrait(name) => name.clone(),
             Type::List(_) => "List".to_string(),
             Type::Set(_) => "Set".to_string(),
@@ -432,6 +568,15 @@ impl Type {
             // A `Named(n)` is a member of an abstract kind when the registry says so — the one rule
             // the pure lattice defers to the `nominal` hook (`Named(n) <: Enum` iff `n` is an enum).
             (Named(n, _), Kind(k)) => nominal(n, *k),
+            // Two type parameters relate only by IDENTITY — the same declaration, whatever either
+            // is spelled. `ParamRef`'s `PartialEq` compares the id alone, so this is `sub == sup`;
+            // it is written out rather than left to the catch-all because "a parameter is a
+            // subtype of a same-named parameter" is exactly the wrong answer this arc removes.
+            (Param(a), Param(b)) => a.id == b.id,
+            // A parameter and anything else are unrelated in the pure lattice. Instantiation is
+            // substitution, not subtyping: an argument reaches a parameter by binding it, and a
+            // still-open parameter reaches a concrete slot only after erasure to `dyn`.
+            (Param(_), _) | (_, Param(_)) => false,
             // Abstract kind-types: a kind is a subtype only of the same kind (widening into `dyn`
             // is handled above).
             (Kind(a), Kind(b)) => a == b,
@@ -596,6 +741,9 @@ impl std::fmt::Display for Type {
             Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Type::Kind(k) => f.write_str(k.name()),
             Type::DynTrait(tr) => write!(f, "dyn {}", short_type_name(tr)),
+            // A parameter renders as the user wrote it — identically to the `Named("T")` it used
+            // to be, so no diagnostic or hover text changes.
+            Type::Param(p) => f.write_str(&p.name),
             Type::Named(n, args) if args.is_empty() => f.write_str(short_type_name(n)),
             Type::Named(n, args) => {
                 write!(f, "{}<", short_type_name(n))?;
@@ -695,6 +843,7 @@ mod tests {
             Type::Union(vec![Type::Int, Type::String]),
             Type::Tuple(vec![Type::Int, Type::String]),
             Type::DynTrait("Show".into()),
+            Type::Param(ParamRef::new(ParamId::at(Span::new(1, 2)), "T")),
         ];
         for bits in [8u8, 16, 32, 64] {
             for signed in [true, false] {
@@ -725,7 +874,7 @@ mod tests {
                 .map(std::mem::discriminant)
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            23,
+            24,
             "a `Type` variant was added or removed — add a sample to `every_variant` and update this \
              count, so the numeric-set check below keeps covering the whole lattice"
         );
@@ -992,6 +1141,65 @@ mod tests {
         // gives, which would quietly turn "no values" into "no information".
         assert_eq!(Type::union([Type::Never, Type::Never]), Type::Never);
         assert_ne!(Type::union([Type::Never]), Type::Unknown);
+    }
+
+    /// A type parameter is its **declaration**, not its spelling. Both halves are load-bearing and
+    /// both are regressions waiting to happen, so both are pinned here rather than only in the
+    /// conformance corpus:
+    ///
+    /// - Same declaration, different spelling → the **same** parameter. Nothing may re-key on the
+    ///   name; if a future `#[derive(PartialEq)]` on `ParamRef` (or a map keyed on `p.name`)
+    ///   sneaks back in, this half fails.
+    /// - Same spelling, different declaration → **different** parameters. This is the whole bug:
+    ///   `class Repo<T>`'s `T` and `fn label<T>()`'s `T` are two parameters, and a substitution
+    ///   that keys on `"T"` silently makes the outer one win.
+    #[test]
+    fn a_parameter_is_its_declaration_not_its_spelling() {
+        let outer = ParamId::at(Span::new(10, 11));
+        let inner = ParamId::at(Span::new(30, 31));
+        let same_decl_other_name = Type::Param(ParamRef::new(outer, "U"));
+        assert_eq!(Type::Param(ParamRef::new(outer, "T")), same_decl_other_name);
+        assert_ne!(
+            Type::Param(ParamRef::new(outer, "T")),
+            Type::Param(ParamRef::new(inner, "T")),
+            "two `T`s declared in different places are different parameters"
+        );
+        // …and the subtype relation agrees, in both directions.
+        let (o, i) = (
+            Type::Param(ParamRef::new(outer, "T")),
+            Type::Param(ParamRef::new(inner, "T")),
+        );
+        assert!(Type::subtype(&o, &o));
+        assert!(!Type::subtype(&o, &i));
+        assert!(!Type::subtype(&i, &o));
+        // A parameter relates to nothing concrete: instantiation is substitution, not subtyping.
+        assert!(!Type::subtype(&o, &Type::Int));
+        assert!(!Type::subtype(&Type::Int, &o));
+        // …except through the lattice's own top and bottom, which are prior to every arm.
+        assert!(Type::subtype(&o, &Type::Dyn));
+        assert!(Type::subtype(&Type::Never, &o));
+        // Hashing must agree with equality, or an identity-keyed substitution map would miss.
+        let mut m = std::collections::HashMap::new();
+        m.insert(ParamRef::new(outer, "T"), Type::Int);
+        assert_eq!(m.get(&ParamRef::new(outer, "U")), Some(&Type::Int));
+        assert_eq!(m.get(&ParamRef::new(inner, "T")), None);
+        // The spelling survives for display and for the name-keyed reflection surface.
+        assert_eq!(o.to_string(), "T");
+        assert_eq!(o.head_name(), "T");
+    }
+
+    /// A synthetic parameter (the prelude constructors' `T`/`E`, which have no source
+    /// declaration) can never alias a real one, however the real one is spelled or placed.
+    #[test]
+    fn synthetic_parameter_ids_are_disjoint_from_real_ones() {
+        assert_ne!(ParamId::synthetic(0), ParamId::synthetic(1));
+        assert_eq!(ParamId::synthetic(0), ParamId::synthetic(0));
+        assert_eq!(ParamId::synthetic(0).decl_span(), None);
+        for offset in [0u32, 1, u32::MAX] {
+            assert_ne!(ParamId::synthetic(offset), ParamId::at(Span::new(0, offset)));
+        }
+        let real = ParamId::at(Span::new(4, 5));
+        assert_eq!(real.decl_span(), Some(Span::new(4, 5)));
     }
 
     /// The bottom is a **concrete declared type**, not an inference hole and not the dynamic escape:
