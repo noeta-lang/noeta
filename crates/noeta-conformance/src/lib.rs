@@ -25,6 +25,7 @@ use noeta_diagnostics::Diagnostic;
 use noeta_span::{Source, SourceId, SourceMap};
 
 mod bundle;
+mod determinism;
 mod differential;
 mod expectation;
 mod ir_corpus;
@@ -38,6 +39,7 @@ mod report;
 mod wasm;
 
 pub use bundle::{BundleFailure, BundleReport, run_bundle_roundtrip};
+pub use determinism::{DeterminismReport, digest_corpus};
 pub use differential::{DiffReport, Mismatch, run_differential};
 pub use expectation::{ErrorExpectation, Expectations};
 pub use ir_corpus::{IrCorpusReport, run_ir_corpus};
