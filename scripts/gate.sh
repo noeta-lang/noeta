@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # The pre-merge gate — run what `.github/workflows/ci.yml` runs, locally, before merging to `main`.
 #
-# Why this exists: `main` here is developed in parallel worktrees and is never pushed, so CI never
-# actually executes. The gates in ci.yml are the right gates and nothing runs them, which is how
-# `main` twice sat red under `clippy -D warnings` — each time found by accident, by an agent doing
-# unrelated work. This script is the thing you run instead of the CI that will not run for you.
+# Why this exists: `main` here is developed in parallel worktrees and pushed in batches, so
+# `.github/workflows/ci.yml` runs — but only at push cadence, which can be many merges later. The
+# gates in ci.yml are the right gates; what is missing is anything running them *between* merges.
+# That gap is not theoretical: `main` twice sat red under `clippy -D warnings` in a single day, each
+# time found by accident by an agent doing unrelated work, and a `noeta-mcp` test sat red for over
+# two hours. CI would have caught all three — at the next push, after the bad merges had already
+# been built on. This script moves that feedback to the merge itself.
 #
 # It is built to be hard to get a false pass from. A postmortem on one of those red commits found
 # the local check had *reported a pass* because clippy was piped through `tail` and the exit code

@@ -215,7 +215,7 @@ This project is currently pre-alpha and not public, so you don't need to worry a
 ### Before You're Done
 
 > [!IMPORTANT]
-> **Run `scripts/gate.sh`, green, before you merge to `main`.** `main` is never pushed, so `.github/workflows/ci.yml` never actually executes — the gates it defines are real and nothing runs them. That is not a theoretical gap: `main` has twice sat red under `clippy -D warnings` (a `too_many_arguments`, an `unnecessary_lazy_evaluations`), each time discovered by accident by an agent doing unrelated work, and one of those was merged after a local check *reported a pass* because clippy had been piped through `tail`.
+> **Run `scripts/gate.sh`, green, before you merge to `main`.** `main` is pushed in batches, so `.github/workflows/ci.yml` runs at push cadence — many merges may land between one run and the next, and a red one is discovered on top of everything built since. That is not a theoretical gap: `main` has twice sat red under `clippy -D warnings` (a `too_many_arguments`, an `unnecessary_lazy_evaluations`), each time discovered by accident by an agent doing unrelated work, and one of those was merged after a local check *reported a pass* because clippy had been piped through `tail`.
 >
 > `scripts/gate.sh` runs the CI jobs in CI's own split, reads every exit code directly, never pipes a gated command, runs every step even after one fails, and prints a per-step PASS/FAIL/SKIP table (a SKIP is never a PASS). Three tiers, measured on a 20-core box with `CARGO_BUILD_JOBS=8`:
 >

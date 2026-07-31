@@ -27,5 +27,5 @@ This is a pre-alpha, not-yet-public language implementation built primarily thro
 - American English in code, comments, and docs.
 - No hard line wrap in markdown.
 - Work on a branch / worktree to avoid conflicts with parallel agents.
-- `main` is never pushed, so GitHub Actions never runs. `scripts/gate.sh` is the only thing that executes the CI gates — treat a merge without it as an unreviewed merge.
+- `main` is pushed in batches, so GitHub Actions runs at push cadence rather than per merge. `scripts/gate.sh` runs the same gates locally, at the merge — treat a merge without it as one whose breakage you have deferred to whoever pushes next.
 - Each crate has a `README.md` (one paragraph: what it takes in, what it emits).
