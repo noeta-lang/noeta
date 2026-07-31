@@ -1450,4 +1450,39 @@ mod tests {
         let out = fmt("echo \"\u{1b}[0m\"").unwrap();
         assert_eq!(out, "echo \"\\u{1b}[0m\"\n");
     }
+
+    /// A comment written inside a **block body** stays inside it.
+    ///
+    /// The corpus harness proves every comment survives and that formatting is idempotent — neither
+    /// of which notices a comment that moved. A match arm's block body and an anonymous closure's
+    /// were printed with an empty comment region, so they claimed none of the comments inside them
+    /// and every one fell through to the enclosing interleave, which re-emitted them *outside* the
+    /// braces and against the following item. Idempotent, complete, and documenting the wrong line.
+    #[test]
+    fn a_comment_inside_a_block_body_stays_inside_it() {
+        let src = "\
+f = fn(x: int): int {
+    // inside the closure
+    return x + 1
+}
+
+fn pick(x: ?int): string {
+    match x {
+        some(v) => {
+            // first statement of the arm
+            a = v + 1
+            // last statement of the arm
+            return \"got ${a}\"
+        },
+        // between the arms
+        none => {
+            return \"nothing\"
+        },
+    }
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a block body");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
 }

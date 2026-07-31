@@ -2203,8 +2203,12 @@ impl Printer<'_> {
                 None => self.interp(parts)?,
             },
             Expr::Closure {
-                params, ret, body, ..
-            } => self.closure(params, ret.as_ref(), body)?,
+                params,
+                ret,
+                body,
+                span,
+                ..
+            } => self.closure(params, ret.as_ref(), body, *span)?,
             Expr::Match {
                 scrutinee,
                 arms,
@@ -2563,11 +2567,17 @@ impl Printer<'_> {
         Ok(Doc::concat(docs))
     }
 
+    /// An anonymous closure. `span` is the whole `fn(…) { … }` expression, and it is what lets a
+    /// block body interleave the comments **inside** it: `block` attaches a comment by asking which
+    /// region it falls in, so a body handed the empty region `(0, 0)` claims none of them and every
+    /// comment in the body is left for whatever encloses the closure to re-emit — outside the braces,
+    /// against a different statement than the author wrote it against.
     fn closure(
         &self,
         params: &[Param],
         ret: Option<&TypeRef>,
         body: &ClosureBody,
+        span: Span,
     ) -> Result<Doc, FmtError> {
         let mut parts = vec![Doc::text("fn"), self.params(params)?];
         if let Some(ret) = ret {
@@ -2581,7 +2591,7 @@ impl Printer<'_> {
             }
             ClosureBody::Block(stmts) => {
                 parts.push(Doc::text(" "));
-                parts.push(self.block(stmts, 0, 0)?);
+                parts.push(self.block(stmts, span.start, span.end)?);
             }
         }
         Ok(Doc::concat(parts))
@@ -2941,7 +2951,12 @@ impl Printer<'_> {
             };
             let body = match &a.body {
                 ClosureBody::Expr(e) => self.expr(e)?,
-                ClosureBody::Block(stmts) => self.block(stmts, 0, 0)?,
+                // Bounded by the arm's own span, so a comment written INSIDE a block arm stays
+                // inside it. Handed the empty region `(0, 0)`, the block claimed no comment at all
+                // and every one of them fell through to the arm-level interleave below — which
+                // re-emitted them *between* arms, silently reattaching each to the following arm.
+                // `noeta fmt` is supposed to be safe; moving a comment across a brace is not.
+                ClosureBody::Block(stmts) => self.block(stmts, a.span.start, a.span.end)?,
             };
             Ok(Doc::concat([
                 pat,
