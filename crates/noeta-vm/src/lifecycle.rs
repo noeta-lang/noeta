@@ -98,6 +98,55 @@ pub type ProfileHookFactory = Arc<dyn Fn(&str) -> Box<dyn ProfileHook> + Send + 
 /// lock at each isolate's start and end).
 pub type ProfileSink = Arc<std::sync::Mutex<Vec<(String, Box<dyn ProfileHook>)>>>;
 
+/// The real-OS-thread isolate state (isolates I.4b; audit-1 finding 3): spawn plumbing,
+/// in-flight worker slots, and the borrow-share promotion region. Inert in the sandbox.
+pub(crate) struct IsolateState {
+    /// Real OS-thread isolates (isolates I.4b), CLI-only / out-of-oracle. `parallel_isolates` selects
+    /// the real path in the `Op::SpawnIsolate` handler; `isolate_module` is an `Arc` clone of the
+    /// compiled module (`Send + Sync`) the entry point holds *alongside* the `&Module` borrow, so a
+    /// worker thread can own the module for its lifetime; `isolate_factory` builds a fresh host +
+    /// executor per worker (injected by the CLI so `noeta-vm` needs no `noeta-host-real`/tokio dependency);
+    /// `isolates` holds each spawned worker's result channel + join handle; `inflight_isolates` counts
+    /// workers whose result has not yet been harvested (so the scheduler treats a pending isolate as
+    /// progress, not a deadlock). All inert in the sandbox (`parallel_isolates` false).
+    pub(crate) parallel_isolates: bool,
+    pub(crate) isolate_module: Option<Arc<Module>>,
+    pub(crate) isolate_factory: Option<IsolateFactory>,
+    /// Per-isolate profiling (injected by `noeta profile`): build a hook for each spawned worker,
+    /// deposit it (named) in the sink when the worker finishes. `None` on ordinary runs.
+    pub(crate) profile_seam: Option<(ProfileHookFactory, ProfileSink)>,
+    pub(crate) isolates: Vec<IsolateSlot>,
+    pub(crate) inflight_isolates: usize,
+    /// The borrow-share region for real-isolate arguments (P-PAR S2): promotable argument graphs
+    /// are deep-copied into it **once** and every worker borrows zero-copy. `promote_memo` maps a
+    /// source object's bits → its promoted root across spawns (the fan-out promote-once memo);
+    /// each memoized source is retained into `promote_sources` so its address stays valid for the
+    /// memo's lifetime. All three are freed/cleared together when the last in-flight isolate is
+    /// joined (`finish_isolate`) and defensively at teardown. Always empty in the sandbox.
+    pub(crate) shared_region: noeta_value::SharedRegion,
+    pub(crate) promote_memo: HashMap<u64, Value>,
+    pub(crate) promote_sources: Vec<Value>,
+    /// Worker-side map of globals the parent could **not** ship into this isolate (isolates I.4b):
+    /// global slot → the unshippable value's type name (e.g. a `class`, which has reference identity
+    /// and cannot cross into a fresh heap). The slot is left unbound; if the worker body actually
+    /// *reads* it, `Op::LoadGlobal` raises a precise E0042 naming the global + its type + the fix,
+    /// instead of the confusing "cannot find `x`" an ordinary unbound slot yields. Empty on the
+    /// parent VM and whenever every global shipped.
+    pub(crate) unshippable_globals: HashMap<u32, String>,
+    /// **Worker-side cancellation flag** (isolate-cancel): the `Arc<AtomicBool>` this worker's
+    /// parent sets from `h.cancel()`. The worker polls it at its **safepoints** — the dispatch
+    /// loop's frame transfers and taken loop back-edges, plus each scheduler round — and unwinds
+    /// when it is set. `None` on the parent VM and on every cooperative task's VM (a cooperative
+    /// task is cancelled by the scheduler's own `Task::cancelled` flag, since it is already
+    /// parked), so the poll is a never-taken, perfectly-predicted branch outside a worker.
+    pub(crate) cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Set when this worker observed its [`cancel_flag`](Self::cancel_flag) at a safepoint and
+    /// unwound. Distinguishes the resulting `Abort` from a genuine runtime error, so
+    /// [`run_isolate_worker`](crate::lifecycle::run_isolate_worker) ships
+    /// [`IsolateOutcome::Cancelled`] rather than a failure.
+    pub(crate) cancel_observed: bool,
+}
+
 /// A spawned worker isolate (isolates I.4b): the channel its outcome arrives on, the thread's join
 /// handle (taken to join at teardown), and the **cancellation flag** the parent sets from
 /// `h.cancel()` (isolate-cancel) and the worker polls at its safepoints.

@@ -615,3 +615,129 @@ fn run_real_isolate_cancel_still_runs_the_workers_destructors() {
         "a cancelled worker must still run its live locals' destructors; got: {markers:?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn run_real_isolate_cancel_does_not_preempt_a_native_call() {
+    // **The named limit**, pinned so it stays named. A worker blocked *inside the host* — here a
+    // `fs.read` on a FIFO with no writer — is not executing Noeta, so it reaches no safepoint and
+    // the cancellation request cannot land. The `concurrent` block waits for it, deliberately:
+    // abandoning a worker mid-syscall leaves a thread outliving its scope, still owning its heap and
+    // its handles (which is what the old behavior did, and it raced the parent's exit-time teardown
+    // into a segfault).
+    //
+    // The test proves both halves without hanging. A helper thread unwedges the read after 700 ms,
+    // so the program cannot possibly finish before then — that elapsed floor *is* the "could not be
+    // preempted" claim (measured without the unwedge: the process sits in the block's join
+    // indefinitely). And once the read returns, the worker has a loop still to run, so it reaches a
+    // safepoint and reports `cancelled`: the request was never lost while the worker was blocked, it
+    // simply could not take effect until the worker was executing Noeta again.
+    //
+    // The loop after the read is load-bearing rather than padding. Without it the body's remaining
+    // work is a `return`, which finishes before any safepoint comes around — and `Ok(8)` is then the
+    // *honest* answer (the request arrived too late to stop anything), which is a fine outcome but a
+    // useless assertion.
+    let dir = temp_root().join("noeta_cli_test_isolate_cancel_native");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let fifo = dir.join("fifo");
+    let fifo_path = fifo.to_str().expect("utf-8 path");
+    let made = std::process::Command::new("mkfifo")
+        .arg(fifo_path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !made {
+        return; // no `mkfifo` on this box — nothing to pin, and nothing to fail either
+    }
+    let src = format!(
+        "use std.{{io, fs}}\n\
+         use std.task.{{sleep}}\n\
+         fn spin(iters: int): int {{ mut n = 0; while n < iters {{ n = n + 1 }} return n }}\n\
+         async fn wedged(path: string): int {{ return fs.read(path).len() + spin(40000000) }}\n\
+         async fn run(): int {{\n\
+         concurrent {{\n\
+         h = isolate wedged(\"{fifo_path}\")\n\
+         sleep(300).await\n\
+         h.cancel()\n\
+         io.outln(match h.join() {{ Ok(v) => \"ok=\" ~ v, Err(_) => \"cancelled\" }})\n\
+         }}\n\
+         return 0\n\
+         }}\n\
+         echo run().await"
+    );
+    let file = dir.join("main.noe");
+    std::fs::write(&file, &src).expect("write program");
+    // Unwedge from outside: opening the FIFO for writing (and closing) lets the worker's read
+    // return. Well after the 300 ms cancel, so the cancel really does land on a blocked worker.
+    // Deliberately **not** joined: opening a FIFO for writing blocks until a reader appears, so if
+    // the program never got that far this thread would never return, and joining it would turn a
+    // clear assertion failure into a hung test. The harness's exit reaps it.
+    let writer_path = fifo.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        let _ = std::fs::write(&writer_path, "unwedged");
+    });
+    let start = std::time::Instant::now();
+    lang()
+        .arg("run")
+        .arg(&file)
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout("cancelled\n0\n");
+    assert!(
+        start.elapsed() >= std::time::Duration::from_millis(600),
+        "the run must have waited on the blocked native read (unwedged at 700ms) rather than \
+         preempting it at the 300ms cancel; took {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn run_real_isolate_cancel_reaches_a_worker_parked_on_timers() {
+    // The scheduler-loop half of the cancellation poll. A worker whose body only ever *awaits* runs
+    // no bytecode between suspensions, so the dispatch loop's safepoints never come around — the
+    // check in the driving loops (`join_scope` / `drive_future_outcome`) is the only one it can
+    // reach. This watcher sleeps in 5 ms slices for what would be 5 s; cancelled 200 ms in, it must
+    // stop promptly rather than sit out the remaining wait.
+    //
+    // Slices, not one `sleep(5000)`, and that is the documented rule rather than a test artifact: a
+    // single long sleep parks the worker inside the executor's real-time wait, which the poll cannot
+    // interrupt, so it observes the request only when the sleep ends (measured at 2.8 s for a 3 s
+    // sleep cancelled at 200 ms). See the follow-up row in `plans/backlog.md`.
+    let file = temp_program(
+        "isolate_cancel_timers",
+        "use std.io\n\
+         use std.task.{sleep}\n\
+         async fn watcher(ms: int): int {\n\
+         mut w = 0\n\
+         while w < ms { sleep(5).await; w = w + 5 }\n\
+         return 1\n\
+         }\n\
+         async fn run(): int {\n\
+         concurrent {\n\
+         h = isolate watcher(5000)\n\
+         sleep(200).await\n\
+         h.cancel()\n\
+         io.outln(match h.join() { Ok(v) => \"ok=\" ~ v, Err(_) => \"cancelled\" })\n\
+         }\n\
+         return 0\n\
+         }\n\
+         echo run().await",
+    );
+    let start = std::time::Instant::now();
+    lang()
+        .arg("run")
+        .arg(&file)
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .stdout("cancelled\n0\n");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(2_000),
+        "a cancelled worker parked on timers must stop at the next scheduler round, not sit out its \
+         remaining 4.8s; took {elapsed:?}"
+    );
+}

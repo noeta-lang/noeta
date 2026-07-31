@@ -698,10 +698,10 @@ impl<'m> Vm<'m> {
     /// `isolate-cancel` notes in `docs/Concurrency-Internals.md`.
     #[inline]
     pub(crate) fn cancel_requested(&self) -> bool {
-        match &self.isolates.cancel_flag {
-            Some(flag) => flag.load(std::sync::atomic::Ordering::Relaxed),
-            None => false,
-        }
+        self.isolates
+            .cancel_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Honor an observed cancellation request: latch it (so the worker's `Abort` is reported as

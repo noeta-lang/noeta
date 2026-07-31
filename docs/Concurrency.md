@@ -181,11 +181,13 @@ concurrent {
 
 **Where the stop happens.** A **task** (`spawn`, or a `race` loser) is already parked between polls when the request lands, so it stops exactly there: its last `.await`, and the code past that point never runs. A **real isolate** is an OS thread that is genuinely running, so it stops at its next **safepoint** — a call, a return, a loop iteration, or a round of its own scheduler. Safepoints are dense enough that a compute-bound isolate with no suspension point anywhere in it is still cancellable; a 40-million-iteration arithmetic loop cancelled 200 ms in stops within milliseconds rather than running its remaining three-and-a-half seconds.
 
-**What cancellation does not promise.** Three things, and all three are deliberate.
+**What cancellation does not promise.** Each of these is a deliberate limit, not an omission.
 
 - **It does not undo work already done.** A cancelled task keeps every file it wrote, every message it sent, every row it inserted. `Err(Cancelled)` means "this produced no value", not "this never happened" — a caller that needs the effects reverted has to revert them.
 - **A request that arrives too late is not a cancellation.** If the body finished before the request was noticed, `join` reports `Ok(v)`. It never claims work that ran to completion was cancelled.
-- **It cannot preempt a native call.** An isolate blocked inside the host — a pipe read, a socket read, a blocking syscall — is not executing Noeta, so it reaches no safepoint and does not stop until that call returns. This is the one case where a cancel can leave you waiting, and the fix is a deadline on the operation itself rather than a cancel around it.
+- **It cannot preempt a native call.** An isolate blocked inside the host — a pipe read, a socket read, a blocking syscall — is not executing Noeta, so it reaches no safepoint and does not stop until that call returns. This is the one case where a cancel can leave you waiting indefinitely, and the fix is a deadline on the operation itself rather than a cancel around it.
+
+**One `sleep` is not a safepoint.** A worker parked in `sleep(3000).await` is not running either, and its clock advance is a single real sleep — so it observes a cancel when that sleep *ends*, not when it is issued (measured: cancelled 200 ms in, it stopped 2.8 s later). Sleep in slices when you want a bound: the same watcher written as `while w < ms { sleep(5).await; w = w + 5 }` stops within a millisecond, because each slice returns to the scheduler and the scheduler checks. This costs nothing on the ordinary path — it only matters for a task you intend to cancel.
 
 **Cancellation and the closing brace.** A `concurrent` block joins everything it spawned, and a cancelled member is no exception: the block waits for it to actually stop before returning. This is the load-bearing half of structured concurrency, and it is why a cancelled isolate is joined rather than abandoned — the alternative is a thread that outlives its scope, still holding its heap and its handles, still writing to the world the program thinks it has finished with.
 
