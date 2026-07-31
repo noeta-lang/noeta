@@ -788,6 +788,226 @@ mod tests {
     }
 
     #[test]
+    fn safety_gate_sees_tier_block_attachment() {
+        // The annotation form `@test fn t()` desugars to a one-item `TierBlock` with
+        // `attached: true`; the braced form `@test { fn t() {…} }` is the same block with
+        // `attached: false`. Nothing else about them differs, and the checker branches on the flag
+        // (E0054's declared-site check runs only when attached), so collapsing one into the other is
+        // a program change that can invent an attachment-site error the author's source does not
+        // have. The formatter did exactly that until `1e13e2007`; the gate compared the two EQUAL,
+        // because `Pretty`'s `TierBlock` arm destructured `attached` away with `..`.
+        let parse = |src: &str| {
+            let source = noeta_span::Source::new(SourceId::FIRST, "t.noe", src);
+            let lexed = noeta_lexer::lex(&source);
+            noeta_parser::parse(&source, &lexed.tokens).program
+        };
+        assert!(
+            !safety::ast_equal_modulo_spans(
+                &parse("@test fn t(): void {\n    echo 1\n}\n"),
+                &parse("@test {\n    fn t(): void {\n        echo 1\n    }\n}\n"),
+            ),
+            "the gate is blind to `TierBlock::attached` — the formatter can collapse a braced tier \
+             block into the annotation form and change what the checker does"
+        );
+        // And the printer keeps each form as the author wrote it: the annotation stays an
+        // annotation (canonically on its own line above the declaration), the braced block keeps
+        // its braces — including the one-`fn` block the collapse used to eat.
+        for src in [
+            "@test\nfn t(): void {\n    echo 1\n}\n",
+            "@test {\n    fn t(): void {\n        echo 1\n    }\n}\n",
+        ] {
+            assert_eq!(
+                fmt(src).unwrap(),
+                src,
+                "tier attachment form must round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn safety_gate_sees_every_surveyed_declaration_field() {
+        // The `attached` hole was found by exploiting it; this table is the rest of the survey that
+        // followed. Every pair differs in exactly one AST field that `Pretty` did **not** render,
+        // and every one of them compared EQUAL to the gate before this slice — meaning a formatter
+        // that dropped or rewrote that field would have been waved through.
+        //
+        // Each field here is one the printer re-emits from the AST, so each was a place a printing
+        // bug could not be caught. Two of them were not hypothetical: the tier-block `attached`
+        // flag (its own test above) and the payload-less variant pattern at the end of this list.
+        let parse = |src: &str| {
+            let source = noeta_span::Source::new(SourceId::FIRST, "t.noe", src);
+            let lexed = noeta_lexer::lex(&source);
+            let parsed = noeta_parser::parse(&source, &lexed.tokens);
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "test input does not parse: {src:?}: {:?}",
+                parsed.diagnostics
+            );
+            parsed.program
+        };
+        for (what, a, b) in [
+            // --- a binding's type annotation (the boundary the value is checked against) ---
+            ("binding annotation", "x: int = 1\n", "x = 1\n"),
+            ("binding annotation type", "x: int = 1\n", "x: dyn = 1\n"),
+            // --- a callable's signature ---
+            (
+                "fn return type",
+                "fn f(): int {\n    return 1\n}\n",
+                "fn f() {\n    return 1\n}\n",
+            ),
+            (
+                "fn return type identity",
+                "fn f(): int {\n    return 1\n}\n",
+                "fn f(): dyn {\n    return 1\n}\n",
+            ),
+            (
+                "param annotation",
+                "fn f(x: int) {\n    echo x\n}\n",
+                "fn f(x) {\n    echo x\n}\n",
+            ),
+            (
+                "param annotation type",
+                "fn f(x: int) {\n    echo x\n}\n",
+                "fn f(x: string) {\n    echo x\n}\n",
+            ),
+            (
+                "param default presence",
+                "fn f(x: int = 1) {\n    echo x\n}\n",
+                "fn f(x: int) {\n    echo x\n}\n",
+            ),
+            (
+                "param default value",
+                "fn f(x: int = 1) {\n    echo x\n}\n",
+                "fn f(x: int = 2) {\n    echo x\n}\n",
+            ),
+            (
+                "closure return type",
+                "f = fn(x: int): int => x\n",
+                "f = fn(x: int) => x\n",
+            ),
+            // --- a data declaration's members ---
+            (
+                "field annotation",
+                "struct P { x: int }\n",
+                "struct P { x: string }\n",
+            ),
+            (
+                "field visibility",
+                "struct P { pub x: int }\n",
+                "struct P { x: int }\n",
+            ),
+            (
+                "field attribute",
+                "struct P { #[Column(\"a\")] x: int }\n",
+                "struct P { x: int }\n",
+            ),
+            (
+                "field default value",
+                "struct P { x: int = 1 }\n",
+                "struct P { x: int = 2 }\n",
+            ),
+            // --- an enum's backing and its variants ---
+            (
+                "enum backing type",
+                "enum S: int { A = 1 }\n",
+                "enum S: string { A = 1 }\n",
+            ),
+            (
+                "variant backing value",
+                "enum S: string { A = \"a\" }\n",
+                "enum S: string { A = \"b\" }\n",
+            ),
+            (
+                "variant attribute",
+                "enum S { #[Doc(\"x\")] A; B }\n",
+                "enum S { A; B }\n",
+            ),
+            // --- a class's destructor: not a method, so it appeared nowhere ---
+            (
+                "destructor",
+                "class C {\n    x: int\n\n    destruct {\n        echo 1\n    }\n}\n",
+                "class C {\n    x: int\n}\n",
+            ),
+            (
+                "destructor body",
+                "class C {\n    x: int\n\n    destruct {\n        echo 1\n    }\n}\n",
+                "class C {\n    x: int\n\n    destruct {\n        echo 2\n    }\n}\n",
+            ),
+            // --- which trait a body method implements (`methods` holds both, `impls` the grouping) ---
+            (
+                "in-body impl grouping",
+                "struct P {\n    x: int\n\n    impl Printable {\n        fn to_string(): string {\n            return \"p\"\n        }\n    }\n}\n",
+                "struct P {\n    x: int\n\n    fn to_string(): string {\n        return \"p\"\n    }\n}\n",
+            ),
+            // --- an impl's associated-type bindings ---
+            (
+                "impl assoc binding",
+                "impl Iterate for P {\n    type Item = int\n}\n",
+                "impl Iterate for P {\n    type Item = string\n}\n",
+            ),
+            // --- a trait's own header and contract ---
+            (
+                "trait visibility",
+                "pub trait T {\n    fn f(): int\n}\n",
+                "trait T {\n    fn f(): int\n}\n",
+            ),
+            (
+                "trait type params",
+                "trait T<A> {\n    fn f(): int\n}\n",
+                "trait T {\n    fn f(): int\n}\n",
+            ),
+            (
+                "trait assoc type",
+                "trait T {\n    type Item\n\n    fn f(): int\n}\n",
+                "trait T {\n    fn f(): int\n}\n",
+            ),
+            (
+                "trait required vs defaulted method",
+                "trait T {\n    fn f(): int\n}\n",
+                "trait T {\n    fn f(): int {}\n}\n",
+            ),
+            // --- a method directive's arguments (its tier's knobs, read back by the runner) ---
+            (
+                "method directive args",
+                "class C {\n    @bench(1000)\n    fn f() {\n        echo 1\n    }\n}\n",
+                "class C {\n    @bench(2000)\n    fn f() {\n        echo 1\n    }\n}\n",
+            ),
+            // --- attribute-argument literal values ---
+            (
+                "attr list vs set",
+                "#[A([1, 2])]\nstruct P { x: int }\n",
+                "#[A(#{1, 2})]\nstruct P { x: int }\n",
+            ),
+            (
+                "attr enum payload",
+                "#[A(Status.Code(404))]\nstruct P { x: int }\n",
+                "#[A(Status.Code(500))]\nstruct P { x: int }\n",
+            ),
+            (
+                "attr struct fields",
+                "#[A(Point { x: 1 })]\nstruct P { x: int }\n",
+                "#[A(Point { x: 2 })]\nstruct P { x: int }\n",
+            ),
+            (
+                "attr int vs float",
+                "#[A(1)]\nstruct P { x: int }\n",
+                "#[A(1.0)]\nstruct P { x: int }\n",
+            ),
+            // --- and the second live bug: a payload-less variant pattern is not a binding ---
+            (
+                "payload-less variant pattern vs binding",
+                "fn f(r: Result<void, string>): int {\n    return match r {\n        Ok() => 1,\n        Err(e) => 2,\n    }\n}\n",
+                "fn f(r: Result<void, string>): int {\n    return match r {\n        ok => 1,\n        Err(e) => 2,\n    }\n}\n",
+            ),
+        ] {
+            assert!(
+                !safety::ast_equal_modulo_spans(&parse(a), &parse(b)),
+                "the safety gate is blind to a difference in {what}:\n{a}\nvs\n{b}"
+            );
+        }
+    }
+
+    #[test]
     fn every_type_decorating_directive_is_rendered_into_the_gate() {
         // The structural guarantee behind `safety_gate_distinguishes_decorators`: it is not enough
         // that the pairs above happen to be covered — every directive that can decorate a type must
