@@ -2125,11 +2125,17 @@ impl Interpreter {
         }
     }
 
-    /// Materialize a declared type's field schema into a `List<FieldSpec>` (`{ name, type, optional }`,
-    /// declaration order) — the type-level reflection `field_specs_of`. An unknown or non-fielded type
-    /// yields the empty list. Each `type` is the field's declared type (precise, from the reflection
-    /// artifact), unlike `fields_of`'s value-level erasure. The VM builds the matching shape the same
-    /// way, so the values agree across the differential by construction.
+    /// Materialize a declared type's field schema into a `List<FieldSpec>` (`{ name, type, optional,
+    /// attrs }`, declaration order) — the type-level reflection `field_specs_of`. An unknown or
+    /// non-fielded type yields the empty list. Each `type` is the field's declared type (precise,
+    /// from the reflection artifact), unlike `fields_of`'s value-level erasure. The VM builds the
+    /// matching shape the same way, so the values agree across the differential by construction.
+    ///
+    /// `attrs` is **joined from the attribute manifest**, exactly as `materialize_params` joins a
+    /// parameter's: the rows are the ones `attributes_of::<T>()` returns for the same field, reached
+    /// through the shared `field_attributes_for` key. So the field door and the parameter door hand
+    /// a schema deriver the same shape, and a field attribute cannot be visible through one query
+    /// and missing from the other.
     fn materialize_field_specs(&self, type_name: &str) -> Value {
         let spec_def = Rc::new(fresh_type_def(
             noeta_ast::reflect::FIELD_SPEC,
@@ -2145,6 +2151,9 @@ impl Interpreter {
                     Value::Str(spec.name.to_string()),
                     build_type_value(spec.ty),
                     Value::Bool(spec.optional),
+                    self.materialize_attr_instances(
+                        self.reflection.field_attributes_for(type_name, spec.name),
+                    ),
                 ];
                 Value::Object(Rc::new(ObjectValue::new(spec_def.clone(), slots)))
             })
@@ -2159,6 +2168,10 @@ impl Interpreter {
     /// `materialize_field_specs` builds one, and `backing` goes through the shared
     /// `attr_value_to_eval`; the VM builds the matching shapes the same way, so the values agree
     /// across the differential by construction.
+    ///
+    /// A payload slot's `attrs` is the empty list rather than a manifest join, and that is the true
+    /// answer, not a stub: a variant payload has no syntax for an attribute (the `#[…]` a variant
+    /// bears is the *variant*'s, keyed `Enum.Variant`), so there is nothing to look up.
     fn materialize_variant_specs(&self, type_name: &str) -> Value {
         let spec_def = Rc::new(fresh_type_def(
             noeta_ast::reflect::FIELD_SPEC,
@@ -2183,6 +2196,7 @@ impl Interpreter {
                             Value::Str(spec.name.to_string()),
                             build_type_value(spec.ty),
                             Value::Bool(spec.optional),
+                            Value::list(Vec::new()),
                         ];
                         Value::Object(Rc::new(ObjectValue::new(spec_def.clone(), slots)))
                     })
@@ -2353,9 +2367,18 @@ impl Interpreter {
     /// `attribute_shape`, same `materialize_args` field resolution — so the value a consumer reads
     /// off `ParamInfo.attrs` is indistinguishable from the one it would read off an `Attributed`.
     fn materialize_param_attrs(&self, callable: &str, param: &str) -> Value {
-        let items: Vec<Value> = self
-            .reflection
-            .param_attributes_for(callable, param)
+        self.materialize_attr_instances(self.reflection.param_attributes_for(callable, param))
+    }
+
+    /// A member's manifest rows, materialized into a `List<dyn>` of attribute-struct instances —
+    /// the one builder both `ParamInfo.attrs` and `FieldSpec.attrs` go through, so "a field's
+    /// attributes are built exactly as a parameter's" is a shared call rather than a claim two
+    /// copies have to keep. An empty row set yields an empty list, never an absence.
+    fn materialize_attr_instances(
+        &self,
+        records: Vec<&noeta_ast::reflect::AttributeRecord>,
+    ) -> Value {
+        let items: Vec<Value> = records
             .into_iter()
             .map(|a| {
                 let shape = noeta_ast::reflect::attribute_shape(&a.name, &self.reflection);
