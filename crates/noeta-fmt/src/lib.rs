@@ -1060,6 +1060,45 @@ mod tests {
     }
 
     #[test]
+    fn a_break_between_arguments_is_kept_where_it_was_written() {
+        // The other half of the same loss: the author kept the first argument on the `(` line and
+        // broke before the second — the canonical `assert(cond,⏎    "why")` shape. `seq_broke` only
+        // sees a break *after* the open delimiter, so this collapsed onto one line however long it
+        // was. The break comes back in exactly the gap it was written in, one continuation indent.
+        let src = "fn f(): void {\n    assert(a == b,\n        \"why\")\n}";
+        let once = fmt(src).unwrap();
+        assert_eq!(once, format!("{src}\n"));
+        assert_eq!(fmt(&once).unwrap(), once, "arg break is a fixed point");
+    }
+
+    #[test]
+    fn only_the_gaps_the_author_broke_carry_a_break() {
+        // Three arguments, one break: the other gap stays a space. The fully-expanded
+        // one-per-line-plus-trailing-comma form is reserved for a break *after* the `(`, which is
+        // the stronger "I expanded this list" signal — see the two shapes side by side.
+        let once = fmt("g(a, b,\n    c)").unwrap();
+        assert_eq!(once, "g(a, b,\n    c)\n");
+        assert_eq!(fmt(&once).unwrap(), once);
+
+        let expanded = fmt("g(\n    a, b, c)").unwrap();
+        assert_eq!(expanded, "g(\n    a,\n    b,\n    c,\n)\n");
+        assert_eq!(fmt(&expanded).unwrap(), expanded);
+    }
+
+    #[test]
+    fn a_multiline_argument_does_not_fake_a_gap_break() {
+        // The signal is the gap *between* two adjacent arguments — the comma and its whitespace —
+        // never "a newline anywhere in the list". An argument that spans lines on its own (here a
+        // chain the author broke) must not drag the argument after it onto a new line.
+        let once = fmt("fn f(): void {\n    h(xs.map(g)\n        .filter(p), 1)\n}").unwrap();
+        assert_eq!(
+            once,
+            "fn f(): void {\n    h(xs.map(g)\n        .filter(p), 1)\n}\n"
+        );
+        assert_eq!(fmt(&once).unwrap(), once);
+    }
+
+    #[test]
     fn wrap_still_re_derives_chain_layout_from_width() {
         // `wrap = true` is the width-driven policy: it re-derives layout from `line_width` and does
         // *not* consult the author's breaks. A broken chain that fits is joined back up.

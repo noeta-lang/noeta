@@ -2876,7 +2876,73 @@ impl Printer<'_> {
         let broke = args
             .first()
             .is_some_and(|f| self.seq_broke(open_ref, f.span.start));
+        let gaps = self.gap_breaks(args, |a| a.span);
+        if !broke && self.breaks_at_author_gaps(&gaps) {
+            return Ok(self.delimited_at_author_breaks("(", ds, ")", &gaps));
+        }
         Ok(self.delimited("(", ds, ")", false, broke))
+    }
+
+    /// Whether the author broke the source **between** each adjacent pair of `items` — one flag per
+    /// gap, so `[false, true]` means a newline sits between the second and third item only.
+    ///
+    /// This is the second half of the source-directed sequence signal, and the *only* one available
+    /// when the author kept the first element on the opening-delimiter's line
+    /// (`assert(cond,⏎    "why")`). It is sound where a newline "anywhere across the list" is not:
+    /// the gap between two adjacent elements is exactly the comma and the whitespace around it, so a
+    /// newline in it is unambiguously the author's — it can never have leaked out of an element that
+    /// itself spans lines (a closure body, a nested broken call, an object literal), which is the
+    /// false positive that keeps [`Self::params`]' broader test from being usable here.
+    fn gap_breaks<T>(&self, items: &[T], span_of: impl Fn(&T) -> Span) -> Vec<bool> {
+        items
+            .windows(2)
+            .map(|w| self.broke_between(span_of(&w[0]).end, span_of(&w[1]).start))
+            .collect()
+    }
+
+    /// Whether [`Self::delimited_at_author_breaks`] applies: at least one gap carries the author's
+    /// break, and the current policy permits emitting one at all. `wrap = true` re-derives layout
+    /// from the width instead, and a tier-body hole (`force_flat`) may not contain a newline.
+    fn breaks_at_author_gaps(&self, gaps: &[bool]) -> bool {
+        !self.force_flat.get() && !self.config.wrap && gaps.iter().any(|b| *b)
+    }
+
+    /// Lay a comma-separated sequence out with a break in **exactly** the gaps the author broke
+    /// (see [`Self::gap_breaks`]), the continuation indented one step. Only called when
+    /// [`Self::breaks_at_author_gaps`] holds; otherwise the caller uses [`Self::delimited`].
+    ///
+    /// This is deliberately *not* the fully-expanded `delimited` form. The author who wrote
+    /// `assert(cond,⏎    "why")` did not ask for one argument per line and a trailing comma; the
+    /// default config's contract is that it keeps the line breaks that are there, not that it
+    /// re-derives a layout around them. Emitting the shape back unchanged is also what makes this a
+    /// fixed point: the second pass reads the same newline in the same gap and the same absence of
+    /// one before the first element, so it produces the same output. (Breaking right *after* the
+    /// open delimiter remains the separate, stronger "expanded form" signal `delimited` keys off,
+    /// and still yields one element per line.)
+    fn delimited_at_author_breaks(
+        &self,
+        open: &str,
+        elems: Vec<Doc>,
+        close: &str,
+        gaps: &[bool],
+    ) -> Doc {
+        let mut inner = Vec::with_capacity(elems.len() * 2);
+        for (i, elem) in elems.into_iter().enumerate() {
+            if let Some(broke) = i.checked_sub(1).and_then(|g| gaps.get(g)) {
+                inner.push(Doc::text(","));
+                inner.push(if *broke {
+                    Doc::hardline()
+                } else {
+                    Doc::text(" ")
+                });
+            }
+            inner.push(elem);
+        }
+        Doc::concat([
+            Doc::text(open),
+            Doc::concat(inner).nest(self.indent_step()),
+            Doc::text(close),
+        ])
     }
 
     /// Preserve a **multiline backtick template** verbatim (F4). All string kinds decode to
