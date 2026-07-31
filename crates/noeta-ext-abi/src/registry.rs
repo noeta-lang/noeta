@@ -1853,7 +1853,7 @@ pub struct ExtAttrField {
 /// like any native fielded type: a consumer resolves `use std.test.{Skip}` / `use std.test` /
 /// `#[std.test.Skip]` through the same `classify_use`/`namespace_types` machinery, and the checker
 /// keys `symbols.attributes` on the [`ExtAttribute::qualified`] identity (D2). There is no global
-/// attribute namespace — std's tier attributes live under `std.test` (`Skip`/`Name`/`Group`/`Data`),
+/// attribute namespace — std's tier attributes live under `std.test` (`Skip`/`Name`/`Group`/`Data`/`Timeout`),
 /// `std.bench` (`Bench`), and `std.doc` (`Doc`), imported like any attribute.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtAttribute {
