@@ -48,6 +48,11 @@ noeta-host-real = { path = "../noeta-host-real", default-features = false }
 noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 noeta-span = { workspace = true }
 noeta-diagnostics = { workspace = true }
+# The shared run epilogue (`RunTail`, audit row 1) — the one rendering of a finished run into
+# process output. It lives in `noeta-backend` because that is the common ancestor of every
+# execution surface: this staticlib reaches it without acquiring the compiler front-end that
+# `noeta-runner` (where the CLI's copy of the tail lives) would drag in.
+noeta-backend = { workspace = true }
 
 [features]
 # All rings on by default — the plain archive is fully capable. `noeta build --native`'s footprint

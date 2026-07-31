@@ -96,19 +96,12 @@ fn run() -> ExitCode {
     // code + location show, but there is no snippet — the honest cost of shipping no `.noe` (same as
     // the L1/L2 bundle runner).
     let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, "<aot>", "")]);
-    print!("{}", result.stdout);
-    use std::io::Write as _;
-    let _ = std::io::stdout().flush();
-    for diagnostic in &result.diagnostics {
-        eprint!(
-            "{}",
-            noeta_diagnostics::render(sources.source(diagnostic.span.source), diagnostic)
-        );
-    }
-    if trace.len() >= 2 {
-        eprint!("{}", noeta_vm::render_trace(&trace, &sources));
-    }
-    ExitCode::from(result.exit_code as u8)
+    // The shared run epilogue (audit row 1). This tail was hand-rolled and wrong three ways: it
+    // dropped the program's own `stderr` stream entirely, it rendered diagnostics one-by-one
+    // through `render` instead of `render_mapped` (so a multi-source span resolved against the
+    // wrong file), and it converted the exit code with `as u8` — which made a program exiting 256
+    // exit **0**, a failure reported as a success.
+    noeta_backend::RunTail::render(&result, &trace, &sources).emit()
 }
 
 /// Read this executable's stapled trailer to recover the embedded bundle, and decode it to a
@@ -126,10 +119,18 @@ fn load_embedded_module() -> Result<Module, String> {
 /// per-isolate factory mints a fresh real host + wall-clock executor (isolates I.4b), exactly as the
 /// CLI's `run_module_real_host` does; the extra step here is binding the linker-resolved
 /// [`noeta_aot_dispatch`] table so eligible prototypes dispatch to native code.
+///
+/// The host runs with **live output** (`with_live_output(true)`), like every other foreground run
+/// surface. Without it a `--native` binary buffered its whole stdout until exit, so a long-running
+/// or killed program showed nothing at all — exactly what made a slow run indistinguishable from a
+/// hung one on the paths that already turned it on (audit row 1).
 fn run_native(module: std::sync::Arc<Module>) -> (noeta_vm::RunResult, Vec<noeta_vm::TraceFrame>) {
     let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(|| {
-        let host: Box<dyn noeta_stdlib::Host> =
-            Box::new(noeta_host_real::RealHost::new().expect("cannot start an isolate's runtime"));
+        let host: Box<dyn noeta_stdlib::Host> = Box::new(
+            noeta_host_real::RealHost::new()
+                .expect("cannot start an isolate's runtime")
+                .with_live_output(true),
+        );
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
             noeta_host_real::RealExecutor::new().expect("cannot start an isolate's async executor"),
         );

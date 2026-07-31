@@ -80,6 +80,19 @@ impl Component {
             | Component::Report => Stream::Stderr,
         }
     }
+
+    /// A short human label for this component — what a surface that *shows* the components rather
+    /// than writing them to streams (the `wasi:http` edge's 500 body) titles each section with.
+    /// Total by construction, like [`Component::stream`].
+    pub fn label(self) -> &'static str {
+        match self {
+            Component::Stdout => "stdout",
+            Component::ProgramStderr => "stderr",
+            Component::Diagnostics => "diagnostic",
+            Component::Traceback => "traceback",
+            Component::Report => "report",
+        }
+    }
 }
 
 /// One rendered component of a finished run.

@@ -2406,6 +2406,7 @@ version = "0.2.3"
 name = "noeta-aot-runtime"
 version = "0.2.3"
 dependencies = [
+ "noeta-backend",
  "noeta-bundle",
  "noeta-bytecode",
  "noeta-diagnostics",
@@ -3127,6 +3128,7 @@ dependencies = [
 name = "noeta-wasm-serve"
 version = "0.2.3"
 dependencies = [
+ "noeta-backend",
  "noeta-bundle",
  "noeta-bytecode",
  "noeta-db",

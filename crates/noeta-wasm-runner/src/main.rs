@@ -23,7 +23,6 @@
 
 mod embedded;
 
-use std::io::Write;
 use std::process::ExitCode;
 
 use noeta_span::{Source, SourceId, SourceMap};
@@ -120,25 +119,13 @@ fn run(bytes: &[u8], name: &str, program_argv: Vec<String>, sandbox: bool) -> Ex
     let (result, trace) =
         noeta_vm::VmBackend::new().run_module_debug(&module, host, executor, None);
 
-    print!("{}", result.stdout);
-    let _ = std::io::stdout().flush();
-
-    // The program's OWN stderr stream (`std.io`'s `err`/`errln`), buffered into `RunResult` exactly
-    // as stdout is, and written FIRST — the order every run tail uses: program stderr, then
-    // diagnostics, then the traceback (`noeta_runner::run_compiled_module`). Omitting it silently
-    // dropped every `err`/`errln` byte a wasm-hosted program wrote.
-    let _ = std::io::stderr().write_all(result.stderr.as_bytes());
-
     // A bundle ships no source: diagnostics and tracebacks render against a synthetic empty
     // source (message/code/file:line show, no snippet) — the `noeta run app.noeb` convention.
     let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, name, "")]);
-    if !result.diagnostics.is_empty() {
-        let rendered = noeta_diagnostics::render_mapped(&sources, result.diagnostics.iter());
-        let _ = std::io::stderr().write_all(rendered.as_bytes());
-    }
-    if trace.len() >= 2 {
-        eprint!("{}", noeta_vm::render_trace(&trace, &sources));
-    }
-
-    ExitCode::from(u8::try_from(result.exit_code).unwrap_or(1))
+    // The shared run epilogue (audit row 1): the program's stdout, then its OWN stderr stream
+    // (`std.io`'s `err`/`errln`, buffered into `RunResult` exactly as stdout is), then the
+    // diagnostics, then the traceback. This tail used to hand-write that order; it is now the same
+    // rendering every other execution surface uses, so the next component added to a run reaches
+    // this binary without anyone editing it.
+    noeta_backend::RunTail::render(&result, &trace, &sources).emit()
 }

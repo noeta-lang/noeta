@@ -33,6 +33,8 @@ mod outbound;
 
 use std::cell::OnceCell;
 
+use noeta_backend::RunTail;
+use noeta_span::{Source, SourceId, SourceMap};
 use noeta_stdlib::{NetRequest, NetResponse};
 use noeta_wasi_host::{OutboundHook, WasiHost};
 
@@ -155,35 +157,45 @@ fn run(
     let (host, reply) = host.with_inbound(request);
     let executor: Box<dyn noeta_stdlib::Executor> = Box::new(noeta_stdlib::SandboxExecutor::new());
     // The documented plain-run-plus-traceback entry — cooperative, tier-0, the wasm shape.
-    let (result, _trace) =
+    let (result, trace) =
         noeta_vm::VmBackend::new().run_module_debug(module, Box::new(host), executor, None);
 
-    // Surface recorded runtime diagnostics on stderr **even when a reply exists**: a handler
+    // The shared run epilogue (audit row 1). This surface wants *structured* output — it composes a
+    // response body — which is exactly why the epilogue is a value and not a print statement: the
+    // components are enumerable here and writable everywhere else. A component-per-request has no
+    // source text, so spans render name+line only, like a `.noeb` run.
+    let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, "<serve>", "")]);
+    let tail = RunTail::render(&result, &trace, &sources);
+
+    // Everything the run said goes to the platform log, **even when a reply exists**: a handler
     // abort is recovered by `http.serve` into a generic 500 (clients must not see internals),
-    // which is indistinguishable from a platform failure without the cause. The platform
-    // forwards guest stderr to its own log (`wasmtime serve`, Spin), so this is the debugging
-    // view at the edge — it is what names the real error when the e2e's only symptom is
-    // "unexpected proxy body: Internal Server Error".
-    for diagnostic in &result.diagnostics {
-        eprintln!(
-            "noeta-wasm-serve: runtime diagnostic: {}",
-            diagnostic.message
-        );
-    }
+    // which is indistinguishable from a platform failure without the cause. The platform forwards
+    // guest stdout/stderr to its own log (`wasmtime serve`, Spin), so this is the debugging view at
+    // the edge — it is what names the real error when the e2e's only symptom is "unexpected proxy
+    // body: Internal Server Error". Previously this printed one line per diagnostic *message* and
+    // nothing else: the program's stdout was dropped on the success path, its own `err`/`errln`
+    // stream was dropped on every path, and an abort's traceback was never rendered at all.
+    let _ = tail.write_to(&mut std::io::stdout(), &mut std::io::stderr());
 
     if let Some(response) = reply.lock().expect("reply slot not poisoned").take() {
         return response;
     }
-    // No reply reached the slot: the program never served, or it aborted first. Surface what it
-    // did produce — stdout and any diagnostics — as a 500 body instead of hanging the client.
-    let mut body = String::new();
-    body.push_str("the program produced no HTTP response\n");
-    if !result.stdout.is_empty() {
-        body.push_str("--- stdout ---\n");
-        body.push_str(&result.stdout);
-    }
-    for diagnostic in &result.diagnostics {
-        body.push_str(&format!("--- diagnostic ---\n{}\n", diagnostic.message));
+    // No reply reached the slot: the program never served, or it aborted first. Surface what it did
+    // produce as a 500 body instead of hanging the client — every component of the tail, labelled,
+    // so a future one lands in the body without an edit here.
+    let mut body = String::from("the program produced no HTTP response\n");
+    for part in tail.parts() {
+        if part.text.is_empty() {
+            continue;
+        }
+        body.push_str(&format!(
+            "--- {} ---\n{}",
+            part.component.label(),
+            part.text
+        ));
+        if !part.text.ends_with('\n') {
+            body.push('\n');
+        }
     }
     failure(&body)
 }

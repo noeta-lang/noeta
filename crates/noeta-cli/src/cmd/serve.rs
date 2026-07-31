@@ -499,8 +499,9 @@ pub(crate) fn serve_parallel_impl(
         let module = std::sync::Arc::clone(&module);
         let args = args.clone();
         let app_id = app_id.clone();
+        let sources = loaded.sources.clone();
         handles.push(std::thread::spawn(move || {
-            run_worker(module, listener, args, app_id)
+            run_worker(module, listener, args, app_id, sources)
         }));
     }
     // Every worker drains and returns on shutdown; a non-zero worker exit propagates.
@@ -517,11 +518,16 @@ pub(crate) fn serve_parallel_impl(
 /// One `--parallel` worker (server-hmr S1): a real host seeded with the pre-bound listener plus a
 /// wall-clock executor, running the compiled serve module to completion (it returns when the
 /// graceful-drain flag closes the accept loop).
+///
+/// `sources` is the fleet's source map, cloned per worker so the worker's own tail can render an
+/// abort properly: this path used to print the five words `[worker] aborted` and no stack, in a
+/// project that ships production stack traces on both backends (audit row 1).
 pub(crate) fn run_worker(
     module: std::sync::Arc<noeta_bytecode::Module>,
     listener: std::net::TcpListener,
     args: Vec<String>,
     app_id: Option<String>,
+    sources: SourceMap,
 ) -> u8 {
     let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
         Ok(h) => Box::new(
@@ -556,15 +562,7 @@ pub(crate) fn run_worker(
     });
     let (result, trace, _) = VmBackend::new()
         .run_module_with_host_and_executor_parallel(module, host, executor, factory, false, None);
-    print!("{}", result.stdout);
-    let _ = io::stdout().flush();
-    // The program's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout flushes.
-    eprint!("{}", result.stderr);
-    let _ = io::stderr().flush();
-    if trace.len() >= 2 {
-        eprintln!("[worker] aborted");
-    }
-    u8::try_from(result.exit_code).unwrap_or(1)
+    emit_worker_tail(&result, &trace, &sources)
 }
 
 /// Hot multi-core serve (server-hmr F5): each of `workers` worker isolates runs the debug-session
@@ -586,7 +584,6 @@ pub(crate) fn serve_parallel_hot(
     app_id: Option<String>,
     addr: &str,
 ) -> u8 {
-    let _ = sources;
     // One consumer per worker isolate: the queue reclaims a deposited plan (its fragment AST and
     // its whole-program `Sites` bundle) only once ALL of them have installed it, so a worker still
     // compiling its session below — or parked mid-request — cannot lose a swap.
@@ -618,8 +615,11 @@ pub(crate) fn serve_parallel_hot(
         let wake = std::sync::Arc::clone(&wake);
         let args = args.clone();
         let app_id = app_id.clone();
+        let sources = sources.clone();
         handles.push(std::thread::spawn(move || {
-            run_worker_hot(program, sites, listener, mailbox, wake, args, app_id)
+            run_worker_hot(
+                program, sites, listener, mailbox, wake, args, app_id, sources,
+            )
         }));
     }
     let mut code = 0u8;
@@ -635,6 +635,7 @@ pub(crate) fn serve_parallel_hot(
 /// One hot `--parallel` worker (server-hmr F5): compiles its own session (each isolate is
 /// shared-nothing, so it holds its own `SessionCompiler` for fragment installs), adopts the
 /// pre-bound listener, arms the shared broadcast queue + wake, and runs the debug-session hot VM.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_worker_hot(
     program: noeta_ast::Program,
     sites: noeta_compiler::Sites,
@@ -643,6 +644,7 @@ pub(crate) fn run_worker_hot(
     wake: std::sync::Arc<noeta_host_real::Notify>,
     args: Vec<String>,
     app_id: Option<String>,
+    sources: SourceMap,
 ) -> u8 {
     let (module, compiler) =
         match noeta_compiler::compile_with_sites_session(&program, sites, false, false) {
@@ -675,15 +677,23 @@ pub(crate) fn run_worker_hot(
     };
     let (result, trace) =
         VmBackend::new().run_module_hot(&module, compiler, host, executor, mailbox);
-    print!("{}", result.stdout);
-    let _ = io::stdout().flush();
-    // The program's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout flushes.
-    eprint!("{}", result.stderr);
-    let _ = io::stderr().flush();
-    if trace.len() >= 2 {
+    emit_worker_tail(&result, &trace, &sources)
+}
+
+/// The shared run epilogue for one `--parallel` worker (audit row 1): the program's stdout, its own
+/// stderr stream, the run's diagnostics and — the part both worker paths were missing — the abort
+/// traceback. A worker that dies inside a request handler now says *where*, prefixed so the line is
+/// attributable in a fleet's interleaved output.
+fn emit_worker_tail(
+    result: &noeta_backend::RunResult,
+    trace: &[noeta_vm::TraceFrame],
+    sources: &SourceMap,
+) -> u8 {
+    let tail = noeta_backend::RunTail::render(result, trace, sources);
+    if tail.aborted() {
         eprintln!("[worker] aborted");
     }
-    u8::try_from(result.exit_code).unwrap_or(1)
+    tail.emit_status()
 }
 
 /// Run an entry-call program with **in-process hot reload** (server-hmr W1) — `noeta serve
@@ -758,14 +768,6 @@ pub(crate) fn run_program_hot(
     };
     let (result, trace) =
         VmBackend::new().run_module_hot(&module, compiler, host, executor, mailbox);
-    print!("{}", result.stdout);
-    let _ = io::stdout().flush();
-    // The program's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout flushes.
-    eprint!("{}", result.stderr);
-    let _ = io::stderr().flush();
-    emit_diagnostics_mapped(&loaded.sources, result.diagnostics.iter());
-    if trace.len() >= 2 {
-        eprint!("{}", noeta_vm::render_trace(&trace, &loaded.sources));
-    }
-    u8::try_from(result.exit_code).unwrap_or(1)
+    // The shared run epilogue (audit row 1) — an eighth hand-written copy of it lived here.
+    noeta_backend::RunTail::render(&result, &trace, &loaded.sources).emit_status()
 }

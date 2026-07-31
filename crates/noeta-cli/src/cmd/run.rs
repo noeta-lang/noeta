@@ -38,19 +38,11 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
     }
 
     match execute_real_host(&loaded.program, &checked, args, true, None) {
+        // The shared run epilogue (audit row 1): program stdout, program stderr, diagnostics,
+        // traceback — one rendering, used by every execution surface. This returns the program's
+        // *unclamped* exit code (the caller converts), not the process status.
         Ok((result, trace)) => {
-            print!("{}", result.stdout);
-            let _ = io::stdout().flush();
-            // The program's stderr stream (`std.io`'s `err`/`errln`) goes to real stderr, after
-            // stdout is flushed and before any diagnostics/traceback the run produced.
-            eprint!("{}", result.stderr);
-            let _ = io::stderr().flush();
-            emit_diagnostics_mapped(&loaded.sources, result.diagnostics.iter());
-            // An abort's stack trace, after the diagnostic it belongs to. Only when there is a call
-            // chain to show — a single-frame trace repeats what the diagnostic's span already says.
-            if trace.len() >= 2 {
-                eprint!("{}", noeta_vm::render_trace(&trace, &loaded.sources));
-            }
+            noeta_backend::RunTail::render(&result, &trace, &loaded.sources).emit_status();
             result.exit_code
         }
         // An internal compile failure renders like any other diagnostic when the compiler knew

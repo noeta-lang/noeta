@@ -12,6 +12,11 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# The shared run epilogue (`RunTail`, audit row 1): this component composes the run's output into a
+# *response body* rather than writing it to streams, which is the reason the epilogue is a value
+# with enumerable parts instead of a print statement.
+noeta-backend = { workspace = true }
+noeta-span = { workspace = true }
 noeta-bundle = { workspace = true }
 noeta-bytecode = { workspace = true }
 noeta-stdlib = { workspace = true }
@@ -25,7 +30,6 @@ wasi = { workspace = true }
 [dev-dependencies]
 # The unit tests compile handler programs through the salsa pipeline, like the runner's tests.
 noeta-db = { workspace = true }
-noeta-span = { workspace = true }
 
 # One of the workspace's few `unsafe` opt-outs (see ARCHITECTURE.md): reading the stapled-bundle
 # slot — the same `read_volatile` + `from_raw_parts` pattern (and the same justification) as
