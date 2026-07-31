@@ -7,6 +7,7 @@ pub(crate) mod cache;
 pub(crate) mod check;
 pub(crate) mod doc;
 pub(crate) mod expand;
+pub(crate) mod explain;
 pub(crate) mod fmt;
 pub(crate) mod grammar;
 pub(crate) mod ide;

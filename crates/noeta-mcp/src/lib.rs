@@ -429,6 +429,11 @@ pub struct ExplainArgs {
 }
 
 /// The `explain_diagnostic` result: what the code means plus the real programs that trigger it.
+///
+/// `summary`/`detail`/`severity`/`group` come from the toolchain's own explanation catalog
+/// ([`noeta_diagnostics::DiagnosticCode::explain`]) — the same store `noeta explain` prints and
+/// the docs site renders its reference page from, so an agent and a human never get different
+/// answers about a code.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ExplainOut {
     /// The canonical code, e.g. `E0007`.
@@ -437,6 +442,14 @@ pub struct ExplainOut {
     pub title: String,
     /// Whether `code` is a known diagnostic.
     pub known: bool,
+    /// One sentence: what happened. Empty when `known` is false.
+    pub summary: String,
+    /// How to fix it. Empty where the summary already says it, or when `known` is false.
+    pub detail: String,
+    /// `error` or `warning` — a warning prints but does not fail a build.
+    pub severity: String,
+    /// The catalog section this code belongs to, e.g. `Control flow and matching`.
+    pub group: String,
     /// Real, CI-tested example programs that raise this diagnostic (with their descriptions).
     pub examples: Vec<ExampleOut>,
     /// Documentation pages that mention this code, as `[slug, title]`.
@@ -966,9 +979,10 @@ the source untouched) if it does not parse — format never guesses at broken so
 
     /// Explain a diagnostic code with real programs that trigger it.
     #[tool(
-        description = "Explain a Noeta diagnostic code (e.g. `E0007`): its name, the real CI-tested \
-example programs that raise it (so you can see the cause and the fix), and the docs that cover it. \
-Call this whenever `check` returns a code you want to resolve."
+        description = "Explain a Noeta diagnostic code (e.g. `E0007`): what it means and how to \
+fix it (the toolchain's own explanation catalog, the same text `noeta explain` prints), plus the \
+real CI-tested example programs that raise it and the docs that cover it. Call this whenever \
+`check` returns a code you want to resolve."
     )]
     async fn explain_diagnostic(
         &self,
@@ -979,9 +993,29 @@ Call this whenever `check` returns a code you want to resolve."
             Some(t) => (t, true),
             None => (String::new(), false),
         };
+        // The catalog entry, when the code is real. Same store `noeta explain` reads.
+        let entry = DiagnosticCode::from_code(&code).map(|c| c.explain());
+        let (summary, detail, severity, group) = match entry {
+            Some(e) => (
+                e.summary.to_string(),
+                e.detail.to_string(),
+                match e.severity {
+                    noeta_diagnostics::Severity::Warning => "warning",
+                    noeta_diagnostics::Severity::Note => "note",
+                    noeta_diagnostics::Severity::Error => "error",
+                }
+                .to_string(),
+                e.group.to_string(),
+            ),
+            None => (String::new(), String::new(), String::new(), String::new()),
+        };
         Json(ExplainOut {
             title,
             known,
+            summary,
+            detail,
+            severity,
+            group,
             // Cap the examples so `explain_diagnostic` stays token-frugal — a common code can appear
             // in dozens of cases; the `diagnostics/`-dir canonical repros sort first.
             examples: corpus::examples_for_code(&code)
