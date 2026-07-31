@@ -343,13 +343,24 @@ impl VmSession {
     ///
     /// The caller owns the two gates the plan's existence implies (see
     /// [`noeta_compiler::hotswap::diff_programs`]): the NEW program checked green (transactional —
-    /// never swap red code), and the differ found no blockers. The fragment itself compiles
-    /// checkerless (conservative codegen — always sound; the session's accumulated checker state
-    /// describes v1, not v2, so precise site-keyed codegen would be built on the wrong universe).
+    /// never swap red code), and the differ found no blockers.
+    ///
+    /// `sites` is that green check's **whole-program** bundle (server-hmr H5). Supplying it
+    /// compiles the fragment exactly as a cold start of the new version compiles it — packed
+    /// lists, `type_of` full fidelity, decode recipes, call-site-typed native calls, precise
+    /// destructor relevance — because the fragment's statements are cloned from the checked
+    /// program with their real spans and a bundle is span-keyed. `None` is the checkerless,
+    /// conservative compile: always sound, silently degraded. Only a session the checker has seen
+    /// IN FULL may pass `Some` (a driver that also runs unchecked [`VmSession::eval`] entries has
+    /// not — precise relevance derived without them could skip a destructor).
     ///
     /// A function *value* captured before the swap (`mut h = f`) keeps the old body by design —
     /// closures hold their proto directly; only slot-routed calls rebind.
-    pub fn hot_swap(&mut self, plan: &noeta_compiler::hotswap::SwapPlan) -> SessionOutput {
+    pub fn hot_swap(
+        &mut self,
+        plan: &noeta_compiler::hotswap::SwapPlan,
+        sites: Option<&noeta_compiler::Sites>,
+    ) -> SessionOutput {
         // Slots the fragment's binding statements will overwrite — resolved BEFORE the fragment
         // compiles, so only names that already exist (v1 bindings being replaced) are collected;
         // genuinely new bindings have no old node to dispose.
@@ -366,7 +377,7 @@ impl VmSession {
         let prepare = plan.rerun_top_level;
         self.run_capturing_with(
             &plan.fragment,
-            None,
+            sites,
             |vm| {
                 if prepare {
                     vm.hotswap_prepare(&rebound);
@@ -743,12 +754,42 @@ impl crate::FragmentCompiler for SessionCompiler {
         SessionCompiler::extend(self, fragment).map_err(|u| u.reason.clone())
     }
 
+    /// Recover the checker's own [`noeta_compiler::Sites`] from the opaque handle the VM core
+    /// ferried (see [`crate::FragmentSites`]) and lower the fragment against it. The downcast
+    /// cannot fail in practice — this impl is the only consumer and the `Sites` impl below the only
+    /// producer — so a mismatch is an internal error reported as a *failed swap*: the old version
+    /// keeps serving rather than a degraded compile landing unannounced.
+    fn extend_checked(
+        &mut self,
+        fragment: &Program,
+        sites: &dyn crate::FragmentSites,
+    ) -> Result<Module, String> {
+        let sites = sites
+            .as_any()
+            .downcast_ref::<noeta_compiler::Sites>()
+            .ok_or_else(|| {
+                "internal error: the fragment's site bundle is not this compiler's `Sites`"
+                    .to_string()
+            })?;
+        SessionCompiler::extend_checked(self, fragment, sites).map_err(|u| u.reason.clone())
+    }
+
     fn global_slot(&self, name: &str) -> Option<u32> {
         self.global_slots().get(name).copied()
     }
 
     fn declare_global(&mut self, name: &str, mutable: bool, overwrite: bool) {
         SessionCompiler::declare_global(self, name, mutable, overwrite);
+    }
+}
+
+/// The checker's bundle, viewed through the VM core's opaque site seam (server-hmr H5): a hot
+/// deposit travels the compiler-free mailbox as a [`crate::FragmentSites`] handle and is recovered
+/// here — the one place that may name `noeta_compiler`. Lives in the `compile`-gated module for the
+/// same reason the [`crate::FragmentCompiler`] impl above does.
+impl crate::FragmentSites for noeta_compiler::Sites {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

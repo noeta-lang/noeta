@@ -237,7 +237,7 @@ fn installed_fragments_extend_a_running_debug_vm() {
 
     // Fragment 1: calls the program's fn + global by their original ids.
     let entry = vm
-        .install_fragment(&fragment("echo twice(base + 1);"))
+        .install_fragment(&fragment("echo twice(base + 1);"), None)
         .expect("fragment compiles");
     let Ok(v) = vm.run_thunk(entry, &[]) else {
         panic!("fragment runs: {:?}", vm.out.diagnostics);
@@ -248,7 +248,7 @@ fn installed_fragments_extend_a_running_debug_vm() {
     // Fragment 2: constructs the program's struct; interned-shape identity makes it equal to
     // the value entry 0 built.
     let entry = vm
-        .install_fragment(&fragment("echo p0 == P { x: 3 };"))
+        .install_fragment(&fragment("echo p0 == P { x: 3 };"), None)
         .expect("fragment compiles");
     let Ok(v) = vm.run_thunk(entry, &[]) else {
         panic!("fragment runs: {:?}", vm.out.diagnostics);
@@ -259,7 +259,7 @@ fn installed_fragments_extend_a_running_debug_vm() {
     // Fragment 3: ESCAPE — rebind the program's callback global to a fragment-defined closure
     // (a proto index that only exists in the extended module).
     let entry = vm
-        .install_fragment(&fragment("cb = fn(n: int) => twice(n) + base;"))
+        .install_fragment(&fragment("cb = fn(n: int) => twice(n) + base;"), None)
         .expect("fragment compiles");
     let Ok(v) = vm.run_thunk(entry, &[]) else {
         panic!("fragment runs: {:?}", vm.out.diagnostics);
@@ -269,7 +269,7 @@ fn installed_fragments_extend_a_running_debug_vm() {
     // Fragment 4: the PROGRAM's own function (old-module code) calls the escaped closure — the
     // dispatch resolves its fragment proto through the newest module at the frame transfer.
     let entry = vm
-        .install_fragment(&fragment("echo callcb(4);"))
+        .install_fragment(&fragment("echo callcb(4);"), None)
         .expect("fragment compiles");
     let Ok(v) = vm.run_thunk(entry, &[]) else {
         panic!("fragment runs: {:?}", vm.out.diagnostics);
@@ -280,7 +280,7 @@ fn installed_fragments_extend_a_running_debug_vm() {
     // A fragment that ABORTS unwinds cleanly through the swapped module (the release loops
     // resolve every frame's proto against the newest snapshot) and pollutes nothing.
     let entry = vm
-        .install_fragment(&fragment("echo [1][5];"))
+        .install_fragment(&fragment("echo [1][5];"), None)
         .expect("fragment compiles");
     assert!(vm.run_thunk(entry, &[]).is_err(), "out of bounds aborts");
     vm.out.diagnostics.clear();
