@@ -20,11 +20,13 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// A scratch directory for this test process's fixture programs.
-fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("noeta-live-stream-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
-    dir
+/// A scratch directory for one fixture program, private to this process and this call.
+///
+/// Not the shared system temp dir: a Noeta entry point pulls in its *siblings* (the loader links
+/// the containing directory as the project), so a fixture sharing a directory with another
+/// process's stray `.noe` files compiles them too. The guard removes the tree when it drops.
+fn scratch(name: &str) -> noeta_test_temp::TempDir {
+    noeta_test_temp::TempDir::new(&format!("live-stream-{name}"))
 }
 
 /// Wait for `addr` to accept, or fail after ~4s.

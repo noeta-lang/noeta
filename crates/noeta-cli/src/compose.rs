@@ -1465,8 +1465,7 @@ mod tests {
         // A workspace toolchain with two crates. `toolchain_patch_section` must emit a `[patch]` on
         // the canonical repo URL redirecting each `crates/*` member to its path — so a native package
         // that git-deps the noeta repo unifies its `noeta_ext_abi::Extension` with the shim's.
-        let root = std::env::temp_dir().join(format!("noeta_patch_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = noeta_test_temp::unique_path("patch-test");
         for c in ["noeta-ext-abi", "noeta-vm"] {
             let d = root.join("crates").join(c);
             std::fs::create_dir_all(&d).unwrap();
@@ -1504,9 +1503,7 @@ mod tests {
         // toolchain crate to the cached checkout of the BINARY's own tag — `path` entries, because
         // Cargo rejects a patch whose source is the same canonical git URL regardless of a
         // differing `tag`/`rev`/`.git` suffix (verified against cargo 1.97).
-        let checkout =
-            std::env::temp_dir().join(format!("noeta_gittag_patch_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&checkout);
+        let checkout = noeta_test_temp::unique_path("gittag-patch-test");
         for c in ["noeta-ext-abi", "noeta-stdlib"] {
             let d = checkout.join("crates").join(c);
             std::fs::create_dir_all(&d).unwrap();

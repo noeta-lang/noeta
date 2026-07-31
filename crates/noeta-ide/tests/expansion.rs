@@ -412,12 +412,7 @@ fn editing_a_field_re_runs_the_expansion() {
 fn an_impact_session_watches_the_files_an_expansion_read() {
     install();
     // A unique on-disk project — `ImpactSession` scans a real directory.
-    let dir = std::env::temp_dir().join(format!(
-        "noeta-reads-session-{}",
-        std::process::id() as u64 * 31 + 7
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create the project dir");
+    let dir = noeta_test_temp::TempDir::new("reads-session");
     let entry = dir.join("main.noe");
     std::fs::write(
         &entry,

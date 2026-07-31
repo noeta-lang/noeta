@@ -20,11 +20,20 @@ fn build_bundle(text: &str) -> Vec<u8> {
     noeta_bundle::write(module)
 }
 
-/// A fresh temp path for one test's bundle.
-fn temp_bundle(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("noeta-runner-{}-{name}", std::process::id()));
-    std::fs::write(&path, bytes).expect("write bundle");
-    path
+/// One test's bundle, in a fixture directory of its own.
+///
+/// The *directory* is the point, not the file name. The runner dispatches by content, so any file
+/// that is not a bundle is compiled as `.noe` source — and the loader then links the entry's
+/// sibling directory as the project. A fixture written straight into the shared system temp dir
+/// therefore drags every stray `.noe` file any other process left in `/tmp` into this test's
+/// program, and the test fails with a diagnostic about somebody else's code:
+/// `[E0019] no module para.aether in this project`, whose `help` listed a sibling agent session's
+/// scratch files. `TempPath` carries its directory's guard, so the tree lives exactly as long as
+/// the path does and holds nothing but what this test put there.
+fn temp_bundle(name: &str, bytes: &[u8]) -> noeta_test_temp::TempPath {
+    let dir = noeta_test_temp::TempDir::new("runner");
+    std::fs::write(dir.join(name), bytes).expect("write bundle");
+    dir.into_child(name)
 }
 
 fn runner() -> Command {
@@ -34,7 +43,7 @@ fn runner() -> Command {
 #[test]
 fn runs_a_bundle_on_the_real_host() {
     let path = temp_bundle("hello.noeb", &build_bundle("echo \"hello\";"));
-    let out = runner().arg(&path).output().expect("runner runs");
+    let out = runner().arg(path.path()).output().expect("runner runs");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hello\n");
     assert_eq!(
         out.status.code(),
@@ -42,7 +51,6 @@ fn runs_a_bundle_on_the_real_host() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    std::fs::remove_file(path).ok();
 }
 
 #[test]
@@ -53,7 +61,7 @@ fn passes_the_program_argument_vector() {
         &build_bundle("use std.{args};\nfor a in args.all() { echo a; }"),
     );
     let out = runner()
-        .arg(&path)
+        .arg(path.path())
         .arg("alpha")
         .arg("beta")
         .output()
@@ -61,14 +69,12 @@ fn passes_the_program_argument_vector() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("alpha"), "stdout: {stdout}");
     assert!(stdout.contains("beta"), "stdout: {stdout}");
-    std::fs::remove_file(path).ok();
 }
 
 #[test]
 fn runs_a_noe_source_file_directly() {
     // PHP-style: point the runner at `.noe` source; it compiles on the fly (no pre-built bundle).
-    let dir = std::env::temp_dir().join(format!("noeta-runner-src-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("mkdir");
+    let dir = noeta_test_temp::TempDir::new("runner-src");
     let src = dir.join("app.noe");
     std::fs::write(&src, "echo \"from source\";").expect("write source");
     let out = runner().arg(&src).output().expect("runner runs");
@@ -79,15 +85,13 @@ fn runs_a_noe_source_file_directly() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(out.status.code(), Some(0));
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn reports_a_compile_error_in_source() {
     // A compile failure renders diagnostics and exits non-zero — the CLI's exact pipeline. An
     // undefined name is a guaranteed compile error (E0005).
-    let dir = std::env::temp_dir().join(format!("noeta-runner-err-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("mkdir");
+    let dir = noeta_test_temp::TempDir::new("runner-err");
     let src = dir.join("bad.noe");
     std::fs::write(&src, "echo undefined_name_xyz;").expect("write source");
     let out = runner().arg(&src).output().expect("runner runs");
@@ -96,18 +100,16 @@ fn reports_a_compile_error_in_source() {
         !String::from_utf8_lossy(&out.stderr).is_empty(),
         "expected a diagnostic on stderr"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn renders_an_abort_with_its_traceback() {
     let text = "fn boom(): int {\n  panic(\"kaboom\");\n}\necho boom();";
     let path = temp_bundle("abort.noeb", &build_bundle(text));
-    let out = runner().arg(&path).output().expect("runner runs");
+    let out = runner().arg(path.path()).output().expect("runner runs");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_ne!(out.status.code(), Some(0));
     assert!(stderr.contains("kaboom"), "stderr: {stderr}");
-    std::fs::remove_file(path).ok();
 }
 
 #[test]
@@ -125,7 +127,7 @@ fn treats_a_non_bundle_file_as_source() {
     // Dispatch is by content (bundle magic), not extension — a non-bundle file is compiled as `.noe`
     // source, exactly as `noeta run` sniffs it. Valid source runs; garbage would be a compile error.
     let path = temp_bundle("plain.txt", b"echo \"i am source\";");
-    let out = runner().arg(&path).output().expect("runs");
+    let out = runner().arg(path.path()).output().expect("runs");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "i am source\n",
@@ -133,7 +135,29 @@ fn treats_a_non_bundle_file_as_source() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(out.status.code(), Some(0));
-    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn a_fixture_is_alone_in_its_directory() {
+    // The isolation itself, asserted rather than assumed. What makes the source tests above robust
+    // is not the unique file *name* but the private *directory* — the loader links an entry's
+    // siblings as its project, so a fixture back under the shared temp root would make this suite's
+    // result depend on whatever else happens to be in `/tmp`. That is exactly how it failed.
+    let path = temp_bundle("only.noeb", &build_bundle("echo 1;"));
+    let siblings: Vec<_> = std::fs::read_dir(path.dir())
+        .expect("the fixture directory exists")
+        .map(|entry| entry.expect("read the fixture directory").file_name())
+        .collect();
+    assert_eq!(
+        siblings,
+        vec![std::ffi::OsString::from("only.noeb")],
+        "a fixture shares its directory with nothing"
+    );
+    assert_ne!(
+        path.dir(),
+        std::env::temp_dir(),
+        "fixtures never sit directly in the shared system temp dir"
+    );
 }
 
 #[test]

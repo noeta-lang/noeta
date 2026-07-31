@@ -427,10 +427,10 @@ mod tests {
     struct Scratch(PathBuf);
     impl Scratch {
         fn new(tag: &str) -> Scratch {
-            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir =
-                std::env::temp_dir().join(format!("noeta-derive-{tag}-{}-{n}", std::process::id()));
+            // Per process and per call, and never the shared system temp dir: these fixtures are
+            // *linked*, and the loader treats an entry's sibling files as modules of the same
+            // project — so a shared directory would sweep another process's `.noe` files in.
+            let dir = noeta_test_temp::unique_path(&format!("derive-{tag}"));
             std::fs::create_dir_all(&dir).unwrap();
             Scratch(dir)
         }

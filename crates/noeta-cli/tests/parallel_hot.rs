@@ -33,8 +33,7 @@ fn get(addr: &str) -> Result<String, String> {
 #[test]
 #[ignore = "spawns the CLI across threads and edits real files; run explicitly"]
 fn an_edit_broadcasts_to_every_worker() {
-    let dir = std::env::temp_dir().join(format!("noeta-parallel-hot-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = noeta_test_temp::TempDir::new("parallel-hot");
     let app_path = dir.join("app.noe");
     std::fs::write(&app_path, app("v1")).unwrap();
 

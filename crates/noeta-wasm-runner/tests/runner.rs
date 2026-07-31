@@ -20,12 +20,16 @@ fn build_bundle(text: &str) -> Vec<u8> {
     noeta_bundle::write(module)
 }
 
-/// A fresh temp path for one test's bundle.
-fn temp_bundle(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("noeta-wasm-runner-{}-{name}", std::process::id()));
-    std::fs::write(&path, bytes).expect("write bundle");
-    path
+/// One test's bundle, in a fixture directory of its own.
+///
+/// Per-process and per-call, never the shared system temp dir: fixtures dropped there are visible
+/// to every other process on the machine, and a Noeta entry point drags its *siblings* in — the
+/// loader links the containing directory as the project. `TempPath` carries the directory's guard,
+/// so the tree lives exactly as long as the path does.
+fn temp_bundle(name: &str, bytes: &[u8]) -> noeta_test_temp::TempPath {
+    let dir = noeta_test_temp::TempDir::new("wasm-runner");
+    std::fs::write(dir.join(name), bytes).expect("write bundle");
+    dir.into_child(name)
 }
 
 fn runner() -> Command {
@@ -35,7 +39,7 @@ fn runner() -> Command {
 #[test]
 fn runs_a_bundle_on_the_wasi_host() {
     let path = temp_bundle("hello.noeb", &build_bundle("echo \"hello\";"));
-    let out = runner().arg(&path).output().expect("runner runs");
+    let out = runner().arg(path.path()).output().expect("runner runs");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hello\n");
     assert_eq!(
         out.status.code(),
@@ -43,7 +47,6 @@ fn runs_a_bundle_on_the_wasi_host() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    std::fs::remove_file(path).ok();
 }
 
 #[test]
@@ -62,7 +65,7 @@ fn sandbox_mode_matches_a_native_sandbox_run() {
     let path = temp_bundle("seeded.noeb", &bundle);
     let out = runner()
         .arg("--sandbox")
-        .arg(&path)
+        .arg(path.path())
         .output()
         .expect("runner runs");
     assert_eq!(String::from_utf8_lossy(&out.stdout), native.stdout);
@@ -72,23 +75,21 @@ fn sandbox_mode_matches_a_native_sandbox_run() {
     // stapled artifacts, whose argv belongs to the program (W1.2).
     let out = runner()
         .env("NOETA_WASM_SANDBOX", "1")
-        .arg(&path)
+        .arg(path.path())
         .output()
         .expect("runner runs");
     assert_eq!(String::from_utf8_lossy(&out.stdout), native.stdout);
     assert_eq!(out.status.code(), Some(native.exit_code));
-    std::fs::remove_file(path).ok();
 }
 
 #[test]
 fn renders_an_abort_with_its_traceback() {
     let text = "fn boom(): int {\n  panic(\"kaboom\");\n}\necho boom();";
     let path = temp_bundle("abort.noeb", &build_bundle(text));
-    let out = runner().arg(&path).output().expect("runner runs");
+    let out = runner().arg(path.path()).output().expect("runner runs");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_ne!(out.status.code(), Some(0));
     assert!(stderr.contains("kaboom"), "stderr: {stderr}");
-    std::fs::remove_file(path).ok();
 }
 
 #[test]
@@ -101,10 +102,9 @@ fn refuses_a_missing_file_and_a_non_bundle() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read"));
 
     let path = temp_bundle("plain.txt", b"echo \"not a bundle\";");
-    let out = runner().arg(&path).output().expect("runs");
+    let out = runner().arg(path.path()).output().expect("runs");
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("not a `.noeb` bundle"));
-    std::fs::remove_file(path).ok();
 }
 
 #[test]

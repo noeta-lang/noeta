@@ -62,8 +62,7 @@ fn wait_for(buf: &Arc<Mutex<String>>, from: usize, needle: &str) -> Result<usize
 #[test]
 #[ignore = "spawns the CLI and writes real files; run explicitly"]
 fn an_edit_reruns_exactly_the_impacted_tests() {
-    let dir = std::env::temp_dir().join(format!("noeta-impact-watch-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = noeta_test_temp::TempDir::new("impact-watch");
     let app_path = dir.join("app.noe");
     std::fs::write(&app_path, app("1")).unwrap();
 
@@ -130,8 +129,7 @@ fn a_sibling_module_edit_narrows_to_its_caller_tests() {
     // The multi-file impact arc's headline: editing an IMPORTED module reruns exactly the
     // entry tests that transitively reach the change — the pre-salsa engine degraded every
     // non-entry edit to a full rerun.
-    let dir = std::env::temp_dir().join(format!("noeta-impact-watch-mf-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = noeta_test_temp::TempDir::new("impact-watch-mf");
     let lib_path = dir.join("lib.noe");
     std::fs::write(&lib_path, lib("a + b", "9")).unwrap();
     std::fs::write(dir.join("app.noe"), APP_USING_LIB).unwrap();

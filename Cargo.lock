@@ -2467,6 +2467,7 @@ dependencies = [
 name = "noeta-cache"
 version = "0.2.3"
 dependencies = [
+ "noeta-test-temp",
  "sha2",
 ]
 
@@ -2578,6 +2579,7 @@ dependencies = [
  "noeta-pm",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-test-temp",
  "noeta-value",
  "noeta-vm",
  "predicates",
@@ -2602,6 +2604,7 @@ dependencies = [
  "noeta-runner",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-test-temp",
  "noeta-value",
  "noeta-vm",
  "serde_json",
@@ -2830,6 +2833,7 @@ dependencies = [
  "noeta-parser",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-test-temp",
 ]
 
 [[package]]
@@ -3007,6 +3011,7 @@ dependencies = [
  "noeta-pm",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-test-temp",
  "noeta-vm",
 ]
 
@@ -3100,6 +3105,7 @@ dependencies = [
  "compact_str",
  "getrandom 0.3.4",
  "noeta-stdlib",
+ "noeta-test-temp",
 ]
 
 [[package]]
@@ -3112,6 +3118,7 @@ dependencies = [
  "noeta-diagnostics",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-test-temp",
  "noeta-vm",
  "noeta-wasi-host",
 ]

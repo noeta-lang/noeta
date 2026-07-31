@@ -467,14 +467,7 @@ mod tests {
     use super::*;
 
     fn temp_root(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "noeta-cache-cmd-test-{}-{tag}-{n}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = noeta_test_temp::unique_path(&format!("cache-cmd-{tag}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
