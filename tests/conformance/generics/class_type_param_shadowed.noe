@@ -1,22 +1,27 @@
-// A method's OWN type parameter that shadows one of the enclosing type's is a different `K`, and
-// it resolves through a different channel: the receiver's reflected tag records the CLASS's
-// arguments, the call node's `type_args` operand carries the METHOD's. Both reach the one compiled
-// body, so the shadowing name answers with the method's instantiation — here `A`, inferred from
-// the argument — and the class's `Pair<A, int>` is simply not what `type_name::<K>()` asks about.
+// A method's OWN type parameter that shadows one of the enclosing type's is a different `K`, and it
+// resolves through a different channel: the receiver's reflected tag records the CLASS's arguments,
+// the call node's `type_args` operand carries the METHOD's. Both reach the one compiled body, so
+// the shadowing name answers with the method's instantiation.
+//
+// **Discriminating on purpose.** This case used to instantiate both `K`s with the same type `A`, so
+// it read as proof of shadowing while being equally consistent with the opposite rule — and the
+// opposite rule was what the checker actually implemented (the class's argument won a name-keyed
+// substitution and the method's own `K` was unreachable). Here the class is a `Pair<A, int>` and the
+// argument is a `B`: under the old behaviour this was `E0007`, `argument of type B is not assignable
+// to A`. It answers `B` only because the two `K`s are genuinely two parameters.
 //
 // This was a refusal (E0058) while a method had no forwarding channel at all: the two `K`s were
 // indistinguishable at run time, so answering either would have been a guess. Shadowing is now an
 // ordinary scoping question with an ordinary answer, and the sibling case that still refuses —
 // a parameter no call can infer — is `reflection/type_name_diagnostics.noe`.
-//
-// One thing this case cannot show, because both `K`s are `A` here: the reused name does not
-// actually SHADOW. The class's argument binds it first and wins, so passing a `B` to a `Pair<A,
-// int>` is `E0007`, `argument of type B is not assignable to A` — the method's own `K` is
-// unreachable, not merely inner. `generic_methods/both_turbofishes_name_collision.noe` pins that.
+// expect: stdout "1B"
 // expect: stdout "1A"
 // expect: exit 0
 struct A {
     x: int
+}
+struct B {
+    y: int
 }
 class Pair<K, V> {
     pub n: int
@@ -25,9 +30,17 @@ class Pair<K, V> {
         return Pair { n: n };
     }
 
+    // `K` shadows the class's; it is inferred from the argument, not read off the receiver.
     fn shadowed<K>(x: K): string {
+        return "${self.n}" ~ type_name::<K>();
+    }
+
+    // The class's `K`, reached under a name the method does not shadow — the control that proves
+    // the receiver channel still works and that the two answers differ.
+    fn own(): string {
         return "${self.n}" ~ type_name::<K>();
     }
 }
 p: Pair<A, int> = Pair.new(1);
-echo p.shadowed(A { x: 2 });
+echo p.shadowed(B { y: 2 });
+echo p.own();

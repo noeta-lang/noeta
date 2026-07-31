@@ -1,0 +1,52 @@
+// A **trait's** type parameter and the implementing type's, spelled the same and bound to
+// different types. Nothing in the surface lets these two collide the way a class's and a method's
+// did — a trait method may not declare type parameters of its own (E0058, see
+// `generic_methods/trait_method_generics_rejected.noe`), and a standalone `impl` introduces none
+// either: it reuses the target type's, by declaration, which is what makes an impl's method body
+// see exactly what an in-body one sees.
+//
+// So this file pins the *other* half of the same property: the trait's `K` is resolved in the
+// TRAIT's scope and the class's `K` in the class's, and the two are told apart by where each was
+// declared. They were previously told apart by nothing at all — the trait's method signature was
+// resolved against whatever scope the caller happened to be in, and agreed with the trait only
+// because both were name-keyed. A `dyn` receiver reaching the same trait method must agree.
+// expect: stdout "7"
+// expect: stdout "k=7"
+// expect: stdout "7"
+// expect: exit 0
+
+// The trait's parameter is `K`, and it is an `int` at every impl below.
+trait Keyed<K> {
+    fn key(): K
+    fn describe(): string {
+        return "k=${self.key()}";
+    }
+}
+
+// The class's parameter is ALSO `K` — a different one, instantiated with `string` at the use site.
+class Box<K> {
+    pub label: K
+    pub code: int
+
+    impl Keyed<int> {
+        fn key(): int {
+            return self.code;
+        }
+    }
+}
+
+// A bound naming the trait at its instantiation types `key()` as `int` — through the trait's `K`,
+// substituted from the bound's argument, not through anything the caller spells `K`.
+fn read<T: Keyed<int>>(t: T): int {
+    return t.key();
+}
+
+// The `dyn` twin: no `dyn Trait<...>` form exists, so the trait's `K` instantiates permissively.
+fn read_dyn(t: dyn Keyed): dyn {
+    return t.key();
+}
+
+b: Box<string> = Box { label: "hi", code: 7 };
+echo read(b);
+echo b.describe();
+echo read_dyn(b);

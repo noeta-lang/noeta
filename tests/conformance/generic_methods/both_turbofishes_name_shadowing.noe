@@ -1,0 +1,48 @@
+// **The name-shadowing rule.** A method type parameter that reuses one of its class's names IS a
+// fresh parameter, and it shadows — exactly as a local binding shadows a global, and for the same
+// reason: they are two declarations, not one name.
+//
+// The composed spelling is where both parameter lists are written out at one call site, so it is
+// where the rule is most visible: the receiver's `::<Todo>` binds the CLASS's `T`, the method's
+// `::<User>` binds the METHOD's, and the two never meet.
+//
+// This file used to pin the opposite. A type parameter had no identity of its own — it was a
+// `Type::Named` recognized as a parameter by membership in a side-table of in-scope *names*, and
+// the substitution map was keyed on that name — so the class's argument occupied `"T"` first and
+// the method's own binding hit an `or_insert` on an occupied slot. The explicitly written
+// `::<User>` was **discarded**, silently: `collide::<User>(User { … })` reported `argument of type
+// User is not assignable to Todo`, and the argument-free `label::<User>()` below reported nothing
+// at all and answered `Todo`. The old note called that "documented rather than changed" because
+// changing it looked like it meant changing the seed for every generic call; it did not — it meant
+// giving a parameter an identity (`Type::Param`, keyed on its declaration site), after which the
+// seed's two entries are simply two different keys and `or_insert` means only what it says.
+// expect: stdout "User"
+// expect: stdout "Todo/User"
+// expect: stdout "User"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+class Repo<T> {
+    // `T` again: a FRESH parameter that shadows the class's inside this method.
+    fn collide<T>(x: T): string {
+        return type_name::<T>();
+    }
+
+    // A distinct name reaches both, and still does.
+    fn distinct<U>(): string {
+        return type_name::<T>() ~ "/" ~ type_name::<U>();
+    }
+
+    // The case nothing caught: no argument, so no type mismatch could stumble over the
+    // discarded turbofish. It answered `Todo` and checked clean.
+    fn label<T>(): string {
+        return type_name::<T>();
+    }
+}
+echo Repo::<Todo>.collide::<User>(User { id: 1 });
+echo Repo::<Todo>.distinct::<User>();
+echo Repo::<Todo>.label::<User>();

@@ -298,24 +298,32 @@ impl Checker {
             let Some(m) = decl.methods.iter().find(|m| m.sig.name == name) else {
                 continue;
             };
+            // The trait's method signature is written in the TRAIT's scope, not the caller's, so
+            // it is resolved against the trait's own `<…>` — otherwise a `K` in the signature would
+            // resolve to whatever the caller happens to spell `K` (or to nothing at all), and the
+            // substitution below would miss. That the two used to agree was an accident of both
+            // being name-keyed.
+            let trait_scope = param_scope(&decl.type_params, &self.imports.extern_types);
             let subst: Subst = decl
                 .type_params
                 .iter()
                 .enumerate()
                 .map(|(i, tp)| (ParamId::at(tp.span), b.args.get(i).cloned().unwrap_or(Type::Dyn)))
                 .collect();
+            let sig_ty = |t: &TypeRef| from_ref_q(t, &self.imports.extern_types, &trait_scope);
             let params: Vec<Type> = m
                 .sig
                 .params
                 .iter()
-                .map(|p| apply_subst(&self.annot_param(p), &subst))
+                .map(|p| {
+                    apply_subst(
+                        &p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
+                        &subst,
+                    )
+                })
                 .collect();
             let ret = async_return(
-                m.sig
-                    .ret
-                    .as_ref()
-                    .map(|t| self.annot(t))
-                    .unwrap_or(Type::Unknown),
+                m.sig.ret.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
                 m.sig.is_async,
             );
             return Some((
@@ -352,19 +360,27 @@ impl Checker {
     ) -> Option<(Vec<Type>, usize, Type)> {
         let decl = self.symbols.user_traits.get(tr)?;
         let m = decl.methods.iter().find(|m| m.sig.name == name)?;
+        // Resolved in the TRAIT's scope, like the bound path above — see the note there.
+        let trait_scope = param_scope(&decl.type_params, &self.imports.extern_types);
         let subst: Subst = decl
             .type_params
             .iter()
             .map(|tp| (ParamId::at(tp.span), Type::Dyn))
             .collect();
+        let sig_ty = |t: &TypeRef| from_ref_q(t, &self.imports.extern_types, &trait_scope);
         let params: Vec<Type> = m
             .sig
             .params
             .iter()
-            .map(|p| apply_subst(&self.annot_param(p), &subst))
+            .map(|p| {
+                apply_subst(
+                    &p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
+                    &subst,
+                )
+            })
             .collect();
         let ret = async_return(
-            self.annot_field(&m.sig.ret),
+            m.sig.ret.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
             m.sig.is_async,
         );
         Some((
