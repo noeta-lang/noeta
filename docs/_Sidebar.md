@@ -37,7 +37,6 @@
 - [Concurrency](Concurrency)
 - [Reactivity](Reactivity)
 - [Built-ins (Ring 1)](Standard-Library)
-- [Diagnostics (`E0xxx`)](Diagnostics)
 
 **Specialized**
 - [Fixed-Width Ints & Packed Types](Fixed-Width-Integers)

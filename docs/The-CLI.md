@@ -8,6 +8,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta run`](#noeta-run) | Type-check and execute a program. |
 | [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, `--native` for machine code, `--wasm`/`--serve` for [WebAssembly](WebAssembly-and-the-Edge)). |
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
+| [`noeta explain`](#noeta-explain) | Explain a diagnostic code — what `E0xxx` means and how to fix it. |
 | [`noeta expand`](#noeta-expand) | Print the source that compile-time `@`-directive expansions generated. |
 | [`noeta migrate`](#noeta-migrate) | Apply database schema migrations — an extension command the [para/db](para-db) package provides. |
 | [`noeta serve`](#noeta-serve-and---watch) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
@@ -201,6 +202,33 @@ noeta check [PATH]
 ```
 
 Parses and type-checks without running or building — the CI/pre-commit gate (the `cargo check` / `tsc --noEmit` primitive). `PATH` defaults to the current directory, walked recursively for `.noe` files (resolving and deduping shared modules); a single file checks just that file with its sibling modules linked in. `--format json` emits a single machine-readable report on stdout for CI/editors/the MCP server; the default renders diagnostics for a terminal. Exits non-zero if any error-severity diagnostic is found (warnings print but do not fail).
+
+## `noeta explain`
+
+```text
+noeta explain <CODE>         # what a diagnostic code means, and how to fix it
+noeta explain --all          # the whole catalog, grouped
+noeta explain … --format json   # the machine-readable catalog
+```
+
+Every diagnostic the toolchain renders carries a stable `E0xxx` code; this is how you look one up without leaving the terminal. The code may be spelled any way you would type it — `E0059`, `e0059`, or a bare `59`.
+
+```console
+$ noeta explain E0059
+E0059 — shadowed binding (error)
+
+A binder reuses a name that already means something in scope.
+
+One name means one thing per scope stack. Assignment already reassigns rather than
+re-declaring, and an `is` test narrows the same binding, so shadowing is never needed to
+express anything — rename the binder.
+
+  more: https://docs.noeta.dev/Syntax-Basics
+```
+
+A code the catalog does not know exits `1` and suggests its neighbours (a transposed digit is the usual miss); naming neither a code nor `--all` exits `2`.
+
+The explanations live with the codes in the compiler, so the three places they surface cannot disagree: this command, the [`explain_diagnostic`](Editor-and-AI-Tooling#the-agent-surface-noeta-mcp) tool `noeta mcp` serves to agents, and the generated [Diagnostics](Diagnostics) reference — which is rendered from `noeta explain --all --format json`.
 
 ## `noeta expand`
 
