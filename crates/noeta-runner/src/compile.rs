@@ -309,7 +309,10 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
                 diagnostics: activated.diagnostics,
             });
         }
-        (activated.program, std::mem::take(&mut activated.diagnostics))
+        (
+            activated.program,
+            std::mem::take(&mut activated.diagnostics),
+        )
     };
     Ok(Loaded {
         program,

@@ -831,9 +831,10 @@ impl<'m> Vm<'m> {
         // code is its own outcome, and an advisory diagnostic is not a failure. (Every runtime
         // diagnostic is an abort today, so this is the same value; spelling it `is_empty()` is how
         // the first advisory runtime diagnostic would silently start failing programs.)
-        let exit_code = self.out.requested_exit.unwrap_or(
-            u8::from(noeta_diagnostics::has_errors(&self.out.diagnostics)).into(),
-        );
+        let exit_code = self
+            .out
+            .requested_exit
+            .unwrap_or(u8::from(noeta_diagnostics::has_errors(&self.out.diagnostics)).into());
         RunResult {
             stdout: std::mem::take(&mut self.out.stdout),
             stderr: std::mem::take(&mut self.out.stderr),

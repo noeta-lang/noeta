@@ -134,7 +134,11 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
     if noeta_diagnostics::has_errors(
-        tokens.0.diagnostics.iter().chain(parsed.0.diagnostics.iter()),
+        tokens
+            .0
+            .diagnostics
+            .iter()
+            .chain(parsed.0.diagnostics.iter()),
     ) {
         report.not_run.parse_failed += 1;
         return;
