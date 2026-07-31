@@ -722,25 +722,61 @@ struct Lowerer<'a> {
     synth_step_name: Option<String>,
     /// The armed seal for the synthesized generator/async step closure (see `synth_step_name`).
     synth_step_captures: Option<Vec<String>>,
-    /// The runtime **narrowing identity** each `use`-imported local type name resolves to, so a
-    /// target (`x is MyId`, `x.as<Uuid>()`) matches the value's runtime tag in both backends (they
-    /// share this lowered IR). Two kinds of entry:
-    ///
-    /// - a **native** type (`use std.id.Uuid [as MyId]`) → its **qualified** identity
-    ///   (`std.id.Uuid`), which is what an extern value reports for narrowing — so a native target
-    ///   never collides with a same-short-named *user* type (whose runtime tag is the bare name).
-    /// - a **user-type alias** (`use App.User as Customer`) → the imported type's own name (`User`),
-    ///   its runtime tag.
-    ///
-    /// A plain (non-aliased) *user* import needs no entry — its local name is already the tag.
-    ///
-    /// Everything lowering knows about the *program* rather than the node in hand — see
-    /// [`ProgramFacts`], which is the one place such state may live.
+    /// Everything lowering knows about the **program** rather than about the node in hand — see
+    /// [`ProgramFacts`], which is the one place such state may live. There is exactly one field of
+    /// this kind, and `tests/lowerer_field_census.rs` is what keeps it that way: a second
+    /// program-derived table beside this one would be empty for a fragment lowering (a hot swap, a
+    /// REPL entry), which is how three shipped bugs happened.
     facts: ProgramFacts,
     /// The extension registry a **native** expression tier's handler resolves against
     /// (instance-registry IR5): an `@json` block's `ExtTier::handler` is looked up here, so an
     /// embed session's own extension-declared expression tier lowers against *its* registry.
     registry: &'static noeta_ext_abi::registry::Registry,
+}
+
+/// The **compile-time half of the field census** (`tests/lowerer_field_census.rs`).
+///
+/// The census proper reads [`Lowerer`]'s field list out of this file's *source* and refuses any
+/// field it cannot classify. That read is text, so it could in principle go stale — a field written
+/// in a shape the scanner does not recognize would be silently invisible to it, and an unclassified
+/// field is exactly what the census exists to catch.
+///
+/// This test is the backstop: it names every field twice, once building a [`Lowerer`] and once
+/// taking it apart, with no `..` on either side. Adding a field therefore fails to **compile** here
+/// (E0063 on the literal, E0027 on the pattern) whatever shape it is written in, and the compiler
+/// error lands next to this doc comment, which says where to go classify it.
+#[cfg(test)]
+#[test]
+fn every_lowerer_field_is_named_by_the_census() {
+    // An empty registry, leaked once: this test is about the field LIST, not about which natives
+    // resolve, and `noeta-ir` links no extension units of its own (so there is no process default).
+    static REGISTRY: std::sync::OnceLock<noeta_ext_abi::registry::Registry> =
+        std::sync::OnceLock::new();
+    let registry = REGISTRY.get_or_init(|| noeta_ext_abi::registry::Registry::new(Vec::new()));
+
+    let lowerer = Lowerer {
+        temps: 0,
+        fn_depth: 0,
+        sites: LoweringSites::empty(),
+        real_isolates: false,
+        synth_step_name: None,
+        synth_step_captures: None,
+        facts: ProgramFacts::default(),
+        registry,
+    };
+    // No `..` — a new field must be added here, and then classified in
+    // `tests/lowerer_field_census.rs::TABLE` as per-node state, environment/config, checker-supplied
+    // sites, or (for the ONE `ProgramFacts`) program-derived.
+    let Lowerer {
+        temps: _,
+        fn_depth: _,
+        sites: _,
+        real_isolates: _,
+        synth_step_name: _,
+        synth_step_captures: _,
+        facts: _,
+        registry: _,
+    } = lowerer;
 }
 
 /// What lowering learns from **the whole program** instead of from the node it is lowering.
