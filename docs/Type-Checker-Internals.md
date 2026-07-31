@@ -71,7 +71,9 @@ The resulting contract in one line: **no holes at named boundaries, inference in
 
 **Where the suppression can surprise you.** Because a check silently stands down on an `Unknown` operand, code in `Unknown`-typed territory gets *runtime* errors where statically-typed code would get compile-time ones: a misspelled method on a `dyn` value, arithmetic on an erased generic's `T`, or a field access downstream of an expression the checker could not type will pass the check and fail (or misbehave) only when it runs. The symptom to recognize is an error that "should have been caught" pointing into code that touches `dyn` or a generic parameter — hover the operands in the editor: if one shows no concrete type, the checker never looked. The boundary rules (E0022/E0023) exist precisely to keep this territory small.
 
-**Generics are erased**: `class Box<T>` parses, checks (a type parameter is treated as `Unknown`), and runs with `T` erased to one shape.
+**Generics are erased**: `class Box<T>` parses, checks, and runs with `T` erased to one shape.
+
+A type parameter is its own thing in the lattice (`Type::Param`), and its **identity is the `<T>` that declared it** — not its spelling. That is what makes `fn m<T>()` inside `class C<T>` shadow rather than collide: substitution, binding and erasure all key on the declaration site, so the class's `T` and the method's `T` are two entries in one substitution rather than one entry two things fight over. Where the parameter is genuinely open at a boundary — an argument checked against a still-uninstantiated `T`, a field whose type mentions one — it **erases to `dyn`**, so the boundary accepts anything; that is the erasure, and it is separate from the identity. The spelling survives only for display: a diagnostic, a hover, and `type_name::<T>()` all still say `T`.
 
 ## Why it can't drift from the backends
 
