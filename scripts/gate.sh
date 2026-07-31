@@ -20,6 +20,12 @@
 #   scripts/gate.sh             the merge gate  — + tests, doc samples, JIT oracles    ~15m / 35m
 #   scripts/gate.sh --full      full CI parity  — + wasm, miri, editor tooling         +2m and up
 #
+# The merge tier also runs the `#[ignore]`d real-socket suites (`scripts/hot-e2e.sh` — hot reload,
+# LiveView, graceful drain) against the JIT-enabled CLI it has already built. Measured at 5s warm,
+# 0 failures in 62 consecutive runs including 24 at eight-way concurrency on a saturated box, so it
+# does not move the numbers below; it is listed here because a step nobody knows about is a step
+# nobody maintains.
+#
 # Those are MEASURED wall times on a 20-core box, `warm target dir / cold target dir`, with
 # CARGO_BUILD_JOBS=8. The two long poles in the merge gate are `cargo test --workspace` (4m50s warm,
 # 9m53s cold) and the lean-CLI build (8m warm, 9m cold — it is a second, Cranelift-free link of the
@@ -276,8 +282,9 @@ has_target() {
 #   fmt + clippy  (tier 1, --quick)  — the two lints that have twice landed a red `main`, and the
 #                                     cheapest things that can. Fast enough for the inner loop.
 #   test/docs/jit (tier 2, default)  — the oracles: conformance, eval↔VM differential, leak, the
-#                                     doc samples, and the JIT's own differential. This is the set
-#                                     a merge to `main` must clear.
+#                                     doc samples, the JIT's own differential, and the `#[ignore]`d
+#                                     real-socket end-to-end suites (hot reload, LiveView, drain).
+#                                     This is the set a merge to `main` must clear.
 #   wasm/miri/editors (tier 3)       — portability, `unsafe` soundness, and the editor grammars.
 #                                     Real gates, but they need wasmtime/nightly+miri/npm and they
 #                                     dominate the runtime, so they are opt-in per merge, not per
@@ -330,6 +337,13 @@ step 2 jit "JIT differential (cancel-poll arm)" -- \
     "${CARGO[@]}" run -p noeta-conformance --features jit --locked -- --jit-differential --cancel-poll
 step 2 jit "JIT-enabled CLI (integration + doc samples)" -- \
     "${CARGO[@]}" test -p noeta-cli --locked
+# The `#[ignore]`d real-socket suites — hot reload, LiveView, graceful drain. The step above builds
+# them and runs none of them (that is what `#[ignore]` means), so this runs them explicitly, through
+# the same script ci.yml's `jit` job calls. Tier 2, not tier 3: measured at 5s warm over 62 runs,
+# it is the cheapest step in the merge gate, and it is the only one that watches a swap land in a
+# server that is actually serving. See scripts/hot-e2e.sh for what it covers and what it asserts.
+step 2 jit "hot-reload e2e (#[ignore]d real-socket suites)" -- \
+    env "NOETA_GATE_TOOLCHAIN=$TC" bash "$ROOT/scripts/hot-e2e.sh"
 
 # --- wasm: the portability invariant + the wasm/browser/serve oracles --------------------------
 if [[ "$TC" == "default" ]]; then

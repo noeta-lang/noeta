@@ -222,7 +222,7 @@ This project is currently pre-alpha and not public, so you don't need to worry a
 > | | What it runs | Warm | Cold |
 > |---|---|---|---|
 > | `scripts/gate.sh --quick` | `cargo fmt --all --check` + both `clippy -D warnings` splits | 1m20s | 2m10s |
-> | `scripts/gate.sh` | + workspace suite & oracles, lean-CLI + feature shapes, doc samples, JIT differentials | ~15 min | 35 min |
+> | `scripts/gate.sh` | + workspace suite & oracles, lean-CLI + feature shapes, doc samples, JIT differentials, the `#[ignore]`d real-socket hot-reload suites | ~15 min | 35 min |
 > | `scripts/gate.sh --full` | + wasm portability/differential, miri, editor tooling | +2 min and up | — |
 >
 > `--quick` is the inner loop, the default is the merge gate, `--full` is for a release tag. `--full`'s miri and editor legs are cheap (1m12s and 4s); its wasm legs SKIP without `wasmtime` on PATH and without the wasm targets installed *for the gating toolchain*, and are the expensive part when they do run. Useful flags: `--list` (print the plan), `--only <substring>` (one group), `--install-hook` (opt-in `pre-push` hook running `--quick` — never installed for you, and **not recommended here**: hooks live in the *common* git dir, so installing one changes every worktree of this repo including other agents', and no hook fires on the fast-forward merge into `main` that is the moment we actually care about). Honor `CARGO_TARGET_DIR`/`CARGO_BUILD_JOBS` as everywhere else — the script respects them and sets neither.
