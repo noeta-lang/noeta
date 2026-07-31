@@ -16,6 +16,7 @@ d = 1_000u32
 - There is **no implicit widening** — moving a value between widths is explicit (via the conversion methods below).
 - An untyped literal **coerces** into a fixed-width annotation when it is in range: `x: u16 = 1000`.
 - At runtime a fixed-width value is erased to a 64-bit word, so `type_of(255u8)` reports `Type.Int`. Declared-type reflection agrees by construction: a top-level `i32`/`u8` parameter reflects `Type.Int` through `params_of` too (and a top-level `f64` reflects `Type.Float`; `f32` is reified everywhere and reports `Type.F32`). In **container-element position** a width is a real storage slot and is preserved: a `List<i32>` annotation reflects `Type.List(Type.IntN(32, true))`, at any depth. See [Attributes & Reflection](Attributes-and-Reflection#params_ofname-listparaminfo).
+- A **type test against a width** (`x is i32`, `x is f64`) is answered by the checker, not at runtime: `a: i32` makes `a is i32` `true` and `a is i64` `false`, decided where the width actually lives — in the static type. Once a value is laundered through `dyn` the width is gone and nothing can recover it, so a test there is **E0063** (a warning) and you should test the base type instead (`x is int`, `x is float`). `f32` is exempt — it is reified, so the runtime answers it — and so is a container target like `List<i32>`.
 
 Arithmetic **wraps** at the type's width, sign-appropriately:
 

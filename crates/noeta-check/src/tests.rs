@@ -3213,7 +3213,11 @@ fn a_width_test_decided_false_is_folded_silently_too() {
     for target in ["i64", "u32", "i8"] {
         let src = format!("fn f(): bool {{ a: i32 = 5; return a is {target}; }}\n");
         assert!(codes(&src).is_empty(), "`is {target}` should be silent");
-        assert_eq!(folded_answers(&src), [false], "`is {target}` should fold false");
+        assert_eq!(
+            folded_answers(&src),
+            [false],
+            "`is {target}` should fold false"
+        );
     }
 }
 
@@ -3257,10 +3261,11 @@ fn f32_needs_no_special_case_and_gets_none() {
 
 #[test]
 fn a_folded_true_test_still_narrows_its_branch() {
-    // Folding must not cost the narrowing the test performs. The branch below binds a `dyn`-typed
-    // field off `a` only because `a` is seen as an `i32` there; the E0007 that would follow a lost
-    // narrowing is what this asserts the absence of.
-    let src = "fn f(): int { a: i32 = 5; if a is i32 { b: i32 = a; return b.to_int(); } return 0; }\n";
+    // Folding must not cost the narrowing the test performs. Inside the branch `a` is still seen
+    // as an `i32`, so `b: i32 = a` and the `i32` method on it both check; the E0007 that a lost
+    // narrowing would produce is what this asserts the absence of.
+    let src =
+        "fn f(): int { a: i32 = 5; if a is i32 { b: i32 = a; return b.to_int(); } return 0; }\n";
     assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
 
