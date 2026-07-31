@@ -333,6 +333,7 @@ for f in field_specs_of("FieldSpec") {
 // name: Type.String
 // type: Type.Named(Type, [])
 // optional: Type.Bool
+// attrs: Type.List(Type.Dyn)
 ```
 
 Each shadows like any prelude name: declaring your own `enum Ordering` or `struct FieldEntry` replaces it for that program.
@@ -454,7 +455,7 @@ Two edges are worth knowing. A polymorphic native return is reported as precisel
 
 ### `field_specs_of::<T>(): List<FieldSpec>` / `field_specs_of(name): List<FieldSpec>`
 
-The **type-level** field schema of a declared struct or class — one `FieldSpec` per field in declaration order: `{ name: string, type: Type, optional: bool }`. It is the declaration-side twin of `fields_of`: that one reflects an *instance*'s field **values** (and so sees the runtime-erased type), this one reflects the **declaration**, so `type` is precise and `optional` reports whether the field declared a default. An unknown name, or an enum, yields the empty list — an enum's cases are `variants_of`'s answer, and the two are meant to be asked as a pair.
+The **type-level** field schema of a declared struct or class — one `FieldSpec` per field in declaration order: `{ name: string, type: Type, optional: bool, attrs: List<dyn> }`. It is the declaration-side twin of `fields_of`: that one reflects an *instance*'s field **values** (and so sees the runtime-erased type), this one reflects the **declaration**, so `type` is precise, `optional` reports whether the field declared a default, and `attrs` holds the field's own `#[...]` attribute instances. An unknown name, or an enum, yields the empty list — an enum's cases are `variants_of`'s answer, and the two are meant to be asked as a pair.
 
 Two surfaces, one node: the turbofish `field_specs_of::<T>()` when you know the type statically, and `field_specs_of(name)` when you hold it only as a runtime string (a `Type.Struct(name, _)` you just reflected). They converge on one name-keyed query, so both behave identically — including inside a module, where the turbofish resolves `T` to the same **qualified** identity `type_of` reports (`field_specs_of::<Todo>()` in the module `app.storage` asks for `app.storage.Todo`). The string surface takes the name verbatim, so it wants that qualified name too.
 
@@ -472,6 +473,33 @@ for spec in field_specs_of::<ServerOpts>() {
 // host: Type.String optional=true
 // verbose: Type.Bool optional=true
 ```
+
+**A field describes itself, exactly as a parameter does.** `attrs` is the field half of `ParamInfo.attrs`, and it is there so the two doors are one walk: a library deriving a schema reads a callable's parameters with `params_of` and a type's fields with `field_specs_of`, and both hand back a descriptor carrying its own annotation, so one narrowing body serves both.
+
+```noeta
+@attribute(Param, Field)
+struct Arg { help: string = "" }
+
+struct Order {
+    #[Arg(help: "the order id")] id: string
+    qty: int = 1
+}
+
+fn help_of(attrs: List<dyn>): string {
+    for a in attrs {
+        if a is Arg { return a.help }
+    }
+    return ""
+}
+
+for spec in field_specs_of::<Order>() {
+    echo "${spec.name}: ${help_of(spec.attrs)}"
+}
+// id: the order id
+// qty:
+```
+
+Like the parameter half it is a **view** of the attribute manifest, not a second table: the instances are the same rows `attributes_of::<Arg>()` returns for the target `"Order.id"`, reached through the same key builder, so the two surfaces cannot disagree about which attribute belongs to which field. An unannotated field reports an empty list, never an absence — `qty` above has no `#[Arg]`, and `spec.attrs` is `[]` rather than missing.
 
 ### `variants_of::<T>(): List<VariantSpec>` / `variants_of(name): List<VariantSpec>`
 
@@ -536,7 +564,7 @@ for v in variants_of::<Status>() {
 // Done = some(done)
 ```
 
-A variant's own `#[...]` attributes are deliberately **not** in the report — exactly as a field's are not in `FieldSpec`. A member's attributes are already keyed in the manifest under its qualified `Enum.Variant` target, the same `Type.field` convention the struct side uses, so `attributes_of::<T>()` is the one answer to "what is annotated on this member" for fields, methods, parameters and variants alike. Carrying them here would make the enum half of one surface answer a question the struct half does not, and give a consumer two places to look for one fact:
+A variant's own `#[...]` attributes are deliberately **not** in the report. They are already keyed in the manifest under the qualified `Enum.Variant` target, the same `Type.field` convention the struct side uses, so `attributes_of::<T>()` is the one answer to "what is annotated on this variant". What the struct half carries (`FieldSpec.attrs`) is the *member-of-a-signature* case: a schema deriver walks parameters and fields side by side and needs those two descriptors to be the same shape, and a variant is not walked that way. A variant **payload** slot reports `attrs` as the empty list, which is the true answer rather than a stub — a payload slot has no attribute syntax to carry one.
 
 ```noeta
 @attribute
