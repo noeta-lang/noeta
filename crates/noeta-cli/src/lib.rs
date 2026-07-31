@@ -165,6 +165,12 @@ enum Command {
         /// runner does nothing.
         #[arg(long)]
         target: Option<String>,
+        /// Per-test deadline in seconds (default: 60). A test that does not finish within it is
+        /// reported `TIME` — it is neither a pass nor an assertion failure — and the rest of the
+        /// suite still runs and reports. Raise it for one test with `#[std.test.Timeout(N)]`
+        /// instead; `--timeout 0` removes the bound for the whole run.
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u64>,
     },
     /// Discover and run a program's `@bench` blocks, measuring each (object-model slice 6).
     Bench {
@@ -1148,6 +1154,7 @@ pub fn run_cli(
             names,
             json,
             target,
+            timeout,
         } => {
             tier_runner::set_test_opts(tier_runner::TestOpts {
                 fail_fast,
@@ -1156,6 +1163,7 @@ pub fn run_cli(
                 names,
                 json,
                 target,
+                timeout,
             });
             tier_runner::dispatch_std_tier("test", &file)
         }

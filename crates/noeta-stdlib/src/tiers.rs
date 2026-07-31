@@ -177,8 +177,9 @@ fn json_reindent(
 }
 
 /// The attributes the built-in tiers own, each under its **tier's namespace** (D2 — no global
-/// attribute namespace): the test runner's metadata quartet under `std.test`
-/// (`Skip`/`Name`/`Group`/`Data`), `bench`'s knob under `std.bench` (`Bench { iterations }`), and
+/// attribute namespace): the test runner's metadata set under `std.test`
+/// (`Skip`/`Name`/`Group`/`Data`/`Timeout`), `bench`'s knob under `std.bench`
+/// (`Bench { iterations }`), and
 /// the doc tier's stamped text carrier under `std.doc` (`Doc { text }` — written by `@doc` activation
 /// with its qualified name, never by hand). A consumer imports them like any attribute:
 /// `use std.test.{Skip, Name}` then `#[Skip]`, or qualified `#[std.test.Skip]`.
@@ -217,6 +218,18 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
         fields: &[ExtAttrField {
             name: "rows",
             ty: AttrFieldType::Dyn,
+            default: None,
+        }],
+    },
+    // The per-test deadline override. Mandatory field: `#[Timeout]` with no number would have to
+    // mean *something* about a bound, and every reading of it (the default? none?) is a guess the
+    // reader would have to look up — so the number is written where the override is.
+    ExtAttribute {
+        name: "Timeout",
+        namespace: "std.test",
+        fields: &[ExtAttrField {
+            name: "seconds",
+            ty: AttrFieldType::Int,
             default: None,
         }],
     },

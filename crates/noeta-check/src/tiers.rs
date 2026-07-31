@@ -2642,8 +2642,8 @@ mod tests {
     #[test]
     fn extension_declarations_match_the_reflect_constants() {
         use noeta_ast::reflect::{
-            TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP, TIER_ATTR_BENCH,
-            TIER_ATTR_DOC,
+            TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP, TEST_ATTR_TIMEOUT,
+            TIER_ATTR_BENCH, TIER_ATTR_DOC,
         };
         // The contract is the **qualified** identity now (D2b): the reflect constants are FQNs, so
         // pin them against each declaration's `qualified()`, not its short `name`.
@@ -2655,6 +2655,7 @@ mod tests {
             TEST_ATTR_NAME,
             TEST_ATTR_GROUP,
             TEST_ATTR_DATA,
+            TEST_ATTR_TIMEOUT,
             TIER_ATTR_BENCH,
             TIER_ATTR_DOC,
         ] {

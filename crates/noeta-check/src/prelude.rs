@@ -460,7 +460,7 @@ impl Checker {
     }
 
     /// Register every installed extension's declared **prelude attributes** (tier-extensions
-    /// port) — std's core unit ships the test-metadata quartet (`Skip`/`Name`/`Group`/`Data`),
+    /// port) — std's core unit ships the test-metadata set (`Skip`/`Name`/`Group`/`Data`/`Timeout`),
     /// `bench`'s knob (`Bench { iterations: int }`), and the doc tier's text carrier
     /// (`Doc { text: string }`); a third-party extension's attributes register identically. Each
     /// is an ordinary struct (fields validated by the construction gate) marked `@attribute` (so

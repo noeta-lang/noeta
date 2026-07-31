@@ -40,6 +40,8 @@ pub(crate) struct TestOpts {
     pub names: Vec<String>,
     pub json: bool,
     pub target: Option<String>,
+    /// `--timeout <SECONDS>`; `None` leaves the runner's own default in place.
+    pub timeout: Option<u64>,
 }
 
 /// The flags `noeta bench` parsed, stashed for the native runner.
@@ -102,6 +104,7 @@ fn test_runner(_ctx: &mut dyn CommandCtx, run: &TierRun<'_>) -> u8 {
         &o.names,
         o.json,
         &o.target,
+        o.timeout,
     )
 }
 
