@@ -282,7 +282,9 @@ mod tests {
 
     #[test]
     fn hidden_components_are_recognized_the_way_the_watcher_recognizes_them() {
-        assert!(has_hidden_component(Path::new("/home/u/.cargo-targets/x/tmp")));
+        assert!(has_hidden_component(Path::new(
+            "/home/u/.cargo-targets/x/tmp"
+        )));
         assert!(has_hidden_component(Path::new("/a/.git/b")));
         assert!(!has_hidden_component(Path::new("/tmp/noeta-tests")));
         // `.` and `..` are path syntax, not hidden directories.
