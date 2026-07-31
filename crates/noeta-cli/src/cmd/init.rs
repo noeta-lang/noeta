@@ -31,6 +31,7 @@ const AGENTS_MD: &str = include_str!("../../templates/init/AGENTS.md");
 const SYNTAX_PAGES: &[&str] = &[
     "Syntax-Basics",
     "Language-Tour",
+    "Conventions",
     "Type-System",
     "Structs-Classes-and-Enums",
     "Functions-and-Closures",
