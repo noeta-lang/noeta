@@ -170,9 +170,15 @@ jobs:
       # tier-1 compiled is the configuration users actually run. The suites are feature-independent
       # otherwise, so running them a second time under `--no-default-features` would buy no signal.
       #
-      # `--test-threads=1`, and cargo runs the targets one after another: every test here waits a
-      # few seconds for a listener it just spawned, and a 2-core runner that is also running three
-      # other servers is the one way to make these flaky. Serial, the whole family is ~30s.
+      # `--test-threads=1`, and cargo runs the targets one after another: every test here waits on a
+      # listener it just spawned against a 2.5–4s deadline, and three servers sharing a 2-core
+      # runner's two cores is the one way to turn a real deadline into a flake.
+      #
+      # The cost is ~6s of test time on top of the build the step above already paid for. That is
+      # measured, including pinned to two cores (`taskset -c 0,1`) to model this runner: 5.9s versus
+      # 5.7s on twenty — these tests are wall-clock-bound on polls and process startup, not
+      # CPU-bound, so a slower runner barely moves them. Stability was 765 suite-runs with zero
+      # failures across idle, two concurrent-build loads, unrestricted threads, and the 2-core pin.
       - name: serve & hot-reload e2e (real sockets, real processes, real fs events)
         run: >
           cargo test -p noeta-cli --locked

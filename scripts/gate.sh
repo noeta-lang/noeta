@@ -347,14 +347,16 @@ step 2 jit "JIT-enabled CLI (integration + doc samples)" -- \
 # shipped JIT-enabled CLI is already built, so this step is runtime only); `tests/cli/automation.rs`
 # fails the build if a new ignored suite appears in neither list.
 #
-# Measured before being wired in: 80 consecutive runs of all nine suites, 720 suite-runs, zero
+# Measured before being wired in: 85 consecutive runs of all nine suites, 765 suite-runs, zero
 # failures — 20 at ambient load, 20 beside a lean-CLI build, 20 beside a release build, 20 with
-# unrestricted intra-suite threads. ~6s serial for the family.
+# unrestricted intra-suite threads, 5 pinned to two cores. ~6s serial for the family.
 #
 # `--test-threads=1` anyway, and cargo runs the targets one after another. Unrestricted was 4.5s
 # rather than 6.0s here, but "here" is 20 cores; a GitHub runner has 2, and each of these tests waits
 # on a listener it just spawned against a 2.5–4s deadline. Three servers sharing two cores is the
-# one way to turn a real deadline into a flake, and 1.5s is not worth it.
+# one way to turn a real deadline into a flake, and 1.5s is not worth it. Two cores cost almost
+# nothing on its own (5.9s vs 5.7s pinned with `taskset -c 0,1`): these tests are wall-clock-bound
+# on polls and process startup rather than CPU-bound, which is also why they do not slow a gate.
 step 2 serve "serve & hot-reload e2e (real sockets, --ignored)" -- \
     "${CARGO[@]}" test -p noeta-cli --locked \
     --test serve --test live_serve --test live_stream --test graceful_drain \
