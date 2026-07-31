@@ -18,7 +18,14 @@ pub(crate) fn cmd_lsp() -> ExitCode {
 }
 
 /// Start the Noeta debug adapter over stdio, blocking until the editor client disconnects.
+///
+/// Delegates to the project's composed toolchain first, for the same reason as [`cmd_lsp`] and with
+/// a sharper consequence: the adapter does not merely *analyze* a program, it loads, checks,
+/// compiles and runs it. Without the composition a launch in a `[trust] native` project cannot
+/// resolve the extension's modules at all, so debugging such a program failed at its first step,
+/// reported as an `output` event full of unresolved imports rather than as a missing toolchain.
 pub(crate) fn cmd_dap() -> ExitCode {
+    crate::compose::delegate_server_if_composed();
     noeta_dap::run_stdio();
     ExitCode::SUCCESS
 }

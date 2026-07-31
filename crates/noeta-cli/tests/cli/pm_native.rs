@@ -951,6 +951,109 @@ fn composed_toolchain_end_to_end() {
         !response.contains("E0019"),
         "no unresolved-import cascade from a delegated server: {response}"
     );
+
+    // 9. **The debugger composes too**, and it is the sharpest case of the three: the adapter does
+    //    not merely analyze the program, it loads, checks, compiles and *runs* it. Undelegated, a
+    //    launch in this app cannot resolve `imgfx` at all, so debugging failed at its first step —
+    //    surfacing as an `output` event full of unresolved imports rather than as a missing
+    //    toolchain. A successful launch runs the same entry step 3 checked, so the native handler's
+    //    answer (`fx.double(21)`) must appear in the program's output.
+    //
+    //    The assertion is the program's *output*, not the absence of one diagnostic code. Measured
+    //    by neutralizing the delegation: an undelegated launch of this entry reports `E0014 unknown
+    //    module fx` and `E0007 no method brighten` — not the `E0019` the MCP surface produces, since
+    //    the extension's failure lands wherever its modules were used. Any check for a particular
+    //    code would have passed straight through the real defect.
+    let output = dap_launch(&app, &entry);
+    assert!(
+        !output.contains(r#""category":"stderr""#),
+        "a delegated debug adapter launches cleanly, with no diagnostics on stderr: {output}"
+    );
+    assert!(
+        output.contains("42"),
+        "the debugged program must reach the native handler: {output}"
+    );
+}
+
+/// Drive a real `noeta dap` server over stdio from `cwd`: launch `entry` and return every `output`
+/// event body the adapter emitted, concatenated.
+///
+/// Spawned as a real process from a real working directory for the same reason as [`mcp_check`] —
+/// what is under test is which toolchain the `noeta dap` *process* is, which an in-process harness
+/// (`noeta_dap::serve` over in-memory buffers, as `noeta-dap`'s own tests use) cannot show.
+/// Hand-rolled DAP framing: `Content-Length: N\r\n\r\n<json>`.
+fn dap_launch(cwd: &std::path::Path, entry: &std::path::Path) -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("noeta"));
+    let mut child = cmd
+        .env(
+            "NOETA_CACHE_DIR",
+            concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+        )
+        .env("NOETA_COMPOSE_DEBUG", "1")
+        .env(
+            "NOETA_COMPOSE_TARGET_DIR",
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).parent().unwrap(),
+        )
+        .arg("dap")
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the debug adapter starts");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+
+    let mut send = |seq: u32, command: &str, arguments: String| {
+        let body = format!(
+            r#"{{"seq":{seq},"type":"request","command":"{command}","arguments":{arguments}}}"#
+        );
+        write!(stdin, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        stdin.flush().unwrap();
+    };
+    send(1, "initialize", r#"{"adapterID":"noeta"}"#.to_string());
+    send(
+        2,
+        "launch",
+        format!(r#"{{"program":"{}"}}"#, entry.display()),
+    );
+    send(3, "configurationDone", "{}".to_string());
+
+    // Read framed messages until the adapter says the program ended, collecting the `output` bodies.
+    // The loop is bounded by `terminated` and by the child's own exit — a launch that never produces
+    // it ends when the pipe closes, so a hang here is a real hang and not a missing sentinel.
+    let mut collected = String::new();
+    let mut header = String::new();
+    loop {
+        header.clear();
+        if stdout.read_line(&mut header).unwrap_or(0) == 0 {
+            break;
+        }
+        let Some(len) = header
+            .strip_prefix("Content-Length:")
+            .and_then(|n| n.trim().parse::<usize>().ok())
+        else {
+            continue; // the blank separator line
+        };
+        let mut blank = String::new();
+        let _ = stdout.read_line(&mut blank);
+        let mut buf = vec![0u8; len];
+        if stdout.read_exact(&mut buf).is_err() {
+            break;
+        }
+        let message = String::from_utf8_lossy(&buf).to_string();
+        if message.contains(r#""event":"output""#) {
+            collected.push_str(&message);
+        }
+        if message.contains(r#""event":"terminated""#) {
+            break;
+        }
+    }
+    drop(stdin);
+    let _ = child.wait();
+    collected
 }
 
 /// Drive a real `noeta mcp` server over stdio from `cwd` and return the raw `tools/call` response
