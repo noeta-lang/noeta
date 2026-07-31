@@ -4171,7 +4171,10 @@ mod tests {
             )
             .expect("open document offers completions");
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"new"), "members after `::<T>.`: {labels:?}");
+        assert!(
+            labels.contains(&"new"),
+            "members after `::<T>.`: {labels:?}"
+        );
         assert!(
             labels.contains(&"open"),
             "members after `::<T>.`: {labels:?}"
