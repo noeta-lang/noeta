@@ -1,7 +1,10 @@
 //! Multi-worker in-process hot reload (server-hmr F5): under `noeta serve --parallel N --watch`,
 //! a source edit **broadcasts** to every worker isolate — each drains the shared swap queue and
-//! serves the new code, no restart. `#[ignore]` (real port, real threads, real fs events):
-//! `cargo test -p noeta-cli --test parallel_hot -- --ignored`.
+//! serves the new code, no restart.
+//!
+//! `#[ignore]`d for the real port, threads and fs events it needs, and run by name from ci.yml's
+//! `scripts/hot-e2e.sh`, which both ci.yml and `scripts/gate.sh` run (`tests/cli/automation.rs` keeps that list honest).
+//! By hand: `cargo test -p noeta-cli --test parallel_hot -- --ignored`.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

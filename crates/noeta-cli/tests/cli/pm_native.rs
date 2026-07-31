@@ -984,9 +984,11 @@ fn an_unknown_subcommand_falls_back_to_a_noeta_prefixed_binary_on_path() {
 /// SECOND `noeta-ext-abi` and the shim's `NOETA_EXTENSIONS` aggregation would not type-check.
 ///
 /// `#[ignore]`d like the other compose-heavy gates (it clones the repo and cargo-fetches git
-/// deps). CI would run it as its own serial step, e.g.
-/// `cargo test -p noeta-cli --test cli -- --ignored composed_toolchain_out_of_tree_git_abi_dep`
-/// (no such step exists yet); locally run it with `-- --ignored` from the repo root.
+/// deps). ci.yml's `test` job runs it as its own serial step — `… --locked -- --ignored
+/// composed_toolchain`, whose prefix filter selects this test and its registry sibling — after the
+/// step above reclaims ~25 GB of runner disk for the second toolchain the compose builds. That is
+/// the one CI step `scripts/gate.sh` deliberately omits (see its header), so run it by hand,
+/// `-- --ignored` from the repo root, when you touch native-package composition.
 #[test]
 #[ignore = "compose-heavy: clones the toolchain repo + composes a toolchain; run explicitly or via its own CI step"]
 fn composed_toolchain_out_of_tree_git_abi_dep() {
@@ -1212,8 +1214,9 @@ pub fn triple(args: &[NativeValue]) -> Result<NativeOut, StdError> {
 ///      dispatches once granted.
 ///
 /// `noeta publish` itself composes too (the native-build publish quality gate), so the whole test
-/// runs three compositions; like its git-dep sibling it is `#[ignore]`d and meant to run as its
-/// own serial step: `cargo test -p noeta-cli --test cli -- --ignored native_package_from_registry`.
+/// runs three compositions; like its git-dep sibling it is `#[ignore]`d and runs in ci.yml's `test`
+/// job under the shared `-- --ignored composed_toolchain` filter, which the `compose_guard` above
+/// keeps serial against its sibling.
 #[test]
 #[ignore = "compose-heavy: publishes + composes a toolchain; run explicitly or via its own CI step"]
 fn composed_toolchain_native_package_from_registry_index() {
