@@ -1098,9 +1098,16 @@ impl<'m> Vm<'m> {
     /// is the **loop itself** — precisely the shape that may never come back. Measured before this
     /// guard: a `while true { i = i + 1 }` `@test` case OSR'd into native code and could not be
     /// stopped at all, while the same loop with one heap op in it (which bails every iteration)
-    /// stopped on request. Declining OSR costs a cancellable run tier-1 on its hot loops and nothing
-    /// else; every other run is untouched (`cancel_flag` is `None`, one predicted branch on a
-    /// path that already crossed a function call).
+    /// stopped on request. Every other run is untouched — `cancel_flag` is `None`, so this is one
+    /// predicted branch on a path that already crossed a function call.
+    ///
+    /// **What it costs, and why the cost falls in the right place.** Only a loop the JIT can sustain
+    /// end to end is affected; one whose body touches the heap or calls out bails every iteration
+    /// and was never running natively anyway. Measured under `noeta test`: a 200M-iteration counting
+    /// loop takes 7.0 s bounded and 0.83 s unbounded (`#[Timeout(0)]`), while a 60M-iteration loop
+    /// with an accumulator — which carries one bail site — is 4.25 s against 4.04 s. The tax
+    /// therefore lands exactly on the loops that have no safepoint in them, which are exactly the
+    /// loops a timeout could otherwise do nothing about.
     #[cfg(feature = "jit")]
     pub(crate) fn jit_osr_backedge(&mut self, proto: usize) -> bool {
         if self.isolates.cancel_flag.is_some() {
