@@ -2010,13 +2010,34 @@ impl Checker {
 /// theirs are found too.
 ///
 /// Deliberately excluded, and why:
-/// - [`Type::Named`] — a declared or imported type, whose method may still arrive through a trait
-///   impl or a runtime dispatch this pass cannot see. Lenient by design.
+/// - [`Type::Named`] — a type parameter, a native type, or a declared one. The declared half is
+///   closed too, but by a different question: see [`user_type_is_closed`], which this predicate's
+///   two call sites ask alongside it.
 /// - [`Type::Dyn`], [`Type::Unknown`] and the other gradual holes — they never reach here, because
 ///   `method_call_return` answers them with the deferred type rather than `Unknown`.
 /// - [`Type::DynTrait`] — resolved against the trait's declared methods, but a trait object's
 ///   dispatch is the runtime's call to make.
-/// Whether the receiver's member set is known **in full** here — the builtins
+pub(crate) fn closed_to_new_methods(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Int
+            | Type::IntN { .. }
+            | Type::Float
+            | Type::F32
+            | Type::F64
+            | Type::Bool
+            | Type::Unit
+            | Type::String
+            | Type::Bytes
+            | Type::List(_)
+            | Type::Map(_, _)
+            | Type::Set(_)
+            | Type::Option(_)
+            | Type::Result(_, _)
+    )
+}
+
+/// Whether the receiver's member set is known **in full** here: the builtins that
 /// [`closed_to_new_methods`] covers, plus a nominal type this program itself declares.
 ///
 /// The second half is what makes `Ollama.local()` a typo the checker catches. Reflection is
@@ -2047,26 +2068,6 @@ pub(crate) fn user_type_is_closed(checker: &crate::Checker, ty: &Type) -> bool {
     }
     checker.symbols.records.contains_key(n.as_str())
         || checker.symbols.enums.contains_key(n.as_str())
-}
-
-pub(crate) fn closed_to_new_methods(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Int
-            | Type::IntN { .. }
-            | Type::Float
-            | Type::F32
-            | Type::F64
-            | Type::Bool
-            | Type::Unit
-            | Type::String
-            | Type::Bytes
-            | Type::List(_)
-            | Type::Map(_, _)
-            | Type::Set(_)
-            | Type::Option(_)
-            | Type::Result(_, _)
-    )
 }
 
 /// A compact human label for a **computed callee** — the expression standing in for a name in an

@@ -3918,16 +3918,18 @@ where
                     .repeated()
                     .collect::<Vec<_>>(),
             )
-            .map(|((first, first_span), rest): ((String, Span), Vec<(String, Span)>)| {
-                let mut name = first;
-                let mut span = first_span;
-                for (seg, seg_span) in rest {
-                    name.push('.');
-                    name.push_str(&seg);
-                    span.end = seg_span.end;
-                }
-                (name, span)
-            });
+            .map(
+                |((first, first_span), rest): ((String, Span), Vec<(String, Span)>)| {
+                    let mut name = first;
+                    let mut span = first_span;
+                    for (seg, seg_span) in rest {
+                        name.push('.');
+                        name.push_str(&seg);
+                        span.end = seg_span.end;
+                    }
+                    (name, span)
+                },
+            );
         let trait_bound = bound_path
             .then(
                 type_parser(ctx)

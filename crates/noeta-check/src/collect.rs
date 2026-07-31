@@ -26,7 +26,10 @@ impl Checker {
     pub(crate) fn collect_imports(&mut self, program: &Program) {
         use noeta_ext_abi::registry::UseKind;
         for stmt in &program.stmts {
-            let Stmt::Use { path, names, span, .. } = stmt else {
+            let Stmt::Use {
+                path, names, span, ..
+            } = stmt
+            else {
                 continue;
             };
             let use_span = *span;

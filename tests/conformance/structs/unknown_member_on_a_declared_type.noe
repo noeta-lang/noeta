@@ -10,9 +10,9 @@
 // An in-scope **type parameter** is a `Type::Named` too and stays lenient: a bound licenses methods
 // rather than closing the world, and a method no bound declares is documented to defer to runtime
 // dispatch. `takes_any` below is the positive control for that — it must not be flagged.
-// expect: error E0007 at 34:5
 // expect: error E0007 at 35:5
 // expect: error E0007 at 36:5
+// expect: error E0007 at 37:15
 // expect: exit 1
 struct P {
     host: string = "h"
