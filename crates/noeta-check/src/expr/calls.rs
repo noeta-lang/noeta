@@ -205,10 +205,7 @@ impl Checker {
             ));
             return Vec::new();
         }
-        type_args
-            .iter()
-            .map(|t| self.annot(t))
-            .collect()
+        type_args.iter().map(|t| self.annot(t)).collect()
     }
 
     /// Whether a fresh-constructor call **absorbs** `expected` — the pre-filter that keeps this arm
@@ -620,10 +617,7 @@ impl Checker {
         for t in type_args {
             self.check_type_ref(t);
         }
-        let resolved: Vec<Type> = type_args
-            .iter()
-            .map(|t| self.annot(t))
-            .collect();
+        let resolved: Vec<Type> = type_args.iter().map(|t| self.annot(t)).collect();
         // A local binding cannot be instantiated, and shadows the free function in call position —
         // reject rather than silently routing past the shadow.
         if lookup(env, name).is_some() {
@@ -1662,10 +1656,7 @@ impl Checker {
         for t in type_args {
             self.check_type_ref(t);
         }
-        let resolved: Vec<Type> = type_args
-            .iter()
-            .map(|t| self.annot(t))
-            .collect();
+        let resolved: Vec<Type> = type_args.iter().map(|t| self.annot(t)).collect();
         // Resolve the receiver: a bare unshadowed TYPE name is the associated form — with the
         // class's instantiation taken from a call-site turbofish if one is spelled
         // (`Repo::<Todo>.m::<U>(…)`) and left to inference if not; anything else synthesizes and

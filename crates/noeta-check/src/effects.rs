@@ -73,7 +73,13 @@ impl Checker {
         self.symbols
             .generic_types
             .get(name)
-            .map(|params| params.iter().map(|p| p.id).zip(args.iter().cloned()).collect())
+            .map(|params| {
+                params
+                    .iter()
+                    .map(|p| p.id)
+                    .zip(args.iter().cloned())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

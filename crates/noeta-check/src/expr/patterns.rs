@@ -332,9 +332,7 @@ impl Checker {
         let type_targets: Vec<Type> = arms
             .iter()
             .filter_map(|a| match &a.pattern {
-                Pattern::IsType { ty, .. } if a.guard.is_none() => {
-                    Some(self.annot(ty))
-                }
+                Pattern::IsType { ty, .. } if a.guard.is_none() => Some(self.annot(ty)),
                 _ => None,
             })
             .collect();

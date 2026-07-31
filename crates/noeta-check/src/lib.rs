@@ -1791,11 +1791,7 @@ impl Checker {
     fn bind_nested_fns(&self, stmts: &[Stmt], env: &mut Env) {
         for stmt in stmts {
             if let Stmt::Fn(decl) = stmt {
-                let params = decl
-                    .params
-                    .iter()
-                    .map(|p| self.annot_param(p))
-                    .collect();
+                let params = decl.params.iter().map(|p| self.annot_param(p)).collect();
                 let ret = decl
                     .ret
                     .as_ref()
@@ -2215,11 +2211,7 @@ impl Checker {
                         .is_none_or(|t| self.impossible_type_test(t, ty).is_none())
                 {
                     env.push(HashMap::new());
-                    bind(
-                        env,
-                        name.as_str(),
-                        self.annot(ty),
-                    );
+                    bind(env, name.as_str(), self.annot(ty));
                     self.check_block(then_body, env);
                     env.pop();
                 } else {

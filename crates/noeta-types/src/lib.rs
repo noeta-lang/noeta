@@ -1196,7 +1196,10 @@ mod tests {
         assert_eq!(ParamId::synthetic(0), ParamId::synthetic(0));
         assert_eq!(ParamId::synthetic(0).decl_span(), None);
         for offset in [0u32, 1, u32::MAX] {
-            assert_ne!(ParamId::synthetic(offset), ParamId::at(Span::new(0, offset)));
+            assert_ne!(
+                ParamId::synthetic(offset),
+                ParamId::at(Span::new(0, offset))
+            );
         }
         let real = ParamId::at(Span::new(4, 5));
         assert_eq!(real.decl_span(), Some(Span::new(4, 5)));

@@ -981,7 +981,10 @@ pub(crate) fn constraint_mismatch(
 pub(crate) fn self_type(name: &str, type_params: &[TypeParam]) -> Type {
     Type::Named(
         name.to_string(),
-        type_params.iter().map(|p| Type::Param(param_ref(p))).collect(),
+        type_params
+            .iter()
+            .map(|p| Type::Param(param_ref(p)))
+            .collect(),
     )
 }
 

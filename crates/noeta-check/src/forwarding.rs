@@ -43,11 +43,11 @@
 //! rejected at the call site with a "spell the turbofish" help.
 
 use crate::constructors::FreshConstructors;
+use crate::env::{ParamScope, ParamSet, Subst};
 use crate::subst::{
     apply_subst, bind_type_params, extend_param_scope, from_ref_q, mentions_param, param_ref,
     param_scope, scope_ids,
 };
-use crate::env::{ParamScope, ParamSet, Subst};
 use noeta_ast::{ClosureBody, Expr, FnDecl, ObjectLit, Program, Stmt, StrPart, TypeRef};
 use noeta_types::{ParamRef, Type};
 use std::collections::{HashMap, HashSet};

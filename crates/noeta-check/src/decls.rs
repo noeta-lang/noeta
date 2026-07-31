@@ -122,10 +122,9 @@ impl Checker {
             let Some(default) = &f.default else { continue };
             // The field's declared type is the default's expected type — the field analogue of the
             // parameter rule above, so `r: Retry = .{ attempts: 3 }` names its type.
-            let declared = f
-                .ty
-                .is_some()
-                .then(|| erase_type_params(self.annot_field(&f.ty), &tps));
+            let declared =
+                f.ty.is_some()
+                    .then(|| erase_type_params(self.annot_field(&f.ty), &tps));
             let actual = match (&declared, default) {
                 (Some(expected), Expr::Object(l)) if l.type_name.is_none() => {
                     self.check(default, expected, env)

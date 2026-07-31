@@ -253,12 +253,7 @@ impl Checker {
         // carry no type parameters, so no substitution is needed.
         let decl = self.symbols.user_traits.get(&local)?;
         let m = decl.methods.iter().find(|m| m.sig.name == name)?;
-        let params: Vec<Type> = m
-            .sig
-            .params
-            .iter()
-            .map(|p| self.annot_param(p))
-            .collect();
+        let params: Vec<Type> = m.sig.params.iter().map(|p| self.annot_param(p)).collect();
         let required = required_params(&m.sig.params);
         // `async` is part of the return type on every path that reads a signature (`async fn m(): T`
         // is called for a `Future<T>`), so this one wraps too — a native trait's synthesized decl is
@@ -308,19 +303,19 @@ impl Checker {
                 .type_params
                 .iter()
                 .enumerate()
-                .map(|(i, tp)| (ParamId::at(tp.span), b.args.get(i).cloned().unwrap_or(Type::Dyn)))
+                .map(|(i, tp)| {
+                    (
+                        ParamId::at(tp.span),
+                        b.args.get(i).cloned().unwrap_or(Type::Dyn),
+                    )
+                })
                 .collect();
             let sig_ty = |t: &TypeRef| from_ref_q(t, &self.imports.extern_types, &trait_scope);
             let params: Vec<Type> = m
                 .sig
                 .params
                 .iter()
-                .map(|p| {
-                    apply_subst(
-                        &p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
-                        &subst,
-                    )
-                })
+                .map(|p| apply_subst(&p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown), &subst))
                 .collect();
             let ret = async_return(
                 m.sig.ret.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
@@ -372,12 +367,7 @@ impl Checker {
             .sig
             .params
             .iter()
-            .map(|p| {
-                apply_subst(
-                    &p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
-                    &subst,
-                )
-            })
+            .map(|p| apply_subst(&p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown), &subst))
             .collect();
         let ret = async_return(
             m.sig.ret.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),

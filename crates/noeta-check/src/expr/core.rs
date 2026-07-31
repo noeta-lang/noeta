@@ -367,9 +367,7 @@ impl Checker {
                 // result" shape (`map` expects `(T) -> dyn`): checking against `dyn` would erase the
                 // body's real type and starve the call-site refinements (`xs.map(f) → List<R>`), so
                 // the body is inferred instead; `dyn` accepts whatever comes out.
-                let declared = ann
-                    .as_ref()
-                    .map(|t| self.annot(t));
+                let declared = ann.as_ref().map(|t| self.annot(t));
                 let body_expected = declared
                     .clone()
                     .or_else(|| (!matches!(**ret, Type::Dyn)).then(|| (**ret).clone()));
@@ -1270,16 +1268,11 @@ impl Checker {
                 // With an explicit return annotation, check the body against it (and adopt it as the
                 // closure's return type); otherwise infer it from the body (the arrow expression's
                 // type, or a block's joined `return`s).
-                let declared = ann
-                    .as_ref()
-                    .map(|t| self.annot(t));
+                let declared = ann.as_ref().map(|t| self.annot(t));
                 let ret = self.closure_body_type(body, declared.as_ref(), env);
                 env.pop();
                 Type::Fn {
-                    params: params
-                        .iter()
-                        .map(|p| self.annot_param(p))
-                        .collect(),
+                    params: params.iter().map(|p| self.annot_param(p)).collect(),
                     ret: Box::new(ret),
                 }
             }
@@ -2439,7 +2432,13 @@ impl Checker {
             // arrives; a `T` with no slot still erases and records nothing.
             let inferred_params: ParamSet = pset
                 .iter()
-                .filter(|id| !self.coloring.forwardable_params.iter().any(|p| p.id == **id))
+                .filter(|id| {
+                    !self
+                        .coloring
+                        .forwardable_params
+                        .iter()
+                        .any(|p| p.id == **id)
+                })
                 .copied()
                 .collect();
             let absorbed_declared = if field_fn_expectation.is_none()

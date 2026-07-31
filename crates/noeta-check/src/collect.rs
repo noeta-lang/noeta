@@ -225,11 +225,7 @@ impl Checker {
         // gap if the shadowing rule ever changed.
         let mut tps = param_ids(type_params);
         tps.extend(param_ids(&m.type_params));
-        let raw_params: Vec<Type> = m
-            .params
-            .iter()
-            .map(|p| param_type(p, xt, &scope))
-            .collect();
+        let raw_params: Vec<Type> = m.params.iter().map(|p| param_type(p, xt, &scope)).collect();
         let raw_ret = async_return(
             m.ret
                 .as_ref()
@@ -570,11 +566,8 @@ impl Checker {
                     let xt = &self.imports.extern_types;
                     let scope = param_scope(&f.type_params, xt);
                     let tps = param_ids(&f.type_params);
-                    let raw_params: Vec<Type> = f
-                        .params
-                        .iter()
-                        .map(|p| param_type(p, xt, &scope))
-                        .collect();
+                    let raw_params: Vec<Type> =
+                        f.params.iter().map(|p| param_type(p, xt, &scope)).collect();
                     // An `async fn f(): T` call produces `Future<T>` (Track A); wrap before erasure so
                     // the erased signature and the generic instantiation both carry the future.
                     let raw_ret = async_return(
