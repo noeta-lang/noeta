@@ -79,7 +79,8 @@ time.sleep(120)
   fail "the e2e's own upstream never came up on 127.0.0.1:8916"
 }
 stop_upstream() {
-  [ -n "$UPSTREAM_PID" ] && kill "$UPSTREAM_PID" 2>/dev/null
+  # `|| true`: an already-dead upstream must not take the script down under `set -e`.
+  [ -n "$UPSTREAM_PID" ] && kill "$UPSTREAM_PID" 2>/dev/null || true
   UPSTREAM_PID=""
   for _ in $(seq 1 50); do
     curl -s -o /dev/null --max-time 1 "http://127.0.0.1:8916/data" || return 0
