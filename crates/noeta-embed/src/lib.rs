@@ -545,7 +545,13 @@ impl Session {
                 blockers.iter().map(ToString::to_string).collect(),
             )),
             SwapDiff::Swap(plan) => {
-                let out = self.session.hot_swap(&plan);
+                // Checkerless (`None`) even though the check above produced a whole-program
+                // bundle: an embedding host may also feed this session UNCHECKED entries through
+                // [`Session::eval`], and the precise destructor relevance a bundle brings is only
+                // sound when the checker has seen every entry (a type declared at an eval prompt
+                // is in no bundle). `noeta serve --watch`, whose session takes checked programs
+                // only, does pass its bundle — see `noeta_vm::HotFragment::sites`.
+                let out = self.session.hot_swap(&plan, None);
                 if !out.trace.is_empty() {
                     // The fragment's re-run panicked; the program keeps running on what DID
                     // land (function bodies rebind before the top level re-runs).

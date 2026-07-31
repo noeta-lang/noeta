@@ -2238,22 +2238,19 @@ impl Checker {
         // them into one entry would make two differently-instantiated construction sites report each
         // other's argument. Every existing consumer reads only the fields it always read; the pair
         // merely stops entries that differ in a fact SOME consumer needs from collapsing.
+        //
+        // The lookup-or-append itself lives in [`crate::intern_type_arg_entry`], because a LIVE
+        // session re-runs it to absorb a freshly-checked table into the one its running values
+        // already index — and a session that keyed the table differently from this would silently
+        // resolve a hidden slot to the wrong type.
         let repr = crate::type_to_repr_top(sigma, &self.symbols.type_kinds);
-        let idx = match self
-            .sites
-            .type_arg_table
-            .iter()
-            .zip(&self.sites.type_arg_reprs)
-            .position(|(e, r)| *e == info && *r == repr)
-        {
-            Some(i) => i,
-            None => {
-                self.sites.type_arg_table.push(info);
-                self.sites.type_arg_reprs.push(repr);
-                self.sites.type_arg_table.len() - 1
-            }
-        };
-        noeta_ext_abi::HiddenArg::Table(idx as u32)
+        let idx = crate::intern_type_arg_entry(
+            &mut self.sites.type_arg_table,
+            &mut self.sites.type_arg_reprs,
+            info,
+            repr,
+        );
+        noeta_ext_abi::HiddenArg::Table(idx)
     }
 
     /// Resolve a checker [`Type`] into a [`noeta_ext_abi::TypeRecipe`] for call-site-typed

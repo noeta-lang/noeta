@@ -21,12 +21,59 @@ pub trait FragmentCompiler: std::fmt::Debug {
     /// Compile `fragment` as a stable-prefix extension of the running program, returning the
     /// extended module (a superset — every index minted under an earlier module stays valid).
     /// `Err` is the rendered reason.
+    ///
+    /// **Checkerless**: no site-keyed codegen hints, and conservative destructor relevance. Sound
+    /// for any fragment, but a *degraded* compile of one the checker did see — prefer
+    /// [`FragmentCompiler::extend_checked`] when the caller holds that check's [`FragmentSites`].
     fn extend(&mut self, fragment: &Program) -> Result<Module, String>;
+    /// [`FragmentCompiler::extend`] with the **whole-program** site bundle of the check that
+    /// admitted this fragment: the same site-driven codegen a cold start runs — packed lists and
+    /// index-field fusion, `type_of` full fidelity, method handles, streaming `for`s, width
+    /// masking, `@derive(Deserialize<Json>)` decode recipes, call-site-typed native calls — and
+    /// PRECISE destructor relevance instead of the conservative "every value is relevant"
+    /// approximation.
+    ///
+    /// The bundle is opaque here by design (see [`FragmentSites`]); the implementor recovers its
+    /// own type from it. Only sound when the checker has seen every entry of the session — the
+    /// caller owns that gate (see [`HotFragment::sites`]).
+    fn extend_checked(
+        &mut self,
+        fragment: &Program,
+        sites: &dyn FragmentSites,
+    ) -> Result<Module, String>;
     /// The global slot a name currently binds, if any (used to collect re-bound top-level slots
     /// before a hot re-run).
     fn global_slot(&self, name: &str) -> Option<u32>;
     /// Declare a global into the session's name-space (a fragment's new/overwritten binding).
     fn declare_global(&mut self, name: &str, mutable: bool, overwrite: bool);
+}
+
+/// One type checker's **span-keyed site bundle**, in transit through the VM core (server-hmr H5).
+///
+/// The VM core cannot name `noeta_check::Sites`: the whole point of the [`FragmentCompiler`] seam
+/// (native-size slice 2) is that an AOT binary links no compiler and no checker at all, and a
+/// `HotFragment` field naming one would drag both into every build. So a bundle crosses the core as
+/// an opaque handle — deposited by the driver that ran the check, ferried by the mailbox, and
+/// downcast back to its real type by the *implementor*, which is the one place that owns it (the
+/// `compile`-gated `SessionCompiler` adapter). The core only moves it.
+///
+/// `Send + Sync` because the mailbox broadcasts one bundle to every `--parallel` worker isolate.
+pub trait FragmentSites: std::fmt::Debug + Send + Sync + std::any::Any {
+    /// The bundle as `Any`, so the implementor that produced it can recover its concrete type.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// A shared handle to one [`FragmentSites`] bundle: cloned per worker, borrowed per install.
+pub type HotSites = Arc<dyn FragmentSites>;
+
+/// One VM's **seat** on a shared [`HotChannel`] (server-hmr F5 + H5 retention): the mailbox plus the
+/// consumer slot it claimed when the mailbox was armed. The channel tracks each consumer's drain
+/// cursor under that slot, which is both how a worker resumes where it left off and how the queue
+/// knows when a deposited plan has reached everyone and its program-sized `Sites` bundle can go.
+#[derive(Debug)]
+pub(crate) struct HotConsumer {
+    pub(crate) mailbox: HotSwapMailbox,
+    pub(crate) slot: usize,
 }
 
 /// The binding names a top-level statement (re)binds — the globals a re-running swap overwrites.
@@ -66,6 +113,22 @@ pub struct HotFragment {
     pub added: Vec<String>,
     /// Names changed by this edit (preferred over `added` in the report when non-empty).
     pub changed: Vec<String>,
+    /// The **whole-program** site bundle of the check that admitted this edit (server-hmr H5), so
+    /// every worker installs it through [`FragmentCompiler::extend_checked`] and the swapped code
+    /// is compiled exactly as a cold start would compile it. `None` falls back to the checkerless
+    /// compile — sound, but silently degraded (see [`FragmentCompiler::extend`]).
+    ///
+    /// The fragment's statements are cloned from the checked program **with their real spans**
+    /// (`diff_programs` clones them as-is), and a bundle is span-keyed, so the whole program's
+    /// sites apply to a fragment lowering directly — no re-keying, no per-fragment check.
+    ///
+    /// Depositing one asserts the soundness gate precise destructor relevance needs: *the checker
+    /// has seen every entry of this session*. The hot watcher earns it — it re-links and checks the
+    /// WHOLE new program before every deposit, and each change that could invalidate it (a removed
+    /// type, a changed signature, a changed layout) is a `SwapBlocker` that restarts instead of
+    /// swapping. A driver that also feeds the session *unchecked* entries (a REPL/console `eval`)
+    /// has not, and deposits `None`.
+    pub sites: Option<HotSites>,
 }
 
 /// The hot-reload mailbox (server-hmr W1): a watcher thread — which owns parsing, checking
@@ -78,23 +141,183 @@ pub type HotSwapMailbox = Arc<HotChannel>;
 /// The hot-reload channel shared by the watcher thread, the VM, and (through the [`NativeCtx`]
 /// accessors) the serve loop (server-hmr L3).
 ///
-/// - `plan` — the swap mailbox (see [`HotSwapMailbox`]).
+/// - the plan queue — the swap mailbox (see [`HotSwapMailbox`] and [`PlanQueue`]), deposited into
+///   by [`HotChannel::deposit`] and drained per consumer by [`HotChannel::drain`].
 /// - `error` — the last **rejected** edit's rendered diagnostics: the watcher deposits on a red
 ///   check (replacing an older error; a green deposit clears it), the serve loop takes it and
 ///   pushes an `error` frame to live LiveView clients for the browser overlay.
-/// - `swaps` — the swap **generation**: incremented after each successfully applied swap, so the
-///   serve loop can detect "a swap landed since my last iteration" and push `reload` to clients.
+///
+/// The swap **generation** is the plan's index in the queue; each VM tracks its own applied count
+/// (`Vm::applied_swaps`), which is how the serve loop detects "a swap landed since my last
+/// iteration" and pushes `reload` to *its* clients.
 ///
 /// [`NativeCtx`]: noeta_stdlib::NativeCtx
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct HotChannel {
-    /// The **append-only queue** of swap plans, generation = index (server-hmr F5). A single
-    /// depositor (the watcher) pushes; every consuming VM drains the tail it has not yet applied,
-    /// so a swap **broadcasts** to every worker isolate (`serve --parallel --watch`) rather than
-    /// being taken by one. Each plan is diffed against the previous *deposited* version, so
-    /// applying them in order keeps each worker's session in lockstep.
-    pub plans: std::sync::Mutex<Vec<HotFragment>>,
+    queue: std::sync::Mutex<PlanQueue>,
     pub error: std::sync::Mutex<Option<String>>,
+}
+
+impl Default for HotChannel {
+    /// A channel for **one** consumer — the single-worker `noeta serve --watch` shape. A
+    /// `--parallel N` fleet must say so: [`HotChannel::new`].
+    fn default() -> Self {
+        HotChannel::new(1)
+    }
+}
+
+/// The broadcast queue behind a [`HotChannel`] (server-hmr F5), plus the per-consumer cursors that
+/// let it **reclaim** what everyone has already installed (server-hmr H5 retention).
+///
+/// **Generation = index, still.** `plans` is append-only in its *indices*: a deposit pushes, and an
+/// index once minted is never reused or shifted. What is reclaimed is a passed plan's *payload* —
+/// the slot is tombstoned to `None` in place, so the whole-program [`FragmentSites`] bundle and the
+/// fragment AST are freed while the generation numbering the drain cursors and
+/// `NativeCtx::hot_swap_count` are keyed on stays literally true. The residue of a swap the fleet
+/// has fully absorbed is one empty `Option` slot (~a hundred bytes), not a program-sized bundle.
+///
+/// **Nothing is reclaimed that a consumer has not passed.** `cursors` holds one entry per consumer
+/// declared at [`HotChannel::new`], and reclamation only ever covers the prefix *below the minimum*
+/// cursor. A declared-but-not-yet-registered consumer sits at 0, so reclamation cannot start before
+/// the whole fleet has armed — which is what makes a worker still compiling its session (or parked
+/// mid-request) unable to lose a plan it has not applied.
+#[derive(Debug)]
+struct PlanQueue {
+    /// Generation → the plan, or `None` once every consumer has drained past it.
+    plans: Vec<Option<HotFragment>>,
+    /// One cursor per declared consumer: the generation it drains from next. [`RETIRED`] once its
+    /// VM has finished running, so a dead worker cannot pin the prefix for the rest of the session.
+    cursors: Vec<usize>,
+    /// How many cursors [`HotChannel::register`] has handed out.
+    claimed: usize,
+    /// Generations `..reclaimed` are tombstoned — the frontier, and the cursor a consumer
+    /// registering beyond the declared count starts at (so it can never read a hole).
+    reclaimed: usize,
+}
+
+/// A cursor value meaning "this consumer is gone" — it holds nothing back.
+const RETIRED: usize = usize::MAX;
+
+impl HotChannel {
+    /// A channel broadcasting to exactly `consumers` VMs — one per worker isolate of the
+    /// `serve --parallel N --watch` fleet, or 1 for single-worker hot serve. The count is what
+    /// reclamation is gated on, so it must match the number of VMs that will arm this mailbox.
+    pub fn new(consumers: usize) -> HotChannel {
+        HotChannel {
+            queue: std::sync::Mutex::new(PlanQueue {
+                plans: Vec::new(),
+                cursors: vec![0; consumers.max(1)],
+                claimed: 0,
+                reclaimed: 0,
+            }),
+            error: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Deposit one ready-to-apply plan (the watcher thread's half). Blocks on the queue lock: a
+    /// deposit is rare and must not be dropped, unlike a consumer's opportunistic drain.
+    pub fn deposit(&self, plan: HotFragment) {
+        if let Ok(mut q) = self.queue.lock() {
+            q.plans.push(Some(plan));
+        }
+    }
+
+    /// How many generations have been deposited — the queue's length, tombstones included, i.e. the
+    /// next generation number. Unaffected by reclamation.
+    pub fn deposited(&self) -> usize {
+        self.queue.lock().map(|q| q.plans.len()).unwrap_or(0)
+    }
+
+    /// How many deposited plans **still hold their payload** (fragment + [`FragmentSites`]). This is
+    /// the retention an editing session pays: it rises with each deposit and falls back as the fleet
+    /// installs, rather than tracking [`HotChannel::deposited`] forever.
+    pub fn resident_plans(&self) -> usize {
+        self.queue
+            .lock()
+            .map(|q| q.plans.iter().filter(|p| p.is_some()).count())
+            .unwrap_or(0)
+    }
+
+    /// Claim this VM's consumer cursor. Called once per mailbox-armed VM, before it can drain.
+    pub(crate) fn register(&self) -> usize {
+        let Ok(mut q) = self.queue.lock() else {
+            return 0;
+        };
+        if q.claimed < q.cursors.len() {
+            let slot = q.claimed;
+            q.claimed += 1;
+            return slot;
+        }
+        // More VMs armed this mailbox than were declared — a driver bug. Rather than hand back a
+        // cursor that may point into an already-tombstoned prefix, start the extra consumer at the
+        // frontier: it misses only swaps the whole declared fleet had already installed.
+        debug_assert!(
+            false,
+            "more consumers registered than the {} declared at HotChannel::new",
+            q.cursors.len()
+        );
+        let frontier = q.reclaimed;
+        q.cursors.push(frontier);
+        q.claimed += 1;
+        q.cursors.len() - 1
+    }
+
+    /// This consumer's VM has finished: stop holding the prefix back, so a worker that exits (or
+    /// panics its way out of the fleet) cannot pin the queue for the rest of the session.
+    /// Idempotent, and deliberately **does not itself collect** — reclamation is the drain's job, so
+    /// a queue that only ever shrinks at teardown is a visible regression rather than a passing
+    /// test. The next live consumer's drain picks the released prefix up.
+    pub(crate) fn retire(&self, slot: usize) {
+        if let Ok(mut q) = self.queue.lock()
+            && let Some(cursor) = q.cursors.get_mut(slot)
+        {
+            *cursor = RETIRED;
+        }
+    }
+
+    /// Take everything consumer `slot` has not yet drained, advance its cursor past them, and
+    /// reclaim the payload of every generation the whole fleet has now passed.
+    ///
+    /// `None` when there is nothing pending **or** the queue is momentarily contended: this runs at
+    /// a scheduler safepoint inside a serving program, so it never blocks — the next tick retries,
+    /// and the cursor makes the retry lossless.
+    pub(crate) fn drain(&self, slot: usize) -> Option<Vec<HotFragment>> {
+        let mut q = self.queue.try_lock().ok()?;
+        let from = *q.cursors.get(slot)?;
+        if from >= q.plans.len() {
+            return None;
+        }
+        let pending: Vec<HotFragment> = q.plans[from..]
+            .iter()
+            .map(|plan| {
+                plan.clone().expect(
+                    "a generation a live consumer has not passed is never reclaimed — see PlanQueue",
+                )
+            })
+            .collect();
+        q.cursors[slot] = q.plans.len();
+        q.collect();
+        Some(pending)
+    }
+}
+
+impl PlanQueue {
+    /// Tombstone every generation below the slowest consumer's cursor. The caller holds the lock.
+    fn collect(&mut self) {
+        let frontier = self
+            .cursors
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(0)
+            .min(self.plans.len());
+        for slot in &mut self.plans[self.reclaimed..frontier] {
+            // Drops the fragment AST and the last local reference to this check's whole-program
+            // `Sites` bundle — the retention this whole mechanism exists for.
+            *slot = None;
+        }
+        self.reclaimed = self.reclaimed.max(frontier);
+    }
 }
 
 impl<'m> Vm<'m> {
@@ -112,15 +335,15 @@ impl<'m> Vm<'m> {
     /// watcher thread already gated on parse/check, so a failure here is compile-internal (or the
     /// fragment's own top-level code erroring at run time, e.g. a re-run initializer panicking).
     pub(crate) fn apply_pending_hotswap(&mut self) {
-        let Some(mailbox) = &self.hot_mailbox else {
+        let Some(HotConsumer { mailbox, slot }) = &self.hot_mailbox else {
             return;
         };
-        // Drain the broadcast queue from this VM's own generation (server-hmr F5): clone the
-        // plans it has not applied yet (the lock is held only for the clone, never across the
-        // apply), then apply each in order. N workers each drain the same queue independently.
-        let pending: Vec<HotFragment> = match mailbox.plans.try_lock() {
-            Ok(plans) if plans.len() > self.applied_swaps => plans[self.applied_swaps..].to_vec(),
-            _ => return,
+        // Drain the broadcast queue from this VM's own cursor (server-hmr F5): clone the plans it
+        // has not applied yet (the lock is held only for the clone, never across the apply), then
+        // apply each in order. N workers each drain the same queue independently, and the drain
+        // reclaims whatever the slowest of them has now passed (server-hmr H5 retention).
+        let Some(pending) = mailbox.drain(*slot) else {
+            return;
         };
         for plan in pending {
             self.apply_one_swap(plan);
@@ -152,7 +375,11 @@ impl<'m> Vm<'m> {
         if plan.rerun_top_level {
             self.hotswap_prepare(&rebound);
         }
-        let entry = match self.install_fragment(&plan.fragment) {
+        // Installed WITH the deposit's whole-program sites when it carries them (server-hmr H5):
+        // the swapped bodies then compile with the same site-keyed codegen and precise destructor
+        // relevance a cold start of this version gets, instead of degrading the running program
+        // one edit at a time.
+        let entry = match self.install_fragment(&plan.fragment, plan.sites.as_deref()) {
             Ok(entry) => entry,
             Err(msg) => {
                 eprintln!("[hot] swap failed to compile: {msg} — still serving the old version");
@@ -195,8 +422,11 @@ impl<'m> Vm<'m> {
     }
 
     /// Install a debug-console **fragment** into this running Vm (tooling-unification T4). The
-    /// fragment compiles through the adopted session compiler — checkerless, stable-prefix id
-    /// accumulation, exactly a REPL entry — and the Vm then:
+    /// fragment compiles through the adopted session compiler — stable-prefix id accumulation,
+    /// exactly a REPL entry; checkerless, or with `sites` through
+    /// [`FragmentCompiler::extend_checked`] when the caller holds the whole-program bundle of the
+    /// check that admitted it (server-hmr H5: a hot swap does, a console entry does not) — and the
+    /// Vm then:
     ///
     /// 1. **Relocates the fragment's entry chunk** to a fresh proto index at the end of the table.
     ///    `SessionCompiler::extend` rewrites proto 0 per entry, but proto 0 of the *running* module
@@ -216,7 +446,11 @@ impl<'m> Vm<'m> {
     ///
     /// Returns the relocated entry's proto index; the caller runs it via [`Vm::run_thunk`]. Debug
     /// runs keep the JIT unarmed (asserted): tier-1 mirror tables never see a swapped module.
-    pub(crate) fn install_fragment(&mut self, fragment: &Program) -> Result<u32, String> {
+    pub(crate) fn install_fragment(
+        &mut self,
+        fragment: &Program,
+        sites: Option<&dyn FragmentSites>,
+    ) -> Result<u32, String> {
         // Tier-1 across a swap (server-hmr H3): retire the armed engine (pages parked in the
         // graveyard so in-flight native frames stay executable), install the fragment against a
         // clean tier-0 world, then re-arm fresh against the swapped module and let tiering
@@ -236,15 +470,22 @@ impl<'m> Vm<'m> {
         // about to produce is memoized by the caller *after* we return, so it survives.
         session.memo.clear();
         let arena = session.arena;
-        let mut extended = session.compiler.extend(fragment)?;
+        let mut extended = match sites {
+            None => session.compiler.extend(fragment)?,
+            Some(sites) => session.compiler.extend_checked(fragment, sites)?,
+        };
         // (1) Relocate the entry; proto 0 stays the program's `main`.
         let entry = std::mem::replace(&mut extended.protos[0], self.module.protos[0].clone());
         extended.protos.push(entry);
         let entry_idx = (extended.protos.len() - 1) as u32;
-        // The checkerless snapshot carries no `map(...)`-packed pairs; keep the base compile's
-        // precise ones so the swapped module stays self-consistent (`vm.map_packed` already holds
-        // the resolved schemas either way).
-        extended.map_packed_sites = self.module.map_packed_sites.clone();
+        // A checkerless snapshot carries no `map(...)`-packed pairs of its own; keep the base
+        // compile's precise ones so the swapped module stays self-consistent (`vm.map_packed`
+        // already holds the resolved schemas either way). A CHECKED install interned this
+        // fragment's own pairs into the session accumulation, making its snapshot a superset —
+        // keep that instead, and resolve the fresh spans below.
+        if sites.is_none() {
+            extended.map_packed_sites = self.module.map_packed_sites.clone();
+        }
 
         // (2) Grow the derived tables from the snapshot's tails (all appends are prefix-stable).
         for shape in &extended.shapes[self.persist.shapes.len()..] {
@@ -282,6 +523,15 @@ impl<'m> Vm<'m> {
                     byte_size: def.byte_size as usize,
                     column: def.column,
                 }));
+        }
+        // A checked install's snapshot may carry `map(...)`-result packed sites the fragment
+        // introduced. The live `map_packed` table is built once at load (`Vm::load_with`), so
+        // without this the new span would resolve to nothing and the swapped `map(...)` would build
+        // a boxed list where a cold start builds a flat one. Idempotent for the spans already
+        // there — the accumulation re-arrives whole with every snapshot.
+        for (span, idx) in &extended.map_packed_sites {
+            let schema = self.persist.packed_schemas[*idx as usize];
+            self.map_packed.insert(*span, schema);
         }
         for repr in &extended.type_reprs[self.persist.type_reprs.len()..] {
             self.persist.type_reprs.push(Rc::new(repr.clone()));
@@ -633,7 +883,10 @@ impl<'m> Vm<'m> {
             }],
             span,
         };
-        let entry = self.install_fragment(&wrapper)?;
+        // Checkerless: a console/watch/hover entry is code the checker never saw, so there is no
+        // bundle to compile it against — and its conservative codegen is sound regardless of what
+        // the session accumulated.
+        let entry = self.install_fragment(&wrapper, None)?;
         if let (Some(key), Some(session)) = (memo_key, self.debug_session.as_mut()) {
             session.memo.insert(key, entry);
         }

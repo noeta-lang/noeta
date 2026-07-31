@@ -60,8 +60,11 @@ fn verdict(old_src: &str, new_src: &str) -> SwapDiff {
 }
 
 /// The full driver dance: gate on the NEW version's check (transactional), require a swappable
-/// verdict, apply it. Returns the plan (for bookkeeping assertions) and the swap entry's output
-/// (a re-running swap's re-executed top level lands its stdout here).
+/// verdict, apply it **with that check's whole-program sites** — exactly what the hot watcher
+/// deposits (server-hmr H5), so the fragment compiles with the same site-keyed codegen and precise
+/// destructor relevance a cold start of the new version gets. Returns the plan (for bookkeeping
+/// assertions) and the swap entry's output (a re-running swap's re-executed top level lands its
+/// stdout here).
 fn apply(
     session: &mut VmSession,
     old_src: &str,
@@ -76,7 +79,7 @@ fn apply(
     );
     match verdict(old_src, new_src) {
         SwapDiff::Swap(plan) => {
-            let out = session.hot_swap(&plan);
+            let out = session.hot_swap(&plan, Some(&checked.sites));
             assert!(
                 out.diagnostics.is_empty() && out.trace.is_empty(),
                 "the swap fragment must run cleanly: {:?} {:?}",
@@ -153,6 +156,61 @@ fn a_swapped_body_keeps_an_expression_tier_from_the_program_that_declared_it() {
     oracle(&app("v1"), &app("v2"), "echo page();");
 }
 
+/// The sibling of the tier case, for the table built from the program's **`use` statements**: only
+/// a *new or changed* import rides in a fragment, so a body swapped under an UNCHANGED import
+/// lowered with no alias for it — and `v is Uuid` quietly answered `false` where a cold start
+/// answers `true`. A narrowing that silently flips is the worst shape this bug class takes.
+#[test]
+fn a_swapped_body_narrows_against_an_unchanged_native_import() {
+    let app = |tag: &str| {
+        format!(
+            "use std.id\n\
+             use std.id.Uuid\n\
+             fn kind(): string {{\n\
+             \x20   v = id.uuid()\n\
+             \x20   return \"{tag} ${{v is Uuid}}\"\n\
+             }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "echo kind();");
+}
+
+/// The same table read the other way: `type_of` on a value whose type came in through an unchanged
+/// import must report the qualified identity the reflection artifact registers, not the bare local
+/// name the fragment happens to see.
+#[test]
+fn a_swapped_body_reflects_an_unchanged_native_imports_qualified_name() {
+    let app = |tag: &str| {
+        format!(
+            "use std.id\n\
+             use std.id.Uuid\n\
+             fn describe(): string {{\n\
+             \x20   v = id.uuid()\n\
+             \x20   return \"{tag} ${{type_of(v).name()}}\"\n\
+             }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "echo describe();");
+}
+
+/// Module globals: the async/generator state-machine desugar needs the program's top-level names so
+/// a bare assignment to one stays a global store instead of being hoisted into a state cell. A
+/// fragment holds only the changed declarations, so the set was all but empty and a swapped async
+/// body that touched a global **panicked** — where the same code cold-starts fine.
+#[test]
+fn a_swapped_async_body_still_sees_the_module_globals() {
+    let app = |tag: &str| {
+        format!(
+            "mut count = 0\n\
+             async fn bump() use (count): int {{\n\
+             \x20   count = count + 1\n\
+             \x20   return count + {tag}\n\
+             }}\n"
+        )
+    };
+    oracle(&app("0"), &app("10"), "echo bump().await\necho count\n");
+}
+
 #[test]
 fn an_unchanged_caller_dispatches_to_the_swapped_callee() {
     // THE HMR property: `describe` is byte-identical across versions (never recompiled), yet its
@@ -213,6 +271,205 @@ fn a_method_body_swap_reaches_instances_created_before_the_swap() {
               }\n\
               mut c = Counter.new()\n";
     oracle(v1, v2, "echo c.describe();");
+}
+
+// ------------------------------------------- H5: the swap compiles against the check's own sites
+//
+// Everything below is a body edit whose swapped code needs a **span-keyed checker site** to behave
+// the way a cold start behaves. Every one of them diverged from its own cold start under the
+// checkerless install — a call-site-typed decode lost its recipe and aborted, a packed list came
+// back boxed, named arguments bound positionally, a bare variant pattern matched everything, `i8`
+// arithmetic stopped wrapping — which is what made a long editing session drift away from the
+// program a restart would run.
+
+/// Call-site-typed native decode (`json.parse::<T>`): the turbofish `T` is resolved by the CHECKER
+/// into a `TypeRecipe` keyed by the call's span (`Sites::typed_module_call_sites`). The swapped
+/// body's call is a fresh span, so a checkerless install lowers it as an ordinary module call with
+/// no recipe at all.
+#[test]
+fn a_swapped_body_decodes_through_a_call_site_typed_json_parse() {
+    let app = |tag: &str| {
+        format!(
+            "use std.{{json}}\n\
+             struct Point {{ x: int  y: int }}\n\
+             fn decode(text: string): string {{\n\
+             \x20   p = json.parse::<Point>(text)\n\
+             \x20   return \"{tag} ${{p.x}},${{p.y}}\"\n\
+             }}\n"
+        )
+    };
+    oracle(
+        &app("v1"),
+        &app("v2"),
+        "echo decode(\"{\\\"x\\\": 1, \\\"y\\\": 2}\");",
+    );
+}
+
+/// `@derive(Deserialize<Json>)` + `json.decode_typed(name, text)` — the router-facing decode. Two
+/// sites carry it: the per-type recipe registry the derive produces and the call span lowering
+/// turns into a `DecodeTyped`. A checkerless install recognizes neither.
+#[test]
+fn a_swapped_body_decodes_by_runtime_type_name() {
+    let app = |tag: &str| {
+        format!(
+            "use std.json\n\
+             @derive(Deserialize<Json>)\n\
+             struct User {{ name: string  age: int }}\n\
+             fn describe(text: string): string {{\n\
+             \x20   return match json.decode_typed(\"User\", text) {{\n\
+             \x20       Ok(u) => \"{tag} ${{u.name}}/${{u.age}}\",\n\
+             \x20       Err(e) => \"{tag} err: ${{e}}\",\n\
+             \x20   }}\n\
+             }}\n"
+        )
+    };
+    oracle(
+        &app("v1"),
+        &app("v2"),
+        "echo describe(\"{\\\"name\\\": \\\"Ada\\\", \\\"age\\\": 36}\");",
+    );
+}
+
+/// A `List<@packed struct>` literal: the checker records the element's flat layout at the
+/// constructing span (`Sites::packed_list_sites`), and only then does the list get contiguous raw
+/// storage. Boxed vs flat is invisible to most of the language on purpose — `to_bytes` is where it
+/// surfaces, since a boxed list has no canonical buffer at all (E0007).
+#[test]
+fn a_swapped_body_builds_its_packed_list_flat() {
+    let app = |tag: &str| {
+        format!(
+            "@packed struct Pt {{ x: i32  y: i32 }}\n\
+             fn layout(): string {{\n\
+             \x20   pts = [Pt {{ x: 1i32, y: 2i32 }}, Pt {{ x: 3i32, y: 4i32 }}]\n\
+             \x20   return \"{tag} ${{pts.to_bytes().len()}}\"\n\
+             }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "echo layout();");
+}
+
+// (A `type_of` case is deliberately absent: both an annotated empty-list reflection
+// (`xs: List<string> = []` → `type_of(xs)`) and a generic one (`type_of(wrap(1))`) were measured
+// IDENTICAL across the two install paths — the runtime tag the annotation-driven construction
+// already carries answers them, so neither distinguishes checked from checkerless and a test on
+// one would prove nothing about this seam.)
+
+/// **Named arguments**: the checker resolves a call's label binding into an argument permutation
+/// keyed by the call span (`Sites::arg_orders`) — it is the only pass that knows the callee's
+/// parameter names. Without it the swapped body binds the arguments POSITIONALLY: not an abort, a
+/// silently wrong answer (`2-1` where a restart says `1-2`).
+#[test]
+fn a_swapped_body_binds_its_named_arguments_by_label() {
+    let app = |tag: &str| {
+        format!(
+            "fn mk(a: int, b: int): string {{ return \"${{a}}-${{b}}\" }}\n\
+             fn call(): string {{ return \"{tag} ${{mk(b: 2, a: 1)}}\" }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "echo call();");
+}
+
+/// **Bare payload-free variant patterns**: `Red =>` is a variant test only because the checker
+/// resolved that name against the scrutinee's enum and recorded the span
+/// (`Sites::variant_pattern_sites`); otherwise it is an ordinary binding pattern, which matches
+/// EVERYTHING. The swapped body took its first arm for every colour — again silently, with no
+/// diagnostic anywhere.
+#[test]
+fn a_swapped_body_matches_bare_variant_patterns_as_variants() {
+    let app = |tag: &str| {
+        format!(
+            "enum Color {{ Red; Green }}\n\
+             fn name(c: Color): string {{\n\
+             \x20   return match c {{ Red => \"{tag} red\", Green => \"{tag} green\" }}\n\
+             }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "echo name(Color.Green);");
+}
+
+/// **Fixed-width arithmetic** (Tier W): a same-width `i8` multiplication masks to 8 bits only where
+/// the checker recorded the site. The checkerless swap computed `100 * 3 = 300` where a restart
+/// wraps it to `44`.
+#[test]
+fn a_swapped_body_masks_fixed_width_arithmetic() {
+    let app = |tag: &str| {
+        format!(
+            "fn wrapmul(): string {{\n\
+             \x20   x: i8 = 100i8\n\
+             \x20   return \"{tag} ${{x * 3i8}}\"\n\
+             }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "echo wrapmul();");
+}
+
+/// The **live-VM** half of H5, end to end through the mailbox the CLI actually uses: a deposit
+/// carrying its sites is drained at a scheduler tick and installed via `Vm::install_fragment` →
+/// `FragmentCompiler::extend_checked`. Same named-argument probe as above, so a checkerless install
+/// prints `2-1` on the post-swap line; with the bundle both lines bind by label. (The oracle tests
+/// above drive `VmSession::hot_swap`; only this one proves the *mailbox* carries the bundle across
+/// to the worker that drains it.)
+#[test]
+fn a_mailbox_deposit_installs_the_fragment_with_its_sites() {
+    use noeta_vm::{HotChannel, HotSwapMailbox, VmBackend};
+
+    let v = |tag: &str| {
+        format!(
+            "use std.task.{{sleep, all}}\n\
+             fn mk(a: int, b: int): string {{ return \"${{a}}-${{b}}\" }}\n\
+             fn f(): string {{ return \"{tag} ${{mk(b: 2, a: 1)}}\" }}\n\
+             async fn probe(): string {{\n\
+             \x20   sleep(1).await\n\
+             \x20   return f()\n\
+             }}\n\
+             echo f()\n\
+             results = all([probe()])\n\
+             echo results[0]\n"
+        )
+    };
+    let (v1, v2) = (v("one"), v("two"));
+    noeta_stdlib::registry::default_seeded();
+    let program = parse(&v1);
+    let checked = noeta_check::check_all(&program);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let (module, compiler) =
+        noeta_compiler::compile_with_sites_session(&program, checked.sites, false, false)
+            .expect("compiles");
+
+    // The watcher's deposit: the swappable plan plus the whole-program sites of the check that
+    // admitted it. The first scheduler tick (inside the await) drains and applies it.
+    let SwapDiff::Swap(plan) = verdict(&v1, &v2) else {
+        panic!("a body edit must be swappable");
+    };
+    let new_checked = noeta_check::check_all(&parse(&v2));
+    assert!(
+        new_checked.diagnostics.is_empty(),
+        "{:?}",
+        new_checked.diagnostics
+    );
+    let mailbox: HotSwapMailbox = std::sync::Arc::new(HotChannel::default());
+    mailbox.deposit(noeta_vm::HotFragment {
+        fragment: plan.fragment,
+        rerun_top_level: plan.rerun_top_level,
+        added: plan.added,
+        changed: plan.changed,
+        sites: Some(std::sync::Arc::new(new_checked.sites)),
+    });
+
+    let (result, trace) = VmBackend::new().run_module_hot(
+        &module,
+        compiler,
+        Box::new(noeta_stdlib::SandboxHost::new()),
+        Box::new(noeta_stdlib::SandboxExecutor::new()),
+        mailbox,
+    );
+    assert!(trace.is_empty(), "no abort across the swap: {trace:?}");
+    assert_eq!(
+        result.stdout, "one 1-2\ntwo 1-2\n",
+        "the swapped body binds its named arguments by label — the deposit's sites reached the \
+         install"
+    );
+    assert_eq!(result.exit_code, 0);
 }
 
 // ---------------------------------------------------------------- differ verdicts
@@ -299,12 +556,15 @@ fn a_swap_lands_under_a_live_force_jit_engine() {
     };
     let mailbox: HotSwapMailbox = std::sync::Arc::new(HotChannel::default());
     // The mailbox queues `HotFragment`s (server-hmr F5): the watcher owns the compiler and hands the
-    // VM only the applied-swap payload, mirroring `noeta_cli::watch`'s deposit.
-    mailbox.plans.lock().unwrap().push(noeta_vm::HotFragment {
+    // VM only the applied-swap payload, mirroring `noeta_cli::watch`'s deposit — the gate's own
+    // whole-program sites included (H5).
+    let new_checked = noeta_check::check_all(&parse(&v2));
+    mailbox.deposit(noeta_vm::HotFragment {
         fragment: plan.fragment,
         rerun_top_level: plan.rerun_top_level,
         added: plan.added,
         changed: plan.changed,
+        sites: Some(std::sync::Arc::new(new_checked.sites)),
     });
 
     let (result, trace) = VmBackend::new().run_module_hot_forced_jit(
@@ -710,5 +970,178 @@ fn residency_returns_to_baseline_across_rerunning_swaps_with_reactivity() {
         noeta_value::live_count(),
         before,
         "teardown after re-running swap churn returns residency to baseline"
+    );
+}
+
+// ------------------------------------------- broadcast-queue retention (server-hmr H5 retention)
+
+/// The versions the two retention tests below swap through: one function body, one distinct tag
+/// each. `probe`'s await is the scheduler tick the drain happens at, so the second echo reports
+/// whatever the fleet installed.
+fn tagged(tag: usize) -> String {
+    format!(
+        "use std.task.{{sleep, all}}\n\
+         fn f(): string {{ return \"v{tag}\" }}\n\
+         async fn probe(): string {{\n\
+         \x20   sleep(1).await\n\
+         \x20   return f()\n\
+         }}\n\
+         echo f()\n\
+         results = all([probe()])\n\
+         echo results[0]\n"
+    )
+}
+
+/// Deposit the `generation` → `generation + 1` body edit exactly as the watcher does — the swappable plan plus the
+/// whole-program `Sites` of the check that admitted it — and hand back a `Weak` on that bundle, so a
+/// caller can observe its real liveness rather than the queue's opinion of it.
+fn deposit_edit(
+    mailbox: &noeta_vm::HotSwapMailbox,
+    generation: usize,
+) -> std::sync::Weak<noeta_compiler::Sites> {
+    let (old, new) = (tagged(generation), tagged(generation + 1));
+    let SwapDiff::Swap(plan) = verdict(&old, &new) else {
+        panic!("a body edit must be swappable");
+    };
+    let checked = noeta_check::check_all(&parse(&new));
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let sites = std::sync::Arc::new(checked.sites);
+    let weak = std::sync::Arc::downgrade(&sites);
+    mailbox.deposit(noeta_vm::HotFragment {
+        fragment: plan.fragment,
+        rerun_top_level: plan.rerun_top_level,
+        added: plan.added,
+        changed: plan.changed,
+        sites: Some(sites),
+    });
+    weak
+}
+
+/// Run one hot worker isolate over `mailbox` from the v1 baseline: its own compile, its own
+/// session, its own cursor on the shared queue — what `serve_parallel_hot` spawns per core.
+fn run_hot_worker(mailbox: &noeta_vm::HotSwapMailbox) -> noeta_vm::RunResult {
+    let program = parse(&tagged(1));
+    let checked = noeta_check::check_all(&program);
+    let (module, compiler) =
+        noeta_compiler::compile_with_sites_session(&program, checked.sites, false, false)
+            .expect("compiles");
+    let (result, trace) = noeta_vm::VmBackend::new().run_module_hot(
+        &module,
+        compiler,
+        Box::new(noeta_stdlib::SandboxHost::new()),
+        Box::new(noeta_stdlib::SandboxExecutor::new()),
+        std::sync::Arc::clone(mailbox),
+    );
+    assert!(trace.is_empty(), "no abort across the swaps: {trace:?}");
+    result
+}
+
+/// **A deposit's payload is reclaimed once — and only once — every worker has installed it.**
+///
+/// The queue is append-only and a `--parallel N` fleet drains it by N independent cursors, so
+/// nothing may be dropped until the slowest worker has passed it. Since H5 made each deposit carry
+/// the whole-program `Sites` of the check that admitted it, "when the process exits" stopped being
+/// an acceptable answer: measured on a 293 KB app, that bundle is 204 KiB against 14 KiB for the
+/// one-function fragment beside it, and it scales with the PROGRAM where the fragment scales with
+/// the EDIT. A day of saves would retain hundreds of MB of superseded site maps.
+///
+/// This drives the real path — `HotChannel::deposit` from the watcher's side, `Vm::apply_pending_hotswap`
+/// → `HotChannel::drain` → `Vm::install_fragment` from each worker's — with a three-consumer channel
+/// and three real hot VMs, and pins both directions at each step:
+///
+/// * after one and after two workers, all `N` plans are still resident and every `Sites` bundle is
+///   still reachable — a worker that has not drained cannot lose a swap;
+/// * after the third, residency is zero and every bundle has actually been *freed*, asserted through
+///   `Weak` handles to the deposited `Arc`s rather than through the queue's own bookkeeping.
+///
+/// The workers run in sequence rather than concurrently: the cursor arithmetic is identical (the
+/// queue serializes either way) and the frontier then moves deterministically. Retirement
+/// deliberately does not collect, so a queue that only shrank at teardown would fail the middle
+/// assertions instead of passing this test by accident. The concurrent fleet is covered by
+/// `noeta-cli`'s `parallel_hot` integration test.
+#[test]
+fn a_deposited_plan_is_reclaimed_when_the_last_worker_has_installed_it() {
+    const WORKERS: usize = 3;
+    const DEPOSITS: usize = 6;
+
+    noeta_stdlib::registry::default_seeded();
+    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(noeta_vm::HotChannel::new(WORKERS));
+    let bundles: Vec<std::sync::Weak<noeta_compiler::Sites>> = (1..=DEPOSITS)
+        .map(|generation| deposit_edit(&mailbox, generation))
+        .collect();
+    assert_eq!(mailbox.deposited(), DEPOSITS);
+    assert_eq!(mailbox.resident_plans(), DEPOSITS, "nothing drained yet");
+
+    let live = |bundles: &[std::sync::Weak<noeta_compiler::Sites>]| {
+        bundles.iter().filter(|w| w.upgrade().is_some()).count()
+    };
+
+    for worker in 1..=WORKERS {
+        let result = run_hot_worker(&mailbox);
+        assert_eq!(
+            result.stdout,
+            format!("v1\nv{}\n", DEPOSITS + 1),
+            "worker {worker} drains the whole queue at its tick and ends on the last deposit"
+        );
+        // The generation numbering is untouched by reclamation: index IS the generation, the queue
+        // never shifts — only a passed plan's payload is released out of its slot.
+        assert_eq!(mailbox.deposited(), DEPOSITS);
+        if worker < WORKERS {
+            assert_eq!(
+                mailbox.resident_plans(),
+                DEPOSITS,
+                "worker {worker} of {WORKERS} has drained, but the rest have not — nothing may be \
+                 dropped while a consumer could still need it"
+            );
+            assert_eq!(
+                live(&bundles),
+                DEPOSITS,
+                "every whole-program `Sites` bundle is still reachable after worker {worker}"
+            );
+        }
+    }
+    assert_eq!(
+        mailbox.resident_plans(),
+        0,
+        "every worker has installed every deposit — the queue holds no plan payloads, so an \
+         editing session costs O(1) in bundles, not O(saves x program size)"
+    );
+    assert_eq!(
+        live(&bundles),
+        0,
+        "and the bundles are actually freed, not merely unreferenced by the queue"
+    );
+    assert_eq!(
+        mailbox.deposited(),
+        DEPOSITS,
+        "generation = index survives reclamation"
+    );
+}
+
+/// The negative half, isolated: a **declared consumer that never registers** — a worker still
+/// compiling its session when the first edit lands — holds the whole queue back. The fleet size is
+/// declared at `HotChannel::new` and an unclaimed cursor sits at generation 0, so reclamation cannot
+/// begin before every worker has armed. Without that gate a fast worker's drain would tombstone
+/// plans the slow one has never seen, and it would serve a program missing swaps.
+#[test]
+fn an_unregistered_consumer_holds_the_whole_queue() {
+    noeta_stdlib::registry::default_seeded();
+    // Two workers declared; only one ever runs.
+    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(noeta_vm::HotChannel::new(2));
+    let bundle = deposit_edit(&mailbox, 1);
+
+    let result = run_hot_worker(&mailbox);
+    assert_eq!(
+        result.stdout, "v1\nv2\n",
+        "the one live worker did install it"
+    );
+    assert_eq!(
+        mailbox.resident_plans(),
+        1,
+        "the second declared worker has not drained — the plan stays"
+    );
+    assert!(
+        bundle.upgrade().is_some(),
+        "and its `Sites` bundle stays with it"
     );
 }

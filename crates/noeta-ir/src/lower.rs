@@ -378,18 +378,14 @@ pub struct LowerOptions {
     /// default; an embed session threads its own assembled set, so a session's compile honors
     /// its extensions.
     pub registry: &'static noeta_ext_abi::registry::Registry,
-    /// Expression-tier handlers declared **outside** the program being lowered (tier name → handler
-    /// fn), for a lowering that is a *fragment* of a larger program: a hot-swapped definition, a
-    /// REPL entry in a session whose earlier entries declared the tier.
+    /// The facts of the **enclosing program**, for a lowering that is a *fragment* of one: a
+    /// hot-swapped definition, a REPL entry in a session whose earlier entries declared what it
+    /// uses. Empty (the default) means "this **is** the whole program", which is every file-pipeline
+    /// compile.
     ///
-    /// `@html { … }` is a value only because some `@tier(html, …, expr: Html)` fn says so, and
-    /// [`expr_tier_handlers`](noeta_ast::desugar::expr_tier_handlers) reads that declaration off the
-    /// program in hand. A fragment does not contain it — the declaration lives in the package the
-    /// fragment imports — so lowering one in isolation resolved no handler and emitted the
-    /// "`@html` is not an expression tier" panic *in place of the template*: a hot swap that
-    /// compiled cleanly and then failed every request. The session carries the table forward
-    /// instead; the program's own declarations still win over it.
-    pub ambient_expr_tiers: HashMap<String, String>,
+    /// See [`ProgramFacts`] for what belongs here and why a fragment lowered without it produced
+    /// panics and silently wrong narrowings. [`ProgramFacts::under`] states the merge rule.
+    pub ambient: ProgramFacts,
 }
 
 impl Default for LowerOptions {
@@ -397,7 +393,7 @@ impl Default for LowerOptions {
         LowerOptions {
             real_isolates: false,
             registry: noeta_ext_abi::registry::single_registry_process(),
-            ambient_expr_tiers: HashMap::new(),
+            ambient: ProgramFacts::default(),
         }
     }
 }
@@ -671,7 +667,7 @@ pub fn lower_with_sites_opts(
     let LowerOptions {
         real_isolates,
         registry,
-        mut ambient_expr_tiers,
+        ambient,
     } = opts;
     // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) before lowering,
     // so `(type, method)` dispatch resolves them — against THIS lowering's registry, so an embed
@@ -685,16 +681,10 @@ pub fn lower_with_sites_opts(
         real_isolates,
         synth_step_name: None,
         synth_step_captures: None,
-        type_aliases: collect_type_aliases(program, registry),
-        native_type_imports: collect_native_type_imports(program, registry),
-        expr_tiers: {
-            // The program's own declarations shadow the ambient ones (a fragment redeclaring a
-            // tier means its handler), and are the whole table for a whole-program lowering.
-            ambient_expr_tiers.extend(noeta_ast::desugar::expr_tier_handlers(program));
-            ambient_expr_tiers
-        },
+        // What this lowering knows about the program: the code in hand, folded over whatever the
+        // caller says encloses it (empty for a whole program — see `LowerOptions::ambient`).
+        facts: ambient.under(program, registry),
         registry,
-        module_globals: module_global_names(program),
     };
     let top = lowerer.lower_top_level(&program.stmts)?;
     Ok(Program {
@@ -743,7 +733,45 @@ struct Lowerer<'a> {
     ///   its runtime tag.
     ///
     /// A plain (non-aliased) *user* import needs no entry — its local name is already the tag.
-    type_aliases: HashMap<String, String>,
+    ///
+    /// Everything lowering knows about the *program* rather than the node in hand — see
+    /// [`ProgramFacts`], which is the one place such state may live.
+    facts: ProgramFacts,
+    /// The extension registry a **native** expression tier's handler resolves against
+    /// (instance-registry IR5): an `@json` block's `ExtTier::handler` is looked up here, so an
+    /// embed session's own extension-declared expression tier lowers against *its* registry.
+    registry: &'static noeta_ext_abi::registry::Registry,
+}
+
+/// What lowering learns from **the whole program** instead of from the node it is lowering.
+///
+/// This exists because a lowering is not always given a whole program. A hot-swap fragment and a
+/// REPL entry are *pieces* of one — and every table here, derived by reading the program's
+/// top-level statements, is therefore empty or partial for them. Each such table was independently
+/// a bug: an `@html { … }` in a swapped body lowered to a panic because the `@tier` declaration is
+/// in the imported package; `x is Uuid` silently answered `false` because only a *changed* `use`
+/// rides in a fragment; a swapped `async` body that assigned a module global panicked because the
+/// state-machine desugar hoisted a global into a cell.
+///
+/// So: this struct is the single home for that state. A new table lowering derives from the program
+/// belongs **here**, not beside it as another `Lowerer` field — landing here is what forces the
+/// question "and what does a fragment see?" to be answered rather than skipped. The answer is
+/// [`LowerOptions::ambient`]: the facts of the enclosing program, which [`ProgramFacts::under`]
+/// folds beneath the ones the code in hand declares for itself.
+#[derive(Debug, Default, Clone)]
+pub struct ProgramFacts {
+    /// The runtime **narrowing identity** each `use`-imported local type name resolves to, so a
+    /// target (`x is MyId`, `x.as<Uuid>()`) matches the value's runtime tag in both backends (they
+    /// share this lowered IR). Two kinds of entry:
+    ///
+    /// - a **native** type (`use std.id.Uuid [as MyId]`) → its **qualified** identity
+    ///   (`std.id.Uuid`), which is what an extern value reports for narrowing — so a native target
+    ///   never collides with a same-short-named *user* type (whose runtime tag is the bare name).
+    /// - a **user-type alias** (`use App.User as Customer`) → the imported type's own name (`User`),
+    ///   its runtime tag.
+    ///
+    /// A plain (non-aliased) *user* import needs no entry — its local name is already the tag.
+    pub type_aliases: HashMap<String, String>,
     /// The **qualified identity** each leaf-imported native type's local name denotes (`Framing` →
     /// `std.http.Framing`), built from the program's own `use` statements — the rewrite
     /// [`Lowerer::lower_type_operand`] applies so a reflection turbofish keys on the name the
@@ -752,23 +780,67 @@ struct Lowerer<'a> {
     /// registry-wide short-name lookup on purpose: only a name this program actually imported is
     /// rewritten, so a program's own `Framing` is never redirected to a native type it never
     /// mentioned.
-    native_type_imports: HashMap<String, String>,
+    pub native_type_imports: HashMap<String, String>,
     /// The program's declared expression-tier handlers (tier name → handler fn name), so an
     /// [`Expr::TierExpr`] lowers as the handler call it means — the same
     /// [`noeta_ast::desugar::tier_expr_call`] construction the checker typed. The checker gated
     /// unknown/non-expr tiers (E0052), so a miss here is `Unsupported`, never a panic.
-    expr_tiers: HashMap<String, String>,
-    /// The extension registry a **native** expression tier's handler resolves against
-    /// (instance-registry IR5): an `@json` block's `ExtTier::handler` is looked up here, so an
-    /// embed session's own extension-declared expression tier lowers against *its* registry.
-    registry: &'static noeta_ext_abi::registry::Registry,
+    pub expr_tiers: HashMap<String, String>,
     /// Every top-level binding/`fn` name — the module globals. Threaded into the async/generator
     /// state-machine desugar so a **bare reassignment of a global** (`g.n = …`, `counter = …`) is
     /// kept as a global store rather than mis-hoisted into a state-machine cell (which would
     /// initialize a fresh `none` upvalue and shadow the real global — the reference reads a stale
     /// value). A global is never a capturable local, mirroring the compiler's free-variable
     /// analysis (which already filters globals out of captures).
-    module_globals: HashSet<String>,
+    pub module_globals: HashSet<String>,
+}
+
+impl ProgramFacts {
+    /// Read a program's own facts. For a whole-program lowering this is the entire table; for a
+    /// fragment it is the part the fragment happens to carry, which is why [`Self::under`] exists.
+    pub fn of(
+        program: &AstProgram,
+        registry: &'static noeta_ext_abi::registry::Registry,
+    ) -> ProgramFacts {
+        ProgramFacts {
+            type_aliases: collect_type_aliases(program, registry),
+            native_type_imports: collect_native_type_imports(program, registry),
+            expr_tiers: noeta_ast::desugar::expr_tier_handlers(program)
+                .into_iter()
+                .collect(),
+            module_globals: module_global_names(program),
+        }
+    }
+
+    /// Fold these (ambient) facts **under** `program`'s own, yielding what a lowering of `program`
+    /// should see.
+    ///
+    /// The merge rule differs per table, and this is the one place it is stated. The three
+    /// name → name maps **shadow**: an entry the code in hand declares wins, because redeclaring a
+    /// local name means the local one (a fragment that adds `use other.Uuid` means *that* `Uuid`).
+    /// `module_globals` **unions**: a global is a global no matter which side of the program the
+    /// lowering can see, and the set is only ever read as "is this name a global", never "whose".
+    pub fn under(
+        mut self,
+        program: &AstProgram,
+        registry: &'static noeta_ext_abi::registry::Registry,
+    ) -> ProgramFacts {
+        let own = ProgramFacts::of(program, registry);
+        self.type_aliases.extend(own.type_aliases);
+        self.native_type_imports.extend(own.native_type_imports);
+        self.expr_tiers.extend(own.expr_tiers);
+        self.module_globals.extend(own.module_globals);
+        self
+    }
+
+    /// Absorb a later program's facts into an accumulating set (a session adding an entry): same
+    /// per-table rules as [`Self::under`], with the newcomer winning.
+    pub fn absorb(&mut self, other: ProgramFacts) {
+        self.type_aliases.extend(other.type_aliases);
+        self.native_type_imports.extend(other.native_type_imports);
+        self.expr_tiers.extend(other.expr_tiers);
+        self.module_globals.extend(other.module_globals);
+    }
 }
 
 /// The top-level binding and `fn` names of a program — the module globals a nested function
@@ -995,12 +1067,13 @@ impl Lowerer<'_> {
     /// making `is`/`as`/`type_of` match a value's runtime tag. A no-op (plain clone) when the file
     /// declared no aliases, which is the overwhelmingly common case.
     fn resolve_type_aliases(&self, ty: &TypeRef) -> TypeRef {
-        if self.type_aliases.is_empty() {
+        if self.facts.type_aliases.is_empty() {
             return ty.clone();
         }
         match ty {
             TypeRef::Named { name, args, span } => TypeRef::Named {
                 name: self
+                    .facts
                     .type_aliases
                     .get(name.as_str())
                     .map(noeta_ast::Name::canonical)
@@ -1041,6 +1114,7 @@ impl Lowerer<'_> {
             // linked name, which is already the table's key.
             TypeRef::DynTrait { trait_name, span } => TypeRef::DynTrait {
                 trait_name: self
+                    .facts
                     .type_aliases
                     .get(trait_name.as_str())
                     .map(noeta_ast::Name::canonical)
@@ -1631,14 +1705,15 @@ impl Lowerer<'_> {
             // Sealed: only the globals the function explicitly named in `use (…)`.
             Some(allow) => {
                 let allowed: HashSet<&str> = allow.iter().map(String::as_str).collect();
-                self.module_globals
+                self.facts
+                    .module_globals
                     .iter()
                     .filter(|g| allowed.contains(g.as_str()))
                     .cloned()
                     .collect()
             }
             // An auto-capturing closure keeps the full outward rule.
-            None => self.module_globals.clone(),
+            None => self.facts.module_globals.clone(),
         }
     }
 
@@ -1828,7 +1903,8 @@ impl Lowerer<'_> {
     /// and `variants_of(type_name::<Framing>())` answers what `variants_of::<Framing>()` does.
     fn reflection_head_name(&self, ty: &TypeRef) -> String {
         let name = ty.head_name();
-        self.native_type_imports
+        self.facts
+            .native_type_imports
             .get(name.as_str())
             .cloned()
             .unwrap_or(name)
@@ -2639,7 +2715,8 @@ impl Lowerer<'_> {
                     .and_then(|t| t.handler)
                     .map(noeta_ast::desugar::ExprTierHandler::from_native_path)
                     .or_else(|| {
-                        self.expr_tiers
+                        self.facts
+                            .expr_tiers
                             .get(tier)
                             .cloned()
                             .map(noeta_ast::desugar::ExprTierHandler::Program)
@@ -3513,4 +3590,85 @@ impl Lowerer<'_> {
 /// collide with a source identifier.
 fn hidden_param_name(i: u32) -> String {
     format!("$ty{i}")
+}
+
+#[cfg(test)]
+mod program_facts_tests {
+    use super::*;
+
+    fn parse(src: &str) -> AstProgram {
+        let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "<facts>", src);
+        let lexed = noeta_lexer::lex(&source);
+        let parsed = noeta_parser::parse(&source, &lexed.tokens);
+        assert!(
+            lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty(),
+            "fixture should parse: {:?} {:?}",
+            lexed.diagnostics,
+            parsed.diagnostics
+        );
+        parsed.program
+    }
+
+    /// An empty registry, leaked once: these tests are about the merge rule, not about which
+    /// natives resolve, and `noeta-ir` links no extension units of its own (installing the process
+    /// default would need `noeta-stdlib`, which it deliberately does not depend on).
+    fn registry() -> &'static noeta_ext_abi::registry::Registry {
+        static REGISTRY: std::sync::OnceLock<noeta_ext_abi::registry::Registry> =
+            std::sync::OnceLock::new();
+        REGISTRY.get_or_init(|| noeta_ext_abi::registry::Registry::new(Vec::new()))
+    }
+
+    /// The merge rule, stated once here and once in [`ProgramFacts::under`]: the name → name maps
+    /// shadow (the code in hand wins), the global-name set unions.
+    #[test]
+    fn a_fragments_own_declarations_shadow_the_ambient_ones() {
+        let whole = parse(
+            "fn render(statics: List<string>, holes: List<() -> string>): int { return 1 }\n\
+             mut outer = 0\n",
+        );
+        let mut ambient = ProgramFacts::of(&whole, registry());
+        ambient
+            .expr_tiers
+            .insert("html".to_string(), "package.render".to_string());
+
+        // A fragment that declares nothing keeps every ambient entry.
+        let bare = parse("fn page(): int { return 2 }\n");
+        let folded = ambient.clone().under(&bare, registry());
+        assert_eq!(
+            folded.expr_tiers.get("html").map(String::as_str),
+            Some("package.render")
+        );
+        // …and its own globals JOIN the enclosing program's rather than replacing them.
+        assert!(folded.module_globals.contains("outer"));
+        assert!(folded.module_globals.contains("page"));
+
+        // A fragment that redeclares the tier means its own handler.
+        let shadowing = parse(
+            "@tier(html, text: \"html\", expr: int)\n\
+             fn mine(statics: List<string>, holes: List<() -> string>): int { return 3 }\n",
+        );
+        let folded = ambient.under(&shadowing, registry());
+        assert_eq!(
+            folded.expr_tiers.get("html").map(String::as_str),
+            Some("mine")
+        );
+    }
+
+    /// A whole-program lowering passes no ambient facts, so `under` must be exactly `of` — the
+    /// property that keeps every file-pipeline compile byte-identical to what it was before facts
+    /// became a thing a caller can supply.
+    #[test]
+    fn an_empty_ambient_set_leaves_a_programs_own_facts_untouched() {
+        let program = parse(
+            "use std.id.Uuid\n\
+             mut counter = 0\n\
+             fn f(): int { return 1 }\n",
+        );
+        let own = ProgramFacts::of(&program, registry());
+        let folded = ProgramFacts::default().under(&program, registry());
+        assert_eq!(own.type_aliases, folded.type_aliases);
+        assert_eq!(own.native_type_imports, folded.native_type_imports);
+        assert_eq!(own.expr_tiers, folded.expr_tiers);
+        assert_eq!(own.module_globals, folded.module_globals);
+    }
 }
