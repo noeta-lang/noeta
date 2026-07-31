@@ -707,11 +707,18 @@ impl<'m> Vm<'m> {
     /// Honor an observed cancellation request: latch it (so the worker's `Abort` is reported as
     /// [`IsolateOutcome::Cancelled`] rather than a failure), propagate it to every isolate this
     /// worker itself spawned — structured concurrency, downward: cancelling a subtree's root
-    /// cancels the subtree — and hand back the `Abort` that unwinds this worker's frames. Teardown
-    /// then runs exactly as it does for a completed body, so a cancelled worker's heap returns to
-    /// zero residency and its destructors fire.
+    /// cancels the subtree — and hand back the `Abort` that unwinds this worker's frames.
+    ///
+    /// **Disarms the poll on the way out**, which is load-bearing rather than tidy: the abort's
+    /// unwind and the teardown behind it both *run user code* — a frame local's `destruct`, then
+    /// every global's — on fresh frame stacks that re-enter the dispatch loop, and `run_destructor`
+    /// discards the `Abort` it gets back. A flag still set would therefore abort each destructor at
+    /// its very first frame transfer, silently, and a cancelled worker would skip the destructors a
+    /// completed one runs. The request has been honored exactly once; `cancel_observed` remembers
+    /// that, so nothing is lost by no longer asking.
     pub(crate) fn observe_cancel(&mut self) -> Abort {
         self.isolates.cancel_observed = true;
+        self.isolates.cancel_flag = None;
         for id in 0..self.isolates.isolates.len() as u32 {
             self.request_isolate_cancel(id);
         }

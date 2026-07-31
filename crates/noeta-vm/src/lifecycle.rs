@@ -1942,10 +1942,22 @@ impl<'m> Vm<'m> {
             ret_transform: RetTransform::None,
             upvalues: Vec::new(),
         });
+        // **A destructor is uninterruptible** (isolate-cancel): lift the worker's cancellation flag
+        // for the duration, so a cancel that lands mid-cleanup is observed at the next safepoint in
+        // ordinary code instead of truncating the cleanup. It has to be lifted rather than merely
+        // ignored, because the abort a cancellation raises is *discarded* right below — observing it
+        // here would end the destructor's body silently and then let the worker carry on as if
+        // nothing had been asked. `None` on every non-worker VM, so this is a pair of moves of a
+        // null pointer. Not restored once the request has been honored: `observe_cancel` clears the
+        // flag permanently, and the unwind behind it runs the remaining destructors through here.
+        let armed = self.isolates.cancel_flag.take();
         // A destructor returns unit (its body is run for its effects); discard it. An abort
         // inside a destructor has already recorded its diagnostic.
         if let Ok(v) = self.run(frames, regs) {
             release(v);
+        }
+        if !self.isolates.cancel_observed {
+            self.isolates.cancel_flag = armed;
         }
     }
 }

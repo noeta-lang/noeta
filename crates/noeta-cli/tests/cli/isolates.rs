@@ -552,3 +552,66 @@ fn run_real_isolate_cancel_is_joined_before_the_block_closes() {
         .success()
         .stdout("cancelled\nstopped\n0\n");
 }
+
+#[test]
+fn run_real_isolate_cancel_still_runs_the_workers_destructors() {
+    // A cancelled worker unwinds through the same path a panic takes, and that path *runs user
+    // code*: every live frame local's `destruct`, on a fresh frame stack that re-enters the dispatch
+    // loop. The cancellation poll therefore has to stand down before that happens — a flag still set
+    // aborts each destructor at its own first frame transfer, before its first op, and
+    // `run_destructor` discards the abort, so a cancelled worker would silently skip the cleanup a
+    // completed one does. Two mechanisms make that hold: `observe_cancel` clears the flag once the
+    // request has been honored, and `run_destructor` lifts it around every destructor besides, so a
+    // cancel landing *during* cleanup does not truncate it either.
+    //
+    // `held` lives in the synchronous frame the cancel interrupts, and its `destruct` must land
+    // exactly once — the same once an uncancelled run produces. (An `async fn`'s own locals live in
+    // the state machine's capture cells rather than a frame, and those are *not* destructor-aware on
+    // the worker path today — measured, and true of an uncancelled worker too, so it is a separate
+    // pre-existing gap and not something to pin here.) Worker stdout never returns to the parent, so
+    // the marker goes to real disk.
+    let dir = temp_root().join("noeta_cli_test_isolate_cancel_dtor");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let marker = dir.join("markers.log");
+    let marker_path = marker.to_str().expect("utf-8 path");
+    let src = format!(
+        "use std.{{io, fs}}\n\
+         use std.task.{{sleep}}\n\
+         class Res {{ pub tag: string\n\
+         fn new(t: string): Res {{ return Res {{ tag: t }} }}\n\
+         destruct {{ fs.append(\"{marker_path}\", \"x\\n\") }} }}\n\
+         fn spin(iters: int): int {{\n\
+         held = Res.new(\"held\")\n\
+         mut n = 0\n\
+         while n < iters {{ n = n + 1 }}\n\
+         return n + held.tag.len()\n\
+         }}\n\
+         async fn work(iters: int): int {{ return spin(iters) }}\n\
+         async fn run(): int {{\n\
+         concurrent {{\n\
+         h = isolate work(40000000)\n\
+         sleep(200).await\n\
+         h.cancel()\n\
+         io.outln(match h.join() {{ Ok(v) => \"ok=\" ~ v, Err(_) => \"cancelled\" }})\n\
+         }}\n\
+         return 0\n\
+         }}\n\
+         echo run().await"
+    );
+    let file = dir.join("main.noe");
+    std::fs::write(&file, &src).expect("write program");
+    lang()
+        .arg("run")
+        .arg(&file)
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .stdout("cancelled\n0\n");
+    let markers = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(
+        markers.lines().count(),
+        1,
+        "a cancelled worker must still run its live locals' destructors; got: {markers:?}"
+    );
+}
