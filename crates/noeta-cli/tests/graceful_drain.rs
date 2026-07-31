@@ -1,4 +1,7 @@
-//! Graceful drain + `--host` (server-hmr S0), end to end. `#[ignore]` (real port, real signal):
+//! Graceful drain + `--host` (server-hmr S0), end to end.
+//!
+//! `#[ignore]`d for the real port and signal it needs, and run by name from ci.yml's `jit` job and
+//! `scripts/gate.sh`'s `serve` group (`tests/cli/automation.rs` keeps both honest). By hand:
 //! `cargo test -p noeta-cli --test graceful_drain -- --ignored`.
 
 use std::io::{Read, Write};

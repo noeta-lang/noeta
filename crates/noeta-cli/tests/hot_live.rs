@@ -2,8 +2,11 @@
 //! server under `noeta serve --watch`. A hot-swappable edit pushes `{"type":"reload"}` to the
 //! live socket and closes it; the reconnect lands in a fresh session running the NEW code whose
 //! snapshot carries the PRESERVED signal state. A rejected (red-check) edit pushes an `error`
-//! frame — the overlay — and keeps the socket open. `#[ignore]` (real port, real processes,
-//! real fs events): `cargo test -p noeta-cli --test hot_live -- --ignored`.
+//! frame — the overlay — and keeps the socket open.
+//!
+//! `#[ignore]`d for the real port, processes and fs events it needs, and run by name from ci.yml's
+//! `jit` job and `scripts/gate.sh`'s `serve` group (`tests/cli/automation.rs` keeps both honest).
+//! By hand: `cargo test -p noeta-cli --test hot_live -- --ignored`.
 
 mod common;
 

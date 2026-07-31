@@ -1,6 +1,9 @@
 //! Impact-filtered test watch, end to end (server-hmr W3): under `noeta test --watch`, editing a
 //! leaf function reruns exactly the tests that (transitively) call it; an inert edit reruns
-//! nothing. `#[ignore]` (real processes, real fs events):
+//! nothing.
+//!
+//! `#[ignore]`d for the real processes and fs events it needs, and run by name from ci.yml's `jit`
+//! job and `scripts/gate.sh`'s `serve` group (`tests/cli/automation.rs` keeps both honest). By hand:
 //! `cargo test -p noeta-cli --test impact_watch -- --ignored`.
 
 use std::io::Read;

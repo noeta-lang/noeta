@@ -1,7 +1,10 @@
 //! `noeta serve` integration test (http-server S4): spawn the CLI serving a real handler, drive a
-//! real HTTP request over a loopback socket, and assert the routed response. `#[ignore]` so CI stays
-//! hermetic (it binds a real port and spawns a process) — run explicitly:
-//! `cargo test -p noeta-cli --test serve -- --ignored`.
+//! real HTTP request over a loopback socket, and assert the routed response.
+//!
+//! `#[ignore]`d because it binds a real port and spawns a process — a plain `cargo test` should not
+//! do that behind your back. It still runs on every CI run and every merge gate: ci.yml's `jit` job
+//! and `scripts/gate.sh`'s `serve` group name it, and `tests/cli/automation.rs` fails the build if
+//! they stop. By hand: `cargo test -p noeta-cli --test serve -- --ignored`.
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};

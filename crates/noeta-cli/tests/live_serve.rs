@@ -1,7 +1,10 @@
 //! LiveView end-to-end over a real socket (server-hmr L2): serve the bundled counter example,
 //! fetch the page and the bundled client shim over plain HTTP, then speak the view/diff protocol
 //! through a real RFC 6455 websocket — snapshot on connect, JSON events in, minimal patch frames
-//! out. `#[ignore]` so CI stays hermetic (real port, real process) — run explicitly:
+//! out.
+//!
+//! `#[ignore]`d for the real port and process it needs, and run by name from ci.yml's `jit` job and
+//! `scripts/gate.sh`'s `serve` group (`tests/cli/automation.rs` keeps both honest). By hand:
 //! `cargo test -p noeta-cli --test live_serve -- --ignored`.
 
 mod common;

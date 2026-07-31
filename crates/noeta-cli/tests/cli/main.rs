@@ -9,6 +9,7 @@
 
 mod support;
 
+mod automation;
 mod bench;
 mod build;
 mod cache;

@@ -12,7 +12,8 @@
 //! The reading test is the one that would catch a body that only works when it arrives all at
 //! once — it deliberately splits a frame across two writes, and splits one CRLF down the middle.
 //!
-//! `#[ignore]` so CI stays hermetic (real ports, real processes) — run explicitly:
+//! `#[ignore]`d for the real ports and processes these need, and run by name from ci.yml's `jit` job
+//! and `scripts/gate.sh`'s `serve` group (`tests/cli/automation.rs` keeps both honest). By hand:
 //! `cargo test -p noeta-cli --test live_stream -- --ignored`.
 
 use std::io::{Read, Write};

@@ -17,16 +17,20 @@
 # hide the state of the rest; everything runs, then the script exits non-zero.
 #
 #   scripts/gate.sh --quick     the inner loop  — fmt + both clippy splits           1m20s / 2m10s
-#   scripts/gate.sh             the merge gate  — + tests, doc samples, JIT oracles    ~15m / 35m
+#   scripts/gate.sh             the merge gate  — + tests, doc samples, JIT oracles,   ~15m / 35m
+#                                                 serve/hot-reload e2e
 #   scripts/gate.sh --full      full CI parity  — + wasm, miri, editor tooling         +2m and up
 #
 # Those are MEASURED wall times on a 20-core box, `warm target dir / cold target dir`, with
 # CARGO_BUILD_JOBS=8. The two long poles in the merge gate are `cargo test --workspace` (4m50s warm,
 # 9m53s cold) and the lean-CLI build (8m warm, 9m cold — it is a second, Cranelift-free link of the
-# whole CLI); the JIT group adds 13m cold and a few minutes warm. `--full` adds miri (1m12s, 63
-# tests) and the editor tooling (4s) — cheap. Its wasm legs were NOT measured here: they SKIP
-# without `wasmtime` on PATH and without the wasm targets installed *for the gating toolchain*, and
-# the runner/playground/component builds behind them are the expensive part when they do run.
+# whole CLI); the JIT group adds 13m cold and a few minutes warm. The serve/hot-reload group adds
+# 6s of test time on top of a build the `jit` group has already paid for (nine suites, thirteen
+# tests, run serially) — under 1% of the tier either way, which is why it is here and not deferred
+# to `--full`. `--full` adds miri (1m12s, 63 tests) and the editor tooling (4s) — cheap. Its wasm
+# legs were NOT measured here: they SKIP without `wasmtime` on PATH and without the wasm targets
+# installed *for the gating toolchain*, and the runner/playground/component builds behind them are
+# the expensive part when they do run.
 #
 # Budget accordingly, and do not be surprised: a gate whose cost is a surprise gets skipped, and a
 # skipped gate is exactly what we already have.
@@ -278,6 +282,10 @@ has_target() {
 #   test/docs/jit (tier 2, default)  — the oracles: conformance, eval↔VM differential, leak, the
 #                                     doc samples, and the JIT's own differential. This is the set
 #                                     a merge to `main` must clear.
+#   serve         (tier 2, default)  — the `#[ignore]`d serving/hot-reload e2e suites, which until
+#                                     now ran on no automation whatsoever. Six seconds on top of a
+#                                     build tier 2 already does, and the only thing that watches the
+#                                     watcher. Mirrors ci.yml's `jit` job, where the step lives.
 #   wasm/miri/editors (tier 3)       — portability, `unsafe` soundness, and the editor grammars.
 #                                     Real gates, but they need wasmtime/nightly+miri/npm and they
 #                                     dominate the runtime, so they are opt-in per merge, not per
@@ -330,6 +338,29 @@ step 2 jit "JIT differential (cancel-poll arm)" -- \
     "${CARGO[@]}" run -p noeta-conformance --features jit --locked -- --jit-differential --cancel-poll
 step 2 jit "JIT-enabled CLI (integration + doc samples)" -- \
     "${CARGO[@]}" test -p noeta-cli --locked
+
+# --- serve: the hot-reload / serving e2e suites, which ran on no automation at all --------------
+# `#[ignore]`d (real ports, real child processes, real fs events) and therefore run by nothing:
+# ci.yml excludes `noeta-cli` from the workspace suite and its other CLI step skips ignored tests.
+# The whole hot-reload story was gated on a human typing `-- --ignored`, which is how a hot swap
+# that silently no-op'd inside a package lived on. Named here and in ci.yml (`jit` job, where the
+# shipped JIT-enabled CLI is already built, so this step is runtime only); `tests/cli/automation.rs`
+# fails the build if a new ignored suite appears in neither list.
+#
+# Measured before being wired in: 80 consecutive runs of all nine suites, 720 suite-runs, zero
+# failures — 20 at ambient load, 20 beside a lean-CLI build, 20 beside a release build, 20 with
+# unrestricted intra-suite threads. ~6s serial for the family.
+#
+# `--test-threads=1` anyway, and cargo runs the targets one after another. Unrestricted was 4.5s
+# rather than 6.0s here, but "here" is 20 cores; a GitHub runner has 2, and each of these tests waits
+# on a listener it just spawned against a 2.5–4s deadline. Three servers sharing two cores is the
+# one way to turn a real deadline into a flake, and 1.5s is not worth it.
+step 2 serve "serve & hot-reload e2e (real sockets, --ignored)" -- \
+    "${CARGO[@]}" test -p noeta-cli --locked \
+    --test serve --test live_serve --test live_stream --test graceful_drain \
+    --test parallel_serve --test hot_serve --test hot_live --test parallel_hot \
+    --test impact_watch \
+    -- --ignored --test-threads=1
 
 # --- wasm: the portability invariant + the wasm/browser/serve oracles --------------------------
 if [[ "$TC" == "default" ]]; then

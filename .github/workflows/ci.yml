@@ -154,6 +154,32 @@ jobs:
       # exercise the production hot-counter JIT end-to-end (real-host `noeta run`/`test`). Gate that path.
       - name: JIT-enabled CLI (integration + doc samples)
         run: cargo test -p noeta-cli --locked
+      # The serve / hot-reload / watch e2e suites. They are `#[ignore]`d — a developer typing
+      # `cargo test` should not have real ports bound and real child processes spawned underneath
+      # them — so, exactly like the composed-toolchain step in the `test` job, CI names them.
+      #
+      # Nothing named them before, and the whole hot-reload and serving story therefore ran on no
+      # machine but a developer's, when they remembered `-- --ignored`. That is how a hot swap that
+      # silently no-op'd inside a package survived: the watcher printed `[hot] swapped: fetch` while
+      # the live server went on serving the old body, and `hot_serve` — the test that asserts
+      # precisely that — was never executed. `tests/cli/automation.rs` now fails the build if a new
+      # ignored suite appears without a step here, so this list cannot quietly fall behind again.
+      #
+      # Run here, in the `jit` job, because this is where the *shipped* CLI is built: the binary
+      # these tests spawn defaults to the `jit` feature, so hot-swapping code that may already be
+      # tier-1 compiled is the configuration users actually run. The suites are feature-independent
+      # otherwise, so running them a second time under `--no-default-features` would buy no signal.
+      #
+      # `--test-threads=1`, and cargo runs the targets one after another: every test here waits a
+      # few seconds for a listener it just spawned, and a 2-core runner that is also running three
+      # other servers is the one way to make these flaky. Serial, the whole family is ~30s.
+      - name: serve & hot-reload e2e (real sockets, real processes, real fs events)
+        run: >
+          cargo test -p noeta-cli --locked
+          --test serve --test live_serve --test live_stream --test graceful_drain
+          --test parallel_serve --test hot_serve --test hot_live --test parallel_hot
+          --test impact_watch
+          -- --ignored --test-threads=1
       # The shipped examples are code users copy and the docs link to by path, so a language change
       # must not be able to invalidate them unnoticed — it twice did (the sealed-fn and no-shadowing
       # rules each broke a LiveView example, and both sat broken because the only tests referencing
