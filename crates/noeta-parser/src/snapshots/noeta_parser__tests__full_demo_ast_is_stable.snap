@@ -5,11 +5,17 @@ expression: pretty(src)
 (program @0..2707
   (use App.Models [User] @669..689)
   (use std.id [next_id] @690..711)
-  (struct Item [price qty] @713..750)
-  (enum-backed Status [Pending Paid Refunded] @752..846)
+  (struct Item [price: float qty: int] @713..750)
+  (enum-backed Status: string [Pending= Paid= Refunded=] @752..846
+    (variant-value Pending
+      (str "pending" @788..797))
+    (variant-value Paid
+      (str "paid" @810..816))
+    (variant-value Refunded
+      (str "refunded" @833..843)))
   (enum OrderError [Empty NegativePrice(index: int)] @848..909)
-  (class Order [id customer items mut status] @911..1549
-    (fn new [id customer items] @1006..1162
+  (class Order [id: int customer: User items: List<Item> mut status: Status] @911..1549
+    (fn new [id: int customer: User items: List<Item>]: Order @1006..1162
       (return @1074..1156
         (object Order @1081..1155
           (field id @1089..1095
@@ -21,7 +27,7 @@ expression: pretty(src)
           (field status @1131..1153
             (member Pending @1139..1153
               (ident Status @1139..1145))))))
-    (fn total [] @1168..1259
+    (fn total []: float @1168..1259
       (return @1196..1253
         (call @1203..1252
           (member sum @1203..1250
@@ -35,7 +41,7 @@ expression: pretty(src)
                     (ident it @1228..1230))
                   (member qty @1239..1245
                     (ident it @1239..1241)))))))))
-    (fn label [] @1265..1547
+    (fn label []: string @1265..1547
       (return @1294..1541
         (match @1301..1540
           (member status @1307..1318
@@ -65,7 +71,7 @@ expression: pretty(src)
                 (member id @1511..1518
                   (ident self @1511..1515)))
               (lit " refunded")))))))
-  (fn validate [items] @1551..1843
+  (fn validate [items: List<Item>]: Result<void, OrderError> @1551..1843
     (if @1614..1679
       (binary "==" @1617..1633
         (call @1617..1628
@@ -99,7 +105,7 @@ expression: pretty(src)
     (return @1829..1841
       (call @1836..1840
         (ident Ok @1836..1838))))
-  (fn place [items customer] @1845..1995
+  (fn place [items: List<Item> customer: User]: Result<Order, OrderError> @1845..1995
     (expr-stmt @1922..1939
       (try @1922..1938
         (call @1922..1937
@@ -115,7 +121,7 @@ expression: pretty(src)
             (ident next_id @1964..1971))
           (ident customer @1975..1983)
           (ident items @1985..1990)))))
-  (fn describe [items customer] @2016..2358
+  (fn describe [items: List<Item> customer: User]: string @2016..2358
     (return @2077..2356
       (match @2084..2355
         (call @2090..2112

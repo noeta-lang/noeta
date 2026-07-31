@@ -3,7 +3,7 @@ source: crates/noeta-parser/src/lib.rs
 expression: "pretty(\"fn f(x: dyn): dyn { a = x.as<int | string>(); b = x.as<?int | string>(); return a; }\")"
 ---
 (program @0..84
-  (fn f [x] @0..84
+  (fn f [x: dyn]: dyn @0..84
     (binding a @20..45
       (as int | string @24..44
         (ident x @24..25)))

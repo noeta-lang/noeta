@@ -4,6 +4,24 @@
 //! structs, which is noisy and unstable). Spans are rendered as `@start..end` so a
 //! span regression shows up directly in a snapshot diff. It is also the printer the
 //! parse→print→parse property test (Slice 9) builds on.
+//!
+//! # It is also the fmt safety gate, so: **no `..` in an arm**
+//!
+//! `noeta fmt` promises its output "re-parses to the same AST modulo spans" and implements that by
+//! comparing *this* rendering with the span annotations erased (`noeta-fmt/src/safety.rs`). A field
+//! no arm here prints is therefore a field the formatter may silently rewrite — which is not a
+//! hypothetical: a `..` on the [`Stmt::TierBlock`] arm hid `attached`, and a printer rule that
+//! collapsed `@test { fn t() {…} }` into `@test fn t()` flipped it past the gate; an unqualified
+//! payload-less variant pattern rendered like a catch-all binding, and the printer was dropping
+//! exactly the parens that tell them apart, turning `Ok() => …` into a pattern that matches
+//! everything.
+//!
+//! So every arm **binds every field by name**, and a field that is deliberately not rendered is
+//! `_`-bound rather than swept up by `..`. That makes the decision visible at the site and makes a
+//! newly added field a compile error here instead of a silent hole in the safety property. The only
+//! fields currently `_`-bound are spans (formatting shifts every byte offset by construction, so
+//! the gate erases them on purpose) — see `plans/fmt-structural-safety-gate.md` for the full survey
+//! and for the structural comparison that should eventually replace this proxy.
 
 use crate::{
     AttrArg, AttrValue, CallArg, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl,
@@ -41,6 +59,12 @@ fn span(s: Span) -> String {
 /// prevent, and a worse one here: dropping `#[Arg(short: "r")]` changes what a signature-driven
 /// framework generates while leaving the program's own behaviour identical, so nothing else would
 /// notice.
+///
+/// The **type annotation** and the *presence* of a **default** are rendered for the same reason:
+/// the formatter re-emits both from the AST, so dropping `: int` (which is what the checker checks
+/// the argument against) or a ` = expr` (which is what makes the parameter optional) would
+/// otherwise compare equal. The default's *expression* is rendered separately, as a child of the
+/// declaration — it can be arbitrarily large, and a flat list is the wrong place for it.
 fn param_list(params: &[Param]) -> String {
     params
         .iter()
@@ -50,10 +74,77 @@ fn param_list(params: &[Param]) -> String {
                 .iter()
                 .map(|a| format!("#[{}{}] ", a.name, attr_args_str(&a.args)))
                 .collect();
-            format!("{attrs}{}", p.name)
+            let ty =
+                p.ty.as_ref()
+                    .map(|t| format!(": {}", type_ref_str(t)))
+                    .unwrap_or_default();
+            let default = if p.default.is_some() { "=" } else { "" };
+            format!("{attrs}{}{ty}{default}", p.name)
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Emit `(<label> <name> …expr…)` as a child line — the declaration-attached expressions the head
+/// line can only mark as present: a parameter's or field's default, an enum variant's backing value.
+///
+/// They are part of the declaration's meaning (`x: int = 1` and `x: int = 2` are different
+/// programs) and the formatter re-emits each of them through the ordinary expression printer, so a
+/// printing bug in one is a program change. Rendering only the marker in the head line, as this
+/// printer did, made every such bug invisible to the fmt safety gate.
+fn expr_child(out: &mut String, level: usize, label: &str, name: &str, value: &Expr) {
+    out.push('\n');
+    indent(out, level);
+    out.push_str(&format!("({label} {name}\n"));
+    value.pretty(out, level + 1);
+    out.push(')');
+}
+
+/// The `impl Trait { … }` blocks written inside a type body, as child lines.
+///
+/// A block's methods are *also* flattened into the declaration's `methods` list, so the bodies were
+/// already compared — but which trait each belongs to lived only here, and here was unrendered. A
+/// formatter that emitted an impl block's method as an inherent one (or moved it between blocks)
+/// produced a program with different `impls` and an identical `methods` list, and the gate compared
+/// the two equal. The member *names* are listed so the grouping, not just the trait, is compared.
+fn impl_blocks(out: &mut String, level: usize, impls: &[crate::ImplBlock]) {
+    for b in impls {
+        let args = if b.trait_args.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<{}>",
+                b.trait_args
+                    .iter()
+                    .map(type_ref_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let names: Vec<&str> = b.methods.iter().map(|m| m.name.as_str()).collect();
+        out.push('\n');
+        indent(out, level);
+        out.push_str(&format!(
+            "(impl-block {}{args} [{}]{})",
+            b.trait_name,
+            names.join(" "),
+            assoc_bindings_str(&b.assoc_bindings)
+        ));
+    }
+}
+
+/// An impl's `type Name = Concrete;` associated-type bindings, or the empty string when it has
+/// none. They resolve `Self::Name` in the trait's signatures for this implementor, so dropping or
+/// re-pointing one changes what the checker resolves — it belongs in the gate.
+fn assoc_bindings_str(bindings: &[(String, TypeRef)]) -> String {
+    if bindings.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = bindings
+        .iter()
+        .map(|(n, t)| format!("{n}={}", type_ref_str(t)))
+        .collect();
+    format!(" {{{}}}", parts.join(", "))
 }
 
 /// An enum variant's payload list, for the AST rendering the fmt safety gate compares.
@@ -150,13 +241,23 @@ impl Pretty for Stmt {
             Stmt::Binding {
                 mut_decl,
                 name,
+                name_span: _,
+                ty,
                 value,
                 span: s,
-                ..
             } => {
                 indent(out, level);
                 let kw = if *mut_decl { "binding-mut" } else { "binding" };
-                out.push_str(&format!("({kw} {name} {}\n", span(*s)));
+                // The **type annotation** is the boundary the value is checked against and the only
+                // way to type an otherwise un-inferable value (`acc: List<int> = []`), so a
+                // formatter that dropped or altered it would change what the checker accepts. It is
+                // re-emitted from the AST, and it was not in this dump — rendered now, and only
+                // when written, so an unannotated binding's snapshot is unchanged.
+                let ty = ty
+                    .as_ref()
+                    .map(|t| format!(": {}", type_ref_str(t)))
+                    .unwrap_or_default();
+                out.push_str(&format!("({kw} {name}{ty} {}\n", span(*s)));
                 value.pretty(out, level + 1);
                 out.push(')');
             }
@@ -262,8 +363,8 @@ impl Pretty for Stmt {
             } => {
                 indent(out, level);
                 let pat = match pattern {
-                    ForPattern::Single { name, .. } => name.clone(),
-                    ForPattern::Tuple { names, .. } => {
+                    ForPattern::Single { name, name_span: _ } => name.clone(),
+                    ForPattern::Tuple { names, span: _ } => {
                         let names: Vec<&str> = names.iter().map(|(n, _)| n.as_str()).collect();
                         format!("({})", names.join(", "))
                     }
@@ -315,14 +416,25 @@ impl Pretty for Stmt {
             }
             Stmt::TierBlock {
                 tier,
+                tier_span: _,
                 args,
                 items,
                 doc_text,
+                attached,
                 span: s,
-                ..
             } => {
                 indent(out, level);
                 out.push_str(&format!("(tier {tier}{} {}", attr_args_str(args), span(*s)));
+                // `attached` — "there were no braces" — is part of the block's identity, not a
+                // layout detail: `@test fn t() {…}` and `@test { fn t() {…} }` produce otherwise
+                // byte-identical `TierBlock`s, and the checker treats them differently (E0054's
+                // declared-site check runs only on an attached block). The formatter once collapsed
+                // the braced form into the annotation form and the gate compared the two EQUAL,
+                // because this arm destructured with `..`. Rendered only when set, so a braced
+                // block's snapshot is unchanged.
+                if *attached {
+                    out.push_str(" :attached");
+                }
                 if let Some(text) = doc_text {
                     out.push_str(&format!(" :text {text:?}"));
                 }
@@ -367,11 +479,11 @@ impl Pretty for FnDecl {
             .directives
             .iter()
             .map(|d| {
-                let args = if d.args.is_empty() {
-                    String::new()
-                } else {
-                    format!("({})", d.args.len())
-                };
+                // The argument **values**, not just how many there were. A directive's args are the
+                // tier's knobs (`@bench(iterations: 1000)`), read back by its runner, so
+                // `@bench(1000)` and `@bench(2000)` are different programs — and they rendered
+                // identically as `@bench(1)` while only the arity was printed.
+                let args = attr_args_str(&d.args);
                 let body = match &d.doc_text {
                     Some(text) => format!(" {{{text}}}"),
                     None => String::new(),
@@ -392,8 +504,15 @@ impl Pretty for FnDecl {
             let names: Vec<&str> = self.captures.iter().map(|(n, _)| n.as_str()).collect();
             format!(" use ({})", names.join(", "))
         };
+        // The declared **return type**. The checker types every `return` against it, and the `?`
+        // position rule (E0012) reads its shape, so dropping or changing it is a program change —
+        // and the formatter re-emits it from the AST. It was not in this dump at all.
+        let ret = match &self.ret {
+            Some(t) => format!(": {}", type_ref_str(t)),
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "({tier}{directives}{attrs}{}fn {}{}{}{captures} [{}] {}",
+            "({tier}{directives}{attrs}{}fn {}{}{}{captures} [{}]{ret} {}",
             if self.is_async { "async " } else { "" },
             pub_str(self.is_public),
             self.name,
@@ -401,6 +520,12 @@ impl Pretty for FnDecl {
             param_list(&self.params),
             span(self.span)
         ));
+        // Parameter defaults, whose presence the parameter list marks with `=`.
+        for p in &self.params {
+            if let Some(default) = &p.default {
+                expr_child(out, level + 1, "param-default", &p.name, default);
+            }
+        }
         for stmt in &self.body {
             out.push('\n');
             stmt.pretty(out, level + 1);
@@ -421,15 +546,35 @@ impl Pretty for EnumDecl {
             .variants
             .iter()
             .map(|v| {
+                // A variant's own `#[...]` attributes reach the reflection manifest exactly as a
+                // field's do, and a backed variant's `= value` is what the enum *is*; both were
+                // dropped here. The backing expression itself is a child line (below).
+                let attrs: String = v
+                    .attrs
+                    .iter()
+                    .map(|a| format!("#[{}{}] ", a.name, attr_args_str(&a.args)))
+                    .collect();
+                let backed = if v.backed_value.is_some() { "=" } else { "" };
                 if v.fields.is_empty() {
-                    v.name.clone()
+                    format!("{attrs}{}{backed}", v.name)
                 } else {
-                    format!("{}({})", v.name, variant_payload_list(&v.fields))
+                    format!(
+                        "{attrs}{}({}){backed}",
+                        v.name,
+                        variant_payload_list(&v.fields)
+                    )
                 }
             })
             .collect();
+        // Which primitive backs the enum, not merely *that* one does: `enum S: string` and
+        // `enum S: int` both printed `enum-backed`, so a formatter that rewrote the backing type
+        // compared equal.
+        let backing = match &self.backing {
+            Some(t) => format!(": {}", type_ref_str(t)),
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "({kind} {}{}{}{} [{}] {}",
+            "({kind} {}{}{}{}{backing} [{}] {}",
             decorators_str(&self.decorators),
             pub_str(self.is_public),
             self.name,
@@ -437,6 +582,11 @@ impl Pretty for EnumDecl {
             variants.join(" "),
             span(self.span)
         ));
+        for v in &self.variants {
+            if let Some(value) = &v.backed_value {
+                expr_child(out, level + 1, "variant-value", &v.name, value);
+            }
+        }
         // An enum body may carry methods (the unified body, object-model slice 3); print them like a
         // class's so a method-bearing enum is visible in the AST snapshot. A variant-only enum prints
         // exactly as before (no trailing methods).
@@ -444,6 +594,7 @@ impl Pretty for EnumDecl {
             out.push('\n');
             method.pretty(out, level + 1);
         }
+        impl_blocks(out, level + 1, &self.impls);
         out.push(')');
     }
 }
@@ -561,15 +712,34 @@ fn decorators_str(d: &crate::Decorators) -> String {
     }
 }
 
+/// One `struct`/`class` field, for the S-expression dump.
+///
+/// A trailing `=` marks a field carrying a default (slice 5) — the expression itself is not inlined
+/// (it can be multi-line); it is rendered as a `(field-default …)` child of the declaration, so the
+/// gate still compares it.
+///
+/// The declared **type**, the `pub` marker and the field's `#[...]` attributes are rendered for the
+/// same reason every other declaration detail is: the formatter re-emits all three from the AST, and
+/// none of them was in this dump — so dropping a field's `: int`, its visibility, or its `#[Column]`
+/// compared equal to the gate.
 fn field_decl_str(field: &FieldDecl) -> String {
-    // A trailing `=` marks a field carrying a default (slice 5) — the expression itself is not
-    // inlined (it can be multi-line), only its presence is surfaced in the snapshot.
+    let attrs: String = field
+        .attrs
+        .iter()
+        .map(|a| format!("#[{}{}] ", a.name, attr_args_str(&a.args)))
+        .collect();
+    let mut_marker = if field.mut_field { "mut " } else { "" };
+    let ty = field
+        .ty
+        .as_ref()
+        .map(|t| format!(": {}", type_ref_str(t)))
+        .unwrap_or_default();
     let default = if field.default.is_some() { " =" } else { "" };
-    if field.mut_field {
-        format!("mut {}{default}", field.name)
-    } else {
-        format!("{}{default}", field.name)
-    }
+    format!(
+        "{attrs}{}{mut_marker}{}{ty}{default}",
+        pub_str(field.is_public),
+        field.name
+    )
 }
 
 /// Render a declaration's generic parameters as `<A, B>` (or `<T: Comparable + Display>` when
@@ -627,21 +797,28 @@ fn attr_args_str(args: &[AttrArg]) -> String {
     format!("({})", parts.join(", "))
 }
 
+/// A comma-separated rendering of a list of attribute-argument values.
+fn attr_value_list(items: &[AttrValue]) -> String {
+    items
+        .iter()
+        .map(attr_value_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// A compact rendering of an attribute-argument literal value, enough to make a snapshot legible.
 pub(crate) fn attr_value_str(value: &AttrValue) -> String {
     match value {
         AttrValue::Str(s) => format!("{s:?}"),
         AttrValue::Int(n) => n.to_string(),
-        AttrValue::Float(f) => f.to_string(),
+        // `{:?}`, not `to_string()`: a whole-valued float renders `1` through `Display`, which is
+        // exactly what `Int(1)` renders — two different attribute arguments, one spelling.
+        AttrValue::Float(f) => format!("{f:?}"),
         AttrValue::Bool(b) => b.to_string(),
-        AttrValue::List(items) | AttrValue::Set(items) => format!(
-            "[{}]",
-            items
-                .iter()
-                .map(attr_value_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        AttrValue::List(items) => format!("[{}]", attr_value_list(items)),
+        // A set is `#{…}`, its own surface form. Sharing the list arm meant `[1, 2]` and `#{1, 2}`
+        // — different values of different types — rendered identically.
+        AttrValue::Set(items) => format!("#{{{}}}", attr_value_list(items)),
         AttrValue::Map(entries) => format!(
             "{{{}}}",
             entries
@@ -650,10 +827,28 @@ pub(crate) fn attr_value_str(value: &AttrValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        // With its payload: `Status.Code(404)` and `Status.Code(500)` construct different attribute
+        // instances, and both rendered as the bare `Status.Code`.
         AttrValue::Enum {
-            enum_name, variant, ..
-        } => format!("{enum_name}.{variant}"),
-        AttrValue::Struct { type_name, .. } => format!("{type_name} {{…}}"),
+            enum_name,
+            variant,
+            args,
+        } if args.is_empty() => format!("{enum_name}.{variant}"),
+        AttrValue::Enum {
+            enum_name,
+            variant,
+            args,
+        } => format!("{enum_name}.{variant}({})", attr_value_list(args)),
+        // With its fields: `Point { x: 1 }` rendered as `Point {…}`, so every struct-valued
+        // attribute argument of a given type compared equal to every other.
+        AttrValue::Struct { type_name, fields } => format!(
+            "{type_name} {{{}}}",
+            fields
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", attr_value_str(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         // Rendered WITH its generic arguments: the fmt safety gate compares this output, so a
         // formatter dropping the `<Json>` from `@derive(Serialize<Json>)` must be detectable.
         AttrValue::TypeRef { name, args } if args.is_empty() => name.to_string(),
@@ -677,12 +872,18 @@ impl Pretty for StructDecl {
             fields.join(" "),
             span(self.span)
         ));
+        for f in &self.fields {
+            if let Some(default) = &f.default {
+                expr_child(out, level + 1, "field-default", &f.name, default);
+            }
+        }
         // A struct body may carry methods (the unified body) — print them like a class's, so a
         // formatter dropping one is a detected change. A field-only struct prints as before.
         for method in &self.methods {
             out.push('\n');
             method.pretty(out, level + 1);
         }
+        impl_blocks(out, level + 1, &self.impls);
         out.push(')');
     }
 }
@@ -700,9 +901,28 @@ impl Pretty for ClassDecl {
             fields.join(" "),
             span(self.span)
         ));
+        for f in &self.fields {
+            if let Some(default) = &f.default {
+                expr_child(out, level + 1, "field-default", &f.name, default);
+            }
+        }
         for method in &self.methods {
             out.push('\n');
             method.pretty(out, level + 1);
+        }
+        impl_blocks(out, level + 1, &self.impls);
+        // The `destruct { … }` block. It is not a method — it has no call site and never appeared
+        // in `methods` — so it was rendered nowhere, and a formatter that dropped it silently
+        // removed the code the collector runs when the last reference to an instance goes away.
+        if let Some(body) = &self.destructor {
+            out.push('\n');
+            indent(out, level + 1);
+            out.push_str("(destruct");
+            for stmt in body {
+                out.push('\n');
+                stmt.pretty(out, level + 2);
+            }
+            out.push(')');
         }
         out.push(')');
     }
@@ -724,9 +944,10 @@ impl Pretty for ImplDecl {
             )
         };
         out.push_str(&format!(
-            "(impl {}{args} for {} {}",
+            "(impl {}{args} for {}{} {}",
             self.trait_name,
             self.target,
+            assoc_bindings_str(&self.assoc_bindings),
             span(self.span)
         ));
         for method in &self.methods {
@@ -745,15 +966,42 @@ impl Pretty for TraitDecl {
         // formatter could drop one without the gate noticing. They are misplaced directives (the
         // checker reports E0054), but "the checker rejects it" is not a reason for the *formatter*
         // to be free to silently rewrite the program: fmt runs on code that does not yet check.
+        //
+        // `pub` and the generic parameters were missing for the same class of reason — nothing
+        // rendered them on this path — even though `pub` decides whether the trait is importable at
+        // all and `<Fmt>` decides what an `impl` must instantiate.
         out.push_str(&format!(
-            "(trait {}{} {}",
+            "(trait {}{}{}{} {}",
             decorators_str(&self.decorators),
+            pub_str(self.is_public),
             self.name,
+            type_params_str(&self.type_params),
             span(self.span)
         ));
+        // Associated types: `type Name;` (every impl must bind it) or `type Name = Default;`.
+        for a in &self.assoc_types {
+            out.push('\n');
+            indent(out, level + 1);
+            match &a.default {
+                Some(t) => out.push_str(&format!("(assoc-type {} = {})", a.name, type_ref_str(t))),
+                None => out.push_str(&format!("(assoc-type {})", a.name)),
+            }
+        }
         for method in &self.methods {
             out.push('\n');
-            method.sig.pretty(out, level + 1);
+            // `has_default` distinguishes a **required** method from a default whose body happens
+            // to be empty — `fn f(): int` and `fn f(): int {}` render the same signature with the
+            // same (empty) body list, and the checker demands an `impl` provide the first and not
+            // the second. Wrapping the required ones is the only thing in this dump that tells them
+            // apart.
+            if method.has_default {
+                method.sig.pretty(out, level + 1);
+            } else {
+                indent(out, level + 1);
+                out.push_str("(required\n");
+                method.sig.pretty(out, level + 2);
+                out.push(')');
+            }
         }
         out.push(')');
     }
@@ -788,30 +1036,39 @@ impl Pretty for ObjectLit {
 /// Render a pattern to a compact inline form for snapshots.
 fn pattern_str(pattern: &Pattern) -> String {
     match pattern {
-        Pattern::Wildcard { .. } => "_".to_string(),
-        Pattern::Binding { name, .. } => name.clone(),
-        Pattern::Int { value, .. } => value.to_string(),
-        Pattern::Str { value, .. } => format!("{value:?}"),
-        Pattern::Bool { value, .. } => value.to_string(),
+        Pattern::Wildcard { span: _ } => "_".to_string(),
+        Pattern::Binding { name, span: _ } => name.clone(),
+        Pattern::Int { value, span: _ } => value.to_string(),
+        Pattern::Str { value, span: _ } => format!("{value:?}"),
+        Pattern::Bool { value, span: _ } => value.to_string(),
         Pattern::Variant {
             type_name,
             variant,
             bindings,
-            ..
+            span: _,
         } => {
             let head = match type_name {
                 Some(t) => format!("{t}.{variant}"),
                 None => variant.clone(),
             };
-            if bindings.is_empty() {
-                head
-            } else {
-                let inner: Vec<String> = bindings.iter().map(pattern_str).collect();
-                format!("{head}({})", inner.join(", "))
+            match (bindings.is_empty(), type_name.is_some()) {
+                // A **qualified** fieldless variant is unambiguous: `Color.Red` can only be a
+                // constructor, and `Color.Red()` parses to this same node.
+                (true, true) => head,
+                // An **unqualified** one is not. `Ok()` is this node; bare `Ok` is a
+                // `Pattern::Binding` that matches *anything*. Both rendered as `Ok`, so the fmt
+                // safety gate compared a payload-less variant arm equal to a catch-all binding —
+                // and the printer was dropping exactly those parens, turning `Ok() => …` into
+                // `Ok => …`. The `()` is written here because it is written in the source.
+                (true, false) => format!("{head}()"),
+                (false, _) => {
+                    let inner: Vec<String> = bindings.iter().map(pattern_str).collect();
+                    format!("{head}({})", inner.join(", "))
+                }
             }
         }
-        Pattern::IsType { ty, .. } => format!("is {}", type_ref_str(ty)),
-        Pattern::Tuple { elements, .. } => {
+        Pattern::IsType { ty, span: _ } => format!("is {}", type_ref_str(ty)),
+        Pattern::Tuple { elements, span: _ } => {
             let inner: Vec<String> = elements.iter().map(pattern_str).collect();
             format!("({})", inner.join(", "))
         }
@@ -888,15 +1145,31 @@ impl Pretty for Expr {
             }
             Expr::Closure {
                 params,
-                ret: _,
+                ret,
                 body,
                 span: s,
             } => {
-                out.push_str(&format!("(closure [{}] {}\n", param_list(params), span(*s)));
+                // The return annotation `fn(x): int => …` is optional and checked when written, so
+                // dropping it changes what the checker accepts. It was explicitly discarded here.
+                let ret = match ret {
+                    Some(t) => format!(": {}", type_ref_str(t)),
+                    None => String::new(),
+                };
+                out.push_str(&format!(
+                    "(closure [{}]{ret} {}\n",
+                    param_list(params),
+                    span(*s)
+                ));
                 match body {
                     ClosureBody::Expr(e) => e.pretty(out, level + 1),
                     ClosureBody::Block(stmts) => {
-                        for stmt in stmts {
+                        // One statement per line. Without the separator, consecutive statements ran
+                        // together on one line, which is a rendering in which two different
+                        // statement lists can coincide.
+                        for (i, stmt) in stmts.iter().enumerate() {
+                            if i > 0 {
+                                out.push('\n');
+                            }
                             stmt.pretty(out, level + 1);
                         }
                     }
@@ -968,8 +1241,8 @@ impl Pretty for Expr {
             Expr::Member {
                 receiver,
                 name,
+                name_span: _,
                 span: s,
-                ..
             } => {
                 out.push_str(&format!("(member {name} {}\n", span(*s)));
                 receiver.pretty(out, level + 1);
@@ -1157,10 +1430,10 @@ impl Pretty for Expr {
             Expr::TypedModuleCall {
                 recv,
                 func,
+                func_span: _,
                 ty,
                 args,
                 span: s,
-                ..
             } => {
                 out.push_str(&format!(
                     "(typed-call {func} {} {}\n",
@@ -1176,10 +1449,10 @@ impl Pretty for Expr {
             }
             Expr::TypedCall {
                 name,
+                name_span: _,
                 type_args,
                 args,
                 span: s,
-                ..
             } => {
                 let tys: Vec<String> = type_args.iter().map(type_ref_str).collect();
                 out.push_str(&format!(
@@ -1210,10 +1483,10 @@ impl Pretty for Expr {
             Expr::TypedMethodCall {
                 recv,
                 name,
+                name_span: _,
                 type_args,
                 args,
                 span: s,
-                ..
             } => {
                 let tys: Vec<String> = type_args.iter().map(type_ref_str).collect();
                 out.push_str(&format!(
@@ -1231,9 +1504,9 @@ impl Pretty for Expr {
             Expr::FieldSet {
                 receiver,
                 field,
+                field_span: _,
                 value,
                 span: s,
-                ..
             } => {
                 out.push_str(&format!("(field-set {field} {}\n", span(*s)));
                 receiver.pretty(out, level + 1);
@@ -1243,10 +1516,10 @@ impl Pretty for Expr {
             }
             Expr::TierExpr {
                 tier,
+                tier_span: _,
                 statics,
                 holes,
                 span: s,
-                ..
             } => {
                 out.push_str(&format!("(tier-expr {tier} {}", span(*s)));
                 for (i, static_) in statics.iter().enumerate() {
