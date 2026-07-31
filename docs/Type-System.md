@@ -57,11 +57,7 @@ fn head(xs: List<int>): ?int { return xs.first() }
 echo head([]) ?? -1     // -1
 ```
 
-An optional is **its own reified type**, not a union of `T` and absence — `some(x)` really is a
-wrapper, and `echo` shows it as one. So `x is T` on a `?T` is *always false*: the value's runtime
-head constructor is `some`/`none`, never the payload's. The checker says so (**E0065**, a warning)
-and declines to narrow on such a test, so the unreachable branch does not go on type-checking as the
-payload. `Result<T, E>` behaves identically (`Ok`/`Err` are its head constructors).
+An optional is **its own reified type**, not a union of `T` and absence — `some(x)` really is a wrapper, and `echo` shows it as one. So `x is T` on a `?T` is *always false*: the value's runtime head constructor is `some`/`none`, never the payload's. The checker says so (**E0065**, a warning) and declines to narrow on such a test, so the unreachable branch does not go on type-checking as the payload. `Result<T, E>` behaves identically (`Ok`/`Err` are its head constructors).
 
 ```noeta check
 struct P { x: int }
@@ -76,8 +72,7 @@ fn f(p: ?P): int {
 echo f(some(P { x: 7 }))    // 7
 ```
 
-For mere presence, compare against the value: `p != none`. And `p is none` / `p is some` name
-*constructors*, not types — they are E0013, with the working spelling in the help.
+For mere presence, compare against the value: `p != none`. And `p is none` / `p is some` name *constructors*, not types — they are E0013, with the working spelling in the help.
 
 ## Unions — `A | B`
 
@@ -110,9 +105,7 @@ echo d is string       // false
 
 ## `never` — the bottom
 
-`never` is `dyn`'s exact opposite. Where every type widens *into* `dyn`, `never` widens into *every*
-type; where `dyn` is inhabited by every value, `never` is inhabited by none. It is the return type of
-a function that **does not return**:
+`never` is `dyn`'s exact opposite. Where every type widens *into* `dyn`, `never` widens into *every* type; where `dyn` is inhabited by every value, `never` is inhabited by none. It is the return type of a function that **does not return**:
 
 ```noeta check
 use std.os
@@ -123,8 +116,7 @@ server.serve(8080, fetch)  // `server.serve(port, handler, host?): never` — th
 panic("unreachable")       // `panic(msg): never`
 ```
 
-Because `never` is a subtype of everything, a call to one of these type-checks in any position —
-there is no value to be wrong about — and nothing written after it can run.
+Because `never` is a subtype of everything, a call to one of these type-checks in any position — there is no value to be wrong about — and nothing written after it can run.
 
 You write it on your own functions the same way:
 
@@ -138,16 +130,9 @@ fn width(kind: string): int {
 }
 ```
 
-It is **declared, never inferred**. A function returns `never` because its signature says so, not
-because the checker proved its body loops forever — so divergence is a fact you can read off a
-signature, at the call site, without interprocedural analysis. That is what makes it useful to
-tooling: `noeta test` reads it to decide which top-level statements belong in the setup every test
-shares, which is why a top-level `server.serve(…)` never blocks a test run
-(see [Testing](Testing#what-runs-and-what-does-not)).
+It is **declared, never inferred**. A function returns `never` because its signature says so, not because the checker proved its body loops forever — so divergence is a fact you can read off a signature, at the call site, without interprocedural analysis. That is what makes it useful to tooling: `noeta test` reads it to decide which top-level statements belong in the setup every test shares, which is why a top-level `server.serve(…)` never blocks a test run (see [Testing](Testing#what-runs-and-what-does-not)).
 
-Two consequences follow from being uninhabited. `x is never` is always `false` — no value has the
-type. And `never` vanishes from a union: `int | never` *is* `int`, because the second arm contributes
-no values.
+Two consequences follow from being uninhabited. `x is never` is always `false` — no value has the type. And `never` vanishes from a union: `int | never` *is* `int`, because the second arm contributes no values.
 
 ## Type tests and narrowing
 

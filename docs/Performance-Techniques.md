@@ -20,10 +20,7 @@ A round-up of the performance story, including the numeric-layout work and one i
 
 ## Finding the hot spots
 
-Before optimizing, measure: [`noeta profile`](Profiling) reports where a program spends its time — an
-exact per-function call-count/self-time table (`--instrument`) or a wall-time **flamegraph** (SVG /
-speedscope). It profiles the production VM tier-0, so it shows the language-level shape of a run
-(which function/line is hot); see [Profiling](Profiling) for what tier-0 does and does not reflect.
+Before optimizing, measure: [`noeta profile`](Profiling) reports where a program spends its time — an exact per-function call-count/self-time table (`--instrument`) or a wall-time **flamegraph** (SVG / speedscope). It profiles the production VM tier-0, so it shows the language-level shape of a run (which function/line is hot); see [Profiling](Profiling) for what tier-0 does and does not reflect.
 
 ## Memory management is a performance feature
 

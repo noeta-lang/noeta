@@ -1,6 +1,6 @@
 # Extending Tiers
 
-The built-in [dev tiers](Dev-Tiers) — `@test`, `@bench`, `@doc`, `@debug` — are not special-cased in the compiler: std declares them through the same `ExtTier` surface a third-party extension uses (only the runners are native), and the tier name-space is **open**. This page covers the extension points: declaring a tier of your own, binding a tier to a dependency's provider (and renaming to avoid collisions), and **expression tiers** — embedded languages as typed values. For the tier model itself (activation, stripping, `noeta.toml` build targets), see [Dev Tiers](Dev-Tiers).
+The built-in [dev tiers](Dev-Tiers) — `@test`, `@bench`, `@doc`, `@debug` — are not special-cased in the compiler: std declares them through the same `ExtTier` surface a third-party extension uses, drives them through the same registry-dispatched runner seam, and the tier name-space is **open**. This page covers the extension points: declaring a tier of your own, binding a tier to a dependency's provider (and renaming to avoid collisions), and **expression tiers** — embedded languages as typed values. For the tier model itself (activation, stripping, `noeta.toml` build targets), see [Dev Tiers](Dev-Tiers).
 
 ## Declaring your own tier
 
@@ -26,6 +26,12 @@ pub fn run_fuzz(roots: List<TierRoot>): void {
 - The decorated fn is the **runner**: it must be `fn(roots: List<TierRoot>): void`, where each `TierRoot { name: string, run: () -> void }` is an activated root fn as a first-class handle. Anything else about the declaration — a name colliding with a built-in, a duplicate, a non-attribute config, a wrong signature — is **E0051** at the declaration.
 - A consumer opts in with one import (`use fuzzkit.tiers.run_fuzz` — the config struct links along with the runner), writes `@fuzz { … }` blocks, and runs **`noeta fuzz <file>`**: the unknown subcommand resolves against the file's declared tiers and dispatches to the runner in-process, after the compose and before the `noeta-<cmd>` external-binary probes. Roots keep white-box access and strip from a normal build, exactly like the built-in tiers.
 - In `noeta.toml`, any identifier is a valid local tier name in a target's `tiers` live-set — whether it resolves (against your `[tiers]` bindings) is checked where the tier is used.
+
+### Native runners
+
+A runner does not have to be written in Noeta. A Rust extension can ship one through **`Extension::tier_runners`**, which returns `ExtTierRunner { tier, run }` pairs — a `&'static str` naming the `ExtTier` it drives and a `fn(&mut dyn CommandCtx, &TierRun) -> u8` invoked with the collected roots. The runner attaches to the tier of that name declared by a unit sharing the runner's `root`, so a rename or a rescope resolves to the right one. An extension that both declares a tier and ships its runner lists it in `tiers` *and* `tier_runners`; the two are separate lists because std's own declarations live beneath the CLI while its native runners live inside it, and the pair cannot be spelled in one literal.
+
+This is not a std privilege — `@test`, `@bench`, and `@doc` are dispatched through exactly this seam, so a third-party tier reaches the CLI the same way. A tier with no runner registers none: an inline-only tier like `debug`, or an [expression tier](#expression-tiers--embedded-languages-as-values) that uses `ExtTier::handler` instead.
 
 ### Choosing a tier's provider
 
