@@ -344,3 +344,21 @@ lexer's own tokens).
    self-referential (the new CI step catches a local edit, not an un-propagated
    copy), and `list_advisories` classifies a malformed feed body as `Network`, so
    a JSON-shape drift still degrades to a note.
+
+## A drift class the wasm work surfaced: fixtures that live in strings
+
+`79352778` tightened `?` into E0012 and swept the tree — six conformance fixtures, the docs,
+`noeta-check`'s own tests. It missed two, and neither was an oversight: the `wasi:http` e2e's
+handler is a **heredoc inside a shell script**, and its native twin is a **Rust string literal**
+whose `compile()` helper never runs the checker. Both are invisible to a sweep that greps for
+`.noe` files, and both sat behind a gate that was skipping.
+
+The same class ate an http-client arc one cycle earlier (`ee2ac7c6`: "the corpus, docs, and this
+crate's lib test — but not the e2e script's heredoc fixture"). **Twice is a class.**
+
+The tree is clean today — the only remaining embedded `?` is top-level code, where deferring is
+correct. What is missing is anything that would notice next time. Options, cheapest first: have the
+language-rule sweeps grep string literals and heredocs too (a checklist, so discipline); make the
+Rust-side twins run the checker rather than only the compiler (removes half the class outright);
+or extract embedded fixtures into real `.noe` files the corpus already walks (removes it entirely,
+at the cost of the e2e scripts being self-contained).
