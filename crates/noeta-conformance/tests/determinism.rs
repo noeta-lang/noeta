@@ -19,6 +19,15 @@
 //! Spawning also defeats every in-process cache (salsa, the startup bytecode cache) for free: the
 //! child shares nothing with the parent but the corpus on disk.
 //!
+//! # What is digested
+//!
+//! Two entries per corpus program: `<case>` — the compiled module's bytes — and
+//! `<case> [diagnostics]` — the checker's verdict, present whether or not the program was accepted.
+//! The second half was added after a checker-side instance of the same bug class went unseen here:
+//! a rejected program compiles nothing, so the module digest could not speak for it, and the
+//! ambiguity it turned on (two traits defaulting one method, the winner picked by a `HashMap` walk)
+//! changed only what the checker *concluded*.
+//!
 //! # Verifying the gate can fail
 //!
 //! A determinism gate that cannot fail is worse than none. To check it by hand, reintroduce the
@@ -91,9 +100,9 @@ fn compiled_modules_are_byte_identical_across_processes() {
         let diverged = mine.diff(&theirs);
         assert!(
             diverged.is_empty(),
-            "compilation is not deterministic: {} of {} corpus programs compiled to different \
-             bytes in a second process. A `HashSet`/`HashMap` iteration order is reaching the \
-             serialized module.\nfirst 20:\n{}",
+            "compilation is not deterministic: {} of {} corpus entries differed in a second \
+             process. A `HashSet`/`HashMap` iteration order is reaching the serialized module — or, \
+             for a `… [diagnostics]` entry, the checker's own verdict.\nfirst 20:\n{}",
             diverged.len(),
             mine.digests.len(),
             diverged
