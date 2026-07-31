@@ -23,12 +23,21 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
     // the `type_of` site map the backend needs, so the checker runs exactly once (it previously
     // ran again inside the backend).
     let checked = loaded.check();
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&loaded.sources, checked.diagnostics.iter());
+    // Report everything the front half found — activation's and the check's — *then* decide. Only an
+    // **error** stops the program: a warning describes well-formed code, and a lint that refuses to
+    // run what `noeta check` calls fine is a hard stop wearing a nudge's clothes. Diagnostics go out
+    // first, before a single byte of the program's own output, because they are compile-time facts
+    // about the whole file; interleaving them with the run would misattribute them to whatever line
+    // happened to be printing.
+    emit_diagnostics_mapped(
+        &loaded.sources,
+        loaded.warnings.iter().chain(checked.diagnostics.iter()),
+    );
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
 
-    match execute_real_host(&loaded.program, &checked, args) {
+    match execute_real_host(&loaded.program, &checked, args, true) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
@@ -44,9 +53,14 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
             }
             result.exit_code
         }
-        Err(err) => {
-            eprintln!("noeta: {err}");
-            1
+        // An internal compile failure renders like any other diagnostic when the compiler knew
+        // where it stopped — the source map is right here.
+        Err(u) => {
+            let (text, code) =
+                noeta_runner::CompileFailure::from_unsupported(&loaded.sources, &u).to_text();
+            eprint!("{text}");
+            let _ = io::stderr().flush();
+            i32::from(code)
         }
     }
 }
@@ -60,15 +74,20 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
 /// (I.4b) build on. The conformance differential still runs *both* backends over the deterministic
 /// sandbox, so this real-host path is never compared backend-to-backend. Shared by `noeta run` and the
 /// `@test` runner so both execute a program identically.
+/// `live_output` streams the program's output to the terminal as it is produced rather than
+/// batch-capturing it into the returned [`noeta_backend::RunResult`] — `true` for a foreground
+/// `noeta run`, `false` for the `@test` runner, whose report *is* the captured stdout.
 pub(crate) fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
     args: Vec<String>,
-) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), String> {
+    live_output: bool,
+) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), noeta_compiler::Unsupported> {
     let (result, trace, _) = run_module_real_host(
         std::sync::Arc::new(compile_real(program, checked)?),
         args,
         false,
+        live_output,
     );
     Ok((result, trace))
 }
@@ -103,13 +122,14 @@ pub(crate) fn run_module_real_host(
     module: std::sync::Arc<noeta_bytecode::Module>,
     args: Vec<String>,
     jit_report: bool,
+    live_output: bool,
 ) -> (
     noeta_backend::RunResult,
     Vec<noeta_vm::TraceFrame>,
     Option<noeta_vm::JitReport>,
 ) {
     let app_id = p2p_app_namespace(&args);
-    noeta_runner::run_module_real_host(module, args, app_id, jit_report)
+    noeta_runner::run_module_real_host(module, args, app_id, jit_report, live_output)
 }
 
 /// P-AOT L2: detect and run a bundle stapled onto this executable (a `noeta build --exe` artifact),
@@ -164,13 +184,27 @@ pub(crate) fn cmd_run(
     // Everything else — resolve tiers, consult the startup cache, and (on a miss) load → check →
     // compile — is the shared whole-file pipeline. On success run the module with the program's
     // pass-through args; on failure report it.
-    match compile_whole_file_with(file, tiers, target, no_cache, resolved.map(|g| g.packages)) {
-        Ok(compiled) => run_compiled_module(
-            compiled.module,
-            &compiled.sources,
-            program_args(file, args),
-            jit_stats,
-        ),
+    match compile_whole_file_with(
+        file,
+        tiers,
+        target,
+        no_cache,
+        resolved.map(|g| noeta_runner::compile::ResolvedFront {
+            packages: g.packages,
+            package_uses: g.package_uses,
+        }),
+    ) {
+        // Warnings first, then the program: a compile-time fact about the file belongs before the
+        // file's own output, not spliced into it.
+        Ok(compiled) => {
+            emit_diagnostics_mapped(&compiled.sources, compiled.warnings.iter());
+            run_compiled_module(
+                compiled.module,
+                &compiled.sources,
+                program_args(file, args),
+                jit_stats,
+            )
+        }
         Err(failure) => failure.report(),
     }
 }

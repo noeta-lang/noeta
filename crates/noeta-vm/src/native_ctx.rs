@@ -175,12 +175,46 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn write_stdout(&mut self, text: &str) {
-        // The same buffer `Op::Echo` appends to — an `io.out` and an `echo` interleave in order.
-        self.vm.out.stdout.push_str(text);
+        // The same buffer `Op::Echo` appends to — an `io.out` and an `echo` interleave in order —
+        // and the same live-output drain, so the two also *appear* in order under `noeta run`.
+        self.vm.emit_stdout(text);
     }
 
     fn write_stderr(&mut self, text: &str) {
-        self.vm.out.stderr.push_str(text);
+        self.vm.emit_stderr(text);
+    }
+
+    fn flush_output(&mut self) {
+        // Take-then-restore: a host that does not stream (the sandbox) writes nothing and reports
+        // false, and the text goes back into the batch buffer untouched.
+        for stream in [noeta_stdlib::Stream::Stdout, noeta_stdlib::Stream::Stderr] {
+            let buffer = match stream {
+                noeta_stdlib::Stream::Stdout => &mut self.vm.out.stdout,
+                _ => &mut self.vm.out.stderr,
+            };
+            if buffer.is_empty() {
+                continue;
+            }
+            let text = std::mem::take(buffer);
+            if !self.vm.persist.host.stream_output(stream, &text) {
+                match stream {
+                    noeta_stdlib::Stream::Stdout => self.vm.out.stdout = text,
+                    _ => self.vm.out.stderr = text,
+                }
+            }
+        }
+    }
+
+    fn drain_runtime_diagnostics(&mut self) -> Vec<String> {
+        // Clearing the abort trace as well: the next abort in this long-lived loop is a *new*
+        // failure and must record its own traceback rather than inherit this one's.
+        self.vm.out.abort_trace.clear();
+        self.vm
+            .out
+            .diagnostics
+            .drain(..)
+            .map(|d| format!("[{}] {}", d.code.code(), d.message))
+            .collect()
     }
 
     fn render(&mut self, slot: Slot) -> CtxResult<String> {
@@ -210,6 +244,43 @@ impl NativeCtx for VmCtx<'_, '_> {
         } else {
             Ok(v.display())
         }
+    }
+
+    fn call_method(&mut self, recv: Slot, method: &str, args: &[Slot]) -> CtxResult<Option<Slot>> {
+        let receiver = self.get(recv)?;
+        // Only a user-declared shape has methods to reach; anything else reports "no such method"
+        // so the caller can fall back rather than abort.
+        if !(receiver.is_object() || receiver.is_enum()) {
+            return Ok(None);
+        }
+        let Some(shape) = receiver.shape() else {
+            return Ok(None);
+        };
+        if self.vm.method_proto(&shape.name, method).is_none() {
+            return Ok(None);
+        }
+        // `run_method_handle` consumes its owned arguments — the receiver first, then the rest —
+        // so each is retained out of the (borrowed) slot table, exactly as `render` does.
+        let mut owned = Vec::with_capacity(args.len() + 1);
+        retain(receiver);
+        owned.push(receiver);
+        for &a in args {
+            let v = self.get(a)?;
+            retain(v);
+            owned.push(v);
+        }
+        // Empty `ty` resolves the method through the receiver's own shape (the bound-method path).
+        match self
+            .vm
+            .run_method_handle("", method, false, owned, self.span)
+        {
+            Ok(result) => Ok(Some(self.insert(result))),
+            Err(Abort) => Err(CtxError::Abort),
+        }
+    }
+
+    fn bytes_of(&mut self, slot: Slot) -> CtxResult<Option<Vec<u8>>> {
+        Ok(self.get(slot)?.bytes_data())
     }
 
     fn view(&mut self, slot: Slot) -> CtxResult<NativeValue> {

@@ -1,6 +1,6 @@
 # Reactivity
 
-The standard library ships **fine-grained reactivity** — `signal`, `computed`, and `effect` — the same model SolidJS popularized, running server-side. State lives in signals; derivations and side effects declare what they read, and the runtime reruns exactly what a change affects, in a deterministic, glitch-free order. These are ordinary stdlib values (no new keywords), the load-bearing primitive behind the reactive-single-binary story; the transport that carries changes to a browser — the view/diff protocol over the bundled WebSocket server — is covered under [Views](#views--pushing-state-to-a-client) below.
+The standard library ships **fine-grained reactivity** — `signal`, `computed`, and `effect` — the same model SolidJS popularized, running server-side. State lives in signals; derivations and side effects declare what they read, and the runtime reruns exactly what a change affects, in a deterministic, glitch-free order. These are ordinary stdlib values (no new keywords); the transport that carries changes to a browser — the view/diff protocol over the bundled WebSocket server — is covered under [Views](#views--pushing-state-to-a-client) below.
 
 ```noeta
 use std.reactive.{signal, computed, effect}
@@ -114,7 +114,7 @@ effect(fn() { echo "sum is ${plus.get() + times.get()}" })
 base.set(3)       // effect reruns exactly once: "sum is 43" (13 + 30)
 ```
 
-The rerun order is deterministic — ascending creation order within a flush round — so both execution backends produce byte-identical output (the differential oracle checks this on every program).
+The rerun order is deterministic — ascending creation order within a flush round (verified across backends by the [differential oracle](Architecture-and-Pipeline#the-two-backend-differential-oracle)).
 
 ## Batching and coalescing
 
@@ -153,7 +153,7 @@ Without this, each `outer` run would leave a live child subscribed to `dep`, and
 
 ## Views — pushing state to a client
 
-A `view()` is a named window onto reactive state, built for pushing changes over a wire (the LiveView pattern — see the `http.server` section of [Standard Library Modules](Standard-Library-Modules)). `expose(name, handle)` binds a name to a `Signal`, `Computed`, or `SyncedSignal`; `snapshot()` renders the full state as a JSON frame (and baselines the view); `diff()` renders a frame of **only the bindings whose value changed since** — or `none` when nothing observably changed:
+A `view()` is a named window onto reactive state, built for pushing changes over a wire (the LiveView pattern — see [std.http](std-http)). `expose(name, handle)` binds a name to a `Signal`, `Computed`, or `SyncedSignal`; `snapshot()` renders the full state as a JSON frame (and baselines the view); `diff()` renders a frame of **only the bindings whose value changed since** — or `none` when nothing observably changed:
 
 ```noeta
 use std.reactive.{signal, computed, view}
@@ -174,8 +174,36 @@ echo v.diff() ?? "none"  // none — same value, nothing to push
 
 Minimality is enforced twice: the flush records exactly which nodes changed (the set signal plus computeds it transitively dirtied), so `diff()` never inspects untouched bindings; and each candidate's fresh value is compared against the last one pushed, so a write of an equal value — or a recompute that lands on the same result — pushes nothing. Frames are deterministic (name-sorted keys, the `json.stringify` encoding), so a scripted client conversation pins them byte-exactly in tests. The change tracking is pay-for-use: until the first `view()` exists, a hot `set` loop records nothing.
 
-Typically each websocket session creates its own view and sends `snapshot()` on connect and `diff()` after handling each client event — the bundled browser shim (`server.liveview_js()`) applies those frames to the DOM. See the LiveView section of [Standard Library Modules](Standard-Library-Modules) and `examples/liveview_counter.noe`.
+Typically each websocket session creates its own view and sends `snapshot()` on connect and `diff()` after handling each client event — the bundled browser shim (`server.liveview_js()`) applies those frames to the DOM. The wiring, as a sketch (the complete runnable version is `examples/liveview_counter.noe`):
 
-## What's next
+```noeta ignore
+// sketch — the session loop of a LiveView server (`noeta serve app.noe`)
+async fn session(sock: Socket) use (count, double): bool {
+    v = view()
+    v.expose("count", count)
+    v.expose("double", double)
+    sock.send(v.snapshot())                  // full state on connect
+    while true {
+        msg = sock.recv().await
+        if msg == none { return true }       // client hung up
+        // …handle the event: count.update(…), count.set(0), …
+        patch = v.diff() ?? ""
+        if patch != "" { sock.send(patch) }  // push only what changed
+    }
+}
 
-This is the reactive **core**. Layers that consume it have landed: **CRDT-synced signals** — reactive state several peers edit concurrently, converging without coordination (the `para/p2p` package, github.com/noeta-lang/para-p2p); the **view/diff push protocol** above, which carries signal changes to a browser over the bundled WebSocket server; and **LiveView** — server-side reactive HTML via `@html` templates whose holes are signals, built on this graph and that transport (the `para/html` package, github.com/noeta-lang/para-html). Reactive persistence and hot-module-reload polish (signals survive code edits under `noeta serve --watch`) continue to build on the same graph.
+fn fetch(req: Request): Response {
+    if req.path() == "/ws" { return server.websocket(session) }
+    return server.response(200, page(), {"content-type": "text/html"})
+}
+```
+
+## Layers built on this graph
+
+This page is the reactive **core**. Three surfaces consume it:
+
+- **CRDT-synced signals** — reactive state several peers edit concurrently, converging without coordination (the `para/p2p` package, github.com/noeta-lang/para-p2p).
+- **The view/diff push protocol** above, which carries signal changes to a browser over the bundled WebSocket server.
+- **LiveView** — server-side reactive HTML via `@html` templates whose holes are signals, built on this graph and that transport (the `para/html` package, github.com/noeta-lang/para-html).
+
+Signals also survive code edits under [`noeta serve --watch`](The-CLI#noeta-serve-and---watch): an unchanged `signal(...)` binding keeps its value across a hot swap, while plain top-level bindings re-initialize.

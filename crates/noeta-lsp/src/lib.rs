@@ -1553,6 +1553,11 @@ impl LanguageServer for Backend {
 /// is synchronous) and serves JSON-RPC on stdin/stdout.
 pub fn run_stdio() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        // The same defect the MCP had: tokio's 2 MiB default is below what parsing an ordinary
+        // real-world module needs in a debug build, and a stack overflow aborts the *process*
+        // rather than failing one request. It covers the blocking pool too, which is where
+        // `read_latest` runs every expensive feature query.
+        .thread_stack_size(noeta_parser::SERVER_STACK_SIZE)
         .enable_all()
         .build()
         .expect("failed to build the language-server tokio runtime");

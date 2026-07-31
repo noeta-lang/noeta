@@ -13,6 +13,9 @@ rust-version.workspace = true
 [dependencies]
 noeta-ide = { workspace = true }
 noeta-diagnostics = { workspace = true }
+# For `SERVER_STACK_SIZE` only: the parser owns the deepest recursion a server thread runs, so it
+# owns the stack size those threads need (tokio's 2 MiB default is below it in a debug build).
+noeta-parser = { workspace = true }
 # tokio: the workspace pin gives us rt/io-util/time; the server also needs the stdio driver
 # (`io-std`) for the JSON-RPC transport, a worker pool (`rt-multi-thread`), and `#[tokio::main]`
 # (`macros`). Feature-unified with the rest of the workspace's tokio usage.

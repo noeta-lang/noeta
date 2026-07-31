@@ -1,0 +1,28 @@
+// `type_name::<T>()`'s two rejections, both inherited for free from keeping `T` a real type
+// reference rather than a string:
+//
+// * an **unresolvable** type is E0013, resolved exactly like any other annotation — a `type_name`
+//   that silently answered `"Ghost"` would be worse than useless, since the whole point is that the
+//   string is compile-checked;
+// * a type **parameter** no instantiation reaches is E0023, at the call.
+//
+// The second is a question about the channel, not about erasure. A parameter is answerable wherever
+// the instantiation actually travels: on the receiver's reflected type tag for a generic TYPE's
+// parameter in an instance method, and on the hidden type-argument slot for a generic FN's or
+// METHOD's own parameter (`poly_values/forward_type_name.noe`,
+// `generic_methods/method_forwarding.noe`). What is left is the case where the channel exists but
+// the CALL has nothing to put in it: `label<U>()` mentions `U` in no parameter and no return, so no
+// argument, annotation or turbofish pins it — and a body that hands a name to something keying on
+// it must not receive a guess. The message says where the fix goes.
+// expect: error E0023 at 27:6
+// expect: error E0013 at 28:18
+// expect: exit 1
+struct Box {
+    id: int
+
+    fn label<U>(): string {
+        return "${self.id}" ~ type_name::<U>()
+    }
+}
+echo Box { id: 1 }.label()
+echo type_name::<Ghost>()

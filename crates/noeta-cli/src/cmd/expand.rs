@@ -76,17 +76,19 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
         std::collections::BTreeMap::new();
     let mut unreadable = false;
 
-    // Group by directory, as `check` does: an entry's workspace is its directory's `.noe` files, so
-    // each directory is read, resolved, lexed, and parsed once and every entry links against that
-    // shared pool.
-    let mut by_dir: std::collections::BTreeMap<PathBuf, Vec<&PathBuf>> =
-        std::collections::BTreeMap::new();
+    // Group by module pool, as `check` does (see `check::entry_pool`): each pool is read, resolved,
+    // lexed, and parsed once and every entry in it links against that shared set.
+    let mut by_dir: std::collections::BTreeMap<
+        PathBuf,
+        (Option<noeta_loader::PackageRoot>, Vec<&PathBuf>),
+    > = std::collections::BTreeMap::new();
     for entry in &entries {
-        let dir = entry
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(""))
-            .to_path_buf();
-        by_dir.entry(dir).or_default().push(entry);
+        let (dir, root) = super::check::entry_pool(entry);
+        by_dir
+            .entry(dir)
+            .or_insert((root, Vec::new()))
+            .1
+            .push(entry);
     }
     // The directory the compose probe's graph belongs to — only that group may reuse it, since
     // another directory could resolve a different (nested) manifest.
@@ -98,16 +100,16 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
             .to_path_buf()
     };
 
-    for (dir, dir_entries) in &by_dir {
+    for (dir, (package_root, dir_entries)) in &by_dir {
         let reusable = if *dir == probe_dir {
             resolved.take()
         } else {
             None
         };
-        let deps = match reusable {
-            Some(graph) => graph.packages,
+        let (deps, package_uses) = match reusable {
+            Some(graph) => (graph.packages, graph.package_uses),
             None => match graph::resolve_graph(dir_entries[0]) {
-                Ok(graph) => graph.packages,
+                Ok(graph) => (graph.packages, graph.package_uses),
                 Err(err) => {
                     for entry in dir_entries {
                         eprintln!("noeta: {}: {err}", entry.display());
@@ -118,9 +120,10 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
             },
         };
         let parsed = noeta_loader::parse_dir(
-            noeta_loader::read_dir_modules(dir),
+            super::check::pool_modules(dir, package_root.as_ref()),
             manifest::root_edition(dir_entries[0]),
             &deps,
+            &package_uses,
         );
         let sources = std::rc::Rc::new(parsed.source_map());
 
@@ -170,9 +173,10 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
                     }
                     Ok(text) => {
                         let lone = noeta_loader::parse_dir(
-                            vec![noeta_loader::RawModule { name, text }],
+                            vec![noeta_loader::RawModule::declared(name, text)],
                             manifest::root_edition(entry),
                             &deps,
+                            &package_uses,
                         );
                         let lone_sources = std::rc::Rc::new(lone.source_map());
                         expand_entry(&lone, &lone_sources, 0);
@@ -205,7 +209,9 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
     // The summary goes to stderr, as `check`'s does, so it never contaminates the source on stdout.
     // "No expansions" is stated rather than left as silence: an empty stdout is also what a broken
     // invocation produces, and the difference matters to whoever is debugging a hook.
-    let errors = diags.len();
+    // Count what the exit code actually claims: *errors*. Every load diagnostic is one today, but
+    // spelling it as `diags.len()` is how "a warning refuses to proceed" gets reintroduced.
+    let errors = diags.values().filter(|(_, d)| d.is_error()).count();
     if expansions.is_empty() {
         eprintln!("no directive expansions");
     } else {

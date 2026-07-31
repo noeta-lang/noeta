@@ -1,0 +1,10 @@
+// The orphan rule's second accepted half: the `impl` lives in the **type's** package, and the trait
+// is foreign.
+// expect: stdout "b says 7"
+// expect: exit 0
+use a.speaks.{Speaks};
+use b.thing.{Thing};
+
+fn say(x: dyn Speaks): string { return x.speak() }
+
+echo say(Thing.new(7))

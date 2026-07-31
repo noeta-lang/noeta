@@ -2,7 +2,7 @@
 // namespace is found, resolution is strict: only `pub` declarations are importable.
 // expect: error E0019 at 7:16
 // expect: exit 1
-namespace App.Main;
+// (No `namespace`: the entry of package `App` derives `App.main` from its own file name.)
 
 use App.Models.Secret;
 

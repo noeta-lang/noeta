@@ -1,9 +1,10 @@
 //! Multi-file module loading and linking (M1.9).
 //!
-//! A program is rooted at an *entry* `.noe` file. Sibling `.noe` files in the entry's
-//! directory are candidate *modules*, each declaring its identity with `namespace App.Models;`.
-//! The entry's `use App.Models.{User}` declarations resolve against those modules' declared
-//! namespaces; each resolved name's real declaration is **merged into one [`Program`]** ahead of
+//! A program is rooted at an *entry* `.noe` file. The other `.noe` files of its **package** are
+//! candidate *modules*, and a module's identity is **derived from where its file sits** (see
+//! [`derive`]) — the package's import prefix plus the file's path inside the package.
+//! The entry's `use dirscan.deep.nested.{Scanner}` declarations resolve against those derived
+//! paths; each resolved name's real declaration is **merged into one [`Program`]** ahead of
 //! the entry's own statements, so both backends run the linked program unchanged and the
 //! differential oracle is preserved by construction.
 //!
@@ -18,6 +19,7 @@
 //! is tagged at parse time with its [`SourceId`], so the caller resolves it through the [`Linked`]
 //! [`SourceMap`] rather than against the entry (slice F4).
 
+pub mod derive;
 pub mod expand;
 mod qualify;
 
@@ -27,8 +29,11 @@ use std::path::Path;
 
 use noeta_ast::{Program, Stmt, UseName};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
-use noeta_span::{Source, SourceId, SourceMap};
+use noeta_span::{PackageOrigin, Source, SourceId, SourceMap, Span};
 
+pub use derive::{
+    MANIFEST_NAME, ModulePath, PackageRoot, derive_module_path, read_package_modules,
+};
 pub use expand::ExpandedSource;
 
 /// A loaded, linked program ready to type-check and run.
@@ -50,6 +55,24 @@ pub struct Linked {
     /// edition. The checker consults this per declaration (via a span's `SourceId`) so a merged
     /// program applies each package's own edition rules — the editions compiler arc's whole point.
     pub editions: noeta_lexer::EditionMap,
+    /// Which **package** each source was read from, keyed by `SourceId` — the provenance the merged
+    /// program otherwise destroys. The entry and its siblings are [`PackageOrigin::Root`]; each
+    /// dependency package's modules carry that package's global key. The checker consults this per
+    /// declaration (via a span's `SourceId`) to enforce the package orphan rule — an
+    /// `impl Trait for Type` must live in the same package as the trait or as the type.
+    ///
+    /// **Compile-time expansion sources are deliberately absent.** Generated code is attributed to
+    /// no package, so an impl a directive synthesized is never judged by the orphan rule: the
+    /// generating directive may sit on a *dependency's* declaration, which would make "the root
+    /// package" the wrong answer rather than merely a missing one.
+    pub packages: noeta_span::PackageMap,
+    /// Per-package `@`-name resolution tables (`[directives]` and `[tiers]` alike), keyed by
+    /// [`PackageOrigin`](noeta_span::PackageOrigin) — the parallel of [`Self::packages`] for
+    /// extension `@name` resolution. Built by the package manager from each package's manifest in
+    /// its own dependency context; the checker resolves a `@name` by the package that wrote it.
+    /// The loader itself has no manifest data, so its own constructions leave this empty; the
+    /// driver that resolved the graph fills it in (it holds the resolved tables).
+    pub package_uses: noeta_span::PackageUses,
     /// Every **non-Noeta file** a compile-time directive expansion read (an OpenAPI spec and the
     /// documents it `$ref`s, say), as the hooks reported them.
     ///
@@ -66,6 +89,26 @@ pub struct Linked {
 pub struct LoadDiagnostic {
     pub source: Source,
     pub diagnostic: Diagnostic,
+}
+
+/// Re-point each diagnostic at **the file its span actually indexes**.
+///
+/// The linking core ([`link_parsed`]/[`link_parsed_with_deps`]) resolves imports over
+/// [`Program`]s — it never sees a [`Source`], so it can only build its diagnostics against the
+/// entry as a provisional render target. That is right for an entry's own bad `use` and wrong for
+/// every other unit: a dependency package's module drives its own `use`s, so an E0019/E0020 raised
+/// there carries *that file's* span, and rendering it against the entry's text prints an arbitrary
+/// slice of the wrong file (or nothing at all).
+///
+/// `sources` is the id-ordered source table — `sources[i].id() == SourceId(i)`, the layout every
+/// loader path builds. An id outside it is left alone: expansion diagnostics already carry their
+/// own generated source, which is not in this table.
+pub fn attribute_to_spans(diagnostics: &mut [LoadDiagnostic], sources: &[Source]) {
+    for load in diagnostics {
+        if let Some(source) = sources.get(load.diagnostic.span.source.0 as usize) {
+            load.source = source.clone();
+        }
+    }
 }
 
 /// A module that failed to lex/parse, and so is **absent from the link pool**.
@@ -149,19 +192,42 @@ impl BrokenModule {
 pub fn load(
     entry_path: &Path,
     root_edition: noeta_lexer::Edition,
+    root: Option<&PackageRoot>,
 ) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
     let text = std::fs::read_to_string(entry_path)?;
     let name = entry_path.display().to_string();
-    let siblings = read_siblings(entry_path);
-    Ok(link(&name, &text, root_edition, &siblings))
+    let siblings = read_siblings(entry_path, root);
+    Ok(link(
+        &name,
+        &text,
+        root_edition,
+        &siblings,
+        entry_module_path(entry_path, root),
+    ))
 }
 
-/// One sibling module's identity (display name + source text), before parsing. Public so the
-/// linker can be driven from in-memory sources in tests.
+/// One sibling module's identity (display name + source text + the module path its location
+/// derives), before parsing. Public so the linker can be driven from in-memory sources in tests.
 #[derive(Debug)]
 pub struct RawModule {
     pub name: String,
     pub text: String,
+    /// The module path derived from where this file sits ([`derive`]). [`ModulePath::Declared`] —
+    /// the default, and what an in-memory caller with no package on disk gets — means nothing was
+    /// derived and the file's own `namespace` declaration stands.
+    pub path: ModulePath,
+}
+
+impl RawModule {
+    /// A module with **no** derived path: its `namespace` declaration is its identity. The
+    /// in-memory/no-package constructor (tests, a lone script's flat sibling scan).
+    pub fn declared(name: impl Into<String>, text: impl Into<String>) -> RawModule {
+        RawModule {
+            name: name.into(),
+            text: text.into(),
+            path: ModulePath::Declared,
+        }
+    }
 }
 
 /// Load and link the program rooted at `entry_path` **with its dependency packages** — the
@@ -172,57 +238,69 @@ pub fn load_with_deps(
     entry_path: &Path,
     root_edition: noeta_lexer::Edition,
     deps: &[DepPackage],
+    package_uses: &noeta_span::PackageUses,
+    root: Option<&PackageRoot>,
+) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
+    load_with_deps_appending(entry_path, root_edition, deps, package_uses, root, &[])
+}
+
+/// As [`load_with_deps`], but appending `entry_tail` — statements a **driver** synthesizes onto the
+/// entry (higher-order-abi H6) — to the entry program *before* it links.
+///
+/// An extension command runs a program with a synthesized trailing call: `noeta serve` appends
+/// `server.serve(port, fetch)`, `noeta migrate` appends `migrations.emit(path, up)`. Those
+/// statements must go through the linker like handwritten ones, because two things the linker does
+/// are exactly what such a call needs:
+///
+/// * **Its `use` resolves.** Resolving an import is what pulls the module it names into the program,
+///   so a `use` added to the *linked* program bound nothing the loader owns — a dependency package's
+///   `.noe` submodule (`para.db.migrations`) reached the checker as an unresolved member of its
+///   package root, `[E0019] module para.db has no member migrations`, while the byte-identical
+///   import written into the file by hand resolved. Only *extension* modules (`std.http.server`,
+///   `para.db`) ever bound late, and only because the checker's own tables cover those.
+/// * **Its names are qualified.** An entry that declares a `namespace` has its own declarations
+///   rewritten to qualified identities (`fn up` becomes `todo.main.up`), and a resolved module import
+///   is α-renamed to the merged declaration's canonical name. A call assembled afterwards names
+///   neither, so it resolved to nothing — "cannot find `up` in this scope" against a file whose
+///   `fn up` is right there.
+///
+/// A `use` in the tail whose local name the entry already binds is skipped: the program's own import
+/// wins, as it does for a handwritten duplicate.
+pub fn load_with_deps_appending(
+    entry_path: &Path,
+    root_edition: noeta_lexer::Edition,
+    deps: &[DepPackage],
+    package_uses: &noeta_span::PackageUses,
+    root: Option<&PackageRoot>,
+    entry_tail: &[Stmt],
 ) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
     let text = std::fs::read_to_string(entry_path)?;
     let name = entry_path.display().to_string();
-    let siblings = read_siblings(entry_path);
-    Ok(link_with_deps(&name, &text, root_edition, &siblings, deps))
-}
-
-/// Read every `.noe` file **under `dir` recursively** as a [`RawModule`], in sorted order (so
-/// SourceId assignment stays deterministic). A dependency package is a directory *tree*, not the
-/// single flat directory the entry's siblings live in, so this walks subdirectories. Names are the
-/// files' display paths (for diagnostics). Unreadable files are skipped.
-pub fn read_package_sources(dir: &Path) -> io::Result<Vec<RawModule>> {
-    let mut paths = Vec::new();
-    collect_noe_files(dir, &mut paths)?;
-    paths.sort();
-    Ok(paths
-        .into_iter()
-        .filter_map(|p| {
-            let text = std::fs::read_to_string(&p).ok()?;
-            Some(RawModule {
-                name: p.display().to_string(),
-                text,
-            })
-        })
-        .collect())
-}
-
-/// Recursively gather `.noe` file paths under `dir` into `out`. A subdirectory that can't be read is
-/// skipped (best-effort), matching the sibling scan's tolerance.
-fn collect_noe_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            let _ = collect_noe_files(&path, out);
-        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "noe") {
-            out.push(path);
-        }
-    }
-    Ok(())
+    let siblings = read_siblings(entry_path, root);
+    Ok(link_with_deps_appending(
+        &name,
+        &text,
+        root_edition,
+        &siblings,
+        deps,
+        package_uses,
+        entry_module_path(entry_path, root),
+        entry_tail,
+    ))
 }
 
 /// A dependency package's sources, to be linked into the entry under the consumer's import root
 /// (package-manager P2.1, model R1). `root` is the package's own namespace root segment (the
-/// `package` half of its `[package] name`); `key` is the consumer's dependency-table key. The loader
-/// **re-roots** the package's modules from `root` to `key` — rewriting the leading segment of each
+/// `package` half of its `[package] name`); `prefix` is the prefix its modules derive under here (the
+/// consumer's dependency-table key, plus the package segment for a scope-array member). The loader
+/// **re-roots** the package's modules from `root` to `prefix` — rewriting the leading segment of each
 /// module's `namespace` and its intra-package `use`s — so the consumer addresses the package as
-/// `use <key>.<sub>.Name` while the package's own imports (written against `root`) keep resolving.
+/// `use <prefix>.<sub>.Name` while the package's own imports (written against `root`, which is what
+/// its own modules derive under standalone) keep resolving.
 ///
-/// Unlike a sibling, a dependency module's own `use`s **drive** imports (a package is a closed unit:
-/// its internal cross-references must resolve), whereas same-app siblings stay pure decl-sources — so
-/// wiring dependencies never changes single-package linking.
+/// A dependency module's own `use`s **drive** imports, exactly as a sibling's do (a package is a
+/// closed unit: its internal cross-references must resolve) — the re-rooting above is what makes its
+/// intra-package `use`s address the same modules the consumer's key does.
 ///
 /// **Transitive dependencies** (package-manager P2.4). A package's own modules import *its own*
 /// dependencies by *its own* local keys (`use jsonlib.parse.X`), which collide across packages (two
@@ -230,11 +308,22 @@ fn collect_noe_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Resul
 /// it maps each of this package's local dependency keys to the **globally-unique segment** the resolver
 /// assigned the package that key resolves to, so every `use` leading segment in the flat pool addresses
 /// exactly one package. For a leaf/direct dependency with no dependencies of its own it is empty, so
-/// single-level linking is byte-for-byte unchanged. `key` is this package's own global segment (the
-/// consumer's dep-key for a direct dependency, a synthesized unique segment for a transitive-only one).
+/// single-level linking is byte-for-byte unchanged. [`DepPackage::key`] is this package's own global
+/// segment (the consumer's dep-key for a direct dependency, a synthesized unique segment for a
+/// transitive-only one).
 #[derive(Debug)]
 pub struct DepPackage {
-    pub key: String,
+    /// The prefix this package's modules **derive** under in this consumer's build — the key alone
+    /// for a plain `[dependencies]` entry, `{key}.{package root segment}` for a scope-array member
+    /// (`para = [{ package = "para/db" }, …]` → `para.db`). The same prefix `noeta-pm` handed
+    /// [`PackageRoot`] when it read the modules, so what a module's path derives to and what its
+    /// intra-package `use`s are re-rooted to cannot disagree. Its first segment is the consumer's
+    /// import key ([`Self::key`]).
+    pub prefix: Vec<String>,
+    /// The package's **own** root segment — the `package` half of its identity (`db` for `para/db`),
+    /// which is the prefix its modules derive under when it is built *standalone*. This is therefore
+    /// the segment an intra-package `use` leads with in every build, and what [`reroot_path`]
+    /// rewrites to [`Self::prefix`].
     pub root: String,
     pub modules: Vec<RawModule>,
     /// This package's local dependency keys → the global segment of the package each resolves to
@@ -253,40 +342,131 @@ pub struct DepPackage {
     /// unrepresentable here rather than silently degrading to the default. (`noeta-edition` is the
     /// bottom-of-DAG vocabulary crate, so depending on the type costs the loader nothing.)
     pub edition: noeta_lexer::Edition,
+    /// This package's resolved `@name` bindings — its `[directives]` and `[tiers]` merged into one map
+    /// (local `@name` → the provider namespace root(s) and exported name, per-package naming arc; a
+    /// `@name` is one namespace, so the two tables cannot collide). Resolved by the package manager in
+    /// **this** package's dependency context; the loader keys them by this package's [`PackageOrigin`]
+    /// into the checker's per-package `@name` tables so a `@name` resolves in the source that wrote it.
+    /// Empty for a package that uses no extension `@`-directives or tiers.
+    pub directives: std::collections::HashMap<String, noeta_span::PackageUse>,
 }
 
-/// Re-root a namespace/use path in place: replace its leading segment per the rules
-/// (package-manager P2.1/P2.4). If the leading segment is the package's own `root`, it becomes the
-/// package's global `key`; otherwise, if it is one of the package's local dependency keys, it becomes
-/// that dependency's global segment (`renames`). A path leading with anything else — `std`, or a
-/// malformed package path — is left untouched.
-/// Public so a caller holding a namespace **outside** a [`Program`] can address it the same way
-/// [`reroot_program`] addresses a parsed one — the salsa layer recovers a broken dependency module's
-/// namespace from its tokens (it has no usable AST), and that namespace must be re-rooted to the
-/// consumer's key or it will never match the `use` that names it.
-pub fn reroot_path(
-    path: &mut [String],
-    root: &str,
-    key: &str,
-    renames: &std::collections::BTreeMap<String, String>,
-) {
-    let Some(head) = path.first_mut() else {
-        return;
-    };
-    if head.as_str() == root {
-        *head = key.to_string();
-    } else if let Some(global) = renames.get(head.as_str()) {
-        *head = global.clone();
+impl DepPackage {
+    /// The consumer's **import key** for this package — the first segment of [`Self::prefix`]. What
+    /// the package is addressed by as a whole (`PackageOrigin::Dependency`, a native package's
+    /// retained import root); the segments after it, if any, belong to the package rather than to the
+    /// consumer's manifest.
+    pub fn key(&self) -> &str {
+        self.prefix.first().map_or("", String::as_str)
     }
 }
 
+/// Re-root a namespace/use path in place: replace its leading segment per the rules
+/// (package-manager P2.1/P2.4).
+///
+/// **The rule: a leading segment equal to the package's own root segment becomes the whole prefix
+/// the package's modules derive under here.** `root` is always the *package* half of the identity
+/// (`db` for `para/db`) — the prefix the package derives under when it is built **standalone** — and
+/// `prefix` is what it derives under in *this* build (the consumer's key, plus the package segment
+/// for a scope-array member: `para = [{ package = "para/db" }, …]` → `para.db`). So the one spelling
+/// `use db.query` addresses the same module in both builds: standalone `prefix == [root]` and the
+/// rewrite is a no-op; as a dependency it becomes `use para.db.query`, which is what `query.noe`
+/// derives there.
+///
+/// That is what makes an intra-package import writable at all. Rewriting a *single* segment to the
+/// *key* could not: for a scope-array member the key is the **scope** half, so `use db.query` matched
+/// nothing and was never rewritten, while `use para.db.query` matched nothing standalone — a package
+/// author had to pick which of the two builds to break. It is also what makes the key real: keying
+/// `acme/cli` as `mycli` rewrites its internal `use cli.x` to `mycli.x`.
+///
+/// Otherwise, if the leading segment is one of the package's own local dependency keys it becomes
+/// that dependency's global segment (`renames`) — a **single** segment, because the author already
+/// spelled whatever follows (`use para.db.query` inside a package that keys the `para` scope array
+/// re-roots only `para`). A path leading with anything else — `std`, a native extension's own
+/// namespace root, or a malformed package path — is left untouched.
+///
+/// Public so a caller holding a namespace **outside** a [`Program`] can address it the same way
+/// [`reroot_program`] addresses a parsed one — the salsa layer recovers a broken dependency module's
+/// namespace from its tokens (it has no usable AST), and that namespace must be re-rooted to the
+/// consumer's prefix or it will never match the `use` that names it.
+pub fn reroot_path(
+    path: &mut Vec<String>,
+    root: &str,
+    prefix: &[String],
+    renames: &std::collections::BTreeMap<String, String>,
+) {
+    let Some(head) = path.first() else {
+        return;
+    };
+    if head.as_str() == root {
+        // The whole prefix, not one segment: a scope member's is two segments deep.
+        path.splice(0..1, prefix.iter().cloned());
+    } else if let Some(global) = renames.get(head.as_str()) {
+        path[0] = global.clone();
+    }
+}
+
+/// Re-root a `use`, whose leading segment is **not always in its `path`**.
+///
+/// The parser splits a non-grouped import so that its *leaf* is the imported name and only what
+/// precedes it is the `path` (`use App.Models.User` → path `App.Models`, name `User`). A
+/// **single-segment** import therefore has an *empty* path and carries its one segment — the whole
+/// module it names — in `names`. That is exactly the shape a package's own collapsed root takes
+/// (`aether.noe` at the root of `para/aether` derives the bare path `aether`, so a sibling imports
+/// it `use aether`), and keying re-rooting on `path.first()` alone skipped it silently: the module
+/// was re-rooted to `para.aether` while the `use` still named `aether`, so the import resolved to
+/// nothing and the diagnostic had an empty path to name.
+///
+/// So the dotted spelling is re-rooted whole and re-split. When the trailing segment changes the
+/// **local binding** must not follow it — the source wrote `use aether` and its body says
+/// `aether.App`, while a consumer keying the package `myweb` re-roots the module to `myweb` — so an
+/// un-aliased import pins its original spelling as an explicit alias. A scope-array member
+/// (`aether` → `para.aether`) keeps its trailing segment and needs none.
+fn reroot_use(
+    path: &mut Vec<String>,
+    names: &mut [UseName],
+    root: &str,
+    prefix: &[String],
+    renames: &std::collections::BTreeMap<String, String>,
+) {
+    if !path.is_empty() {
+        reroot_path(path, root, prefix, renames);
+        return;
+    }
+    // An empty path means a single-segment import, which is the only shape that puts the leading
+    // segment in `names`; a group (`use a.{B}`) always has its prefix in `path`.
+    let [name] = names else {
+        return;
+    };
+    let mut full = vec![name.name.clone()];
+    reroot_path(&mut full, root, prefix, renames);
+    let Some(last) = full.pop() else {
+        return;
+    };
+    if last != name.name && name.alias.is_none() {
+        name.alias = Some(std::mem::replace(&mut name.name, last));
+    } else {
+        name.name = last;
+    }
+    *path = full;
+}
+
 /// Re-root a dependency module's `namespace` (its match key) and `use` paths (its import drivers).
-/// The `namespace` only ever leads with the package's own root, so it is rewritten `root` → `key`; a
-/// `use` may lead with the package root (an intra-package reference) or one of the package's local
-/// dependency keys (a transitive reference), both handled by [`reroot_path`]. Touches only those two
-/// statement kinds — both are consumed *during* linking (matching / import-driving) and never appear
-/// in the merged declaration output — so re-rooting cannot alter what a package contributes, only how
-/// it's addressed.
+///
+/// **A module's path is now derived, not declared** ([`derive`]), so the `namespace` rewrite is no
+/// longer what gives a dependency its identity — the derivation already produces it under the
+/// consumer's key. What the rewrite still does is put a *declared* namespace into the consumer's
+/// naming space so [`apply_derived_paths`] can compare like with like: a package that declares
+/// `namespace greet.hello` and is keyed `hi` re-roots to `hi.hello`, which is exactly what
+/// `hello.noe` derives, so the declaration is a restatement rather than a contradiction. (It is a
+/// no-op once the declarations are gone.)
+///
+/// Both kinds lead with the same segment when they refer to the package itself — its own root
+/// segment, which is what its modules derive under standalone — so both are rewritten `root` →
+/// `prefix`; a `use` may instead lead with one of the package's local dependency keys (a transitive
+/// reference), also handled by [`reroot_path`]. Touches only those two statement kinds — both are
+/// consumed *during* linking (matching / import-driving) and never appear in the merged declaration
+/// output — so re-rooting cannot alter what a package contributes, only how it's addressed.
 ///
 /// Public so a salsa-based linker (`noeta-db`) can re-root a dependency's parsed [`Program`] before
 /// feeding it to [`link_parsed_with_deps`] — the CLI's [`link_with_deps`] does this inline, but the
@@ -295,13 +475,15 @@ pub fn reroot_path(
 pub fn reroot_program(
     program: &mut Program,
     root: &str,
-    key: &str,
+    prefix: &[String],
     renames: &std::collections::BTreeMap<String, String>,
 ) {
     for stmt in &mut program.stmts {
         match stmt {
-            Stmt::Namespace { path, .. } => reroot_path(path, root, key, renames),
-            Stmt::Use { path, .. } => reroot_path(path, root, key, renames),
+            Stmt::Namespace { path, .. } => reroot_path(path, root, prefix, renames),
+            Stmt::Use { path, names, .. } => {
+                reroot_use(path, names, root, prefix, renames);
+            }
             _ => {}
         }
     }
@@ -315,6 +497,11 @@ pub fn reroot_program(
 pub struct RawWorkspace {
     pub entry: Source,
     pub modules: Vec<Source>,
+    /// The module path each source's location derives, **index-aligned with the `SourceId`s**: the
+    /// entry at 0, the modules at `1..`. A [`Source`] carries a file name, not an identity, and the
+    /// salsa graph rebuilds programs from `Source`s alone — so the derivation has to travel beside
+    /// them or the query path would fall back to declared namespaces while the batch path derives.
+    pub paths: Vec<ModulePath>,
 }
 
 /// Read the entry file and its sibling `.noe` modules into labeled [`Source`]s, without lexing,
@@ -341,34 +528,119 @@ pub fn workspace_sources(workspace: &RawWorkspace, deps: &[DepPackage]) -> Vec<S
     sources
 }
 
-pub fn read_workspace(entry_path: &Path) -> io::Result<RawWorkspace> {
+pub fn read_workspace(entry_path: &Path, root: Option<&PackageRoot>) -> io::Result<RawWorkspace> {
     let text = std::fs::read_to_string(entry_path)?;
     let entry = Source::new(SourceId(0), entry_path.display().to_string(), text);
-    let modules = read_siblings(entry_path)
+    let mut paths = vec![entry_module_path(entry_path, root)];
+    let modules = read_siblings(entry_path, root)
         .into_iter()
         .enumerate()
-        .map(|(i, raw)| Source::new(SourceId((i + 1) as u32), raw.name, raw.text))
+        .map(|(i, raw)| {
+            paths.push(raw.path);
+            Source::new(SourceId((i + 1) as u32), raw.name, raw.text)
+        })
         .collect();
-    Ok(RawWorkspace { entry, modules })
+    Ok(RawWorkspace {
+        entry,
+        modules,
+        paths,
+    })
 }
 
-/// Gather the `.noe` files in the entry's directory other than the entry itself, in sorted
-/// order (so SourceId assignment and resolution are deterministic). A read failure yields no
-/// siblings — a lone file simply links to itself.
-fn read_siblings(entry_path: &Path) -> Vec<RawModule> {
-    let Some(dir) = entry_path.parent() else {
-        return Vec::new();
+/// Whether `entry_path` sits inside one of the package's **data directories** (`migrations/`,
+/// `seeds/`). A file there is a *program the driver runs*, not a module of the package: `noeta migrate`
+/// loads it as an entry, and it is neither imported by the package's modules nor an importer of them.
+/// Both facts follow — it has no derived module path ([`entry_module_path`]), and it links with none of
+/// the package's own modules as siblings ([`read_siblings`]).
+fn entry_in_data_dir(root: &PackageRoot, entry_path: &Path) -> bool {
+    root.relative(entry_path)
+        .is_some_and(|relative| root.data_dirs.iter().any(|dir| relative.starts_with(dir)))
+}
+
+/// The module path the **entry** file's own location derives — it is a file of the package like any
+/// other, and a sibling may legitimately `use` what it declares.
+///
+/// The one exception is an entry inside a package **data directory** (`migrations/`, `seeds/`): a
+/// `noeta migrate` run loads such a file *as its entry* rather than reaching it through the package
+/// walk (which already prunes those directories — [`read_package_modules`]). A migration is a program
+/// named for *when* it runs (`20260719000002_more_users.noe`), a stem no `use` could ever spell, so
+/// it has no module path — [`ModulePath::Declared`], the same treatment the walk gives it. Deriving
+/// one here instead reported E0074 against a file whose name is exactly right for what it is, which is
+/// the very failure the data-directory concept exists to prevent.
+fn entry_module_path(entry_path: &Path, root: Option<&PackageRoot>) -> ModulePath {
+    let Some(root) = root else {
+        return ModulePath::Declared;
     };
-    let entry_name = entry_path.file_name();
-    let mut modules = read_dir_modules(dir);
-    modules.retain(|m| Path::new(&m.name).file_name() != entry_name);
+    if entry_in_data_dir(root, entry_path) {
+        return ModulePath::Declared;
+    }
+    root.relative(entry_path)
+        .map_or(ModulePath::Declared, |relative| {
+            derive_module_path(&root.prefix, relative)
+        })
+}
+
+/// Gather the entry's **sibling modules**: every other `.noe` file of the package, in sorted order
+/// (so `SourceId` assignment and resolution are deterministic).
+///
+/// With a [`PackageRoot`] this is the package walk ([`read_package_modules`]) — recursive and
+/// pruned, exactly as a *dependency* package has always been walked, so `src/deep/nested.noe` is a
+/// module of the app just as a dependency's `inner/deep.noe` is a module of the dependency. Without
+/// one (a lone script in a directory that is not a package) it stays the flat scan of the entry's
+/// own directory: a bare `noeta run` must not recursively swallow whatever tree it happens to stand
+/// in, and with no package there is no prefix to derive under either.
+///
+/// A read failure yields no siblings — a lone file simply links to itself.
+///
+/// A **data-directory entry** (a `migrations/`/`seeds/` program the driver runs) links with *no*
+/// package siblings: it is a standalone program that reaches its dependency packages through `deps`,
+/// and the app's own modules are no more its concern than it is theirs. Pulling them in also broke
+/// outright — a sibling module carrying executable top-level statements (an app entry naming its own
+/// top-level bindings) only links as the program root, so linking it beside a migration reported the
+/// app's own names as unresolved against code the migration never wrote.
+fn read_siblings(entry_path: &Path, root: Option<&PackageRoot>) -> Vec<RawModule> {
+    let mut modules = match root {
+        Some(root) if entry_in_data_dir(root, entry_path) => return Vec::new(),
+        Some(root) => read_package_modules(root),
+        None => {
+            let Some(dir) = entry_path.parent() else {
+                return Vec::new();
+            };
+            read_dir_modules(dir)
+        }
+    };
+    // The entry is not its own sibling. Compared by full path under a package walk (two files can
+    // share a name in different directories) and by file name otherwise (the flat scan's paths are
+    // spelled however the invocation spelled them).
+    match root {
+        Some(_) => modules.retain(|m| !same_file(Path::new(&m.name), entry_path)),
+        None => {
+            let entry_name = entry_path.file_name();
+            modules.retain(|m| Path::new(&m.name).file_name() != entry_name);
+        }
+    }
     modules
 }
 
-/// Read every `.noe` file directly in `dir` (flat — the sibling scan's scope, unlike
-/// [`read_package_sources`]'s recursive package walk) as a [`RawModule`], in sorted order.
-/// A directory that cannot be read yields no modules; unreadable files are skipped — both
-/// matching [`read_siblings`]'s tolerance (it is this scan minus the entry).
+/// Whether two paths name the same file. The package walk spells its paths from the package root
+/// while the invocation spells the entry however it likes, so the cheap comparison is tried first
+/// and canonicalization only settles the cases it misses — the entry appearing in its own sibling
+/// pool would merge every one of its declarations twice.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+}
+
+/// Read every `.noe` file directly in `dir` (flat — the sibling scan's scope) as a [`RawModule`],
+/// in sorted order. A directory that cannot be read yields no modules; unreadable files are skipped
+/// — both matching [`read_siblings`]'s tolerance (it is this scan minus the entry).
+///
+/// This is the **no-package** scan: nothing here derives a module path, so every module's
+/// `namespace` declaration stands. A directory that *is* a package is a tree, and its modules have
+/// derived paths — use [`read_package_modules`] with its [`PackageRoot`].
 pub fn read_dir_modules(dir: &Path) -> Vec<RawModule> {
     // A bare relative entry (`noeta test app.noe`) has parent `""` — the current directory —
     // but `read_dir("")` errors, which silently dropped every sibling: an E0019 from the very
@@ -397,10 +669,7 @@ pub fn read_dir_modules(dir: &Path) -> Vec<RawModule> {
         .into_iter()
         .filter_map(|p| {
             let text = std::fs::read_to_string(&p).ok()?;
-            Some(RawModule {
-                name: p.display().to_string(),
-                text,
-            })
+            Some(RawModule::declared(p.display().to_string(), text))
         })
         .collect()
 }
@@ -412,25 +681,38 @@ pub fn link(
     entry_text: &str,
     root_edition: noeta_lexer::Edition,
     siblings: &[RawModule],
+    entry_path: ModulePath,
 ) -> Result<Linked, Vec<LoadDiagnostic>> {
     // The entry is always SourceId 0; siblings follow. Each module keeps its own source so its
     // spans stay valid and its diagnostics render against it. The deps-free path: entry + siblings
-    // are one package, so every source takes the root edition.
+    // are one package, so every source takes the root edition and the root package.
     let entry = Source::new(SourceId(0), entry_name, entry_text);
     let mut sources: Vec<Source> = vec![entry.clone()];
     let mut editions = noeta_lexer::EditionMap::new();
+    let mut packages = noeta_span::PackageMap::new();
     editions.set(SourceId(0), root_edition);
+    packages.set(SourceId(0), PackageOrigin::Root);
     for (i, raw) in siblings.iter().enumerate() {
         let id = SourceId((i + 1) as u32);
         sources.push(Source::new(id, raw.name.as_str(), raw.text.as_str()));
         editions.set(id, root_edition);
+        packages.set(id, PackageOrigin::Root);
     }
-    let (lexeds, text_tiers) = lex_program(&sources, &editions);
+    // The deps-free path has no manifest and so no `[tiers]`/`[directives]` bindings — an empty
+    // `PackageUses` means [`lex_program`] contributes no per-package renamed text tiers (only a
+    // file's own `@tier(…, text)` declarations, which its per-file scan discovers regardless).
+    let (lexeds, text_tiers) = lex_program(
+        &sources,
+        &editions,
+        &packages,
+        &noeta_span::PackageUses::new(),
+    );
 
     // Entry + siblings parse under the root package's edition (deps-free: no dependency packages,
     // so no other editions are in play). `link_with_deps` is the twin that also links dependencies,
     // each under its own edition.
-    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
+    let mut entry_parsed =
+        noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
     let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
@@ -453,21 +735,53 @@ pub fn link(
     // parse error instead of the cascading "no module" (see [`BrokenModule`]). Every sibling's
     // `Source` is retained (whether or not it parsed) so the `SourceMap` indices line up with the
     // `SourceId`s the parser stamped onto spans.
-    let mut module_programs: Vec<Program> = Vec::new();
+    let mut module_programs: Vec<(usize, Program)> = Vec::new();
     let mut broken: Vec<BrokenModule> = Vec::new();
-    for (source, lexed) in sources.iter().zip(&lexeds).skip(1) {
-        match parse_module(source, lexed, root_edition, &text_tiers) {
-            Ok(program) => module_programs.push(program),
+    for (index, (source, lexed)) in sources.iter().zip(&lexeds).enumerate().skip(1) {
+        match parse_module(
+            source,
+            lexed,
+            root_edition,
+            &text_tiers,
+            &siblings[index - 1].path,
+        ) {
+            Ok(program) => module_programs.push((index, program)),
             Err(module) => broken.push(*module),
         }
     }
 
-    let refs: Vec<&Program> = module_programs.iter().collect();
+    // Derivation decides identity: each file's path becomes its `namespace` (see
+    // [`apply_derived_paths`]). Runs before linking, so a collision or a contradicted declaration is
+    // reported against the files themselves rather than as the "no module"/"has no export" cascade
+    // it used to become at whoever imported them.
+    let mut units = vec![DerivedUnit {
+        source: &entry,
+        path: &entry_path,
+        program: &mut entry_parsed.program,
+    }];
+    units.extend(
+        module_programs
+            .iter_mut()
+            .map(|(index, program)| DerivedUnit {
+                source: &sources[*index],
+                path: &siblings[*index - 1].path,
+                program,
+            }),
+    );
+    let path_diagnostics = apply_derived_paths(units);
+    if !path_diagnostics.is_empty() {
+        return Err(path_diagnostics);
+    }
+
+    let refs: Vec<&Program> = module_programs.iter().map(|(_, p)| p).collect();
     let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
     let Linkage {
         mut program,
         source_maps,
-    } = link_parsed(&entry, &entry_parsed.program, &refs, &broken_refs)?;
+    } = link_parsed(&entry, &entry_parsed.program, &refs, &broken_refs).map_err(|mut d| {
+        attribute_to_spans(&mut d, &sources);
+        d
+    })?;
     let reads = expand_into(
         &mut program,
         &source_maps,
@@ -481,6 +795,8 @@ pub fn link(
         entry,
         sources: SourceMap::new(sources),
         editions,
+        packages,
+        package_uses: noeta_span::PackageUses::new(),
         reads,
     })
 }
@@ -496,7 +812,7 @@ pub fn link(
 /// through the same [`SourceMap`] as one in a hand-written file.
 fn expand_into(
     program: &mut Program,
-    source_maps: &std::collections::HashMap<SourceId, qualify::QMap>,
+    source_maps: &std::collections::HashMap<SourceId, qualify::UnitMap>,
     sources: &mut Vec<Source>,
     editions: &mut noeta_lexer::EditionMap,
     root_edition: noeta_lexer::Edition,
@@ -552,7 +868,7 @@ fn expand_into(
 /// the link when `diagnostics` is non-empty, but register `reads` either way.
 pub fn run_expansion(
     program: &mut Program,
-    source_maps: &std::collections::HashMap<SourceId, qualify::QMap>,
+    source_maps: &std::collections::HashMap<SourceId, qualify::UnitMap>,
     sources: impl FnOnce() -> Vec<Source>,
     next_id: u32,
     root_edition: noeta_lexer::Edition,
@@ -595,17 +911,48 @@ pub fn link_with_deps(
     root_edition: noeta_lexer::Edition,
     siblings: &[RawModule],
     deps: &[DepPackage],
+    package_uses: &noeta_span::PackageUses,
+    entry_path: ModulePath,
+) -> Result<Linked, Vec<LoadDiagnostic>> {
+    link_with_deps_appending(
+        entry_name,
+        entry_text,
+        root_edition,
+        siblings,
+        deps,
+        package_uses,
+        entry_path,
+        &[],
+    )
+}
+
+/// As [`link_with_deps`], but appending a driver's `entry_tail` to the entry before it links — the
+/// linking half of [`load_with_deps_appending`], where the reason those statements have to arrive
+/// *before* the link is spelled out.
+#[allow(clippy::too_many_arguments)]
+pub fn link_with_deps_appending(
+    entry_name: &str,
+    entry_text: &str,
+    root_edition: noeta_lexer::Edition,
+    siblings: &[RawModule],
+    deps: &[DepPackage],
+    package_uses: &noeta_span::PackageUses,
+    entry_path: ModulePath,
+    entry_tail: &[Stmt],
 ) -> Result<Linked, Vec<LoadDiagnostic>> {
     // Assemble every module's `Source` up front — entry = 0, siblings `1..=S`, dependency modules
     // continuing the sequence — then lex them as one program (see [`lex_program`]: a text tier
     // declared in any file, a dependency package's included, captures verbatim bodies in every
-    // file) before any parsing. The `editions` side-table is built in lock-step: the entry and its
-    // siblings take the root package's edition, each dependency's modules that package's own.
+    // file) before any parsing. The `editions` and `packages` side-tables are built in lock-step:
+    // the entry and its siblings take the root package's edition and are the root package, each
+    // dependency's modules take that package's own edition and its global key.
     let entry = Source::new(SourceId(0), entry_name, entry_text);
     let mut next_id: u32 = 1;
     let mut sources: Vec<Source> = vec![entry.clone()];
     let mut editions = noeta_lexer::EditionMap::new();
+    let mut packages = noeta_span::PackageMap::new();
     editions.set(SourceId(0), root_edition);
+    packages.set(SourceId(0), PackageOrigin::Root);
     for raw in siblings {
         sources.push(Source::new(
             SourceId(next_id),
@@ -613,6 +960,7 @@ pub fn link_with_deps(
             raw.text.as_str(),
         ));
         editions.set(SourceId(next_id), root_edition);
+        packages.set(SourceId(next_id), PackageOrigin::Root);
         next_id += 1;
     }
     let sibling_end = sources.len();
@@ -624,13 +972,23 @@ pub fn link_with_deps(
                 raw.text.as_str(),
             ));
             editions.set(SourceId(next_id), dep.edition);
+            packages.set(
+                SourceId(next_id),
+                PackageOrigin::Dependency(dep.key().to_string()),
+            );
             next_id += 1;
         }
     }
-    let (lexeds, text_tiers) = lex_program(&sources, &editions);
+    let (lexeds, text_tiers) = lex_program(&sources, &editions, &packages, package_uses);
 
     // The entry parses under the root package's edition.
-    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
+    let mut entry_parsed =
+        noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
+    // The driver's tail joins the entry *before* anything reads the program — so it is one of the
+    // entry's own statements by the time derivation writes the entry's module path in and the
+    // linker resolves its imports, which is exactly what the tail's `use` and its qualified names
+    // need (see [`load_with_deps_appending`]).
+    append_entry_tail(&mut entry_parsed.program, entry_tail);
     let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
@@ -649,18 +1007,28 @@ pub fn link_with_deps(
 
     // Parse the siblings (pure decl-sources) under the root edition. A broken sibling is kept for
     // attribution rather than dropped (see [`BrokenModule`]).
-    let mut sibling_programs: Vec<Program> = Vec::new();
+    let mut sibling_programs: Vec<(usize, Program)> = Vec::new();
     let mut broken: Vec<BrokenModule> = Vec::new();
-    for (source, lexed) in sources[1..sibling_end].iter().zip(&lexeds[1..sibling_end]) {
-        match parse_module(source, lexed, root_edition, &text_tiers) {
-            Ok(program) => sibling_programs.push(program),
+    for (index, (source, lexed)) in sources[1..sibling_end]
+        .iter()
+        .zip(&lexeds[1..sibling_end])
+        .enumerate()
+    {
+        match parse_module(
+            source,
+            lexed,
+            root_edition,
+            &text_tiers,
+            &siblings[index].path,
+        ) {
+            Ok(program) => sibling_programs.push((index + 1, program)),
             Err(module) => broken.push(*module),
         }
     }
 
     // Parse + re-root each dependency package's modules under *that package's* edition (the sources
     // continue past the siblings in the same package order they were assembled above).
-    let (dep_programs, broken_deps) =
+    let (mut dep_programs, broken_deps) =
         parse_dep_programs(&sources, &lexeds, sibling_end, deps, &text_tiers);
 
     // A dependency package that does not parse is a hard error, reported against the offending file
@@ -675,8 +1043,37 @@ pub fn link_with_deps(
             .collect());
     }
 
-    let sibling_refs: Vec<&Program> = sibling_programs.iter().collect();
-    let dep_refs: Vec<&Program> = dep_programs.iter().collect();
+    // The entry, its siblings, and every dependency module take the path their location derives —
+    // dependency modules **after** re-rooting, so a declared namespace is compared in the consumer's
+    // own naming space (see [`apply_derived_paths`]). One pass over all of them, because a collision
+    // is a program-wide fact: two files of one package deriving one path is the same error as a
+    // dependency module colliding with a sibling.
+    let mut units = vec![DerivedUnit {
+        source: &entry,
+        path: &entry_path,
+        program: &mut entry_parsed.program,
+    }];
+    units.extend(
+        sibling_programs
+            .iter_mut()
+            .map(|(index, program)| DerivedUnit {
+                source: &sources[*index],
+                path: &siblings[*index - 1].path,
+                program,
+            }),
+    );
+    units.extend(dep_programs.iter_mut().map(|(index, program)| DerivedUnit {
+        source: &sources[*index],
+        path: dep_module_path(deps, *index - sibling_end),
+        program,
+    }));
+    let path_diagnostics = apply_derived_paths(units);
+    if !path_diagnostics.is_empty() {
+        return Err(path_diagnostics);
+    }
+
+    let sibling_refs: Vec<&Program> = sibling_programs.iter().map(|(_, p)| p).collect();
+    let dep_refs: Vec<&Program> = dep_programs.iter().map(|(_, p)| p).collect();
     let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
     let native_roots = native_dep_roots(deps);
     let Linkage {
@@ -689,7 +1086,11 @@ pub fn link_with_deps(
         &dep_refs,
         &broken_refs,
         Some(&native_roots),
-    )?;
+    )
+    .map_err(|mut d| {
+        attribute_to_spans(&mut d, &sources);
+        d
+    })?;
     let reads = expand_into(
         &mut program,
         &source_maps,
@@ -703,8 +1104,36 @@ pub fn link_with_deps(
         entry,
         sources: SourceMap::new(sources),
         editions,
+        packages,
+        // Carry the resolved per-package `@name` tables through, so a caller reading `linked.package_uses`
+        // (the tier-name CLI fallback, the checker's activation) resolves `@name`s per the package that
+        // wrote them rather than reaching an empty table — the same map that drove the text-tier lex above.
+        package_uses: package_uses.clone(),
         reads,
     })
+}
+
+/// Append a driver's synthesized statements to the entry program, so they link as handwritten ones
+/// do (see [`load_with_deps_appending`] for what requires that and why they cannot arrive after).
+///
+/// A tail `use` whose local name the entry already binds is dropped rather than added twice: the
+/// program's own import wins, which is both what a handwritten duplicate gets and what keeps a file
+/// that already imports the module from colliding with an import it never asked for (E0020).
+fn append_entry_tail(program: &mut Program, tail: &[Stmt]) {
+    let bound = |program: &Program, local: &str| {
+        program.stmts.iter().any(|stmt| match stmt {
+            Stmt::Use { names, .. } => names.iter().any(|n| n.local() == local),
+            _ => false,
+        })
+    };
+    for stmt in tail {
+        if let Stmt::Use { names, .. } = stmt
+            && names.iter().any(|n| bound(program, n.local()))
+        {
+            continue;
+        }
+        program.stmts.push(stmt.clone());
+    }
 }
 
 /// Parse + re-root each dependency package's modules under *that package's* edition. The dependency
@@ -718,16 +1147,22 @@ fn parse_dep_programs(
     offset: usize,
     deps: &[DepPackage],
     text_tiers: &noeta_lexer::TextTiers,
-) -> (Vec<Program>, Vec<BrokenModule>) {
-    let mut dep_programs: Vec<Program> = Vec::new();
+) -> (Vec<(usize, Program)>, Vec<BrokenModule>) {
+    let mut dep_programs: Vec<(usize, Program)> = Vec::new();
     let mut broken: Vec<BrokenModule> = Vec::new();
     let mut dep_idx = offset;
     for dep in deps {
-        for _ in &dep.modules {
-            match parse_module(&sources[dep_idx], &lexeds[dep_idx], dep.edition, text_tiers) {
+        for raw in &dep.modules {
+            match parse_module(
+                &sources[dep_idx],
+                &lexeds[dep_idx],
+                dep.edition,
+                text_tiers,
+                &raw.path,
+            ) {
                 Ok(mut program) => {
-                    reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
-                    dep_programs.push(program);
+                    reroot_program(&mut program, &dep.root, &dep.prefix, &dep.dep_renames);
+                    dep_programs.push((dep_idx, program));
                 }
                 Err(module) => broken.push(*module),
             }
@@ -737,12 +1172,26 @@ fn parse_dep_programs(
     (dep_programs, broken)
 }
 
+/// The `flat`-th dependency module's derived path, across every package's modules in the order the
+/// sources were assembled (package order, each package's modules in scan order) — the same walk
+/// [`parse_dep_programs`] does, so the two agree by construction.
+fn dep_module_path(deps: &[DepPackage], flat: usize) -> &ModulePath {
+    let mut remaining = flat;
+    for dep in deps {
+        if remaining < dep.modules.len() {
+            return &dep.modules[remaining].path;
+        }
+        remaining -= dep.modules.len();
+    }
+    &ModulePath::Declared
+}
+
 /// A resolved dependency graph is complete knowledge: the always-legitimate non-std roots are the
 /// declared native-package keys (their members live in the composed toolchain, not the link pool).
 fn native_dep_roots(deps: &[DepPackage]) -> Vec<String> {
     deps.iter()
         .filter(|d| d.native)
-        .map(|d| d.key.clone())
+        .map(|d| d.key().to_string())
         .collect()
 }
 
@@ -767,13 +1216,22 @@ type ModuleParse = Result<Program, Box<BrokenModule>>;
 pub struct ParsedDir {
     sources: Vec<Source>,
     editions: noeta_lexer::EditionMap,
+    /// Which package each source was read from, keyed by the shared `SourceId` numbering — the
+    /// directory-mode twin of `Linked::packages`. Directory modules are the root package;
+    /// dependency modules carry their package's global key.
+    packages: noeta_span::PackageMap,
     modules: Vec<ModuleParse>,
-    dep_programs: Vec<Program>,
+    dep_programs: Vec<(usize, Program)>,
     /// Dependency-package modules that failed to lex/parse — a hard error for *every* entry in the
     /// directory (a dependency is shared by all of them), reported against the dependency's own
     /// file. `noeta check` dedups by (file, span, code), so one broken dependency file prints once
     /// however many entries the directory holds.
     broken_deps: Vec<BrokenModule>,
+    /// What the *derivation* found wrong with the directory's files — a name that cannot be a path
+    /// segment, two files deriving one path, a `namespace` contradicting the file's location. A
+    /// property of the file set, so it fails every entry in it ([`ParsedDir::link_entry`]), like a
+    /// broken dependency module.
+    path_diagnostics: Vec<LoadDiagnostic>,
     native_roots: Vec<String>,
     /// The union of text tiers declared anywhere in the directory (or its dependencies), from the
     /// one program-wide lex — kept because an expansion's generated source is lexed and parsed with
@@ -808,13 +1266,17 @@ pub struct EntryLink {
 /// once, for per-entry linking via [`ParsedDir::link_entry`]. Mirrors [`link_with_deps`]'s
 /// assembly: one program-wide lex (text-tier union spans every file, dependencies included),
 /// entry/sibling sources under the root package's edition, each dependency's under its own.
+/// `package_uses` (the whole program's resolved `@name` tables) lets that lex honor a package's
+/// renamed text tiers, exactly as [`link_with_deps`] does.
 pub fn parse_dir(
     modules: Vec<RawModule>,
     root_edition: noeta_lexer::Edition,
     deps: &[DepPackage],
+    package_uses: &noeta_span::PackageUses,
 ) -> ParsedDir {
     let mut sources: Vec<Source> = Vec::with_capacity(modules.len());
     let mut editions = noeta_lexer::EditionMap::new();
+    let mut packages = noeta_span::PackageMap::new();
     let mut next_id: u32 = 0;
     for raw in &modules {
         sources.push(Source::new(
@@ -823,6 +1285,7 @@ pub fn parse_dir(
             raw.text.as_str(),
         ));
         editions.set(SourceId(next_id), root_edition);
+        packages.set(SourceId(next_id), PackageOrigin::Root);
         next_id += 1;
     }
     for dep in deps {
@@ -833,29 +1296,61 @@ pub fn parse_dir(
                 raw.text.as_str(),
             ));
             editions.set(SourceId(next_id), dep.edition);
+            packages.set(
+                SourceId(next_id),
+                PackageOrigin::Dependency(dep.key().to_string()),
+            );
             next_id += 1;
         }
     }
-    let (lexeds, text_tiers) = lex_program(&sources, &editions);
+    let (lexeds, text_tiers) = lex_program(&sources, &editions, &packages, package_uses);
 
     // Parse every directory module once — [`parse_module`] parses even after lex errors (as the
     // entry role always did) and chains lex + parse diagnostics onto the partial program, which is
     // exactly what both the entry and the sibling role need here.
-    let parsed_modules: Vec<ModuleParse> = sources[..modules.len()]
+    let mut parsed_modules: Vec<ModuleParse> = sources[..modules.len()]
         .iter()
         .zip(&lexeds)
-        .map(|(source, lexed)| parse_module(source, lexed, root_edition, &text_tiers))
+        .zip(&modules)
+        .map(|((source, lexed), raw)| {
+            parse_module(source, lexed, root_edition, &text_tiers, &raw.path)
+        })
         .collect();
 
-    let (dep_programs, broken_deps) =
+    let (mut dep_programs, broken_deps) =
         parse_dep_programs(&sources, &lexeds, modules.len(), deps, &text_tiers);
+
+    // Derivation applies once for the whole directory, not per entry: a collision or a contradicted
+    // declaration is a fact about the *files*, identical whichever of them is being checked. The
+    // diagnostics ride on the `ParsedDir` and every entry's link reports them (the CLI dedups by
+    // file+span+code, exactly as it does for a broken dependency).
+    let mut units: Vec<DerivedUnit> = parsed_modules
+        .iter_mut()
+        .enumerate()
+        .filter_map(|(index, parse)| {
+            parse.as_mut().ok().map(|program| DerivedUnit {
+                source: &sources[index],
+                path: &modules[index].path,
+                program,
+            })
+        })
+        .collect();
+    units.extend(dep_programs.iter_mut().map(|(index, program)| DerivedUnit {
+        source: &sources[*index],
+        path: dep_module_path(deps, *index - modules.len()),
+        program,
+    }));
+    let path_diagnostics = apply_derived_paths(units);
+
     let native_roots = native_dep_roots(deps);
     ParsedDir {
         sources,
         editions,
+        packages,
         modules: parsed_modules,
         dep_programs,
         broken_deps,
+        path_diagnostics,
         native_roots,
         text_tiers,
         root_edition,
@@ -867,7 +1362,15 @@ impl ParsedDir {
     /// `None` when the directory scan didn't yield it (an unreadable file, or a path spelled
     /// differently than the scan spells it — the caller falls back to a lone-file load).
     pub fn module_index(&self, name: &str) -> Option<usize> {
-        (0..self.modules.len()).find(|&i| self.sources[i].name() == name)
+        (0..self.modules.len())
+            .find(|&i| self.sources[i].name() == name)
+            // A package's modules are spelled from the package root while the invocation spells the
+            // entry however it likes; falling back to "is it the same file" keeps an entry linking
+            // against its own package instead of degrading to a lone-file check.
+            .or_else(|| {
+                (0..self.modules.len())
+                    .find(|&i| same_file(Path::new(self.sources[i].name()), Path::new(name)))
+            })
     }
 
     /// Every source (directory modules + dependency modules) under the shared id numbering —
@@ -879,6 +1382,13 @@ impl ParsedDir {
     /// Which edition governs each source, keyed by the shared `SourceId` numbering.
     pub fn editions(&self) -> &noeta_lexer::EditionMap {
         &self.editions
+    }
+
+    /// Which package each source came from, keyed by the shared `SourceId` numbering. An entry's
+    /// expansions are deliberately absent (as in `Linked::packages`), so the orphan rule never
+    /// judges generated code.
+    pub fn packages(&self) -> &noeta_span::PackageMap {
+        &self.packages
     }
 
     /// The shared sources **plus** one entry's expansions ([`EntryLink::expansions`]), so a
@@ -930,6 +1440,18 @@ impl ParsedDir {
                 .flat_map(BrokenModule::load_diagnostics)
                 .collect());
         }
+        // Same standing as a broken dependency: the file set is not linkable, and saying so beats
+        // the "no module"/"has no export" cascade the bad derivation would produce downstream.
+        if !self.path_diagnostics.is_empty() {
+            return Err(self
+                .path_diagnostics
+                .iter()
+                .map(|d| LoadDiagnostic {
+                    source: d.source.clone(),
+                    diagnostic: d.diagnostic.clone(),
+                })
+                .collect());
+        }
         let siblings: Vec<&Program> = self
             .modules
             .iter()
@@ -946,7 +1468,7 @@ impl ParsedDir {
             .filter(|&(i, _)| i != index)
             .filter_map(|(_, m)| m.as_ref().err().map(Box::as_ref))
             .collect();
-        let dep_refs: Vec<&Program> = self.dep_programs.iter().collect();
+        let dep_refs: Vec<&Program> = self.dep_programs.iter().map(|(_, p)| p).collect();
         let Linkage {
             mut program,
             source_maps,
@@ -957,7 +1479,11 @@ impl ParsedDir {
             &dep_refs,
             &broken,
             Some(&self.native_roots),
-        )?;
+        )
+        .map_err(|mut d| {
+            attribute_to_spans(&mut d, &self.sources);
+            d
+        })?;
         let (expansions, reads, diagnostics) = run_expansion(
             &mut program,
             &source_maps,
@@ -984,9 +1510,20 @@ impl ParsedDir {
 /// all declarations is applied and every file re-lexes with it — so a tier declared in one file
 /// (or one dependency package) captures `@x { … }` bodies verbatim in every other. Only programs
 /// declaring text tiers pay the second pass.
+///
+/// **Per-package renamed text tiers (per-package naming arc, sub-step 3g).** A `[tiers]` binding may
+/// map a *local* `@name` onto a text provider tier (`docs = "std:doc"`, `@docs { # markdown }`). The
+/// lexer only knows the provider's *exported* name (`doc`) as verbatim-capturing, so the local name
+/// must be added — but **only for the package that bound it**. Two packages can bind different locals,
+/// or the same local to different meanings, so the augmentation is keyed by [`PackageOrigin`] (from
+/// `packages`) and each source re-lexes with *its own* package's set. `package_uses` carries every
+/// package's `@name` bindings (the root's under [`PackageOrigin::Root`], each dependency's under its
+/// link segment); an empty map (a bare script, a single-file check) is exactly today's behavior.
 fn lex_program(
     sources: &[Source],
     editions: &noeta_lexer::EditionMap,
+    packages: &noeta_span::PackageMap,
+    package_uses: &noeta_span::PackageUses,
 ) -> (Vec<noeta_lexer::Lexed>, noeta_lexer::TextTiers) {
     // Each source lexes under ITS OWN package's edition (editions arc): the map was built in
     // lock-step with the sources, so a future edition that changes tokenization (a promoted
@@ -1003,29 +1540,129 @@ fn lex_program(
             )
         })
         .collect();
-    // Verbatim-body tiers come from two sources: a program's own `@tier(…, text/expr)` (found by
-    // the lexer's per-file token scan) and the installed extensions' declarations (`doc`, and any
-    // native `@json`/`@sql` — no `.noe` file declares these).
-    let mut declared: Vec<String> = lexeds
+    // Program-wide verbatim-body tiers come from two sources: a program's own `@tier(…, text/expr)`
+    // (found by the lexer's per-file token scan) and the installed extensions' declarations (`doc`,
+    // and any native `@json`/`@sql` — no `.noe` file declares these). These apply to EVERY file (a
+    // tier declared in one file names the same tier everywhere), unchanged by the per-package layer.
+    let mut global_names: Vec<String> = lexeds
         .iter()
         .flat_map(|l| l.text_tier_decls.iter().cloned())
         .collect();
-    declared.extend(
+    global_names.extend(
         noeta_ext_abi::registry::single_registry_process()
             .ext_verbatim_tier_names()
             .into_iter()
             .map(str::to_string),
     );
-    let set = noeta_lexer::TextTiers::with(declared.clone());
-    let default = noeta_lexer::TextTiers::default();
-    if declared.iter().all(|name| default.contains(name)) {
-        return (lexeds, set);
+    let global = noeta_lexer::TextTiers::with(global_names.clone());
+    // The per-package layer: each origin's local `@name`s that resolve to a text tier (see
+    // [`renamed_text_tier_locals`]). Keyed by origin so a rename in package A never forces verbatim
+    // capture of the same spelling in package B.
+    let renamed = renamed_text_tier_locals(package_uses, packages, &lexeds);
+
+    // The set the *parser* and *expansion* see is the union of every contribution — the parser
+    // consults it only to re-lex `${…}` interpolation holes (a nested `@name { … }` inside a hole),
+    // never to decide a top-level block's text-vs-code (that is already baked into the lexer's tokens
+    // by the per-package pass below); generated code has no single owning package, so the union is
+    // the only meaningful set there too. The union is broader than any one package's set, which only
+    // matters for the exotic nested-tier-in-a-hole case — safe, since it merely captures more prose.
+    let mut union = global.clone();
+    for locals in renamed.values() {
+        for name in locals {
+            union.insert(name.clone());
+        }
     }
+
+    // Fast path: the default `{doc}` covers every program-wide name and no package renamed a text
+    // tier — the first pass already lexed correctly, so nothing re-lexes (the common case: no text
+    // tier beyond `doc`, no `[tiers]` text binding).
+    let default = noeta_lexer::TextTiers::default();
+    if global_names.iter().all(|name| default.contains(name)) && renamed.is_empty() {
+        return (lexeds, global);
+    }
+
+    // Re-lex each source with ITS OWN package's set: the program-wide `global` plus the local names
+    // that package bound to a text tier. A source whose package renamed nothing re-lexes with exactly
+    // `global` (unchanged from the old behavior); only a package with a text-tier binding widens.
     let relexed = sources
         .iter()
-        .map(|source| noeta_lexer::lex_in(source, edition_of(source), &set))
+        .map(|source| {
+            let mut set = global.clone();
+            if let Some(origin) = packages.source_package(source.id())
+                && let Some(locals) = renamed.get(origin)
+            {
+                for name in locals {
+                    set.insert(name.clone());
+                }
+            }
+            noeta_lexer::lex_in(source, edition_of(source), &set)
+        })
         .collect();
-    (relexed, set)
+    (relexed, union)
+}
+
+/// The local `@name`s each package binds to a **text** (verbatim-body) tier — the per-package input
+/// to [`lex_program`]'s re-lex, keyed by the binding package's [`PackageOrigin`]. A `[tiers]` binding
+/// `local = "provider[:exported]"` makes `local` a text tier for that package iff the provider tier it
+/// names is itself a text (or expression) tier — resolved two ways, mirroring the checker's
+/// `TierRegistry::resolve_at`:
+///
+/// * an **extension** provider — `find_ext_tier_scoped(provider_roots, exported)` lands on the tier
+///   the binding named (scoped so `std`'s `doc` and a third party's same-named tier never conflate),
+///   and it is a text tier when its `.text`/`.expr` is set (the same predicate `ext_verbatim_tier_names`
+///   uses); or
+/// * a **program-declared** provider — a dependency shipping `@tier(exported, …, text: "…")`. At lex
+///   time there is no parsed AST, but the first lex pass already scanned each source's own text-tier
+///   declarations ([`noeta_lexer::Lexed::text_tier_decls`]); indexed by the declaring source's package
+///   segment, that answers "does the provider this local names declare `exported` as text?" — matched
+///   against `provider_roots` (a `.noe` `@tier` runner is re-rooted to the consumer's link segment,
+///   which is exactly the dependency's [`PackageOrigin::Dependency`] key, so the two line up).
+fn renamed_text_tier_locals(
+    package_uses: &noeta_span::PackageUses,
+    packages: &noeta_span::PackageMap,
+    lexeds: &[noeta_lexer::Lexed],
+) -> std::collections::HashMap<PackageOrigin, Vec<String>> {
+    if package_uses.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    // Program-declared text tiers, indexed by the declaring package's link segment. A dependency's
+    // modules carry `PackageOrigin::Dependency(key)`, and that `key` is the very segment a `@tier`
+    // runner is re-rooted to — so `provider_roots` (which carries that segment) matches here.
+    let mut declared_by_segment: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
+        std::collections::HashMap::new();
+    for (index, lexed) in lexeds.iter().enumerate() {
+        if lexed.text_tier_decls.is_empty() {
+            continue;
+        }
+        if let Some(PackageOrigin::Dependency(key)) =
+            packages.source_package(SourceId(index as u32))
+        {
+            let entry = declared_by_segment.entry(key.as_str()).or_default();
+            for name in &lexed.text_tier_decls {
+                entry.insert(name.as_str());
+            }
+        }
+    }
+
+    let registry = noeta_ext_abi::registry::single_registry_process();
+    let mut out: std::collections::HashMap<PackageOrigin, Vec<String>> =
+        std::collections::HashMap::new();
+    for (origin, local, use_) in package_uses.iter() {
+        // An extension provider whose named tier captures verbatim (a text or expression tier).
+        let ext_text = registry
+            .find_ext_tier_scoped(&use_.provider_roots, &use_.exported)
+            .is_some_and(|tier| tier.text.is_some() || tier.expr.is_some());
+        // Or a dependency-declared `@tier(exported, …, text: "…")` under one of the provider roots.
+        let declared_text = use_.provider_roots.iter().any(|root| {
+            declared_by_segment
+                .get(root.as_str())
+                .is_some_and(|names| names.contains(use_.exported.as_str()))
+        });
+        if ext_text || declared_text {
+            out.entry(origin.clone()).or_default().push(local.clone());
+        }
+    }
+    out
 }
 
 /// Parse an already-lexed source, yielding its [`Program`] when both lex and parse are clean and a
@@ -1040,6 +1677,7 @@ fn parse_module(
     lexed: &noeta_lexer::Lexed,
     edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
+    path: &ModulePath,
 ) -> Result<Program, Box<BrokenModule>> {
     // Parse under the owning package's edition — the entry/sibling's root edition or a
     // dependency's own — so a future edition-gated grammar applies per package.
@@ -1056,7 +1694,13 @@ fn parse_module(
     } else {
         Err(Box::new(BrokenModule {
             source: source.clone(),
-            namespace: namespace_from_tokens(source, &lexed.tokens),
+            // A *derived* path is known whether or not the file parses — it comes from the file's
+            // location, not its contents — so a broken module attributes a consumer's unresolved
+            // `use` even when the syntax error precedes (or replaces) any `namespace` line.
+            namespace: match path {
+                ModulePath::Derived(derived) => Some(derived.clone()),
+                _ => namespace_from_tokens(source, &lexed.tokens),
+            },
             diagnostics,
         }))
     }
@@ -1073,6 +1717,134 @@ fn retarget(mut diagnostic: Diagnostic, id: SourceId) -> Diagnostic {
         label.span.source = id;
     }
     diagnostic
+}
+
+/// One parsed file and the module path its **location** derives — the input to
+/// [`apply_derived_paths`]. Public so the salsa linker (`noeta-db`) applies derivation identically:
+/// the editor and the compiler must not disagree about which module a file is.
+#[derive(Debug)]
+pub struct DerivedUnit<'a> {
+    pub source: &'a Source,
+    pub path: &'a ModulePath,
+    pub program: &'a mut Program,
+}
+
+/// Make each file's **derived** path its module path, and report every way the filesystem says
+/// something the program cannot mean.
+///
+/// This is where derivation becomes the linker's truth: a derived path is written into the program
+/// as its `namespace`, so everything downstream (`module_namespace`, resolution, qualification)
+/// reads one identity with one origin. Three things are errors here rather than silence:
+///
+/// * a **`namespace` declaration at all** (E0072) — retired syntax, refused whether it restates the
+///   derived path or contradicts it, since either way it is a second place to keep in sync;
+/// * **two files deriving one path** (E0073), naming both files. This used to be silent: the second
+///   file's exports vanished and the failure surfaced at whoever imported them;
+/// * a **name that is not a legal path segment** (E0074), with the rename to make.
+///
+/// A file with no derived path ([`ModulePath::Declared`] — a lone script, an in-memory caller) is
+/// left exactly as it was, so nothing that never had a package changes behavior.
+///
+/// Called **after** dependency re-rooting ([`reroot_program`]), because that is what puts a declared
+/// namespace into the consumer's own naming space, which is the space the derivation is in.
+pub fn apply_derived_paths(units: Vec<DerivedUnit<'_>>) -> Vec<LoadDiagnostic> {
+    let mut diagnostics = Vec::new();
+    // Derived path → the file that claimed it first (both are named when a second one does).
+    let mut claimed: std::collections::HashMap<Vec<String>, String> =
+        std::collections::HashMap::new();
+    for unit in units {
+        let derived = match unit.path {
+            ModulePath::Declared => continue,
+            ModulePath::Illegal { segment, rename_to } => {
+                diagnostics.push(LoadDiagnostic {
+                    source: unit.source.clone(),
+                    diagnostic: Diagnostic::error(
+                        DiagnosticCode::IllegalModulePath,
+                        first_line(unit.source),
+                        format!(
+                            "`{segment}` cannot be part of a module path — a module's path is \
+                             derived from where its file sits, and every segment of it has to be \
+                             spellable in a `use`"
+                        ),
+                    )
+                    .with_help(format!("rename it to `{rename_to}`")),
+                });
+                continue;
+            }
+            ModulePath::Derived(derived) => derived,
+        };
+        if let Some(first) = claimed.get(derived) {
+            diagnostics.push(LoadDiagnostic {
+                source: unit.source.clone(),
+                diagnostic: Diagnostic::error(
+                    DiagnosticCode::ModulePathCollision,
+                    first_line(unit.source),
+                    format!(
+                        "two files derive the module path `{}`: `{first}` and `{}`",
+                        derived.join("."),
+                        unit.source.name()
+                    ),
+                )
+                .with_help(
+                    "one module path is one module — rename or move one of the files so their \
+                     paths differ",
+                ),
+            });
+            continue;
+        }
+        claimed.insert(derived.clone(), unit.source.name().to_string());
+
+        // `namespace` is retired surface syntax, and this is where it is refused: a module's path
+        // is derived from where its file sits, so a declaration can only restate the derivation or
+        // contradict it, and neither earns a line of source. The refusal lives here rather than in
+        // the parser because `Stmt::Namespace` is *also* this function's own output — it writes the
+        // derived path into the program under that node, which keeps `module_namespace` the single
+        // identity seam every consumer downstream reads. Every user-facing command routes through
+        // the loader, so no real file escapes this.
+        // The message does not quote the declared path, and that is deliberate: by the time this
+        // runs, [`reroot_program`] has rewritten a *dependency's* declared leading segment into the
+        // consumer's naming space, so the node no longer holds what the file says. Quoting it told
+        // a `namespace lib.api;` author their file said `namespace hi.api`. The span points at the
+        // line and the renderer prints it, so the declaration is on screen regardless.
+        if let Some(span) = unit.program.stmts.iter().find_map(|stmt| match stmt {
+            Stmt::Namespace { span, .. } => Some(*span),
+            _ => None,
+        }) {
+            diagnostics.push(LoadDiagnostic {
+                source: unit.source.clone(),
+                diagnostic: Diagnostic::error(
+                    DiagnosticCode::ModulePathMismatch,
+                    span,
+                    "a module's path is derived from where its file sits, so it cannot be declared"
+                        .to_string(),
+                )
+                .with_help(format!(
+                    "delete this line: this file's path derives as `{}`, and moving the file is \
+                     how you rename the module",
+                    derived.join(".")
+                )),
+            });
+            continue;
+        }
+        unit.program.stmts.insert(
+            0,
+            Stmt::Namespace {
+                path: derived.clone(),
+                span: first_line(unit.source),
+            },
+        );
+    }
+    diagnostics
+}
+
+/// A span covering `source`'s first line — what a diagnostic about the *file* (not about anything
+/// written in it) points at.
+fn first_line(source: &Source) -> Span {
+    let end = source
+        .text()
+        .find('\n')
+        .unwrap_or_else(|| source.text().len());
+    Span::new_in(source.id(), 0, end as u32)
 }
 
 /// Resolve and merge an *already-parsed* entry against already-parsed candidate modules — the pure
@@ -1094,7 +1866,7 @@ pub fn link_parsed(
         entry,
         entry_program,
         modules,
-        &[],
+        modules,
         broken,
         RetainPolicy::Lenient,
     )
@@ -1103,8 +1875,8 @@ pub fn link_parsed(
 /// The cross-package variant (package-manager P2.1): like [`link_parsed`], but `dep_modules` are the
 /// re-rooted source modules of the entry's dependency packages. They are **both** resolution
 /// candidates *and* import drivers — a package is a closed unit, so its own `use`s (already re-rooted
-/// to the consumer's key) resolve its internal cross-references, unlike same-app siblings which stay
-/// pure decl-sources. `dep_modules` must already be re-rooted (see [`reroot_program`]); the caller
+/// to the consumer's key) resolve its internal cross-references, the same way a sibling's do.
+/// `dep_modules` must already be re-rooted (see [`reroot_program`]); the caller
 /// ([`link_with_deps`]) does that. Every std import inside a dependency (`use std.…`) resolves against
 /// no module here and is retained (deduped) so the compiler binds it downstream, exactly as an
 /// entry's std imports are.
@@ -1123,7 +1895,9 @@ pub fn link_parsed_with_deps(
     broken: &[&BrokenModule],
     native_roots: Option<&[String]>,
 ) -> Result<Linkage, Vec<LoadDiagnostic>> {
-    // Dependency modules join the resolution pool; only they (not siblings) also drive imports.
+    // Sibling and dependency modules alike join the resolution pool *and* drive imports: a `use` is
+    // file-scoped, so a module that writes `use std.{env}` must get `env` bound in the merged
+    // program whether it is a sibling of the entry or a file inside a package.
     let pool: Vec<&Program> = siblings.iter().chain(dep_modules).copied().collect();
     let native: HashSet<String> = native_roots.unwrap_or_default().iter().cloned().collect();
     let retain = match native_roots {
@@ -1132,29 +1906,49 @@ pub fn link_parsed_with_deps(
         },
         None => RetainPolicy::Lenient,
     };
-    link_core(entry, entry_program, &pool, dep_modules, broken, retain)
+    link_core(entry, entry_program, &pool, &pool, broken, retain)
 }
 
-/// Where a merged top-level name came from — its local declaration, or the namespace an import
-/// pulled it from. Lets two `use`s that name the **same** declaration (the entry and a dependency
-/// module both importing `webclient.client.Client`) merge it once, while a genuine clash (same name,
-/// different namespace, or an import shadowing a local) is still an E0020 collision.
+/// Where a top-level name in **one compilation unit** came from — a declaration that unit makes, or
+/// the namespace one of its imports pulled it from. Lets a file name the same declaration twice
+/// (`use webclient.client.Client` written twice, or once per grouped list) without complaint, while
+/// a genuine clash *within that file* — same local name, different namespace, or an import over a
+/// declaration — is the E0020 collision.
+///
+/// This decides collisions only. Whether a resolved declaration is *merged* is a program-wide
+/// question with a program-wide answer (`merged_q`, keyed on the qualified identity): several files
+/// legitimately import one declaration, and it must land in the linked program exactly once.
+#[derive(Clone)]
 enum Origin {
     Local,
     Import(Vec<String>),
 }
 
-/// The shared linking core: resolve the entry's imports (and any `dep_drivers`' imports) against the
+/// One **compilation unit's** top-level name table, seeded with the declarations the unit makes
+/// itself (each [`Origin::Local`]). A unit is one file — the entry, or a pooled module driving its
+/// own `use`s — because that is the scope a `use` binds in: two files importing different
+/// declarations under the same local name is not a clash, and never was one for the reader.
+fn unit_origins(stmts: &[Stmt]) -> std::collections::HashMap<String, Origin> {
+    stmts
+        .iter()
+        .filter_map(decl_name)
+        .map(|n| (n.to_string(), Origin::Local))
+        .collect()
+}
+
+/// The shared linking core: resolve the entry's imports (and any `drivers`' imports) against the
 /// `pool`, merging each resolved declaration once and retaining every unresolved `use` (deduped) for
-/// the compiler's downstream binding. `dep_drivers` is empty for single-package linking, so that path
+/// the compiler's downstream binding. `drivers` is empty for single-package linking, so that path
 /// is unchanged bar one refinement: a duplicate *identical* import (same namespace + name) is now
-/// skipped rather than flagged, which a closed dependency unit needs and no well-formed program relied
-/// on erroring.
+/// skipped rather than flagged, which a closed dependency unit needs and no well-formed program
+/// relied on erroring. `drivers` is normally the `pool` itself: a `use` is file-scoped, so every
+/// loaded module's own imports must be honored, or a module that writes `use std.{env}` finds `env`
+/// unbound in the merged program while the entry's imports leak in to cover for it.
 fn link_core(
     entry: &Source,
     entry_program: &Program,
     pool: &[&Program],
-    dep_drivers: &[&Program],
+    drivers: &[&Program],
     broken: &[&BrokenModule],
     retain: RetainPolicy,
 ) -> Result<Linkage, Vec<LoadDiagnostic>> {
@@ -1163,8 +1957,15 @@ fn link_core(
     // seeded by the assembling driver (audit-6 F2) — is the lens.
     let reg = noeta_ext_abi::registry::single_registry_process();
     // A module contributes only if it declares a namespace to resolve against.
+    // The **entry** is a resolution candidate alongside the pool: it declares a namespace like any
+    // other module, and a sibling may legitimately `use` it (two files of one project importing each
+    // other). Leaving it out made such a `use` an "unknown module" error the moment sibling imports
+    // started resolving. Its declarations are already in the program, so resolving to one merges
+    // nothing — see the `Origin::Local` arm in `drive_use`.
     let module_views: Vec<ModuleView> = pool
         .iter()
+        .copied()
+        .chain(std::iter::once(entry_program))
         .filter_map(|prog| {
             module_namespace(prog).map(|namespace| ModuleView {
                 namespace,
@@ -1203,37 +2004,44 @@ fn link_core(
         import_targets.extend(native_roots.iter().cloned());
     }
 
-    let entry_map = build_module_map(&entry_ns, &entry_program.stmts, &module_views, reg);
-    let module_maps: std::collections::HashMap<Vec<String>, qualify::QMap> = module_views
+    let entry_map = build_module_map(&entry_ns, &entry_program.stmts, &module_views, reg, false);
+    let module_maps: std::collections::HashMap<Vec<String>, qualify::UnitMap> = module_views
         .iter()
         .map(|mv| {
+            // The entry is a resolution candidate in `module_views` too, but it is not a *merged*
+            // unit — its statements are the program's tail, in its own scope — so it keeps its
+            // short handle names (see `build_module_map`).
+            let is_entry = mv.namespace == entry_ns;
             (
                 mv.namespace.clone(),
-                build_module_map(&mv.namespace, mv.stmts, &module_views, reg),
+                build_module_map(&mv.namespace, mv.stmts, &module_views, reg, !is_entry),
             )
         })
-        .collect();
-
-    // Every merged top-level name → its origin. Seeded with the entry's own declarations (each
-    // `Local`); an import that would shadow a local, or clash with a differently-sourced import, is a
-    // collision. An import that re-names an already-merged declaration from the *same* namespace is a
-    // no-op (the closed-unit dedup).
-    let mut origins: std::collections::HashMap<String, Origin> = entry_program
-        .stmts
-        .iter()
-        .filter_map(decl_name)
-        .map(|n| (n.to_string(), Origin::Local))
         .collect();
 
     let mut imported: Vec<Stmt> = Vec::new();
     // Qualified identities already merged (explicit imports and their transitive same-module
     // dependencies alike) — the dedup key for the reachability closure, keyed on the dotted identity
     // no local name can collide with, so a declaration pulled two ways merges exactly once.
-    let mut merged_q: HashSet<String> = HashSet::new();
+    //
+    // Seeded with the **entry's own** declarations: they are already in the program (they are the
+    // program's tail), so a dependency module that imports one of them must not merge a second copy.
+    // The entry only resolves as a module at all when it declares a namespace, so a namespace-less
+    // entry seeds nothing.
+    let mut merged_q: HashSet<String> = if entry_ns.is_empty() {
+        HashSet::new()
+    } else {
+        entry_program
+            .stmts
+            .iter()
+            .filter_map(qualifiable_decl_name)
+            .map(|n| format!("{}.{n}", entry_ns.join(".")))
+            .collect()
+    };
     let mut errors: Vec<LoadDiagnostic> = Vec::new();
     // Retained (unresolved) imports — std imports and opaque-stub fallbacks — deduped by (path, name)
     // across the entry and every dependency so a shared `use std.…` isn't bound twice.
-    let mut seen_retained: HashSet<(Vec<String>, String)> = HashSet::new();
+    let mut seen_retained: HashSet<(Vec<String>, String, String)> = HashSet::new();
     let mut dep_retained: Vec<Stmt> = Vec::new();
     let mut entry_stmts: Vec<Stmt> = Vec::with_capacity(entry_program.stmts.len());
 
@@ -1248,10 +2056,17 @@ fn link_core(
         .map(|m| m.source.name())
         .collect();
 
-    // Resolve one `use`'s names against the pool. Resolved names merge their declaration (deduped by
-    // origin); unresolved names are collected for retention. Returns the still-unresolved names.
+    // Resolve one `use`'s names against the pool. Resolved names merge their declaration (deduped on
+    // its qualified identity); unresolved names are collected for retention. Returns the
+    // still-unresolved names.
+    //
+    // `origins` is the **driving unit's own** name table (see the driver loop): a `use` is
+    // file-scoped, so collision detection is per file. Merge dedup is *not* — a declaration two
+    // files import merges once — which is why the two jobs are split across `origins` (per unit) and
+    // `merged_q` (program-wide).
     let mut drive_use = |path: &[String],
                          names: &[UseName],
+                         origins: &mut std::collections::HashMap<String, Origin>,
                          imported: &mut Vec<Stmt>,
                          errors: &mut Vec<LoadDiagnostic>|
      -> Vec<UseName> {
@@ -1260,7 +2075,8 @@ fn link_core(
             match resolve(&module_views, path, &name.name) {
                 // Keyed on the import's *local* (alias-aware) name: `use App.A.User as AUser` and
                 // `use App.B.User as BUser` bind distinct locals and coexist, while two imports (or an
-                // import and a local decl) sharing one local name are still the E0020 clash.
+                // import and a local decl) sharing one local name *in the same file* are the E0020
+                // clash.
                 Resolution::Resolved(decl) => match origins.get(name.local()) {
                     None => {
                         origins.insert(name.local().to_string(), Origin::Import(path.to_vec()));
@@ -1270,19 +2086,25 @@ fn link_core(
                         // and a `@tier` config, now just one edge of the general closure). Without
                         // this, an exported declaration that references anything non-leaf in its own
                         // module leaves that reference out of the merged program (E0005/E0004).
-                        let mut decl = *decl;
-                        if let Some(map) = module_maps.get(path) {
-                            qualify::qualify_stmt(&mut decl, map);
+                        //
+                        // Guarded on the qualified identity, not on this unit's name table: several
+                        // files legitimately import the same declaration (and the entry's own
+                        // declarations are seeded in), and it must land in the program exactly once.
+                        if merged_q.insert(format!("{}.{}", path.join("."), name.name)) {
+                            let mut decl = *decl;
+                            if let Some(map) = module_maps.get(path) {
+                                qualify::qualify_stmt(&mut decl, map);
+                            }
+                            imported.push(decl);
+                            merge_module_closure(
+                                path,
+                                &name.name,
+                                &module_views,
+                                &module_maps,
+                                &mut merged_q,
+                                imported,
+                            );
                         }
-                        imported.push(decl);
-                        merge_module_closure(
-                            path,
-                            &name.name,
-                            &module_views,
-                            &module_maps,
-                            &mut merged_q,
-                            imported,
-                        );
                     }
                     // Same declaration re-imported (same namespace) — merge once, ignore the rest.
                     Some(Origin::Import(p)) if p.as_slice() == path => {}
@@ -1359,6 +2181,29 @@ fn link_core(
                             .is_some_and(|r| reg.is_extension_root(r) || native_roots.contains(r)),
                     };
                     if retained {
+                        // A retained (native) import binds a name in this file just as a resolved
+                        // one does, so it answers the same one-name-one-meaning question. Without
+                        // this it was invisible to the collision table, and a file importing BOTH a
+                        // loaded `.noe` module and a native module of the same leaf name
+                        // (`use pet_proxy.client` + `use std.http.client`) silently kept only the
+                        // `.noe` meaning — `client.new(…)` resolved to the file's own package and
+                        // surfaced much later as a missing function. Import-vs-import only: a
+                        // native import that merely shares a name with a *declaration* is left to
+                        // the checker's own shadowing rules, which already see both.
+                        if canonical_use_binding(reg, path, &name.name).is_some() {
+                            match origins.get(name.local()) {
+                                None => {
+                                    origins.insert(
+                                        name.local().to_string(),
+                                        Origin::Import(path.to_vec()),
+                                    );
+                                }
+                                Some(Origin::Import(p)) if p.as_slice() != path => {
+                                    errors.push(collision_error(entry, path, name));
+                                }
+                                Some(_) => {}
+                            }
+                        }
                         unresolved.push(name.clone());
                     // A namespace that IS declared, by a file that simply failed to parse, is not a
                     // missing module: it is a syntax error the consumer was never shown.
@@ -1373,8 +2218,17 @@ fn link_core(
                             errors.extend(module.load_diagnostics());
                         }
                     } else {
+                        // Match on the same spelling the message names — for a single-segment
+                        // import that is the leaf, since the path is empty (see
+                        // [`unknown_module_error`]); measuring "" against every module suggests
+                        // whichever is shortest.
+                        let target = if path.is_empty() {
+                            name.name.clone()
+                        } else {
+                            path.join(".")
+                        };
                         let suggestion = noeta_diagnostics::closest(
-                            &path.join("."),
+                            &target,
                             import_targets.iter().map(String::as_str),
                         );
                         errors.push(unknown_module_error(
@@ -1412,7 +2266,7 @@ fn link_core(
     // meaning. Checked per unit (the `use` is file-scoped), for the entry and every dependency
     // driver alike; only imports that actually resolve to a loaded module or item fire, so a
     // retained extern `use` (std — the checker's tables cover it) is not double-reported.
-    for stmts in std::iter::once(&entry_program.stmts).chain(dep_drivers.iter().map(|d| &d.stmts)) {
+    for stmts in std::iter::once(&entry_program.stmts).chain(drivers.iter().map(|d| &d.stmts)) {
         let unit_bound: HashSet<String> =
             stmts.iter().flat_map(qualify::bound_value_names).collect();
         for stmt in stmts.iter() {
@@ -1432,10 +2286,15 @@ fn link_core(
     // Dotted references that missed the entry's QMap (with spans) — filtered against the loaded
     // modules below to diagnose a qualified reference that lacks its `use`.
     let mut dotted_misses: Vec<(String, noeta_span::Span)> = Vec::new();
+    // The entry unit's name table, seeded with its own declarations (each `Local`) — an import that
+    // would shadow one of them, or clash with a differently-sourced import *in this same file*, is
+    // the E0020 collision.
+    let mut entry_origins = unit_origins(&entry_program.stmts);
     for stmt in &entry_program.stmts {
         match stmt {
             Stmt::Use { path, names, span } => {
-                let unresolved = drive_use(path, names, &mut imported, &mut errors);
+                let unresolved =
+                    drive_use(path, names, &mut entry_origins, &mut imported, &mut errors);
                 let fresh = retain_fresh(&mut seen_retained, path, unresolved);
                 if !fresh.is_empty() {
                     entry_stmts.push(Stmt::Use {
@@ -1446,6 +2305,45 @@ fn link_core(
                 }
             }
             other => {
+                // **A tier block's own `use`s drive linking too.** The block-scope overlay
+                // ([`qualify::UnitMap::tier_scopes`]) already qualifies the block's references to
+                // the module's identity — but qualifying a name is not linking it: a `.noe` module
+                // only reaches the merged program when some `use` *merges* its declarations, and
+                // the collection above walks the entry's **top-level** statements only. So
+                // `@test { use probe.lib.side.{Thing} … }` produced a perfectly qualified
+                // `probe.lib.side.Thing` that nothing declared — `noeta check` saw a qualified
+                // name it does not adjudicate and reported nothing, and `noeta test` failed every
+                // use site with "cannot find type … in this scope". A std import inside the same
+                // block worked throughout, because an extension module resolves through the
+                // registry and never needs the unit graph at all.
+                //
+                // Driven unconditionally, not per active tier: which tiers are live is the *build
+                // target*'s call, taken downstream in `noeta_check::tiers` (the loader has no
+                // active set, and the linked program is one memoized salsa value shared by
+                // `check`/`run`/`test`). Merging is safe regardless — every merged declaration
+                // lands under its **qualified** identity, so it binds no short name, collides with
+                // nothing, and is unreferenced (hence stripped with the block) in a build where
+                // the tier is inactive. This is also exactly what a top-level `use` that only the
+                // `@test` block references already does.
+                //
+                // The unresolved remainder is deliberately **dropped** rather than retained: the
+                // `use` statement itself stays *inside* the block (a rewrite table, not a hoisted
+                // import), so an inactive build drops it with the block and leaves nothing
+                // dangling. Activation inlines the block's items — the `use` among them — and the
+                // retained binding is created then.
+                if let Stmt::TierBlock { items, .. } = other {
+                    // Block-scoped name table: the unit's, plus the block's own declarations. A
+                    // `use` binds in one scope, so the E0020 question is answered per scope —
+                    // and a block importing the same declaration the file already imports is the
+                    // same import, not a clash.
+                    let mut block_origins = entry_origins.clone();
+                    block_origins.extend(unit_origins(items));
+                    for item in items {
+                        if let Stmt::Use { path, names, .. } = item {
+                            drive_use(path, names, &mut block_origins, &mut imported, &mut errors);
+                        }
+                    }
+                }
                 // The entry's own declarations and statements qualify against the entry's map (its
                 // own namespace + its resolved imports), with the whole tail's bindings in scope.
                 let mut stmt = other.clone();
@@ -1462,10 +2360,36 @@ fn link_core(
 
     // Each dependency module's `use`s also drive imports (closed unit); their unresolved remainder
     // (std imports) is retained up front, ahead of the entry's statements.
-    for driver in dep_drivers {
+    //
+    // **Each driver gets its own name table.** A `use` binds a name in *one file*, so the E0020
+    // collision question — "does this local name already mean something here?" — is answered per
+    // file, exactly as the shadowing check above recomputes `unit_bound` per unit. One table shared
+    // across every pooled module made two unrelated packages that each declare a `Middleware` (say
+    // `para.aether` and `para.api`, two packages sharing the `para` import root) unlinkable: the
+    // first package's own file to import its own `Middleware` claimed the name for the whole
+    // program, and the second package's import of *its* `Middleware` was reported as a clash.
+    for driver in drivers {
+        let mut origins = unit_origins(&driver.stmts);
+        // This driver's α-rename table (empty for a namespace-less module, which contributes
+        // nothing to the merged program anyway). Its retained `use`s must be *aliased* to the same
+        // canonical names its merged bodies were rewritten to, so the binding the backends create
+        // and the reference that reads it are one decision, taken here.
+        let handles = module_namespace(driver)
+            .and_then(|ns| module_maps.get(&ns))
+            .map(|m| m.handles.clone())
+            .unwrap_or_default();
         for stmt in &driver.stmts {
             if let Stmt::Use { path, names, span } = stmt {
-                let unresolved = drive_use(path, names, &mut imported, &mut errors);
+                let unresolved = drive_use(path, names, &mut origins, &mut imported, &mut errors);
+                let unresolved = unresolved
+                    .into_iter()
+                    .map(|mut n| {
+                        if let Some(canonical) = handles.get(n.local()) {
+                            n.alias = Some(canonical.clone());
+                        }
+                        n
+                    })
+                    .collect();
                 let fresh = retain_fresh(&mut seen_retained, path, unresolved);
                 if !fresh.is_empty() {
                     dep_retained.push(Stmt::Use {
@@ -1509,58 +2433,44 @@ fn link_core(
         });
     }
 
-    // A standalone `impl Trait for T {}` in a pooled module (a sibling, or a dependency's own module)
-    // has no import name, so the `use`-driven merge above never pulls it — yet coherence requires an
-    // impl to travel with its target type (a `dyn Trait` coercion or a bound check needs to see it).
-    // An **inline** impl rides on its type's `class`/`struct` declaration and is already merged with it;
-    // this closes the **standalone** case. Merge each pooled standalone impl whose (qualified) target
-    // type was itself merged — so the impl only lands when the type it refers to is present — deduped
-    // by (target, trait) so a module reachable two ways contributes each impl once.
-    let merged_types: HashSet<String> = imported
-        .iter()
-        .filter_map(decl_name)
-        .map(str::to_string)
-        .collect();
-    let mut seen_impls: HashSet<(String, String)> = HashSet::new();
+    // **A data attribute is a link root.** A `#[...]` exists precisely so that something which never
+    // names a declaration can still find it — `attributes_of::<Tool>()` discovers it, `invoke` calls
+    // it by name — so an annotated declaration in a pooled module belongs to the program even though
+    // no `use` reaches it. Without this rule the manifest held only the annotated declarations the
+    // entry happened to import *by name*: a sibling's `pub fn` that nothing imported and a
+    // module-private one were both absent, so the registration mechanism attributes exist for could
+    // not see its own registrations, and `attributes_of` / `roles_of` contradicted their documented
+    // "every `#[T(...)]` attribute in the program".
+    //
+    // Scoped to the annotation, not to the file: only the *annotated* declaration is a root, dragged
+    // in with the same same-module closure an imported one gets. An unannotated, unimported helper
+    // stays out, so this is emphatically not "compile the whole directory" — a module contributes
+    // exactly what it asked to be discovered by, plus whatever that needs in order to run.
+    // Visibility does not gate it either, for the same reason it does not gate the closure: `#[Tool]`
+    // on a non-`pub` fn is a registration, and reflection dispatches by name, not by import.
+    //
+    // The entry is a `module_views` member too when it declares a namespace, but `merged_q` is
+    // pre-seeded with its declarations (they are the program's tail), so its own annotated
+    // declarations are never merged a second time.
     for mv in &module_views {
-        let Some(map) = module_maps.get(&mv.namespace) else {
-            continue;
-        };
         for stmt in mv.stmts {
-            if !matches!(stmt, Stmt::Impl(_)) {
+            let Some(name) = qualifiable_decl_name(stmt) else {
+                continue;
+            };
+            if !carries_data_attribute(stmt) {
                 continue;
             }
-            let mut cloned = stmt.clone();
-            qualify::qualify_stmt(&mut cloned, map);
-            if let Stmt::Impl(decl) = &cloned
-                && merged_types.contains(&decl.target)
-                && seen_impls.insert((decl.target.clone(), decl.trait_name.clone()))
-            {
-                imported.push(cloned);
-                // The impl's method bodies may reference same-module free declarations — an internal
-                // helper `fn`, a module-local type — that no `use` names and that the target type's
-                // own closure never reached (they are the impl's dependencies, not the type's). They
-                // must travel with the impl or the checker fails E0005 on a body it cannot see, and
-                // *only across the package boundary*: inside the module every declaration is present,
-                // so this hole is invisible until a consumer imports the type. Seed the same closure
-                // the `use`-driven merge runs, from the impl's own (pre-qualification, short-named)
-                // references.
-                let refs = qualify::referenced_names(stmt);
-                let mut work = Vec::new();
-                for name in refs {
-                    if merge_one_dep(
-                        &name,
-                        mv,
-                        &mv.namespace,
-                        &module_maps,
-                        &mut merged_q,
-                        &mut imported,
-                    ) {
-                        work.push(name);
-                    }
-                }
+            let name = name.to_string();
+            if merge_one_dep(
+                &name,
+                mv,
+                &mv.namespace,
+                &module_maps,
+                &mut merged_q,
+                &mut imported,
+            ) {
                 expand_module_refs(
-                    work,
+                    vec![name],
                     mv,
                     &mv.namespace,
                     &module_maps,
@@ -1568,6 +2478,164 @@ fn link_core(
                     &mut imported,
                 );
             }
+        }
+    }
+
+    // A standalone `impl Trait for T {}` in a pooled module (a sibling, or a dependency's own module)
+    // has no import name, so the `use`-driven merge above never pulls it — yet coherence requires an
+    // impl to travel with its target type (a `dyn Trait` coercion or a bound check needs to see it).
+    // An **inline** impl rides on its type's `class`/`struct` declaration and is already merged with it;
+    // this closes the **standalone** case. Merge each pooled standalone impl whose (qualified) target
+    // type is in the program — so the impl only lands when the type it refers to is present — deduped
+    // by the impl's own **span**, so a declaration reached more than once contributes once.
+    //
+    // **To a fixpoint, over the whole program's types.** "Is the target type present?" has an answer
+    // that *grows while this loop runs*, and getting either half of that wrong drops an impl in
+    // silence — the type still links and its inherent methods still dispatch, so the only symptom is
+    // that the trait went missing, in a *consumer* of the package and never in the package's own
+    // tests. Two ways it grew:
+    //
+    // - An impl's own dependency closure (below) merges the declarations its bodies name, so a type
+    //   can arrive *because of another impl*: `impl Codec for MyCodec { fn decoder(): dyn Decoder {
+    //     return MyDecoder.new() } }` is what brings `MyDecoder` in, and `impl Decoder for MyDecoder`
+    //   is only eligible afterwards. One pass over a pre-loop snapshot never saw it, and no
+    //   source order can rescue a single pass — the two impls may be written either way round, in
+    //   either file — so iterate until a round merges nothing new.
+    // - The **entry's own** declarations are the program's tail (`entry_stmts`), not `imported`, so a
+    //   sibling's `impl Decoder for Target` against a `Target` the entry declares saw an absent type
+    //   and was dropped.
+    //
+    // The dedup set answers the *same* question from the other side — "is this impl already in the
+    // program?" — so it is seeded from the program rather than starting empty, and it is keyed on the
+    // **span**: the identity of a declaration is where it is written.
+    //
+    // Both halves of that were wrong, and each dropped an impl silently. Starting empty: an entry
+    // that declares a `namespace` is a `module_views` member like any other, so the scan below meets
+    // the entry's own `impl Marker for Box2` again — with the entry's types now in `merged_types`
+    // (above), an unseeded set made that a second copy and coherence correctly called it E0027
+    // "implemented more than once". (Named declarations are protected from exactly this by
+    // `merged_q`'s entry seeding; an impl introduces no name, so this is where it is seeded.)
+    // Keying on `(target, trait)`: that is the identity of an impl's *coherence slot*, not of an
+    // impl, so two different modules each writing `impl Decoder for Target` collapsed to whichever
+    // the scan reached first, and the program ran with one of the two bodies and no diagnostic at
+    // all. Those are a genuine conflict, and E0027 is what says so — the linker's job is to carry
+    // each declaration into the program exactly once, not to adjudicate which of two should win.
+    let mut seen_impls: HashSet<Span> = imported
+        .iter()
+        .chain(entry_stmts.iter())
+        .filter_map(standalone_impl_span)
+        .collect();
+    loop {
+        // Owned, and recomputed per round: the scan below pushes into `imported`, so it cannot hold
+        // a borrow of it, and the round after must see whatever this one merged.
+        let merged_types: HashSet<String> = imported
+            .iter()
+            .chain(entry_stmts.iter())
+            .filter_map(decl_name)
+            .map(str::to_string)
+            .collect();
+        let before = imported.len();
+        for mv in &module_views {
+            let Some(map) = module_maps.get(&mv.namespace) else {
+                continue;
+            };
+            for stmt in mv.stmts {
+                if !matches!(stmt, Stmt::Impl(_)) {
+                    continue;
+                }
+                let mut cloned = stmt.clone();
+                qualify::qualify_stmt(&mut cloned, map);
+                if let Stmt::Impl(decl) = &cloned
+                    && merged_types.contains(decl.target.as_str())
+                    && seen_impls.insert(decl.span)
+                {
+                    imported.push(cloned);
+                    // The impl's method bodies may reference same-module free declarations — an
+                    // internal helper `fn`, a module-local type — that no `use` names and that the
+                    // target type's own closure never reached (they are the impl's dependencies, not
+                    // the type's). They must travel with the impl or the checker fails E0005 on a
+                    // body it cannot see, and *only across the package boundary*: inside the module
+                    // every declaration is present, so this hole is invisible until a consumer
+                    // imports the type. Seed the same closure the `use`-driven merge runs, from the
+                    // impl's own (pre-qualification, short-named) references.
+                    let refs = qualify::referenced_names(stmt);
+                    let mut work = Vec::new();
+                    for name in refs {
+                        if merge_one_dep(
+                            &name,
+                            mv,
+                            &mv.namespace,
+                            &module_maps,
+                            &mut merged_q,
+                            &mut imported,
+                        ) {
+                            work.push(name);
+                        }
+                    }
+                    expand_module_refs(
+                        work,
+                        mv,
+                        &mv.namespace,
+                        &module_maps,
+                        &mut merged_q,
+                        &mut imported,
+                    );
+                }
+            }
+        }
+        // Nothing merged ⇒ no type became present ⇒ no further impl can become eligible. `merged_q`
+        // and `seen_impls` bound the total number of merges, so this terminates.
+        if imported.len() == before {
+            break;
+        }
+    }
+
+    // A merged binding keeps its short name (it gains no qualified identity), so two modules that
+    // each export a capturing declaration over a same-named module binding would land two `x`s in
+    // one flat scope — and the later one would silently win for both. That is a genuine ambiguity
+    // the linker must not adjudicate, so it is an error naming both sides. (Declarations cannot
+    // reach this: they merge under qualified identities.)
+    //
+    // A merged statement keeps the span of the module it was cloned from, so the module each one
+    // came from is its source — the same identity `source_maps` below keys on.
+    let module_of = |stmt: &Stmt| -> String {
+        module_views
+            .iter()
+            .find(|mv| {
+                mv.stmts
+                    .first()
+                    .is_some_and(|first| first.span().source == stmt.span().source)
+            })
+            .map_or_else(|| "another module".to_string(), |mv| mv.namespace.join("."))
+    };
+    let mut binding_origin: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for (name, module) in imported.iter().flat_map(|stmt| match stmt {
+        Stmt::Binding { name, .. } => vec![(name.clone(), module_of(stmt))],
+        Stmt::Destructure { targets, .. } => targets
+            .iter()
+            .map(|(name, _)| (name.clone(), module_of(stmt)))
+            .collect(),
+        _ => Vec::new(),
+    }) {
+        if let Some(first) = binding_origin.insert(name.clone(), module.clone())
+            && first != module
+        {
+            errors.push(LoadDiagnostic {
+                source: entry.clone(),
+                diagnostic: Diagnostic::error(
+                    DiagnosticCode::NameCollision,
+                    Span::empty_at(0),
+                    format!(
+                        "the module-level binding `{name}` is needed by declarations merged from \
+                         both `{first}` and `{module}`, and a binding keeps its own name in the \
+                         merged program"
+                    ),
+                )
+                .with_help(
+                    "rename one of them, or move the shared value behind a function both modules call",
+                ),
+            });
         }
     }
 
@@ -1580,7 +2648,7 @@ fn link_core(
     // pass: its generated members are written against the imports of the file the directive sits
     // in, but they are parsed after this function has already qualified everything, so they would
     // otherwise reach the checker with bare names that resolve to nothing.
-    let mut source_maps: std::collections::HashMap<SourceId, qualify::QMap> =
+    let mut source_maps: std::collections::HashMap<SourceId, qualify::UnitMap> =
         std::collections::HashMap::new();
     source_maps.insert(entry.id(), entry_map);
     for mv in &module_views {
@@ -1616,19 +2684,25 @@ pub struct Linkage {
     /// Keyed by the [`SourceId`] of the file the map belongs to. A file with no `namespace` and no
     /// imports has an empty map, which makes qualification a no-op — the correct answer, not a
     /// missing one.
-    pub source_maps: std::collections::HashMap<SourceId, qualify::QMap>,
+    pub source_maps: std::collections::HashMap<SourceId, qualify::UnitMap>,
 }
 
 /// Filter `names` down to those not yet retained under `path`, recording the fresh ones — so a
 /// `use std.…` shared by the entry and several dependencies is retained exactly once.
+///
+/// Keyed on the **binding** as well as the imported name: the entry keeps its short handle names
+/// while every merged unit's are α-renamed to their canonical identity, so `use std.http.url` can
+/// legitimately need two retained forms — one binding `url` for the entry, one binding
+/// `std.http.url` for the dependency bodies that were rewritten to it. Deduping on the imported
+/// name alone dropped the second and left those bodies calling an unbound name.
 fn retain_fresh(
-    seen: &mut HashSet<(Vec<String>, String)>,
+    seen: &mut HashSet<(Vec<String>, String, String)>,
     path: &[String],
     names: Vec<UseName>,
 ) -> Vec<UseName> {
     names
         .into_iter()
-        .filter(|n| seen.insert((path.to_vec(), n.name.clone())))
+        .filter(|n| seen.insert((path.to_vec(), n.name.clone(), n.local().to_string())))
         .collect()
 }
 
@@ -1637,6 +2711,18 @@ fn retain_fresh(
 struct ModuleView<'a> {
     namespace: Vec<String>,
     stmts: &'a [Stmt],
+}
+
+/// Whether `stmt` is a top-level **value binding** introducing `name` — `x = …` or a destructure
+/// naming it. Unlike a class/fn/type it gains no qualified identity (it stays `x` in the flat merged
+/// scope), so it is not a [`qualifiable_decl_name`]; it is still a thing a merged declaration can
+/// need, through a `use (…)` capture.
+fn binds_top_level_value(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Binding { name: bound, .. } => bound == name,
+        Stmt::Destructure { targets, .. } => targets.iter().any(|(bound, _)| bound == name),
+        _ => false,
+    }
 }
 
 /// The namespace a module declares (`namespace App.Models;`), if any.
@@ -1653,16 +2739,64 @@ fn module_namespace(program: &Program) -> Option<Vec<String>> {
 /// identity. (A method is not top-level — it resolves through its type, so it is not here.)
 fn qualifiable_decl_name(stmt: &Stmt) -> Option<&str> {
     match stmt {
-        Stmt::Class(decl) => Some(&decl.name),
-        Stmt::Struct(decl) => Some(&decl.name),
-        Stmt::Enum(decl) => Some(&decl.name),
-        Stmt::Fn(decl) => Some(&decl.name),
+        Stmt::Class(decl) => Some(decl.name.as_str()),
+        Stmt::Struct(decl) => Some(decl.name.as_str()),
+        Stmt::Enum(decl) => Some(decl.name.as_str()),
+        Stmt::Fn(decl) => Some(decl.name.as_str()),
         // A user-defined trait is a qualifiable declaration (L1): a `dyn Trait` type, a `<T: Trait>`
         // bound, or an `impl Trait for T` referencing a module-local trait drags its declaration into
         // the merged program via the cross-module closure — without this a package-local trait
         // (e.g. aether's `Middleware`) is "unknown" once the package is linked as a dependency.
-        Stmt::Trait(decl) => Some(&decl.name),
+        Stmt::Trait(decl) => Some(decl.name.as_str()),
         _ => None,
+    }
+}
+
+/// Whether a top-level declaration carries a `#[...]` **data attribute** anywhere inside it — on
+/// itself, or on a member the reflection manifest keys under it (a method, a field, an enum
+/// variant, a parameter, an in-body `impl` block's method).
+///
+/// This is the "is it a link root" test: an annotated declaration is part of the program whether or
+/// not a `use` reaches it, because the annotation *is* the reference (see the root loop in
+/// [`link_core`]). Members count because their attributes are keyed under the owning declaration
+/// (`Type.method`, `Type.field`, `build#target`) — a `#[Route]` on a method of a class nothing
+/// imported is exactly as discoverable-by-design as one on a free function.
+///
+/// Only `#[...]` data attributes count; a `@derive`/`@role`/`@semantic`/`@packed` **directive** does
+/// not. A directive drives codegen on a declaration that is already in the program — it is not a
+/// registration something else goes looking for — so making it a root would drag in declarations no
+/// reflection query can ever return. (A `@role` still reaches the manifest, transitively: it rides
+/// on an `@attribute` struct, and the *applications* of that struct are what this test finds.)
+fn carries_data_attribute(stmt: &Stmt) -> bool {
+    let on_fn = |decl: &noeta_ast::FnDecl| {
+        !decl.attrs.is_empty() || decl.params.iter().any(|p| !p.attrs.is_empty())
+    };
+    let on_impls =
+        |impls: &[noeta_ast::ImplBlock]| impls.iter().any(|block| block.methods.iter().any(&on_fn));
+    match stmt {
+        Stmt::Fn(decl) => on_fn(decl),
+        Stmt::Struct(decl) => {
+            !decl.decorators.attrs.is_empty()
+                || decl.fields.iter().any(|f| !f.attrs.is_empty())
+                || decl.methods.iter().any(&on_fn)
+                || on_impls(&decl.impls)
+        }
+        Stmt::Class(decl) => {
+            !decl.decorators.attrs.is_empty()
+                || decl.fields.iter().any(|f| !f.attrs.is_empty())
+                || decl.methods.iter().any(&on_fn)
+                || on_impls(&decl.impls)
+        }
+        Stmt::Enum(decl) => {
+            !decl.decorators.attrs.is_empty()
+                || decl.variants.iter().any(|v| !v.attrs.is_empty())
+                || decl.methods.iter().any(&on_fn)
+                || on_impls(&decl.impls)
+        }
+        Stmt::Trait(decl) => {
+            !decl.decorators.attrs.is_empty() || decl.methods.iter().any(|m| on_fn(&m.sig))
+        }
+        _ => false,
     }
 }
 
@@ -1685,7 +2819,7 @@ fn merge_module_closure(
     path: &[String],
     root: &str,
     module_views: &[ModuleView],
-    module_maps: &std::collections::HashMap<Vec<String>, qualify::QMap>,
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::UnitMap>,
     merged_q: &mut HashSet<String>,
     imported: &mut Vec<Stmt>,
 ) {
@@ -1711,19 +2845,67 @@ fn merge_module_closure(
 /// another module's export — those resolve elsewhere) and is not already merged (deduped through
 /// `merged_q` on the qualified identity, so a declaration reached two ways lands once). The boolean
 /// tells the caller whether to expand this declaration's own references in turn.
+///
+/// A top-level **value binding** is deliberately NOT reachable this way: the names driving this come
+/// from `referenced_names`, a harmless over-approximation for declarations (merging one that turns
+/// out to be unneeded is inert) but not for a binding, which *runs* its initializer. A parameter
+/// that happens to share a module binding's name would otherwise drag that binding, and its side
+/// effects, into a program that never asked for it. Bindings arrive through
+/// [`merge_one_capture`] instead, whose seed — a `use (…)` clause — is exact.
 fn merge_one_dep(
     name: &str,
     module: &ModuleView,
     path: &[String],
-    module_maps: &std::collections::HashMap<Vec<String>, qualify::QMap>,
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::UnitMap>,
     merged_q: &mut HashSet<String>,
     imported: &mut Vec<Stmt>,
 ) -> bool {
-    let Some(decl) = module
-        .stmts
-        .iter()
-        .find(|s| qualifiable_decl_name(s) == Some(name))
-    else {
+    merge_matching(
+        module,
+        path,
+        module_maps,
+        merged_q,
+        imported,
+        name,
+        |stmt| qualifiable_decl_name(stmt) == Some(name),
+    )
+}
+
+/// Merge the same-module top-level **value binding** a merged declaration's `use (…)` names, and
+/// report whether it was freshly merged. A capture is the one way a sealed body reaches a module
+/// binding, so this seed is exact rather than an over-approximation — see [`merge_one_dep`].
+fn merge_one_capture(
+    name: &str,
+    module: &ModuleView,
+    path: &[String],
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::UnitMap>,
+    merged_q: &mut HashSet<String>,
+    imported: &mut Vec<Stmt>,
+) -> bool {
+    merge_matching(
+        module,
+        path,
+        module_maps,
+        merged_q,
+        imported,
+        name,
+        |stmt| binds_top_level_value(stmt, name),
+    )
+}
+
+/// The shared body of [`merge_one_dep`] and [`merge_one_capture`]: find the first same-module
+/// statement `matches` accepts, merge it under its qualified identity (deduped), and report whether
+/// this call is the one that merged it.
+fn merge_matching(
+    module: &ModuleView,
+    path: &[String],
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::UnitMap>,
+    merged_q: &mut HashSet<String>,
+    imported: &mut Vec<Stmt>,
+    name: &str,
+    matches: impl Fn(&Stmt) -> bool,
+) -> bool {
+    let Some(decl) = module.stmts.iter().find(|s| matches(s)) else {
         return false;
     };
     if !merged_q.insert(format!("{}.{name}", path.join("."))) {
@@ -1746,7 +2928,7 @@ fn expand_module_refs(
     mut work: Vec<String>,
     module: &ModuleView,
     path: &[String],
-    module_maps: &std::collections::HashMap<Vec<String>, qualify::QMap>,
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::UnitMap>,
     merged_q: &mut HashSet<String>,
     imported: &mut Vec<Stmt>,
 ) {
@@ -1754,15 +2936,79 @@ fn expand_module_refs(
         let Some(decl) = module
             .stmts
             .iter()
-            .find(|s| qualifiable_decl_name(s) == Some(&name))
+            .find(|s| qualifiable_decl_name(s) == Some(&name) || binds_top_level_value(s, &name))
         else {
             continue;
         };
+        // A merged binding expands too: its initializer (`conn = connect()`) names declarations of
+        // the same module, which have to travel with it.
         for referenced in qualify::referenced_names(decl) {
             if merge_one_dep(&referenced, module, path, module_maps, merged_q, imported) {
                 work.push(referenced);
             }
         }
+        // A `use (…)` capture is the ONE way a sealed body reaches a module-level value binding, so
+        // the capture list is the exact edge set from a declaration to the bindings it needs. Merge
+        // each one: without it an imported (or attribute-discovered) `pub fn f() use (x)` lands in
+        // the program with its binding left behind in the module it came from, and `x` resolves to
+        // nothing — E0005 "cannot capture `x`" against a declaration the consumer never wrote.
+        //
+        // Precise on purpose: seeded from `captures`, never from `referenced_names` — see
+        // `merge_one_dep` for why a binding must not ride the coarser seed.
+        for captured in captures_of(decl) {
+            if merge_one_capture(&captured, module, path, module_maps, merged_q, imported) {
+                work.push(captured);
+            }
+        }
+        // A merged **binding** carries an initializer that has to evaluate in the consumer's
+        // program, and an initializer names its module's other bindings directly — top-level code
+        // is not a sealed body, so `todos = repository(conn)` reaches `conn` with no capture clause
+        // to declare it. Those are edges too, and the *free* names are the exact set: subtracting
+        // everything the statement binds itself keeps a closure parameter inside the initializer
+        // from dragging a same-named module binding along with it.
+        if binds_any_top_level_value(decl) {
+            let bound = qualify::bound_value_names(decl);
+            for referenced in qualify::referenced_names(decl) {
+                if bound.contains(&referenced) {
+                    continue;
+                }
+                if merge_one_capture(&referenced, module, path, module_maps, merged_q, imported) {
+                    work.push(referenced);
+                }
+            }
+        }
+    }
+}
+
+/// Whether `stmt` is a top-level value binding at all (`x = …` or a destructure) — the statements
+/// whose initializers run in the merged program, so their free names are merge edges.
+fn binds_any_top_level_value(stmt: &Stmt) -> bool {
+    matches!(stmt, Stmt::Binding { .. } | Stmt::Destructure { .. })
+}
+
+/// Every `use (…)` capture on a top-level declaration: a free function's own, and the methods' of a
+/// class/struct/`impl` block. Shallow by design — a *nested* `fn`'s captures resolve at ITS
+/// declaration site (inside the enclosing body), so a module binding it names is necessarily
+/// captured by the enclosing top-level function too, and is reached through that.
+fn captures_of(stmt: &Stmt) -> Vec<String> {
+    let names = |methods: &[noeta_ast::FnDecl]| -> Vec<String> {
+        methods
+            .iter()
+            .flat_map(|m| m.captures.iter().map(|(n, _)| n.clone()))
+            .collect()
+    };
+    match stmt {
+        Stmt::Fn(decl) => decl.captures.iter().map(|(n, _)| n.clone()).collect(),
+        Stmt::Class(decl) => names(&decl.methods)
+            .into_iter()
+            .chain(decl.impls.iter().flat_map(|b| names(&b.methods)))
+            .collect(),
+        Stmt::Struct(decl) => names(&decl.methods)
+            .into_iter()
+            .chain(decl.impls.iter().flat_map(|b| names(&b.methods)))
+            .collect(),
+        Stmt::Impl(decl) => names(&decl.methods),
+        _ => Vec::new(),
     }
 }
 
@@ -1803,12 +3049,19 @@ fn module_declares(modules: &[ModuleView], path: &[String], name: &str) -> bool 
 /// - **Imports that resolve to a loaded module** qualify to that module's identity, keyed by the
 ///   import's local (alias-aware) name (`use App.A.User as AUser` → `AUser` → `App.A.User`). An
 ///   extern or opaque-stub import resolves to no module ([`module_declares`] is false) and is skipped.
+///
+/// `canonical_handles` additionally fills [`qualify::UnitMap::handles`] — the α-rename of this
+/// unit's **native** `use` bindings (see [`native_use_handles`]). It is on for every *merged* unit
+/// and off for the entry, because the merged program's flat global scope **is** the entry's scope:
+/// the entry's own short names are already the program's, and every other file's file-scoped
+/// bindings are renamed into it, exactly as their declarations are qualified into it.
 fn build_module_map(
     own_ns: &[String],
     own_stmts: &[Stmt],
     modules: &[ModuleView],
     reg: &noeta_ext_abi::registry::Registry,
-) -> qualify::QMap {
+    canonical_handles: bool,
+) -> qualify::UnitMap {
     let mut map = qualify::QMap::new();
     // Identity entries (`App.Models.User` → itself) look like no-ops but are load-bearing: the
     // member-chain collapse in `qualify` turns a chain into a flat `Ident(FQN)` only on a map
@@ -1823,72 +3076,207 @@ fn build_module_map(
             }
         }
     }
+    // A unit's own declarations shadow an import of the same name, whichever scope the import sits
+    // in — so the set is the unit's, shared by the unit map and every tier-block overlay below.
+    let declared: HashSet<&str> = own_stmts.iter().filter_map(decl_name).collect();
+    add_module_import_aliases(&mut map, own_stmts, modules);
+    add_native_type_aliases(&mut map, own_stmts, &declared, reg);
+    let handles = if canonical_handles {
+        native_use_handles(own_stmts, modules, reg)
+    } else {
+        qualify::QMap::new()
+    };
+    // A tier block's own `use`s (`@test { use std.test.{Skip} … }`) bind inside the block only, so
+    // they get a **per-block overlay** instead of joining the tables above — see
+    // [`qualify::UnitMap::tier_scopes`]. Without this the block's references were qualified against
+    // the unit's table alone: `#[Skip("…")]` stayed the bare `Skip` the runner (which matches the
+    // qualified `std.test.Skip`) never recognizes, so activation lifted a test whose skip had
+    // silently evaporated.
+    let mut tier_scopes = std::collections::HashMap::new();
     for stmt in own_stmts {
-        if let Stmt::Use { path, names, .. } = stmt {
-            for n in names {
-                if module_declares(modules, path, &n.name) {
-                    let qualified = format!("{}.{}", path.join("."), n.name);
-                    map.insert(qualified.clone(), qualified.clone());
-                    map.insert(n.local().to_string(), qualified);
-                } else if let Some(module) = module_with_namespace(modules, path, &n.name) {
-                    // A whole-module import (`use geometry.vec`): every `pub` declaration aliases
-                    // under the local binding — `vec.Vec2` → `geometry.vec.Vec2` — so qualified
-                    // references (struct-literal heads, annotations, patterns, member chains)
-                    // rewrite to the FQN the merged program declares.
-                    let ns = module.namespace.join(".");
-                    for decl in module.stmts.iter().filter(|s| decl_is_public(s)) {
-                        if let Some(dname) = qualifiable_decl_name(decl) {
-                            let qualified = format!("{ns}.{dname}");
-                            map.insert(qualified.clone(), qualified.clone());
-                            map.insert(format!("{}.{dname}", n.local()), qualified);
-                        }
+        let Stmt::TierBlock { items, span, .. } = stmt else {
+            continue;
+        };
+        if !items.iter().any(|s| matches!(s, Stmt::Use { .. })) {
+            continue;
+        }
+        let mut names = map.clone();
+        add_module_import_aliases(&mut names, items, modules);
+        add_native_type_aliases(&mut names, items, &declared, reg);
+        let mut block_handles = handles.clone();
+        if canonical_handles {
+            block_handles.extend(native_use_handles(items, modules, reg));
+        }
+        tier_scopes.insert(
+            *span,
+            qualify::UnitMap {
+                names,
+                handles: block_handles,
+                tier_scopes: std::collections::HashMap::new(),
+            },
+        );
+    }
+    qualify::UnitMap {
+        names: map,
+        handles,
+        tier_scopes,
+    }
+}
+
+/// Fold the **loaded-module** imports among `use_stmts` into a rewrite map: an import that resolves
+/// to a real module qualifies to that module's identity, keyed by the import's local (alias-aware)
+/// name. Split out of [`build_module_map`] so a tier block's own `use`s can be folded into a
+/// block-scoped overlay through the exact same rule.
+fn add_module_import_aliases(map: &mut qualify::QMap, use_stmts: &[Stmt], modules: &[ModuleView]) {
+    for stmt in use_stmts {
+        let Stmt::Use { path, names, .. } = stmt else {
+            continue;
+        };
+        for n in names {
+            if module_declares(modules, path, &n.name) {
+                let qualified = format!("{}.{}", path.join("."), n.name);
+                map.insert(qualified.clone(), qualified.clone());
+                map.insert(n.local().to_string(), qualified);
+            } else if let Some(module) = module_with_namespace(modules, path, &n.name) {
+                // A whole-module import (`use geometry.vec`): every `pub` declaration aliases
+                // under the local binding — `vec.Vec2` → `geometry.vec.Vec2` — so qualified
+                // references (struct-literal heads, annotations, patterns, member chains)
+                // rewrite to the FQN the merged program declares.
+                let ns = module.namespace.join(".");
+                for decl in module.stmts.iter().filter(|s| decl_is_public(s)) {
+                    if let Some(dname) = qualifiable_decl_name(decl) {
+                        let qualified = format!("{ns}.{dname}");
+                        map.insert(qualified.clone(), qualified.clone());
+                        map.insert(format!("{}.{dname}", n.local()), qualified);
                     }
                 }
             }
         }
     }
-    add_native_attribute_aliases(&mut map, own_stmts, reg);
-    map
 }
 
-/// Fold a module's native **attribute** imports into its rewrite map, so a `#[Skip]` /
-/// `attributes_of::<Skip>()` written after `use std.test.{Skip}` rewrites to its qualified identity
-/// `std.test.Skip` — the one FQN the checker's gate keys on, the reflection manifest carries, and the
-/// test/bench/mcp/doc runners read (D2b: one identity everywhere). Mirrors the checker's `use`
-/// classification (`classify_use`), but keeps **only** attribute-kind imports (`is_ext_attribute`):
-/// every other native import stays the checker's `extern_types` job, so this rewrite never touches a
-/// type or value name — its blast radius is attribute names alone. A leaf `use std.test.{Skip}` binds
-/// `Skip`; a group `use std.test` / concrete `use std.test.mod` binds the projected `test.Skip` form.
-fn add_native_attribute_aliases(
-    map: &mut qualify::QMap,
+/// A unit's **native `use` handles**: each import that binds a name in the *value* namespace and
+/// resolves to no loaded file → the canonical name the merged program binds it under.
+///
+/// A `use` binds in one file; the merged program has one flat global scope. A leaf name is
+/// therefore not a usable binding key across units — `use std.http.url` in a dependency and
+/// `use para.url` in a package it never heard of both want to bind `url`, and whichever `use`
+/// executed last used to win for the whole program (silently, and only at run time: the checker
+/// keeps its own table). The identity a native import resolves to is unique, so it is the binding
+/// name: `use std.http.url` binds `std.http.url`, `use std.http.url.{decode as d}` binds
+/// `std.http.url.decode`. Because every canonical name is dotted, it can never collide with the
+/// entry's own short-named bindings either.
+///
+/// [`Registry::classify_use`](noeta_ext_abi::registry::Registry::classify_use) is the classifier —
+/// the same one the checker and both backends consult — so the name recorded here is by
+/// construction the name they resolve the import to. Imports that resolve to a loaded `.noe` module
+/// are excluded: those are merged and rewritten through [`qualify::UnitMap::names`] instead.
+fn native_use_handles(
     own_stmts: &[Stmt],
+    modules: &[ModuleView],
+    reg: &noeta_ext_abi::registry::Registry,
+) -> qualify::QMap {
+    let mut handles = qualify::QMap::new();
+    for stmt in own_stmts {
+        let Stmt::Use { path, names, .. } = stmt else {
+            continue;
+        };
+        for n in names {
+            if module_declares(modules, path, &n.name)
+                || module_with_namespace(modules, path, &n.name).is_some()
+            {
+                continue;
+            }
+            if let Some(canonical) = canonical_use_binding(reg, path, &n.name) {
+                handles.insert(n.local().to_string(), canonical);
+            }
+        }
+    }
+    handles
+}
+
+/// The canonical binding name of a native import, or `None` when the import binds nothing in the
+/// **value** namespace (a type/enum/class/trait import binds in the type namespace, which the
+/// qualified-identity rewrite already covers, and an unresolvable target binds nothing at all).
+fn canonical_use_binding(
+    reg: &noeta_ext_abi::registry::Registry,
+    path: &[String],
+    name: &str,
+) -> Option<String> {
+    use noeta_ext_abi::registry::UseKind;
+    match reg.classify_use(path, name) {
+        // A whole module (`use std.http.url`) or a navigable namespace group (`use std.http`):
+        // the handle *is* the qualified path.
+        UseKind::Module(qualified) | UseKind::Namespace(qualified) => Some(qualified),
+        // A selective member import (`use std.http.url.{decode}`) binds one function value; its
+        // canonical name is the function's own qualified identity.
+        UseKind::MemberFn { module, func } => Some(format!("{module}.{func}")),
+        _ => None,
+    }
+}
+
+/// Fold a module's **native type** imports into its rewrite map, so every spelling of a native type
+/// rewrites to the one qualified identity the rest of the toolchain keys on (`std.http.Framing`,
+/// `std.test.Skip`) — the FQN the checker seeds its symbol tables under, the reflection manifest
+/// carries, both backends build shapes from, and the test/bench/mcp/doc runners read. Mirrors the
+/// checker's `use` classification (`classify_use`).
+///
+/// Two spellings reach here. A **leaf** import (`use std.test.{Skip}`) binds the short local name;
+/// a **group** import (`use std.http`, or a concrete module `use std.test.mod`) binds the projected
+/// dotted form (`http.Framing`). Aliasing the group form is what makes `http.Framing.Sse` work at
+/// all: the collapse in [`qualify`] turns the dotted prefix into a single `Ident(std.http.Framing)`
+/// with `.Sse` still on it, which is exactly the shape a leaf-imported `Framing.Sse` reaches the
+/// backends as. Without the alias the chain stayed `((http).Framing).Sse`, the compiler saw a member
+/// access on the namespace handle, and the program died at *compile* time with an internal
+/// "type member used as a value" — while `use std.http.{Framing}` + `Framing.Sse` worked. That
+/// asymmetry is not a curiosity: two packages exporting the same short name (`std.http.Framing` and
+/// `para.ai.provider.Framing`) cannot both be leaf-imported, so the dotted form is the *only*
+/// spelling available to a program that needs both.
+///
+/// A **local declaration wins**: a name a file declares itself is not rewritten to a native type of
+/// the same name, matching the shadowing rule the rest of the prelude follows. `declared` is the
+/// unit's own declaration names, passed in rather than derived from `use_stmts` so a tier-block
+/// overlay (whose `use_stmts` are one block's imports) still honors the whole file's shadowing.
+fn add_native_type_aliases(
+    map: &mut qualify::QMap,
+    use_stmts: &[Stmt],
+    declared: &HashSet<&str>,
     reg: &noeta_ext_abi::registry::Registry,
 ) {
     use noeta_ext_abi::registry::UseKind;
     let mut alias = |local: String, qualified: String| {
+        if declared.contains(local.as_str()) {
+            return;
+        }
         map.insert(qualified.clone(), qualified.clone());
         map.insert(local, qualified);
     };
-    for stmt in own_stmts {
+    for stmt in use_stmts {
         let Stmt::Use { path, names, .. } = stmt else {
             continue;
         };
         for n in names {
             let local = n.local();
             match reg.classify_use(path, &n.name) {
+                // A leaf import of a native attribute struct. (Other leaf-imported native types are
+                // the checker's `extern_types` job and already resolve; aliasing them here too would
+                // rewrite a *value* spelling the backends bind under the short name.)
                 UseKind::ExtStruct(qualified) if reg.is_ext_attribute(&qualified) => {
                     alias(local.to_string(), qualified);
                 }
-                UseKind::Namespace(prefix) => {
+                // A group import — every native **value type** under the namespace, by its dotted
+                // spelling. Enums, fielded types (classes/structs), and attribute structs only: a
+                // native **trait** is keyed by its *short* name throughout the checker (`impl
+                // fx.Pixels for T`, a `T: Pixels` bound, `dyn Pixels`), so rewriting its dotted
+                // spelling to the qualified identity makes the `impl` name a trait the checker has
+                // never heard of. A trait is a contract, not a value — nothing constructs one — so
+                // it needs no dotted alias in the first place.
+                UseKind::Namespace(prefix) | UseKind::Module(prefix) => {
                     for (rel, q) in reg.namespace_types(&prefix) {
-                        if reg.is_ext_attribute(&q) {
-                            alias(format!("{local}.{rel}"), q);
-                        }
-                    }
-                }
-                UseKind::Module(qualified) => {
-                    for (rel, q) in reg.namespace_types(&qualified) {
-                        if reg.is_ext_attribute(&q) {
+                        let is_value_type = reg.find_enum_qualified(&q).is_some()
+                            || reg.resolve_fielded(&q).is_some()
+                            || reg.is_ext_attribute(&q);
+                        if is_value_type {
                             alias(format!("{local}.{rel}"), q);
                         }
                     }
@@ -2003,7 +3391,14 @@ fn unknown_module_error(
     suggestion: Option<&str>,
     unparseable: &[&str],
 ) -> LoadDiagnostic {
-    let namespace = path.join(".");
+    // A single-segment import carries its one segment in `name`, not `path` (the parser splits a
+    // non-grouped `use` at its leaf), so an empty path is not a module named "" — it is the
+    // whole-module reading, and the leaf is the only name the reader wrote.
+    let namespace = if path.is_empty() {
+        name.name.clone()
+    } else {
+        path.join(".")
+    };
     let mut diagnostic = Diagnostic::error(
         DiagnosticCode::UnresolvedImport,
         name.span,
@@ -2049,8 +3444,12 @@ pub fn broken_module_for<'b>(
     })
 }
 
-/// Build the `E0020` diagnostic for an import whose name collides with another top-level name in
-/// the entry (a second import of it, or a local declaration), pointed at the imported name.
+/// Build the `E0020` diagnostic for an import whose local name collides with another top-level name
+/// **in the same file** (a second import of it, or a declaration that file makes), pointed at the
+/// imported name.
+///
+/// `entry` is the *provisional* render target — the linking core has no [`Source`] for a dependency
+/// module, so the file the span really indexes is resolved afterwards by [`attribute_to_spans`].
 fn collision_error(entry: &Source, path: &[String], name: &UseName) -> LoadDiagnostic {
     let namespace = path.join(".");
     LoadDiagnostic {
@@ -2107,13 +3506,29 @@ fn decl_is_public(stmt: &Stmt) -> bool {
 /// statements that declare no importable name.
 fn decl_name(stmt: &Stmt) -> Option<&str> {
     match stmt {
-        Stmt::Class(decl) => Some(&decl.name),
-        Stmt::Struct(decl) => Some(&decl.name),
-        Stmt::Enum(decl) => Some(&decl.name),
-        Stmt::Fn(decl) => Some(&decl.name),
+        Stmt::Class(decl) => Some(decl.name.as_str()),
+        Stmt::Struct(decl) => Some(decl.name.as_str()),
+        Stmt::Enum(decl) => Some(decl.name.as_str()),
+        Stmt::Fn(decl) => Some(decl.name.as_str()),
         // A user-defined trait is an importable name (L1) — `use pkg.mod.{MyTrait}` brings it into
         // scope for `dyn MyTrait`, a `<T: MyTrait>` bound, or an `impl MyTrait for T`.
-        Stmt::Trait(decl) => Some(&decl.name),
+        Stmt::Trait(decl) => Some(decl.name.as_str()),
+        _ => None,
+    }
+}
+
+/// The identity of a **standalone** `impl Trait for Target`: its span. `None` for every other
+/// statement.
+///
+/// An impl declares no name, so it is absent from every name-keyed table the linker dedups with
+/// (`merged_q`, `unit_origins`), and "where it is written" is what identifies it instead — stable
+/// under [`qualify::qualify_stmt`], which rewrites names and leaves spans alone, so a merged clone
+/// still answers to its source statement. Deliberately *not* `(target, trait)`: that names the
+/// coherence slot rather than the declaration, so two modules that both fill it would collapse into
+/// one silently instead of reaching the checker as the E0027 they are.
+fn standalone_impl_span(stmt: &Stmt) -> Option<Span> {
+    match stmt {
+        Stmt::Impl(decl) => Some(decl.span),
         _ => None,
     }
 }
@@ -2134,7 +3549,13 @@ mod tests {
         siblings: &[RawModule],
     ) -> Result<Linked, Vec<LoadDiagnostic>> {
         noeta_stdlib::registry::default_seeded();
-        super::link(entry_name, entry_text, root_edition, siblings)
+        super::link(
+            entry_name,
+            entry_text,
+            root_edition,
+            siblings,
+            ModulePath::Declared,
+        )
     }
 
     fn link_with_deps(
@@ -2145,14 +3566,19 @@ mod tests {
         deps: &[DepPackage],
     ) -> Result<Linked, Vec<LoadDiagnostic>> {
         noeta_stdlib::registry::default_seeded();
-        super::link_with_deps(entry_name, entry_text, root_edition, siblings, deps)
+        super::link_with_deps(
+            entry_name,
+            entry_text,
+            root_edition,
+            siblings,
+            deps,
+            &noeta_span::PackageUses::new(),
+            ModulePath::Declared,
+        )
     }
 
     fn module(name: &str, text: &str) -> RawModule {
-        RawModule {
-            name: name.to_string(),
-            text: text.to_string(),
-        }
+        RawModule::declared(name, text)
     }
 
     // --- cross-package linking (package-manager P2.1) -----------------------------------------
@@ -2169,7 +3595,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .any(|s| matches!(s, Stmt::Class(c) if leaf(&c.name) == name))
+            .any(|s| matches!(s, Stmt::Class(c) if leaf(c.name.as_str()) == name))
     }
 
     fn has_fn(linked: &Linked, name: &str) -> bool {
@@ -2177,7 +3603,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .any(|s| matches!(s, Stmt::Fn(f) if leaf(&f.name) == name))
+            .any(|s| matches!(s, Stmt::Fn(f) if leaf(f.name.as_str()) == name))
     }
 
     fn has_struct(linked: &Linked, name: &str) -> bool {
@@ -2185,7 +3611,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .any(|s| matches!(s, Stmt::Struct(d) if leaf(&d.name) == name))
+            .any(|s| matches!(s, Stmt::Struct(d) if leaf(d.name.as_str()) == name))
     }
 
     #[test]
@@ -2197,7 +3623,7 @@ mod tests {
         // *keying* — the map is populated, not left empty, and covers each source — which is the
         // wiring the first edition-gated rule will consult once editions diverge.)
         let dep_a = DepPackage {
-            key: "a".to_string(),
+            prefix: vec!["a".to_string()],
             root: "a".to_string(),
             modules: vec![module(
                 "a.noe",
@@ -2206,9 +3632,10 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let dep_b = DepPackage {
-            key: "b".to_string(),
+            prefix: vec!["b".to_string()],
             root: "b".to_string(),
             modules: vec![module(
                 "b.noe",
@@ -2217,6 +3644,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         // The entry need not import the deps: their sources are assembled (and thus keyed in the
         // editions map) whether or not a declaration is pulled into the merge.
@@ -2262,7 +3690,7 @@ mod tests {
         // keys it `webclient` and imports `use webclient.client.Client` — the loader re-roots
         // `http.*` → `webclient.*`.
         let dep = DepPackage {
-            key: "webclient".to_string(),
+            prefix: vec!["webclient".to_string()],
             root: "http".to_string(),
             modules: vec![module(
                 "client.noe",
@@ -2271,6 +3699,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use webclient.client.Client;\nc = Client { base: \"x\" };\n";
         let linked = link_with_deps(
@@ -2292,6 +3721,229 @@ mod tests {
         );
     }
 
+    /// A dependency module whose path is **derived** (as `noeta-pm` hands them over) rather than
+    /// declared — the shape every intra-package re-rooting assertion below needs, because the whole
+    /// point is that the derived path and the re-rooted `use` must meet.
+    fn derived(name: &str, path: &[&str], text: &str) -> RawModule {
+        RawModule {
+            name: name.to_string(),
+            text: text.to_string(),
+            path: ModulePath::Derived(path.iter().map(|s| (*s).to_string()).collect()),
+        }
+    }
+
+    #[test]
+    fn a_scope_members_intra_package_use_reroots_to_its_derived_prefix() {
+        // `para/db` reached through a scope array (`para = [{ package = "para/db" }, … ]`): its
+        // modules derive under the TWO-segment prefix `para.db`, while the package's own root
+        // segment stays `db` — what it derives under standalone, and therefore the one spelling its
+        // internal imports can use in both builds. Rewriting a single segment to the *key* could not
+        // express this: the key is the scope half, so `use db.query` matched nothing and was left
+        // alone, while `use para.db.query` matched nothing standalone.
+        let dep = DepPackage {
+            prefix: vec!["para".to_string(), "db".to_string()],
+            root: "db".to_string(),
+            modules: vec![
+                derived(
+                    "db.noe",
+                    &["para", "db"],
+                    "pub fn open(): string { return \"conn\"; }\n",
+                ),
+                derived(
+                    "query.noe",
+                    &["para", "db", "query"],
+                    "use db.open;\npub fn run(): string { return open(); }\n",
+                ),
+            ],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let entry = "use para.db.query.run;\nx = run();\n";
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .expect("the intra-package `use db.open` must re-root to `para.db.open`");
+        assert!(has_fn(&linked, "run"));
+        assert!(has_fn(&linked, "open"));
+    }
+
+    #[test]
+    fn a_plain_keys_intra_package_use_reroots_to_the_key() {
+        // The one-segment prefix: `acme/cli` keyed `mycli`. The package's own segment is `cli`, so
+        // its internal `use cli.args` becomes `use mycli.args` — the key made real.
+        let dep = DepPackage {
+            prefix: vec!["mycli".to_string()],
+            root: "cli".to_string(),
+            modules: vec![
+                derived(
+                    "args.noe",
+                    &["mycli", "args"],
+                    "pub fn count(): int { return 2; }\n",
+                ),
+                derived(
+                    "cli.noe",
+                    &["mycli", "cli"],
+                    "use cli.args.count;\npub fn run(): int { return count(); }\n",
+                ),
+            ],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let entry = "use mycli.cli.run;\nx = run();\n";
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .expect("the intra-package `use cli.args` must re-root to `mycli.args`");
+        assert!(has_fn(&linked, "run"));
+        assert!(has_fn(&linked, "count"));
+    }
+
+    #[test]
+    fn reroot_path_replaces_the_package_segment_with_the_whole_prefix() {
+        let no_renames = std::collections::BTreeMap::new();
+        let reroot = |path: &[&str], root: &str, prefix: &[&str]| {
+            let mut path: Vec<String> = path.iter().map(|s| (*s).to_string()).collect();
+            let prefix: Vec<String> = prefix.iter().map(|s| (*s).to_string()).collect();
+            reroot_path(&mut path, root, &prefix, &no_renames);
+            path
+        };
+        // A scope member: one segment in, two out — and everything after it survives.
+        assert_eq!(
+            reroot(&["db", "query", "run"], "db", &["para", "db"]),
+            ["para", "db", "query", "run"]
+        );
+        // Standalone the prefix IS the root segment, so the very same source is a no-op.
+        assert_eq!(reroot(&["db", "query"], "db", &["db"]), ["db", "query"]);
+        // A plain key: one segment in, one out, but a different one.
+        assert_eq!(
+            reroot(&["cli", "args"], "cli", &["mycli"]),
+            ["mycli", "args"]
+        );
+        // Anything that is not the package itself is untouched — `std`, and (the case that made
+        // rewriting from the *scope* half actively harmful) a native extension's own namespace root,
+        // which a package's own modules import by its literal name.
+        assert_eq!(reroot(&["std", "fs"], "db", &["para", "db"]), ["std", "fs"]);
+        assert_eq!(
+            reroot(&["para", "db", "Connection"], "db", &["mydb", "db"]),
+            ["para", "db", "Connection"]
+        );
+    }
+
+    #[test]
+    fn reroot_path_replaces_a_local_dependency_key_with_one_segment() {
+        // The `renames` branch maps the package's OWN dependency key to that dependency's global
+        // segment — one segment, because the author already spelled whatever follows it (a scope
+        // array's package half included).
+        let renames: std::collections::BTreeMap<String, String> =
+            [("para".to_string(), "para_1".to_string())]
+                .into_iter()
+                .collect();
+        let mut path = vec!["para".to_string(), "db".to_string(), "query".to_string()];
+        reroot_path(
+            &mut path,
+            "api",
+            &["para".to_string(), "api".to_string()],
+            &renames,
+        );
+        assert_eq!(path, ["para_1", "db", "query"]);
+    }
+
+    #[test]
+    fn a_single_segment_use_carries_its_module_in_the_name_and_is_still_rerooted() {
+        // The parser splits a non-grouped `use` at its leaf, so `use aether` has an EMPTY path and
+        // its one segment — the whole module — sits in `names`. Keying re-rooting on `path.first()`
+        // alone skipped exactly this shape, which is the one a package's own collapsed root takes.
+        let no_renames = std::collections::BTreeMap::new();
+        let reroot = |spelled: &str, root: &str, prefix: &[&str]| {
+            let mut path = Vec::new();
+            let mut names = vec![UseName {
+                name: spelled.to_string(),
+                span: Span::new(0, 0),
+                alias: None,
+            }];
+            let prefix: Vec<String> = prefix.iter().map(|s| (*s).to_string()).collect();
+            reroot_use(&mut path, &mut names, root, &prefix, &no_renames);
+            let n = names.remove(0);
+            (path, n.name, n.alias)
+        };
+
+        // A scope member: the module becomes `para.aether`, and because the trailing segment is
+        // unchanged the local binding needs no alias — the body's `aether.App` still resolves.
+        assert_eq!(
+            reroot("aether", "aether", &["para", "aether"]),
+            (vec!["para".to_string()], "aether".to_string(), None)
+        );
+        // A plain key renames the trailing segment, so the original spelling is pinned as an alias:
+        // the module is `myweb`, but the source that wrote `use aether` still binds `aether`.
+        assert_eq!(
+            reroot("aether", "aether", &["myweb"]),
+            (
+                Vec::<String>::new(),
+                "myweb".to_string(),
+                Some("aether".to_string())
+            )
+        );
+        // Standalone the prefix IS the root, so the same source is untouched — no synthetic alias.
+        assert_eq!(
+            reroot("aether", "aether", &["aether"]),
+            (Vec::<String>::new(), "aether".to_string(), None)
+        );
+        // Not the package itself: a bare `use math` naming something else is left alone.
+        assert_eq!(
+            reroot("math", "aether", &["para", "aether"]),
+            (Vec::<String>::new(), "math".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn a_single_segment_use_of_a_dependencys_collapsed_root_links() {
+        // The end-to-end shape the unit test above is the mechanism for: package `aether` consumed
+        // under the scope-array prefix `para.aether`, whose own `openapi.noe` imports the collapsed
+        // root as a whole module. Before the fix this failed as ``no module `` in this project`` —
+        // an EMPTY name, because the diagnostic had only the (empty) path to report.
+        let dep = DepPackage {
+            prefix: vec!["para".to_string(), "aether".to_string()],
+            root: "aether".to_string(),
+            modules: vec![
+                derived(
+                    "aether.noe",
+                    &["para", "aether"],
+                    "pub struct App {\n  port: int\n}\n",
+                ),
+                derived(
+                    "openapi.noe",
+                    &["para", "aether", "openapi"],
+                    "use aether\npub fn describe(a: aether.App): int {\n  return a.port;\n}\n",
+                ),
+            ],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let linked = link_with_deps(
+            "main.noe",
+            "use para.aether.openapi.describe\nfn main(): int { return 0; }\n",
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            &[dep],
+        )
+        .expect("the collapsed root resolves through a whole-module `use`");
+        assert!(has_fn(&linked, "describe"));
+    }
+
     #[test]
     fn a_typoed_dependency_module_is_an_error() {
         // The dependency provides `webclient.client`, so `webclient` is one of the linked project's
@@ -2299,7 +3951,7 @@ mod tests {
         // root — a hard error (E0019), not a silent opaque stub. Foreign-package imports are exactly
         // the ones you fat-finger, and the loader *does* validate them (they are in the pool).
         let dep = DepPackage {
-            key: "webclient".to_string(),
+            prefix: vec!["webclient".to_string()],
             root: "http".to_string(),
             modules: vec![module(
                 "client.noe",
@@ -2308,6 +3960,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use webclient.clientt.Client;\nc = Client { base: \"x\" };\n";
         let errors = link_with_deps(
@@ -2333,12 +3986,13 @@ mod tests {
         // is a *declared* native dependency (`native: true`), the loader retains the import for the
         // composed toolchain to validate — it does not flag it.
         let dep = DepPackage {
-            key: "imgfx".to_string(),
+            prefix: vec!["imgfx".to_string()],
             root: "imgfx".to_string(),
             modules: Vec::new(),
             dep_renames: Default::default(),
             native: true,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use imgfx.fx;\necho fx.double(21);\n";
         let linked = link_with_deps(
@@ -2364,7 +4018,7 @@ mod tests {
     /// A dependency package whose `broken.noe` has a syntax error, plus a clean sibling module.
     fn dep_with_broken_module() -> DepPackage {
         DepPackage {
-            key: "para".to_string(),
+            prefix: vec!["para".to_string()],
             root: "para".to_string(),
             modules: vec![
                 module(
@@ -2379,6 +4033,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         }
     }
 
@@ -2438,12 +4093,13 @@ mod tests {
         // module, and a `use` under its key must still be retained, never flagged. A pure-Noeta
         // package with a broken file and a native package with no files must not be confused.
         let native = DepPackage {
-            key: "imgfx".to_string(),
+            prefix: vec!["imgfx".to_string()],
             root: "imgfx".to_string(),
             modules: Vec::new(),
             dep_renames: Default::default(),
             native: true,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use imgfx.fx;\necho fx.double(21);\n";
         let linked = link_with_deps(
@@ -2609,12 +4265,13 @@ mod tests {
         // `imgfx`) or a package never added to the manifest — is an error, not a silent stub. This is
         // the foreign-package typo case: exactly what you cannot catch by eye.
         let dep = DepPackage {
-            key: "imgfx".to_string(),
+            prefix: vec!["imgfx".to_string()],
             root: "imgfx".to_string(),
             modules: Vec::new(),
             dep_renames: Default::default(),
             native: true,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use imgtx.fx;\necho fx.double(21);\n";
         let errors = link_with_deps(
@@ -2642,7 +4299,7 @@ mod tests {
         // re-rooting rewrites it to `use webclient.models.Body`, and — because a dependency module's
         // `use`s drive imports — `Body` is pulled in even though the consumer never named it.
         let dep = DepPackage {
-            key: "webclient".to_string(),
+            prefix: vec!["webclient".to_string()],
             root: "http".to_string(),
             modules: vec![
                 module(
@@ -2657,6 +4314,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use webclient.client.Client;\nc = Client { body: Body { text: \"hi\" } };\n";
         let linked = link_with_deps(
@@ -2679,7 +4337,7 @@ mod tests {
         // Both packages have root segment `http` (e.g. `a/http` and `b/http`); distinct keys keep
         // them apart — the collision the dep-key decoupling exists to prevent.
         let a = DepPackage {
-            key: "alpha".to_string(),
+            prefix: vec!["alpha".to_string()],
             root: "http".to_string(),
             modules: vec![module(
                 "a.noe",
@@ -2688,9 +4346,10 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let b = DepPackage {
-            key: "beta".to_string(),
+            prefix: vec!["beta".to_string()],
             root: "http".to_string(),
             modules: vec![module(
                 "b.noe",
@@ -2699,6 +4358,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry =
             "use alpha.core.Ping;\nuse beta.core.Pong;\np = Ping { n: 1 };\nq = Pong { n: 2 };\n";
@@ -2715,6 +4375,181 @@ mod tests {
     }
 
     #[test]
+    fn two_packages_may_each_import_their_own_declaration_of_one_name() {
+        // The `para` scope, reduced: two packages share the import root `para`, and each declares
+        // *and internally imports* a `Middleware`. Every `use` here is file-scoped — no one file
+        // binds `Middleware` twice — so this must link clean. It did not: the collision table was
+        // one flat bare-name map spanning every compilation unit, so `para-aether`'s own file
+        // claimed `Middleware` for the whole program and `para-api`'s claim of *its* `Middleware`
+        // came back as E0020.
+        let aether = DepPackage {
+            prefix: vec!["para".to_string()],
+            root: "para".to_string(),
+            modules: vec![
+                module(
+                    "aether.noe",
+                    "namespace para.aether;\npub trait Middleware { fn run(): int }\n",
+                ),
+                module(
+                    "aether_use.noe",
+                    "namespace para.aether.serve;\nuse para.aether.{Middleware};\n\
+                     pub fn drive(m: dyn Middleware): int { m.run() }\n",
+                ),
+            ],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let api = DepPackage {
+            prefix: vec!["para".to_string()],
+            root: "para".to_string(),
+            modules: vec![
+                module(
+                    "api.noe",
+                    "namespace para.api;\npub trait Middleware { fn call(): int }\n",
+                ),
+                module(
+                    "api_use.noe",
+                    "namespace para.api.middleware;\nuse para.api.{Middleware};\n\
+                     pub fn apply(m: dyn Middleware): int { m.call() }\n",
+                ),
+            ],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let entry = "use para.aether.serve.{drive};\nuse para.api.middleware.{apply};\n";
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            &[aether, api],
+        )
+        .unwrap();
+
+        // Both traits are present, each under its own qualified identity, and exactly once.
+        let traits: Vec<&str> = linked
+            .program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Trait(t) => Some(t.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            traits,
+            vec!["para.aether.Middleware", "para.api.Middleware"],
+            "each package's own `Middleware` merges exactly once, under its own identity"
+        );
+        assert!(has_fn(&linked, "drive"));
+        assert!(has_fn(&linked, "apply"));
+    }
+
+    #[test]
+    fn one_declaration_imported_by_two_files_merges_once() {
+        // Per-unit collision scoping must not turn into per-unit *merging*: two sibling modules
+        // importing the same declaration each see a free name in their own table, so only the
+        // program-wide qualified-identity guard keeps the declaration from landing twice.
+        let models = module(
+            "models.noe",
+            "namespace App.Models;\npub class User { id: int }\n",
+        );
+        let a = module(
+            "a.noe",
+            "namespace App.A;\nuse App.Models.User;\npub fn one(u: User): int { u.id }\n",
+        );
+        let b = module(
+            "b.noe",
+            "namespace App.B;\nuse App.Models.User;\npub fn two(u: User): int { u.id }\n",
+        );
+        let entry = "use App.A.one;\nuse App.B.two;\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[models, a, b],
+        )
+        .unwrap();
+        let users = linked
+            .program
+            .stmts
+            .iter()
+            .filter(|s| matches!(s, Stmt::Class(c) if leaf(c.name.as_str()) == "User"))
+            .count();
+        assert_eq!(users, 1, "`User` must be merged exactly once");
+    }
+
+    #[test]
+    fn a_module_importing_the_entrys_own_declaration_does_not_duplicate_it() {
+        // The entry declares `Config` in its own namespace and a sibling imports it back. The
+        // declaration is already the program's tail, so the import must merge nothing — the entry's
+        // identities are seeded into the merge-dedup set for exactly this.
+        let helper = module(
+            "helper.noe",
+            "namespace App.Helper;\nuse App.Root.Config;\npub fn read(c: Config): int { c.n }\n",
+        );
+        let entry = "namespace App.Root;\nuse App.Helper.read;\npub class Config { n: int }\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&helper),
+        )
+        .unwrap();
+        let configs = linked
+            .program
+            .stmts
+            .iter()
+            .filter(|s| matches!(s, Stmt::Class(c) if leaf(c.name.as_str()) == "Config"))
+            .count();
+        assert_eq!(configs, 1, "`Config` must not be merged alongside itself");
+    }
+
+    #[test]
+    fn a_dependency_modules_own_collision_is_still_e0020_and_blames_its_own_file() {
+        // Per-unit scoping is not per-unit silence: two imports of the same local name *inside one
+        // dependency file* remain the clash, and the diagnostic must render against that file — not
+        // the entry, whose text does not contain the span at all.
+        let dep = DepPackage {
+            prefix: vec!["pkg".to_string()],
+            root: "pkg".to_string(),
+            modules: vec![
+                module("a.noe", "namespace pkg.a;\npub class User { id: int }\n"),
+                module("b.noe", "namespace pkg.b;\npub class User { n: int }\n"),
+                module(
+                    "c.noe",
+                    "namespace pkg.c;\nuse pkg.a.User;\nuse pkg.b.User;\npub fn go(): int { 1 }\n",
+                ),
+            ],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let errs = link_with_deps(
+            "main.noe",
+            "use pkg.c.go;\n",
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].diagnostic.code, DiagnosticCode::NameCollision);
+        assert_eq!(
+            errs[0].source.name(),
+            "c.noe",
+            "the diagnostic must render against the file its span indexes"
+        );
+        // And the span really does index that file — the rendered slice is the imported name.
+        assert_eq!(errs[0].source.slice(errs[0].diagnostic.span), "User");
+    }
+
+    #[test]
     fn a_transitive_dependency_resolves_through_dep_renames() {
         // The consumer depends on `app` (root `app`), which itself depends on a package it keys
         // `jsonlib` (root `json`). The resolver gives the transitive package the global segment
@@ -2723,7 +4558,7 @@ mod tests {
         let mut app_renames = std::collections::BTreeMap::new();
         app_renames.insert("jsonlib".to_string(), "pkg_json".to_string());
         let app = DepPackage {
-            key: "app".to_string(),
+            prefix: vec!["app".to_string()],
             root: "app".to_string(),
             modules: vec![module(
                 "widget.noe",
@@ -2732,9 +4567,10 @@ mod tests {
             dep_renames: app_renames,
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let json = DepPackage {
-            key: "pkg_json".to_string(),
+            prefix: vec!["pkg_json".to_string()],
             root: "json".to_string(),
             modules: vec![module(
                 "parse.noe",
@@ -2743,6 +4579,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use app.core.Widget;\nw = Widget { v: Value { n: 1 } };\n";
         let linked = link_with_deps(
@@ -2761,11 +4598,226 @@ mod tests {
     }
 
     #[test]
+    fn linking_records_which_package_each_source_came_from() {
+        // Package provenance is the thing linking otherwise destroys: the merged program is one
+        // flat statement list, and nothing in it says which package a declaration arrived from.
+        // The `packages` side-table is the only carrier — the entry and its siblings are the root
+        // package, each dependency's modules that package's global key — and the checker's orphan
+        // rule (E0070) reads it through each declaration's span.
+        let dep = DepPackage {
+            prefix: vec!["geo".to_string()],
+            root: "shapes".to_string(),
+            modules: vec![module(
+                "circle.noe",
+                "namespace shapes.circle;\npub fn area(r: float): float { return r * r; }\n",
+            )],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let sibling = module(
+            "lib.noe",
+            "namespace App.Lib;\npub fn two(): int { return 2; }\n",
+        );
+        let linked = link_with_deps(
+            "main.noe",
+            "use geo.circle.area;\nuse App.Lib.two;\necho two();\n",
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+            std::slice::from_ref(&dep),
+        )
+        .unwrap();
+        assert_eq!(
+            linked.packages.source_package(SourceId(0)),
+            Some(&PackageOrigin::Root),
+            "the entry is the root package"
+        );
+        assert_eq!(
+            linked.packages.source_package(SourceId(1)),
+            Some(&PackageOrigin::Root),
+            "a sibling module is the SAME package as the entry — the orphan rule\'s boundary is \
+             the package, not the file"
+        );
+        assert_eq!(
+            linked.packages.source_package(SourceId(2)),
+            Some(&PackageOrigin::Dependency("geo".to_string())),
+            "a dependency module carries its package\'s global key (not its own root segment)"
+        );
+        // Never guessed: a source the loader did not read is unknown, not "the root package".
+        assert_eq!(linked.packages.source_package(SourceId(9)), None);
+    }
+
+    #[test]
+    fn a_deps_free_link_puts_every_source_in_the_root_package() {
+        let sibling = module(
+            "lib.noe",
+            "namespace App.Lib;\npub fn two(): int { return 2; }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "use App.Lib.two;\necho two();\n",
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .unwrap();
+        assert_eq!(
+            linked.packages.source_package(SourceId(0)),
+            Some(&PackageOrigin::Root)
+        );
+        assert_eq!(
+            linked.packages.source_package(SourceId(1)),
+            Some(&PackageOrigin::Root)
+        );
+    }
+
+    /// A **native** package that also ships plain `.noe` modules (`para/db`: the native `para.db`
+    /// surface beside `para.db.schema` and `para.db.migrations`), and a driver's entry call naming
+    /// one of them — `noeta migrate` appends `migrations.emit(path, up)` to a migration that
+    /// imports only `para.db.schema`.
+    ///
+    /// The tail's `use` has to arrive *before* linking, because resolving an import is what pulls
+    /// the module it names into the program. Pushed onto the linked program instead, it bound
+    /// nothing: `migrations` reached the checker as an unresolved member of the package root
+    /// (`[E0019] module para.db has no member migrations`) while the byte-identical import written
+    /// into the file by hand resolved — the asymmetry that made `.noe` migrations unrunnable.
+    #[test]
+    fn a_drivers_entry_tail_imports_a_native_packages_noe_submodule() {
+        noeta_stdlib::registry::default_seeded();
+        let dep = DepPackage {
+            prefix: vec!["para".to_string()],
+            root: "para".to_string(),
+            modules: vec![module(
+                "migrations.noe",
+                "namespace para.db.migrations;\npub fn emit(out: string): void { echo out; }\n",
+            )],
+            dep_renames: Default::default(),
+            native: true,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        // The entry names the module nowhere — the driver's tail is what brings it in.
+        let entry = "pub fn up(): string { return \"out.schema\"; }\n";
+        let sp = Span::empty_at(0);
+        let tail = vec![
+            Stmt::Use {
+                path: vec!["para".to_string(), "db".to_string()],
+                names: vec![UseName {
+                    name: "migrations".to_string(),
+                    alias: None,
+                    span: sp,
+                }],
+                span: sp,
+            },
+            Stmt::Expr {
+                expr: Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        receiver: Box::new(Expr::Ident {
+                            name: noeta_ast::Name::canonical("migrations"),
+                            span: sp,
+                        }),
+                        name: "emit".to_string(),
+                        name_span: sp,
+                        span: sp,
+                    }),
+                    args: vec![noeta_ast::CallArg::positional(Expr::Str {
+                        value: "out.schema".to_string(),
+                        span: sp,
+                    })],
+                    span: sp,
+                },
+                span: sp,
+            },
+        ];
+        let linked = link_with_deps_appending(
+            "0001_notes.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+            &noeta_span::PackageUses::new(),
+            // In-memory sources with no package on disk, so nothing derives and each module is
+            // identified by the `namespace` it declares.
+            ModulePath::Declared,
+            &tail,
+        )
+        .expect("the tail's import resolves the package's own `.noe` submodule");
+        // The module was pulled in…
+        assert!(has_fn(&linked, "emit"), "{:?}", linked.program.stmts);
+        // …its `use` was consumed rather than retained as an unresolved native import…
+        assert!(
+            !linked.program.stmts.iter().any(|s| matches!(
+                s,
+                Stmt::Use { path, .. } if path == &["para".to_string(), "db".to_string()]
+            )),
+            "the tail's `use` resolved to a loaded module, so nothing should be retained"
+        );
+        // …and the call was qualified alongside the entry's own statements, so it names the merged
+        // declaration rather than a module member nothing binds.
+        let Some(Stmt::Expr {
+            expr: Expr::Call { callee, .. },
+            ..
+        }) = linked.program.stmts.last()
+        else {
+            panic!("the tail's call is the program's last statement");
+        };
+        assert!(
+            matches!(&**callee, Expr::Ident { name, .. } if name.as_str().ends_with("emit")),
+            "the call should have been qualified to the merged `emit`, got {callee:?}"
+        );
+    }
+
+    /// The entry's own import of the same local name wins: a migration that already writes
+    /// `use para.db.migrations` must not have a second one appended under it (E0020, one name one
+    /// meaning) — it is the same deference a handwritten duplicate gets.
+    #[test]
+    fn a_drivers_entry_use_defers_to_one_the_entry_already_wrote() {
+        noeta_stdlib::registry::default_seeded();
+        let dep = DepPackage {
+            prefix: vec!["para".to_string()],
+            root: "para".to_string(),
+            modules: vec![module(
+                "migrations.noe",
+                "namespace para.db.migrations;\npub fn emit(out: string): void { echo out; }\n",
+            )],
+            dep_renames: Default::default(),
+            native: true,
+            edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
+        };
+        let entry = "use para.db.migrations;\nmigrations.emit(\"out.schema\");\n";
+        let sp = Span::empty_at(0);
+        let tail = vec![Stmt::Use {
+            path: vec!["para".to_string(), "db".to_string()],
+            names: vec![UseName {
+                name: "migrations".to_string(),
+                alias: None,
+                span: sp,
+            }],
+            span: sp,
+        }];
+        let linked = link_with_deps_appending(
+            "0001_notes.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+            &noeta_span::PackageUses::new(),
+            // In-memory sources with no package on disk, so nothing derives and each module is
+            // identified by the `namespace` it declares.
+            ModulePath::Declared,
+            &tail,
+        )
+        .expect("a duplicate import must be dropped, not reported");
+        assert!(has_fn(&linked, "emit"));
+    }
+
+    #[test]
     fn a_dependency_std_import_is_retained_for_the_compiler() {
         // A package that `use`s `std.*` internally: the loader can't resolve std (not a module), so
         // the `use std.math.sqrt` is retained in the merged program for the compiler to bind.
         let dep = DepPackage {
-            key: "geo".to_string(),
+            prefix: vec!["geo".to_string()],
             root: "shapes".to_string(),
             modules: vec![module(
                 "circle.noe",
@@ -2774,6 +4826,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use geo.circle.area;\necho area(2.0);\n";
         let linked = link_with_deps(
@@ -3057,7 +5110,7 @@ mod tests {
             let Expr::Object(lit) = value else {
                 panic!("object literal")
             };
-            lit.type_name.clone().expect("named literal")
+            lit.type_name.clone().expect("named literal").to_string()
         };
         assert_eq!(ctor("a"), "App.Models.User");
         assert_eq!(ctor("b"), "App.People.User");
@@ -3159,7 +5212,7 @@ mod tests {
     #[test]
     fn an_imported_fn_drags_in_its_internal_helper() {
         let dep = DepPackage {
-            key: "mathx".to_string(),
+            prefix: vec!["mathx".to_string()],
             root: "mathx".to_string(),
             modules: vec![module(
                 "lib.noe",
@@ -3170,6 +5223,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use mathx.lib.twice;\necho twice(21);\n";
         let linked = link_with_deps(
@@ -3192,7 +5246,7 @@ mod tests {
     #[test]
     fn an_imported_fn_drags_in_a_module_local_type() {
         let dep = DepPackage {
-            key: "widgets".to_string(),
+            prefix: vec!["widgets".to_string()],
             root: "widgets".to_string(),
             modules: vec![module(
                 "lib.noe",
@@ -3203,6 +5257,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use widgets.lib.origin;\np = origin();\necho p.x;\n";
         let linked = link_with_deps(
@@ -3225,7 +5280,7 @@ mod tests {
     #[test]
     fn the_closure_is_transitive_to_a_fixpoint() {
         let dep = DepPackage {
-            key: "chain".to_string(),
+            prefix: vec!["chain".to_string()],
             root: "chain".to_string(),
             modules: vec![module(
                 "lib.noe",
@@ -3237,6 +5292,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use chain.lib.go;\ni = go(3);\necho i.v;\n";
         let linked = link_with_deps(
@@ -3265,7 +5321,7 @@ mod tests {
     #[test]
     fn a_standalone_impl_drags_in_what_its_bodies_reference() {
         let dep = DepPackage {
-            key: "svc".to_string(),
+            prefix: vec!["svc".to_string()],
             root: "svc".to_string(),
             modules: vec![module(
                 "lib.noe",
@@ -3278,6 +5334,7 @@ mod tests {
             dep_renames: Default::default(),
             native: false,
             edition: noeta_lexer::Edition::DEFAULT,
+            directives: Default::default(),
         };
         let entry = "use svc.lib.{Shape, S};\necho S.new().go();\n";
         let linked = link_with_deps(
@@ -3322,6 +5379,548 @@ mod tests {
         assert!(
             has_struct(&linked, "Box"),
             "the sibling's local type is pulled"
+        );
+    }
+
+    // --- a sibling module's extension imports ---------------------------------------------------
+
+    /// The `use std.…` of every retained import in `linked`, as `path.name` strings.
+    fn retained_uses(linked: &Linked) -> Vec<String> {
+        linked
+            .program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Use { path, names, .. } => Some(
+                    names
+                        .iter()
+                        .map(|n| format!("{}.{}", path.join("."), n.name))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn a_contributing_siblings_std_import_is_carried_into_the_merged_program() {
+        // A `use` is file-scoped, so a sibling that imports an extension module must get it bound
+        // in the merged program. Before siblings drove their own imports, `twice`'s `math.round(…)`
+        // reached a merged program with no `math` binding and the entry failed with E0005 "cannot
+        // find `math` in this scope" — pointing at a sibling line that checks clean on its own. In
+        // effect a non-entry module could not use the standard library at all.
+        let sibling = module(
+            "helper.noe",
+            "namespace Demo.Helper;\n             use std.math\n             pub fn twice(v: float): int { return math.round(v * 2.0); }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "use Demo.Helper.twice\necho twice(2.5);\n",
+            noeta_lexer::Edition::default(),
+            &[sibling],
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "twice"), "the declaration merges");
+        assert!(
+            retained_uses(&linked).contains(&"std.math".to_string()),
+            "the sibling's `use std.math` must ride along: {:?}",
+            retained_uses(&linked)
+        );
+    }
+
+    // --- a data attribute is a link root -------------------------------------------------------
+    //
+    // `#[...]` exists so something that never names a declaration can still find it. An annotated
+    // declaration therefore belongs to the program whether or not a `use` reaches it — otherwise
+    // `attributes_of` / `roles_of` see only what the entry happened to import, and the registration
+    // mechanism cannot see its own registrations.
+
+    /// The module every root test links against: three `#[Marked]` functions (one imported, one
+    /// exported-but-unreferenced, one module-private) plus an unannotated, unreferenced helper.
+    fn marked_module() -> RawModule {
+        module(
+            "tools.noe",
+            "namespace app.tools;\n\
+             @attribute(Function)\n@role(Semantic.TrustBoundary)\npub struct Marked { name: string }\n\
+             #[Marked(\"a\")]\npub fn imported(): string { return \"a\"; }\n\
+             #[Marked(\"b\")]\npub fn unimported(): string { return \"b\"; }\n\
+             #[Marked(\"c\")]\nfn hidden(): string { return \"c\"; }\n\
+             pub fn unannotated(): string { return \"d\"; }\n",
+        )
+    }
+
+    #[test]
+    fn an_annotated_sibling_declaration_links_without_an_import() {
+        let linked = link(
+            "main.noe",
+            "use app.tools.{Marked, imported}\necho imported();\n",
+            noeta_lexer::Edition::default(),
+            &[marked_module()],
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "imported"), "the imported one merges");
+        assert!(
+            has_fn(&linked, "unimported"),
+            "an exported-but-unreferenced annotated fn is a root"
+        );
+        assert!(
+            has_fn(&linked, "hidden"),
+            "visibility does not gate the rule — a `#[Marked]` non-`pub` fn is a registration"
+        );
+    }
+
+    /// The rule is scoped to the *annotation*, not to the file: an unannotated declaration nothing
+    /// references stays out, so this is not "compile the whole directory".
+    #[test]
+    fn an_unannotated_unreferenced_sibling_declaration_stays_out() {
+        let linked = link(
+            "main.noe",
+            "use app.tools.{Marked, imported}\necho imported();\n",
+            noeta_lexer::Edition::default(),
+            &[marked_module()],
+        )
+        .expect("links");
+        assert!(
+            !has_fn(&linked, "unannotated"),
+            "an unannotated, unreferenced declaration must not be dragged in"
+        );
+    }
+
+    /// A module the entry never imports *at all* still contributes its annotated declarations —
+    /// the case a `#[Tool]`-scanning framework depends on, where no file references the tools.
+    #[test]
+    fn an_entirely_unimported_module_contributes_its_annotated_declarations() {
+        let linked = link(
+            "main.noe",
+            "echo 1;\n",
+            noeta_lexer::Edition::default(),
+            &[marked_module()],
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "imported"));
+        assert!(has_fn(&linked, "unimported"));
+        assert!(has_fn(&linked, "hidden"));
+        assert!(
+            has_struct(&linked, "Marked"),
+            "the attribute struct rides in on the closure, so the manifest can materialize it"
+        );
+        assert!(!has_fn(&linked, "unannotated"));
+    }
+
+    /// An annotated declaration is merged with the same **closure** an imported one gets, so the
+    /// helper it calls travels with it and the merged program still compiles.
+    #[test]
+    fn an_annotated_root_drags_in_its_same_module_helper() {
+        let sibling = module(
+            "tools.noe",
+            "namespace app.tools;\n\
+             @attribute(Function)\npub struct Marked { name: string }\n\
+             #[Marked(\"a\")]\npub fn tool(): string { return shout(); }\n\
+             fn shout(): string { return \"hi\"; }\n",
+        );
+        let linked = link(
+            "main.noe",
+            "echo 1;\n",
+            noeta_lexer::Edition::default(),
+            &[sibling],
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "tool"));
+        assert!(
+            has_fn(&linked, "shout"),
+            "the annotated root's internal helper must ride along"
+        );
+    }
+
+    /// The entry declares a namespace, so it is a resolution candidate *and* a `module_views`
+    /// member — its own annotated declarations must not be merged a second time.
+    #[test]
+    fn a_namespaced_entrys_own_annotated_declaration_merges_once() {
+        let linked = link(
+            "main.noe",
+            "namespace app.main;\n\
+             @attribute(Function)\nstruct Marked { name: string }\n\
+             #[Marked(\"a\")]\nfn tool(): string { return \"a\"; }\n\
+             echo tool();\n",
+            noeta_lexer::Edition::default(),
+            &[],
+        )
+        .expect("links");
+        let tools = linked
+            .program
+            .stmts
+            .iter()
+            .filter(|s| matches!(s, Stmt::Fn(f) if leaf(f.name.as_str()) == "tool"))
+            .count();
+        assert_eq!(tools, 1, "the entry's own declaration is not duplicated");
+    }
+
+    // --- a tier block's own `use`s (block-scoped qualification) --------------------------------
+
+    /// The attribute names on the first `Stmt::Fn` inside the program's first `@<tier>` block.
+    fn block_fn_attrs(linked: &Linked) -> Vec<String> {
+        linked
+            .program
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::TierBlock { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("a tier block")
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.to_string()).collect()),
+                _ => None,
+            })
+            .expect("a fn inside the block")
+    }
+
+    /// The attribute names on the first *top-level* `Stmt::Fn`.
+    fn top_fn_attrs(linked: &Linked) -> Vec<String> {
+        linked
+            .program
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Fn(decl) => Some(decl.attrs.iter().map(|a| a.name.to_string()).collect()),
+                _ => None,
+            })
+            .expect("a top-level fn")
+    }
+
+    #[test]
+    fn a_tier_blocks_own_use_qualifies_references_inside_the_block() {
+        // The `use` sits *inside* the `@test` block, so it only reaches the top-level statement
+        // stream once the tier activates — after the linker has run. The qualifier must still see
+        // it, or `#[Skip(…)]` stays the bare `Skip` that neither the checker's attribute table nor
+        // the test runner (which matches the qualified `std.test.Skip`) recognizes, and the skip
+        // silently evaporates.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use std.test.{Skip}\n  #[Skip(\"later\")]\n  fn f(text: string): string { return text; }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[],
+        )
+        .expect("links");
+        assert_eq!(
+            block_fn_attrs(&linked),
+            vec![noeta_ast::reflect::TEST_ATTR_SKIP.to_string()]
+        );
+    }
+
+    #[test]
+    fn a_tier_blocks_use_does_not_qualify_references_outside_it() {
+        // The overlay is scoped to the block: the same name on a top-level fn is untouched, so it
+        // still resolves to nothing and still earns its "cannot be used as an attribute" error.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use std.test.{Skip}\n  fn inside(): void { }\n}\n#[Skip(\"outside\")]\nfn outside(): void { }\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[],
+        )
+        .expect("links");
+        assert_eq!(top_fn_attrs(&linked), vec!["Skip".to_string()]);
+    }
+
+    #[test]
+    fn a_tier_blocks_use_is_not_hoisted_out_of_the_block() {
+        // The overlay is a *rewrite table*, not an import: the `use` statement itself stays inside
+        // the block, so a build with the tier inactive drops it with the block and no import is
+        // left dangling in the merged program.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use std.test.{Skip}\n  #[Skip(\"later\")]\n  fn f(text: string): string { return text; }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[],
+        )
+        .expect("links");
+        assert!(
+            !linked
+                .program
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Use { .. })),
+            "no top-level `use` may appear: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// A sibling module exporting the type a tier block imports — the `.noe` half of the repro that
+    /// qualification alone could not fix (a std import inside a block always worked, because an
+    /// extension module resolves through the registry and never needs the unit graph).
+    fn side_module() -> RawModule {
+        module(
+            "side.noe",
+            "namespace probe.lib.side;\npub struct Thing { n: int }\npub fn make(): int { return 3 }\n",
+        )
+    }
+
+    #[test]
+    fn a_tier_blocks_use_links_a_loaded_module() {
+        // Qualifying a name is not linking it: the block-scope overlay rewrote `Thing` to
+        // `probe.lib.side.Thing`, but nothing merged the declaration, so `noeta check` reported
+        // nothing and `noeta test` failed with "cannot find type `probe.lib.side.Thing` in this
+        // scope". The block's `use` must drive the merge exactly as a top-level one does.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use probe.lib.side.{Thing}\n  fn t(): void { x = Thing { n: 3 } }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[side_module()],
+        )
+        .expect("links");
+        assert!(
+            has_struct(&linked, "Thing"),
+            "the block-imported declaration must be in the merged program: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    #[test]
+    fn a_tier_blocks_whole_module_use_links_the_module() {
+        // The second import form (`use probe.lib.side` + `side.Thing`) merges every `pub`
+        // declaration, and failed identically before the fix.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use probe.lib.side\n  fn t(): void { x = side.Thing { n: side.make() } }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[side_module()],
+        )
+        .expect("links");
+        assert!(has_struct(&linked, "Thing"), "the module's type merges");
+        assert!(has_fn(&linked, "make"), "the module's fn merges");
+    }
+
+    #[test]
+    fn a_tier_blocks_use_of_a_module_is_still_not_hoisted() {
+        // Linking the module must not hoist the import: the `use` stays inside the block, so an
+        // inactive build drops it with the block. The merged declaration is harmless there — it
+        // carries a qualified identity, so it binds no short name and nothing references it.
+        let linked = link(
+            "main.noe",
+            "@test {\n  use probe.lib.side.{Thing}\n  fn t(): void { x = Thing { n: 3 } }\n}\necho 1;\n",
+            noeta_lexer::Edition::default(),
+            &[side_module()],
+        )
+        .expect("links");
+        assert!(
+            !linked
+                .program
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Use { .. })),
+            "no top-level `use` may appear: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    #[test]
+    fn a_renamed_text_tier_captures_verbatim_per_package() {
+        // 3g at the loader seam: a root package binds std's `doc` **text** tier under a local `@docs`
+        // (`PackageUses`: Root → `docs` = provider `std`, exported `doc`). The body is a hard lex error
+        // if tokenized as code — a bare `"` opens an unterminated string — so it links cleanly ONLY if
+        // `docs` reached the lexer's text-tier set for the Root package. The control (no binding) fails.
+        noeta_stdlib::registry::default_seeded();
+        let src = "@docs {\n# Heading with a bare \" quote and <angle> bits\n}\n\
+                   fn add(a: int, b: int): int { return a + b }\n";
+
+        let mut uses = noeta_span::PackageUses::new();
+        uses.set(
+            PackageOrigin::Root,
+            "docs".to_string(),
+            noeta_span::PackageUse {
+                provider_roots: vec!["std".to_string()],
+                exported: "doc".to_string(),
+            },
+        );
+        super::link_with_deps(
+            "main.noe",
+            src,
+            noeta_lexer::Edition::default(),
+            &[],
+            &[],
+            &uses,
+            ModulePath::Declared,
+        )
+        .expect("a renamed text tier captures verbatim and links");
+
+        // Control: with no binding, `docs` is unknown (only the bare `doc` is a default text tier), so
+        // `@docs { … }` tokenizes as code and the bare quote is a lex error — the fix is load-bearing.
+        let errs = super::link_with_deps(
+            "main.noe",
+            src,
+            noeta_lexer::Edition::default(),
+            &[],
+            &[],
+            &noeta_span::PackageUses::new(),
+            ModulePath::Declared,
+        )
+        .expect_err("without the binding, the markdown body is lexed as code and fails");
+        assert!(!errs.is_empty());
+    }
+
+    /// Whether the merged program declares a top-level value binding `name`.
+    fn has_binding(linked: &Linked, name: &str) -> bool {
+        linked
+            .program
+            .stmts
+            .iter()
+            .any(|s| matches!(s, Stmt::Binding { name: n, .. } if n == name))
+    }
+
+    /// A `use (…)` capture is a reference to a module-level binding, so importing the function has
+    /// to bring the binding with it. Without this the import lands in the program and its capture
+    /// resolves to nothing — E0005 against a declaration the consumer never wrote, and the only way
+    /// to consume the package was to not use captures at all.
+    #[test]
+    fn an_imported_fn_drags_in_the_binding_it_captures() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             fn seed(): int { return 7; }\n\
+             x = seed();\n\
+             pub fn reader() use (x): int { return x; }\n",
+        );
+        let entry = "use app.lib.reader;\nn = reader();\necho n;\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "reader"));
+        assert!(
+            has_binding(&linked, "x"),
+            "the captured module binding travels with the import: {:?}",
+            linked.program.stmts
+        );
+        assert!(
+            has_fn(&linked, "seed"),
+            "and the binding's own initializer keeps expanding the closure"
+        );
+    }
+
+    /// A method's captures count too — the declaration site of a method's `use (…)` is the module
+    /// top level, exactly like a free function's.
+    #[test]
+    fn an_imported_class_drags_in_the_binding_its_method_captures() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             base = 10;\n\
+             pub class Counter {\n\
+               n: int\n\
+               fn new(): Counter { return Counter { n: 0 }; }\n\
+               fn total() use (base): int { return self.n + base; }\n\
+             }\n",
+        );
+        let entry = "use app.lib.Counter;\nc = Counter.new();\necho c.total();\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        assert!(
+            has_binding(&linked, "base"),
+            "a method's capture drags its module binding too: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// An **attribute-discovered** root (a declaration nothing imports, merged because its `#[…]`
+    /// annotation is the reference) reaches the same closure — including through a callee. This is
+    /// the shape that made `noeta check .` report errors against a *sibling* file: checking the
+    /// module that merely declares the attribute dragged the annotated fn and its helper in, and
+    /// left the helper's captured binding behind.
+    #[test]
+    fn an_attribute_root_drags_in_the_binding_its_callee_captures() {
+        let annotated = module(
+            "routes.noe",
+            "namespace app.routes;\n\
+             use app.attrs.Mark;\n\
+             x = 3;\n\
+             fn helper() use (x): int { return x; }\n\
+             #[Mark(\"/cap\")]\n\
+             fn handler(): int { return helper(); }\n",
+        );
+        let entry = "namespace app.attrs;\n@attribute\npub struct Mark { path: string }\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&annotated),
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "handler"), "the annotated root is merged");
+        assert!(has_fn(&linked, "helper"), "and its callee");
+        assert!(
+            has_binding(&linked, "x"),
+            "and the callee's captured binding: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// A binding is merged from the **capture** seed only, never from the reference seed. A
+    /// parameter that shares a module binding's name is not a reference to it, and merging a
+    /// binding is not inert — it runs its initializer in the consumer's program.
+    #[test]
+    fn a_parameter_sharing_a_binding_name_does_not_drag_the_binding() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             limit = 99;\n\
+             pub fn clamp(limit: int): int { return limit; }\n",
+        );
+        let entry = "use app.lib.clamp;\necho clamp(3);\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("links");
+        assert!(has_fn(&linked, "clamp"));
+        assert!(
+            !has_binding(&linked, "limit"),
+            "the module binding is not dragged in by a same-named parameter: {:?}",
+            linked.program.stmts
+        );
+    }
+
+    /// A merged binding keeps its own name, so two modules needing same-named bindings is a real
+    /// ambiguity — named, not silently resolved in favour of whichever merged last.
+    #[test]
+    fn two_modules_needing_a_same_named_binding_collide() {
+        let a = module(
+            "a.noe",
+            "namespace app.a;\n\
+             shared = 1;\n\
+             pub fn from_a() use (shared): int { return shared; }\n",
+        );
+        let b = module(
+            "b.noe",
+            "namespace app.b;\n\
+             shared = 2;\n\
+             pub fn from_b() use (shared): int { return shared; }\n",
+        );
+        let entry = "use app.a.from_a;\nuse app.b.from_b;\necho from_a() + from_b();\n";
+        let errors = link("main.noe", entry, noeta_lexer::Edition::DEFAULT, &[a, b])
+            .expect_err("the two `shared` bindings cannot both be `shared`");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.diagnostic.message.contains("shared")
+                    && e.diagnostic.message.contains("app.a")
+                    && e.diagnostic.message.contains("app.b")),
+            "the error names the binding and both modules: {:?}",
+            errors
+                .iter()
+                .map(|e| e.diagnostic.message.clone())
+                .collect::<Vec<_>>()
         );
     }
 }

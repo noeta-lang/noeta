@@ -51,6 +51,7 @@ mod pretty;
 pub use lower::{
     LowerOptions, LoweringSites, Unsupported, hoist_impl_methods_with_registry,
     hoist_standalone_impl_methods, lower, lower_with_sites, lower_with_sites_opts,
+    native_trait_impls,
 };
 pub use pretty::dump;
 
@@ -68,6 +69,13 @@ pub struct Program {
     /// call-site-typed sites (`json.try_parse::<T>` with a forwarded `T`) through this one table,
     /// so they agree by construction. Empty for programs without forwarding.
     pub type_args: Vec<noeta_ext_abi::TypeArgInfo>,
+    /// The **reflection projection** of [`Program::type_args`], indexed identically: each interned
+    /// instantiation's [`noeta_ast::reflect::TypeRepr`], or `None` where it has none. Read by
+    /// [`Rvalue::Method::reflect_slot`] — a construction whose instantiation arrives on a hidden slot
+    /// resolves its tag here, so the tag is still a statically-interned repr and only the *choice* of
+    /// entry is dynamic. A parallel table because `noeta_ext_abi::TypeArgInfo` may not depend on
+    /// `noeta-ast` (the lean-ABI-crate decision).
+    pub type_arg_reprs: Vec<Option<noeta_ast::reflect::TypeRepr>>,
     pub span: Span,
 }
 
@@ -218,9 +226,21 @@ pub enum Rvalue {
     Call {
         callee: Atom,
         args: Vec<Atom>,
-        /// Which parameters `args` supplies, when that is not simply the first `args.len()` of
-        /// them — bit `p` set means parameter `p` is supplied, and `args` holds the supplied
-        /// values in parameter order.
+        /// The **type arguments** this call supplies to a forwarding generic's leading
+        /// [`Func::hidden`] slots (poly-values F2b), in slot order — empty for the overwhelming
+        /// majority of calls, which forward nothing.
+        ///
+        /// A separate channel from `args` on purpose. Each atom is either an interned index into
+        /// [`Program::type_args`] (a concrete instantiation) or a read of the enclosing function's
+        /// own `$ty` slot (a pass-through). Carrying them here rather than prepending them onto
+        /// `args` is what lets `supplied` keep meaning "which **value** parameters are supplied":
+        /// while these rode in the argument list, every parameter position shifted and the binding
+        /// map had to be discarded at any forwarding call.
+        type_args: Vec<Atom>,
+        /// Which **value** parameters `args` supplies, when that is not simply the first
+        /// `args.len()` of them — bit `p` set means value parameter `p` is supplied, and `args`
+        /// holds the supplied values in parameter order. Indexed over the value parameters alone;
+        /// the callee's leading type-argument slots are not part of this space.
         ///
         /// `None` is the ordinary call: arguments fill parameters left to right and the callee
         /// defaults any trailing remainder. `Some` arises from named arguments that skip a
@@ -254,6 +274,35 @@ pub enum Rvalue {
         /// type arguments after a `dyn` launder. `None` for an ordinary method call (the common case)
         /// and for a non-generic enum. Invisible to value semantics.
         reflect: Option<noeta_ast::reflect::TypeRepr>,
+        /// The **dynamic** twin of `reflect` (generic-in-generic construction): the enclosing body's
+        /// hidden type-argument slot atom (`$ty<i>`) whose entry names the instantiation to stamp on
+        /// the object this call freshly built.
+        ///
+        /// `Some` only where the checker recorded a
+        /// [`dynamic construction site`](noeta_check::Sites::dynamic_construction_sites): a provably
+        /// fresh constructor of a generic type whose instantiation is a type *parameter* of the
+        /// enclosing self-less member (`Repository.new(…)` initializing a `repo: Repository<T>` inside
+        /// `LiveRepository<T>`). One compiled body serves every instantiation, so the concrete
+        /// `Repository<Todo>` is not in it — but the OUTER call resolved and interned it, and passes
+        /// its table index on this slot. Both backends read the same index out of the same table, so
+        /// they resolve the identical tag.
+        ///
+        /// Never `Some` together with `reflect`: a call site's instantiation is either in the body or
+        /// on the slot, and the checker's two recording arms are mutually exclusive.
+        reflect_slot: Option<Atom>,
+        /// The [`Rvalue::Call::type_args`] twin (Axis A): the type arguments this call supplies to
+        /// a forwarding generic **method**'s leading [`Func::hidden`] slots, in slot order — empty
+        /// for the overwhelming majority of method calls.
+        ///
+        /// Only a call that resolved a static receiver type can fill this; the four name-keyed
+        /// entry points a method has — a `dyn` receiver, a bound handle (`v.m`), an unbound handle
+        /// (`T.m`), and `invoke(v, "m", args)` — carry no instantiation, which is exactly why the
+        /// slots may not be smuggled in as prepended arguments: those paths bind positionally and
+        /// would read a value argument as a type-table index. Reaching a forwarding method through
+        /// one of them aborts instead ("no instantiation reaches here"), on the same precedent
+        /// `class_type_param_unknown_instantiation` set for an unknowable instantiation on the
+        /// receiver channel.
+        type_args: Vec<Atom>,
         /// The [`Rvalue::Call::supplied`] twin. Indexed over the method's **declared** parameters,
         /// parallel to `args` — the receiver travels separately, so it takes no bit. A backend
         /// whose register layout places the receiver in parameter slot 0 (the VM's does) shifts
@@ -438,12 +487,24 @@ pub enum Rvalue {
     As {
         operand: Atom,
         ty: TypeRef,
+        /// The target's head name as a **run-time string**, when `T` is a type parameter of an
+        /// enclosing generic (`v.as<T>()` inside `class Repo<T>` or `fn load<T>`): the atom is the
+        /// [`Rvalue::TypeArgName`]/[`Rvalue::TypeSlotName`] lowering already emits for
+        /// `type_name::<T>()`, so the narrow matches on exactly the name that surface answers with.
+        ///
+        /// `None` for every statically-written target, which keeps its baked `ty`. When `Some`, the
+        /// string replaces `ty`'s head — the checker only records the site for a *bare* parameter
+        /// target (a composite is E0058), so there is never a second name to place.
+        dynamic: Option<Atom>,
         span: Span,
     },
     /// `expr is T` — a `bool` head-constructor type test.
     TypeTest {
         operand: Atom,
         ty: TypeRef,
+        /// The run-time head name, exactly as [`Rvalue::As`] carries it — the two share the matcher,
+        /// so they share this channel.
+        dynamic: Option<Atom>,
         span: Span,
     },
     /// Wrap a step closure into a generator iterator (`IterState::Gen`) — the tail of a lowered
@@ -509,11 +570,47 @@ pub enum Rvalue {
         args: Vec<Atom>,
         span: Span,
     },
+    /// `type_name::<T>()` where `T` is a **type parameter of the enclosing generic type**, inside
+    /// one of its instance methods (generic constructor reflection, Gap B): the qualified name of
+    /// type argument `index` of `operand`'s reflected type tag, as a `string`.
+    ///
+    /// One compiled body serves every instantiation, so there is no constant to fold; the
+    /// instantiation travels on the receiver instead, in the very tag `type_of` already reads.
+    /// `operand` is always `self` as lowering emits it. A value whose tag does not carry that
+    /// argument — an instance built where the instantiation was genuinely unknown — **aborts** with
+    /// a message naming the type and the parameter, rather than answering `"dyn"`: a wrong name
+    /// would flow silently into whatever keyed on it.
+    TypeArgName {
+        operand: Atom,
+        index: u32,
+        /// The enclosing type and parameter names, for the abort message only.
+        type_name: String,
+        param: String,
+        span: Span,
+    },
+    /// `type_name::<T>()` where `T` is a **forwarded type parameter of the enclosing top-level
+    /// generic fn** (poly-values F2b): the instantiation's qualified name, read out of
+    /// [`Program::type_args`] at the index the hidden slot holds.
+    ///
+    /// The fn-side twin of [`Rvalue::TypeArgName`] — same answer, different channel. A generic
+    /// *type* carries its instantiation on the receiver; a generic *fn* has no receiver, so it
+    /// carries it in the hidden argument that already delivers `json.try_parse::<T>`'s decode
+    /// recipe. This surface reads only the entry's NAME, which is why it forwards even for an
+    /// instantiation that has no recipe at all.
+    ///
+    /// `slot` is the hidden `$ty<i>` local as lowering emits it. An index the table does not hold
+    /// cannot arise from a checked program (the checker resolves every slot at the instantiating
+    /// call); the backends treat it as the corrupt-slot abort the recipe path already does.
+    TypeSlotName { slot: Atom, span: Span },
     /// `type_of(value)` — the runtime `Type` descriptor of a value.
     TypeOf { operand: Atom, span: Span },
     /// `fields_of(value)` — a struct/class instance's fields as `List<FieldEntry>` (derive
     /// layer 3); the empty list for any other value.
     FieldsOf { operand: Atom, span: Span },
+    /// `traits_of(value)` — the qualified trait names the value's nominal type has a registered
+    /// `impl` for, as a sorted, deduped `List<string>` (the shared membership table the precise
+    /// `is dyn Trait` narrowing tests); the empty list for a non-nominal value.
+    TraitsOf { operand: Atom, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4).
     /// `blob` is the byte operand; `layout` is element `T`'s packed layout (looked up by the lowering
     /// in the `packed_list_sites` channel — the same one list literals use). `None` if the checker
@@ -546,11 +643,22 @@ pub enum Rvalue {
     /// `params_of(target)` — the declared parameter list of the fn/method named by the runtime
     /// `target` string, materialized as `List<ParamInfo>`.
     ParamsOf { target: Atom, span: Span },
+    /// `returns_of(target)` — the declared return type of the fn/method named by the runtime
+    /// `target` string, materialized as a `?Type`: `some(t)` for a known callable, `none` when no
+    /// callable of that name is known. Reads the SAME signature record `ParamsOf` reads, so the two
+    /// queries agree about which callables exist.
+    ReturnsOf { target: Atom, span: Span },
     /// `field_specs_of::<T>()` / `field_specs_of(name)` — the declared field schema of the struct/class
     /// named by the runtime `name` string, materialized as `List<FieldSpec>` (empty for an unknown or
     /// non-fielded type). The turbofish form reaches here identically — the parser lowered `T` to its
     /// name string — so there is only ever a runtime name operand.
     FieldSpecsOf { name: Atom, span: Span },
+    /// `variants_of::<T>()` / `variants_of(name)` — the declared variant schema of the enum named by
+    /// the runtime `name` string, materialized as `List<VariantSpec>` (empty for an unknown type, or
+    /// for one that is not an enum). The enum twin of [`Rvalue::FieldSpecsOf`], reached the same way:
+    /// the parser lowered a turbofish `T` to its name string, so there is only ever a runtime name
+    /// operand.
+    VariantsOf { name: Atom, span: Span },
     /// `construct::<T>(fields)` / `construct(name, fields)` — build a struct value of the type named by
     /// the runtime `name` string from `fields` (a runtime `List<dyn>` of field values in declaration
     /// order), reusing the same construction path as a `T { … }` literal. Materializes a
@@ -776,7 +884,20 @@ pub enum Stmt {
 #[derive(Debug, Clone)]
 pub struct Arm {
     pub pattern: Pattern,
+    /// The arm's guard (`pattern if cond => …`), if any. Evaluated **only after** the pattern
+    /// structurally matches, with the pattern's bindings bound; a `false` guard falls through to
+    /// the next arm exactly as a failed pattern would. Its block's `tail` is the guard's bool.
+    pub guard: Option<Guard>,
     pub body: Block,
+    pub span: Span,
+}
+
+/// A match-arm guard: the lazily-evaluated value block computing the guard's bool (tail `Some`),
+/// plus the guard expression's source span — a [`Block`] carries no span of its own, and the
+/// runtime non-bool error (both backends, identical) is reported at the guard.
+#[derive(Debug, Clone)]
+pub struct Guard {
+    pub block: Block,
     pub span: Span,
 }
 
@@ -800,7 +921,7 @@ impl Block {
 
 impl Stmt {
     /// Visit each **control-flow child block** of this statement: the two arms of `if`, the
-    /// `while` condition and body, the `for` body, each `match` arm's body, and the lazy
+    /// `while` condition and body, the `for` body, each `match` arm's guard and body, and the lazy
     /// `right`/`fallback` operand of `&&`/`||`/`??`. Leaf statements have none.
     ///
     /// Deliberately does **not** descend into a `Decl` (a nested `fn`/`class` is a *separate*
@@ -829,6 +950,9 @@ impl Stmt {
             Stmt::For { body, .. } => f(body),
             Stmt::Match { arms, .. } => {
                 for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        f(&guard.block);
+                    }
                     f(&arm.body);
                 }
             }
@@ -871,6 +995,22 @@ pub struct Func {
     /// capture / global loads for statics and allow-listed names behave as before.
     pub captures: Option<Vec<String>>,
     pub params: Vec<String>,
+    /// How many of the leading [`Self::params`] are **type-argument slots** rather than value
+    /// parameters (poly-values F2b): a forwarding generic's `$ty0`, `$ty1`, … .
+    ///
+    /// The slots are still parameters — the body names them and register allocation places them
+    /// like any other — but they are supplied through their **own channel**, the call node's
+    /// `type_args`, never through the value-argument list. That separation is what this count
+    /// expresses: every binder lays type arguments into this many leading slots and value
+    /// arguments after them, so arity, defaults and the `supplied` mask are all reckoned over the
+    /// value parameters alone. Before it, a forwarding call smuggled its slots in as *prepended
+    /// arguments*, which shifted every parameter position and forced the argument-binding map to
+    /// be thrown away at any forwarding call site.
+    ///
+    /// A call supplying a different count than the callee declares cannot arise from a checked
+    /// program; a backend that meets one aborts rather than misbinding, because the alternative is
+    /// silently reading a value argument as a type-table index.
+    pub hidden: u32,
     /// Each parameter's default thunk, parallel to `params` (`None` for a required
     /// parameter). A default is evaluated in the *captured* scope when its argument is
     /// omitted, so it carries its own temporary frame.

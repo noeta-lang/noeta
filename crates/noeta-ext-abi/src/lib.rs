@@ -14,7 +14,97 @@
 /// ABI break is a compile error and this constant is *recorded*, not yet *checked* — it exists
 /// so the future dynamically-loaded-extension path has a handshake to refuse a mismatch with,
 /// instead of undefined behavior through a stale `TypeId`/layout (audit-2 F10).
-pub const ABI_VERSION: u32 = 1;
+///
+/// **Bump it freely.** "Any change" means any change — an added registration field, a new capability
+/// method with a default, a new `ExtType`, not only something that stops existing code compiling.
+/// Pre-1.0 the cost of a bump is a digit, while the cost of a *missed* bump is a version number that
+/// silently under-describes the contract, which is the one thing this constant exists to prevent. Do
+/// not spend a paragraph deciding whether an addition qualifies; if you touched the contract, bump.
+/// Entries 2–5 below were written under a narrower source-break-only test and read as though the
+/// question were finely balanced — it is not.
+///
+/// **2** — [`registry::ExtFn`] gained the required `param_names` field (so a `name:` label at a
+/// call site binds against a native signature). A registration table written for ABI 1 omits it
+/// and no longer compiles; the composed build reports that as an ABI mismatch naming the package
+/// it belongs to (`compose::compose_failure`) rather than as a bare `rustc` error.
+///
+/// **3** — [`registry::TypeRecipe::Struct`]'s `fields` became `Vec<FieldRecipe>` (from
+/// `Vec<(String, TypeRecipe)>`) so each field carries its [`registry::FieldDefault`] — what an
+/// omitted input field means. A `typed_dispatch` that walks a struct recipe destructures the tuple
+/// and no longer compiles; there is no silent behavior change, and `..DEFAULTS` cannot cover it
+/// (the change is inside a matched enum variant, not an added registration field).
+///
+/// **4** — [`registry::DirectiveCtx`] gained the required `fields` field (the decorated
+/// declaration's shape, so an `expand` hook can generate from a struct's members and not only from
+/// its name). A hook itself takes `&DirectiveCtx` and is unaffected, but code that *constructs* one
+/// — in practice a package's own tests — no longer compiles without it.
+///
+/// **5** — [`host::Network::net_stream_open`] returns [`stream::StreamHead`] (the stream id plus the
+/// response status/headers/url) instead of a bare `u64`, so a streamed non-2xx is observable at all.
+/// A host that *overrides* it, and an `ExternIo` that calls it through `&mut dyn Host`, both need the
+/// new type. It is deliberately not the additive shape (a separate `net_stream_status(id)` accessor
+/// with a default), because a default there would let a streaming host silently report `200` for a
+/// real `429` — the same invisible failure the change exists to remove.
+///
+/// **6** — the streaming-body surface itself, counted rather than waved through: the `Network`
+/// capability's `net_stream_*` methods, the `SseSink` send/close pair, and the `Frame`/`Framing`/
+/// `FrameStream` registrations. Every one is additive and nothing written for ABI 5 stops compiling
+/// — and under the rule above that is beside the point. They changed the contract, so they get a
+/// number. Retroactive, because they landed while the narrower test was in force.
+/// **7** — the Ring 1 `bytes` surface grew its element reads: [`ring1::bytes_index`] (the `b[i]`
+/// body) and [`ring1::bytes_slice`] (the `b.slice(start, end?)` body), the shared semantics both
+/// backends call in for a primitive `bytes` previously did not have at all — it could be produced
+/// and measured but never taken apart, which made every in-language decoder inexpressible. Purely
+/// additive: nothing written for ABI 6 stops compiling. Counted anyway, per the rule above, because
+/// it widens what the ABI crate promises an extension (and a backend) can rely on.
+///
+/// **8** — the subprocess doors got their recoverable and awaitable twins, and the [`host::Os`]
+/// capability was **re-rooted on them**. [`host::Os::os_try_spawn`] and
+/// [`host::Os::os_proc_try_write_stdin`] are the new required primitives (returning a classified
+/// [`os::OsError`]); the aborting `os_spawn`/`os_proc_write_stdin` became *defaults* derived from
+/// them, so the two doors of each pair cannot drift. [`host::Os::os_proc_read_spawn`] is additive
+/// (a default over the blocking reads). Plus the registrations: `os.try_spawn`,
+/// `Process.try_write`, `Process.read_line_async`/`read_err_line_async`/`read_async`, the
+/// [`os::OsError`] extern type, and the [`os::ProcRead`]/[`os::ProcReadIo`] seam types.
+///
+/// This one is a genuine break rather than a counted-anyway addition: a host that implemented
+/// `os_spawn` and `os_proc_write_stdin` still compiles those methods, but now satisfies neither
+/// required primitive, so the composed build reports an ABI mismatch naming the package rather than
+/// a bare trait error. That is the intended failure — the alternative (a defaulted `os_try_spawn`
+/// that classifies by sniffing the aborting door's message string) would make every third-party
+/// host silently answer `other` for a missing binary, which is exactly the information these doors
+/// exist to deliver.
+///
+/// **9** — `std.tracing` grew the **active-span annotators**: `tracing.set_attribute`,
+/// `tracing.add_event`, `tracing.add_event_with`, and `tracing.record_error`, ctx functions that
+/// apply the `Span` mutations to the span the caller is already *inside* rather than to a handle it
+/// holds. `Span` gained the matching `add_event_with(name, attrs)` (and with it `deep_marshal`, so
+/// the map argument arrives whole), closing the one place the `Tracing` capability could carry
+/// event attributes but no surface could produce them. Purely additive registration (no
+/// [`host::Host`] method changed, nothing written for ABI 8 stops compiling), counted anyway under
+/// the rule above because it widens the registry surface an extension and a backend can rely on.
+/// Deliberately not a `current_span() -> ?Span`: that would hand a caller `.end()` on a span it
+/// never opened — see the `std.tracing` module header.
+///
+/// **10** — the enum-construction arc: [`registry::TypeRecipe`] gained an `Enum` form (with
+/// [`registry::VariantRecipe`]/[`registry::VariantTag`]), so an enum-typed field decodes from the
+/// wire values its own JSON Schema advertises, and [`registry::NativeOut::Variant`] gained the
+/// required `has_validator` field that makes a decoded case honor the same `Validate` door contract a
+/// decoded struct already did. `TypeRecipe` is named in this list twice over now, so the form is
+/// squarely a bump; the `NativeOut` field is a genuine source break for an extension that returns an
+/// enum (add `has_validator: false` — a dispatch's own return value is not untrusted input crossing a
+/// door). Also `json.parse`/`try_parse`/`decode_typed` report a new
+/// [`crate::registry::TypeRecipe`]-driven failure kind, `unknown_variant`, distinct from `mismatch`.
+///
+/// **11** — `regex.compile` got its recoverable twin, `regex.try_compile(pattern):
+/// Result<Pattern, string>`, and `std.regex` was re-rooted on it the way [`host::Os`] was in ABI 8:
+/// `regex::try_compile` is the primitive and the aborting `regex::compile` is derived from it, so
+/// the two doors cannot report different things about the same pattern. Purely additive
+/// registration (nothing written for ABI 10 stops compiling), counted anyway under the rule above
+/// because it widens the registry surface. The `Err` side is a plain `string` rather than a
+/// classified extern error: a pattern has exactly one way to be invalid, so a `kind()` would be a
+/// constant, and the engine's own caret-carrying diagnostic is the whole value.
+pub const ABI_VERSION: u32 = 11;
 
 pub mod args;
 pub mod channel;
@@ -31,6 +121,7 @@ pub mod os;
 pub mod p2p;
 pub mod registry;
 pub mod ring1;
+pub mod stream;
 pub mod telemetry;
 
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
@@ -50,14 +141,23 @@ pub use net::{
 };
 pub use os::{ExecIo, ExecResult, Process};
 pub use p2p::{P2pBackend, P2pBroker, P2pReceiveIo};
+// The streaming-body surface (http-streaming arc). Deliberately NOT a glob: the module's own
+// `Stream`-adjacent names would collide with `host::Stream` (the stdin/stdout/stderr enum), and
+// the type here is `FrameStream` precisely so the two never have to be disambiguated.
 pub use registry::{
     ArenaGetter, AssocDerivation, AttrTarget, BundleReceiver, ClassDispatch, ConstraintArity,
     ConstraintField, ConstraintLayout, CtxTypeDispatch, EnumBacking, ExtAssocType, ExtCapability,
-    ExtClass, ExtEnum, ExtField, ExtFielded, ExtFn, ExtModule, ExtRoleTag, ExtStruct, ExtTrait,
-    ExtTraitMethod, ExtType, ExtTypeDirective, ExtVariant, Extension, FieldedDispatch, FieldedKind,
-    HiddenArg, ModuleDispatch, NativeOut, NativeValue, Nominal, NominalKind, NominalType,
-    PackedConstraint, PackedLayoutKind, RetTy, Scalar, ScalarVec, SigType, TraitDispatch,
-    TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch, TypedTypeDispatch, VariantValue,
+    ExtClass, ExtEnum, ExtField, ExtFielded, ExtFn, ExtModule, ExtRoleTag, ExtStruct, ExtTier,
+    ExtTierRunner, ExtTrait, ExtTraitMethod, ExtType, ExtTypeDirective, ExtVariant, Extension,
+    FieldDefault, FieldRecipe, FieldedDispatch, FieldedKind, HiddenArg, ModuleDispatch, NativeOut,
+    NativeValue, Nominal, NominalKind, NominalType, PackedConstraint, PackedLayoutKind, RetTy,
+    Scalar, ScalarVec, SigType, TierRoot, TierRoots, TierRun, TierRunner, TierText, TraitDispatch,
+    TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch, TypedTypeDispatch, VariantRecipe,
+    VariantTag, VariantValue,
+};
+pub use stream::{
+    Frame, FrameDecoder, FrameStream, Framing, SseCloseIo, SseSendIo, SseSink, StreamRecvIo,
+    Utf8Chunker,
 };
 // The Ring 1 bodies moved to `ring1` (audit-2 F8); the glob keeps every existing path
 // (`noeta_ext_abi::Arg`, `noeta_stdlib::string_method`, ...) compiling unchanged. The shared

@@ -158,6 +158,32 @@ pub trait NativeCtx {
     /// effect — so the two backends are held byte-identical on it.
     fn write_stderr(&mut self, text: &str);
 
+    /// Stream whatever the program has written to stdout/stderr so far straight to the real
+    /// terminal, if the host supports it ([`crate::Console::stream_output`]) — otherwise a no-op
+    /// that leaves the batch buffers untouched.
+    ///
+    /// For a program that *ends*, batch-capturing output and rendering it at teardown is right.
+    /// A long-running one — `noeta serve`, which runs until Ctrl-C — never reaches that teardown,
+    /// so a native driving such a loop should flush at a natural boundary (each pass of the accept
+    /// loop) to make `echo` usable for logging. Under the sandbox host nothing streams and the
+    /// buffers stay authoritative, so the backend differential is unaffected.
+    fn flush_output(&mut self) {}
+
+    /// Drain the runtime diagnostics the backend has recorded so far, rendered one per entry as
+    /// `"[CODE] message"`.
+    ///
+    /// The recovery seam for a native that **drops** a [`CtxError::Abort`] to keep running — the
+    /// way `http.serve` turns a handler abort into a 500 and a websocket session's abort into a
+    /// closed stream. The diagnostic behind that abort is recorded backend-side, but a long-lived
+    /// loop never reaches the program end that would print it, so without draining here the error
+    /// is invisible to the developer *and* accumulates for the life of the process. Callers that
+    /// swallow an abort should drain and report.
+    ///
+    /// Defaults to empty for the harness/test contexts that record no diagnostics.
+    fn drain_runtime_diagnostics(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Render a slot's value to its display string through the backend's **own** `Value::display`
     /// path — the exact one `echo` / `Op::Stringify` use, including a re-entry into a user
     /// `to_string` for a `Display` object or enum. The single canonical rendering: `std.io`'s
@@ -165,6 +191,16 @@ pub trait NativeCtx {
     /// (there is no second copy of display logic in the std native). An abort inside a user
     /// `to_string` propagates as [`CtxError::Abort`] (recorded backend-side).
     fn render(&mut self, slot: Slot) -> CtxResult<String>;
+
+    /// A slot's **raw bytes**, or `None` when it is not a `bytes` value.
+    ///
+    /// [`NativeCtx::view`]'s deep projection renders bytes as a *summary string* (`"<12 bytes>"`)
+    /// so a display/JSON path can never panic on binary — right for that job, lossy for this one.
+    /// A native that genuinely needs the payload (a `Syncable` value's wire encoding, say) reads
+    /// it here instead of parsing the summary back.
+    fn bytes_of(&mut self, _slot: Slot) -> CtxResult<Option<Vec<u8>>> {
+        Ok(None)
+    }
 
     /// Marshal a slot's value into the neutral argument view (the deep projection — these are
     /// orchestration paths, never hot loops; elements that stay opaque ride as slots instead).
@@ -185,6 +221,27 @@ pub trait NativeCtx {
     /// consumed; the result arrives in a fresh slot. An abort in the callee returns
     /// [`CtxError::Abort`] (recorded backend-side), which the dispatch may propagate or recover.
     fn call(&mut self, callee: Slot, args: &[Slot]) -> CtxResult<Slot>;
+
+    /// Call a **named method** on a value, re-entering the backend to run its body —
+    /// `Ok(None)` when the receiver declares no such method.
+    ///
+    /// [`NativeCtx::call`] takes a callable *value*; this takes a receiver and a name, which is
+    /// what a native needs to reach a method a **user type** declared. The motivating case is a
+    /// trait an extension declares and a user type implements: `para.crdt.Mergeable`'s `merge` is
+    /// written in Noeta, and the sync engine holding two such values has no closure to call — only
+    /// the values and the method name from the contract. Both backends already do exactly this
+    /// internally to run a user `to_string` from [`NativeCtx::render`]; this exposes it.
+    ///
+    /// `recv` and `args` are borrowed (the caller keeps its slots); the returned slot is a fresh
+    /// one the caller owns. An abort inside the method propagates as [`CtxError::Abort`].
+    fn call_method(
+        &mut self,
+        _recv: Slot,
+        _method: &str,
+        _args: &[Slot],
+    ) -> CtxResult<Option<Slot>> {
+        Ok(None)
+    }
 
     /// Call a callable slot with `list[index]` as its single argument — the fused
     /// `list_get` + `call` + `free` a bounded mapper's fill loop performs per item (H2). One

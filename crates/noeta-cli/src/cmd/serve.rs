@@ -5,19 +5,127 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use noeta_ast::{Expr, Stmt};
 use noeta_diagnostics::render;
 use noeta_pm::{graph, manifest};
 use noeta_runner::compile::Loaded;
 use noeta_runner::compile_real;
-use noeta_span::SourceMap;
+use noeta_span::{SourceMap, Span};
 use noeta_vm::VmBackend;
 
 use crate::cmd::run::{p2p_app_namespace, run_program};
 use crate::output::emit_diagnostics_mapped;
 use crate::{compose, watch};
 
-pub(crate) fn ext_command_clap(ext: &'static noeta_stdlib::ExtCommand) -> clap::Command {
-    let mut cmd = clap::Command::new(ext.name).about(ext.about);
+/// The request-handler function `noeta serve` drives — the one name a served program must define.
+const HANDLER: &str = "fetch";
+
+/// The module the serve entry call names, qualified — see [`EntryCall::module`](noeta_stdlib::EntryCall).
+/// The multi-core path never reaches `run_file` (it binds the listener itself), so it assembles the
+/// same `EntryCall` from here; both paths therefore name one module and build one call.
+const SERVE_ENTRY_MODULE: &str = "std.http.server";
+
+/// The statements a synthesized [`EntryCall`](noeta_stdlib::EntryCall) contributes to the entry
+/// program: the `use` that binds the module the call names, then the call —
+/// `use std.http.server` + `server.serve(port, fetch, host)`.
+///
+/// Both go to the **loader** ([`noeta_loader::load_with_deps_appending`]), which appends them before
+/// linking, so they resolve the way the same two lines written into the file would: the import pulls
+/// in the module it names (a dependency package's `.noe` submodule otherwise binds nothing at all),
+/// and the call's names are qualified and α-renamed alongside the entry's own. A module named by a
+/// single bare segment brings no `use` — it binds nothing and leaves resolution to the program's own
+/// imports (see `EntryCall::module`).
+///
+/// A synthetic span (offset 0) throughout: these nodes are compiler-generated, so no diagnostic
+/// should ever need to locate them in the file. The program supplies any identifier the call names
+/// (`fetch`, `up`); a missing one surfaces as an ordinary check error against the name the command
+/// documents.
+fn entry_tail(entry: &noeta_stdlib::EntryCall) -> Vec<Stmt> {
+    let sp = Span::empty_at(0);
+    let ident = |name: &str| Expr::Ident {
+        name: noeta_ast::Name::canonical(name),
+        span: sp,
+    };
+    let mut stmts = Vec::new();
+    let mut path: Vec<String> = entry.module.split('.').map(str::to_string).collect();
+    let local = path.pop().unwrap_or_default();
+    if !path.is_empty() {
+        stmts.push(Stmt::Use {
+            path,
+            names: vec![noeta_ast::UseName {
+                name: local.clone(),
+                alias: None,
+                span: sp,
+            }],
+            span: sp,
+        });
+    }
+    let hot = std::env::var_os("NOETA_HOT").is_some();
+    let args: Vec<Expr> = entry
+        .args
+        .iter()
+        .map(|arg| match arg {
+            noeta_stdlib::EntryArg::Int(value) => Expr::Int {
+                value: *value,
+                span: sp,
+            },
+            noeta_stdlib::EntryArg::Str(value) => Expr::Str {
+                value: value.clone(),
+                span: sp,
+            },
+            // In hot mode (server-hmr W1), late-bind an identifier argument through a trampoline
+            // closure `fn(req) => fetch(req)`: the serve loop captures its handler argument ONCE at
+            // startup, but the trampoline's body re-resolves the global per call — so a hot swap
+            // rebinding `fetch` reaches the live loop.
+            noeta_stdlib::EntryArg::Ident(name) if hot => Expr::Closure {
+                params: vec![noeta_ast::Param {
+                    attrs: Vec::new(),
+                    name: "req".to_string(),
+                    name_span: sp,
+                    ty: None,
+                    default: None,
+                    span: sp,
+                    positional: false,
+                }],
+                ret: None,
+                body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
+                    callee: Box::new(ident(name)),
+                    args: vec![noeta_ast::CallArg::positional(ident("req"))],
+                    span: sp,
+                })),
+                span: sp,
+            },
+            noeta_stdlib::EntryArg::Ident(name) => ident(name),
+        })
+        .collect();
+    let call = Expr::Call {
+        callee: Box::new(Expr::Member {
+            receiver: Box::new(ident(&local)),
+            name: entry.func.to_string(),
+            name_span: sp,
+            span: sp,
+        }),
+        args: args
+            .into_iter()
+            .map(noeta_ast::CallArg::positional)
+            .collect(),
+        span: sp,
+    };
+    stmts.push(Stmt::Expr {
+        expr: call,
+        span: sp,
+    });
+    stmts
+}
+
+/// Build the clap subcommand for an extension command, registered under `name` — the local name a
+/// `[trust.commands]` binding chose (equal to `ext.name` for std's own commands, which register
+/// under their exported names).
+pub(crate) fn ext_command_clap(
+    name: &'static str,
+    ext: &'static noeta_stdlib::ExtCommand,
+) -> clap::Command {
+    let mut cmd = clap::Command::new(name).about(ext.about);
     for spec in ext.args {
         cmd = cmd.arg(match spec.kind {
             noeta_stdlib::ArgKind::Path => clap::Arg::new(spec.name)
@@ -179,9 +287,6 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         entry: Option<&noeta_stdlib::EntryCall>,
         banner: Option<&str>,
     ) -> u8 {
-        use noeta_ast::{Expr, Stmt};
-        use noeta_span::Span;
-
         // An extension command drives a program run; a native-dep app delegates to its composed
         // toolchain like every other verb (composition failure is fatal, never a stock fallback).
         let resolved = match compose::maybe_delegate(file) {
@@ -193,17 +298,29 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         // cross-package `use <dep-key>.…` the plain `run` path does (package-manager P2.1c) —
         // the compose probe's graph when it resolved (audit-5 F2), else resolved here so the
         // error renders on this path.
-        let deps = match resolved {
-            Some(graph) => graph.packages,
+        let (deps, package_uses) = match resolved {
+            Some(graph) => (graph.packages, graph.package_uses),
             None => match graph::resolve_graph(file) {
-                Ok(graph) => graph.packages,
+                Ok(graph) => (graph.packages, graph.package_uses),
                 Err(err) => {
                     eprintln!("noeta: {err}");
                     return 2;
                 }
             },
         };
-        let linked = match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
+        // The entry call and the `use` that binds it, handed to the *loader* rather than pushed
+        // onto the linked program: a synthesized statement has to go through the linker exactly as
+        // a handwritten one does, or its import resolves nothing and its names are left unqualified
+        // (see `load_with_deps_appending`).
+        let tail = entry.map(entry_tail).unwrap_or_default();
+        let linked = match noeta_loader::load_with_deps_appending(
+            file,
+            manifest::root_edition(file),
+            &deps,
+            &package_uses,
+            noeta_pm::sources::package_root(file).as_ref(),
+            &tail,
+        ) {
             Err(err) => {
                 eprintln!("noeta: cannot read {}: {err}", file.display());
                 return 2;
@@ -217,84 +334,23 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
             }
             Ok(Ok(linked)) => linked,
         };
+        // The entry source, kept past the `Loaded` rewrap: the hot path's diff baseline is the
+        // entry unit of THIS program — the one about to be compiled and served.
+        let entry_source = linked.entry.clone();
         // Rewrap as the runner's `Loaded` so the type check below rides `Loaded::check` — the
         // editions-threading choke point (audit-3 F8).
-        let mut loaded = crate::context::loaded(linked);
+        let loaded = crate::context::loaded(linked);
 
-        // Synthesize `<module>.<func>(<args>)` as a trailing top-level statement. The program
-        // supplies any identifiers the call names (`fetch`); a missing one surfaces as an
-        // ordinary check error. A synthetic span (offset 0) is fine — this node is
-        // compiler-generated, never the subject of a diagnostic the user needs to locate.
-        if let Some(entry) = entry {
-            let sp = Span::empty_at(0);
-            let ident = |name: &str| Expr::Ident {
-                name: name.to_string(),
-                span: sp,
-            };
-            let callee = Expr::Member {
-                receiver: Box::new(ident(entry.module)),
-                name: entry.func.to_string(),
-                name_span: sp,
-                span: sp,
-            };
-            let hot = std::env::var_os("NOETA_HOT").is_some();
-            let args: Vec<Expr> = entry
-                .args
-                .iter()
-                .map(|arg| match arg {
-                    noeta_stdlib::EntryArg::Int(value) => Expr::Int {
-                        value: *value,
-                        span: sp,
-                    },
-                    noeta_stdlib::EntryArg::Str(value) => Expr::Str {
-                        value: value.clone(),
-                        span: sp,
-                    },
-                    // In hot mode (server-hmr W1), late-bind an identifier argument through a
-                    // trampoline closure `fn(req) => fetch(req)`: the serve loop captures its
-                    // handler argument ONCE at startup, but the trampoline's body re-resolves the
-                    // global per call — so a hot swap rebinding `fetch` reaches the live loop.
-                    noeta_stdlib::EntryArg::Ident(name) if hot => Expr::Closure {
-                        params: vec![noeta_ast::Param {
-                            attrs: Vec::new(),
-                            name: "req".to_string(),
-                            name_span: sp,
-                            ty: None,
-                            default: None,
-                            span: sp,
-                        }],
-                        ret: None,
-                        body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
-                            callee: Box::new(ident(name)),
-                            args: vec![noeta_ast::CallArg::positional(ident("req"))],
-                            span: sp,
-                        })),
-                        span: sp,
-                    },
-                    noeta_stdlib::EntryArg::Ident(name) => ident(name),
-                })
-                .collect();
-            let call = Expr::Call {
-                callee: Box::new(callee),
-                args: args
-                    .into_iter()
-                    .map(noeta_ast::CallArg::positional)
-                    .collect(),
-                span: sp,
-            };
-            loaded.program.stmts.push(Stmt::Expr {
-                expr: call,
-                span: sp,
-            });
-        }
-
+        // Armed, not printed: the serve loop emits it once the listener is actually bound, so a
+        // bind clash or a check error is never preceded by "listening on …".
         if let Some(banner) = banner {
-            eprintln!("{banner}");
+            noeta_stdlib::serve::arm_serve_banner(banner.to_string());
         }
         // Hot mode (server-hmr W1, armed by the `--watch` wrapper for `serve`): run through the
         // debug-session machinery with the hot-swap mailbox, so edits swap into the LIVE process.
         if std::env::var_os("NOETA_HOT").is_some() {
-            return run_program_hot(file, &loaded);
+            let baseline = watch::EntryUnit::of(&loaded.program, &entry_source);
+            return run_program_hot(file, &loaded, tail, baseline);
         }
         // An entry call injected before compiling means the module differs from `run`'s for the
         // same source — a command run must never share the startup cache's `(source+tiers)` key,
@@ -326,26 +382,42 @@ pub(crate) fn serve_parallel_impl(
     host: &str,
     workers: usize,
 ) -> u8 {
-    use noeta_ast::{Expr, Stmt};
-    use noeta_span::Span;
-
     let resolved = match compose::maybe_delegate(file) {
         Err(_) => return 1,
         Ok(resolved) => resolved,
     };
     // The compose probe's graph when it resolved (audit-5 F2), else resolved here so the error
     // renders on this path.
-    let deps = match resolved {
-        Some(graph) => graph.packages,
+    let (deps, package_uses) = match resolved {
+        Some(graph) => (graph.packages, graph.package_uses),
         None => match graph::resolve_graph(file) {
-            Ok(graph) => graph.packages,
+            Ok(graph) => (graph.packages, graph.package_uses),
             Err(err) => {
                 eprintln!("noeta: {err}");
                 return 2;
             }
         },
     };
-    let linked = match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
+    // The multi-core entry call is the same `server.serve(port, fetch, host)` the single-worker path
+    // makes, built the same way and handed to the loader the same way — including the hot-mode
+    // handler trampoline, which `entry_tail` applies to an `Ident` argument (server-hmr F5).
+    let tail = entry_tail(&noeta_stdlib::EntryCall {
+        module: SERVE_ENTRY_MODULE,
+        func: "serve",
+        args: vec![
+            noeta_stdlib::EntryArg::Int(port),
+            noeta_stdlib::EntryArg::Ident(HANDLER),
+            noeta_stdlib::EntryArg::Str(host.to_string()),
+        ],
+    });
+    let linked = match noeta_loader::load_with_deps_appending(
+        file,
+        manifest::root_edition(file),
+        &deps,
+        &package_uses,
+        noeta_pm::sources::package_root(file).as_ref(),
+        &tail,
+    ) {
         Err(err) => {
             eprintln!("noeta: cannot read {}: {err}", file.display());
             return 2;
@@ -359,72 +431,20 @@ pub(crate) fn serve_parallel_impl(
         }
         Ok(Ok(linked)) => linked,
     };
+    // The entry source, kept past the `Loaded` rewrap — the hot fleet's diff baseline (see the
+    // single-worker path).
+    let entry_source = linked.entry.clone();
     // Rewrap as the runner's `Loaded` so the type check below rides `Loaded::check` — the
     // editions-threading choke point (audit-3 F8).
-    let mut loaded = crate::context::loaded(linked);
-
-    // In hot mode (`--parallel --watch`, server-hmr F5) the handler is a TRAMPOLINE
-    // `fn(req) => fetch(req)`, so the serve loop's one-shot handler capture late-binds `fetch`
-    // per request and a swap that rebinds `fetch` reaches every worker's live loop (the same
-    // trick the single-worker hot path uses). A plain run passes `fetch` directly.
-    let hot = std::env::var_os("NOETA_HOT").is_some();
-    let sp = Span::empty_at(0);
-    let ident = |name: &str| Expr::Ident {
-        name: name.to_string(),
-        span: sp,
-    };
-    let handler = if hot {
-        Expr::Closure {
-            params: vec![noeta_ast::Param {
-                attrs: Vec::new(),
-                name: "req".to_string(),
-                name_span: sp,
-                ty: None,
-                default: None,
-                span: sp,
-            }],
-            ret: None,
-            body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
-                callee: Box::new(ident("fetch")),
-                args: vec![noeta_ast::CallArg::positional(ident("req"))],
-                span: sp,
-            })),
-            span: sp,
-        }
-    } else {
-        ident("fetch")
-    };
-    let call = Expr::Call {
-        callee: Box::new(Expr::Member {
-            receiver: Box::new(ident("server")),
-            name: "serve".to_string(),
-            name_span: sp,
-            span: sp,
-        }),
-        args: vec![
-            Expr::Int {
-                value: port,
-                span: sp,
-            },
-            handler,
-            Expr::Str {
-                value: host.to_string(),
-                span: sp,
-            },
-        ]
-        .into_iter()
-        .map(noeta_ast::CallArg::positional)
-        .collect(),
-        span: sp,
-    };
-    loaded.program.stmts.push(Stmt::Expr {
-        expr: call,
-        span: sp,
-    });
+    let loaded = crate::context::loaded(linked);
 
     let checked = loaded.check();
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&loaded.sources, checked.diagnostics.iter());
+    // Report first, gate on errors only — a warning must not stop a server from starting.
+    emit_diagnostics_mapped(
+        &loaded.sources,
+        loaded.warnings.iter().chain(checked.diagnostics.iter()),
+    );
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
 
@@ -442,9 +462,12 @@ pub(crate) fn serve_parallel_impl(
 
     // Hot multi-core (F5): each worker runs the debug-session hot path; ONE watcher deposits into
     // the shared broadcast queue and every worker drains it, so a swap spans the whole fleet.
-    if hot {
+    if std::env::var_os("NOETA_HOT").is_some() {
+        let baseline = watch::EntryUnit::of(&loaded.program, &entry_source);
         return serve_parallel_hot(
             file,
+            tail,
+            baseline,
             &loaded.program,
             &checked,
             &loaded.sources,
@@ -552,6 +575,8 @@ pub(crate) fn run_worker(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn serve_parallel_hot(
     entry_path: &std::path::Path,
+    tail: Vec<Stmt>,
+    baseline: watch::EntryUnit,
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
     sources: &SourceMap,
@@ -566,6 +591,8 @@ pub(crate) fn serve_parallel_hot(
     let wake = std::sync::Arc::new(noeta_host_real::Notify::new());
     watch::spawn_hot_watcher(
         entry_path.to_path_buf(),
+        tail,
+        baseline,
         std::sync::Arc::clone(&mailbox),
         std::sync::Arc::clone(&wake),
     );
@@ -659,14 +686,23 @@ pub(crate) fn run_worker_hot(
 /// Run an entry-call program with **in-process hot reload** (server-hmr W1) — `noeta serve
 /// --watch`'s hot mode. The program compiles through the *session* compiler (kept alive for
 /// fragment installs) and runs on the real host with a [`noeta_vm::HotSwapMailbox`] armed; a
-/// watcher thread ([`watch::spawn_hot_watcher`]) parses/checks/diffs each edit of the entry file
+/// watcher thread ([`watch::spawn_hot_watcher`]) re-links/checks/diffs each edit of the entry file
 /// and deposits swappable plans (blockers or non-entry edits exit with the restart sentinel the
 /// `--watch` wrapper honors). JIT stays unarmed on this path (H3 lifts).
-pub(crate) fn run_program_hot(entry_path: &std::path::Path, loaded: &Loaded) -> u8 {
+pub(crate) fn run_program_hot(
+    entry_path: &std::path::Path,
+    loaded: &Loaded,
+    tail: Vec<Stmt>,
+    baseline: watch::EntryUnit,
+) -> u8 {
     // `Loaded::check`: the editions ride structurally with the program they govern.
     let checked = loaded.check();
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&loaded.sources, checked.diagnostics.iter());
+    // Report first, gate on errors only — the same rule `noeta run` follows.
+    emit_diagnostics_mapped(
+        &loaded.sources,
+        loaded.warnings.iter().chain(checked.diagnostics.iter()),
+    );
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
     let (module, compiler) = match noeta_compiler::compile_with_sites_session(
@@ -692,6 +728,8 @@ pub(crate) fn run_program_hot(entry_path: &std::path::Path, loaded: &Loaded) -> 
     let wake = std::sync::Arc::new(noeta_host_real::Notify::new());
     watch::spawn_hot_watcher(
         entry_path.to_path_buf(),
+        tail,
+        baseline,
         std::sync::Arc::clone(&mailbox),
         std::sync::Arc::clone(&wake),
     );

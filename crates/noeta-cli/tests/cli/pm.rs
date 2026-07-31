@@ -199,8 +199,7 @@ fn tier_dep_project(name: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         lib.join("tiers.noe"),
-        "namespace fuzz.tiers;\n\
-         @attribute(Function)\npub struct Fuzz { cases: int }\n\
+        "@attribute(Function)\npub struct Fuzz { cases: int }\n\
          @tier(fuzz, config: Fuzz)\n\
          pub fn run_fuzz(roots: List<TierRoot>): void {\n\
              echo \"fuzzkit: ${roots.len()} roots\"\n\
@@ -218,8 +217,9 @@ fn tier_dep_project(name: &str) -> PathBuf {
     app.join("main.noe")
 }
 
-/// The provider-override e2e: `fuzzkit` also declares `@tier(bench, config: Fuzz)`; the app's
-/// `custom` target maps `bench = "fuzzkit"`. Extends [`tier_dep_project`]'s fixture.
+/// The package-provider e2e: `fuzzkit` also declares `@tier(bench, config: Fuzz)`; the app's `[tiers]`
+/// binds `bench = "fuzzkit"`, so its `@bench` is fuzzkit's tier — package-level, not target-selected.
+/// Extends [`tier_dep_project`]'s fixture.
 fn tier_override_project(name: &str) -> PathBuf {
     let entry = tier_dep_project(name);
     let app_dir = entry.parent().unwrap().to_path_buf();
@@ -237,7 +237,8 @@ fn tier_override_project(name: &str) -> PathBuf {
         app_dir.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
          [dependencies]\nfuzzkit = { path = \"../fuzzkit\" }\n\
-         [targets.custom.tiers]\nbench = \"fuzzkit\"\n",
+         [tiers]\nbench = \"fuzzkit\"\n\
+         [targets.custom.tiers]\nbench = true\n",
     )
     .unwrap();
     std::fs::write(
@@ -250,11 +251,11 @@ fn tier_override_project(name: &str) -> PathBuf {
 }
 
 #[test]
-fn a_target_overrides_a_builtin_tier_provider() {
-    // `bench = "fuzzkit"` in the target's tiers map: `--target custom` stamps fuzzkit's config
-    // (`cases:` is a `Fuzz` knob, not std's `Bench`) and dispatches to fuzzkit's runner; without
-    // the target the native bench runs and the same knob is correctly rejected against std's
-    // `Bench { iterations }`.
+fn a_tiers_binding_routes_a_tier_to_its_package_provider() {
+    // `[tiers] bench = "fuzzkit"` binds the app's `@bench` to fuzzkit's `@tier(bench)` — package-level,
+    // so its config is fuzzkit's `Fuzz` (`cases:` is valid, not std's `Bench { iterations }`) and it
+    // dispatches to fuzzkit's runner. The provider is the same whether or not a target is passed (a
+    // target only selects which tiers are *live*, never which provider a tier resolves to).
     let entry = tier_override_project("tier_override_bench");
     lang()
         .arg("bench")
@@ -267,12 +268,11 @@ fn a_target_overrides_a_builtin_tier_provider() {
             predicate::str::contains("ALT BENCH: 1 roots")
                 .and(predicate::str::contains("  measures ran")),
         );
-    lang()
-        .arg("bench")
-        .arg(&entry)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("has no field `cases`"));
+    // Same provider without a target — the binding is package-level, not a target override.
+    lang().arg("bench").arg(&entry).assert().success().stdout(
+        predicate::str::contains("ALT BENCH: 1 roots")
+            .and(predicate::str::contains("  measures ran")),
+    );
 }
 
 #[test]
@@ -285,7 +285,8 @@ fn a_provider_that_declares_no_such_tier_is_an_error() {
         app_dir.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
          [dependencies]\nfuzzkit = { path = \"../fuzzkit\" }\n\
-         [targets.custom.tiers]\nbench = \"fuzzkit\"\n",
+         [tiers]\nbench = \"fuzzkit\"\n\
+         [targets.custom.tiers]\nbench = true\n",
     )
     .unwrap();
     lang()
@@ -313,7 +314,7 @@ fn tests_in_a_dependency_using_program_run() {
     let lib = entry.parent().unwrap().parent().unwrap().join("fuzzkit");
     std::fs::write(
         lib.join("tiers.noe"),
-        "namespace fuzz.tiers;\npub fn helper_answer(): int { return 42 }\n",
+        "pub fn helper_answer(): int { return 42 }\n",
     )
     .unwrap();
     lang()
@@ -335,6 +336,91 @@ fn a_dependency_declared_tier_dispatches_cross_package() {
             .and(predicate::str::contains("  app_case ran")),
     );
     // And the same program runs clean with the tier stripped.
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+/// A **tier-name collision**: two path dependencies each declare a runner-bearing `@tier(fuzz)`. The
+/// app depends on both and disambiguates in `[tiers]` — `fuzz = "depa"` keeps one under its own name,
+/// `crit = "depb:fuzz"` **renames** the other to a local `@crit`. This is the case rename exists for,
+/// and the residual the generic `noeta <localname>` dispatch used to miss: the runner is registered
+/// under what the provider exported (`fuzz` on `depb`), so a lookup keyed on the literal local name
+/// (`crit`) found nothing. Dispatch must resolve the local name to its tier *identity* first.
+fn tier_collision_project(name: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let depa = base.join("depa");
+    let depb = base.join("depb");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(&depa).expect("mk depa");
+    std::fs::create_dir_all(&depb).expect("mk depb");
+    // Each dependency ships the *same* tier name `fuzz` with a distinctly-named runner that prints
+    // its own package, then runs each root — so the output alone proves which runner fired.
+    let dep = |dir: &PathBuf, pkg: &str, runner: &str, label: &str| {
+        std::fs::write(
+            dir.join("noeta.toml"),
+            format!("[package]\nname = \"{pkg}\"\nversion = \"1.0.0\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("tiers.noe"),
+            format!(
+                "@tier(fuzz)\n\
+                 pub fn {runner}(roots: List<TierRoot>): void {{\n\
+                     echo \"{label}: ${{roots.len()}} roots\"\n\
+                     for root in roots {{ run = root.run; run() }}\n\
+                 }}\n"
+            ),
+        )
+        .unwrap();
+    };
+    // The namespace root matches the package-name root (`depa`/`depb`), which is also the dependency
+    // import-root key, so `use depa.tiers.run_a` resolves through the loader's re-rooting.
+    dep(&depa, "acme/depa", "run_a", "depa fuzz");
+    dep(&depb, "acme/depb", "run_b", "depb fuzz");
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ndepa = { path = \"../depa\" }\ndepb = { path = \"../depb\" }\n\
+         [tiers]\nfuzz = \"depa\"\ncrit = \"depb:fuzz\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use depa.tiers.run_a\n\
+         use depb.tiers.run_b\n\
+         @fuzz {\n    fn a_case(): void { echo \"  a_case ran\" }\n}\n\
+         @crit {\n    fn b_case(): void { echo \"  b_case ran\" }\n}\n",
+    )
+    .unwrap();
+    app.join("main.noe")
+}
+
+#[test]
+fn a_renamed_collision_tier_dispatches_by_identity() {
+    // The renamed-local-name generic dispatch: `noeta fuzz` runs depa's runner (bound by its own
+    // name), and `noeta crit` runs depb's — the local name `crit` resolving through `[tiers]` to
+    // depb's exported `fuzz`, not a literal `find_tier_runner("crit")` that would miss. The other
+    // package's block strips each time (its identity is not active), so exactly one runner fires.
+    let entry = tier_collision_project("tier_collision");
+    lang().arg("fuzz").arg(&entry).assert().success().stdout(
+        predicate::str::contains("depa fuzz: 1 roots")
+            .and(predicate::str::contains("  a_case ran"))
+            .and(predicate::str::contains("depb fuzz").not())
+            .and(predicate::str::contains("  b_case ran").not()),
+    );
+    lang().arg("crit").arg(&entry).assert().success().stdout(
+        predicate::str::contains("depb fuzz: 1 roots")
+            .and(predicate::str::contains("  b_case ran"))
+            .and(predicate::str::contains("depa fuzz").not())
+            .and(predicate::str::contains("  a_case ran").not()),
+    );
+    // Both tier blocks strip on a normal run — the program prints nothing.
     lang()
         .arg("run")
         .arg(&entry)
@@ -374,8 +460,7 @@ fn text_tier_dep_project(name: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         lib.join("tiers.noe"),
-        "namespace spec.tiers;\n\
-         @tier(spec, text: \"xml\")\n\
+        "@tier(spec, text: \"xml\")\n\
          pub fn run_specs(roots: List<TierText>): void {\n\
              echo \"speckit: ${roots.len()} bodies\"\n\
              for root in roots {\n\
@@ -394,14 +479,114 @@ fn a_dependency_declared_text_tier_captures_cross_package() {
     // `@spec { … }` XML body (quotes and all — invalid as Noeta tokens) still captures verbatim,
     // targets the adjacent fn, and dispatches to the dependency's runner.
     let entry = text_tier_dep_project("text_tier_dep");
+    // The target is the fn's **qualified** identity: the entry is a file of the `acme/app` package,
+    // so its path derives (`app.main`) exactly as any other module's does, and its declarations are
+    // qualified under it. (Before derivation an entry that declared no `namespace` had none, and the
+    // target read as the bare `add`.)
     lang().arg("spec").arg(&entry).assert().success().stdout(
         predicate::str::contains("speckit: 1 bodies")
-            .and(predicate::str::contains("-- add"))
+            .and(predicate::str::contains("-- app.main.add"))
             .and(predicate::str::contains(
                 "<case name=\"adds\" expect=\"3\"/>",
             )),
     );
     // The same program runs and checks clean with the tier stripped.
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+    lang().arg("check").arg(&entry).assert().success();
+}
+
+/// A markdown body that is a hard **lex** error if tokenized as code — a bare `"` opens an
+/// unterminated string literal, `<`/`>` are stray operators. Only verbatim capture (the lexer taking
+/// the whole `@…{ … }` body as one `DocText` token) lets it through; without the per-package text-tier
+/// fix a *renamed* text tier would tokenize this as code and fail to parse. Kept adjacent to a `fn` so
+/// the tier has a declaration to target.
+const RENAMED_TEXT_TIER_SRC: &str = "\
+@docs {\n\
+# Widget\n\
+\n\
+A bare \" quote and <angle> brackets: invalid as code, fine as markdown.\n\
+}\n\
+fn add(a: int, b: int): int { return a + b }\n";
+
+#[test]
+fn a_renamed_text_tier_captures_under_its_local_name() {
+    // The 3g headline: `[tiers] docs = "std:doc"` renames std's `doc` **text** tier to a local
+    // `@docs`. The lexer only knows `doc` as verbatim-capturing, so the local `docs` must be added —
+    // per package, from the manifest binding — or `@docs { # markdown }` tokenizes as code and the
+    // parse blows up on the bare quote. Both `run` (the block strips, program prints nothing) and
+    // `check` (the body is verbatim markdown, not code) must be clean.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("rename_text_tier");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("mk project dir");
+    let entry = base.join("main.noe");
+    std::fs::write(&entry, RENAMED_TEXT_TIER_SRC).unwrap();
+    std::fs::write(
+        base.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n[tiers]\ndocs = \"std:doc\"\n",
+    )
+    .unwrap();
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+    lang().arg("check").arg(&entry).assert().success();
+}
+
+/// A consumer app + a `speckit` path dependency declaring a **text** tier `@tier(spec, text: "xml")`,
+/// which the app binds under a *different* local name via `[tiers] checks = "speckit:spec"`. The cross-
+/// package renamed-text-tier proof: capture must key on the app's own local `@checks`, resolved through
+/// the binding to the dependency's declared text tier — not on the exported `spec` spelling.
+fn renamed_dep_text_tier_project(name: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("speckit");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(&lib).expect("mk lib");
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nspeckit = { path = \"../speckit\" }\n\
+         [tiers]\nchecks = \"speckit:spec\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use speckit.tiers.run_specs\n\
+         @checks {\n  <case name=\"adds\" expect=\"3\"/> with a bare \" quote\n}\n\
+         fn add(a: int, b: int): int { return a + b }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/spec\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("tiers.noe"),
+        "@tier(spec, text: \"xml\")\n\
+         pub fn run_specs(roots: List<TierText>): void {\n\
+             echo \"speckit: ${roots.len()} bodies\"\n\
+         }\n",
+    )
+    .unwrap();
+    app.join("main.noe")
+}
+
+#[test]
+fn a_renamed_dependency_text_tier_captures_cross_package() {
+    // The app's `@checks { … }` XML body (quotes and all, invalid as Noeta tokens) captures verbatim
+    // only because the loader resolves the app's `[tiers] checks = "speckit:spec"` binding to the
+    // dependency's declared text tier and adds `checks` to the app package's text-tier set. Without
+    // 3g's per-package resolution, only the bare `spec` would capture and `@checks` would fail to parse.
+    let entry = renamed_dep_text_tier_project("rename_dep_text_tier");
     lang()
         .arg("run")
         .arg(&entry)
@@ -435,7 +620,7 @@ fn a_dependency_syntax_error_is_reported_against_the_dependency_file() {
         let lib = entry.parent().unwrap().parent().unwrap().join("greetlib");
         std::fs::write(
             lib.join("hello.noe"),
-            "namespace greet.hello;\npub fn greeting(): string {\n  let ] = ;\n}\n",
+            "pub fn greeting(): string {\n  let ] = ;\n}\n",
         )
         .unwrap();
         let assert = lang().arg(cmd).arg(&entry).assert().failure();
@@ -519,7 +704,7 @@ fn a_transitive_path_dependency_resolves_and_runs() {
     .unwrap();
     std::fs::write(
         mid.join("api.noe"),
-        "namespace mid.api;\nuse deep.base.leaf;\npub fn top(): string { return leaf(); }\n",
+        "use deep.base.leaf;\npub fn top(): string { return leaf(); }\n",
     )
     .unwrap();
     std::fs::write(
@@ -529,7 +714,7 @@ fn a_transitive_path_dependency_resolves_and_runs() {
     .unwrap();
     std::fs::write(
         low.join("base.noe"),
-        "namespace low.base;\npub fn leaf(): string { return \"deep transitive value\"; }\n",
+        "pub fn leaf(): string { return \"deep transitive value\"; }\n",
     )
     .unwrap();
 
@@ -569,42 +754,26 @@ fn a_version_conflict_is_reported() {
          [dependencies]\ns = { path = \"../c1\" }\n",
     )
     .unwrap();
-    std::fs::write(
-        a.join("a.noe"),
-        "namespace a.x;\npub fn f(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(a.join("a.noe"), "pub fn f(): int { return 1; }\n").unwrap();
     std::fs::write(
         b.join("noeta.toml"),
         "[package]\nname = \"acme/b\"\nversion = \"1.0.0\"\n\
          [dependencies]\ns = { path = \"../c2\" }\n",
     )
     .unwrap();
-    std::fs::write(
-        b.join("b.noe"),
-        "namespace b.x;\npub fn g(): int { return 2; }\n",
-    )
-    .unwrap();
+    std::fs::write(b.join("b.noe"), "pub fn g(): int { return 2; }\n").unwrap();
     std::fs::write(
         c1.join("noeta.toml"),
         "[package]\nname = \"acme/shared\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        c1.join("s.noe"),
-        "namespace shared.core;\npub fn h(): int { return 3; }\n",
-    )
-    .unwrap();
+    std::fs::write(c1.join("s.noe"), "pub fn h(): int { return 3; }\n").unwrap();
     std::fs::write(
         c2.join("noeta.toml"),
         "[package]\nname = \"acme/shared\"\nversion = \"2.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        c2.join("s.noe"),
-        "namespace shared.core;\npub fn h(): int { return 4; }\n",
-    )
-    .unwrap();
+    std::fs::write(c2.join("s.noe"), "pub fn h(): int { return 4; }\n").unwrap();
 
     lang()
         .arg("run")
@@ -636,7 +805,7 @@ fn a_published_package_resolves_as_a_registry_dependency() {
     .unwrap();
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"hello from the registry\"; }\n",
+        "pub fn greeting(): string { return \"hello from the registry\"; }\n",
     )
     .unwrap();
     git_in(&["add", "."], &repo);
@@ -705,7 +874,7 @@ fn the_lockfile_pins_registry_selection_and_bypasses_the_index() {
     .unwrap();
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"one point oh\"; }\n",
+        "pub fn greeting(): string { return \"one point oh\"; }\n",
     )
     .unwrap();
     git_in(&["add", "."], &repo);
@@ -755,7 +924,7 @@ fn the_lockfile_pins_registry_selection_and_bypasses_the_index() {
     // Upstream publishes v1.1.0 (still within ^1.0).
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"one point one\"; }\n",
+        "pub fn greeting(): string { return \"one point one\"; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -844,7 +1013,7 @@ fn a_git_forge_registry_resolves_and_runs_a_package() {
     git_in(&["init", "-q", "-b", "main"], &repo);
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"hello from the org registry\"; }\n",
+        "pub fn greeting(): string { return \"hello from the org registry\"; }\n",
     )
     .unwrap();
     commit_version(
@@ -901,7 +1070,7 @@ fn a_git_forge_resolve_tolerates_the_auth_token_override() {
     git_in(&["init", "-q", "-b", "main"], &repo);
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"hello (token path)\"; }\n",
+        "pub fn greeting(): string { return \"hello (token path)\"; }\n",
     )
     .unwrap();
     commit_version(
@@ -1035,7 +1204,7 @@ fn a_resolve_with_an_active_patch_is_loud_and_links_the_patched_tree() {
         .unwrap();
         std::fs::write(
             dir.join("api.noe"),
-            format!("namespace lib.api;\npub fn which(): string {{ return \"{marker}\"; }}\n"),
+            format!("pub fn which(): string {{ return \"{marker}\"; }}\n"),
         )
         .unwrap();
     }
@@ -1084,7 +1253,7 @@ fn a_target_scoped_dependency_links_only_under_its_target() {
     .unwrap();
     std::fs::write(
         lib.join("api.noe"),
-        "namespace devlib.api;\npub fn marker(): string { return \"dev tooling linked\"; }\n",
+        "pub fn marker(): string { return \"dev tooling linked\"; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -1185,11 +1354,7 @@ fn provenance_signs_verifies_and_pins_the_scope_key() {
         "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        repo.join("m.noe"),
-        "namespace greet.core;\npub fn v(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(repo.join("core.noe"), "pub fn v(): int { return 1; }\n").unwrap();
     git_in(&["add", "."], &repo);
     git_in(&["commit", "-q", "-m", "r"], &repo);
     git_in(&["tag", "v1.0.0"], &repo);
@@ -1288,11 +1453,7 @@ fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
         "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        repo.join("m.noe"),
-        "namespace greet.core;\npub fn v(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(repo.join("core.noe"), "pub fn v(): int { return 1; }\n").unwrap();
     git_in(&["add", "."], &repo);
     git_in(&["commit", "-q", "-m", "r"], &repo);
     git_in(&["tag", "v1.0.0"], &repo);
@@ -1419,11 +1580,7 @@ fn interactive_oob_publish_signs_keyless_end_to_end() {
         "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        repo.join("m.noe"),
-        "namespace greet.core;\npub fn v(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(repo.join("core.noe"), "pub fn v(): int { return 1; }\n").unwrap();
     git_in(&["add", "."], &repo);
     git_in(&["commit", "-q", "-m", "r"], &repo);
     git_in(&["tag", "v1.0.0"], &repo);
@@ -1585,11 +1742,7 @@ fn keyless_publish_verifies_pins_and_defends_end_to_end() {
         "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        repo.join("m.noe"),
-        "namespace greet.core;\npub fn v(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(repo.join("core.noe"), "pub fn v(): int { return 1; }\n").unwrap();
     git_in(&["add", "."], &repo);
     git_in(&["commit", "-q", "-m", "r"], &repo);
     git_in(&["tag", "v1.0.0"], &repo);
@@ -1843,7 +1996,7 @@ fn a_git_tag_dependency_is_fetched_and_run() {
     .unwrap();
     std::fs::write(
         dep_repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"hi from a git dep\"; }\n",
+        "pub fn greeting(): string { return \"hi from a git dep\"; }\n",
     )
     .unwrap();
     git_in(&["add", "."], &dep_repo);
@@ -1895,11 +2048,7 @@ fn noeta_add_edits_the_manifest_and_resolves() {
         "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        lib.join("m.noe"),
-        "namespace lib.core;\npub fn v(): int { return 42; }\n",
-    )
-    .unwrap();
+    std::fs::write(lib.join("core.noe"), "pub fn v(): int { return 42; }\n").unwrap();
 
     lang()
         .current_dir(&app)
@@ -1945,11 +2094,7 @@ fn noeta_update_rewrites_the_lock() {
         "[package]\nname = \"acme/up\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        dep_repo.join("m.noe"),
-        "namespace up.core;\npub fn v(): int { return 7; }\n",
-    )
-    .unwrap();
+    std::fs::write(dep_repo.join("core.noe"), "pub fn v(): int { return 7; }\n").unwrap();
     git_in(&["add", "."], &dep_repo);
     git_in(&["commit", "-q", "-m", "r"], &dep_repo);
     git_in(&["tag", "v1.0.0"], &dep_repo);
@@ -1992,8 +2137,8 @@ fn a_git_dependency_is_pinned_and_reproduces_offline() {
     )
     .unwrap();
     std::fs::write(
-        dep_repo.join("m.noe"),
-        "namespace pinned.core;\npub fn val(): string { return \"pinned offline value\"; }\n",
+        dep_repo.join("core.noe"),
+        "pub fn val(): string { return \"pinned offline value\"; }\n",
     )
     .unwrap();
     git_in(&["add", "."], &dep_repo);
@@ -2062,8 +2207,7 @@ fn publish_docs_only_reuploads_docs_without_touching_the_index() {
     .unwrap();
     std::fs::write(
         pkg.join("lib.noe"),
-        "namespace greeter.lib;\n\
-         pub fn greet(who: string): string { return \"hello \" + who }\n",
+        "pub fn greet(who: string): string { return \"hello \" + who }\n",
     )
     .unwrap();
     git_in(&["init", "-q"], &pkg);
@@ -2102,8 +2246,7 @@ fn publish_docs_only_reuploads_docs_without_touching_the_index() {
     // The source grows a new function; the shelf docs are now stale.
     std::fs::write(
         pkg.join("lib.noe"),
-        "namespace greeter.lib;\n\
-         pub fn greet(who: string): string { return \"hello \" + who }\n\
+        "pub fn greet(who: string): string { return \"hello \" + who }\n\
          pub fn wave(): string { return \"o/\" }\n",
     )
     .unwrap();
@@ -2149,4 +2292,158 @@ fn publish_docs_only_reuploads_docs_without_touching_the_index() {
         .stderr(predicate::str::contains(
             "`acme/greeter@9.9.9` is not published",
         ));
+}
+
+// --- the package orphan rule (E0070) over a real dependency graph -------------------------------
+
+/// Lay out `a` (a trait), `b` (a type), `glue` (depending on both), and an app depending on all
+/// three, with `glue`'s single module written by the caller — the one thing that varies between the
+/// orphan cases. Returns the app's entry path. The app **never names `glue`**: that is the whole
+/// point of the fixture — a transitive dependency injecting behavior into a type from a third
+/// package, in a program that mentions the injector nowhere.
+fn orphan_project(name: &str, glue_module: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    for sub in ["a", "b", "glue", "app"] {
+        std::fs::create_dir_all(base.join(sub)).unwrap();
+    }
+    std::fs::write(
+        base.join("a/noeta.toml"),
+        "[package]\nname = \"vendor/a\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("a/speaks.noe"),
+        "pub trait Speaks { fn speak(): string }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("b/noeta.toml"),
+        "[package]\nname = \"vendor/b\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("b/thing.noe"),
+        "pub class Thing {\n  pub id: int\n  fn new(id: int): Thing { return Thing { id: id } }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("glue/noeta.toml"),
+        "[package]\nname = \"third/glue\"\nversion = \"0.1.0\"\n\
+         [dependencies]\na = { path = \"../a\" }\nb = { path = \"../b\" }\n",
+    )
+    .unwrap();
+    std::fs::write(base.join("glue/impls.noe"), glue_module).unwrap();
+    std::fs::write(
+        base.join("app/noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\na = { path = \"../a\" }\nb = { path = \"../b\" }\nglue = { path = \"../glue\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("app/main.noe"),
+        "use b.thing.{Thing};\necho Thing.new(7).id\n",
+    )
+    .unwrap();
+    base.join("app/main.noe")
+}
+
+#[test]
+fn a_cross_package_orphan_impl_is_rejected_naming_all_three_packages() {
+    // Before the rule, this program ran: `glue` — a package the app names nowhere — made `Thing`
+    // satisfy `Speaks`, and two such packages in one graph collided as an E0027 the end user could
+    // not fix. The diagnostic has to name all three packages and both declaration sites, or the
+    // author cannot tell whose impl this is or why it is refused.
+    let entry = orphan_project(
+        "pm_orphan_reject",
+        "use a.speaks.{Speaks};\nuse b.thing.{Thing};\n\
+         impl Speaks for Thing { fn speak(): string { return \"glue\" } }\n",
+    );
+    let out = lang().arg("run").arg(&entry).assert().failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("E0070"), "{stderr}");
+    for expected in [
+        "package `a`",
+        "package `b`",
+        "package `glue`",
+        // Each side's declaration is located, in its own file, by the multi-file renderer.
+        "speaks.noe",
+        "thing.noe",
+        "impls.noe",
+        // The escape hatch, written out with this impl's own (short, declarable) names.
+        "@derive(Speaks, via: inner)",
+        "class MyThing { pub inner: Thing }",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "the orphan diagnostic must contain {expected:?}:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn an_impl_in_the_traits_package_or_the_types_package_is_accepted() {
+    // The rule forbids a *third* package, not cross-package impls. Both legal homes still run.
+    let with_trait = orphan_project(
+        "pm_orphan_ok_trait_side",
+        // `glue` becomes irrelevant here; the impl moves into the trait's own package below.
+        "pub fn unused(): int { return 0 }\n",
+    );
+    let base = with_trait.parent().unwrap().parent().unwrap();
+    std::fs::write(
+        base.join("a/noeta.toml"),
+        "[package]\nname = \"vendor/a\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nb = { path = \"../b\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("a/speaks.noe"),
+        "use b.thing.{Thing};\npub trait Speaks { fn speak(): string }\n\
+         impl Speaks for Thing { fn speak(): string { return \"a says ${self.id}\" } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("app/main.noe"),
+        "use a.speaks.{Speaks};\nuse b.thing.{Thing};\n\
+         fn say(x: dyn Speaks): string { return x.speak() }\necho say(Thing.new(7))\n",
+    )
+    .unwrap();
+    lang()
+        .arg("run")
+        .arg(&with_trait)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a says 7"));
+
+    // The mirror image: the impl lives with the TYPE and the trait is foreign.
+    let with_type = orphan_project(
+        "pm_orphan_ok_type_side",
+        "pub fn unused(): int { return 0 }\n",
+    );
+    let base = with_type.parent().unwrap().parent().unwrap();
+    std::fs::write(
+        base.join("b/noeta.toml"),
+        "[package]\nname = \"vendor/b\"\nversion = \"0.1.0\"\n\
+         [dependencies]\na = { path = \"../a\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("b/thing.noe"),
+        "use a.speaks.{Speaks};\npub class Thing {\n  pub id: int\n  \
+         fn new(id: int): Thing { return Thing { id: id } }\n}\n\
+         impl Speaks for Thing { fn speak(): string { return \"b says ${self.id}\" } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("app/main.noe"),
+        "use a.speaks.{Speaks};\nuse b.thing.{Thing};\n\
+         fn say(x: dyn Speaks): string { return x.speak() }\necho say(Thing.new(7))\n",
+    )
+    .unwrap();
+    lang()
+        .arg("run")
+        .arg(&with_type)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("b says 7"));
 }

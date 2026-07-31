@@ -482,7 +482,7 @@ fn run_os_spawn_streams_stderr_and_reads_by_chars() {
 #[test]
 fn run_does_real_disk_io() {
     // `fs.write`/`fs.read` hit the REAL disk (RealHost), relative to the working directory.
-    let dir = std::env::temp_dir().join("noeta_cli_realfs_dir");
+    let dir = temp_root().join("noeta_cli_realfs_dir");
     std::fs::create_dir_all(&dir).expect("create work dir");
     let _ = std::fs::remove_file(dir.join("e2e.txt"));
     let file = temp_program(
@@ -510,7 +510,7 @@ fn run_reads_files_asynchronously_on_the_real_executor() {
     // CLI's real executor the reads hit the REAL disk and run concurrently on tokio; here two files
     // are read in a `concurrent` block and awaited for their contents. (Conformance covers the
     // deterministic sandbox path; this proves the real-disk, real-executor path.)
-    let dir = std::env::temp_dir().join("noeta_cli_async_read_dir");
+    let dir = temp_root().join("noeta_cli_async_read_dir");
     std::fs::create_dir_all(&dir).expect("create work dir");
     std::fs::write(dir.join("a.txt"), "alpha").expect("write a");
     std::fs::write(dir.join("b.txt"), "beta").expect("write b");
@@ -542,7 +542,7 @@ fn run_async_metadata_twins_on_the_real_executor() {
     // Extern-types X6: `fs.exists_async`/`remove_async`/`list_async` have NO real body — the
     // real executor's None fallback runs their sync body against the RealHost at spawn. This
     // exercises that degradation path end-to-end on real disk.
-    let dir = std::env::temp_dir().join("noeta_cli_async_meta_dir");
+    let dir = temp_root().join("noeta_cli_async_meta_dir");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create work dir");
     std::fs::write(dir.join("keep.txt"), "k").expect("write keep");
@@ -612,7 +612,7 @@ fn run_bcrypt_round_trips_on_real_entropy() {
 fn run_writes_files_asynchronously_on_the_real_executor() {
     // Track A.10: `fs.write_async`/`append_async` hit the REAL disk via the real executor's tokio
     // runtime, awaited like any future. A write/append/read round-trip lands on disk.
-    let dir = std::env::temp_dir().join("noeta_cli_async_write_dir");
+    let dir = temp_root().join("noeta_cli_async_write_dir");
     std::fs::create_dir_all(&dir).expect("create work dir");
     let _ = std::fs::remove_file(dir.join("w.txt"));
     let src = "use std.{fs}\n\
@@ -886,4 +886,116 @@ fn run_without_jit_stats_prints_no_report() {
         !stderr.contains("JIT report"),
         "no report unless asked:\n{stderr}"
     );
+}
+
+// --- warnings do not block ---------------------------------------------------------
+
+/// A **warning** is reported and the program still runs — the whole program, from its first
+/// statement, exiting on its own merits.
+///
+/// `noeta run` used to gate on "any diagnostic" rather than "any error", so one E0063 (`i32` erases
+/// to `int`, so `x is i32` is always false — advisory, and `noeta check` scores it `0 error(s), 1
+/// warning(s)` and exits 0) meant the program never started: no stdout at all, not even the `echo`
+/// on the line *before* the warned-about one, and exit 1. A file the checker called fine could not
+/// be executed. That also made every new warning a hard stop, which is what makes advisory lints
+/// unshippable — so this asserts the three things that must all hold at once: the warning is still
+/// reported, the program's full output is produced, and the exit code is the program's own.
+#[test]
+fn a_warning_is_reported_and_the_program_still_runs() {
+    let file = temp_program(
+        "warning_does_not_block",
+        "echo \"BEFORE\"\na: i32 = 5\necho \"is i32 -> ${a is i32}\"\necho \"AFTER\"\n",
+    );
+
+    // `check` agrees the program is fine: zero errors, exit 0.
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 error(s), 1 warning(s)"));
+
+    // …so `run` must run it. Every line, in order, exit 0 — with the warning still on stderr.
+    let out = lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("BEFORE\nis i32 -> false\nAFTER\n");
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("[E0063]") && stderr.contains("Warning"),
+        "the warning is still reported, not silenced:\n{stderr}"
+    );
+}
+
+/// The warning survives repetition. A warned program deliberately skips the startup cache: caching
+/// it would short-circuit the whole front-end on the second run, so the lint would appear once and
+/// then never again — a warning you cannot see is worse than no warning at all.
+#[test]
+fn a_warning_is_reported_on_every_run_not_just_the_first() {
+    let file = temp_program(
+        "warning_survives_cache",
+        "a: i32 = 5\necho \"is i32 -> ${a is i32}\"\n",
+    );
+    for run in 1..=2 {
+        let out = lang()
+            .arg("run")
+            .arg(&file)
+            .assert()
+            .success()
+            .stdout("is i32 -> false\n");
+        let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+        assert!(
+            stderr.contains("[E0063]"),
+            "run {run} still reports the warning:\n{stderr}"
+        );
+    }
+}
+
+/// The other half of the rule: an **error** still blocks, and still blocks *before* the program
+/// produces anything. Without this the fix above could be "let everything through".
+#[test]
+fn an_error_still_blocks_the_run_entirely() {
+    let file = temp_program("error_still_blocks", "echo \"BEFORE\"\nx = nope()\n");
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("[E0005]"));
+}
+
+/// A program whose only diagnostic is a warning still *builds*, *dumps*, and — the verbs that share
+/// `run`'s pipeline — reports the warning while producing its artifact.
+#[test]
+fn a_warning_does_not_fail_build_or_dump() {
+    let file = temp_program(
+        "warning_build_dump",
+        "a: i32 = 5\necho \"is i32 -> ${a is i32}\"\n",
+    );
+    let out = lang().arg("dump").arg(&file).assert().success();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("[E0063]"),
+        "dump reports the warning on stderr, keeping stdout the pure disassembly:\n{stderr}"
+    );
+    assert!(
+        String::from_utf8(out.get_output().stdout.clone())
+            .unwrap()
+            .contains("=== main ==="),
+        "the disassembly is still produced"
+    );
+
+    let bundle = file.parent().unwrap().join("out.noeb");
+    lang()
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&bundle)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("[E0063]"));
+    assert!(bundle.exists(), "the artifact is still written");
 }

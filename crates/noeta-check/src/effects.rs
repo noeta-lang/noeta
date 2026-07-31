@@ -42,7 +42,7 @@ impl Checker {
         // The arguments cross into the fresh isolate — check the called function's declared parameter
         // types (a direct-call callee), so a `class` argument is rejected without re-synthesizing args.
         if let Expr::Ident { name, .. } = callee.as_ref()
-            && let Some(sig) = self.symbols.functions.get(name)
+            && let Some(sig) = self.symbols.functions.get(name.as_str())
         {
             for param in sig.params.clone() {
                 if !self.is_send(&param, &mut Vec::new()) {
@@ -69,11 +69,17 @@ impl Checker {
     /// The substitution mapping a declared type's generic parameters to the type arguments a use site
     /// supplied (`Box<int>` → `{T: int}`) — used to instantiate field/payload types before the `Send`
     /// check. Empty for a non-generic type or when no arguments are given.
-    pub(crate) fn type_arg_subst(&self, name: &str, args: &[Type]) -> HashMap<String, Type> {
+    pub(crate) fn type_arg_subst(&self, name: &str, args: &[Type]) -> Subst {
         self.symbols
             .generic_types
             .get(name)
-            .map(|params| params.iter().cloned().zip(args.iter().cloned()).collect())
+            .map(|params| {
+                params
+                    .iter()
+                    .map(|p| p.id)
+                    .zip(args.iter().cloned())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

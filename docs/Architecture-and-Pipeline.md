@@ -30,7 +30,7 @@ tokens ──► noeta-parser (chumsky) ──► AST (noeta-ast)
                               (observable output; the two are asserted identical)
 ```
 
-Each stage is a separate crate with an explicit input and output type and no hidden shared mutable state, so a change to one stage is local to its crate and verifiable by that stage's snapshot tests. This staging is what makes the codebase tractable to work on — including for AI agents.
+Each stage is a separate crate with an explicit input and output type and no hidden shared mutable state, so a change to one stage is local to its crate and verifiable by that stage's snapshot tests. This staging is what makes the codebase tractable to work on.
 
 ## The two-backend differential oracle
 
@@ -44,13 +44,13 @@ Both implement one trait — `trait Backend { fn run(&self, program: &Program) -
 Why build it twice? A second independent implementation is a continuously-running oracle: any divergence between the two is a bug in one of them, caught mechanically instead of by hand-written expected output. Crucially, the comparison is on *observable behavior*, not internal representation — which is exactly what frees the two backends to use completely different value models (an `Rc` enum vs. NaN-boxed words). This oracle is the spine of the whole test strategy, and it constrains the design: any shared semantics that both backends must agree on live *once*, in `noeta-stdlib`, so they cannot drift.
 
 > [!NOTE]
-> **A precise nuance.** The differential's reference used to be the AST tree-walker. Since the memory-management migration, the reference is the **Core-IR interpreter** (the same `noeta-eval` machinery, now interpreting the RC-annotated ANF IR) — because the AST walker fired destructors only at global teardown and so could no longer reproduce last-use destruction. The live differential is now *Core-IR interpreter ↔ VM*: two genuinely different memory machines (Rust `Rc` vs. a manual refcount heap) executing the *same* RC-annotated IR. The AST tree-walker itself was retired in the migration; the Core-IR interpreter is the sole reference path (its `Backend::run` shim still lowers to the same Core IR for perf benches and property tests).
+> **A precise nuance.** The reference backend is the **Core-IR interpreter** — `noeta-eval` interpreting the RC-annotated ANF IR — because last-use destructor timing is a property of the IR, and only an interpreter of that IR can reproduce it exactly. The live differential is therefore *Core-IR interpreter ↔ VM*: two genuinely different memory machines (Rust `Rc` vs. a manual refcount heap) executing the *same* RC-annotated IR. An AST-level tree-walker cannot serve as the reference here: it would fire destructors only at global teardown, so it could not witness the last-use timing the IR encodes.
 
 ## Incremental compilation (salsa)
 
 The pipeline is not just a straight line of function calls — it is expressed as a graph of memoized **queries** using [salsa](https://github.com/salsa-rs/salsa) 0.27 (the framework rust-analyzer is built on), in the `noeta-db` crate. The `SourceProgram` input feeds tracked queries `tokens → ast → checked → bytecode`; the module graph adds `Workspace → linked → linked_checked → linked_bytecode`. Editing one module recomputes only its transitive dependents.
 
-This is not a separate feature bolted on — it is the *same* query graph that would power a responsive LSP, hot-module-reload blast-radius analysis, and agent-local change verification. The sharp crate seams are what make the queries mechanical. (salsa needs memoized returns to be `Update + PartialEq`; the three foreign artifacts are wrapped in local newtypes with conservative "always-changed" impls — the crate's only, miri-gated, `unsafe`.)
+This is not a separate feature bolted on — it is the *same* query graph that would power a responsive LSP, hot-module-reload blast-radius analysis, and agent-local change verification. The sharp crate seams are what make the queries mechanical. (salsa requires memoized returns to be `Update + PartialEq`, so three foreign artifact types are wrapped in local newtypes with conservative "always-changed" impls.)
 
 ## Diagnostics as data
 
@@ -79,3 +79,4 @@ Each crate carries its own `README.md` as its primary documentation. The followi
 - **[Concurrency Internals](Concurrency-Internals)** — the stackless coroutine substrate, isolates, channels.
 - **[Performance Techniques](Performance-Techniques)** — SIMD/layout, inline caches, and what was measured and dropped.
 - **[Native Extensions](Native-Extensions)** — the registry seam for adding native modules.
+- **[Extension Compatibility](Extension-Compatibility)** — the stable surface and versioning contract for native packages.

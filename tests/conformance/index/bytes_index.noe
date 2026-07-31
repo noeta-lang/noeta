@@ -1,0 +1,44 @@
+// `b[i]` reads one byte of a `bytes` buffer as an `int`. `bytes` was the one sequence in the
+// language with a `len()` and no element read at all — a byte buffer could be produced and measured
+// but never taken apart, which made every in-language decoder (base64, a binary frame, a checksum)
+// inexpressible. The read is UNSIGNED (`0..=255`), so a high byte does not come back negative, and
+// `b.slice(start, end?)` lands alongside it so `bytes` has the same reading surface `string` and
+// `List<T>` do rather than one accessor bolted on. Identical under both backends.
+// expect: stdout "104"
+// expect: stdout "195"
+// expect: stdout "169"
+// expect: stdout "3"
+// expect: stdout "Type.Int"
+// expect: stdout "251 255 190"
+// expect: stdout "c3a9"
+// expect: stdout "68"
+// expect: stdout "68c3a9"
+// expect: stdout ""
+// expect: stdout "104 233"
+// expect: exit 0
+
+// "hé" is three UTF-8 bytes: 0x68, 0xc3, 0xa9 — the second and third are ABOVE 127.
+b = "hé".to_bytes()
+echo b[0]
+echo b[1]
+echo b[2]
+echo b.len()
+echo type_of(b[0])
+
+// A high byte reads unsigned, whatever its source.
+hi: List<u8> = [0xfb, 0xff, 0xbe]
+raw = hi.to_bytes()
+echo "${raw[0]} ${raw[1]} ${raw[2]}"
+
+// `slice(start, end?)` — half-open, `end` defaulting to the length, exactly like string/list.
+echo b.slice(1).to_hex()
+echo b.slice(0, 1).to_hex()
+echo b.slice(0, 3).to_hex()
+echo b.slice(3).to_hex()
+
+// The pair composes: a per-byte walk over a slice is now expressible in-language.
+mut out = []
+for i in 0..b.slice(0, 2).len() {
+    out = [...out, b[i]]
+}
+echo "${out[0]} ${out[1] + 38}"

@@ -7,21 +7,72 @@ Multi-file module loading and linking (M1.9).
 
 ## The model
 
-A program is rooted at an entry file. The other `.noe` files in the entry's directory are candidate **modules**, each declaring its identity with `namespace App.Models;`. The entry's imports —
+A program is rooted at an entry file. The other `.noe` files of its **package** are candidate **modules**, and a module's identity is *derived from where its file sits* — the package's import prefix plus the file's path inside the package, `/` → `.`, case preserved verbatim (`derive.rs`). The entry's imports —
 
 ```
-use App.Models.User;
-use App.Billing.{Invoice, Receipt};
+use dirscan.deep.nested.Scanner;
+use billing.{Invoice, Receipt};
 ```
 
-— resolve against those declared namespaces: each imported name's *real* declaration (a class, struct, enum, or function) is pulled from the providing module and **merged into a single `Program`** ahead of the entry's own statements. Both backends then run the merged program unchanged, so the differential oracle is preserved by construction — there is no module-aware runtime, only one linked program.
+— resolve against those derived paths: each imported name's *real* declaration (a class, struct, enum, or function) is pulled from the providing module and **merged into a single `Program`** ahead of the entry's own statements. Both backends then run the merged program unchanged, so the differential oracle is preserved by construction — there is no module-aware runtime, only one linked program.
+
+### The derivation rule
+
+| | |
+|---|---|
+| **Prefix** | a plain `[dependencies]` entry → the **key** (`mycli = { … }` → `mycli.…`); a scope-array member → `{key}.{package segment}`; the root package's own modules → its `[package] name`'s package half |
+| **Path** | the file's path relative to the package root, directories then stem, `/` → `.`; a leading `src/` is layout, not a segment |
+| **Root file** | a stem repeating the segment before it names *that* module (`para-db/db.noe` under prefix `para.db` is `para.db`, not `para.db.db`) |
+| **Case** | preserved verbatim; `use` matching is exact |
+
+A file reached with **no package** (a lone script) derives nothing, and is identified by the `namespace` it declares — the pre-derivation behavior. A `namespace` declaration on a file that *does* derive is accepted only as a restatement: one that disagrees is `E0072`. Two files deriving one path is `E0073`, naming both; a directory or stem that is not a legal identifier segment is `E0074`, with the rename to make.
+
+Deriving the path is what makes the consumer's import key real (`para/cli` keyed `mycli` is `mycli.cli`, where re-rooting a declared `namespace para.cli` silently did nothing), and what makes an app's subdirectories work — the app's own scan is the same recursive, pruned package walk a dependency has always had.
+
+**Intra-package imports** (`reroot_path`). A dependency's own modules import each other by the package's own root segment — the prefix they derive under when the package is built *standalone* — and that leading segment is replaced by the prefix they derive under **here**. `use db.query` inside `para/db` is a no-op standalone, becomes `para.db.query` under `para = [{ package = "para/db" }, …]`, and `mydb.query` under `mydb = { … }`, so one spelling works in every build. Rewriting a single segment to the *key* could not: for a scope-array member the key is the scope half, so `use db.query` matched nothing and was silently left alone while `use para.db.query` matched nothing standalone — a package author had to pick which build to break. A leading segment that is instead one of the package's *own* dependency keys maps to that dependency's global segment (one segment: the author spelled the rest); anything else — `std`, a native extension's namespace root — is untouched.
+
+## What gets merged: imports, their closure, every impl, and every annotated declaration
+
+Four things put a pooled module's declaration into the merged program:
+
+1. an **import** naming it (the `use`-driven merge above);
+2. the **same-module closure** of anything already merged — the internal helper an exported `fn` calls, the module-local type it names in a parameter/return/field;
+3. a **standalone `impl`** whose target type is anywhere in the program (the entry's own declarations included), because an impl has no import name and must travel with its type or the type arrives without its traits;
+4. a **`#[...]` data attribute** anywhere on it — on the declaration itself, or on a method, field, variant, or parameter.
+
+Visibility does not gate an intra-module reference, so a non-`pub` helper is pulled.
+
+The third runs to a **fixpoint**, because "is the target type in the program?" is a question whose answer grows while it is being asked: an impl's own body closure merges the declarations it names, so `impl Codec for MyCodec { fn decoder(): dyn Decoder { return MyDecoder.new() } }` is what puts `MyDecoder` in the program, and `impl Decoder for MyDecoder` only becomes eligible after it. One pass could not see that in either source order, and the impl it dropped failed silently — the type linked and its inherent methods dispatched, so only the trait went missing, in a consumer of the package and never in the package's own tests. Each impl is deduped on its **span**, the identity of a declaration being where it is written; deduping on `(target, trait)` instead named the coherence *slot*, so two modules that each implemented one trait for one type silently collapsed into whichever the scan reached first rather than reaching the checker as the E0027 they are.
+
+The fourth is `carries_data_attribute`, and it exists because an attribute's whole purpose is to make a declaration findable by something that never names it: `attributes_of::<Tool>()` discovers it and `invoke` calls it by name. Merging only along `use` edges meant the manifest held just the annotated declarations the entry happened to import — the registration mechanism could not see its own registrations, and reflection could not report what dispatch could reach. An annotated root is merged with the same closure an imported one gets, so it also *runs*.
+
+It is scoped to the annotation, not the file: an unannotated declaration nothing references still stays out, so this is not whole-directory compilation. A `@derive`/`@role`/`@packed` **directive** is deliberately not a root — it drives codegen on a declaration already in the program rather than registering one for discovery. (A `@role` still reaches the manifest transitively: it rides on an `@attribute` struct, and it is the *applications* of that struct that are roots.)
 
 ## Backward-compatible by construction
 
 Linking is purely additive. A `use` that **no** loaded module provides is left in place, so the runtime falls back to its M0 *opaque-stub* behavior (an imported name with an unknown shape that literals still construct). A single file with no sibling modules therefore links to exactly itself, and the whole existing single-file corpus is unaffected — real resolution lights up only when a sibling module actually provides the imported name, in which case the `use` is trimmed (so no duplicate opaque stub shadows the real declaration).
 
+## One flat scope, so file-scoped names are renamed into it
+
+The merged program has **one global scope**, and that scope is the *entry's*: its own short names are already the program's. Every other unit's file-scoped names are therefore rewritten into it, in both namespaces a file binds:
+
+- **Types and declarations** take their qualified identity (`User` → `App.Models.User`), through a module's `UnitMap::names`.
+- **Native `use` handles** — the value bindings `use std.http.url` (`url`), `use std.{json}` (`json`), `use std.http.url.{decode}` (`decode`) create — take the import's **canonical identity** (`std.http.url`, `std.json`, `std.http.url.decode`), through `UnitMap::handles`. The retained `use` is aliased to the same name, so the binding both backends create and the reference that reads it are one decision, taken here.
+
+Without that second rewrite a leaf name was the binding key across every unit: a dependency's `use std.http.url` and an unrelated package's `use para.url` both claimed the global `url`, last writer won, and the dependency called into a module it had never heard of — while the checker, which keeps its own per-import table, answered correctly. The program checked clean and failed at run time. `Registry::classify_use` is the one classifier all four consumers (checker, both backends, this linker) call, so the canonical name recorded here is by construction the identity they resolve the import to.
+
+## Compile-time directive expansion
+
+Linking is also where an extension's `ExtDirective::expand` hook runs (`expand.rs`), because generated members have to be in the one merged `Program` before anything checks it. Every link entry point routes through the single `run_expansion`, so the editor and the compiler can never disagree about a decorated type's members. Each expansion becomes a **real `Source`** appended to the program's source map, so generated code has true spans; the files the hooks reported reading come back too, as the rebuild trigger a watcher folds into its watch set.
+
+The hook is given a `DirectiveCtx`: the invocation (`args`, `named`), the declaration it decorates (`target`, `site`, and its members as `fields` — via the shared `noeta_ast::shape` derivation, so a hook can generate from a struct's *shape* and sees exactly what the checker hands `ExtDerive::validate`), and the directive's own directory so a relative path argument resolves against the file rather than the process's working directory. Nothing about the surrounding program, so an expansion's output depends only on inputs the caller can key a memoized result on.
+
 ## Diagnostics
 
-Each module keeps its own `Source` (the entry is `SourceId(0)`, siblings follow), so a module's lex/parse diagnostics render against that module. Visibility (`pub`, `E0019`), name-collision (`E0020`), and unknown-type (`E0013`) checks run across the merged program, and the module graph is expressed as salsa queries (`noeta-db`'s `Workspace`/`linked`/`linked_checked`/`linked_bytecode`, so editing one module recomputes only its dependents). One piece remains latent: attributing a *check/runtime* diagnostic that lands on a merged-in declaration back to that declaration's own source (the merged-body `SourceMap`) — a deferred follow-up.
+`Linked` also carries two per-`SourceId` side-tables the merge would otherwise destroy: `editions` (which language edition governs each source) and `packages` (which **package** each source was read from — the entry and its siblings are the root package, each dependency's modules that package's global key). The checker reads the latter through each declaration's span to enforce the package orphan rule (E0070). Compile-time expansion sources are deliberately left out of `packages`: generated code belongs to no package the loader can name — the directive that produced it may sit on a *dependency's* declaration — so attributing it to the root would be wrong rather than merely missing.
+
+Each module keeps its own `Source` (the entry is `SourceId(0)`, siblings follow), so a module's lex/parse diagnostics render against that module. Visibility (`pub`, `E0019`) and unknown-type (`E0013`) are properties of the merged program; **name collision (`E0020`) is not** — a `use` binds in one file, so the collision question is asked per *compilation unit* (the entry, or a pooled module driving its own imports). Two files importing different declarations under the same short name is exactly how two packages sharing an import root coexist, and is never a clash. The module graph is expressed as salsa queries (`noeta-db`'s `Workspace`/`linked`/`linked_checked`/`linked_bytecode`, so editing one module recomputes only its dependents).
+
+An import diagnostic is built by the linking core, which sees `Program`s and no `Source`s, so it can only name the entry as a provisional render target; `attribute_to_spans` then re-points each one at the file its span actually indexes. One piece remains latent: attributing a *check/runtime* diagnostic that lands on a merged-in declaration back to that declaration's own source (the merged-body `SourceMap`) — a deferred follow-up.
 
 Part of the `noeta` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).

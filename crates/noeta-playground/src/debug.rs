@@ -65,7 +65,8 @@ pub fn debug_source(request_json: &str) -> String {
     };
 
     let (db, src, diagnostics) = crate::front_end(&request.source);
-    if !diagnostics.is_empty() {
+    // Errors only — a warning must not refuse to start a debug session (see `run_with_executor`).
+    if crate::blocking(&diagnostics) {
         return json!({ "compiled": false, "diagnostics": diagnostics }).to_string();
     }
 
@@ -81,22 +82,23 @@ pub fn debug_source(request_json: &str) -> String {
     let program = &noeta_db::ast(&db, src).0.program;
     let (checked, checker) =
         noeta_check::check_all_session_with(program, noeta_edition::EditionMap::default());
-    let (module, session) = match noeta_compiler::compile_with_sites_session(
-        program,
-        checked.sites,
-        false,
-        true,
-    ) {
-        Ok(compiled) => compiled,
-        Err(unsupported) => {
-            return json!({
+    let (module, session) =
+        match noeta_compiler::compile_with_sites_session(program, checked.sites, false, true) {
+            Ok(compiled) => compiled,
+            Err(unsupported) => {
+                let located: Vec<_> = unsupported
+                    .diagnostic()
+                    .iter()
+                    .map(|d| noeta_diagnostics::to_json(&sources, d))
+                    .collect();
+                return json!({
                     "compiled": false,
-                    "diagnostics": [],
-                    "error": format!("internal error: the VM cannot compile this program: {}", unsupported.reason),
+                    "diagnostics": located,
+                    "error": unsupported.to_string(),
                 })
                 .to_string();
-        }
-    };
+            }
+        };
 
     let requested = HashMap::from([(crate::SOURCE_NAME.to_string(), request.breakpoints)]);
     let stops = resolve_breakpoints(&module, &sources, &requested);
@@ -127,7 +129,14 @@ pub fn debug_source(request_json: &str) -> String {
         .iter()
         .map(|d| noeta_diagnostics::to_json(&sources, d))
         .collect();
-    let rendered_trace = (trace.len() >= 2).then(|| noeta_vm::render_trace(&trace, &sources));
+    // A traceback explains a FAULT, so a user stop must not produce one. Stopping from a pause
+    // unwinds through the same abort path a panic uses, and the captured frames are simply
+    // wherever the program happened to be parked — so the depth test alone rendered a stack trace
+    // every time someone hit Stop below the top frame, reading as a crash they did not cause.
+    // `terminated` already distinguishes the two (the doc comment above calls the stop's abort
+    // "the stop itself, not a program error"); a real abort mid-session still renders normally.
+    let rendered_trace =
+        (!terminated.get() && trace.len() >= 2).then(|| noeta_vm::render_trace(&trace, &sources));
     json!({
         "compiled": true,
         "stdout": result.stdout,
@@ -635,6 +644,29 @@ mod tests {
         assert_eq!(pauses.len(), 1);
         // Terminated before the echo ran.
         assert_eq!(result["stdout"], "");
+        // And NO traceback: the pause was two frames deep (`add`, then `main`), which used to be
+        // enough to render one on its own, so hitting Stop anywhere below the top frame showed the
+        // visitor a stack trace for a crash they did not cause. A stop is not a fault.
+        assert_eq!(result["trace"], serde_json::Value::Null, "{result}");
+    }
+
+    #[test]
+    fn a_real_abort_during_a_debug_session_still_renders_its_traceback() {
+        // The other side of the stop/fault split: suppressing the terminate traceback must not
+        // suppress a genuine one. This program panics inside `boom` after the pause is resumed, so
+        // the run ends on a real abort and the traceback is the whole point.
+        const ABORTS: &str =
+            "fn boom(n: int): int {\n  panic(\"kaboom\");\n}\n\nx = 1;\necho boom(x);\n";
+        let (result, pauses) = debug_with(ABORTS, &[2], false, &[r#"{"action":"continue"}"#]);
+        assert_eq!(result["compiled"], true);
+        assert_eq!(result["terminated"], false);
+        assert_eq!(pauses.len(), 1);
+        assert_ne!(result["exit_code"], 0, "{result}");
+        let trace = result["trace"].as_str().unwrap_or_default();
+        assert!(
+            trace.contains("boom"),
+            "traceback should name the frame: {result}"
+        );
     }
 
     #[test]

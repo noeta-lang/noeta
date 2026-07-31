@@ -34,12 +34,14 @@ fn get(addr: &str, path: &str) -> Result<String, String> {
 #[test]
 #[ignore = "binds a real socket across threads and sends SIGINT; run explicitly"]
 fn parallel_workers_share_the_listener_and_drain_together() {
-    let dir = std::env::temp_dir().join(format!("noeta-parallel-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = noeta_test_temp::TempDir::new("parallel-serve");
     let app_path = dir.join("app.noe");
     std::fs::write(&app_path, app()).unwrap();
 
-    let port = 8491;
+    // A kernel-assigned port, not a fixed one: a fixed port is shared with every other
+    // checkout and every concurrent run of this test on the machine, and the server that loses the
+    // bind dies where the client sees only a reset connection.
+    let port = noeta_test_temp::free_port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
         .args([
             "serve",

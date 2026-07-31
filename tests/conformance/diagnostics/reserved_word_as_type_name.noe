@@ -1,0 +1,6 @@
+// A declared type's name is a name.
+// expect: error E0046 at 4:8
+// expect: exit 1
+struct type_name {
+    a: int
+}

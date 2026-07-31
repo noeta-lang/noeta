@@ -1,0 +1,35 @@
+// A type parameter **inside a tuple or a union** is a type parameter like any other: it
+// instantiates where a call determines it, and erases to `dyn` where nothing does.
+//
+// It used not to be. The walkers that erase, substitute and bind parameters descended into every
+// container the lattice has *except* `Tuple` and `Union`, so a parameter written inside one came
+// out untouched — and a parameter is a subtype of nothing, so this file did not compile:
+// `second(("a", 2))` reported *"argument of type `(string, int)` is not assignable to `(T, int)`"*,
+// naming a parameter the caller cannot spell. The un-erased form also escaped into caller-visible
+// types: `w` below was `(T, int)` in a scope where `T` means nothing at all.
+// expect: stdout "2"
+// expect: stdout "1"
+// expect: stdout "hi/7"
+// expect: exit 0
+
+// The parameter is inside the tuple, and nothing in the call determines it — so it erases, and the
+// argument is checked against the honest `(dyn, int)`.
+fn second<T>(p: (T, int)): int {
+    return p.1;
+}
+
+// A union member erases the same way: `T | string` becomes `dyn | string`, which IS `dyn`.
+fn tag<T>(x: T | string): string {
+    return "${x}";
+}
+
+// And where a call DOES determine the parameter, a tuple element instantiates like a list element:
+// `wrap("hi")` is a `(string, int)`, not a leaked `(T, int)`.
+fn wrap<T>(v: T): (T, int) {
+    return (v, 7);
+}
+
+echo second(("a", 2));
+echo tag(1);
+w = wrap("hi");
+echo "${w.0}/${w.1}";

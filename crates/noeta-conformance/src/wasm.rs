@@ -155,7 +155,7 @@ pub fn run_wasm_differential(root: &Path, only: Option<&Path>) -> Result<WasmDif
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry) {
+            match crate::read_case_workspace(&case.entry) {
                 Ok(raw) => diff_workspace(&name, &raw, &tools, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
@@ -176,13 +176,17 @@ fn diff_single(name: &str, text: &str, tools: &WasmTools, report: &mut WasmDiffR
     let source = Source::new(SourceId::FIRST, name, text);
     let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
 
-    if !noeta_db::tokens(&db, src).0.diagnostics.is_empty()
-        || !noeta_db::ast(&db, src).0.diagnostics.is_empty()
-    {
+    if noeta_diagnostics::has_errors(
+        noeta_db::tokens(&db, src)
+            .0
+            .diagnostics
+            .iter()
+            .chain(noeta_db::ast(&db, src).0.diagnostics.iter()),
+    ) {
         report.not_run.parse_failed += 1;
         return;
     }
-    if !noeta_db::checked(&db, src).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::checked(&db, src).diagnostics) {
         // A checker-rejected program produces no bundle, so nothing ever reaches the wasm runner
         // — an exclusion, not a match. Its diagnostics are compile-time, out of this oracle's
         // scope, and the corpus harness asserts them.
@@ -203,13 +207,19 @@ fn diff_workspace(
     report: &mut WasmDiffReport,
 ) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
+    let ws = noeta_db::workspace(
+        &db,
+        &raw.entry,
+        &raw.modules,
+        noeta_lexer::Edition::DEFAULT,
+        &raw.paths,
+    );
 
     if noeta_db::linked(&db, ws).program.is_err() {
         report.not_run.link_failed += 1;
         return;
     }
-    if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::linked_checked(&db, ws).diagnostics) {
         report.not_run.checker_rejected += 1;
         return;
     }

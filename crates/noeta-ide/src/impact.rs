@@ -89,8 +89,15 @@ pub fn impact_of_edit(old_src: &str, new_src: &str, edition: noeta_lexer::Editio
     let mut editions = noeta_lexer::EditionMap::new();
     editions.set(noeta_span::SourceId::FIRST, edition);
     let checked = noeta_check::check_all_with_editions(program, editions);
-    if !activated.diagnostics.is_empty() || !checked.diagnostics.is_empty() {
-        // Red code: the consumer's own run will surface the diagnostics.
+    if noeta_diagnostics::has_errors(
+        activated
+            .diagnostics
+            .iter()
+            .chain(checked.diagnostics.iter()),
+    ) {
+        // Red code: the consumer's own run will surface the diagnostics. A *warning* is not red —
+        // narrowing an edit that merely lints is still sound, and widening to `All` over one would
+        // silently cost the watcher its whole point.
         return Impact::All {
             reason: "the edit does not check".into(),
         };
@@ -509,10 +516,16 @@ impl ImpactSession {
                 // precise than the member-name fallback alone) — cheap at dev-loop rate.
                 record_expr_types: true,
                 editions: noeta_db::workspace_editions(&self.db, cache.workspace),
+                packages: noeta_db::workspace_packages(&self.db, cache.workspace),
                 ..noeta_check::CheckOptions::default()
             },
         );
-        if !activated.diagnostics.is_empty() || !checked.diagnostics.is_empty() {
+        if noeta_diagnostics::has_errors(
+            activated
+                .diagnostics
+                .iter()
+                .chain(checked.diagnostics.iter()),
+        ) {
             return Impact::All {
                 reason: "the edit does not check".into(),
             };
@@ -670,11 +683,12 @@ mod tests {
     // ------------------------------------------------------------ the whole-project engine
 
     /// A throwaway project directory (fresh per test — the loader treats every sibling `.noe`
-    /// as a module, so tests must not share directories).
-    fn project(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("noeta_impact_test_{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create test project dir");
+    /// as a module, so tests must not share directories) — and fresh per *process* too, which
+    /// `/tmp/noeta_impact_test_<name>` was not: every checkout and every concurrent test binary
+    /// shared it, and each opened by `remove_dir_all`ing it. The guard comes back with the
+    /// directory; dropping it removes the tree.
+    fn project(name: &str, files: &[(&str, &str)]) -> noeta_test_temp::TempDir {
+        let dir = noeta_test_temp::TempDir::new(&format!("impact-{name}"));
         for (file, text) in files {
             std::fs::write(dir.join(file), text).expect("write test module");
         }

@@ -1,0 +1,9 @@
+// An intra-package import, written the ONE way that works in both builds: leading with the
+// package's own root segment (`db`), which is what this package's modules derive under when it is
+// built standalone. Consumed here as a scope-array member, so it is re-rooted to the two-segment
+// prefix `para.db` — `db.open` becomes `para.db.open`, which is what `db.noe` derives.
+use db.open;
+
+pub fn run(): string {
+    return "${open()}:rows";
+}

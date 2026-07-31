@@ -259,13 +259,28 @@ pub enum DiagnosticCode {
     /// a differently-typed error out of the function. Declare `impl From<Source>` on the target
     /// error type, or align the function's declared error type.
     TryErrorMismatch,
-    /// A generic application carrying the wrong type arguments. Two sites report it: an explicit
+    /// A generic application carrying the wrong type arguments. Three sites report it: an explicit
     /// turbofish instantiation (`f::<T, ...>(args)`) that cannot apply — the callee is not a generic
     /// function (or not a function at all), or the count does not match the declared type parameters
-    /// — and a **built-in type constructor** applied at the wrong arity in a type reference
-    /// (`List<int, string>`, `Map<int>`). In both cases type arguments bind to the constructor's
-    /// parameters in order; supply exactly one per parameter, or omit `<…>` entirely and let them
-    /// infer.
+    /// —; a **built-in type constructor** applied at the wrong arity in a type reference
+    /// (`List<int, string>`, `Map<int>`); and a **name-keyed reflection turbofish**
+    /// (`field_specs_of::<T>()`, `variants_of::<T>()`, `construct::<T>(…)`) whose argument is a type
+    /// **parameter**. In the first two cases type arguments bind to the constructor's parameters
+    /// in order; supply exactly one per parameter, or omit `<…>` entirely and let them infer.
+    ///
+    /// The reflection case is the same shape — a turbofish that cannot apply — for a reason peculiar
+    /// to erasure: those queries are keyed on a type NAME, and one compiled body serves every
+    /// instantiation, so inside `fn f<T>()` the argument `T` is only ever the literal characters `T`.
+    /// Nothing is registered under that key, and before this the query answered with the empty schema
+    /// (or an `Err`) and no diagnostic at all — a wrong answer indistinguishable from a real type with
+    /// no fields.
+    ///
+    /// The fix is to hand the query a *name* rather than a type, and the name is now reachable from
+    /// inside a generic body: `type_name::<T>()` resolves a forwarded parameter through the same
+    /// hidden type-argument slot that carries a forwarded decode recipe, so
+    /// `field_specs_of(type_name::<T>())` answers the real per-instantiation schema. `type_name`
+    /// itself is E0058 only where neither instantiation channel reaches — a generic **method's own**
+    /// `<U>`, or a self-less member of a generic type, whose parameter rides the receiver.
     InvalidTypeArguments,
     /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
     /// that already means something in scope — an enclosing binding, a top-level function or type,
@@ -294,11 +309,21 @@ pub enum DiagnosticCode {
     /// directive misbehaved. The position inside the generated source goes in the message, because
     /// that source is real and openable rather than a fiction the compiler made up.
     DirectiveExpansionFailed,
-    /// **Warning.** A bare-scalar type test `x is iN`/`x is f64` names a fixed-width numeric that is
-    /// *erased* to `int`/`float` on a scalar value — no scalar carries a width tag, so the test is
-    /// statically always false. `f32` is exempt (reified at runtime) and container targets like
-    /// `List<i32>` are exempt (packed element widths are distinct). The fix is to test the base type
-    /// (`x is int` / `x is float`). Advisory, not an error: the program still compiles.
+    /// **Warning.** A bare-scalar type test `x is iN`/`x is f64` that **cannot be answered**: the
+    /// target names a fixed width, and the scrutinee's static type does not fix one.
+    ///
+    /// A width is a property of *storage*, not of a value — every integer width is the same runtime
+    /// word, and an `f64` *is* a `float` bit for bit — so a value laundered through `dyn` (or held
+    /// as a union, or as an erased type parameter) no longer carries the width anywhere, and no
+    /// runtime test can recover it. The fix is to test the base type (`x is int` / `x is float`).
+    ///
+    /// Deliberately **not** reported when the scrutinee's static type settles the question:
+    /// `a: i32` then `a is i32` is answered by the checker and folded to `true`
+    /// (`noeta_check::Sites::folded_type_tests`), and `a is i64` to `false`. Those are decided
+    /// answers, not erasure — this code once fired on them too, which made it noise on exactly the
+    /// programs that were right. `f32` is exempt everywhere (reified at runtime, a real narrowing
+    /// head) and so are container targets like `List<i32>` (a packed element's width lives in the
+    /// buffer's schema). Advisory, not an error: the program still compiles.
     ErasedWidthNarrow,
     /// A string escape is malformed. Covers the numeric escapes added for control characters: a
     /// `\xHH` that lacks two hex digits, is non-hex, or exceeds `0x7F` (the ASCII range — a lone
@@ -307,6 +332,136 @@ pub enum DiagnosticCode {
     /// surrogate (`0xD800`–`0xDFFF`). The other escapes (`\n \t \r \" \\ \$`) and an unknown
     /// escape (`\q` → `q`) are never this error. Reported at parse time against the escape's span.
     InvalidStringEscape,
+    /// **Warning.** A type test `x is T` whose scrutinee is a **reified container** — an
+    /// `Option<…>` or a `Result<…, …>` — against a target that is not that same container. Both
+    /// carry their own runtime head constructor (`some`/`none`, `Ok`/`Err`), so the tag can never
+    /// be the payload's: `x is P` on an `Option<P>` is statically always false, however much it
+    /// reads like "is it a `P`". The fix is to reach the payload — `match x { some(v) => … }` /
+    /// `Ok(v) => …` — or, for mere presence, `x != none`.
+    ///
+    /// The sibling of [`Self::ErasedWidthNarrow`], and reported for the same reason: the test
+    /// compiles and runs, it simply can never be taken, so the branch is silently dead. The
+    /// checker additionally declines to flow-narrow the scrutinee on such a test — the narrowing
+    /// was the real damage, because it made the dead branch type-check as the payload.
+    ///
+    /// Deliberately *not* reported when the target is open (`dyn`, a `dyn Trait`), is a kind-type
+    /// (`x is Enum` is genuinely **true** for both containers — they are enums at runtime), or is
+    /// a bare type parameter (erased; it may instantiate to the container itself).
+    ImpossibleTypeTest,
+    /// A `match` arm that can never run: an earlier **unguarded irrefutable** arm — a `_` wildcard or
+    /// a bare-identifier binding — already matches every value, so control never reaches this one.
+    /// Decidable from the arm list alone, with no type information.
+    ///
+    /// An error rather than a warning, because unlike the always-false type tests
+    /// ([`Self::ErasedWidthNarrow`], [`Self::ImpossibleTypeTest`] — where the *reader* can still see
+    /// which branch is dead) this arm's death is invisible in the source: the catch-all that killed
+    /// it is spelled exactly like the variant patterns around it. The author who wrote
+    /// `String => …, Int => …` on an enum scrutinee gets `"string"` for every value and nothing in
+    /// the text looks wrong. Dead code the author did not intend is never the intent, so it is
+    /// rejected outright — move the catch-all last, or delete the unreachable arm.
+    UnreachableMatchArm,
+    // `E0067` (`VariantShadowedByBinding`) is **retired**. It reported a bare-identifier pattern
+    // naming a payload-free variant of the scrutinee's own enum (`String => …` on a `Type`
+    // declaring `String;`), back when a bare identifier always bound. That spelling now *resolves*
+    // to the variant, so what the code reported is the meaning — there is nothing left to report.
+    // The number stays burned: code assignments are append-only and permanent, so E0067 is never
+    // reused for anything else.
+    /// The bytecode backend could not compile a program the type checker accepted — an **internal
+    /// invariant break**, not a mistake in the source.
+    ///
+    /// It is in the catalog for one reason: so it can be *rendered*. The compiler covers the whole
+    /// language and the differential oracle holds it there, so this should never reach a user; when
+    /// it did, it arrived as a bare `internal error: the VM cannot compile this program: <reason>`
+    /// with no file and no line, which is indistinguishable from a broken toolchain and cost two
+    /// agents real time. Going through the ordinary renderer puts the offending construct under a
+    /// caret, which turns "the compiler is broken" into "this one expression is". No conformance
+    /// case expects it, and none should: a program that produces it is a bug to fix here.
+    InternalCompilerError,
+    /// A `?` propagated an `Err` all the way **out of the top level** — the failure had nowhere left
+    /// to go, so the program aborts with the error's `message()` and a non-zero exit.
+    ///
+    /// The runtime half of the `?` position rule ([`Self::InvalidTry`] is the static half). Inside a
+    /// function with a *declared* return type the checker rejects the `?` outright; top-level code and
+    /// a `dyn`/inferred return have no declared return to check, so the judgement lands here instead
+    /// of being discarded. Before this existed, `client.get(url)?` at the top level (or in a `void`
+    /// function called from it) printed nothing after the `?`, produced no diagnostic, and **exited
+    /// 0** — a broken program CI reported as green.
+    UnhandledError,
+    /// A standalone `impl Trait for Type` in a package that declares **neither** the trait nor the
+    /// type — the **package orphan rule**.
+    ///
+    /// Coherence's uniqueness half ([`Self::ConflictingTraitImpl`]) is a whole-program question and
+    /// always answerable; this is the half that says *who may ask it*. Without it, a transitive
+    /// dependency can implement someone else's trait for someone else's type, and the behavior
+    /// appears in an application that imports both and names neither: `t is dyn Speaks` becomes
+    /// true, and `t.speak()` runs code from a package the author never wrote down. Two such packages
+    /// in one graph then collide as an E0027 the end user cannot fix — they own neither impl and can
+    /// remove neither.
+    ///
+    /// An `impl` must therefore be written where one of the two things it joins lives: with the
+    /// trait, or with the type. Neither in-body `impl Trait { }` nor `@derive(Trait)` can violate it
+    /// (both sit on the type's own declaration), and a *cross-module* impl inside one package is
+    /// unaffected — the boundary is the package, not the file. The escape hatch is the newtype: wrap
+    /// the foreign type in a local one and `@derive(Trait, via: field)`.
+    OrphanImpl,
+    /// **Warning.** A tier runner (`noeta test`/`noeta bench`) left a top-level statement out of the
+    /// shared setup, and a selected tier fn `use (…)`-captures a binding that statement writes to.
+    ///
+    /// Every case runs as `<shared setup> + <call the tier fn>`, and the setup is the file's
+    /// declarations, bindings, and top-level effects that *finish* — so the runner never exits or
+    /// blocks on the program's own `os.exit(…)` / `server.serve(…)` / `while true { … }`. What made
+    /// that policy dangerous was not the drop, it was the **silence**: a kept
+    /// `conn = db.connect(…)` beside a dropped `conn.migrate(…)` handed every test a live, working,
+    /// **empty** database, and the only signal was the database's own `no such table: users`.
+    ///
+    /// This is that missing signal. It fires only where the coupling is real — the statement writes
+    /// a name the selected test captures — and names both sides, so the fix (move the work into a
+    /// binding, or into a helper the test calls) is obvious from the message. Advisory: the tests
+    /// still run.
+    DroppedTierSetup,
+    /// A module's `namespace` declaration disagrees with the path **derived from where the file
+    /// sits** (namespace-derivation arc).
+    ///
+    /// A module's path is the package's import prefix plus the file's path relative to the package
+    /// root, so the declaration is redundant — and a declaration that says something *else* is a
+    /// second, contradictory answer to "what is this module called". Before derivation the
+    /// declaration simply won, which let a file at `helpers/uri.noe` call itself
+    /// `Totally.Unrelated`, and made a package's *internal* file names its public API. The fix is
+    /// always the same: delete the declaration (the derived path is the module's path), or move the
+    /// file to where the declaration says it lives.
+    ModulePathMismatch,
+    /// Two files derive the **same** module path (namespace-derivation arc).
+    ///
+    /// One path is one module. When two files claimed one namespace the second file's exports
+    /// silently vanished, and the failure surfaced far away, at the *importing* file, as "module X
+    /// has no export y". This names both files instead.
+    ModulePathCollision,
+    /// A file or directory name is not a legal module-path segment (namespace-derivation arc).
+    ///
+    /// The module path is derived from the path on disk, so every directory name and file stem in it
+    /// has to be spellable in a `use`. `my-utils.noe` is not: `use pkg.my-utils.…` does not parse.
+    /// It is an error with a rename hint rather than a silent `-` → `_` mapping, which would give
+    /// one module two spellings.
+    IllegalModulePath,
+    /// **Warning.** A declaration's own `<T>` reuses the name of a type parameter the *enclosing*
+    /// declaration already introduced — a method's `<T>` inside a `class Repo<T>`.
+    ///
+    /// It is well-defined: the two are different parameters (identity is the declaration site, not
+    /// the spelling), and the inner one shadows the outer exactly as a local binding shadows a
+    /// global. So this is a **readability** judgement, not a correctness one, and it is a warning
+    /// rather than an error: the meaning is settled, it is just not legible. A reader looking at
+    /// `Repo::<Todo>.label::<User>()` cannot tell from the call which `T` the body means, and the
+    /// class's parameter is unreachable from that body under any spelling.
+    ///
+    /// The fix is to rename one of them. Rust lints this and C# rejects it outright; the language
+    /// takes the middle position, because the shadowing rule itself is worth keeping — it is what
+    /// makes a method's own parameter list mean what it says.
+    ///
+    /// Only shadowing of a *type parameter* is reported. A parameter that shares a name with a
+    /// nominal type (`struct T { }` beside a `class Repo<T>`) is silent: those live in one namespace
+    /// but the parameter is the ordinary, expected meaning inside its own declaration, and naming a
+    /// type `T` is a choice the parameter's author does not control.
+    ShadowedTypeParameter,
 }
 
 impl DiagnosticCode {
@@ -377,6 +532,16 @@ impl DiagnosticCode {
         DiagnosticCode::DirectiveExpansionFailed,
         DiagnosticCode::ErasedWidthNarrow,
         DiagnosticCode::InvalidStringEscape,
+        DiagnosticCode::ImpossibleTypeTest,
+        DiagnosticCode::UnreachableMatchArm,
+        DiagnosticCode::InternalCompilerError,
+        DiagnosticCode::UnhandledError,
+        DiagnosticCode::OrphanImpl,
+        DiagnosticCode::DroppedTierSetup,
+        DiagnosticCode::ModulePathMismatch,
+        DiagnosticCode::ModulePathCollision,
+        DiagnosticCode::IllegalModulePath,
+        DiagnosticCode::ShadowedTypeParameter,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -447,6 +612,17 @@ impl DiagnosticCode {
             DiagnosticCode::DirectiveExpansionFailed => "E0062",
             DiagnosticCode::ErasedWidthNarrow => "E0063",
             DiagnosticCode::InvalidStringEscape => "E0064",
+            DiagnosticCode::ImpossibleTypeTest => "E0065",
+            DiagnosticCode::UnreachableMatchArm => "E0066",
+            // "E0067" is retired (see the enum) and deliberately skipped — never reassigned.
+            DiagnosticCode::InternalCompilerError => "E0068",
+            DiagnosticCode::UnhandledError => "E0069",
+            DiagnosticCode::OrphanImpl => "E0070",
+            DiagnosticCode::DroppedTierSetup => "E0071",
+            DiagnosticCode::ModulePathMismatch => "E0072",
+            DiagnosticCode::ModulePathCollision => "E0073",
+            DiagnosticCode::IllegalModulePath => "E0074",
+            DiagnosticCode::ShadowedTypeParameter => "E0075",
         }
     }
 
@@ -544,6 +720,49 @@ impl Diagnostic {
         self.help = Some(help.into());
         self
     }
+
+    /// Attach a secondary label **in place**, returning `&mut Self` for chaining. The `&mut`
+    /// counterpart of [`with_label`](Diagnostic::with_label), for the same push-then-annotate
+    /// pattern [`help`](Diagnostic::help) serves.
+    pub fn label(&mut self, span: Span, message: impl Into<String>) -> &mut Diagnostic {
+        self.labels.push(Label::new(span, message));
+        self
+    }
+
+    /// The [`DiagnosticCode::UnhandledError`] abort: a `?` propagated an `Err` out of the top level,
+    /// so the program stops here with the error's own `message()`. Composed in the catalog rather
+    /// than at either runtime because **both** backends raise it — the differential oracle compares
+    /// diagnostics verbatim, so a single builder is what keeps the two from wording it differently.
+    /// Whether this diagnostic *blocks* — i.e. its severity is [`Severity::Error`]. A warning or a
+    /// note describes the program without condemning it, so it must never stop the pipeline.
+    pub fn is_error(&self) -> bool {
+        self.severity == Severity::Error
+    }
+
+    pub fn unhandled_error(span: Span, message: &str) -> Diagnostic {
+        Diagnostic::error(
+            DiagnosticCode::UnhandledError,
+            span,
+            format!("unhandled error: {message}"),
+        )
+        .with_help(
+            "this `?` has no `Result` to early-return into, so the failure stops here instead of \
+             being discarded — handle it with `match` / `??`, or move the work into a function that \
+             returns `Result<T, E>` and decide at its call site",
+        )
+    }
+}
+
+/// Whether any of `diagnostics` blocks — the **one** predicate every "may I proceed?" gate in the
+/// toolchain asks.
+///
+/// A `Vec<Diagnostic>` is a mixed bag of severities, so `!diagnostics.is_empty()` is not the
+/// question a gate means to ask: it makes a lone *warning* refuse to run a program that is
+/// perfectly well-formed, which turns every advisory lint into a hard stop and makes new warnings
+/// unsafe to add. Gates ask this instead; they still *render* every diagnostic they were handed,
+/// warnings included — proceeding must never mean going quiet.
+pub fn has_errors<'a>(diagnostics: impl IntoIterator<Item = &'a Diagnostic>) -> bool {
+    diagnostics.into_iter().any(Diagnostic::is_error)
 }
 
 /// The candidate most similar to `target`, if one is close enough to be a plausible typo — the
@@ -610,8 +829,10 @@ mod suggest_tests {
     }
 }
 
+mod explain;
 mod json;
 mod render;
+pub use explain::{Explanation, GROUPS};
 pub use json::{JsonDiagnostic, JsonLabel, JsonSpan, to_json};
 pub use render::{render, render_mapped};
 
@@ -653,6 +874,30 @@ mod all_list_guard {
                 Some(*c),
                 "{}",
                 c.code()
+            );
+        }
+    }
+
+    /// Every code's explanation is well-formed. The `match` in `explain` is exhaustive, so a new
+    /// variant cannot compile without an entry — this guards the parts the compiler cannot: an
+    /// entry that exists but is blank, mis-keyed, or filed under a group nothing renders.
+    #[test]
+    fn every_explanation_is_well_formed() {
+        for c in DiagnosticCode::ALL {
+            let e = c.explain();
+            assert_eq!(e.code, c.code(), "explanation keyed to the wrong code");
+            assert!(!e.title.is_empty(), "{}: empty title", c.code());
+            assert!(!e.summary.is_empty(), "{}: empty summary", c.code());
+            assert!(
+                e.summary.trim_end().ends_with(['.', '!']),
+                "{}: summary should be a sentence",
+                c.code()
+            );
+            assert!(
+                crate::GROUPS.contains(&e.group),
+                "{}: group {:?} is not in GROUPS, so it would render nowhere",
+                c.code(),
+                e.group
             );
         }
     }

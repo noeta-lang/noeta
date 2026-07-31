@@ -1,0 +1,44 @@
+// The other half of `method_forwarding.noe`: a forwarding generic METHOD reached through an entry
+// point that carries **no instantiation** aborts, naming the callee, rather than misbinding.
+//
+// This is the boundary that made a hidden PARAMETER unworkable and a separate `type_args` operand
+// necessary. A method has five runtime entry points; four are name-keyed with no static receiver
+// type for the checker to resolve against — a `dyn` receiver (here), a bound handle (`v.m`), an
+// unbound handle (`T.m`), and `invoke(v, "m", args)` — and all four bind arguments positionally.
+// Had the type argument been prepended into the value-argument list, this call would have bound
+// `"{...}"` into `$ty0` and read a JSON string as an index into the program's type-argument table:
+// a wrong answer, silently. It supplies nothing instead, and the arity mismatch is caught.
+//
+// The abort — not an empty answer, not a `dyn` — is the same judgment
+// `generics/class_type_param_unknown_instantiation.noe` makes on the receiver channel, for the same
+// reason: the instantiation is genuinely unknowable here, the surface exists to key something on
+// it, and the fix belongs at the call site that lost it. Both backends share one message
+// (`noeta_ast::reflect::no_instantiation_message`), so they cannot word it differently.
+// expect: error E0058 at 43:5
+// expect: exit 1
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+class Loader {
+    pub label: string
+
+    fn new(label: string): Loader {
+        return Loader { label: label };
+    }
+
+    fn load<T>(text: string): Result<T, JsonError> {
+        if self.label == "" {
+            return json.try_parse::<T>("{}");
+        }
+        return json.try_parse::<T>(text);
+    }
+}
+
+l = Loader.new("l");
+d: dyn = l;
+r = d.load("{\"id\": 7}");
+echo "unreached";

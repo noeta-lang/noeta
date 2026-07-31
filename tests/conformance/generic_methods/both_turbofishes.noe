@@ -1,0 +1,66 @@
+// **Both turbofishes on one call**: `Repo::<Todo>.blank::<int>()`. The one before the `.` names the
+// CLASS's parameters, the one after the member names the METHOD's OWN, and they compose.
+//
+// The motivating case is `blank` — a SELF-LESS member of a generic class carrying its own type
+// parameter that nothing can infer. It had no spelling at all. Being self-less it must be called on
+// the type, so the class's `T` can only come from a receiver turbofish; its own `U` appears only in
+// the return, so no argument and no annotation can pin it. Each half worked alone
+// (`Plain.blank::<int>()`, `Repo::<Todo>.describe(1)`); the combination was a parse error, and there
+// was nothing else to write.
+//
+// Nothing about the two concepts merges: the class half is still arity-checked against the class's
+// parameter list and the method half against the method's own (`Repo.new::<Todo>` stays the error it
+// was — `new` declares no type parameters). They are checked apart and delivered apart, on the two
+// channels each already used: the class's arguments ride the receiver into `recv_args`, the
+// method's ride the call node's type-argument channel into the hidden slots. `blank` reads both
+// back reflectively, which is the oracle — a half that failed to land would print an erased name.
+//
+// The neighbouring spellings are here rather than only in their own files so a change that widens
+// the combined form into one of them fails with all four side by side.
+// expect: stdout "Todo/int"
+// expect: stdout "User/string"
+// expect: stdout "Todo/int"
+// expect: stdout "todos:Todo"
+// expect: stdout "int"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    // Self-less, and `U` is uninferable: the whole point.
+    fn blank<U>(): string {
+        return type_name::<T>() ~ "/" ~ type_name::<U>();
+    }
+
+    // Self-less, but `U` IS inferable from the argument — the form that already worked.
+    fn describe<U>(x: U): string {
+        return type_name::<T>() ~ "/" ~ type_name::<U>();
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+class Plain {
+    fn blank<U>(): string {
+        return type_name::<U>();
+    }
+}
+// Both turbofishes, the case that had no spelling.
+echo Repo::<Todo>.blank::<int>();
+echo Repo::<User>.blank::<string>();
+// The method's own parameter inferred from an argument — the class turbofish alone.
+echo Repo::<Todo>.describe(1);
+// The class turbofish alone, on a plain associated call.
+echo Repo::<Todo>.new("todos").model();
+// The method turbofish alone, on a NON-generic class: unaffected by any of this.
+echo Plain.blank::<int>();

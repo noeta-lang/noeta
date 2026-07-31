@@ -76,6 +76,20 @@ pub struct SourceProgram {
     /// read it back with [`edition_of`]. Editing it invalidates exactly the queries that read it.
     #[returns(ref)]
     pub edition: noeta_lexer::Edition,
+    /// The module path this source's **location** derives — its identity, which the linker writes in
+    /// as its `namespace` (namespace-derivation arc). A [`Source`] carries a file name, not an
+    /// identity, so the derivation has to be an input beside it or the query graph would fall back
+    /// to declared namespaces while the batch loader derives, and the editor would disagree with the
+    /// compiler about which module a file is.
+    #[returns(ref)]
+    pub module_path: DerivedPath,
+}
+
+/// The derived path at `index`, or [`ModulePath::Declared`](noeta_loader::ModulePath::Declared)
+/// when the caller supplied none — so a workspace built without a package on disk behaves exactly
+/// as it did before derivation.
+fn path_at(paths: &[noeta_loader::ModulePath], index: usize) -> noeta_loader::ModulePath {
+    paths.get(index).cloned().unwrap_or_default()
 }
 
 /// Build (or rebuild) the [`SourceProgram`] input from a [`Source`] and the language edition its
@@ -85,12 +99,24 @@ pub fn source_program(
     source: &Source,
     edition: noeta_lexer::Edition,
 ) -> SourceProgram {
+    source_program_at(db, source, edition, noeta_loader::ModulePath::Declared)
+}
+
+/// [`source_program`] for a source whose module path its **location** derives — the workspace
+/// builders' constructor (`noeta_loader::read_workspace` hands the paths over beside the sources).
+pub fn source_program_at(
+    db: &LangDatabase,
+    source: &Source,
+    edition: noeta_lexer::Edition,
+    path: noeta_loader::ModulePath,
+) -> SourceProgram {
     SourceProgram::new(
         db,
         source.id().0,
         source.name().to_string(),
         source.text().to_string(),
         edition,
+        DerivedPath(path),
     )
 }
 
@@ -221,6 +247,65 @@ replace_update!(Checked);
 replace_update!(Bytecode);
 replace_update!(LinkedProgram);
 
+/// Give a newtype the [`salsa::Update`] salsa needs for an **input field or memoized output that
+/// wants backdating**. Unlike [`replace_update!`], this compares old vs. new (the type is already
+/// [`PartialEq`]) and reports "unchanged" when they are equal — so an edit that leaves the value
+/// identical (a member-text change that does not touch the dependency graph) does *not* invalidate
+/// the queries that read it. Used for the per-package `@name` tables and the per-package renamed
+/// text-tier sets, which change only when a manifest's bindings or a dependency's declarations do.
+macro_rules! backdating_update {
+    ($ty:ty) => {
+        // SAFETY: `old_pointer` points at an initialized `$ty` (salsa only calls `maybe_update`
+        // when a previous value exists). We compare; on a difference we overwrite in place (dropping
+        // the old value) and report "changed", otherwise leave it and report "unchanged" — a valid,
+        // backdating `Update`.
+        unsafe impl salsa::Update for $ty {
+            unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
+                let old = unsafe { &mut *old_pointer };
+                if *old == new_value {
+                    false
+                } else {
+                    *old = new_value;
+                    true
+                }
+            }
+        }
+    };
+}
+
+/// The whole program's per-package `@name` resolution tables ([`noeta_span::PackageUses`]) as a
+/// [`Workspace`] input field. A newtype because the foreign `PackageUses` cannot carry this crate's
+/// [`salsa::Update`] impl (orphan rule); backdating so a member-text edit that leaves the dependency
+/// graph unchanged does not invalidate the per-package text-tier lexing. Built on the query path
+/// (`noeta_pm::graph::resolve_graph_query`) exactly like the dependency modules beside it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceUses(pub noeta_span::PackageUses);
+
+backdating_update!(WorkspaceUses);
+
+/// The module path a source's **location** derives (`noeta_loader::derive`) as a [`SourceProgram`]
+/// input field. Newtype for the same [`salsa::Update`]/orphan reason as [`WorkspaceUses`];
+/// backdating, because a file's path changes only when the file moves — an edit to its text must not
+/// invalidate the link.
+///
+/// The default, [`ModulePath::Declared`](noeta_loader::ModulePath::Declared), means the source was
+/// reached with no package context, so its own `namespace` declaration stands — every single-file
+/// query and every lone script.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DerivedPath(pub noeta_loader::ModulePath);
+
+backdating_update!(DerivedPath);
+
+/// The local `@name`s each package binds to a **text** (verbatim-body) tier, keyed by the binding
+/// package's [`PackageOrigin`] — the per-package input to [`tokens_in`]'s lex, the salsa twin of the
+/// loader's `renamed_text_tier_locals`. Newtype for the same [`salsa::Update`]/orphan reason as
+/// [`WorkspaceUses`]; backdating so it invalidates the workspace-aware lexes only when a `[tiers]`
+/// binding or a dependency's `@tier(…, text)` declaration actually changes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RenamedTextTiers(std::collections::HashMap<noeta_span::PackageOrigin, Vec<String>>);
+
+backdating_update!(RenamedTextTiers);
+
 /// The **extension environment** as an explicit salsa input (singleton): the installed
 /// extensions' verbatim-body tier names, which [`ast`] and [`workspace_text_tiers`] fold into
 /// lexing. Previously these were read straight off the process-global registry inside tracked
@@ -300,8 +385,12 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
     from_check_output(noeta_check::check_all_cancellable(
         &parsed.0.program,
-        source_edition_map(db, src),
-        false,
+        noeta_check::CheckOptions {
+            // A single-source check has no package graph, so provenance stays unknown and the
+            // orphan rule stands down; the whole-workspace queries below carry the real map.
+            editions: source_edition_map(db, src),
+            ..noeta_check::CheckOptions::default()
+        },
         &|| db.unwind_if_revision_cancelled(),
     ))
 }
@@ -316,8 +405,11 @@ pub fn checked_ide(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
     from_check_output(noeta_check::check_all_cancellable(
         &parsed.0.program,
-        source_edition_map(db, src),
-        true,
+        noeta_check::CheckOptions {
+            record_expr_types: true,
+            editions: source_edition_map(db, src),
+            ..noeta_check::CheckOptions::default()
+        },
         &|| db.unwind_if_revision_cancelled(),
     ))
 }
@@ -401,6 +493,13 @@ pub struct Workspace {
     /// carries its re-root info; [`linked_from`] re-roots and links them as closed units.
     #[returns(ref)]
     pub dep_modules: Vec<DepModule>,
+    /// The whole program's per-package `@name` resolution tables (`[directives]`/`[tiers]`), resolved
+    /// on the query path (`noeta_pm::graph::resolve_graph_query`) alongside `dep_modules`. Empty for a
+    /// lone/sibling-only workspace (no manifest, no bindings). [`workspace_renamed_text_tiers`] reads
+    /// it to lex a package's renamed text tiers (`[tiers] docs = "std:doc"`) verbatim in the editor,
+    /// exactly as the loader does under `noeta run`/`noeta check`.
+    #[returns(ref)]
+    pub package_uses: WorkspaceUses,
 }
 
 /// The workspace's conventional entry: its **first member**. What the classic single-entry query
@@ -412,19 +511,32 @@ pub fn workspace_entry(db: &dyn salsa::Database, ws: Workspace) -> SourceProgram
 }
 
 /// One dependency package module in a salsa [`Workspace`] (package-manager P2.1c): its source input
-/// plus the re-root info [`linked`] applies before merging it (`root`→`key`, then each of the
+/// plus the re-root info [`linked`] applies before merging it (`root`→`prefix`, then each of the
 /// package's local dependency keys → the target package's global segment). `renames` is a **flat**
 /// list of `[local0, global0, local1, global1, …]` pairs — a `BTreeMap` is not a salsa input field
 /// type, so the query rebuilds it (see [`reroot_map`]).
 #[salsa::input(debug)]
 pub struct DepModule {
     pub src: SourceProgram,
+    /// The package's own root segment — what its modules derive under standalone, and therefore the
+    /// leading segment of its intra-package `use`s (`noeta_loader::DepPackage::root`).
     #[returns(ref)]
     pub root: String,
+    /// The prefix this package's modules derive under in this consumer's build — the import key alone,
+    /// or `{key}.{package segment}` for a scope-array member (`noeta_loader::DepPackage::prefix`).
     #[returns(ref)]
-    pub key: String,
+    pub prefix: Vec<String>,
     #[returns(ref)]
     pub renames: Vec<String>,
+}
+
+impl DepModule {
+    /// The consumer's **import key** for this module's package — the first segment of
+    /// [`Self::prefix`]. What the package is labeled by (`PackageOrigin::Dependency`) and addressed
+    /// as a whole; the segments after it, if any, belong to the package rather than to the manifest.
+    pub fn import_key(self, db: &dyn salsa::Database) -> &str {
+        self.prefix(db).first().map_or("", String::as_str)
+    }
 }
 
 /// A dependency package's sources + re-root info, the ergonomic input to [`workspace_with_deps`]
@@ -432,9 +544,15 @@ pub struct DepModule {
 #[derive(Debug)]
 pub struct DepSources {
     pub root: String,
-    pub key: String,
+    /// The prefix this package's modules derive under here — the import key alone, or
+    /// `{key}.{package segment}` for a scope-array member.
+    pub prefix: Vec<String>,
     pub renames: Vec<(String, String)>,
     pub modules: Vec<Source>,
+    /// The module path each of `modules` derives, index-aligned with it. Empty for a caller that
+    /// builds dependency sources without a package on disk (then each module's own `namespace`
+    /// declaration stands, as before derivation).
+    pub paths: Vec<noeta_loader::ModulePath>,
     /// This package's language edition — its modules are parsed and checked under it, exactly as
     /// the CLI's `load_with_deps` does (editions arc). Typed: a value resolution never produced is
     /// unrepresentable, instead of a free string silently degrading to the default.
@@ -450,44 +568,59 @@ pub fn workspace(
     entry: &Source,
     modules: &[Source],
     root_edition: noeta_lexer::Edition,
+    paths: &[noeta_loader::ModulePath],
 ) -> Workspace {
     let members = std::iter::once(entry)
         .chain(modules)
-        .map(|s| source_program(db, s, root_edition))
+        .enumerate()
+        .map(|(i, s)| source_program_at(db, s, root_edition, path_at(paths, i)))
         .collect();
-    Workspace::new(db, members, Vec::new())
+    // No manifest on this deps-free path → no `[tiers]`/`[directives]` bindings, so no renamed text
+    // tiers (a member's own `@tier(…, text)` is discovered by the per-file token scan regardless).
+    Workspace::new(db, members, Vec::new(), WorkspaceUses::default())
 }
 
 /// Build a [`Workspace`] that also links **dependency packages** (package-manager P2.1c): the entry
 /// and siblings take `root_edition`; each dependency's modules take that package's own edition. Each
 /// dep module becomes a [`DepModule`] input carrying its re-root info, so cross-package
 /// `use <dep-key>.…` resolves in the salsa graph exactly as in the CLI's `load_with_deps`.
+///
+/// `package_uses` is the whole program's per-package `@name` resolution tables
+/// (`[directives]`/`[tiers]`), resolved on the query path (`noeta_pm::graph::resolve_graph_query`)
+/// exactly as the editor's `noeta_ide::workspace::sync` does — so a renamed text tier
+/// (`[tiers] docs = "std:doc"`) lexes verbatim through this path, not only the editor's. A caller
+/// with no manifest bindings (an inline source, a synthetic filesystem-only dependency graph) passes
+/// an empty [`PackageUses`](noeta_span::PackageUses), which is behavior-identical to before this
+/// parameter existed.
 pub fn workspace_with_deps(
     db: &LangDatabase,
     entry: &Source,
     modules: &[Source],
     deps: &[DepSources],
+    package_uses: &noeta_span::PackageUses,
     root_edition: noeta_lexer::Edition,
+    paths: &[noeta_loader::ModulePath],
 ) -> Workspace {
     let members = std::iter::once(entry)
         .chain(modules)
-        .map(|s| source_program(db, s, root_edition))
+        .enumerate()
+        .map(|(i, s)| source_program_at(db, s, root_edition, path_at(paths, i)))
         .collect();
     let mut dep_inputs = Vec::new();
     for dep in deps {
         let renames = flatten_renames(&dep.renames);
-        for src in &dep.modules {
-            let sp = source_program(db, src, dep.edition);
+        for (i, src) in dep.modules.iter().enumerate() {
+            let sp = source_program_at(db, src, dep.edition, path_at(&dep.paths, i));
             dep_inputs.push(DepModule::new(
                 db,
                 sp,
                 dep.root.clone(),
-                dep.key.clone(),
+                dep.prefix.clone(),
                 renames.clone(),
             ));
         }
     }
-    Workspace::new(db, members, dep_inputs)
+    Workspace::new(db, members, dep_inputs, WorkspaceUses(package_uses.clone()))
 }
 
 /// Reclaim the resident content of a [`SourceProgram`] whose file was **deleted** from a workspace
@@ -562,13 +695,114 @@ pub fn workspace_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Vec<Stri
     names
 }
 
-/// Workspace-aware tokenization: like [`tokens`], but lexing with the whole workspace's text-tier
-/// set ([`workspace_text_tiers`]) — so a text tier declared in one file (or dependency package)
-/// captures `@<name> { … }` bodies verbatim in every member. What [`linked`] reads; the per-file
-/// [`tokens`] stays the single-file surface (its two-pass covers same-file declarations).
+/// The local `@name`s each package binds to a **text** (verbatim-body) tier, keyed by the binding
+/// package's [`PackageOrigin`] — the salsa twin of the loader's `renamed_text_tier_locals`
+/// (per-package tier-naming arc, sub-step 3g). A `[tiers]` binding `local = "provider[:exported]"`
+/// makes `local` a text tier for that package iff the provider tier it names captures verbatim,
+/// resolved the two ways the loader resolves it:
+///
+/// * an **extension** provider — the `exported` tier is one of the installed extensions' verbatim
+///   (text/expr) tiers. Read through the [`ExtEnv`] input (as [`workspace_text_tiers`] already reads
+///   ext tiers) so this stays a salsa dependency, matched by name: under the single-registry stance
+///   the editor runs on there is no same-name provider collision, and a false positive would only
+///   capture more prose; or
+/// * a **program-declared** provider — a dependency shipping `@tier(exported, …, text: "…")`, found
+///   by the dependency modules' own [`tokens`] text-tier scan, indexed by the dependency's link
+///   segment (its [`PackageOrigin::Dependency`] key), against which the binding's `provider_roots`
+///   match — exactly as the loader lines them up.
+///
+/// Empty for a workspace with no `@name` bindings (a lone/sibling-only directory), which is the old
+/// behavior. Backdates on the dependency graph, not on member text (see [`RenamedTextTiers`]).
+#[salsa::tracked(returns(ref))]
+fn workspace_renamed_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> RenamedTextTiers {
+    let uses = &ws.package_uses(db).0;
+    if uses.is_empty() {
+        return RenamedTextTiers::default();
+    }
+    // Program-declared text tiers, indexed by the declaring dependency's link segment — the
+    // `PackageOrigin::Dependency` key a `@tier` runner is re-rooted to, which is exactly the segment
+    // a binding's `provider_roots` carries. Mirrors the loader's `declared_by_segment`.
+    let mut declared_by_segment: std::collections::HashMap<
+        String,
+        std::collections::HashSet<String>,
+    > = std::collections::HashMap::new();
+    for dm in ws.dep_modules(db).iter() {
+        let decls = &tokens(db, dm.src(db)).0.text_tier_decls;
+        if decls.is_empty() {
+            continue;
+        }
+        let entry = declared_by_segment
+            .entry(dm.import_key(db).to_string())
+            .or_default();
+        for name in decls {
+            entry.insert(name.clone());
+        }
+    }
+    let ext_names: std::collections::HashSet<String> =
+        ext_verbatim_tier_names(db).into_iter().collect();
+
+    let mut out: std::collections::HashMap<noeta_span::PackageOrigin, Vec<String>> =
+        std::collections::HashMap::new();
+    for (origin, local, use_) in uses.iter() {
+        let ext_text = ext_names.contains(&use_.exported);
+        let declared_text = use_.provider_roots.iter().any(|root| {
+            declared_by_segment
+                .get(root)
+                .is_some_and(|names| names.contains(&use_.exported))
+        });
+        if ext_text || declared_text {
+            out.entry(origin.clone()).or_default().push(local.clone());
+        }
+    }
+    RenamedTextTiers(out)
+}
+
+/// The verbatim-body text-tier set the workspace-aware lex applies to **one** source: the whole
+/// workspace's global set ([`workspace_text_tiers`]) plus the local `@name`s the source's own package
+/// renamed onto a text tier ([`workspace_renamed_text_tiers`]). The salsa twin of the loader's
+/// per-package re-lex — a source whose package renamed nothing lexes with exactly the global set,
+/// behavior-identical to before the per-package layer.
+fn source_text_tiers(
+    db: &dyn salsa::Database,
+    ws: Workspace,
+    src: SourceProgram,
+) -> noeta_lexer::TextTiers {
+    let mut set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
+    let renamed = workspace_renamed_text_tiers(db, ws);
+    if !renamed.0.is_empty()
+        && let Some(origin) = workspace_packages(db, ws).source_package(SourceId(src.id(db)))
+        && let Some(locals) = renamed.0.get(origin)
+    {
+        for name in locals {
+            set.insert(name.clone());
+        }
+    }
+    set
+}
+
+/// The union of every package's verbatim-body text tiers — the workspace-wide set the parser and
+/// directive expansion consult. They use it only to re-lex a nested tier body inside a `${…}`
+/// interpolation hole; a top-level block's text-vs-code is already baked into [`tokens_in`]'s
+/// per-package tokens. Broader than any one package's set, which is safe there (it merely captures
+/// more prose). Matches the loader's `union` in `lex_program`.
+fn workspace_text_tiers_union(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexer::TextTiers {
+    let mut set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
+    for locals in workspace_renamed_text_tiers(db, ws).0.values() {
+        for name in locals {
+            set.insert(name.clone());
+        }
+    }
+    set
+}
+
+/// Workspace-aware tokenization: like [`tokens`], but lexing with the source's package text-tier
+/// set ([`source_text_tiers`]) — so a text tier declared in one file (or dependency package), or one
+/// a package **renamed** through a `[tiers]` binding, captures `@<name> { … }` bodies verbatim in
+/// that package's members. What [`linked`] reads; the per-file [`tokens`] stays the single-file
+/// surface (its two-pass covers same-file declarations).
 #[salsa::tracked(returns(ref))]
 pub fn tokens_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> Tokens {
-    let set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
+    let set = source_text_tiers(db, ws, src);
     let source = source_of(db, src);
     Tokens(noeta_lexer::lex_in(&source, edition_of(db, src), &set))
 }
@@ -578,9 +812,10 @@ pub fn tokens_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) ->
 pub fn ast_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> Ast {
     let source = source_of(db, src);
     let toks = tokens_in(db, ws, src);
-    // The whole workspace's verbatim-body tier set — the same one `tokens_in` lexed with — so a
-    // nested tier body inside a `${…}` hole re-lexes correctly (an inline `@html { … }` loop).
-    let set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
+    // The whole workspace's verbatim-body tier union — a superset of what `tokens_in` lexed this
+    // source with — so a nested tier body inside a `${…}` hole re-lexes correctly (an inline
+    // `@html { … }` loop), matching the loader's parser set.
+    let set = workspace_text_tiers_union(db, ws);
     Ast(noeta_parser::parse_in(
         &source,
         &toks.0.tokens,
@@ -628,6 +863,18 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     // namespace. Broken siblings come from [`broken_modules`] — kept, not dropped, so a `use` of a
     // namespace one of them declares reports that file's parse error instead of the misleading
     // "no module" cascade (see `noeta_loader::BrokenModule`).
+    //
+    // A workspace whose sources carry **derived** module paths needs those written into the programs
+    // (the path becomes the module's `namespace`), and salsa's parsed ASTs are shared and immutable —
+    // so those programs are cloned. A workspace with no package derives nothing and clones nothing,
+    // which is every lone script and every conformance case.
+    let derives = ws
+        .members(db)
+        .iter()
+        .copied()
+        .chain(ws.dep_modules(db).iter().map(|dm| dm.src(db)))
+        .any(|m| m.module_path(db).0.derived().is_some());
+    let mut module_owned: Vec<(SourceProgram, Program)> = Vec::new();
     let mut module_programs: Vec<&Program> = Vec::new();
     for &m in ws.members(db) {
         if m == entry {
@@ -636,7 +883,11 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         let toks = tokens_in(db, ws, m);
         let parsed = ast_in(db, ws, m);
         if toks.0.diagnostics.is_empty() && parsed.0.diagnostics.is_empty() {
-            module_programs.push(&parsed.0.program);
+            if derives {
+                module_owned.push((m, parsed.0.program.clone()));
+            } else {
+                module_programs.push(&parsed.0.program);
+            }
         }
     }
 
@@ -645,6 +896,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     // of the CLI's `link_with_deps`. Depends on each dep module's `ast`, so editing a path-dependency
     // source re-links, but leaves sibling parses untouched.
     let mut dep_programs: Vec<Program> = Vec::new();
+    let mut dep_srcs: Vec<SourceProgram> = Vec::new();
     for &dm in ws.dep_modules(db) {
         let src = dm.src(db);
         let toks = tokens_in(db, ws, src);
@@ -661,10 +913,11 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
             noeta_loader::reroot_program(
                 &mut program,
                 dm.root(db),
-                dm.key(db),
+                dm.prefix(db),
                 &reroot_map(dm.renames(db)),
             );
             dep_programs.push(program);
+            dep_srcs.push(src);
         }
     }
     // A dependency module that does not parse is a hard error, exactly as in the CLI's
@@ -690,13 +943,59 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         .iter()
         .filter(|m| m.source.id() != SourceId(entry.id(db)))
         .collect();
+    // Derivation decides identity, applied here exactly as the batch loader applies it — after
+    // re-rooting, over every unit at once (a collision is a program-wide fact). Nothing to do, and
+    // nothing cloned, when the workspace carries no derived paths.
+    let mut entry_owned = derives.then(|| entry_ast.0.program.clone());
+    // The files the units render diagnostics against, rebuilt from the inputs: modules first, then
+    // dependency modules, in the order the two lists were filled.
+    let unit_sources: Vec<Source> = if derives {
+        module_owned
+            .iter()
+            .map(|(src, _)| *src)
+            .chain(dep_srcs.iter().copied())
+            .map(|src| source_of(db, src))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if let Some(entry_program) = entry_owned.as_mut() {
+        let dep_offset = module_owned.len();
+        let mut units = vec![noeta_loader::DerivedUnit {
+            source: &entry_source,
+            path: &entry.module_path(db).0,
+            program: entry_program,
+        }];
+        units.extend(
+            module_owned
+                .iter_mut()
+                .enumerate()
+                .map(|(i, (src, program))| noeta_loader::DerivedUnit {
+                    source: &unit_sources[i],
+                    path: &src.module_path(db).0,
+                    program,
+                }),
+        );
+        units.extend(dep_programs.iter_mut().zip(&dep_srcs).enumerate().map(
+            |(i, (program, src))| noeta_loader::DerivedUnit {
+                source: &unit_sources[dep_offset + i],
+                path: &src.module_path(db).0,
+                program,
+            },
+        ));
+        let path_diagnostics = noeta_loader::apply_derived_paths(units);
+        if !path_diagnostics.is_empty() {
+            return unlinked(
+                path_diagnostics.into_iter().map(|d| d.diagnostic).collect(),
+                Vec::new(),
+            );
+        }
+        module_programs = module_owned.iter().map(|(_, p)| p).collect();
+    }
+    let entry_program: &Program = entry_owned.as_ref().unwrap_or(&entry_ast.0.program);
+
     let result = if dep_programs.is_empty() {
-        noeta_loader::link_parsed(
-            &entry_source,
-            &entry_ast.0.program,
-            &module_programs,
-            &broken_refs,
-        )
+        noeta_loader::link_parsed(&entry_source, entry_program, &module_programs, &broken_refs)
     } else {
         let dep_refs: Vec<&Program> = dep_programs.iter().collect();
         // The IDE query links from re-rooted dep *sources* but does not carry the resolved native
@@ -704,7 +1003,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         // intra-project module, never an import it cannot fully see (module-namespaces).
         noeta_loader::link_parsed_with_deps(
             &entry_source,
-            &entry_ast.0.program,
+            entry_program,
             &module_programs,
             &dep_refs,
             &broken_refs,
@@ -745,7 +1044,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         },
         next_id,
         edition_of(db, entry),
-        &noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned()),
+        &workspace_text_tiers_union(db, ws),
     );
     let (expansions, reads, diagnostics) = expansion;
     // A failed expansion fails the link, exactly as it does under `noeta run`/`noeta check` —
@@ -856,7 +1155,7 @@ pub fn broken_modules(db: &dyn salsa::Database, ws: Workspace) -> BrokenModules 
                     noeta_loader::reroot_path(
                         ns,
                         dm.root(db),
-                        dm.key(db),
+                        dm.prefix(db),
                         &reroot_map(dm.renames(db)),
                     );
                 }
@@ -893,6 +1192,26 @@ pub fn workspace_editions(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexe
     map
 }
 
+/// The per-source [`PackageMap`](noeta_span::PackageMap) for a whole workspace — every member
+/// source under the root package, every dependency module under its own package's global key. The
+/// salsa analogue of the loader's `Linked::packages`, so [`linked_checked_from`] can enforce the
+/// package orphan rule over the merged program. Entry-independent, like [`workspace_editions`], and
+/// public for the same reason: a consumer re-checking a *derived* program (a tier-activated one,
+/// say) keeps the same `SourceId`s and so the same map.
+pub fn workspace_packages(db: &dyn salsa::Database, ws: Workspace) -> noeta_span::PackageMap {
+    let mut map = noeta_span::PackageMap::new();
+    for src in ws.members(db).iter().copied() {
+        map.set(SourceId(src.id(db)), noeta_span::PackageOrigin::Root);
+    }
+    for dm in ws.dep_modules(db).iter() {
+        map.set(
+            SourceId(dm.src(db).id(db)),
+            noeta_span::PackageOrigin::Dependency(dm.import_key(db).to_string()),
+        );
+    }
+    map
+}
+
 /// Type-check the program linked from `entry` — the workspace analogue of [`checked`], memoized
 /// per `(ws, entry)`. A load failure carries its diagnostics straight through (there is no
 /// program to check).
@@ -907,8 +1226,12 @@ pub fn linked_checked_from(
         // `expr_types`/`f32_literal_sites` and the prelude-redesign handle-site maps.
         Ok(program) => from_check_output(noeta_check::check_all_cancellable(
             program,
-            workspace_editions(db, ws),
-            false,
+            noeta_check::CheckOptions {
+                editions: workspace_editions(db, ws),
+                packages: workspace_packages(db, ws),
+                package_uses: ws.package_uses(db).0.clone(),
+                ..noeta_check::CheckOptions::default()
+            },
             &|| db.unwind_if_revision_cancelled(),
         )),
         Err(diags) => Checked {
@@ -939,8 +1262,13 @@ pub fn linked_checked_ide_from(
     match &linked_from(db, ws, entry).program {
         Ok(program) => from_check_output(noeta_check::check_all_cancellable(
             program,
-            workspace_editions(db, ws),
-            true,
+            noeta_check::CheckOptions {
+                record_expr_types: true,
+                editions: workspace_editions(db, ws),
+                packages: workspace_packages(db, ws),
+                package_uses: ws.package_uses(db).0.clone(),
+                ..noeta_check::CheckOptions::default()
+            },
             &|| db.unwind_if_revision_cancelled(),
         )),
         Err(diags) => Checked {
@@ -1020,7 +1348,7 @@ mod tests {
         let mut db = LangDatabase::default();
         let source = Source::new(SourceId::FIRST, "test.noe", "echo 1;\n");
         let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
-        let ws = Workspace::new(&db, vec![src], Vec::new());
+        let ws = Workspace::new(&db, vec![src], Vec::new(), WorkspaceUses::default());
         seed_ext_env(&mut db, vec!["blueprint".to_string()]);
         assert!(
             workspace_text_tiers(&db, ws).contains(&"blueprint".to_string()),
@@ -1181,6 +1509,7 @@ mod tests {
             &entry,
             std::slice::from_ref(&a),
             noeta_lexer::Edition::DEFAULT,
+            &[],
         );
 
         let prog = match &linked(&db, ws).program {
@@ -1213,15 +1542,13 @@ mod tests {
         seed_std();
         let entry_text = "namespace App.Main;\nuse App.A.Foo;\nf = Foo { x: 1 };\necho f.x;\n";
         let a_text = "namespace App.A;\npub class Foo { x: int }\n";
-        let raw = noeta_loader::RawModule {
-            name: "a.noe".into(),
-            text: a_text.into(),
-        };
+        let raw = noeta_loader::RawModule::declared("a.noe", a_text);
         let loader = noeta_loader::link(
             "main.noe",
             entry_text,
             noeta_lexer::Edition::DEFAULT,
             std::slice::from_ref(&raw),
+            noeta_loader::ModulePath::Declared,
         )
         .unwrap();
 
@@ -1233,6 +1560,7 @@ mod tests {
             &entry,
             std::slice::from_ref(&a),
             noeta_lexer::Edition::DEFAULT,
+            &[],
         );
         let salsa = match &linked(&db, ws).program {
             Ok(p) => p.clone(),
@@ -1270,7 +1598,12 @@ mod tests {
         let entry_src = source_program(&db, &entry, noeta_lexer::Edition::DEFAULT);
         let a_src = source_program(&db, &a, noeta_lexer::Edition::DEFAULT);
         let b_src = source_program(&db, &b, noeta_lexer::Edition::DEFAULT);
-        let ws = Workspace::new(&db, vec![entry_src, a_src, b_src], Vec::new());
+        let ws = Workspace::new(
+            &db,
+            vec![entry_src, a_src, b_src],
+            Vec::new(),
+            WorkspaceUses::default(),
+        );
 
         assert!(linked(&db, ws).program.is_ok());
         let a_ast_before = ast(&db, a_src) as *const Ast;
@@ -1310,7 +1643,12 @@ mod tests {
         );
         let main_src = source_program(&db, &main, noeta_lexer::Edition::DEFAULT);
         let a_src = source_program(&db, &a, noeta_lexer::Edition::DEFAULT);
-        let ws = Workspace::new(&db, vec![main_src, a_src], Vec::new());
+        let ws = Workspace::new(
+            &db,
+            vec![main_src, a_src],
+            Vec::new(),
+            WorkspaceUses::default(),
+        );
 
         // Link from `main` (imports the sibling), then from `a` (a library module, no imports).
         let from_main = linked_from(&db, ws, main_src);
@@ -1361,8 +1699,9 @@ mod tests {
             "use hi.hello.greeting;\necho greeting();\n",
         );
         let dep = DepSources {
+            paths: Vec::new(),
             root: "greet".to_string(),
-            key: "hi".to_string(),
+            prefix: vec!["hi".to_string()],
             renames: Vec::new(),
             modules: vec![Source::new(
                 SourceId(1),
@@ -1376,7 +1715,9 @@ mod tests {
             &entry,
             &[],
             std::slice::from_ref(&dep),
+            &noeta_span::PackageUses::new(),
             noeta_lexer::Edition::DEFAULT,
+            &[],
         );
         let linked = linked(&db, ws);
         assert!(
@@ -1393,6 +1734,110 @@ mod tests {
                 .iter()
                 .any(|s| format!("{s:?}").contains("greeting")),
             "the dependency's greeting declaration must be linked in"
+        );
+    }
+
+    #[test]
+    fn workspace_with_deps_reroots_a_scope_members_intra_package_use() {
+        // The salsa twin of the loader's scope-array case: `para/db` reached through
+        // `para = [{ package = "para/db" }, … ]` derives under the TWO-segment prefix `para.db`, and
+        // its own modules import each other by the segment they derive under standalone (`db`). The
+        // query path must splice in the whole prefix, exactly as the batch loader does — a single
+        // segment would have made `use db.open` address `para.open`, which is nothing.
+        seed_std();
+        let db = LangDatabase::default();
+        let entry = Source::new(
+            SourceId(0),
+            "main.noe",
+            "use para.db.query.run;\necho run();\n",
+        );
+        let derived = |segments: &[&str]| {
+            noeta_loader::ModulePath::Derived(segments.iter().map(|s| (*s).to_string()).collect())
+        };
+        let dep = DepSources {
+            root: "db".to_string(),
+            prefix: vec!["para".to_string(), "db".to_string()],
+            renames: Vec::new(),
+            modules: vec![
+                Source::new(
+                    SourceId(1),
+                    "db.noe",
+                    "pub fn open(): string { return \"conn\"; }\n",
+                ),
+                Source::new(
+                    SourceId(2),
+                    "query.noe",
+                    "use db.open;\npub fn run(): string { return open(); }\n",
+                ),
+            ],
+            paths: vec![derived(&["para", "db"]), derived(&["para", "db", "query"])],
+            edition: noeta_lexer::Edition::DEFAULT,
+        };
+        let ws = workspace_with_deps(
+            &db,
+            &entry,
+            &[],
+            std::slice::from_ref(&dep),
+            &noeta_span::PackageUses::new(),
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+        );
+        let linked = linked(&db, ws);
+        assert!(
+            linked.program.is_ok(),
+            "a scope member's intra-package `use db.open` must re-root to `para.db.open`: {:?}",
+            linked.program
+        );
+    }
+
+    #[test]
+    fn workspace_with_deps_lexes_a_renamed_text_tier_verbatim() {
+        // Per-package tier-naming arc (3g), harness seam: the `workspace_with_deps` path (used by
+        // `noeta-mcp` and `noeta-conformance`) now carries the whole program's `@name` tables, so a
+        // `[tiers] docs = "std:doc"` binding — the root package renaming std's `doc` **text** tier
+        // under a local `@docs` — lexes the `@docs { … }` body verbatim, exactly as the loader does
+        // under `noeta run`/`noeta check` and the editor does through `sync`. The db twin of the IDE's
+        // `workspace_captures_a_renamed_text_tier_bound_in_the_manifest`.
+        let mut db = LangDatabase::default();
+        // Seed std's `doc` as the known verbatim ext tier the `docs = "std:doc"` binding lands on.
+        seed_ext_env(&mut db, vec!["doc".to_string()]);
+        // Load-bearing: the bare `"` (and `<angle>` bits) make this a hard lex error as code; only the
+        // per-package text-tier resolution captures it verbatim as one `DocText`.
+        let entry = Source::new(
+            SourceId(0),
+            "main.noe",
+            "@docs {\n# Widget\n\nA bare \" quote and <angle> bits: invalid as code, fine as markdown.\n}\nfn add(a: int, b: int): int { return a + b }\n",
+        );
+        // The root package binds local `@docs` → std's `doc` tier, keyed by `PackageOrigin::Root`
+        // (members are Root, see `workspace_packages`) — the same shape `resolve_graph_query` yields
+        // for a `[tiers]` table.
+        let mut package_uses = noeta_span::PackageUses::new();
+        package_uses.set(
+            noeta_span::PackageOrigin::Root,
+            "docs".to_string(),
+            noeta_span::PackageUse {
+                provider_roots: vec!["std".to_string()],
+                exported: "doc".to_string(),
+            },
+        );
+        let ws = workspace_with_deps(
+            &db,
+            &entry,
+            &[],
+            &[],
+            &package_uses,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+        );
+        let entry_src = ws.members(&db)[0];
+        let toks = tokens_in(&db, ws, entry_src);
+        assert!(
+            toks.0
+                .tokens
+                .iter()
+                .any(|t| t.kind == noeta_lexer::TokenKind::DocText),
+            "the renamed tier's body must be captured as one verbatim DocText token, got {:?}",
+            toks.0.tokens.iter().map(|t| t.kind).collect::<Vec<_>>()
         );
     }
 }

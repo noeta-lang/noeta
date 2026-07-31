@@ -129,11 +129,31 @@ pub enum TokenKind {
     /// reflection surface is lexically distinct.
     #[token("type_of")]
     TypeOfKw,
+    /// The reflection keyword `type_name::<T>()` — a type's **qualified runtime identity** as a
+    /// `string` (`"app.storage.Todo"`), the same name `type_of(value)` reports and the same key the
+    /// name-keyed registries (`field_specs_of`, `construct`, `invoke`) are stored under.
+    ///
+    /// Turbofish only, and deliberately so: a `type_name(name)` taking a runtime string would be the
+    /// identity function on that string. Its whole value is that the compiler resolves the type — so
+    /// a rename, a `use … as` alias, or a `namespace` all follow the expression instead of drifting
+    /// away from a hand-written string literal.
+    ///
+    /// A keyword, like every other reflection surface, and specifically NOT contextual the way
+    /// `channel` is: `name::<T>(…)` is already the general typed-call form, so a contextual
+    /// `type_name` would be indistinguishable from a user generic function of that name.
+    #[token("type_name")]
+    TypeNameKw,
     /// The reflection keyword `fields_of(value)` — a struct/class instance's fields as
     /// `List<FieldEntry>` (`{ name: string, value: dyn }`), the value-level counterpart of
     /// `type_of` (derive layer 3). A keyword for symmetry with the other reflection surfaces.
     #[token("fields_of")]
     FieldsOfKw,
+    /// The reflection keyword `traits_of(value)` — the qualified trait names the value's nominal
+    /// type has a registered `impl` for, as a sorted, deduped `List<string>`. Reads the same
+    /// membership table the precise `x is dyn Trait` narrowing tests, so the two surfaces cannot
+    /// disagree. A keyword for symmetry with `fields_of`/`type_of`.
+    #[token("traits_of")]
+    TraitsOfKw,
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer back into a `List<T>` (P-PACK 4.4). A
     /// keyword so the turbofish type argument parses unambiguously; generic over any declared
     /// `@packed` struct (no hardcoded type list — extension-friendly).
@@ -148,6 +168,13 @@ pub enum TokenKind {
     /// for symmetry with `type_of`/`roles_of`/`attributes_of`.
     #[token("params_of")]
     ParamsOfKw,
+    /// The reflection keyword `returns_of(target)` — a callable's declared return type, returned as
+    /// `?Type` (`none` when no callable of that name is known). Takes the same runtime `string`
+    /// target `params_of` takes (a bare fn name or `Type.method`). A keyword for symmetry with
+    /// `params_of`/`type_of`; the trailing `_of` also keeps it clear of the `return` statement
+    /// keyword, which is a strict prefix (longest-match wins, as it already does for `type`/`type_of`).
+    #[token("returns_of")]
+    ReturnsOfKw,
     /// The reflection keyword `invoke(recv, name, args)` — the fallible by-name invocation
     /// primitive: dispatch a method (on a value) or an associated function (on a type) by a
     /// runtime string name, returning `Result`. A keyword for symmetry with the other reflection
@@ -162,11 +189,19 @@ pub enum TokenKind {
     /// argument is an instance and whose result carries values, not declared types).
     #[token("field_specs_of")]
     FieldSpecsOfKw,
+    /// The reflection keyword `variants_of` — a declared enum TYPE's variant schema as
+    /// `List<VariantSpec>` (`{ name: string, payload: List<FieldSpec>, backing: ?dyn }`). The enum
+    /// twin of [`TokenKind::FieldSpecsOfKw`], with the same two disjoint surfaces under one keyword:
+    /// the static turbofish `variants_of::<T>()` and the dynamic `variants_of(name)` a framework uses
+    /// when it holds the type only as the string off a `Type.Named(name, _)` it just reflected.
+    #[token("variants_of")]
+    VariantsOfKw,
     /// The reflection keyword `construct` — build a struct value from field values at runtime, reusing
     /// the same construction path as a `T { … }` literal (defaults + full-initialization honored).
     /// Two surfaces: the static turbofish `construct::<T>(fields)` (desugared to the type name) and
-    /// the dynamic `construct(name, fields)`. Returns `Result<T, string>` (static) /
-    /// `Result<dyn, string>` (dynamic) — a recoverable outcome, mirroring `invoke`.
+    /// the dynamic `construct(name, fields)`. **Both** are typed `Result<dyn, string>` — the turbofish
+    /// spells only the type *name*, so the checker has no `T` to put in the `Ok` slot; narrow the
+    /// payload back with `.as<T>()`. A recoverable outcome either way, mirroring `invoke`.
     #[token("construct")]
     ConstructKw,
     // `channel::<T>(capacity)` — the bounded-channel constructor (isolates I.1) — is deliberately NOT a
@@ -420,12 +455,16 @@ impl TokenKind {
             TokenKind::IsKw => "IsKw",
             TokenKind::AttributesOfKw => "AttributesOfKw",
             TokenKind::TypeOfKw => "TypeOfKw",
+            TokenKind::TypeNameKw => "TypeNameKw",
             TokenKind::FieldsOfKw => "FieldsOfKw",
+            TokenKind::TraitsOfKw => "TraitsOfKw",
             TokenKind::FromBytesKw => "FromBytesKw",
             TokenKind::RolesOfKw => "RolesOfKw",
             TokenKind::ParamsOfKw => "ParamsOfKw",
+            TokenKind::ReturnsOfKw => "ReturnsOfKw",
             TokenKind::InvokeKw => "InvokeKw",
             TokenKind::FieldSpecsOfKw => "FieldSpecsOfKw",
+            TokenKind::VariantsOfKw => "VariantsOfKw",
             TokenKind::ConstructKw => "ConstructKw",
             TokenKind::ColonColon => "ColonColon",
             TokenKind::StringLit => "StringLit",
@@ -531,12 +570,16 @@ impl TokenKind {
             TokenKind::IsKw => "`is`",
             TokenKind::AttributesOfKw => "`attributes_of`",
             TokenKind::TypeOfKw => "`type_of`",
+            TokenKind::TypeNameKw => "`type_name`",
             TokenKind::FieldsOfKw => "`fields_of`",
+            TokenKind::TraitsOfKw => "`traits_of`",
             TokenKind::FromBytesKw => "`from_bytes`",
             TokenKind::RolesOfKw => "`roles_of`",
             TokenKind::ParamsOfKw => "`params_of`",
+            TokenKind::ReturnsOfKw => "`returns_of`",
             TokenKind::InvokeKw => "`invoke`",
             TokenKind::FieldSpecsOfKw => "`field_specs_of`",
+            TokenKind::VariantsOfKw => "`variants_of`",
             TokenKind::ConstructKw => "`construct`",
             TokenKind::ColonColon => "`::`",
             TokenKind::StringLit => "a string literal",
@@ -602,6 +645,111 @@ impl TokenKind {
             TokenKind::BlockCommentOpen => "`/*`",
             TokenKind::LineComment => "`//`",
         }
+    }
+
+    /// This token as a [`ReservedWord`] — `None` unless its spelling is identifier-shaped.
+    ///
+    /// A reserved word is the one class of token a user can write *by accident*: it looks exactly
+    /// like a name, so `fn look(type_name: string)` reads as a perfectly ordinary parameter until
+    /// the parser refuses it. Whoever reports that refusal needs to know two things this token
+    /// alone can answer — how the word is spelled, and what the language holds it back for.
+    ///
+    /// The spelling is **derived** from [`TokenKind::describe`] rather than restated: every
+    /// keyword's `describe` is its own source text in backticks, so a keyword added to the token
+    /// table is covered here the moment it is added. A second hand-written list would be a list to
+    /// forget.
+    pub fn reserved_word(self) -> Option<ReservedWord> {
+        let word = self.describe().strip_prefix('`')?.strip_suffix('`')?;
+        let mut chars = word.chars();
+        let head_ok = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        if !head_ok || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return None;
+        }
+        Some(ReservedWord {
+            word,
+            role: self.reserved_role(),
+        })
+    }
+
+    /// What the language reserves this word for. The two special families are closed sets, so the
+    /// wildcard is the right default rather than a 46-arm list: a *new* reserved word is a keyword
+    /// of the grammar unless it is deliberately one of the other two.
+    fn reserved_role(self) -> ReservedRole {
+        match self {
+            TokenKind::TrueKw | TokenKind::FalseKw => ReservedRole::BooleanLiteral,
+            TokenKind::AttributesOfKw
+            | TokenKind::TypeOfKw
+            | TokenKind::TypeNameKw
+            | TokenKind::FieldsOfKw
+            | TokenKind::TraitsOfKw
+            | TokenKind::FromBytesKw
+            | TokenKind::RolesOfKw
+            | TokenKind::ParamsOfKw
+            | TokenKind::ReturnsOfKw
+            | TokenKind::InvokeKw
+            | TokenKind::FieldSpecsOfKw
+            | TokenKind::VariantsOfKw
+            | TokenKind::ConstructKw => ReservedRole::Reflection,
+            _ => ReservedRole::Keyword,
+        }
+    }
+}
+
+/// What the language reserves a word for.
+///
+/// Held here rather than as an ad-hoc string at the reporting site because the *role* is the
+/// interesting half of the answer: "`type_name` is reserved" leaves a reader guessing, while
+/// "`type_name` is one of the reflection primitives" tells them both that the name is taken and
+/// which surface took it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservedRole {
+    /// A keyword of the core grammar — `fn`, `for`, `match`, `mut`, `struct`, `use`, …
+    Keyword,
+    /// One of the reflection primitives — `type_of`, `type_name`, `field_specs_of`, …. These are
+    /// keywords for a specific reason: each has a turbofish or by-name call form that a *user*
+    /// function of the same name would be indistinguishable from, so the name cannot be shared.
+    Reflection,
+    /// A boolean literal — `true`/`false`. Not a keyword so much as a value that happens to be
+    /// spelled with letters.
+    BooleanLiteral,
+}
+
+impl ReservedRole {
+    /// The role as a noun phrase, completing "`x` is …".
+    pub fn describe(self) -> &'static str {
+        match self {
+            ReservedRole::Keyword => "a keyword of the grammar",
+            ReservedRole::Reflection => "one of the reflection primitives",
+            ReservedRole::BooleanLiteral => "a boolean literal",
+        }
+    }
+}
+
+/// A word the lexer holds back: spelled like an identifier, so a user could plausibly have meant
+/// it as a name, but claimed by the language for something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReservedWord {
+    /// The spelling, exactly as it must be written (`type_name`).
+    pub word: &'static str,
+    /// What the language claims it for.
+    pub role: ReservedRole,
+}
+
+impl ReservedWord {
+    /// The reserved word a piece of source text spells, if any. Goes through the lexer itself, so
+    /// the answer can never disagree with what the lexer actually produces for that text — the
+    /// caller is typically holding a span, not a token.
+    pub fn from_spelling(text: &str) -> Option<ReservedWord> {
+        let mut lexer = TokenKind::lexer(text);
+        let kind = lexer.next()?.ok()?;
+        // The token has to be the *whole* text: `type_names` starts with a keyword match under a
+        // shorter-munch lexer, and a partial match is not the word.
+        if lexer.span() != (0..text.len()) || lexer.next().is_some() {
+            return None;
+        }
+        kind.reserved_word()
     }
 }
 
@@ -1443,6 +1591,105 @@ mod tests {
         let source = Source::new(SourceId::FIRST, "test.noe", text);
         let lexed = lex(&source);
         (source, lexed)
+    }
+
+    /// Every word the lexer holds back, with the role the diagnostic names it by. Written out in
+    /// full — this is the census the "a name is reserved" diagnostic speaks for, and a keyword
+    /// that silently joins or leaves the language should show up as a failure here rather than as
+    /// a message nobody notices went missing.
+    const RESERVED_WORDS: &[(&str, ReservedRole)] = &[
+        ("echo", ReservedRole::Keyword),
+        ("mut", ReservedRole::Keyword),
+        ("true", ReservedRole::BooleanLiteral),
+        ("false", ReservedRole::BooleanLiteral),
+        ("fn", ReservedRole::Keyword),
+        ("return", ReservedRole::Keyword),
+        ("yield", ReservedRole::Keyword),
+        ("async", ReservedRole::Keyword),
+        ("await", ReservedRole::Keyword),
+        ("concurrent", ReservedRole::Keyword),
+        ("spawn", ReservedRole::Keyword),
+        ("isolate", ReservedRole::Keyword),
+        ("if", ReservedRole::Keyword),
+        ("then", ReservedRole::Keyword),
+        ("else", ReservedRole::Keyword),
+        ("for", ReservedRole::Keyword),
+        ("while", ReservedRole::Keyword),
+        ("break", ReservedRole::Keyword),
+        ("continue", ReservedRole::Keyword),
+        ("in", ReservedRole::Keyword),
+        ("enum", ReservedRole::Keyword),
+        ("match", ReservedRole::Keyword),
+        ("struct", ReservedRole::Keyword),
+        ("type", ReservedRole::Keyword),
+        ("class", ReservedRole::Keyword),
+        ("destruct", ReservedRole::Keyword),
+        ("impl", ReservedRole::Keyword),
+        ("trait", ReservedRole::Keyword),
+        ("namespace", ReservedRole::Keyword),
+        ("use", ReservedRole::Keyword),
+        ("pub", ReservedRole::Keyword),
+        ("as", ReservedRole::Keyword),
+        ("is", ReservedRole::Keyword),
+        ("attributes_of", ReservedRole::Reflection),
+        ("type_of", ReservedRole::Reflection),
+        ("type_name", ReservedRole::Reflection),
+        ("fields_of", ReservedRole::Reflection),
+        ("traits_of", ReservedRole::Reflection),
+        ("from_bytes", ReservedRole::Reflection),
+        ("roles_of", ReservedRole::Reflection),
+        ("params_of", ReservedRole::Reflection),
+        ("returns_of", ReservedRole::Reflection),
+        ("invoke", ReservedRole::Reflection),
+        ("field_specs_of", ReservedRole::Reflection),
+        ("variants_of", ReservedRole::Reflection),
+        ("construct", ReservedRole::Reflection),
+    ];
+
+    /// Each census word round-trips: the lexer produces one token for it, that token reports
+    /// itself as a reserved word, and the spelling it reports back is the text that was lexed.
+    #[test]
+    fn every_reserved_word_round_trips() {
+        for (word, role) in RESERVED_WORDS {
+            let (_, lexed) = lex_str(word);
+            assert_eq!(
+                lexed.tokens.len(),
+                1,
+                "`{word}` lexed to more than one token"
+            );
+            let reserved = lexed.tokens[0]
+                .kind
+                .reserved_word()
+                .unwrap_or_else(|| panic!("`{word}` is not reported as a reserved word"));
+            assert_eq!(reserved.word, *word);
+            assert_eq!(reserved.role, *role, "`{word}` has the wrong role");
+            assert_eq!(ReservedWord::from_spelling(word), Some(reserved));
+        }
+    }
+
+    /// Nothing that is not a word is a reserved *word*: operators, literal classes, and plain
+    /// identifiers all report `None`, so a diagnostic keyed off this never fires on `,` or on a
+    /// name the user is perfectly entitled to.
+    #[test]
+    fn non_words_are_not_reserved_words() {
+        for kind in [
+            TokenKind::Ident,
+            TokenKind::IntLit,
+            TokenKind::StringLit,
+            TokenKind::Semicolon,
+            TokenKind::ColonColon,
+            TokenKind::FatArrow,
+            TokenKind::DotLBrace,
+        ] {
+            assert_eq!(kind.reserved_word(), None, "{kind:?}");
+        }
+        for text in ["type_names", "my_type_name", "x", "", "42", "for x", "for;"] {
+            assert_eq!(
+                ReservedWord::from_spelling(text),
+                None,
+                "{text:?} is not a reserved word"
+            );
+        }
     }
 
     /// Opt-in throughput check (F1): confirm that lexing comments as dropped tokens did not regress

@@ -122,7 +122,7 @@ pub fn complete(program: &Program, offset: u32, source: SourceId) -> Vec<Candida
             _ => continue,
         };
         candidates.push(Candidate {
-            label: name.clone(),
+            label: name.to_string(),
             kind,
             detail: None,
         });
@@ -393,7 +393,7 @@ fn derive_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candi
             && decl.methods.iter().all(|m| m.has_default)
         {
             candidates.push(Candidate {
-                label: decl.name.clone(),
+                label: decl.name.to_string(),
                 kind: CandidateKind::Trait,
                 detail: Some(
                     "user trait — fully defaulted, derive adopts the defaults".to_string(),
@@ -460,7 +460,7 @@ fn role_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candida
             && decl.decorators.semantic.is_some()
         {
             candidates.push(Candidate {
-                label: decl.name.clone(),
+                label: decl.name.to_string(),
                 kind: CandidateKind::Enum,
                 detail: Some("@semantic enum".to_string()),
             });
@@ -666,7 +666,7 @@ impl IdeDeriveContext {
                 .stmts
                 .iter()
                 .filter_map(|s| match s {
-                    Stmt::Trait(t) => Some((t.name.clone(), t.clone())),
+                    Stmt::Trait(t) => Some((t.name.to_string(), t.clone())),
                     _ => None,
                 })
                 .collect(),
@@ -752,19 +752,31 @@ pub fn bundle_members(
 fn push_methods(members: &mut Vec<Candidate>, methods: &[noeta_ast::FnDecl]) {
     for method in methods {
         members.push(Candidate {
-            label: method.name.clone(),
+            label: method.name.to_string(),
             kind: CandidateKind::Method,
             detail: Some(symbols::fn_signature(method)),
         });
     }
 }
 
-/// The built-in type names offered in type-annotation position — the primitives, the container
-/// generics, and the fixed-width integers.
-const BUILTIN_TYPES: &[&str] = &[
-    "int", "float", "f32", "bool", "string", "bytes", "unit", "dyn", "List", "Map", "Set",
-    "Option", "Result", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-];
+/// The built-in type names offered in type-annotation position — every surface spelling the
+/// [`BuiltinTy`] funnel decodes: the primitives, the containers (canonical and bare), `Option`/
+/// `Result`, the abstract kind-types, and the generated fixed-width family. Derived from the
+/// funnel rather than hand-listed, because the hand list this replaces had drifted the way string
+/// tables do (`f64`, `void`, and the kind-types were missing) — a new built-in now reaches
+/// completion without this file knowing about it.
+fn builtin_type_names() -> Vec<String> {
+    use noeta_ast::BuiltinTy;
+    let mut names = Vec::new();
+    for ty in BuiltinTy::all() {
+        if let BuiltinTy::IntN { signed, bits } = ty {
+            names.push(BuiltinTy::int_width_name(signed, bits));
+        } else {
+            names.extend(ty.spellings().iter().map(|s| (*s).to_string()));
+        }
+    }
+    names
+}
 
 /// The type names offered in a type-annotation position (C3): the user-declared `struct`/`class`/
 /// `enum` types (with their precise kinds) followed by the built-in types. De-duplicated by label.
@@ -781,14 +793,14 @@ pub fn type_names(program: &Program) -> Vec<Candidate> {
             _ => continue,
         };
         candidates.push(Candidate {
-            label: name.clone(),
+            label: name.to_string(),
             kind,
             detail: None,
         });
     }
-    for name in BUILTIN_TYPES {
+    for name in builtin_type_names() {
         candidates.push(Candidate {
-            label: (*name).to_string(),
+            label: name,
             kind: CandidateKind::Type,
             detail: None,
         });

@@ -41,6 +41,9 @@ noeta-db = { path = "crates/noeta-db" }
 noeta-conformance = { path = "crates/noeta-conformance" }
 # Test-only heap-residency probe (dev-dependency; tracking global allocator)
 noeta-alloc-probe = { path = "crates/noeta-alloc-probe" }
+# Test-only fixture directories (dev-dependency): per-process temp roots, so no two test processes
+# or checkouts share a fixture path. The one place a test temp path is built.
+noeta-test-temp = { path = "crates/noeta-test-temp" }
 # Core IR (memory-management migration: ANF lowering target)
 noeta-ir = { path = "crates/noeta-ir" }
 # Core IR passes (memory-management migration: precise-RC analyses + transforms)
@@ -54,8 +57,6 @@ noeta-stdlib = { path = "crates/noeta-stdlib" }
 # Native-extension ABI (P-NATIVE): the contract + dep-free primitives, split out of noeta-stdlib so
 # the batteries (crypto/uuid/json) don't ride the ABI. noeta-stdlib re-exports it (core/std-style).
 noeta-ext-abi = { path = "crates/noeta-ext-abi" }
-noeta-html = { path = "crates/noeta-html" }
-noeta-css = { path = "crates/noeta-css" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
 noeta-host-real = { path = "crates/noeta-host-real" }
 # Lean production runtime (dev-deps D3): the app-execution core (VM+Host+compile front-end, no dev
@@ -178,7 +179,11 @@ uuid = { version = "1", default-features = false }
 # nested input (or a `${…}` hole that re-enters the grammar deep in the parse) cannot overflow a
 # small caller stack. Without it, `recursive` recurses on the bare caller stack — a ~2 MiB test
 # thread overflows at moderate nesting now that the grammar is large.
-chumsky = { version = "1.0.0-alpha.8", features = ["pratt", "stacker"] }
+# `memoization`: `Parser::memoized` caches a rule's *failures* at an offset, which is what stops one
+# genuinely ambiguous alternative from re-parsing the same subtree per nesting level. The grammar has
+# exactly one such garden path — a match arm's `=> { … }`, ambiguous between a map literal and a
+# statement block — and it made nested `match` parse in 2^depth time. See `arm_body`.
+chumsky = { version = "1.0.0-alpha.8", features = ["pratt", "stacker", "memoization"] }
 # On-demand stack growth for the recursive-descent parser: a `${…}` interpolation hole re-enters the
 # full grammar deep in the parse stack, so its construction runs under `stacker::maybe_grow` to keep
 # a small caller stack (a ~2 MiB test thread) from overflowing. Already pulled in transitively by

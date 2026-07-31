@@ -21,6 +21,7 @@ use noeta_vm::VmBackend;
 // --- The fixture extension: `testext.build.make_default::<T>(): T` -------------------------------
 
 const BUILD_TYPED_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "make_default",
     params: &[],
     // Plain call-site-typed: the result is the turbofish `T` itself.
@@ -50,9 +51,29 @@ fn default_out(recipe: &TypeRecipe) -> NativeOut {
             name: name.clone(),
             fields: fields
                 .iter()
-                .map(|(f, r)| (f.clone(), default_out(r)))
+                // A field's declared default is a DECODE concern (what an omitted JSON key means);
+                // this producer builds a value from nothing, so every field is produced.
+                .map(|f| (f.name.clone(), default_out(&f.recipe)))
                 .collect(),
             has_validator: *has_validator,
+        },
+        // An enum's "default" is its FIRST declared variant — the only choice a producer building a
+        // value from nothing can make without inventing one, and the same case `variants_of` lists
+        // first. A recipe enum always has at least one variant (the checker declines an empty one),
+        // so the fallback is unreachable for a checker-built recipe.
+        TypeRecipe::Enum {
+            name,
+            variants,
+            has_validator,
+        } => match variants.first() {
+            Some(v) => NativeOut::Variant {
+                enum_name: name.clone(),
+                variant: v.name.clone(),
+                variant_index: v.index,
+                fields: Vec::new(),
+                has_validator: *has_validator,
+            },
+            None => NativeOut::Unit,
         },
     }
 }

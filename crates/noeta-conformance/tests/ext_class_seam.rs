@@ -205,6 +205,7 @@ const HANDLE: ExtClass = ExtClass {
     // instance's `label` field off the marshalled receiver and returns a rendered string. Proves a
     // class-kind object's method call routes to the class's native `dispatch` in both backends.
     methods: &[ExtFn {
+        param_names: &[],
         name: "describe",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -269,11 +270,13 @@ const POINT: ExtClass = ExtClass {
     // write the *immutable* `x` and must be rejected at runtime.
     methods: &[
         ExtFn {
+            param_names: &[],
             name: "bump",
             params: &[],
             ret: RetTy::Concrete(SigType::Int),
         },
         ExtFn {
+            param_names: &[],
             name: "bad_bump_x",
             params: &[],
             ret: RetTy::Concrete(SigType::Unit),
@@ -359,12 +362,14 @@ const FX_CLASSES: &[ExtClass] = &[HANDLE, POINT, RES];
 const KIT_FNS: &[ExtFn] = &[
     // Native constructor: returns a real `Handle` instance (return-OUT of a class value).
     ExtFn {
+        param_names: &[],
         name: "open",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Handle")),
     },
     // Takes a `Point` back (arg-IN of a class instance) and reduces its fields.
     ExtFn {
+        param_names: &[],
         name: "sum",
         params: &[SigType::Named("Point")],
         ret: RetTy::Concrete(SigType::Int),
@@ -372,6 +377,7 @@ const KIT_FNS: &[ExtFn] = &[
     // Native constructor for the state-holding `Res` (return-OUT of a class carrying a balanced
     // extern-handle field).
     ExtFn {
+        param_names: &[],
         name: "open_res",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Res")),
@@ -380,6 +386,7 @@ const KIT_FNS: &[ExtFn] = &[
     // marshalled instance. The marshalling `clone_box`es the `bguard` extern-handle field into the
     // seam; with `BalancedGuard` the clone/drop nets zero, so this round-trips leak-free.
     ExtFn {
+        param_names: &[],
         name: "tag",
         params: &[SigType::Named("Res")],
         ret: RetTy::Concrete(SigType::String),
@@ -827,4 +834,90 @@ fn run_one(backend: &str, program: &str) -> (String, i32, i64) {
         }
         other => panic!("unknown backend {other}"),
     }
+}
+
+/// **Native-class reflection** (reflect-holes arc): a native class answers `field_specs_of` with its
+/// real field schema, and the schema it advertises is exactly the one `construct` accepts.
+///
+/// The corpus cannot reach this: `std` declares no native *class*, so this fixture is the only place
+/// the class half of native fielded reflection is exercised, and the assertion has to be differential
+/// — a dynamically constructed class instance is built by two different code paths (the VM rebuilds an
+/// interned shape, the tree-walker builds a `TypeDef`), and they must produce the same value.
+///
+/// Three facts are pinned, and each was a live bug before the seeding landed:
+///
+/// 1. The schema is reported at all, with **precise field types** — including `guard`'s, which is an
+///    extern-handle type and reflects under its qualified identity (`fx.Guard`), the same name
+///    `type_of` gives one of its values. A registry signature spells that nominal `Guard`.
+/// 2. `construct` on a native class **refuses an omission** rather than minting a class with no native
+///    state behind it. That refusal is not a special case: an extension-declared field carries no
+///    literal default, so every native field is mandatory and the shared construction planner rejects
+///    the omission — which is why reflecting a native type's fields and letting `construct` resolve it
+///    are safe to land together.
+/// 3. A **fully supplied** construction produces a real instance of the class: its native method
+///    dispatches (`bump()` reaches `point_dispatch` and mutates in place), and its reflected identity is
+///    the class's own qualified name. Both backends agree on all of it.
+/// 4. `construct` **refuses to set a private field**. `guard` is `is_public: false`, so writing it in a
+///    source literal is E0035, and the reflective door now says the same thing in the checker's own
+///    words. That is the other half of fact 2: an *omission* is refused because a native field has no
+///    default, and a *supply* is refused because this field is private — so `fx.Handle` stays reachable
+///    only through the native `kit.open` that owns its state, which is what its privacy declares. No
+///    shipped extension declares a private field, so this fixture is the only exerciser for the native
+///    side of the gate.
+const REFLECT_PROGRAM: &str = r#"
+use fx.Point
+use fx.Handle
+
+// The schema, from the qualified identity — including a private field and an extern-handle field type.
+for f in field_specs_of("fx.Handle") {
+    echo "handle ${f.name}: ${f.type} optional=${f.optional}"
+}
+echo "point: ${field_specs_of("fx.Point").map(fn(f) => "${f.name}=${f.type}").join(" ")}"
+// A class is not an enum: the pair says "a class, and here is its schema".
+echo "variants: ${variants_of("fx.Point").len()}"
+
+// An omission is refused — a native field has no default, so there is nothing to fill it with.
+echo "omitted: ${match construct("fx.Handle", {"label": "x"}) { Ok(v) => "Ok", Err(e) => e }}"
+
+// SUPPLYING the private `guard` is refused too, in the checker's E0035 words — so there is no route
+// to a `fx.Handle` that skips the native constructor owning its state. Positionally, `guard` is the
+// first field, so it is refused before the value's type is even considered.
+mut byname: Map<string, dyn> = {}
+byname["guard"] = 1
+byname["label"] = "x"
+byname["peer"] = 0
+echo "private named: ${match construct("fx.Handle", byname) { Ok(v) => "Ok", Err(e) => e }}"
+mut bypos: List<dyn> = []
+bypos = bypos ~ [1]
+echo "private positional: ${match construct("fx.Handle", bypos) { Ok(v) => "Ok", Err(e) => e }}"
+
+// A full construction is a real class instance: native dispatch works on it, and it reports the
+// class's own identity.
+made = match construct("fx.Point", [7, 8]) { Ok(v) => v.as<Point>(), Err(e) => none };
+match made {
+    some(p) => {
+        echo "made: ${p.x} ${p.y} ${type_of(p)}"
+        echo "bumped: ${p.bump()} ${p.y}"
+    },
+    none => { echo "made nothing" },
+}
+"#;
+
+#[test]
+fn native_class_reflects_its_schema_and_constructs_from_it_on_both_backends() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let stdout = run_both_agree(REFLECT_PROGRAM);
+    assert_eq!(
+        stdout,
+        "handle guard: Type.Named(fx.Guard, []) optional=false\n\
+         handle label: Type.String optional=false\n\
+         handle peer: Type.Dyn optional=false\n\
+         point: x=Type.Int y=Type.Int\n\
+         variants: 0\n\
+         omitted: missing required field `guard` of `fx.Handle`\n\
+         private named: cannot set private field `guard` of `fx.Handle` from outside it\n\
+         private positional: cannot set private field `guard` of `fx.Handle` from outside it\n\
+         made: 7 8 Type.Class(fx.Point, [])\n\
+         bumped: 9 9\n"
+    );
 }

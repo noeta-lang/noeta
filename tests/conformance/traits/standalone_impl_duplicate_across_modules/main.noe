@@ -1,0 +1,19 @@
+// Two modules that each write `impl Decoder for Target` are a **conflict**, and E0027 says so —
+// across a module boundary exactly as within one file.
+//
+// It used to run. The linker deduped the standalone impls it merged by `(target, trait)`, which
+// names an impl's *coherence slot* rather than the impl, so the second module's declaration was
+// dropped as though it were a second sighting of the first — and the program ran with whichever body
+// the module scan happened to reach first, with no diagnostic at all. A conflict is the checker's to
+// report; the linker's job is to carry each declaration into the program exactly once, which is why
+// it keys on the span now.
+//
+// A **directory** case: a single file cannot express two modules.
+// expect: error E0027 at 5:6
+// expect: exit 1
+
+use pkg.types.{Decoder, Target};
+
+fn want(x: dyn Decoder): string { return x.step("hi") }
+
+echo want(Target.new())

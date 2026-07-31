@@ -109,7 +109,7 @@ fn lenient_retains_a_dep_module_use_of_a_native_module_under_an_extension_root()
             .program
             .stmts
             .iter()
-            .any(|s| matches!(s, noeta_ast::Stmt::Struct(d) if d.name.ends_with("Thing"))),
+            .any(|s| matches!(s, noeta_ast::Stmt::Struct(d) if d.name.as_str().ends_with("Thing"))),
         "the imported `.noe` type must be merged, got: {:?}",
         linked
             .program

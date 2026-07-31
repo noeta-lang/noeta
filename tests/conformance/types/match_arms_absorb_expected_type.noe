@@ -1,0 +1,41 @@
+// The bidirectional expectation a `match` (or `if…then…else`) expression is checked against reaches
+// its ARMS, so a literal that can only be typed *against* an expectation — a heterogeneous
+// `Map<string, dyn>`, an empty `{}` — works inside an arm exactly as it does after a bare `return`.
+// Before, the expectation stopped at the `match` and each arm synthesized blind, so the mixed
+// literal below was E0007 ("map values have differing types") and the author had to lift every arm
+// into its own annotated function purely so the literal had a return type to read.
+// `if c then a else b` is parsed as a desugared `match`, so both branches ride the same rule.
+// expect: stdout "2"
+// expect: stdout "2"
+// expect: stdout "0"
+// expect: stdout "2"
+// expect: stdout "0"
+// expect: stdout "array"
+// expect: exit 0
+
+// The baseline: a `return` already supplies the expectation.
+fn direct(): Map<string, dyn> {
+    return {"type": "array", "n": 1}
+}
+
+// Through a `match` — the mixed arm needs `Map<string, dyn>`, the empty arm needs "a map at all".
+fn via_match(x: int): Map<string, dyn> {
+    return match x {
+        1 => {"type": "array", "n": 1},
+        _ => {},
+    }
+}
+
+// Through an `if…then…else` — the same expectation, both branches.
+fn via_if(x: int): Map<string, dyn> {
+    return if x == 1 then {"type": "array", "n": 1} else {}
+}
+
+echo direct().len()
+echo via_match(1).len()
+echo via_match(2).len()
+echo via_if(1).len()
+echo via_if(2).len()
+
+// The absorbed map really is a usable `Map<string, dyn>`, not just a type-checking artifact.
+echo via_match(1)["type"]

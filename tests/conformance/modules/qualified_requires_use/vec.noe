@@ -1,0 +1,16 @@
+// The imported module: a struct, an enum, and a function — each referenced from the entry by a
+// module-qualified name (`vec.Vec2`, `geometry.vec.add`) rather than an imported short name.
+
+pub struct Vec2 {
+    x: int
+    y: int
+}
+
+pub enum Shape {
+    Circle(int)
+    Point
+}
+
+pub fn add(a: Vec2, b: Vec2): Vec2 {
+    return Vec2 { x: a.x + b.x, y: a.y + b.y }
+}

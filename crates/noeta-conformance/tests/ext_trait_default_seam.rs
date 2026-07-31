@@ -144,6 +144,7 @@ const CHIP2: ExtType = ExtType {
     name: "Chip2",
     namespace: "fx",
     methods: &[ExtFn {
+        param_names: &[],
         name: "tag",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -182,6 +183,7 @@ const GADGET: ExtTrait = ExtTrait {
     namespace: "fx",
     methods: &[ExtTraitMethod {
         sig: ExtFn {
+            param_names: &[],
             name: "tag",
             params: &[],
             ret: RetTy::Concrete(SigType::String),
@@ -197,11 +199,13 @@ const GADGET: ExtTrait = ExtTrait {
 
 const KIT_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "chip",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Chip")),
     },
     ExtFn {
+        param_names: &[],
         name: "chip2",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Chip2")),

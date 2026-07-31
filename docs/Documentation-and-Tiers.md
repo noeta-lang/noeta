@@ -1,6 +1,6 @@
-# Documentation & Dev Tiers
+# Documentation — `@doc` and doc generation
 
-`@test`, `@bench`, `@doc`, and `@debug` are **dev tiers** — kinds of content you co-locate with your code that are stripped from a normal build and activated only by the right tool. This page covers `@doc` (extractable prose), the tier model that unifies all four, and the `noeta.toml` build targets that decide which tiers are live.
+A `@doc { … }` block holds extractable prose that lives with the code it documents. `@doc` is one of the four [dev tiers](Dev-Tiers) — co-located content stripped from a normal build by construction — so **production carries no doc text**. This page covers the `@doc` block itself and everything `noeta doc` generates from it. For the tier model (activation, `noeta.toml` build targets) see [Dev Tiers](Dev-Tiers); for declaring tiers of your own, [Extending Tiers](Extending-Tiers).
 
 ---
 
@@ -20,13 +20,41 @@ fn add(a: int, b: int): int { return a + b }
 
 ### Attachment — docs belong to declarations
 
-A `@doc` block **attaches by adjacency**: immediately above a declaration (`fn`/`struct`/`class`/`enum`), it documents that declaration. A non-attached block (above the `use` header, between sections, or standing alone) is the **module doc** if it is the file's first such block, else free-floating section prose. No new syntax — position decides.
+A `@doc` block **attaches by adjacency**: immediately above a declaration (`fn`/`struct`/`class`/`enum`/`trait`), it documents that declaration. A non-attached block (above the `use` header, between sections, or standing alone) is the **module doc** if it is the file's first such block, else free-floating section prose. No new syntax — position decides.
+
+A **method** is documented the same way — the block leads the method inside the body it is declared in:
+
+```noeta ignore
+class Users {
+    @doc { List every user, newest first. }
+    fn list(): List<User> { … }
+}
+```
+
+This works in all three places a method can be written: a type's own body, an in-body `impl Trait { … }` block, and a standalone `impl Trait for Type { … }`. A field, an enum variant and a `trait`'s bodiless method *signature* take no `@doc` — the grammar has no directive position on them.
 
 Attachment feeds the whole toolchain from one resolution:
 
 - **Hover** (LSP): hovering a documented symbol — its declaration or any call site — shows the doc prose under the type.
 - **`noeta doc`**: an attached block's source header carries the symbol (see below).
 - **Runtime docstrings**: with the `doc` tier live (`noeta run --tier doc`), the attached block is stamped as the prelude `#[Doc(text: "…")]` attribute on its declaration, so `attributes_of::<Doc>()` surfaces it at runtime — Python-style docstrings, opt-in. On a normal build nothing is stamped and the blocks strip as always, so **production carries no doc text**.
+
+A stamped record is keyed by the same target convention as the rest of [reflection](Attributes-and-Reflection): a bare name for a top-level `fn`/type/`trait`, and `Type.method` for a method — so a method's prose joins with `params_of` / `returns_of` / `attributes_of` on one key. This is how a framework reads documentation the author wrote once: `para/api` derives an operation's `description` from its handler's `@doc` block rather than asking for it again in an attribute.
+
+```noeta
+use std.doc.Doc
+
+@doc { Adds two ints. }
+fn add(a: int, b: int): int { return a + b }
+
+class Users {
+    @doc { List every user. }
+    fn list(): List<string> { return [] }
+}
+
+for d in attributes_of::<Doc>() { echo "${d.target}: ${d.value.text.trim()}" }
+// --tier doc → "add: Adds two ints." then "Users.list: List every user."
+```
 
 Extract every `@doc` block to stdout:
 
@@ -44,8 +72,10 @@ $ noeta doc adder.noe
 - No `@doc` blocks → a notice on stderr, exit `0`.
 
 ```text
-noeta doc [OPTIONS] <FILE>
+noeta doc [OPTIONS] [PATH]
 ```
+
+`PATH` (default `.`) is a file or a **directory**. A directory extracts every `.noe` beneath it; a file extracts that file **and its sibling modules**, because a `@doc` block belongs to the file it sits in and linking merges declarations without the blocks beside them — extracting from the linked program alone would silently drop the documentation of every imported symbol. This is the same workspace `--out` has always documented, so the two halves of `noeta doc` agree on what "the docs" means. A file that does not parse contributes nothing rather than failing the run.
 
 ### Generating a documentation artifact
 
@@ -54,7 +84,7 @@ noeta doc [OPTIONS] <FILE>
 - **`docs.json`** — the canonical machine-readable form: schema-versioned, keyed by the package's `[package]` identity and version, modules with their namespace, module doc, and items in source order (sections woven between declarations). Deterministic — no timestamps, no absolute paths — so the artifact is content-addressable and **registry-ready**: a published package's docs can ride along and be rendered server-side.
 - **`index.md` + one page per module** — a faithful Markdown rendering of the same data: each public declaration as a signature code block (carrying its `@tier`/`@attribute` directives) followed by its adjacency-attached prose.
 
-A module that declares a `namespace` (a package module) documents its `pub` API only; a bare entry script documents every top-level declaration. Generation works from a bare parse — a sibling that fails to parse is skipped with a note, never fatal.
+A **package module** — a file whose module path derives from where it sits — documents its `pub` API only; a bare entry script outside any package documents every top-level declaration. Generation works from a bare parse — a sibling that fails to parse is skipped with a note, never fatal.
 
 ### Docs on the registry
 
@@ -67,19 +97,35 @@ $ noeta doc --package acme/greeter@0.3.0 --out docs/   # pinned — render the M
 
 Stored docs are *advisory metadata*, not provenance: unsigned, last-wins on re-publish, and a hosted registry may regenerate them from source itself (the docs.rs model) rather than trust the upload.
 
-Plain extraction (`noeta doc <FILE>`, no `--out`/`--package`) takes one more flag, `--target <NAME>`, which gates extraction on the `doc` tier being live in that build target. `noeta doc` also has a second mode, `--api`, which documents the **intrinsic registry** (the stdlib and any composed native modules) instead of `.noe` source — `--root <NAMESPACE>` scopes it to the extensions rooted at one namespace, `--non-builtin` scopes it to every non-builtin extension (what `noeta publish` uses in a package's composed toolchain — it never guesses a root, so an extension whose namespace root diverges from its package name still documents), and `--lint` gates a package's own docs on every registered symbol living under its extensions' own namespace roots; see `noeta doc --help`.
+### The other flags
+
+`noeta doc` has two more concerns: gating plain extraction on a build target, and a second mode, `--api`, which documents the **intrinsic registry** (the stdlib and any composed native modules) instead of `.noe` source. See `noeta doc --help` for the full text.
+
+| Flag | Applies to | Effect |
+|---|---|---|
+| `--target <NAME>` | plain extraction (`noeta doc <FILE>`, no `--out`/`--package`) | Gate: extract only when the `doc` tier is live in that [build target](Dev-Tiers#naming-tiers-and-build-targets--noetatoml); otherwise nothing is emitted. |
+| `--api` | — | Document the intrinsic registry instead of `.noe` source. |
+| `--root <NAMESPACE>` | `--api` | Scope to the extensions rooted at one namespace (excluding `std`). |
+| `--non-builtin` | `--api` | Scope to every non-builtin extension — what `noeta publish` uses in a package's composed toolchain: it never guesses a root, so an extension whose namespace root diverges from its package name still documents. |
+| `--lint` | `--api --root` / `--api --non-builtin` | Fail (before emitting docs) if the scoped extensions register any symbol outside their own namespace roots — the publish quality gate. Exit 2 lists the offenders. |
 
 ---
 
 ## Folding a sample's context — `// sample:start` / `// sample:end`
 
-Every ` ```noeta ` block in these docs is run through the real `noeta` binary by CI, which is what
-keeps the documentation honest: a renamed method or a changed diagnostic fails the build instead of
-quietly misleading a reader. The cost is that a sample has to be a **complete program** — and the
-struct, imports and helper that make a two-line call compile can easily bury the two lines worth
-reading.
+Every ` ```noeta ` block in these docs is run through the real `noeta` binary by CI, which is what keeps the documentation honest: a renamed method or a changed diagnostic fails the build instead of quietly misleading a reader. The cost is that a sample has to be a **complete program** — and the struct, imports and helper that make a two-line call compile can easily bury the two lines worth reading.
 
 Mark the interesting region and the rest folds away:
+
+```text
+struct Email { addr: string }     ← context: compiled, folded away
+// sample:start
+e = Email { addr: "a@b.com" }     ← the sample: what the page shows
+echo e.addr
+// sample:end
+```
+
+Which renders as the two marked lines, with the whole program behind the expander — this block is the live article, so open it to see the `struct` the sample needs:
 
 ```noeta
 struct Email { addr: string }
@@ -90,216 +136,16 @@ echo e.addr
 // sample:end
 ```
 
-The markers are ordinary comments, so **the whole block still compiles and still runs in CI** —
-nothing about the gate changes. Only presentation does:
+The markers are ordinary comments, so **the whole block still compiles and still runs in CI** — nothing about the gate changes. Only presentation does:
 
 - the **Docs browser** (VS Code) shows the marked region, with a *Show full example* expander;
-- **`noeta doc --out`** and other static markdown bake the same fold in as a `<details>` block, so a
-  reader on GitHub gets the short version with the full program one click away;
-- a block with **no markers** renders exactly as it always has.
+- **`noeta doc --out`** and other static markdown bake the same fold in as a `<details>` block, so a reader on GitHub gets the short version with the full program one click away;
+- a block with **no markers** renders in full, unchanged.
 
-A block may mark several regions — they concatenate in order, so a page can show two interesting
-stretches of one program and fold the plumbing between them. Shortening a sample this way is
-strictly better than deleting the context: the deleted version stops compiling, and a sample that
-does not compile is a sample nothing can check.
-
-## The tier model
-
-There are two orthogonal ideas:
-
-- A **tier** is a *kind of co-located content* — a property of the **source**. Built-in tiers: `test`, `bench`, `debug` (all *code*), and `doc` (*text*) — declared by std's core extension through the same `ExtTier` surface a third-party extension uses (only the runners are native); the name-space is open (see [Declaring your own tier](#declaring-your-own-tier)).
-- A **target** is a *named build recipe* — a property of the **build invocation** (in `noeta.toml`) — that decides which tiers are live: a `dev` target includes them, a `prod` target strips them all.
-
-### How activation works
-
-On a normal `noeta run`, the active-tier set is empty: every `@<tier> { … }` block is **stripped before lowering**. It never reaches the type checker or either backend, so tier content can never affect a production build — the stripping is by construction, not a dead-code pass.
-
-When a tier *is* active, its block's items are **inlined** into the top-level program (the block is pure grouping sugar), and the lifted functions gain white-box access to private fields (see [Testing](Testing)). A block is resolved wherever it appears — top-level *and* nested inside a function body, loop, or branch.
-
-Each tool activates its own tier: `noeta test` activates `test`, `noeta bench` activates `bench`, `noeta doc` activates `doc`. The `debug` tier has no dedicated command — you activate it explicitly.
-
-### `@debug` — conditional inline code
-
-`@debug { … }` is code in *statement* position: instrumentation you want compiled in only sometimes.
-
-```noeta
-fn f(x: int): void {
-    @debug { echo "debug: x is ${x}" }
-    echo "result: ${x * 2}"
-}
-```
-
-```console
-$ noeta run prog.noe              # @debug stripped
-result: 10
-$ noeta run prog.noe --tier debug # @debug compiled in
-debug: x is 5
-result: 10
-```
-
-`--tier <NAME>` is repeatable and unions with any `--target`.
-
-### The annotation form
-
-`@<tier> fn …` is exactly a one-item block — sugar for wrapping a single function:
-
-```noeta
-@test fn adds(): void { assert(add(1, 2) == 3) }
-```
-
-### Directive arguments and diagnostics
-
-A tier directive can take arguments — `@bench(iterations: 1000)` (or positional `@bench(1000)`). A tier's knobs are declared as a prelude **config attribute** (`bench`'s is `Bench { iterations: int }`), and the directive args are distribution sugar: the block stamps `#[Bench(iterations: 1000)]` onto each contained fn that does not already carry one (a per-fn attribute wins). Validation is therefore the ordinary attribute construction gate — an unknown parameter, duplicate, or wrong type reports the same construction diagnostics (`E0005`/`E0007`/`E0009`) as any `#[…]` attribute, and the knobs are reflectable via `attributes_of`.
-
-| Code | Meaning |
-|---|---|
-| **E0036** UnknownDirective | `@<name>` resolves to nothing in the directive name-space — not a built-in directive, not a tier, and not one any installed extension declares (e.g. `@tset`). Raised whether or not it would be active, so a typo never silently vanishes, and it offers the nearest real name. |
-| **E0037** InvalidDirectiveArgument | Arguments on a tier with no config attribute (`@test(x)` — `test` takes no arguments). |
-
----
-
-## Build targets — `noeta.toml`
-
-A `noeta.toml` at (or above) your entry file's directory defines named build targets. Each maps tier names to the package that provides them:
-
-```toml
-[targets.dev.tiers]
-test  = "std"
-bench = { package = "std", samples = 100 }
-debug = "std"
-
-[targets.ci]
-extends = "dev"
-[targets.ci.tiers]
-doc = "std"
-```
-
-- A target's **active tiers** are the tier names in its (inheritance-merged) map.
-- `extends = "<base>"` inherits another target's tiers; the child's own entries override the base's. Cycles are detected and rejected.
-- `--target <NAME>` on `noeta run` activates those tiers (unioned with `--tier`). On `noeta test`/`bench`/`doc`, `--target` acts as a **gate** — the tool no-ops if the target does not make its tier live.
-
-### Target-scoped dependencies
-
-A target can also carry its own dependencies, which **layer on top of** the global `[dependencies]` — the same overlay rule as tiers, so a dev-only tool never rides into a build that didn't ask for it:
-
-```toml
-[dependencies]                          # the default/base — present in every build
-http = { version = "^1.0", package = "acme/http" }
-
-[targets.dev.dependencies]              # layered on only when this target is selected
-lint = { version = "^0.3", package = "acme/noeta-lint" }
-```
-
-The **global config is the default**: omit `--target` and a command sees `[dependencies]` and no tiers — the minimal, safe baseline. Put your shipping dependencies in the global config and keep dev-only tools/tiers in a `[targets.dev]` overlay you opt into with `--target dev`. There is no separate "dev vs prod" concept baked into the language — *you* decide what each target contains; the default build simply excludes anything you scoped under a target.
-
-This is why a **shipped artifact is safe by default**: `noeta build` with no `--target` produces the global (baseline) build, and (as [The CLI](The-CLI#shipped-artifacts-are-lean-by-construction) covers) that artifact links only runtime code — never the dev toolchain. `--target dev` layers dev tiers/deps back in when you actually want them.
-
-> [!NOTE]
-> The table shape leaves room for a target to carry more of the build recipe later.
-
----
-
-## Declaring your own tier
-
-The tier name-space is **open**: a package (or the program itself) brings a new tier into existence with a `@tier` declaration on its **runner** function:
-
-```noeta
-namespace fuzz.tiers;
-
-@attribute(Function)
-pub struct Fuzz { cases: int }          // the tier's knobs, as an ordinary attribute
-
-@tier(fuzz, config: Fuzz)
-pub fn run_fuzz(roots: List<TierRoot>): void {
-    configs = attributes_of::<Fuzz>()   // knob values, per root, via reflection
-    for root in roots {
-        run = root.run
-        run()                           // invoke the root — an in-process fn handle
-    }
-}
-```
-
-- `@tier(name[, config: Type])` names the tier consumers write as `@<name> { … }`; the optional `config:` names an `@attribute` struct whose fields are the tier's knobs — exactly the `Bench { iterations }` model, so `@fuzz(cases: 500) { … }` stamps `#[Fuzz(cases: 500)]` onto each contained fn and the ordinary construction gate validates it.
-- The decorated fn is the **runner**: it must be `fn(roots: List<TierRoot>): void`, where each `TierRoot { name: string, run: () -> void }` is an activated root fn as a first-class handle. Anything else about the declaration — a name colliding with a built-in, a duplicate, a non-attribute config, a wrong signature — is **E0051** at the declaration.
-- A consumer opts in with one import (`use fuzzkit.tiers.run_fuzz` — the config struct links along with the runner), writes `@fuzz { … }` blocks, and runs **`noeta fuzz <file>`**: the unknown subcommand resolves against the file's declared tiers and dispatches to the runner in-process, after the compose and before the `noeta-<cmd>` external-binary probes. Roots keep white-box access and strip from a normal build, exactly like the built-in tiers.
-- In `noeta.toml`, any identifier is a valid tier name in a target's `tiers` map — whether it resolves is checked where the tier is used.
-
-### Overriding a tier's provider
-
-A target's `tiers` map is a **provider selection**, and it can re-point a built-in: with
-
-```toml
-[targets.custom.tiers]
-bench = "fuzzkit"
-```
-
-`noeta bench app.noe --target custom` activates the `bench` tier against **fuzzkit's** `@tier(bench, config: …)` declaration — its config attribute is what `@bench(…)` blocks stamp, and its runner receives the roots — while a plain `noeta bench app.noe` keeps the native runner and std's `Bench { iterations }`. Declaring a tier under a built-in name is legal for exactly this reason: the declaration is dormant until a target selects its package (`E0051` now only rejects two declarations of one tier *within one package*). A provider that declares no such tier is an error naming both sides. `test`/`doc` override the same way — a `doc = "docgen"` provider is the documentation-site seam: activation stamps every attached block as `#[Doc]`, and the runner walks `attributes_of::<Doc>()`. The provider selection is part of the compile (and the startup-cache key), and `noeta <tier> <file> --target <name>` steers custom-tier dispatch the same way.
-
----
-
-## Expression tiers — embedded languages as values
-
-A tier declared with **`expr: Type`** turns its blocks into *expressions*: the body is verbatim foreign-language text with **`${…}` holes**, and each block evaluates to a typed value by calling the decorated fn — the tier's **handler** — with the body's pieces:
-
-```noeta
-@tier(greet, text: "text", expr: string)
-fn render(statics: List<string>, holes: List<() -> string>): string {
-    mut out = ""
-    mut i = 0
-    for s in statics {
-        out = out ~ s
-        if i < holes.len() {
-            h = holes[i]
-            out = out ~ h()
-        }
-        i = i + 1
-    }
-    return out
-}
-
-name = "world"
-echo @greet { hello ${name}! }     // " hello world! "
-```
-
-`@greet { hello ${name}! }` desugars to `render(["hello ", "! "], [fn() => name])` — an ordinary call, which is where all the guarantees come from:
-
-- **Holes are real expressions.** They parse with the full grammar, close over the enclosing scope, and type-check against the handler's declared hole type `U` — a mismatched `${…}` is an ordinary type error pointing *inside* the block. `${…}` follows string interpolation's contract exactly (same `\$` escape for a literal `$`; the text escapes `\{ \} \\` from text tiers also apply).
-- **Statics always number holes + 1** (empty where holes touch), so the handler can interleave deterministically.
-- **Holes are thunks.** Each desugars to a zero-param closure, so *whether and when* a hole evaluates is the handler's choice: call each once for an eager DSL, skip unused fragments, or wrap them in `computed`s for a reactive template.
-- **The block's type is the handler's return type**, which must match the declared `expr:` (E0051 otherwise, like any broken tier declaration). The handler signature is fixed: `fn(statics: List<string>, holes: List<() -> U>): T` for your choice of `U`.
-
-`text: "<lang>"` is optional on an expression tier but recommended — the language ID drives editor highlighting of the body. An expression tier has no runner semantics: its blocks never activate or strip, `noeta <tier>` rejects it, and a block in *statement* position (its value silently discarded) is **E0052** — assign or return it.
-
-Because the declaration is ordinary code, a **pure-Noeta package** can ship `@sql`, `@json`, or `@html` — parsed, checked, typed embedded languages — with no native code and no compiler plugin: consumers `use` the handler's module and write blocks. See `examples/sql_tier.noe` for a small end-to-end DSL.
-
-### Native (Rust-package) expression tiers
-
-A **native** package declares an expression tier the same way it registers modules and types — through the extension ABI (`ExtTier`), naming the body language, the value type, and a **native handler** (a module function). The tier is then available wherever the package is installed, with no import of the handler, and its blocks are checked and typed like any expression. std dogfoods this with **`@json`**: a native handler (`std.template.render`) that interleaves the statics with JSON-quoted holes.
-
-```noeta
-id = "u-7"
-name = "Ada Lovelace"
-row = @json { {"id": ${id}, "name": ${name}} }   // a checked `string`
-echo row                                          // {"id": "u-7", "name": "Ada Lovelace"}
-```
-
-The handler receives the hole thunks as closures and invokes them through the higher-order native capability, so a native tier can be as lazy as a Noeta one. Under the hood both handler kinds are the same thing — a function value the block's desugared call targets — so a native and a program-declared tier are indistinguishable to the checker, both backends, and the LSP.
-
-### Editor support — language, highlighting, and the LSP
-
-A tier's `text:` **is** the body's language, and it flows to the tooling three ways — the language is declared once, in the tier, and every consumer picks it up:
-
-- **The LSP reports it.** Hovering an embedded block's tier name (`@sql { … }`) shows `expression tier @sql — sql body, evaluates to Query` — the declared language and the value type, read from the tier registry. The registry unions the program's own `@tier` declarations with any an installed extension contributes, so a program-declared tier and a native package's tier hover identically. (The block itself already hovers as its value type, `Query`, like any expression.)
-- **Highlighting is extension-provided (VS Code / TextMate).** A package ships a TextMate injection grammar that colors its body as the foreign language, contributed with `injectTo: ["source.noeta"]`. It attaches by textual match (`injectionSelector: L:source.noeta`), so it needs no change to Noeta's own grammar — that is why an extension can provide it. `${…}` holes are scoped back to `source.noeta`, so they highlight as ordinary Noeta inside the foreign text — the same split the compiler makes (statics = foreign language, holes = checked Noeta). See `editors/sql-tier.tmLanguage.json` in the [para-db repo](https://github.com/noeta-lang/para-db) for the shape. For tiers that ship no grammar of their own, the VS Code extension also **generates** a per-project injection grammar: on activation and on `.noe` change it scans the workspace's `@tier(…, text: "lang")` declarations and regenerates `syntaxes/generated-tiers.tmLanguage.json`, so a project-declared tier highlights without any hand-written grammar.
-- **tree-sitter** highlighting of third-party tiers needs a per-project generated grammar (a *static* grammar cannot read the declaration set to know which `@name` opens a verbatim body). The static grammar ships the `@doc` → markdown injection as its fallback; `noeta grammar tree-sitter --out <dir>` generates the overlay for a project's declared tiers — the same model as the TextMate generator, but sourced from the compiler's own tier scan (plus installed native tiers) rather than a regex. It writes `project-tiers.json` (the verbatim-body tier-name token list the grammar reads, so `@spec { … }` parses as prose) and regenerates `queries/injections.scm` (one language rule per tier); `tree-sitter generate` (or `--generate`) then rebuilds the parser. Drop the overlay into a `tree-sitter-noeta` checkout your editor points at.
-
----
-
-## Related: the decorator directives
-
-The `@<tier>` blocks above are distinct from the four **decorator directives** — `@derive`, `@attribute`, `@role`, `@semantic` — which annotate *declarations* rather than gate content. Those are language features, covered in [Attributes & Reflection](Attributes-and-Reflection).
+A block may mark several regions — they concatenate in order, so a page can show two interesting stretches of one program and fold the plumbing between them. Shortening a sample this way is strictly better than deleting the context: the deleted version stops compiling, and a sample that does not compile is a sample nothing can check.
 
 ## See also
 
-- [Testing](Testing) · [Benchmarking](Benchmarking) — the runnable tiers.
+- [Dev Tiers](Dev-Tiers) — the tier model `@doc` belongs to: activation, stripping, `noeta.toml` build targets.
+- [Extending Tiers](Extending-Tiers) — declaring your own tier (including a `doc` provider override), expression tiers.
 - [The `noeta` CLI](The-CLI) — the commands that drive tiers.

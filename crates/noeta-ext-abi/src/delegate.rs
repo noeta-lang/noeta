@@ -199,6 +199,13 @@ macro_rules! __delegate_host_capability {
             ) -> Box<dyn $crate::ExternIo> {
                 self.$field.os_exec_spawn(command, args)
             }
+            fn os_try_spawn(
+                &mut self,
+                command: &str,
+                args: &[String],
+            ) -> Result<u64, $crate::os::OsError> {
+                self.$field.os_try_spawn(command, args)
+            }
             fn os_spawn(
                 &mut self,
                 command: &str,
@@ -252,6 +259,20 @@ macro_rules! __delegate_host_capability {
                 handle: u64,
             ) -> Result<Option<String>, $crate::StdError> {
                 self.$field.os_proc_read_stderr_line(handle)
+            }
+            fn os_proc_read_spawn(
+                &mut self,
+                handle: u64,
+                read: $crate::os::ProcRead,
+            ) -> Box<dyn $crate::ExternIo> {
+                self.$field.os_proc_read_spawn(handle, read)
+            }
+            fn os_proc_try_write_stdin(
+                &mut self,
+                handle: u64,
+                data: &str,
+            ) -> Result<(), $crate::os::OsError> {
+                self.$field.os_proc_try_write_stdin(handle, data)
             }
             fn os_proc_write_stdin(
                 &mut self,
@@ -320,11 +341,60 @@ macro_rules! __delegate_host_capability {
             fn net_ws_recv(&self, conn: u64) -> Box<dyn $crate::ExternIo> {
                 self.$field.net_ws_recv(conn)
             }
+            // Forwarded like the rest of the family. Omitting these two silently substituted the
+            // TRAIT DEFAULTS for the inner host's behavior — `net_ws_is_closed` defaults to `true`,
+            // so a delegating host would report every live socket already closed, and a timed recv
+            // would lose its deadline. Neither is observable today (nothing delegates `Network`
+            // yet), which is exactly why it had to be fixed before something does.
+            fn net_ws_recv_timeout(&self, conn: u64, ms: u64) -> Box<dyn $crate::ExternIo> {
+                self.$field.net_ws_recv_timeout(conn, ms)
+            }
+            fn net_ws_is_closed(&self, conn: u64) -> bool {
+                self.$field.net_ws_is_closed(conn)
+            }
             fn net_ws_send(&self, conn: u64, text: String) -> Box<dyn $crate::ExternIo> {
                 self.$field.net_ws_send(conn, text)
             }
             fn net_ws_close(&self, conn: u64) -> Box<dyn $crate::ExternIo> {
                 self.$field.net_ws_close(conn)
+            }
+            // Streaming bodies (http-streaming arc).
+            fn net_stream_open(
+                &mut self,
+                request: $crate::NetRequest,
+                framing: $crate::stream::Framing,
+            ) -> Result<$crate::stream::StreamHead, $crate::NetError> {
+                self.$field.net_stream_open(request, framing)
+            }
+            fn net_stream_recv_next(
+                &mut self,
+                stream: u64,
+            ) -> Result<Option<$crate::stream::Frame>, $crate::StdError> {
+                self.$field.net_stream_recv_next(stream)
+            }
+            fn net_stream_recv(&self, stream: u64) -> Box<dyn $crate::ExternIo> {
+                self.$field.net_stream_recv(stream)
+            }
+            fn net_stream_close(&mut self, stream: u64) -> Result<(), $crate::StdError> {
+                self.$field.net_stream_close(stream)
+            }
+            fn net_sse_start_now(&mut self, conn: u64) -> Result<(), $crate::StdError> {
+                self.$field.net_sse_start_now(conn)
+            }
+            fn net_sse_send_now(&mut self, conn: u64, wire: &str) -> Result<(), $crate::StdError> {
+                self.$field.net_sse_send_now(conn, wire)
+            }
+            fn net_sse_close_now(&mut self, conn: u64) -> Result<(), $crate::StdError> {
+                self.$field.net_sse_close_now(conn)
+            }
+            fn net_sse_start(&self, conn: u64) -> Box<dyn $crate::ExternIo> {
+                self.$field.net_sse_start(conn)
+            }
+            fn net_sse_send(&self, conn: u64, wire: String) -> Box<dyn $crate::ExternIo> {
+                self.$field.net_sse_send(conn, wire)
+            }
+            fn net_sse_close(&self, conn: u64) -> Box<dyn $crate::ExternIo> {
+                self.$field.net_sse_close(conn)
             }
         }
     };

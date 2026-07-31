@@ -1,0 +1,68 @@
+// Three reference positions the linker's qualification walk did not visit. Each is a name that has
+// to become the qualified identity the declaration now carries, and each failed *differently* from
+// the same cause — the walk destructured the node with `..`, so the field was never named and
+// therefore never rewritten.
+//
+//   * `impl Keyed<Grade>` — an `impl`'s trait ARGUMENTS. Both `impl` forms visited the trait name
+//     and jumped straight to the methods, so `Grade` here stayed short and the checker reported it
+//     as an unknown type, while the identical name one line down (as the method's return type)
+//     resolved fine.
+//   * `@role(WebRole.Controller)` — nothing anywhere visited a role tag's enum, which the checker
+//     looks up by qualified name. And since the grammar takes a bare `Enum.Variant`, spelling it
+//     out was not a workaround either: no spelling reached an imported role enum at all.
+//   * `n if n > Limits.ceiling()` — a match arm's GUARD, the one arm position that can mention a
+//     type other than the one being matched. `Expr::Match` walked the scrutinee, each pattern and
+//     each body, and skipped `MatchArm::guard` entirely.
+//
+// A directory case on purpose: the harness runs a single-file case straight from source text with
+// no loader, so namespace qualification never runs for one and a bare `.noe` could not observe any
+// of these.
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
+// expect: stdout "key: Grade.High"
+// expect: stdout "rank 50: over"
+// expect: stdout "rank 1: under"
+// expect: stdout "role: App.main.renderHome=controller"
+// expect: exit 0
+use App.Lib.WebRole;
+use App.Lib.Grade;
+use App.Lib.Keyed;
+use App.Lib.Limits;
+
+struct Door {
+    code: int
+    impl Keyed<Grade> {
+        fn key(): Grade {
+            return Grade.High;
+        }
+    }
+}
+
+@attribute(Function)
+@role(WebRole.Controller)
+struct Page {
+    path: string
+}
+
+#[Page("/")]
+fn renderHome(): int { return 1; }
+
+fn rank(v: int): string {
+    return match v {
+        n if n > Limits.ceiling() => "over",
+        _ => "under",
+    };
+}
+
+d = Door { code: 1 };
+echo "key: ${d.key()}";
+echo "rank 50: ${rank(50)}";
+echo "rank 1: ${rank(1)}";
+
+for b in roles_of() {
+    name = match b.role {
+        WebRole.Controller => "controller",
+        _ => "other",
+    };
+    echo "role: ${b.target}=${name}";
+}

@@ -5,6 +5,61 @@
 use crate::*;
 
 impl Checker {
+    /// Warn (E0065) when `==`/`!=` compares a **reified container** — an `Option`/`Result` — with a
+    /// concrete type that is not that container, which can never be equal.
+    ///
+    /// The comparison is well-formed (`==` is universal), so this stays advisory. It earns its
+    /// place because the way into it is invisible: `??=` deliberately *unwraps*, retyping its
+    /// binding from `Option<int>` to `int` (the documented one-place exception to reassignment
+    /// stability), so a `mut column: ?int` that has been `??=`-assigned once silently stops
+    /// comparing equal to the `?int` it is being tested against. `x == none` is untouched — that is
+    /// the presence test, and `none` is an `Option`.
+    fn warn_container_compare(&mut self, op: BinaryOp, lt: &Type, rt: &Type, span: Span) {
+        // Only when exactly one side is the container: two containers compare normally, and
+        // neither being one is not this rule's business.
+        let container = |t: &Type| matches!(t, Type::Option(_) | Type::Result(..));
+        let concrete = |t: &Type| {
+            !t.defers_to_runtime()
+                && !container(t)
+                && !matches!(t, Type::Union(_) | Type::DynTrait(_) | Type::Kind(_))
+        };
+        let (held, other) = match (container(lt), container(rt)) {
+            (true, false) if concrete(rt) => (lt, rt),
+            (false, true) if concrete(lt) => (rt, lt),
+            _ => return,
+        };
+        // A type parameter is erased and may instantiate to the container itself.
+        if matches!(other, Type::Param(_)) {
+            return;
+        }
+        let sym = if op == BinaryOp::Eq { "==" } else { "!=" };
+        let verdict = if op == BinaryOp::Eq { "false" } else { "true" };
+        let (payload, wrap, take_apart) = match held {
+            Type::Option(inner) => (
+                (**inner).clone(),
+                "some(y)",
+                "match x { some(v) => …, none => … }",
+            ),
+            Type::Result(ok, _) => (
+                (**ok).clone(),
+                "Ok(y)",
+                "match x { Ok(v) => …, Err(e) => … }",
+            ),
+            _ => return,
+        };
+        let diag = self.warn(
+            DiagnosticCode::ImpossibleTypeTest,
+            span,
+            format!("`{held}` can never equal `{other}`; this `{sym}` is always {verdict}"),
+        );
+        if payload == *other {
+            diag.help(format!(
+                "`{held}` wraps its `{other}` — compare like with like (`x {sym} {wrap}`), or \
+                 take the payload out first (`{take_apart}`)"
+            ));
+        }
+    }
+
     pub(crate) fn synth_binary(
         &mut self,
         op: BinaryOp,
@@ -111,8 +166,13 @@ impl Checker {
                 Type::Bool
             }
             // `==`/`!=` are universal (structural equality fallback) and the logical operators take
-            // bools; none impose a trait bound, so none is checked here.
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::And | BinaryOp::Or => Type::Bool,
+            // bools; none impose a trait bound, so none is checked here. One shape is worth a word
+            // though: comparing a reified container against its own payload type (E0065).
+            BinaryOp::Eq | BinaryOp::Ne => {
+                self.warn_container_compare(op, &lt, &rt, span);
+                Type::Bool
+            }
+            BinaryOp::And | BinaryOp::Or => Type::Bool,
             // `===`/`!==` ask reference identity (*same instance*), meaningful only for the
             // reference kind `class`. A definitely-value operand (scalar, collection, struct/enum,
             // tuple, fn) has no identity → E0034; a `dyn`/hole or class (or a union of them) defers.
@@ -202,8 +262,8 @@ impl Checker {
         if operand.defers_to_runtime() {
             return true;
         }
-        if let Type::Named(n, _) = operand
-            && let Some(bounds) = self.coloring.type_params.get(n)
+        if let Type::Param(p) = operand
+            && let Some(bounds) = self.param_bounds(p)
         {
             return bounds.iter().any(|b| b.name == t.name());
         }
@@ -214,8 +274,8 @@ impl Checker {
     /// or `None` if `operand` is not such a parameter — used to pick the diagnostic flavor.
     pub(crate) fn unbounded_type_param(&self, operand: &Type, t: BuiltinTrait) -> Option<String> {
         match operand {
-            Type::Named(n, _) => match self.coloring.type_params.get(n) {
-                Some(bounds) if !bounds.iter().any(|b| b.name == t.name()) => Some(n.clone()),
+            Type::Param(p) => match self.param_bounds(p) {
+                Some(bounds) if !bounds.iter().any(|b| b.name == t.name()) => Some(p.name.clone()),
                 _ => None,
             },
             _ => None,
@@ -258,18 +318,41 @@ impl Checker {
         }
     }
 
-    /// Synthesize a pipeline right-hand side `left |> right`, where `piped` is the type of `left`,
-    /// threaded as `right`'s first argument. `right` may be a call (`add(10)` → `add(left, 10)`)
-    /// or a bare callee (`inc` → `inc(left)`).
-    pub(crate) fn synth_piped(&mut self, right: &Expr, piped: Type, env: &mut Env) -> Type {
+    /// Synthesize a pipeline right-hand side `left |> right`, where `piped` is the type `left`
+    /// already synthesized to, threaded as `right`'s first argument. `right` may be a call
+    /// (`add(10)` → `add(left, 10)`) or a bare callee (`inc` → `inc(left)`).
+    ///
+    /// The desugared argument list is materialized in full — the piped expression at index 0, the
+    /// written arguments after it — so it stays parallel to `arg_types` and the ordinary call
+    /// machinery applies to a pipeline unchanged: labels bind, a bare literal adapts into a
+    /// fixed-width parameter, a closure finalizes against its parameter type. Passing no argument
+    /// expressions at all (what this did) silently disabled every one of those.
+    ///
+    /// The call's span is recorded in `piped_calls` first, because binding needs to know that
+    /// argument zero is the piped value before it resolves the labels — see
+    /// [`Checker::bind_positional`].
+    pub(crate) fn synth_piped(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        piped: Type,
+        env: &mut Env,
+    ) -> Type {
+        self.sites.piped_calls.insert(right.span());
+        let piped_arg = noeta_ast::CallArg::positional(left.clone());
         match right {
             Expr::Call { callee, args, .. } => {
+                // Written order, and the piped value first: `left` is evaluated before the
+                // right-hand side's own arguments, which is the order both backends lower.
                 let mut arg_types = vec![piped];
                 arg_types.extend(noeta_ast::CallArg::values(args).map(|a| self.synth(a, env)));
-                self.synth_call(callee, &arg_types, &[], right.span(), env)
+                let mut arg_exprs = Vec::with_capacity(args.len() + 1);
+                arg_exprs.push(piped_arg);
+                arg_exprs.extend(args.iter().cloned());
+                self.synth_call(callee, &arg_types, &arg_exprs, right.span(), env)
             }
             Expr::Ident { .. } | Expr::Member { .. } => {
-                self.synth_call(right, &[piped], &[], right.span(), env)
+                self.synth_call(right, &[piped], &[piped_arg], right.span(), env)
             }
             other => {
                 self.synth(other, env);

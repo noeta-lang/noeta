@@ -1,0 +1,14 @@
+// `?` on an `Option` early-returns `none`, so the enclosing function has to be able to return one.
+// Before this rule existed, `fn head(xs: List<string>): string { return xs.first()? }` type-checked
+// clean and then handed the caller a `none` sitting in a slot the checker had promised was a
+// `string` — it printed `none` and `type_of` still said `Type.String`.
+//
+// The `Result` half of the operator already had its own rule (E0057 at the error position); this is
+// the absence-position twin. E0012.
+// expect: error E0012 at 11:12
+// expect: exit 1
+fn head(xs: List<string>): string {
+    return xs.first()?
+}
+
+echo head([])

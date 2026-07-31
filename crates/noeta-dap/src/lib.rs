@@ -262,7 +262,7 @@ fn spawn_run(
     resume: mpsc::Receiver<Resume>,
     out: Sender<Value>,
 ) -> JoinHandle<()> {
-    thread::spawn(move || {
+    let worker = move || {
         let _ = out.send(event(
             "thread",
             json!({ "reason": "started", "threadId": MAIN_THREAD_ID }),
@@ -307,7 +307,15 @@ fn spawn_run(
         ));
         let _ = out.send(exited_event(run.exit_code));
         let _ = out.send(terminated_event());
-    })
+    };
+    // The worker runs the whole compile front end (`compile_file` above), so it needs a real stack,
+    // not `std::thread`'s 2 MiB default: parsing an ordinary real-world module overflows that in a
+    // debug build, and a stack overflow aborts the *adapter process*, taking the debug session with
+    // it. Same defect the MCP/LSP tokio runtimes had, in a hand-rolled thread instead of a runtime.
+    thread::Builder::new()
+        .stack_size(noeta_parser::SERVER_STACK_SIZE)
+        .spawn(worker)
+        .expect("spawn the DAP run worker")
 }
 
 /// Abandon the current run: set the terminate flag (for a *running* worker) and send a terminate
@@ -758,15 +766,10 @@ mod tests {
     /// directory is unique per (test, name) so the loader's sibling scan sees only this file.
     fn fixture(name: &str, source: &str) -> PathBuf {
         // Unique per CALL, not per `name`: two tests may share one fixture builder (`tick_fixture`
-        // serves both watch-memo tests), and since this starts by deleting the directory, a shared
-        // name means each test races to delete the other's file out from under it — an
-        // intermittent `NotFound` that only appears when they run in parallel. The pid keeps
-        // concurrent test *processes* apart, the counter keeps calls within one process apart.
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("noeta-dap-{name}-{}-{unique}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        // serves both watch-memo tests), so a shared name would have each racing the other's setup.
+        // The per-process root keeps concurrent test *processes* apart — off the shared system temp
+        // dir, where another process's stray `.noe` files would be linked in as siblings.
+        let dir = noeta_test_temp::unique_path(&format!("dap-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("main.noe");
         std::fs::write(&path, source).unwrap();

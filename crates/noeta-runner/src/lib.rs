@@ -36,18 +36,27 @@ pub use compile::{CompileFailure, Compiled, compile_real, compile_whole_file, re
 /// program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk / clock
 /// / async state is independent. Injected here (not in `noeta-vm`) so the VM crate needs no
 /// `noeta-host-real`/tokio dependency.
+///
+/// `live_output` decides whether the program's `echo` / `io.out` appears **as it happens** or only
+/// when the run ends. A foreground command a human is watching (`noeta run`, the bundle runners)
+/// passes `true`: output is batch-captured otherwise, so a program that runs for ten minutes — or is
+/// killed before it finishes — shows nothing at all, which is exactly what made a slow run
+/// indistinguishable from a hung one. The `@test` runner passes `false`, because capturing a
+/// passing test's stdout and showing only a failing one's is the behavior its report is built on.
 pub fn run_module_real_host(
     module: Arc<Module>,
     args: Vec<String>,
     app_id: Option<String>,
     jit_report: bool,
+    live_output: bool,
 ) -> (RunResult, Vec<TraceFrame>, Option<JitReport>) {
     let factory: noeta_vm::IsolateFactory = Arc::new(move || {
         let host: Box<dyn noeta_stdlib::Host> = Box::new(
             noeta_host_real::RealHost::new()
                 .expect("cannot start an isolate's runtime")
                 .with_args(args.clone())
-                .with_p2p_app(app_id.clone()),
+                .with_p2p_app(app_id.clone())
+                .with_live_output(live_output),
         );
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
             noeta_host_real::RealExecutor::new().expect("cannot start an isolate's async executor"),
@@ -73,8 +82,10 @@ pub fn run_compiled_module(
     app_id: Option<String>,
     jit_stats: bool,
 ) -> ExitCode {
+    // Live: this is a foreground run whose output a human is reading. Anything the program already
+    // streamed has left the buffer, so the `print!` below renders only the unterminated tail.
     let (result, trace, report) =
-        run_module_real_host(Arc::clone(&module), args, app_id, jit_stats);
+        run_module_real_host(Arc::clone(&module), args, app_id, jit_stats, true);
     print!("{}", result.stdout);
     let _ = std::io::stdout().flush();
     // The program's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout is
@@ -164,6 +175,10 @@ pub fn run_source_file(
 ) -> ExitCode {
     match compile::compile_whole_file(file, tiers, target, no_cache) {
         Ok(compiled) => {
+            // Any warning the compile produced goes out first — before the program's own output, so
+            // a compile-time fact is not mistaken for something the program said.
+            let _ = std::io::stderr()
+                .write_all(render_mapped(&compiled.sources, compiled.warnings.iter()).as_bytes());
             run_compiled_module(compiled.module, &compiled.sources, args, app_id, jit_stats)
         }
         Err(failure) => failure.report(),

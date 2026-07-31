@@ -29,6 +29,10 @@ use noeta_vm::{ProfileHook, VmBackend};
 pub struct Compiled {
     pub module: Module,
     pub sources: SourceMap,
+    /// The compile's non-blocking diagnostics, already rendered. A warning does not stop a profile
+    /// run — the program is well-formed and profiling it is exactly what was asked — so it rides
+    /// here and is replayed as the run's first `stderr` chunk.
+    pub warnings: String,
 }
 
 /// One chunk of program output, tagged with the stream it belongs to. The program's own stdout is
@@ -83,12 +87,14 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
     };
 
     let checked = loaded.check();
-    if !checked.diagnostics.is_empty() {
+    // Errors only — a warning is advisory and must not cost you the profile.
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return Err(RunOutput::failed(
             render_mapped(&loaded.sources, checked.diagnostics.iter()),
             1,
         ));
     }
+    let warnings = render_mapped(&loaded.sources, checked.diagnostics.iter());
 
     match noeta_compiler::compile_with_sites(
         &loaded.program,
@@ -103,12 +109,15 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
         Ok(module) => Ok(Compiled {
             module,
             sources: loaded.sources,
+            warnings,
         }),
         Err(u) => Err(RunOutput::failed(
-            format!(
-                "noeta: internal error: the VM cannot compile this program: {}\n",
-                u.reason
-            ),
+            match u.diagnostic() {
+                Some(diagnostic) => {
+                    noeta_diagnostics::render_mapped(&loaded.sources, std::iter::once(&diagnostic))
+                }
+                None => format!("noeta: {u}\n"),
+            },
             1,
         )),
     }
@@ -198,6 +207,13 @@ pub fn run(
     let wall = start.elapsed();
 
     let mut chunks = Vec::new();
+    // Compile-time facts about the file come before the file's own output.
+    if !compiled.warnings.is_empty() {
+        chunks.push(OutputChunk {
+            category: "stderr",
+            text: compiled.warnings.clone(),
+        });
+    }
     if !result.stdout.is_empty() {
         chunks.push(OutputChunk {
             category: "stdout",

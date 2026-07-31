@@ -40,6 +40,8 @@ pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "ParamInfo",
     // The field-schema element `field_specs_of()` returns (`{ name: string, type: Type, optional }`).
     "FieldSpec",
+    // The variant-schema element `variants_of()` returns (`{ name, payload: List<FieldSpec>, backing }`).
+    "VariantSpec",
     // The roots-list element a declared tier's runner receives (tier-providers T2).
     "TierRoot",
     // The lazy-iterator type (Track I): a writable annotation now that `iter()`/adapters and
@@ -100,21 +102,155 @@ pub(crate) fn required_operator_trait(op: BinaryOp) -> Option<BuiltinTrait> {
     }
 }
 
-/// Replace each generic type parameter (a `Named` whose name is in `params`) with `dyn`, deeply.
-/// Generic parameters are erased at runtime, so a method like `set(v: T)` accepts any argument —
-/// erasing `T` to `dyn` keeps argument checking from a false positive against the erased name.
-pub(crate) fn erase_type_params(ty: Type, params: &HashSet<String>) -> Type {
+/// The reserved synthetic identities, for the two kinds of type parameter the language provides
+/// without a source declaration to take a span from.
+///
+/// Both were previously "identified" by a *name nobody would write* — the prelude constructors
+/// used `$T`/`$E` on the reasoning that no user name contains a `$`. That is the same
+/// spelling-as-identity bet this arc removes everywhere else, so they are reserved ids instead:
+/// [`ParamId::synthetic`] lives in a `SourceId` the parser never stamps, and can therefore not
+/// alias a real declaration however it is spelled.
+pub(crate) mod synthetic {
+    use super::{ParamId, ParamRef};
+
+    /// `Ok`/`Err`/`some`'s success payload, and `Ok`/`Err`'s error payload — the two parameters of
+    /// the prelude constructors, instantiated from an expected function type.
+    pub(crate) fn ctor_ok() -> ParamRef {
+        ParamRef::new(ParamId::synthetic(0), "T")
+    }
+    pub(crate) fn ctor_err() -> ParamRef {
+        ParamRef::new(ParamId::synthetic(1), "E")
+    }
+
+    /// The prelude's own generic types' parameters. Index in this list **is** the identity, so the
+    /// field-type projection and the `generic_types` registration cannot drift apart; a new prelude
+    /// generic means a new name here.
+    const PRELUDE: &[&str] = &["T"];
+    const PRELUDE_BASE: u32 = 16;
+
+    /// The identity of a prelude generic's type parameter named `name`.
+    pub(crate) fn prelude_param(name: &str) -> ParamRef {
+        let i = PRELUDE
+            .iter()
+            .position(|p| *p == name)
+            .expect("a prelude generic's type parameter must be listed in `synthetic::PRELUDE`");
+        ParamRef::new(ParamId::synthetic(PRELUDE_BASE + i as u32), name)
+    }
+}
+
+/// The [`ParamRef`] a declared `<T>` introduces: its identity is *where it is declared*, so every
+/// reference the enclosing scope resolves to it agrees, in this file and in any module that later
+/// reads the collected signature.
+pub(crate) fn param_ref(p: &TypeParam) -> ParamRef {
+    ParamRef::new(ParamId::at(p.span), p.name.clone())
+}
+
+/// The scope a declaration's `<…>` list introduces, layered over `outer`.
+///
+/// Layering is by **replacement**: a method's `<T>` overwrites the entry an enclosing class's `<T>`
+/// put there, so a reference inside the method resolves to the method's parameter. That single
+/// line is the shadowing rule — previously unexpressible, because a set of names has no notion of
+/// "which one", and the two `T`s therefore collapsed into one substitution key.
+///
+/// Built in **two passes**: every parameter's identity enters scope first, then the bounds are
+/// resolved against the completed scope — a bound may name a sibling (`<K, T: Keyed<K>>`), and in
+/// one pass that sibling would still be an unresolved nominal name.
+pub(crate) fn extend_param_scope(
+    outer: &ParamScope,
+    params: &[TypeParam],
+    xt: &HashMap<String, String>,
+) -> ParamScope {
+    let mut scope = outer.clone();
+    for p in params {
+        scope.insert(
+            p.name.clone(),
+            ScopedParam {
+                param: param_ref(p),
+                bounds: Vec::new(),
+            },
+        );
+    }
+    for p in params {
+        let bounds = bound_reqs(&p.bounds, xt, &scope);
+        if let Some(entry) = scope.get_mut(&p.name) {
+            entry.bounds = bounds;
+        }
+    }
+    scope
+}
+
+/// The scope a declaration's `<…>` list introduces on its own (no enclosing parameters).
+pub(crate) fn param_scope(params: &[TypeParam], xt: &HashMap<String, String>) -> ParamScope {
+    extend_param_scope(&ParamScope::new(), params, xt)
+}
+
+/// The identities in a scope — what erasure and binding quantify over.
+pub(crate) fn scope_ids(scope: &ParamScope) -> ParamSet {
+    scope.values().map(|s| s.param.id).collect()
+}
+
+/// The identities of a declaration's own `<…>` list.
+pub(crate) fn param_ids(params: &[TypeParam]) -> ParamSet {
+    params.iter().map(|p| ParamId::at(p.span)).collect()
+}
+
+/// Resolve a written annotation's parameter references: a bare [`Type::Named`] whose spelling the
+/// scope binds becomes the [`Type::Param`] it names, deeply.
+///
+/// **This is the only place a spelling becomes a parameter.** Everything downstream — erasure,
+/// binding, substitution, bound enforcement, forwarding templates, reflection — reads the lattice
+/// variant, so no other site needs to know what names are in scope. Applied right after
+/// [`from_ref_q`], which is the same boundary extern-type qualification already sits at.
+///
+/// A parameter written *with* arguments (`T<int>`) drops them, exactly as erasure always did: a
+/// parameter is not a constructor, and the surface offers no higher-kinded form to mean anything
+/// else by it.
+pub(crate) fn resolve_params(ty: Type, scope: &ParamScope) -> Type {
+    if scope.is_empty() {
+        return ty;
+    }
+    let r = |t: Type| resolve_params(t, scope);
+    match ty {
+        Type::Named(n, args) => match scope.get(&n) {
+            Some(s) => Type::Param(s.param.clone()),
+            None => Type::Named(n, args.into_iter().map(r).collect()),
+        },
+        Type::List(t) => Type::List(Box::new(r(*t))),
+        Type::Set(t) => Type::Set(Box::new(r(*t))),
+        Type::Map(k, v) => Type::Map(Box::new(r(*k)), Box::new(r(*v))),
+        Type::Option(t) => Type::Option(Box::new(r(*t))),
+        Type::Result(t, e) => Type::Result(Box::new(r(*t)), Box::new(r(*e))),
+        Type::Tuple(es) => Type::Tuple(es.into_iter().map(r).collect()),
+        Type::Union(es) => Type::union(es.into_iter().map(r)),
+        Type::Fn { params, ret } => Type::Fn {
+            params: params.into_iter().map(r).collect(),
+            ret: Box::new(r(*ret)),
+        },
+        other => other,
+    }
+}
+
+/// Replace each generic type parameter in `params` with `dyn`, deeply. Generic parameters are
+/// erased at runtime, so a method like `set(v: T)` accepts any argument — erasing `T` to `dyn`
+/// keeps argument checking from a false positive against the un-instantiated parameter.
+///
+/// Quantified over a set of **identities**: a parameter belonging to some other declaration that
+/// happens to share the letter is not in the set and survives, which is what lets a caller's `T`
+/// pass through a callee's erasure untouched.
+pub(crate) fn erase_type_params(ty: Type, params: &ParamSet) -> Type {
     let erase = |t: Type| erase_type_params(t, params);
     match ty {
-        // A type parameter used directly (`T`) erases to `dyn`; a named type with arguments
-        // (`Box<T>`) keeps its name but erases inside its arguments.
-        Type::Named(n, _) if params.contains(&n) => Type::Dyn,
+        Type::Param(p) if params.contains(&p.id) => Type::Dyn,
         Type::Named(n, args) => Type::Named(n, args.into_iter().map(erase).collect()),
         Type::List(t) => Type::List(Box::new(erase(*t))),
         Type::Set(t) => Type::Set(Box::new(erase(*t))),
         Type::Map(k, v) => Type::Map(Box::new(erase(*k)), Box::new(erase(*v))),
         Type::Option(t) => Type::Option(Box::new(erase(*t))),
         Type::Result(t, e) => Type::Result(Box::new(erase(*t)), Box::new(erase(*e))),
+        Type::Tuple(es) => Type::Tuple(es.into_iter().map(erase).collect()),
+        // A union re-normalizes through the smart constructor, so an erased member collapses the
+        // way the lattice says it must: `T | string` erases to `dyn | string`, which **is** `dyn`.
+        Type::Union(es) => Type::union(es.into_iter().map(erase)),
         Type::Fn { params: ps, ret } => Type::Fn {
             params: ps.into_iter().map(erase).collect(),
             ret: Box::new(erase(*ret)),
@@ -128,16 +264,11 @@ pub(crate) fn erase_type_params(ty: Type, params: &HashSet<String>) -> Type {
 /// filled (the first concrete argument that constrains a parameter wins); a deferred argument
 /// (`dyn`/hole) never pins a parameter, so a later concrete argument can. Matching descends into
 /// containers, options/results, and function arrows.
-pub(crate) fn bind_type_params(
-    raw: &Type,
-    arg: &Type,
-    params: &HashSet<String>,
-    subst: &mut HashMap<String, Type>,
-) {
+pub(crate) fn bind_type_params(raw: &Type, arg: &Type, params: &ParamSet, subst: &mut Subst) {
     match (raw, arg) {
         // A deferred argument (`dyn`/hole) never pins a parameter, so a later concrete argument can.
-        (Type::Named(n, _), _) if params.contains(n) && !arg.defers_to_runtime() => {
-            subst.entry(n.clone()).or_insert_with(|| arg.clone());
+        (Type::Param(p), _) if params.contains(&p.id) && !arg.defers_to_runtime() => {
+            subst.entry(p.id).or_insert_with(|| arg.clone());
         }
         // A named generic type (`Box<T>` matched against `Box<int>`): bind through the arguments.
         (Type::Named(rn, rargs), Type::Named(an, aargs)) if rn == an => {
@@ -156,6 +287,18 @@ pub(crate) fn bind_type_params(
             bind_type_params(rt, at, params, subst);
             bind_type_params(re, ae, params, subst);
         }
+        // A tuple binds position-wise, like every other structural container: `(T, int)` matched
+        // against `(int, int)` pins `T = int`. `zip` stops at the shorter one, so a mismatched
+        // arity simply binds what lines up and leaves the rest to the arity check.
+        (Type::Tuple(rs), Type::Tuple(as_)) => {
+            for (r, a) in rs.iter().zip(as_) {
+                bind_type_params(r, a, params, subst);
+            }
+        }
+        // A **union** deliberately binds nothing. `T | string` matched against `int` could mean
+        // `T = int` only if the value is known not to be the other member, and nothing here knows
+        // that — so the parameter stays unbound and the caller's `dyn` fallback takes over, which
+        // accepts the argument without inventing an instantiation.
         (
             Type::Fn {
                 params: rp,
@@ -180,24 +323,23 @@ pub(crate) fn bind_type_params(
 /// runtime erases the argument). `dyn` is destruct-relevant, so a field mentioning a parameter (bare
 /// or nested, `T` / `List<T>`) becomes relevant; a concrete field is unchanged. No-op for a
 /// non-generic type (empty `params`).
-pub(crate) fn params_to_dyn(ty: &Type, params: &[String]) -> Type {
+pub(crate) fn params_to_dyn(ty: &Type, params: &ParamSet) -> Type {
     if params.is_empty() {
         return ty.clone();
     }
-    let subst: HashMap<String, Type> = params.iter().map(|p| (p.clone(), Type::Dyn)).collect();
+    let subst: Subst = params.iter().map(|p| (*p, Type::Dyn)).collect();
     apply_subst(ty, &subst)
 }
 
 /// Whether `ty` mentions one of `params` (bare `T` or nested, `List<T>`), deeply. Used by the
 /// derive field constraint (E0050) to defer parameter-typed fields to the instantiation site.
-pub(crate) fn mentions_param(ty: &Type, params: &[String]) -> bool {
+pub(crate) fn mentions_param(ty: &Type, params: &ParamSet) -> bool {
     if params.is_empty() {
         return false;
     }
     match ty {
-        Type::Named(n, args) => {
-            params.iter().any(|p| p == n) || args.iter().any(|a| mentions_param(a, params))
-        }
+        Type::Param(p) => params.contains(&p.id),
+        Type::Named(_, args) => args.iter().any(|a| mentions_param(a, params)),
         Type::List(t) | Type::Set(t) | Type::Option(t) => mentions_param(t, params),
         Type::Map(k, v) | Type::Result(k, v) => {
             mentions_param(k, params) || mentions_param(v, params)
@@ -213,13 +355,15 @@ pub(crate) fn mentions_param(ty: &Type, params: &[String]) -> bool {
 /// The type parameters of `params` that `ty` mentions (bare or nested), in first-appearance
 /// order, deduplicated. The forwarding call-site resolution uses it to name the exact parameter a
 /// slot template needs but the call left open (D2a).
-pub(crate) fn params_mentioned(ty: &Type, params: &HashSet<String>) -> Vec<String> {
-    fn walk(ty: &Type, params: &HashSet<String>, out: &mut Vec<String>) {
+pub(crate) fn params_mentioned(ty: &Type, params: &ParamSet) -> Vec<ParamRef> {
+    fn walk(ty: &Type, params: &ParamSet, out: &mut Vec<ParamRef>) {
         match ty {
-            Type::Named(n, args) => {
-                if params.contains(n) && !out.iter().any(|o| o == n) {
-                    out.push(n.clone());
+            Type::Param(p) => {
+                if params.contains(&p.id) && !out.contains(p) {
+                    out.push(p.clone());
                 }
+            }
+            Type::Named(_, args) => {
                 for a in args {
                     walk(a, params, out);
                 }
@@ -254,31 +398,29 @@ pub(crate) fn params_mentioned(ty: &Type, params: &HashSet<String>) -> Vec<Strin
 /// callee's (`fn relabel<T>` forwarding `T` into `fn id<T>` must yield `T`, not `dyn`).
 /// [`apply_subst`] replaces each occurrence without recursing into the replacement, so the
 /// inserted type survives verbatim.
-pub(crate) fn subst_or_dyn(
-    ty: &Type,
-    subst: &HashMap<String, Type>,
-    tps: &HashSet<String>,
-) -> Type {
+pub(crate) fn subst_or_dyn(ty: &Type, subst: &Subst, tps: &ParamSet) -> Type {
     let mut full = subst.clone();
-    for n in tps {
-        full.entry(n.clone()).or_insert(Type::Dyn);
+    for id in tps {
+        full.entry(*id).or_insert(Type::Dyn);
     }
     apply_subst(ty, &full)
 }
 
-/// Substitute resolved type parameters into a type, deeply. An unresolved parameter is left as its
-/// `Named` form (the caller erases any residue to `dyn`).
-pub(crate) fn apply_subst(ty: &Type, subst: &HashMap<String, Type>) -> Type {
+/// Substitute resolved type parameters into a type, deeply. An unresolved parameter is left as
+/// itself (the caller erases any residue to `dyn`).
+pub(crate) fn apply_subst(ty: &Type, subst: &Subst) -> Type {
     match ty {
-        // A type parameter (`T`) resolves to its binding; a named generic type (`Box<T>`)
-        // substitutes inside its arguments.
-        Type::Named(n, args) => match subst.get(n) {
+        // A type parameter resolves to its binding, BY IDENTITY — a same-spelled parameter from
+        // another declaration is a different key and is untouched.
+        Type::Param(p) => match subst.get(&p.id) {
             Some(t) => t.clone(),
-            None => Type::Named(
-                n.clone(),
-                args.iter().map(|a| apply_subst(a, subst)).collect(),
-            ),
+            None => ty.clone(),
         },
+        // A named generic type (`Box<T>`) substitutes inside its arguments.
+        Type::Named(n, args) => Type::Named(
+            n.clone(),
+            args.iter().map(|a| apply_subst(a, subst)).collect(),
+        ),
         Type::List(t) => Type::List(Box::new(apply_subst(t, subst))),
         Type::Set(t) => Type::Set(Box::new(apply_subst(t, subst))),
         Type::Map(k, v) => Type::Map(
@@ -290,6 +432,10 @@ pub(crate) fn apply_subst(ty: &Type, subst: &HashMap<String, Type>) -> Type {
             Box::new(apply_subst(t, subst)),
             Box::new(apply_subst(e, subst)),
         ),
+        Type::Tuple(es) => Type::Tuple(es.iter().map(|e| apply_subst(e, subst)).collect()),
+        // Through the smart constructor: substituting can make two members equal (`T | string` with
+        // `T = string`), and a union carrying a duplicate is not a type the lattice produces.
+        Type::Union(es) => Type::union(es.iter().map(|e| apply_subst(e, subst))),
         Type::Fn { params, ret } => Type::Fn {
             params: params.iter().map(|p| apply_subst(p, subst)).collect(),
             ret: Box::new(apply_subst(ret, subst)),
@@ -363,9 +509,7 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
                 )
         }
         // No built-in *primitive* type satisfies these marker/protocol traits without an explicit
-        // `impl`. `Mergeable` in particular is satisfied only by the CRDT extern types, which are
-        // `Type::Named` and so resolve through the seeded `trait_impls` table in `satisfies`, never
-        // reaching here — no primitive is ever `Mergeable`.
+        // `impl`.
         Bt::Clone
         | Bt::Error
         | Bt::From
@@ -378,15 +522,10 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
         | Bt::Members
         | Bt::DynamicCall
         | Bt::TryAdd
-        | Bt::Validate
-        | Bt::Mergeable => false,
+        | Bt::Validate => false,
     }
 }
 
-/// Unify a running element type with the next element's type, for synthesizing a list literal's
-/// element type. Returns the unified type, or `None` if the two are concretely incompatible (a
-/// heterogeneous list). A deferred type (hole / `dyn`) is compatible with anything; two numeric
-/// types unify to `float` (the int/float promotion the runtime performs).
 /// Join a block-bodied closure's collected `return` types into its inferred return type. If the
 /// block does not definitely end in a value-`return` it can fall through to the end, which returns
 /// `void`, so `void` is added to the join. Compatible types collapse via [`unify_element`] (the same
@@ -418,13 +557,26 @@ pub(crate) fn join_closure_returns(stmts: &[Stmt], mut types: Vec<Type>) -> Type
 /// ever *miss* a diverging path (a false negative), never invent one — it cannot reject a valid
 /// function. A block diverges as soon as *one* of its statements does: everything after an
 /// unconditional divergence is unreachable, so the block's end is too.
-pub(crate) fn block_diverges(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(stmt_diverges)
+pub(crate) fn block_diverges(
+    stmts: &[Stmt],
+    exhaustive: &HashSet<Span>,
+    never: &HashSet<Span>,
+) -> bool {
+    stmts.iter().any(|s| stmt_diverges(s, exhaustive, never))
 }
 
 /// Whether a single statement unconditionally transfers control away and never falls through to the
 /// statement after it.
-pub(crate) fn stmt_diverges(stmt: &Stmt) -> bool {
+///
+/// `exhaustive` is the set of `match` spans the typing pass proved total (see
+/// [`crate::Checker::exhaustive_matches`]); `never` is the set of expression spans it typed as the
+/// bottom (see [`crate::sites::SiteMaps::never_exprs`]). Both are facts only the typing pass can
+/// establish, carried across by span so this walk and the diagnostics can never disagree.
+pub(crate) fn stmt_diverges(
+    stmt: &Stmt,
+    exhaustive: &HashSet<Span>,
+    never: &HashSet<Span>,
+) -> bool {
     match stmt {
         // `return` leaves the function. (`yield` does not — a generator resumes after it.)
         Stmt::Return { .. } => true,
@@ -434,35 +586,60 @@ pub(crate) fn stmt_diverges(stmt: &Stmt) -> bool {
             then_body,
             else_body: Some(else_body),
             ..
-        } => block_diverges(then_body) && block_diverges(else_body),
+        } => {
+            block_diverges(then_body, exhaustive, never)
+                && block_diverges(else_body, exhaustive, never)
+        }
         // `while true { … }` with no `break` targeting this loop never exits normally.
         Stmt::While { cond, body, .. } => {
             matches!(cond, Expr::Bool { value: true, .. }) && !body_breaks(body)
         }
         // A structured-concurrency scope is a transparent block for control flow: a `return` inside it
         // still leaves the function.
-        Stmt::Concurrent { body, .. } => block_diverges(body),
-        // A bare `panic(...)` (or a `match` all of whose arms diverge) never returns.
-        Stmt::Expr { expr, .. } => expr_diverges(expr),
+        Stmt::Concurrent { body, .. } => block_diverges(body, exhaustive, never),
+        // A call that does not return, or an exhaustive `match` all of whose arms diverge.
+        Stmt::Expr { expr, .. } => expr_diverges(expr, exhaustive, never),
         _ => false,
     }
 }
 
-/// Whether an expression in statement position unconditionally diverges: a `panic(...)` call, or a
-/// `match` whose (non-empty) arms *all* diverge — an arm body is an expression, so it diverges only by
-/// itself being a `panic`/all-diverging `match`, never by a `return` (a statement can't sit there).
-pub(crate) fn expr_diverges(expr: &Expr) -> bool {
+/// Whether an expression in statement position unconditionally diverges: a call whose declared
+/// return type is `never`, or an **exhaustive** `match` whose arms all diverge.
+///
+/// A `match` transfers control into exactly one arm, so it diverges when every arm does — but only
+/// once control is guaranteed to enter an arm at all, which is precisely exhaustiveness. That
+/// judgement belongs to the typing pass (it needs the scrutinee's type); `exhaustive` carries its
+/// answer over by span, so this walk and `E0011` can never disagree. A `match` the typing pass
+/// could not prove total falls out to the statement after it (or trips the runtime `MatchFail`
+/// backstop) and is not counted.
+///
+/// An expression arm diverges only by being a diverging call/all-diverging `match` itself — a
+/// statement cannot sit there. A **block** arm may hold statements, and its `return` exits the
+/// *enclosing* function (arms lower in the same frame, not as closures), so it diverges exactly as
+/// the same statements would inline.
+///
+/// The divergence test was once the literal name `panic`. It is now the **type**: any call the
+/// typing pass gave [`noeta_types::Type::Never`] — `panic`, `os.exit`, `server.serve`, and any
+/// user function declared `: never`. Without that, `fn die(msg: string): never { panic(msg) }` would
+/// be a type nobody could use: every caller ending in `die(…)` would be E0048, and the language
+/// would offer a way to *declare* divergence that it then refused to *believe*.
+pub(crate) fn expr_diverges(
+    expr: &Expr,
+    exhaustive: &HashSet<Span>,
+    never: &HashSet<Span>,
+) -> bool {
+    if never.contains(&expr.span()) {
+        return true;
+    }
     match expr {
-        Expr::Call { callee, .. } => {
-            matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "panic")
-        }
-        Expr::Match { arms, .. } => {
-            !arms.is_empty()
+        Expr::Match { arms, span, .. } => {
+            exhaustive.contains(span)
+                && !arms.is_empty()
                 && arms.iter().all(|a| match &a.body {
-                    noeta_ast::ClosureBody::Expr(e) => expr_diverges(e),
-                    // A statement-block arm stays conservative (a `return` there EXITS, but this
-                    // helper answers "diverges", and false only weakens the analysis).
-                    noeta_ast::ClosureBody::Block(_) => false,
+                    noeta_ast::ClosureBody::Expr(e) => expr_diverges(e, exhaustive, never),
+                    noeta_ast::ClosureBody::Block(stmts) => {
+                        block_diverges(stmts, exhaustive, never)
+                    }
                 })
         }
         _ => false,
@@ -491,11 +668,31 @@ pub(crate) fn stmt_breaks(stmt: &Stmt) -> bool {
     }
 }
 
+/// Unify a running element type with the next element's type — a list literal's element, a map
+/// literal's key/value, a `~` concatenation's element, a block closure's `return`s. Returns the
+/// unified type, or `None` when the two are concretely incompatible (a heterogeneous list). Two
+/// numeric types unify to `float` (the int/float promotion the runtime performs).
+///
+/// This is a **join** — a least *upper* bound — so it reads `dyn` the way [`Type::subtype`] does: as
+/// the **top**. Only an inference HOLE ([`Type::Unknown`]) is the no-information case absorbed by
+/// whatever it meets (the `acc` this loop starts from, `[]`'s element completed by a later write);
+/// `dyn` is not a hole but a nameable type, so joining it with anything is `dyn` — which the
+/// `subtype` arms below already produce, with no special case of its own.
+///
+/// That distinction is load-bearing, and conflating the two was a hole rather than an instance of the
+/// checker's deliberate `Type::Named` leniency. The leniency is about a nominal type's *members*: the
+/// checker does not know every method a `Named` has, so it defers the lookup to the runtime, which
+/// then verifies it. Here nothing verified anything — reading `dyn` as no-information made the join
+/// answer with the *other* side, so `List<T> ~ [d]` stayed a `List<T>` and `[1, d]` a `List<int>` for
+/// a `dyn` `d`. That silently admitted a value whose type was never checked into a checked slot,
+/// which is precisely what `dyn <: T` being false everywhere else exists to prevent: `some(d)` into a
+/// `?T` was always the E0007 it should be, and the two now agree. The sound route out of `dyn` is the
+/// checked narrow — `d.as<T>()`, which resolves a type parameter as of the same arc as this note.
 pub(crate) fn unify_element(acc: &Type, next: &Type) -> Option<Type> {
-    if acc.defers_to_runtime() {
+    if acc.is_gradual() {
         return Some(next.clone());
     }
-    if next.defers_to_runtime() {
+    if next.is_gradual() {
         return Some(acc.clone());
     }
     if Type::subtype(next, acc) {
@@ -599,8 +796,13 @@ pub(crate) fn reassigns(stmts: &[Stmt], name: &str) -> bool {
 /// language-level `Future`/`Iterator`/…, or an un-imported (hence unknown) name — is left bare;
 /// user-type precedence needs no check here because importing a name you also declare is an E0020
 /// collision, so the two can never both be in scope.
-pub(crate) fn from_ref_q(ty: &TypeRef, xt: &HashMap<String, String>) -> Type {
-    qualify_externs(Type::from_ref(ty), xt)
+///
+/// `scope` is the generic type parameters in scope at the annotation, which is what turns a bare
+/// `T` into the [`Type::Param`] it names — see [`resolve_params`]. Pass an empty scope only where
+/// there genuinely is none (a top-level position outside any generic declaration); every site that
+/// *has* one must pass it, which is why the argument is required rather than defaulted.
+pub(crate) fn from_ref_q(ty: &TypeRef, xt: &HashMap<String, String>, scope: &ParamScope) -> Type {
+    resolve_params(qualify_externs(Type::from_ref(ty), xt), scope)
 }
 
 /// Convert a declaration's surface trait bounds into their checker-side [`BoundReq`]s: names
@@ -609,12 +811,16 @@ pub(crate) fn from_ref_q(ty: &TypeRef, xt: &HashMap<String, String>) -> Type {
 pub(crate) fn bound_reqs(
     bounds: &[noeta_ast::TraitBound],
     xt: &HashMap<String, String>,
+    scope: &ParamScope,
 ) -> Vec<crate::env::BoundReq> {
     bounds
         .iter()
         .map(|b| crate::env::BoundReq {
-            name: b.name.clone(),
-            args: b.args.iter().map(|t| from_ref_q(t, xt)).collect(),
+            name: b.name.to_string(),
+            // A bound's arguments may name a SIBLING parameter (`<K, T: Keyed<K>>`). They are
+            // resolved against the scope the bounds are being built for, which is why
+            // `extend_param_scope` inserts every parameter's `ParamRef` before any bound is read.
+            args: b.args.iter().map(|t| from_ref_q(t, xt, scope)).collect(),
         })
         .collect()
 }
@@ -645,29 +851,14 @@ pub(crate) fn qualify_externs(t: Type, xt: &HashMap<String, String>) -> Type {
 }
 
 /// The declared type of a field, or `Unknown` when unannotated.
-pub(crate) fn field_type(ty: &Option<TypeRef>, xt: &HashMap<String, String>) -> Type {
+pub(crate) fn field_type(
+    ty: &Option<TypeRef>,
+    xt: &HashMap<String, String>,
+    scope: &ParamScope,
+) -> Type {
     ty.as_ref()
-        .map(|t| from_ref_q(t, xt))
+        .map(|t| from_ref_q(t, xt, scope))
         .unwrap_or(Type::Unknown)
-}
-
-/// The type of one enum-variant payload field (R2b). A **positional** payload (`Leaf(T)`, `V(int)`)
-/// is parsed with its type as the `Param`'s *name* and no annotation, so its type is reconstructed
-/// from the name; a **named** field (`Leaf(x: T)`) uses its annotation. Reconstructing from the name
-/// routes through the same name→[`Type`] resolution `from_ref` uses, so `int` maps to [`Type::Int`]
-/// and a type parameter `T` to `Type::Named("T", [])` (the form [`bind_type_params`] unifies).
-pub(crate) fn variant_field_type(p: &Param, xt: &HashMap<String, String>) -> Type {
-    match &p.ty {
-        Some(tr) => from_ref_q(tr, xt),
-        None => from_ref_q(
-            &TypeRef::Named {
-                name: p.name.clone(),
-                args: Vec::new(),
-                span: p.name_span,
-            },
-            xt,
-        ),
-    }
 }
 
 /// The receiver (`self`) type inside a method of `name` — `Named(name, <its own type params>)` — so
@@ -812,15 +1003,15 @@ pub(crate) fn self_type(name: &str, type_params: &[TypeParam]) -> Type {
         name.to_string(),
         type_params
             .iter()
-            .map(|p| Type::Named(p.name.clone(), vec![]))
+            .map(|p| Type::Param(param_ref(p)))
             .collect(),
     )
 }
 
 /// The declared type of a parameter, or `Unknown` when unannotated.
-pub(crate) fn param_type(p: &Param, xt: &HashMap<String, String>) -> Type {
+pub(crate) fn param_type(p: &Param, xt: &HashMap<String, String>, scope: &ParamScope) -> Type {
     p.ty.as_ref()
-        .map(|t| from_ref_q(t, xt))
+        .map(|t| from_ref_q(t, xt, scope))
         .unwrap_or(Type::Unknown)
 }
 

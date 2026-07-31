@@ -40,6 +40,7 @@ pub fn shutdown_notify() -> std::sync::Arc<Notify> {
         .clone()
 }
 
+mod stream;
 #[cfg(feature = "telemetry")]
 mod telemetry;
 mod ws;
@@ -90,12 +91,22 @@ pub struct RealHost {
     readers: HashMap<u64, BufReader<File>>,
     /// Monotonic id source for `readers`.
     next_reader_id: u64,
-    /// The real HTTP client for the `Network` capability (http arc H1). Cheap to clone (an inner
-    /// `Arc`), holds the connection pool; built once per host. Requests are driven on `runtime`.
-    /// Present only under `ring-http-client` (DCE Axis B): a binary that never imports `std.http` links
-    /// without reqwest, so this field — and the TLS stack behind it — is gated out.
+    /// The real HTTP client for the **synchronous** `Network` calls (http arc H1) — and *only* those,
+    /// which is a correctness rule rather than tidiness. See [`new_http_client`]: a client is a
+    /// connection pool, a pooled connection's hyper driver task lives on whichever runtime opened it,
+    /// and reusing it from a different runtime hangs silently. Everything here is driven inside
+    /// `self.runtime.block_on`, so every connection in this pool belongs to `runtime`.
+    ///
+    /// Cheap to clone (an inner `Arc`); built once per host. Present only under `ring-http-client`
+    /// (DCE Axis B): a binary that never imports `std.http` links without reqwest, so this field —
+    /// and the TLS stack behind it — is gated out.
     #[cfg(feature = "ring-http-client")]
     http: reqwest::Client,
+    /// The client for `http.*_async` ([`Network::net_spawn`]), whose futures are polled on the
+    /// **executor's** runtime rather than this host's. A separate pool for a separate runtime — the
+    /// rule stated on `http` above.
+    #[cfg(feature = "ring-http-client")]
+    http_async: reqwest::Client,
     /// Inbound listeners (http-server S1), keyed by the id `net_listen` hands out. Each holds a
     /// bound socket; the tokio listener is created lazily on the executor's runtime at first accept
     /// (so all server socket IO stays on the runtime that drives the accept future, never this
@@ -120,6 +131,19 @@ pub struct RealHost {
     /// shared into every ws descriptor. A conn moves here from `conns` at upgrade and leaves on
     /// close/peer-EOF.
     ws_conns: ws::WsConns,
+    /// Open outbound **streaming** bodies (http-streaming arc), keyed by the id `net_stream_open`
+    /// hands out. Each holds the receiving end of its pump thread's frame channel; dropping the
+    /// entry (an explicit `close`, or host teardown) ends the pump and releases the connection.
+    /// Present only under `ring-http-client` — the reader is reqwest-backed, like `http` above.
+    #[cfg(feature = "ring-http-client")]
+    streams: stream::RealStreams,
+    /// Monotonic id source for `streams`.
+    #[cfg(feature = "ring-http-client")]
+    next_stream: u64,
+    /// Connections switched to `text/event-stream` (http-streaming arc) — the SSE analogue of
+    /// `ws_conns`. A conn moves here from `conns` when a handler answers with `server.sse`, and
+    /// leaves on close or a failed write.
+    sse_conns: stream::SseConns,
     /// The program's argument vector reported through `args.all()` (M2.2). Defaults to the real
     /// process argv (`std::env::args()`), which is exactly what a shipped `noeta build --exe` binary
     /// wants when invoked directly. `noeta run app.noe -- a b c` overrides it via
@@ -147,6 +171,15 @@ pub struct RealHost {
     /// and surfaces it (with "real networking permitted") through [`P2pProvider::real_p2p`], so the
     /// extension can build the node.
     p2p_app_id: Option<String>,
+    /// Whether this host streams program output to the real terminal as it is produced
+    /// ([`Console::streams_output`]), instead of letting it batch until the run ends.
+    ///
+    /// **Off by default, and deliberately so.** Batch-capturing is right for anything that reads
+    /// the finished [`noeta_stdlib::RunResult`]: the `@test` runner hides a passing test's stdout
+    /// and shows a failing one's, `noeta test --json` puts it in the report, and the differential
+    /// oracle compares it. It is wrong for a program a human is watching — `noeta run`, `noeta
+    /// serve` — which is why those drivers turn it on with [`RealHost::with_live_output`].
+    live_output: bool,
 }
 
 /// `RealHost`'s telemetry state. In-flight spans are tracked even with the `telemetry` feature off
@@ -230,20 +263,36 @@ impl RealHost {
             readers: HashMap::new(),
             next_reader_id: 0,
             #[cfg(feature = "ring-http-client")]
-            http: reqwest::Client::new(),
+            http: new_http_client(),
+            #[cfg(feature = "ring-http-client")]
+            http_async: new_http_client(),
             servers: HashMap::new(),
             next_listener: 0,
             prebound: None,
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
             ws_conns: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "ring-http-client")]
+            streams: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "ring-http-client")]
+            next_stream: 1,
+            sse_conns: Arc::new(Mutex::new(HashMap::new())),
             args: std::env::args().collect(),
             env_overlay: HashMap::new(),
             procs: HashMap::new(),
             next_proc: 1,
             tel: RealTelemetry::new(),
             p2p_app_id: None,
+            live_output: false,
         })
+    }
+
+    /// Stream this host's program output to the real terminal as it is produced (see
+    /// [`RealHost::live_output`]). Builder style, so the per-isolate factory can hand every isolate
+    /// the driver's choice.
+    pub fn with_live_output(mut self, live: bool) -> RealHost {
+        self.live_output = live;
+        self
     }
 
     /// Seed a **pre-bound listener** (server-hmr S1): the multi-core `noeta serve --parallel`
@@ -291,6 +340,39 @@ impl RealHost {
             Ok(names)
         })
     }
+}
+
+/// Build one HTTP client — **for exactly one tokio runtime**.
+///
+/// The rule this function exists to name: a `reqwest::Client` is a connection *pool*, and a pooled
+/// connection is inseparable from the runtime that opened it, because hyper's driver task for that
+/// connection lives there and nothing else will poll it. Cloning the client is cheap and shares the
+/// pool, so cloning it *across runtimes* is how a connection ends up being written to by a runtime
+/// that is not running. There is no error and no timeout when that happens — the request future
+/// simply never resolves.
+///
+/// It has happened here: one ordinary `client.get(…)` (host runtime) followed by a `client.stream(…)`
+/// to the same origin (its own pump runtime) hung forever, with the socket showing only the first
+/// call's bytes. See `stream.rs`'s module header for the measurement.
+///
+/// So each runtime that performs requests gets its own client: [`RealHost::http`] for the
+/// synchronous calls on the host's runtime, [`RealHost::http_async`] for `http.*_async` on the
+/// executor's, one per stream pump thread, and one per OTLP exporter thread. Never clone one across
+/// that boundary.
+#[cfg(feature = "ring-http-client")]
+fn new_http_client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
+/// The same one-runtime rule as [`new_http_client`], for a client that must not wait forever: the
+/// OTLP exporter's, whose final flush runs at teardown and would otherwise wedge it on a collector
+/// that stopped answering. Telemetry is best-effort by contract, so a deadline is the honest shape.
+#[cfg(all(feature = "ring-http-client", feature = "telemetry"))]
+fn new_http_client_with_timeout(timeout: std::time::Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 /// Build an `ErrorKind::Io` (`E0021`) error from a real-disk failure.
@@ -356,7 +438,16 @@ impl FileSystem for RealHost {
                 .map_err(|e| io_error(format!("cannot open `{path}` for append: {e}")))?;
             file.write_all(content.as_bytes())
                 .await
-                .map_err(|e| io_error(format!("cannot append to `{path}`: {e}")))
+                .map_err(|e| io_error(format!("cannot append to `{path}`: {e}")))?;
+            // `tokio::fs::File` buffers, and dropping it does **not** guarantee the buffer reaches
+            // the OS — `write_all` returning `Ok` only means the bytes were accepted into that
+            // buffer. Without this flush `fs.append` silently loses data whose write the blocking
+            // pool had not got to: the very next `fs_read` of the same path returns the pre-append
+            // content. (`fs_write`/`fs_read` are safe by construction — those are the free functions,
+            // which hand the whole operation to `std::fs` inside the blocking pool.)
+            file.flush()
+                .await
+                .map_err(|e| io_error(format!("cannot flush `{path}` after append: {e}")))
         })
     }
 
@@ -545,9 +636,10 @@ fn connect_cause(error: &reqwest::Error) -> Option<NetErrorKind> {
 #[derive(Debug)]
 struct HttpIo {
     request: NetRequest,
-    /// Cloned from `RealHost::http` — a reqwest `Client` is a cheap `Arc` handle, used across the
-    /// executor's runtime here (reqwest is runtime-agnostic; connections bind lazily to whichever
-    /// runtime drives the future).
+    /// Cloned from [`RealHost::http_async`] — the pool reserved for the executor's runtime, which is
+    /// what polls this descriptor's body. Deliberately **not** `RealHost::http`: a connection binds
+    /// to the runtime that opened it, so sharing that pool with the synchronous path is how a
+    /// request ends up on a connection nobody is driving (see [`new_http_client`]).
     client: reqwest::Client,
 }
 
@@ -555,14 +647,20 @@ struct HttpIo {
 impl ExternIo for HttpIo {
     fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
         // Only reached if some executor lacks a real body path; the real executor uses `run_real`
-        // and the sandbox uses the default `NetFetchIo`. Perform it on a throwaway runtime.
+        // and the sandbox uses the default `NetFetchIo`. Perform it on a throwaway runtime — with a
+        // throwaway client to match, since a runtime that exists for one call must not be handed
+        // (or leave behind) a connection from anyone else's pool (see `new_http_client`).
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| io_error(format!("cannot start a runtime for the request: {e}")))?;
-        Ok(noeta_stdlib::net::fetch_outcome(rt.block_on(
-            reqwest_fetch(&self.client, self.request.clone()),
-        )))
+        let client = {
+            let _enter = rt.enter();
+            new_http_client()
+        };
+        Ok(noeta_stdlib::net::fetch_outcome(
+            rt.block_on(reqwest_fetch(&client, self.request.clone())),
+        ))
     }
 
     fn run_real(&mut self) -> Option<RealBody> {
@@ -606,7 +704,7 @@ impl Network for RealHost {
     fn net_spawn(&self, request: NetRequest) -> Box<dyn ExternIo> {
         Box::new(HttpIo {
             request,
-            client: self.http.clone(),
+            client: self.http_async.clone(),
         })
     }
 
@@ -687,6 +785,20 @@ impl Network for RealHost {
         })
     }
 
+    fn net_ws_recv_timeout(&self, conn: u64, ms: u64) -> Box<dyn ExternIo> {
+        Box::new(ws::RealWsRecvTimeoutIo {
+            ws_conns: self.ws_conns.clone(),
+            conn,
+            ms,
+        })
+    }
+
+    fn net_ws_is_closed(&self, conn: u64) -> bool {
+        // The entry is removed the moment a recv observes the close (or `close` runs), so its
+        // absence *is* "the peer is gone" — no second piece of state to keep in sync.
+        !self.ws_conns.lock().unwrap().contains_key(&conn)
+    }
+
     fn net_ws_send(&self, conn: u64, text: String) -> Box<dyn ExternIo> {
         Box::new(ws::RealWsSendIo {
             ws_conns: self.ws_conns.clone(),
@@ -700,6 +812,91 @@ impl Network for RealHost {
             ws_conns: self.ws_conns.clone(),
             conn,
         })
+    }
+
+    // --- Streaming bodies (http-streaming arc) ---
+
+    /// Open a real incremental body. Blocks only until the response **head** is in, so a transport
+    /// failure is still the `Err` arm of `stream(...)` and the status/headers the server answered
+    /// with come back with the id; the body then flows on the stream's own thread (see [`stream`]
+    /// for why it needs one).
+    #[cfg(feature = "ring-http-client")]
+    fn net_stream_open(
+        &mut self,
+        request: NetRequest,
+        framing: noeta_stdlib::stream::Framing,
+    ) -> Result<noeta_stdlib::stream::StreamHead, NetError> {
+        // No client is passed in: the stream builds its own on its pump thread, so it can never be
+        // handed a pooled connection whose driver lives on this host's runtime (see `stream.rs`).
+        let (opened, head) = stream::open(request, framing)?;
+        let id = self.next_stream;
+        self.next_stream += 1;
+        self.streams.lock().unwrap().insert(id, opened);
+        Ok(noeta_stdlib::stream::StreamHead {
+            stream: id,
+            status: head.status,
+            headers: head.headers,
+            url: head.url,
+        })
+    }
+
+    /// A genuine incremental read: the descriptor blocks on the stream's frame channel on the
+    /// executor's blocking pool, so the isolate's other tasks run while a stream is quiet.
+    #[cfg(feature = "ring-http-client")]
+    fn net_stream_recv(&self, stream: u64) -> Box<dyn ExternIo> {
+        Box::new(stream::RealStreamRecvIo {
+            streams: self.streams.clone(),
+            stream,
+        })
+    }
+
+    /// Release the stream: dropping the receiver ends its pump thread, which drops the reqwest
+    /// response and releases the connection. Idempotent.
+    #[cfg(feature = "ring-http-client")]
+    fn net_stream_close(&mut self, stream: u64) -> Result<(), StdError> {
+        self.streams.lock().unwrap().remove(&stream);
+        Ok(())
+    }
+
+    /// The real host always overrides [`Network::net_stream_recv`] with the async descriptor, so
+    /// the synchronous fallback is unreachable (the accept/reply contract).
+    #[cfg(feature = "ring-http-client")]
+    fn net_stream_recv_next(
+        &mut self,
+        _stream: u64,
+    ) -> Result<Option<noeta_stdlib::stream::Frame>, StdError> {
+        unreachable!("RealHost streams via the async net_stream_recv descriptor")
+    }
+
+    fn net_sse_start(&self, conn: u64) -> Box<dyn ExternIo> {
+        Box::new(stream::RealSseStartIo {
+            conns: self.conns.clone(),
+            sse_conns: self.sse_conns.clone(),
+            conn,
+        })
+    }
+
+    fn net_sse_send(&self, conn: u64, wire: String) -> Box<dyn ExternIo> {
+        Box::new(stream::RealSseSendIo {
+            sse_conns: self.sse_conns.clone(),
+            conn,
+            wire: Some(wire),
+        })
+    }
+
+    fn net_sse_close(&self, conn: u64) -> Box<dyn ExternIo> {
+        Box::new(stream::RealSseCloseIo {
+            sse_conns: self.sse_conns.clone(),
+            conn,
+        })
+    }
+
+    fn net_sse_start_now(&mut self, _conn: u64) -> Result<(), StdError> {
+        unreachable!("RealHost starts event streams via the async descriptor")
+    }
+
+    fn net_sse_send_now(&mut self, _conn: u64, _wire: &str) -> Result<(), StdError> {
+        unreachable!("RealHost writes event streams via the async descriptor")
     }
 
     fn net_ws_upgrade_now(&mut self, _conn: u64, _key: &str) -> Result<(), StdError> {
@@ -1074,6 +1271,16 @@ fn real_exec(
 struct StreamBuf {
     data: Vec<u8>,
     eof: bool,
+    /// The streaming read cursor into `data`.
+    ///
+    /// It lives **here**, under the same lock as the bytes, rather than in the owning
+    /// [`ChildProc`], because a `read_line_async` body runs on the blocking pool with no access to
+    /// the host's process registry (subprocess-async arc). A cursor kept beside the handle would
+    /// have to be copied out before the read and written back after it, and an async read has
+    /// nowhere to write it back to — so a sync read and an async read on the same child would each
+    /// re-read from the other's position. Under the buffer's own lock, every reader of this stream
+    /// advances one cursor by construction, whichever thread it runs on.
+    cursor: usize,
 }
 
 #[derive(Debug, Default)]
@@ -1083,22 +1290,23 @@ struct SharedStream {
 }
 
 impl SharedStream {
-    /// The next line (without its trailing newline), from `cursor`, blocking until a full line is
-    /// buffered or the stream ends. `None` at end of output; a final unterminated line is returned
-    /// once (like `str::lines`). `cursor` advances past the line (and its newline).
-    fn read_line(&self, cursor: &mut usize) -> Option<String> {
+    /// The next line (without its trailing newline), from the shared cursor, blocking until a full
+    /// line is buffered or the stream ends. `None` at end of output; a final unterminated line is
+    /// returned once (like `str::lines`). The cursor advances past the line (and its newline).
+    fn read_line(&self) -> Option<String> {
         let mut buf = self.buf.lock().unwrap();
         loop {
-            if let Some(rel) = buf.data[*cursor..].iter().position(|&b| b == b'\n') {
-                let end = *cursor + rel;
-                let line = String::from_utf8_lossy(&buf.data[*cursor..end]).into_owned();
-                *cursor = end + 1;
+            let at = buf.cursor;
+            if let Some(rel) = buf.data[at..].iter().position(|&b| b == b'\n') {
+                let end = at + rel;
+                let line = String::from_utf8_lossy(&buf.data[at..end]).into_owned();
+                buf.cursor = end + 1;
                 return Some(line);
             }
             if buf.eof {
-                if *cursor < buf.data.len() {
-                    let line = String::from_utf8_lossy(&buf.data[*cursor..]).into_owned();
-                    *cursor = buf.data.len();
+                if at < buf.data.len() {
+                    let line = String::from_utf8_lossy(&buf.data[at..]).into_owned();
+                    buf.cursor = buf.data.len();
                     return Some(line);
                 }
                 return None;
@@ -1107,18 +1315,19 @@ impl SharedStream {
         }
     }
 
-    /// Up to `count` characters from `cursor`, blocking only until at least one character is
-    /// available, then returning up to `count` of them (POSIX `read` shape); `None` at end of
+    /// Up to `count` characters from the shared cursor, blocking only until at least one character
+    /// is available, then returning up to `count` of them (POSIX `read` shape); `None` at end of
     /// output. Decodes the valid-UTF-8 prefix from the cursor — a multi-byte character split across
     /// a drain chunk waits for its continuation. `count <= 0` yields the empty string.
-    fn read(&self, cursor: &mut usize, count: usize) -> Option<String> {
+    fn read(&self, count: usize) -> Option<String> {
         let mut buf = self.buf.lock().unwrap();
         loop {
+            let at = buf.cursor;
             // Exhausted (nothing left and the stream ended) → end of output.
-            if *cursor >= buf.data.len() && buf.eof {
+            if at >= buf.data.len() && buf.eof {
                 return None;
             }
-            let rest = &buf.data[*cursor..];
+            let rest = &buf.data[at..];
             // The complete-character prefix (a trailing partial UTF-8 sequence is excluded until
             // its bytes arrive).
             let valid = match std::str::from_utf8(rest) {
@@ -1127,7 +1336,7 @@ impl SharedStream {
             };
             if !valid.is_empty() || count == 0 {
                 let chunk: String = valid.chars().take(count).collect();
-                *cursor += chunk.len();
+                buf.cursor = at + chunk.len();
                 return Some(chunk);
             }
             if buf.eof {
@@ -1191,10 +1400,6 @@ struct ChildProc {
     /// The stdout/stderr drain threads, joined when the child is reaped.
     stdout_join: Option<std::thread::JoinHandle<()>>,
     stderr_join: Option<std::thread::JoinHandle<()>>,
-    /// `read_line`/`read`'s cursor into the stdout buffer — independent of the whole-output `wait`.
-    stdout_cursor: usize,
-    /// `read_err_line`'s cursor into the stderr buffer.
-    stderr_cursor: usize,
     /// The child's stdin pipe; `None` once closed. Dropping it signals EOF to the child.
     stdin: Option<std::process::ChildStdin>,
     /// The reaped outcome, cached so a second `wait`/`try_wait` returns it without re-waiting.
@@ -1331,6 +1536,66 @@ impl ExternIo for RealProcWaitIo {
     }
 }
 
+/// The real host's awaitable-streaming-read descriptor (subprocess-async arc): the twin of
+/// [`RealProcWaitIo`] for `read_line_async` / `read_err_line_async` / `read_async(n)`.
+///
+/// It owns nothing but a clone of the target stream's `Arc`, because the read cursor lives inside
+/// the stream — so the blocking body reads and advances under the buffer's own lock, and a
+/// synchronous read afterwards continues from where the async one stopped. This is what makes a
+/// bounded child read expressible at all: `race([p.read_line_async(), task.tick(ms)])`, with the
+/// isolate's other tasks running throughout.
+struct RealProcReadIo {
+    handle: u64,
+    read: noeta_stdlib::os::ProcRead,
+    /// `None` for a handle the host does not know — reported when the descriptor is driven, since
+    /// the builder that made it cannot fail.
+    stream: Option<Arc<SharedStream>>,
+}
+
+impl std::fmt::Debug for RealProcReadIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealProcReadIo")
+            .field("handle", &self.handle)
+            .field("read", &self.read)
+            .finish()
+    }
+}
+
+impl RealProcReadIo {
+    /// Perform the read against `stream`, wrapping the outcome as the `?string` the surface returns.
+    fn perform(stream: &SharedStream, read: noeta_stdlib::os::ProcRead) -> NativeOut {
+        use noeta_stdlib::os::ProcRead;
+        let out = match read {
+            ProcRead::StdoutLine | ProcRead::StderrLine => stream.read_line(),
+            ProcRead::Stdout(count) => stream.read(count.max(0) as usize),
+        };
+        match out {
+            Some(s) => NativeOut::Some(Box::new(NativeOut::Str(s))),
+            None => NativeOut::None,
+        }
+    }
+}
+
+impl ExternIo for RealProcReadIo {
+    fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
+        let stream = self
+            .stream
+            .take()
+            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(self.handle))?;
+        Ok(RealProcReadIo::perform(&stream, self.read))
+    }
+
+    fn run_real(&mut self) -> Option<RealBody> {
+        let stream = self.stream.take();
+        let read = self.read;
+        let handle = self.handle;
+        Some(RealBody::Blocking(Box::new(move || {
+            let stream = stream.ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+            Ok(RealProcReadIo::perform(&stream, read))
+        })))
+    }
+}
+
 /// A `wait_async` descriptor for a child a *previous* `wait_async` already detached: it owns no
 /// child, only a clone of the shared [`WaitSlot`], and blocks on it — so a second (or racing)
 /// `wait_async` resolves to the same outcome the first waiter publishes.
@@ -1448,33 +1713,30 @@ impl ExternIo for RealExecIo {
 }
 
 impl RealHost {
-    /// Shared body of the streaming reads: clone the target stream's `Arc` and cursor out under a
-    /// short `procs` borrow, run `read` **without** holding it (the read may block on the condvar,
-    /// and the drain thread must stay free to append), then write the advanced cursor back.
+    /// The target stream's `Arc`, cloned out under a short `procs` borrow so the read itself runs
+    /// **without** holding it — the read may block on the condvar, and the drain thread must stay
+    /// free to append. Shared by the blocking reads and by the `*_async` descriptors, which need
+    /// exactly this handle and nothing else (the cursor rides inside the stream).
+    fn stream_of(&self, handle: u64, which: Stream) -> Result<Arc<SharedStream>, StdError> {
+        let proc = self
+            .procs
+            .get(&handle)
+            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+        Ok(match which {
+            Stream::Stdout => Arc::clone(&proc.stdout),
+            Stream::Stderr => Arc::clone(&proc.stderr),
+        })
+    }
+
+    /// Shared body of the blocking streaming reads.
     fn stream_read(
         &mut self,
         handle: u64,
         which: Stream,
-        read: impl FnOnce(&SharedStream, &mut usize) -> Option<String>,
+        read: impl FnOnce(&SharedStream) -> Option<String>,
     ) -> Result<Option<String>, StdError> {
-        let (stream, mut cursor) = {
-            let proc = self
-                .procs
-                .get(&handle)
-                .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
-            match which {
-                Stream::Stdout => (Arc::clone(&proc.stdout), proc.stdout_cursor),
-                Stream::Stderr => (Arc::clone(&proc.stderr), proc.stderr_cursor),
-            }
-        };
-        let out = read(&stream, &mut cursor);
-        if let Some(proc) = self.procs.get_mut(&handle) {
-            match which {
-                Stream::Stdout => proc.stdout_cursor = cursor,
-                Stream::Stderr => proc.stderr_cursor = cursor,
-            }
-        }
-        Ok(out)
+        let stream = self.stream_of(handle, which)?;
+        Ok(read(&stream))
     }
 }
 
@@ -1517,7 +1779,11 @@ impl Os for RealHost {
         })
     }
 
-    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError> {
+    fn os_try_spawn(
+        &mut self,
+        command: &str,
+        args: &[String],
+    ) -> Result<u64, noeta_stdlib::os::OsError> {
         use std::process::Stdio;
         let mut child = std::process::Command::new(command)
             .args(args)
@@ -1526,7 +1792,10 @@ impl Os for RealHost {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| io_error(format!("spawn: cannot start `{command}`: {e}")))?;
+            // Classified at the source, from the real `io::Error` — which is the whole reason the
+            // recoverable door is the primitive: "not on PATH" and "not executable" are different
+            // conditions to a caller, and a message string cannot be branched on.
+            .map_err(|e| noeta_stdlib::os::OsError::spawn_failed(command, &e))?;
         let pid = i64::from(child.id());
         // Drain both pipes on background threads into shared buffers, so a chatty child never
         // blocks on a full pipe while the program supervises it, and `read_line` can stream stdout.
@@ -1552,8 +1821,6 @@ impl Os for RealHost {
                 stderr,
                 stdout_join,
                 stderr_join,
-                stdout_cursor: 0,
-                stderr_cursor: 0,
                 stdin,
                 result: None,
                 awaiting: None,
@@ -1691,32 +1958,68 @@ impl Os for RealHost {
     }
 
     fn os_proc_read_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {
-        self.stream_read(handle, Stream::Stdout, |s, c| s.read_line(c))
+        self.stream_read(handle, Stream::Stdout, SharedStream::read_line)
     }
 
     fn os_proc_read(&mut self, handle: u64, count: i64) -> Result<Option<String>, StdError> {
         let want = count.max(0) as usize;
-        self.stream_read(handle, Stream::Stdout, move |s, c| s.read(c, want))
+        self.stream_read(handle, Stream::Stdout, move |s| s.read(want))
+    }
+
+    /// The awaitable streaming reads, on the blocking pool over the child's shared stream buffer —
+    /// so the isolate's other tasks keep running while the child has not spoken yet, which the
+    /// synchronous reads cannot offer at all (they park the whole scheduler on the condvar).
+    ///
+    /// The descriptor needs only the stream `Arc`: the read cursor lives *inside* it, so an async
+    /// read and a later synchronous read on the same child continue from one position. A handle the
+    /// host does not know yields a descriptor that reports it when driven, since this builder
+    /// cannot fail.
+    fn os_proc_read_spawn(
+        &mut self,
+        handle: u64,
+        read: noeta_stdlib::os::ProcRead,
+    ) -> Box<dyn ExternIo> {
+        use noeta_stdlib::os::ProcRead;
+        let which = match read {
+            ProcRead::StderrLine => Stream::Stderr,
+            ProcRead::StdoutLine | ProcRead::Stdout(_) => Stream::Stdout,
+        };
+        Box::new(RealProcReadIo {
+            handle,
+            read,
+            stream: self.stream_of(handle, which).ok(),
+        })
     }
 
     fn os_proc_read_stderr_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {
-        self.stream_read(handle, Stream::Stderr, |s, c| s.read_line(c))
+        self.stream_read(handle, Stream::Stderr, SharedStream::read_line)
     }
 
-    fn os_proc_write_stdin(&mut self, handle: u64, data: &str) -> Result<(), StdError> {
+    fn os_proc_try_write_stdin(
+        &mut self,
+        handle: u64,
+        data: &str,
+    ) -> Result<(), noeta_stdlib::os::OsError> {
+        use noeta_stdlib::os::{OsError, OsErrorKind};
         use std::io::Write;
         let proc = self
             .procs
             .get_mut(&handle)
-            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
-        let stdin = proc
-            .stdin
-            .as_mut()
-            .ok_or_else(|| io_error("write: the child's stdin is closed".to_string()))?;
+            .ok_or_else(|| OsError::unknown_process("write", handle))?;
+        let stdin = proc.stdin.as_mut().ok_or_else(|| {
+            OsError::new(
+                "write",
+                OsErrorKind::StdinClosed,
+                "the child's stdin is closed",
+            )
+        })?;
         stdin
             .write_all(data.as_bytes())
             .and_then(|()| stdin.flush())
-            .map_err(|e| io_error(format!("write: {e}")))
+            // A child that exited between the program's last check and this write gives
+            // `BrokenPipe` here — the race a liveness poll cannot close, classified so the caller
+            // can tell it apart from having closed the pipe itself.
+            .map_err(|e| OsError::write_failed(&e))
     }
 
     fn os_proc_close_stdin(&mut self, handle: u64) -> Result<(), StdError> {
@@ -1779,6 +2082,32 @@ impl Console for RealHost {
         let _ = err.write_all(msg.as_bytes());
         let _ = err.flush();
         self.stdin_read_line()
+    }
+
+    fn stream_output(&mut self, stream: noeta_stdlib::Stream, text: &str) -> bool {
+        use std::io::Write;
+        // Written and flushed now, so a server's log line appears while the server is still up
+        // rather than at Ctrl-C. Each stream goes to its real counterpart; the caller sequences
+        // stdout before stderr, exactly as the end-of-run batch render does.
+        match stream {
+            noeta_stdlib::Stream::Stdout => {
+                let mut out = std::io::stdout();
+                let _ = out.write_all(text.as_bytes());
+                let _ = out.flush();
+            }
+            noeta_stdlib::Stream::Stderr => {
+                let mut err = std::io::stderr();
+                let _ = err.write_all(text.as_bytes());
+                let _ = err.flush();
+            }
+            // Not an output stream — nothing written, so the caller keeps its buffer.
+            noeta_stdlib::Stream::Stdin => return false,
+        }
+        true
+    }
+
+    fn streams_output(&self) -> bool {
+        self.live_output
     }
 }
 
@@ -2096,11 +2425,11 @@ impl RealHost {
         };
         self.tel.metric_exporter = Some(spawn_metric_exporter(
             Arc::clone(&self.tel.metrics),
-            self.http.clone(),
             endpoint,
             headers,
             service_name,
             metric_export_interval(),
+            METRIC_EXPORT_TIMEOUT,
         ));
     }
 
@@ -2131,6 +2460,12 @@ impl Drop for RealHost {
         self.tel.metric_exporter.take();
     }
 }
+
+/// How long one metrics export may take before it is abandoned. Bounded because the *final* export
+/// runs at host teardown and joins the reader thread: an unreachable collector must cost a program's
+/// exit a few seconds, not its termination. Matches the OTel default export timeout.
+#[cfg(feature = "telemetry")]
+const METRIC_EXPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The metrics export interval from `OTEL_METRIC_EXPORT_INTERVAL` (milliseconds, OTel spec), default
 /// 60s. A non-positive / unparseable value falls back to the default.
@@ -2172,17 +2507,20 @@ impl Drop for MetricExporter {
 }
 
 /// Spawn the periodic-export reader thread. It owns its own current-thread tokio runtime (the
-/// interpreter's runtime belongs to the interpreter thread and cannot be driven here); the `reqwest`
-/// client is cheaply cloneable and runtime-agnostic. Best-effort throughout — an export failure, or
-/// a failure to build the runtime, never affects the program.
+/// interpreter's runtime belongs to the interpreter thread and cannot be driven here) **and its own
+/// HTTP client**: a `reqwest::Client` is cheap to clone but its pooled connections are not
+/// runtime-agnostic, so a client shared with the host would eventually hand this thread a connection
+/// only the host's runtime can drive, and the export would hang instead of failing (see
+/// [`new_http_client`]). Best-effort throughout — an export failure, or a failure to build the
+/// runtime, never affects the program.
 #[cfg(feature = "telemetry")]
 fn spawn_metric_exporter(
     store: Arc<Mutex<MetricStore>>,
-    http: reqwest::Client,
     endpoint: String,
     headers: Vec<(String, String)>,
     service_name: String,
     interval: std::time::Duration,
+    export_timeout: std::time::Duration,
 ) -> MetricExporter {
     use std::sync::mpsc::{self, RecvTimeoutError};
     let (shutdown, rx) = mpsc::channel::<()>();
@@ -2194,6 +2532,10 @@ fn spawn_metric_exporter(
                 .build()
             else {
                 return;
+            };
+            let http = {
+                let _enter = rt.enter();
+                new_http_client_with_timeout(export_timeout)
             };
             loop {
                 // Wake on the interval (a periodic export) or on shutdown (the final export).
@@ -2251,17 +2593,15 @@ mod tests {
             s.observe(id, MetricValue::Int(5), Vec::new(), 1_000);
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(500))
-            .build()
-            .unwrap();
         let exporter = spawn_metric_exporter(
             Arc::clone(&store),
-            client,
             endpoint,
             Vec::new(),
             "svc".to_string(),
             std::time::Duration::from_millis(50),
+            // A short export deadline keeps the shutdown/final export from blocking on the
+            // unaccepted connection, so dropping the reader below is prompt.
+            std::time::Duration::from_millis(500),
         );
 
         // Accept the first periodic tick's POST and read its request.
@@ -2285,6 +2625,67 @@ mod tests {
             request.contains("\"asInt\":\"5\""),
             "carries the aggregated counter value"
         );
+    }
+
+    /// **A one-shot request must not poison the stream that follows it.** The regression test for a
+    /// hang that presented as "the model never answers": one `net_fetch` leaves an idle connection
+    /// in a pool, and if the stream pump is handed that pool it gets a connection whose hyper driver
+    /// lives on this host's `current_thread` runtime — which is not running — so the request bytes
+    /// are never written and `send()` never resolves. No error, no timeout, forever.
+    ///
+    /// Hermetic: a two-line loopback HTTP server, answering both requests. The assertion is simply
+    /// that the second one *finishes*; the timeout is the test.
+    #[cfg(feature = "ring-http-client")]
+    #[test]
+    fn a_stream_after_a_one_shot_request_to_the_same_origin_still_opens() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
+        // Answers exactly two requests, keeping the connection alive after the first — which is
+        // what puts a reusable connection in the pool and arms the bug.
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 6\r\n\r\nhello\n",
+                );
+                let _ = sock.flush();
+            }
+        });
+
+        let url = format!("http://{addr}/");
+        let request = move || NetRequest {
+            method: "GET".to_string(),
+            url: url.clone(),
+            headers: vec![],
+            body: vec![],
+            timeout_ms: Some(5_000),
+        };
+
+        let mut host = RealHost::new().unwrap();
+        // 1. The one-shot call, on the host's runtime. This is what pools the connection.
+        let first = host
+            .net_fetch(request())
+            .expect("the one-shot request answers");
+        assert_eq!(first.status, 200);
+
+        // 2. The stream, on its own pump thread. Before the fix this never returned.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let opened = host.net_stream_open(request(), noeta_stdlib::stream::Framing::Lines);
+            let _ = tx.send(opened.map(|head| head.status));
+        });
+        let opened = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the stream must open — a pooled connection from the one-shot call is driven by a runtime that is not running, so this used to hang forever");
+        assert_eq!(opened.expect("the stream opens"), 200);
+
+        let _ = server.join();
     }
 
     /// The real `Network` capability against a live endpoint. `#[ignore]` so CI stays hermetic —
@@ -2311,10 +2712,8 @@ mod tests {
     #[test]
     fn real_host_disk_round_trip() {
         let mut host = RealHost::new().unwrap();
-        let mut path = std::env::temp_dir();
-        path.push("noeta_host_real_roundtrip_test.txt");
-        let path = path.to_string_lossy().into_owned();
-        let _ = host.fs_remove(&path);
+        let dir = noeta_test_temp::TempDir::new("host-roundtrip");
+        let path = dir.join("roundtrip.txt").to_string_lossy().into_owned();
 
         host.fs_write(&path, "hello disk").unwrap();
         assert!(host.fs_exists(&path));
@@ -2333,11 +2732,8 @@ mod tests {
     #[test]
     fn real_host_directory_hierarchy() {
         let mut host = RealHost::new().unwrap();
-        let mut root = std::env::temp_dir();
-        root.push("noeta_host_real_dirs_test");
-        let root = root.to_string_lossy().into_owned();
-        // Start clean.
-        let _ = std::fs::remove_dir_all(&root);
+        let dir = noeta_test_temp::TempDir::new("host-dirs");
+        let root = dir.join("tree").to_string_lossy().into_owned();
 
         let nested = format!("{root}/logs/sub");
         host.fs_mkdir(&nested).unwrap();
@@ -2375,10 +2771,8 @@ mod tests {
     #[test]
     fn real_host_reads_lazily_through_a_file_handle() {
         let mut host = RealHost::new().unwrap();
-        let mut path = std::env::temp_dir();
-        path.push("noeta_host_real_lazy_read_test.txt");
-        let path = path.to_string_lossy().into_owned();
-        let _ = host.fs_remove(&path);
+        let dir = noeta_test_temp::TempDir::new("host-lazy-read");
+        let path = dir.join("lazy_read.txt").to_string_lossy().into_owned();
 
         // A multi-line file with a multibyte character and a final unterminated line.
         let content = "alpha\nbéta\ngamma";

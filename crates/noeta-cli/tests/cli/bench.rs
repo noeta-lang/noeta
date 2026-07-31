@@ -133,6 +133,12 @@ fn bench_baseline_saves_and_compares() {
     // seen once to report no baseline comparison at all under a fully parallel suite, and did not
     // reproduce — removing the shared-directory variable rules that class out rather than leaving a
     // rare CI red no one can reproduce.
+    //
+    // That sighting is now understood, and it was not isolation: under enough load the two-point
+    // subtraction does not resolve, and `--save-baseline` used to persist the clamped `0.0`, after
+    // which `--baseline` skipped the delta in silence and this assertion failed with no explanation.
+    // The product no longer does that — the save is refused, with the reason on stderr — so if this
+    // test goes red under load again it now says why rather than pointing at a missing substring.
     let cache_dir = PathBuf::from(concat!(
         env!("CARGO_TARGET_TMPDIR"),
         "/bench-baseline-cache"
@@ -179,6 +185,83 @@ fn bench_baseline_saves_and_compares() {
         .failure()
         .code(2)
         .stderr(predicate::str::contains("no baseline `nope`"));
+}
+
+#[test]
+fn bench_baseline_says_when_it_cannot_compare() {
+    // `--baseline <name>` is a request for a comparison, so every way of not producing one has to be
+    // visible. The delta used to be dropped in silence whenever the baseline had no usable entry —
+    // which is how a baseline of `0.0` (persisted by the old `.max(0.0)` clamp) made every later
+    // comparison vacuous without anything saying so. Here the silent case is the ordinary one: a
+    // benchmark added after the baseline was saved.
+    // A body with real margin over timer noise: `--save-baseline` now *refuses* an unresolved
+    // measurement, so a bench too cheap to resolve makes this test fail on the setup step rather than
+    // on what it is testing. (Which is the fix working — it caught exactly that while being written.)
+    let one = "fn work(n: int): int {\n\
+                   mut t = 0\n\
+                   for i in 0..n { t = t + i }\n\
+                   return t\n\
+               }\n\
+               @bench(iterations: 2000) fn kept(): void { work(2000) }\n";
+    let dir = temp_dir("bench_no_entry", &[("b.noe", one)]);
+    let file = dir.join("b.noe");
+    // Owns its cache dir for the same reason as `bench_baseline_saves_and_compares` above.
+    let cache_dir = dir.join("cache");
+    let bench = || {
+        let mut cmd = lang();
+        cmd.env("NOETA_CACHE_DIR", &cache_dir);
+        cmd
+    };
+    bench()
+        .arg("bench")
+        .arg(&file)
+        .arg("--save-baseline")
+        .arg("cli-test")
+        .assert()
+        .success();
+
+    // A second benchmark the baseline knows nothing about.
+    std::fs::write(
+        &file,
+        format!("{one}@bench(iterations: 2000) fn added(): void {{ work(1500) }}\n"),
+    )
+    .expect("write the two-bench program");
+    bench()
+        .arg("bench")
+        .arg(&file)
+        .arg("--baseline")
+        .arg("cli-test")
+        .assert()
+        .success()
+        .stdout(
+            // The known bench still compares; the new one says why it does not.
+            predicate::str::contains("% vs cli-test").and(predicate::str::contains(
+                "no comparison vs cli-test: this baseline has no entry for this benchmark",
+            )),
+        );
+    // And the `--json` seam carries the same fact, so a delta consumer can tell "unchanged" from
+    // "never compared".
+    let out = bench()
+        .arg("bench")
+        .arg(&file)
+        .arg("--baseline")
+        .arg("cli-test")
+        .arg("--json")
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("valid JSON");
+    let added = json["benches"]
+        .as_array()
+        .expect("benches")
+        .iter()
+        .find(|b| b["name"] == "added")
+        .expect("the added bench");
+    assert!(added["baselineDeltaPct"].is_null());
+    assert_eq!(
+        added["baselineNote"],
+        serde_json::json!("this baseline has no entry for this benchmark")
+    );
 }
 
 #[test]
@@ -314,4 +397,88 @@ fn bench_unknown_tier_is_e0036() {
         .failure()
         .code(1)
         .stderr(predicate::str::contains("E0036"));
+}
+
+// --- `noeta bench <DIR>` (dev-story sweep): a project's benchmarks, not one file's ---
+
+#[test]
+fn bench_on_a_directory_measures_every_files_benches() {
+    // Same gap `noeta test` had: an entry links a sibling's declarations but never its `@bench`
+    // blocks, and a directory argument was a raw `Is a directory (os error 21)` — so a project's
+    // benchmarks could not all be run. Outcomes are labelled with the file they came from.
+    let dir = temp_dir(
+        "bench_dir_all_files",
+        &[
+            (
+                "src/util.noe",
+                "namespace Proj.Util;\n\
+                 pub fn double(n: int): int { return n * 2; }\n\
+                 @bench(iterations: 5)\n\
+                 fn util_bench(): void { double(21); }\n",
+            ),
+            (
+                "src/main.noe",
+                "use Proj.Util.double\n\
+                 echo double(21);\n\
+                 @bench(iterations: 5)\n\
+                 fn entry_bench(): void { double(1); }\n",
+            ),
+        ],
+    );
+    lang().arg("bench").arg(&dir).assert().success().stdout(
+        predicate::str::contains("src/util.noe::util_bench")
+            .and(predicate::str::contains("src/main.noe::entry_bench"))
+            .and(predicate::str::contains("2 ran, 0 failed, 2 total")),
+    );
+    // The entry alone still measures only the entry — the single-file contract is unchanged.
+    lang()
+        .arg("bench")
+        .arg(dir.join("src/main.noe"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("1 ran, 0 failed, 1 total")
+                .and(predicate::str::contains("util_bench").not()),
+        );
+}
+
+#[test]
+fn bench_directory_baselines_stay_keyed_per_entry_file() {
+    // A baseline is keyed by its entry file and by the bare fn name, so a directory run writes
+    // exactly the files a per-file run writes — and a later single-file run diffs against it.
+    // Enough per-iteration work that the two-point measurement is reliably non-zero — a zero
+    // baseline has no defined delta, exactly as in `bench_baseline_saves_and_compares`.
+    let dir = temp_dir(
+        "bench_dir_baseline",
+        &[(
+            "src/main.noe",
+            "fn work(n: int): int {\n\
+                 mut t = 0\n\
+                 for i in 0..n { t = t + i }\n\
+                 return t\n\
+             }\n\
+             @bench(iterations: 2000) fn only_bench(): void { work(500) }\n",
+        )],
+    );
+    // Persisting a baseline *is* exercising the cache, so this test owns its cache dir.
+    let cache = PathBuf::from(concat!(
+        env!("CARGO_TARGET_TMPDIR"),
+        "/bench-dir-baseline-cache"
+    ));
+    let _ = std::fs::remove_dir_all(&cache);
+    lang()
+        .env("NOETA_CACHE_DIR", &cache)
+        .arg("bench")
+        .arg(&dir)
+        .args(["--save-baseline", "gate"])
+        .assert()
+        .success();
+    lang()
+        .env("NOETA_CACHE_DIR", &cache)
+        .arg("bench")
+        .arg(dir.join("src/main.noe"))
+        .args(["--baseline", "gate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vs gate"));
 }

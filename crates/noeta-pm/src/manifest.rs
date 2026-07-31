@@ -8,21 +8,42 @@
 //! default. The table shape leaves room for a target to absorb the rest of the recipe later
 //! (platform/artifact keys — the resolution of "target" the platform word, by subsumption).
 //!
+//! Two axes, kept apart. **Which provider** declares each tier a package uses is a per-package name
+//! table, `[tiers]` — the tier counterpart of `[directives]` (`local = "provider[:exported]"`, the
+//! provider being `"std"` or a `[dependencies]` key). **Which of those are live** in a given build is
+//! the target's `tiers` — an activation live-set of the package's own local tier names. The live-set
+//! is written as an array on the target: a bare name is live, a `-`-prefixed name turns one off (to
+//! drop a tier an `extends` base left on):
+//!
 //! ```toml
-//! [targets.dev.tiers]
-//! test  = "std"                 # provider = the built-in stdlib tier
-//! bench = { package = "std" }   # table form (room for target-level options later)
+//! [tiers]
+//! test  = "std"                 # the std-declared `test` tier, named `@test` locally
 //! debug = "std"
+//! bench = "std"
+//! fuzz  = "fuzzkit"             # a dependency's `@tier`, named `@fuzz` locally
+//! crit  = "criterion:bench"     # …renamed, so it does not collide with std's `bench`
+//!
+//! [targets.dev]
+//! tiers = ["test", "debug"]     # live in `dev`
 //!
 //! [targets.ci]
-//! extends = "dev"               # inherit dev's tiers…
-//! [targets.ci.tiers]
-//! debug = "std"                 # …and override / add
+//! extends = "dev"               # inherit dev's live set…
+//! tiers = ["bench", "-debug"]   # …turn `bench` on and `debug` off
 //! ```
 //!
-//! A tier's provider is the built-in `"std"` or a declared `[dependencies]` key (P2.6) — an
-//! undeclared name is an error. A target's *active tiers* are the tier names in its
-//! (inheritance-merged) map.
+//! The equivalent legacy boolean sub-table is still accepted, and is exactly what the array desugars
+//! into (`["test", "-debug"]` ≡ `{test = true, debug = false}`):
+//!
+//! ```toml
+//! [targets.dev.tiers]
+//! test  = true
+//! debug = true
+//! ```
+//!
+//! There are no ambient built-in tiers: `test`/`bench`/`doc`/`debug` are ordinary `std`
+//! [`ExtTier`](noeta_ext_abi::registry::ExtTier) declarations a package names in `[tiers]` like any
+//! other provider's. A target's *active tiers* are the local names its (inheritance-merged) live-set
+//! marks `true`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,11 +57,15 @@ use crate::error::PmError;
 use noeta_fmt::FmtConfig;
 
 /// The manifest file name, discovered at or above the entry file's directory.
-pub const MANIFEST_NAME: &str = "noeta.toml";
+///
+/// Defined once, in `noeta-loader`: the loader needs the *name* as the pruning predicate for the
+/// package walk (a subdirectory holding one is a different package), and two spellings of the file
+/// that decides what a package is could drift. Everything the manifest *means* is still here.
+pub use noeta_loader::MANIFEST_NAME;
 
 /// The built-in/stdlib tier provider — always available; every other provider must be a declared
 /// `[dependencies]` key.
-const BUILTIN_PROVIDER: &str = "std";
+pub(crate) const BUILTIN_PROVIDER: &str = "std";
 
 /// A parsed `noeta.toml`: the package's identity (`[package]`, absent for a bare script), its
 /// declared dependencies (`[dependencies]`, keyed by **import root**), and its build targets.
@@ -48,6 +73,21 @@ const BUILTIN_PROVIDER: &str = "std";
 pub struct Manifest {
     package: Option<PackageMeta>,
     dependencies: BTreeMap<String, Dependency>,
+    /// The `[directives]` table: the extension `@`-directives this package's own source uses, each a
+    /// local `@name` → the dependency (by this package's import-root key) that provides it and the name
+    /// it exported. Per-package (see [`UseBinding`]); resolution of a `@name` is scoped to the package
+    /// that wrote it. Authorization to run the provider's native code stays root-only (`[trust].native`).
+    directives: BTreeMap<String, UseBinding>,
+    /// The `[tiers]` table: the dev-tiers this package's own source writes as `@name { … }`, each a
+    /// local `@name` → the provider that declares it and the name it exported. The provider is one of
+    /// **this package's** `[dependencies]` keys or the built-in `"std"` (which declares `test`/`bench`/
+    /// `doc`/`debug` as ordinary [`ExtTier`](noeta_ext_abi::registry::ExtTier)s — there are no ambient
+    /// built-in tiers; a package names the std tiers it uses here, like any other provider). Per-package
+    /// (see [`UseBinding`]) so two packages can name the same provider's tier differently, or rename to
+    /// avoid a collision between two providers' same-named tiers. Which of these are *live* in a build is
+    /// a separate axis: `[targets.<t>.tiers]` (a live-set of these local names). Authorization to run a
+    /// provider's native tier runner stays root-only (`[trust].native`); this table only names.
+    tiers: BTreeMap<String, UseBinding>,
     targets: BTreeMap<String, Target>,
     trust: Trust,
     registries: Registries,
@@ -193,9 +233,14 @@ pub struct Trust {
     /// Packages permitted to compile + run their native Rust crate (which also runs its `cargo`
     /// build — `build.rs`/proc-macros). Any native-declaring package not listed here is refused.
     pub native: std::collections::BTreeSet<String>,
-    /// Packages permitted to contribute `noeta <subcommand>` CLI commands. A command from an
-    /// unlisted package is silently omitted (a capability the user never asked for).
-    pub commands: std::collections::BTreeSet<String>,
+    /// The commands a dependency may contribute, each bound to the **local name** it appears under
+    /// (`noeta <local>`). Keyed by that local name → the providing package and the command it
+    /// exported (`[trust.commands]` / `migrate = "para/db"`, or `undo = "para/db:rollback"` to
+    /// rename). The binding *is* the grant: an entry both authorizes the provider to contribute this
+    /// one command and fixes the name it appears under, so two packages exporting the same command
+    /// name coexist under distinct local names rather than colliding. A command from a package with
+    /// no entry here is never registered (a capability the user never asked for).
+    pub commands: std::collections::BTreeMap<String, Binding>,
     /// Which registry **scopes** (the `company` segment) this project demands carry verified
     /// provenance (namespace-protection #1, require-provenance). A dependency resolved from a required
     /// scope whose release is unsigned is a hard resolve error — the consumer's own guarantee, held
@@ -216,6 +261,43 @@ pub struct Trust {
     /// tier (`operator`/`publisher`/`imported`) makes `noeta audit` **fail** the build, merely **warn**,
     /// or is ignored (`off`). Default: every tier warns; a project opts a tier up to `fail` for CI.
     pub advisories: AdvisoryPolicy,
+}
+
+/// A single entry in a `[trust.commands]` (or, from Slice 2, `[trust.directives]`) table: the
+/// providing package and the name that package exported the command/directive under. The table
+/// **key** is the local name the project uses; this is the resolved right-hand side. Written
+/// `local = "company/package"` (exported name == local name) or `local = "company/package:exported"`
+/// to rename — the first `:` splits the identity (which contains a `/`, never a `:`) from the
+/// exported name, so the exported half may itself contain any character (a command name may hold a
+/// space, e.g. `remote add`). The binding is both the authorization and the name mapping in one
+/// entry, so a package is never named twice to be trusted and bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binding {
+    /// The providing package identity (`company/package`) — the same identity `[trust].native`
+    /// authorizes. Validated as a [`PackageName`] at parse time so a typo fails loudly.
+    pub provider: String,
+    /// The name the provider declared the command/directive under (its `ExtCommand`/`ExtDirective`
+    /// `name`). Equal to the local key unless a `:exported` suffix renamed it.
+    pub exported: String,
+}
+
+/// A per-package `[directives]` / `[tiers]` binding: the local `@name` a package's own source writes,
+/// resolved to a provider named by one of **this package's** dependency import-root keys, and the name
+/// that provider exported. Written `local = "para"` (exported name == local) or `local = "para:html"`
+/// to rename.
+///
+/// Unlike [`Binding`] (`[trust.commands]`: root-only, keyed by global package **identity**), these are
+/// **per-package** and keyed by the using package's own dependency **keys** — the same context a
+/// `use <key>.…` resolves in. So two packages can each name the tier/directive they use from a shared
+/// provider differently, and a package renames to avoid a collision between two providers' same-named
+/// tiers. Authorization is separate and stays root-only (`[trust].native`); this table only names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseBinding {
+    /// A dependency import-root key of the package this table belongs to (a `[dependencies]` key), or
+    /// the built-in provider `"std"` where the table permits it (`[tiers]`, for `test`/`debug`/…).
+    pub provider_key: String,
+    /// The tier/directive name the provider declared. Equal to the local key unless `:exported` renamed it.
+    pub exported: String,
 }
 
 /// The `[db]` table — a project's default database wiring for `noeta migrate` (and any tooling that
@@ -332,6 +414,17 @@ pub struct PackageMeta {
     /// Rust into a consumer's build, which should never be triggered by the mere presence of a
     /// directory.
     pub native: Option<String>,
+    /// The relative directory of this package's **dev-only** native crate (formatter/dev-tool):
+    /// `dev-native = "native"` points at a `Cargo.toml` whose crate exports formatter units (an
+    /// [`Extension`] contributing only `body_formatters()`). Unlike [`native`], a `dev-native`
+    /// crate is admitted **untrusted** — it never needs a `[trust].native` grant — because it runs
+    /// **only** at `noeta fmt`, never in a prod `run`/`build`, and is stripped to formatter-only at
+    /// composition (its runtime surface is discarded). Declaring both `native` and `dev-native` in
+    /// one manifest is a manifest error: a crate is either a runtime dependency or a dev tool.
+    /// `None` for a package with no dev-only native crate.
+    ///
+    /// [`native`]: PackageMeta::native
+    pub dev_native: Option<String>,
     /// The declared license as an **SPDX expression** (`license = "MIT OR Apache-2.0"`). Sent with
     /// a publish and recorded in the registry's immutable release record (and its transparency-log
     /// leaf). `None` when the package declares none. Shape-checked at parse time; the claim is the
@@ -411,6 +504,12 @@ impl PackageName {
     }
 }
 
+impl std::fmt::Display for PackageName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.company, self.package)
+    }
+}
+
 /// One `[dependencies]` entry's **source** (package-manager P2.0). The table *key* is the local import
 /// Which git reference a `git` dependency tracks. A **tag** is the release model (a published,
 /// immutable version); a **branch** or bare **HEAD** tracks a moving ref — for an in-development or
@@ -455,12 +554,23 @@ impl GitRef {
 /// root (an identifier), decoupled from the resolved package's global `company/package` identity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Dependency {
-    /// A local source tree — `dep = { path = "…" }`. Needs no network or resolver (P2.1).
-    Path { path: PathBuf },
+    /// A local source tree — `dep = { path = "…" }`. Needs no network or resolver (P2.1). An
+    /// optional `package = "company/pkg"` is a **checked claim** about the tree the path points at
+    /// (see [`Dependency::declared_package`]) — never a selector: the path alone says which tree,
+    /// and the tree's own `[package] name` alone says which package.
+    Path {
+        path: PathBuf,
+        package: Option<PackageName>,
+    },
     /// A git repository pinned to a [`GitRef`] — a `tag` (a released version), a `branch`, or the
     /// default-branch `HEAD` (`dep = { git = "…" }`, the tag-free in-dev/bundled case). The lockfile
-    /// pins the resolved SHA either way, so a build reproduces exactly.
-    Git { url: String, git_ref: GitRef },
+    /// pins the resolved SHA either way, so a build reproduces exactly. `package` is the same
+    /// **checked claim** it is on a path dependency.
+    Git {
+        url: String,
+        git_ref: GitRef,
+        package: Option<PackageName>,
+    },
     /// A registry dependency by SemVer requirement — `dep = "^1.2"` or
     /// `dep = { version = "^1.2", package = "company/pkg" }`. The registry index resolves
     /// name→git-coords (P2.5). `package` is the registry identity (decoupled from the import-root
@@ -481,12 +591,42 @@ pub enum Dependency {
     Scope(Vec<Dependency>),
 }
 
+impl Dependency {
+    /// The `company/package` identity this entry **names**, if any.
+    ///
+    /// For a [`Registry`][Dependency::Registry] dependency that identity is the *selector* — it is
+    /// what the index is queried for, and resolution fails without it. For a
+    /// [`Path`][Dependency::Path] or [`Git`][Dependency::Git] dependency the source already selects
+    /// the tree, so the identity is instead a **claim** about it: it says which package of a scope
+    /// this entry is, which a bare `{ path = "../.." }` does not, and the resolver verifies it
+    /// against the target's own `[package] name` (a mismatch is a manifest error). Kept rather than
+    /// dropped precisely so it can be checked — an unchecked claim is a comment that can lie.
+    ///
+    /// A [`Scope`][Dependency::Scope] has no identity of its own (its members each have one), so
+    /// this is `None` for it.
+    pub fn declared_package(&self) -> Option<&PackageName> {
+        match self {
+            Dependency::Path { package, .. }
+            | Dependency::Git { package, .. }
+            | Dependency::Registry { package, .. } => package.as_ref(),
+            Dependency::Scope(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Target {
     /// The base target this one inherits tiers and dependencies from (`extends = "dev"`), if any.
     extends: Option<String>,
-    /// This target's own tier → provider entries (overlaid on the base's during resolution).
-    tiers: BTreeMap<String, String>,
+    /// This target's own tier **activation** entries — a local `[tiers]` name → live (`true`) or
+    /// explicitly off (`false`, to turn off a tier an `extends` base left on). Overlaid on the base's
+    /// during resolution; the provider each name resolves to lives in the package's `[tiers]` table,
+    /// not here (that separation is the point — activation is a live-set, not a provider map).
+    ///
+    /// Spelled either as the canonical array on the target (`tiers = ["test", "-debug"]` — bare name
+    /// live, `-name` off) or as the legacy boolean sub-table (`[targets.<t>.tiers]`, `name = true`);
+    /// both parse into this same map.
+    tiers: BTreeMap<String, bool>,
     /// This target's own **target-scoped dependencies** — packages present only when building this
     /// target (dev-deps arc). Overlaid on the base's (via `extends`) and on the global
     /// `[dependencies]` during resolution. A dev tool a package ships lives here under `dev`, so it
@@ -540,7 +680,15 @@ pub fn current_package(manifest_path: &Path) -> Result<(String, semver::Version)
 /// the new entry is inserted under an existing `[dependencies]` header (or a new section is appended),
 /// leaving the rest of the file — comments, ordering, whitespace — untouched. The result is re-parsed
 /// before writing, so a malformed value or an unknown source never corrupts the manifest, and the
-/// write is atomic. Errors if `key` is not an identifier or is already a dependency.
+/// write is atomic. Errors if `key` is not an identifier.
+///
+/// When `key` is **already** a dependency, the entry is widened into a
+/// [scope dependency][`Dependency::Scope`] rather than refused: the existing value and `value_toml`
+/// become the first two members of a `key = [ … ]` array (and a key that is already an array gains
+/// one more member). That is the manifest shape for binding several packages of one scope —
+/// `para/aether` *and* `para/db` — under a single import root, so `noeta add para --package para/db`
+/// after `noeta add para --package para/aether` does the expected thing. Adding the *same* source
+/// twice is still refused.
 pub fn add_dependency(manifest_path: &Path, key: &str, value_toml: &str) -> Result<(), PmError> {
     if !is_identifier(key) {
         return Err(PmError::Manifest(format!(
@@ -551,14 +699,12 @@ pub fn add_dependency(manifest_path: &Path, key: &str, value_toml: &str) -> Resu
         .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", manifest_path.display())))?;
     let manifest = Manifest::parse(&text)
         .map_err(|err| err.map_msg(|m| format!("invalid `{}`: {m}", manifest_path.display())))?;
-    if manifest.dependencies().contains_key(key) {
-        return Err(PmError::Manifest(format!(
-            "dependency `{key}` is already in the manifest"
-        )));
-    }
 
-    let entry = format!("{key} = {value_toml}");
-    let updated = insert_dependency_entry(&text, &entry);
+    let updated = if manifest.dependencies().contains_key(key) {
+        extend_scope_entry(&text, key, value_toml)?
+    } else {
+        insert_dependency_entry(&text, &format!("{key} = {value_toml}"))
+    };
     // Re-parse the edited manifest so a bad value/source fails here rather than corrupting the file.
     Manifest::parse(&updated).map_err(|err| {
         err.map_msg(|m| format!("`noeta add {key}` would make `{MANIFEST_NAME}` invalid: {m}"))
@@ -569,6 +715,146 @@ pub fn add_dependency(manifest_path: &Path, key: &str, value_toml: &str) -> Resu
     std::fs::write(&tmp, &updated)
         .and_then(|()| std::fs::rename(&tmp, manifest_path))
         .map_err(|err| PmError::Io(format!("cannot write `{}`: {err}", manifest_path.display())))
+}
+
+/// Widen `text`'s existing `[dependencies]` entry for `key` into a **scope array** carrying
+/// `value_toml` as one more member (see [`add_dependency`]). A single-source entry becomes a
+/// two-member array; an entry that is already an array gains an element. The existing value's own
+/// text is reused verbatim, so member formatting and any trailing comment survive; only the one
+/// entry is rewritten.
+fn extend_scope_entry(text: &str, key: &str, value_toml: &str) -> Result<String, PmError> {
+    let (span, value_text) = find_dependency_entry(text, key).ok_or_else(|| {
+        // The parse said the key is a dependency, so it is in a `[dependencies]` table we could not
+        // locate textually — a dotted-key or inline-table spelling we do not rewrite.
+        PmError::Manifest(format!(
+            "dependency `{key}` is already in the manifest, and its entry is not in a form \
+             `noeta add` can extend — edit `{MANIFEST_NAME}` by hand to make `{key}` a scope array \
+             (`{key} = [ {{ … }}, {value_toml} ]`)"
+        ))
+    })?;
+
+    // Re-adding the identical source is a mistake, not a scope: an array with two equal members
+    // would resolve one package twice under one root.
+    let members: Vec<String> = match toml::from_str::<toml::Table>(&format!("v = {value_text}"))
+        .ok()
+        .and_then(|t| t.get("v").and_then(|v| v.as_array()).cloned())
+    {
+        // Already an array: keep each member's own text by re-splitting the value, then append.
+        Some(_) => split_array_members(&value_text),
+        None => vec![value_text.trim().to_string()],
+    };
+    if members.iter().any(|m| m == value_toml.trim()) {
+        return Err(PmError::Manifest(format!(
+            "dependency `{key}` already binds this exact source — nothing to add"
+        )));
+    }
+
+    let added = value_toml.trim().to_string();
+    let mut entry = format!("{key} = [\n");
+    for member in members.iter().chain(std::iter::once(&added)) {
+        entry.push_str(&format!("    {member},\n"));
+    }
+    entry.push(']');
+
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    lines.splice(span.clone(), entry.lines().map(str::to_string));
+    let mut out = lines.join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Locate `key`'s entry in `text`'s top-level `[dependencies]` table: its line range and the raw
+/// text of its value (everything right of the `=`, joined across lines for a multi-line array).
+/// `None` when there is no such plain `key = value` entry — including one under a
+/// `[targets.<name>.dependencies]` table, which is a different table and never rewritten here.
+fn find_dependency_entry(text: &str, key: &str) -> Option<(std::ops::Range<usize>, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut in_dependencies = false;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_dependencies = trimmed == "[dependencies]";
+            continue;
+        }
+        if !in_dependencies {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        let Some(value_start) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        // Accumulate lines until the value parses — the cheap way to find where a multi-line array
+        // ends without re-implementing TOML's grammar.
+        let mut value = value_start.trim().to_string();
+        for (j, more) in lines.iter().enumerate().skip(i + 1) {
+            if toml::from_str::<toml::Table>(&format!("v = {value}")).is_ok() {
+                return Some((i..j, value));
+            }
+            value.push('\n');
+            value.push_str(more);
+        }
+        if toml::from_str::<toml::Table>(&format!("v = {value}")).is_ok() {
+            return Some((i..lines.len(), value));
+        }
+        return None;
+    }
+    None
+}
+
+/// Split a TOML array's raw text into its members' own raw texts, so an existing scope array can be
+/// rewritten with one more member without re-serializing (and reformatting) the ones already there.
+/// Commas inside a member's braces, brackets or strings do not split.
+fn split_array_members(array_text: &str) -> Vec<String> {
+    let inner = array_text.trim();
+    let inner = inner
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(inner);
+    let mut members = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string: Option<char> = None;
+    let mut current = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match in_string {
+            Some(quote) => {
+                if ch == '\\' && quote == '"' {
+                    current.push(ch);
+                    if let Some(escaped) = chars.next() {
+                        current.push(escaped);
+                    }
+                    continue;
+                }
+                if ch == quote {
+                    in_string = None;
+                }
+            }
+            None => match ch {
+                '"' | '\'' => in_string = Some(ch),
+                '{' | '[' => depth += 1,
+                '}' | ']' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    let member = current.trim();
+                    if !member.is_empty() {
+                        members.push(member.to_string());
+                    }
+                    current.clear();
+                    continue;
+                }
+                _ => {}
+            },
+        }
+        current.push(ch);
+    }
+    let member = current.trim();
+    if !member.is_empty() {
+        members.push(member.to_string());
+    }
+    members
 }
 
 /// Insert `entry` (a `key = value` line) into `text`'s `[dependencies]` table: right after an
@@ -635,6 +921,22 @@ pub fn resolve_active_tier_providers(
     manifest.active_tier_providers(target)
 }
 
+/// The root package's `[tiers]` provider map for the `noeta.toml` discovered at or above `entry`
+/// ([`Manifest::tier_provider_map`]) — who provides each tier the root names, target-independent. A
+/// bare script with no manifest has no `[tiers]`, so this yields an empty map (its tiers resolve
+/// ambiently). This is what the tier-execution layer dispatches on and the compile cache key folds in.
+pub fn resolve_tier_providers(entry: &Path) -> Result<BTreeMap<String, String>, PmError> {
+    let dir = entry.parent().unwrap_or_else(|| Path::new("."));
+    let Some(path) = find(dir) else {
+        return Ok(BTreeMap::new());
+    };
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", path.display())))?;
+    let manifest = Manifest::parse(&text)
+        .map_err(|err| err.map_msg(|m| format!("invalid `{}`: {m}", path.display())))?;
+    Ok(manifest.tier_provider_map())
+}
+
 /// Gather the entry's **dependency packages** as loader [`DepPackage`]s (package-manager P2.1/P2.4):
 /// resolve the full transitive dependency graph and hand back the re-rooted packages the loader links.
 /// No manifest, or no `[dependencies]`, yields an empty list (a bare script has no deps). The graph
@@ -654,6 +956,17 @@ pub fn dependency_packages_for(
     target: Option<&str>,
 ) -> Result<Vec<noeta_loader::DepPackage>, PmError> {
     Ok(crate::graph::resolve_graph_for(entry, target)?.packages)
+}
+
+/// As [`dependency_packages_for`], but also returns the whole program's per-package `@`-name tables
+/// (`[directives]`; `[tiers]` later) — the [`noeta_span::PackageUses`] the checker resolves `@name`
+/// through. One resolve produces both, so the front-end need not resolve the graph twice.
+pub fn dependency_selection_for(
+    entry: &Path,
+    target: Option<&str>,
+) -> Result<(Vec<noeta_loader::DepPackage>, noeta_span::PackageUses), PmError> {
+    let g = crate::graph::resolve_graph_for(entry, target)?;
+    Ok((g.packages, g.package_uses))
 }
 
 /// As [`dependency_packages`], but a pure **query** ([`crate::graph::resolve_graph_query`]): no
@@ -805,9 +1118,9 @@ pub fn resolve_fmt_config_lenient(file: &Path) -> FmtConfig {
 }
 
 impl Manifest {
-    /// Parse a `noeta.toml`'s text into a [`Manifest`], validating every tier name (a built-in tier)
-    /// and provider (only `"std"` for now). Unknown keys outside `[targets]` and unknown
-    /// target-level keys are ignored, leaving room for later codegen knobs.
+    /// Parse a `noeta.toml`'s text into a [`Manifest`], validating the shape of the `[tiers]`/
+    /// `[directives]` provider bindings and the `[targets.*.tiers]` activation live-set. Unknown keys
+    /// outside `[targets]` and unknown target-level keys are ignored, leaving room for later knobs.
     pub fn parse(text: &str) -> Result<Manifest, PmError> {
         Self::parse_inner(text).map_err(PmError::Manifest)
     }
@@ -819,6 +1132,24 @@ impl Manifest {
         let table: toml::Table = text.parse().map_err(|err| format!("{err}"))?;
         let package = parse_package(&table)?;
         let dependencies = parse_dependencies(&table)?;
+        let global_dep_keys: std::collections::BTreeSet<String> =
+            dependencies.keys().cloned().collect();
+        let directives = parse_use_bindings(&table, "directives", &global_dep_keys, false)?;
+        // `[tiers]` permits the built-in `"std"` provider (it declares `test`/`bench`/`doc`/`debug`);
+        // a directive always comes from a dependency, so `[directives]` does not. A tier's provider may
+        // also be a **target-scoped** dependency (a dev-only tier), so validate against the union of
+        // the global and every target's dependency keys.
+        let mut tier_provider_keys = global_dep_keys.clone();
+        tier_provider_keys.extend(target_scoped_dep_keys(&table)?);
+        let tiers = parse_use_bindings(&table, "tiers", &tier_provider_keys, true)?;
+        // A `@name` is one namespace per package: source cannot tell a directive apart from a tier
+        // until resolution, so a local name may not name both a `[directives]` and a `[tiers]` entry.
+        if let Some(dup) = directives.keys().find(|k| tiers.contains_key(*k)) {
+            return Err(format!(
+                "`{dup}` is declared in both `[directives]` and `[tiers]` — a local `@{dup}` names \
+                 one provider; rename one (`local = \"provider:{dup}\"`)"
+            ));
+        }
         let trust = parse_trust(&table)?;
         let registries = parse_registries(&table)?;
         let db = parse_db(&table)?;
@@ -829,6 +1160,8 @@ impl Manifest {
             return Ok(Manifest {
                 package,
                 dependencies,
+                directives,
+                tiers,
                 targets,
                 trust,
                 registries,
@@ -864,39 +1197,72 @@ impl Manifest {
                     })?)?,
                 };
 
+            // `tiers` is a live-set: local tier names (from the package's own `[tiers]`) each
+            // switched on/off for this build. It has two spellings that parse to the *same*
+            // `BTreeMap<String, bool>`:
+            //   * the canonical ARRAY on the target, `tiers = ["test", "-debug"]` — a bare name is
+            //     live (`true`), a `-`-prefixed name is off (`false`, to turn off a tier an `extends`
+            //     base left on);
+            //   * the legacy boolean sub-table, `[targets.<t>.tiers]` with `name = true|false`.
+            // Neither carries a provider — that separation is the point (a provider-string here was
+            // the old shape). Only the name *shape* is validated; whether a name resolves to a live
+            // provider is checked where the tier is used (E0036).
             let mut tiers = BTreeMap::new();
             if let Some(tiers_value) = target_table.get("tiers") {
-                let tiers_table = tiers_value
-                    .as_table()
-                    .ok_or_else(|| format!("target `{name}`: `tiers` must be a table"))?;
-                for (tier, provider_value) in tiers_table {
-                    // The tier name-space is open (tier-providers T3): a name may be a built-in
-                    // tier or one a dependency declares with `@tier`. The manifest cannot see the
-                    // dependency's source, so it validates only the *shape* here — an identifier —
-                    // and resolution happens where the tier is used (activation validates the name
-                    // against the linked program's registry, E0036).
-                    if !is_identifier(tier) {
-                        return Err(format!(
-                            "target `{name}`: tier `{tier}` is not a valid tier name (an identifier)"
-                        ));
+                if let Some(array) = tiers_value.as_array() {
+                    for element in array {
+                        let raw = element.as_str().ok_or_else(|| {
+                            format!(
+                                "target `{name}`: every entry in the `tiers` array must be a string \
+                                 tier name (bare = live, `-name` = off)"
+                            )
+                        })?;
+                        // Strip an optional leading `-` (subtraction: turn a tier OFF).
+                        let (tier, active) = match raw.strip_prefix('-') {
+                            Some(rest) => (rest, false),
+                            None => (raw, true),
+                        };
+                        if tier.is_empty() || !is_identifier(tier) {
+                            return Err(format!(
+                                "target `{name}`: tier entry `{raw}` is not a valid tier name (an \
+                                 identifier, optionally `-`-prefixed to turn it off)"
+                            ));
+                        }
+                        // A direct `"x"` + `"-x"` contradiction in one array is an error; a plain
+                        // duplicate of the same polarity is last-wins.
+                        if let Some(&prior) = tiers.get(tier)
+                            && prior != active
+                        {
+                            return Err(format!(
+                                "target `{name}`: tier `{tier}` is listed both on and off (`\"{tier}\"` \
+                                 and `\"-{tier}\"`) — pick one"
+                            ));
+                        }
+                        tiers.insert(tier.to_string(), active);
                     }
-                    let provider = provider_of(name, tier, provider_value)?;
-                    // A tier's provider is the built-in stdlib (`"std"`) or a **declared
-                    // dependency** — named by its `[dependencies]` key, the same import root used
-                    // elsewhere (package-manager P2.6). An undeclared name is an error pointing the
-                    // user to add the dependency.
-                    if provider != BUILTIN_PROVIDER
-                        && !dependencies.contains_key(&provider)
-                        && !target_deps.contains_key(&provider)
-                    {
-                        return Err(format!(
-                            "target `{name}`: tier `{tier}` names provider `{provider}`, which is \
-                             neither the built-in `\"{BUILTIN_PROVIDER}\"` nor a declared \
-                             dependency — add `{provider}` to `[dependencies]` or \
-                             `[targets.{name}.dependencies]` to provide this tier"
-                        ));
+                } else if let Some(tiers_table) = tiers_value.as_table() {
+                    for (tier, active_value) in tiers_table {
+                        if !is_identifier(tier) {
+                            return Err(format!(
+                                "target `{name}`: tier `{tier}` is not a valid tier name (an identifier)"
+                            ));
+                        }
+                        let active = active_value.as_bool().ok_or_else(|| {
+                            format!(
+                                "target `{name}`: tier `{tier}` must be `true` or `false` — \
+                                 `[targets.{name}.tiers]` activates local tier names, it no longer names \
+                                 a provider (move the provider to the top-level `[tiers]` table: \
+                                 `{tier} = \"…\"`)"
+                            )
+                        })?;
+                        tiers.insert(tier.clone(), active);
                     }
-                    tiers.insert(tier.clone(), provider);
+                } else {
+                    return Err(format!(
+                        "target `{name}`: `tiers` must be an array of tier names \
+                         (`tiers = [\"test\", \"-debug\"]`, bare = live, `-name` = off) or a table of \
+                         `local = true` activation flags"
+                    ));
                 }
             }
 
@@ -913,6 +1279,8 @@ impl Manifest {
         Ok(Manifest {
             package,
             dependencies,
+            directives,
+            tiers,
             targets,
             trust,
             registries,
@@ -946,29 +1314,72 @@ impl Manifest {
         &self.dependencies
     }
 
+    /// The `[directives]` table — the extension `@`-directives this package's source uses, each local
+    /// `@name` → the dependency (this package's import-root key) that provides it and its exported name.
+    pub fn directives(&self) -> &BTreeMap<String, UseBinding> {
+        &self.directives
+    }
+
+    /// The `[tiers]` table — the dev-tiers this package's source writes as `@name { … }`, each local
+    /// `@name` → the provider (`"std"` or a dependency import-root key) that declares it and its
+    /// exported name. Separate from `[targets.*.tiers]`, which selects which of these are *live*.
+    pub fn tiers(&self) -> &BTreeMap<String, UseBinding> {
+        &self.tiers
+    }
+
+    /// The root's `[tiers]` as a plain local-name → provider-key map — who provides each tier this
+    /// package names, **independent of any build target** (a tier's provider is package-level; the
+    /// target only selects which are live). This is what the tier-execution layer dispatches on and
+    /// what the compile cache key folds in.
+    pub fn tier_provider_map(&self) -> BTreeMap<String, String> {
+        self.tiers
+            .iter()
+            .map(|(local, b)| (local.clone(), b.provider_key.clone()))
+            .collect()
+    }
+
     /// The `[patch]` overrides (dev-time path override): package identity → the local tree that
     /// replaces it. Honored by the resolver **only when this is the root app's manifest**.
     pub fn patch(&self) -> &BTreeMap<String, PathBuf> {
         &self.patch
     }
 
-    /// The active tier names for `target`, merging inherited tiers (`extends`) under this target's
-    /// own (which win), returned sorted. Errors on an unknown target or an `extends` cycle.
+    /// The active tier (local) names for `target`, merging the inherited live-set (`extends`) under
+    /// this target's own (a nearer `false` turns an inherited tier off), returned sorted. Errors on an
+    /// unknown target or an `extends` cycle.
     pub fn active_tiers(&self, target: &str) -> Result<Vec<String>, PmError> {
         let mut chain = Vec::new();
         let merged = self
             .resolve(target, &mut chain)
             .map_err(PmError::Manifest)?;
-        Ok(merged.into_keys().collect())
+        Ok(merged
+            .into_iter()
+            .filter_map(|(tier, active)| active.then_some(tier))
+            .collect())
     }
 
-    /// The active tier → **provider** map for `target` (package-manager P2.6): each live tier mapped
-    /// to the package providing it — the built-in `"std"` or a declared dependency's import-root key.
+    /// The active tier → **provider** map for `target`: each live tier (a local name from the
+    /// activation live-set) mapped to the provider its `[tiers]` entry names — the built-in `"std"` or
+    /// a declared dependency's import-root key. This joins the two axes (the target's live-set and the
+    /// package's `[tiers]` table) for this *root* package's own tiers; a dependency's tiers resolve
+    /// through its own `[tiers]` (the per-package [`noeta_span::PackageUses`] the graph builds). An
+    /// active tier this package's `[tiers]` never mapped is an error pointing the user to add it.
+    ///
     /// The tier-execution layer dispatches on this: `"std"` runs the built-in native runner, a
     /// dependency key runs that package's `@tier` runner (`resolve_active_tier_providers`).
     pub fn active_tier_providers(&self, target: &str) -> Result<BTreeMap<String, String>, PmError> {
-        let mut chain = Vec::new();
-        self.resolve(target, &mut chain).map_err(PmError::Manifest)
+        let active = self.active_tiers(target)?;
+        let mut providers = BTreeMap::new();
+        for tier in active {
+            let binding = self.tiers.get(&tier).ok_or_else(|| {
+                PmError::Manifest(format!(
+                    "target `{target}` activates tier `{tier}`, but no `[tiers]` entry maps it to a \
+                     provider — add `{tier} = \"std\"` (or a dependency key) to `[tiers]`"
+                ))
+            })?;
+            providers.insert(tier, binding.provider_key.clone());
+        }
+        Ok(providers)
     }
 
     /// Resolve a target's effective tier map by walking its `extends` chain base-first, overlaying
@@ -1030,7 +1441,7 @@ impl Manifest {
         &self,
         name: &str,
         chain: &mut Vec<String>,
-    ) -> Result<BTreeMap<String, String>, String> {
+    ) -> Result<BTreeMap<String, bool>, String> {
         if chain.iter().any(|p| p == name) {
             chain.push(name.to_string());
             return Err(format!("target inheritance cycle: {}", chain.join(" -> ")));
@@ -1047,8 +1458,8 @@ impl Manifest {
         };
         chain.pop();
 
-        for (tier, provider) in &target.tiers {
-            merged.insert(tier.clone(), provider.clone());
+        for (tier, active) in &target.tiers {
+            merged.insert(tier.clone(), *active);
         }
         Ok(merged)
     }
@@ -1100,6 +1511,23 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
             Some(validate_native_dir(dir)?)
         }
     };
+    let dev_native = match pkg.get("dev-native") {
+        None => None,
+        Some(v) => {
+            let dir = v
+                .as_str()
+                .ok_or("`package.dev-native` must be a string (a relative directory)")?;
+            Some(validate_native_dir(dir)?)
+        }
+    };
+    if native.is_some() && dev_native.is_some() {
+        return Err(
+            "a package may declare `native` or `dev-native`, not both — a native crate \
+                    is either a runtime dependency (`native`, trust-gated) or a dev-only tool \
+                    (`dev-native`, formatter-only, admitted untrusted)"
+                .to_string(),
+        );
+    }
     let license = match pkg.get("license") {
         None => None,
         Some(v) => {
@@ -1131,6 +1559,7 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
         edition,
         toolchain,
         native,
+        dev_native,
         license,
         keywords,
         description,
@@ -1387,12 +1816,160 @@ fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
     let advisories = parse_advisory_policy(trust_table)?;
     Ok(Trust {
         native: parse_list("native")?,
-        commands: parse_list("commands")?,
+        commands: parse_binding_table(trust_table, "commands")?,
         require_provenance,
         require_transparency,
         publish_cooldown,
         advisories,
     })
+}
+
+/// Parse a `[trust.<field>]` binding table (`local = "company/package[:exported]"`) into a
+/// local-name → [`Binding`] map. This is the shape both `[trust.commands]` and `[trust.directives]`
+/// use: the key is the local name the project addresses the capability under, the value names the
+/// providing package and (optionally, after a `:`) the name that package exported it under.
+///
+/// The pre-mapping array form (`commands = ["company/package"]`) is refused with a migration
+/// message — it granted every command a package shipped, blanket, which is exactly what the local
+/// binding replaces.
+fn parse_binding_table(
+    trust_table: &toml::Table,
+    field: &str,
+) -> Result<BTreeMap<String, Binding>, String> {
+    let Some(value) = trust_table.get(field) else {
+        return Ok(BTreeMap::new());
+    };
+    // A leftover array is the old blanket-by-package form — name the replacement rather than the
+    // generic "must be a table", since this is a migration a reader is likely mid-way through.
+    if value.is_array() {
+        return Err(format!(
+            "`trust.{field}` is now a table mapping each local name to its provider — write \
+             `[trust.{field}]` with `name = \"company/package\"` entries (add `:exported` to rename), \
+             not an array of package identities"
+        ));
+    }
+    let table = value.as_table().ok_or_else(|| {
+        format!("`trust.{field}` must be a table of `local = \"company/package[:exported]\"`")
+    })?;
+    let mut out = BTreeMap::new();
+    for (local, spec_value) in table {
+        let spec = spec_value.as_str().ok_or_else(|| {
+            format!("`trust.{field}.{local}` must be a string `\"company/package[:exported]\"`")
+        })?;
+        // The identity is `company/package` (a `/`, never a `:`), so the FIRST colon unambiguously
+        // begins the exported name; everything after it is that name verbatim. No colon → the
+        // exported name is the local key (the common, no-rename case).
+        let (provider, exported) = match spec.split_once(':') {
+            Some((p, e)) => (p, e),
+            None => (spec, local.as_str()),
+        };
+        PackageName::parse(provider).map_err(|err| format!("`trust.{field}.{local}`: {err}"))?;
+        if exported.is_empty() {
+            return Err(format!(
+                "`trust.{field}.{local}`: the exported name after `:` is empty — drop the `:` to \
+                 bind the provider's own `{local}`, or name the command it exports"
+            ));
+        }
+        out.insert(
+            local.clone(),
+            Binding {
+                provider: provider.to_string(),
+                exported: exported.to_string(),
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Parse a per-package `[directives]` / `[tiers]` table (`local = "dep-key[:exported]"`) into a
+/// local-name → [`UseBinding`] map. The provider is named by one of **this package's** dependency
+/// import-root keys (`valid_providers`), so a `@name` resolves in the same context a `use <key>.…`
+/// does. `allow_builtin` permits the built-in `"std"` provider (for `[tiers]`, whose `test`/`debug`/…
+/// come from the stdlib); `[directives]` passes `false` — a directive always comes from a dependency.
+///
+/// `valid_providers` is the set of legal provider keys: the global `[dependencies]` for `[directives]`,
+/// and those *plus every target-scoped dependency key* for `[tiers]` (a dev-only tier provider is
+/// declared under `[targets.<t>.dependencies]`, and the package-level `[tiers]` table must still be
+/// able to name it).
+/// Every dependency key declared under any `[targets.<t>.dependencies]` (dev-deps arc) — the extra
+/// provider keys a package-level `[tiers]` table may name beyond the global `[dependencies]`. Read
+/// straight off the raw TOML (the targets are not parsed into [`Target`]s until later), tolerating a
+/// malformed `[targets]`/target/`dependencies` shape here (the targets loop reports it precisely).
+fn target_scoped_dep_keys(
+    table: &toml::Table,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut keys = std::collections::BTreeSet::new();
+    let Some(targets) = table.get("targets").and_then(|v| v.as_table()) else {
+        return Ok(keys);
+    };
+    for target in targets.values() {
+        let Some(deps) = target
+            .as_table()
+            .and_then(|t| t.get("dependencies"))
+            .and_then(|d| d.as_table())
+        else {
+            continue;
+        };
+        keys.extend(deps.keys().cloned());
+    }
+    Ok(keys)
+}
+
+fn parse_use_bindings(
+    table: &toml::Table,
+    field: &str,
+    valid_providers: &std::collections::BTreeSet<String>,
+    allow_builtin: bool,
+) -> Result<BTreeMap<String, UseBinding>, String> {
+    let Some(value) = table.get(field) else {
+        return Ok(BTreeMap::new());
+    };
+    let entries = value
+        .as_table()
+        .ok_or_else(|| format!("`{field}` must be a table of `local = \"dep-key[:exported]\"`"))?;
+    let mut out = BTreeMap::new();
+    for (local, spec_value) in entries {
+        let spec = spec_value.as_str().ok_or_else(|| {
+            format!("`{field}.{local}` must be a string `\"dep-key[:exported]\"`")
+        })?;
+        // First `:` splits the provider key from the exported name; no colon → exported == local.
+        let (provider_key, exported) = match spec.split_once(':') {
+            Some((p, e)) => (p, e),
+            None => (spec, local.as_str()),
+        };
+        if provider_key.is_empty() {
+            return Err(format!(
+                "`{field}.{local}`: the provider dependency key is empty"
+            ));
+        }
+        if exported.is_empty() {
+            return Err(format!(
+                "`{field}.{local}`: the exported name after `:` is empty — drop the `:` to bind the \
+                 provider's own `{local}`, or name the {} it exports",
+                field.trim_end_matches('s')
+            ));
+        }
+        let is_builtin = allow_builtin && provider_key == BUILTIN_PROVIDER;
+        if !is_builtin && !valid_providers.contains(provider_key) {
+            let std_hint = if allow_builtin {
+                format!(" (or the built-in `\"{BUILTIN_PROVIDER}\"`)")
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "`{field}.{local}` names provider `{provider_key}`, which is not a `[dependencies]` \
+                 key{std_hint} — add `{provider_key}` to `[dependencies]` to use its {field}"
+            ));
+        }
+        out.insert(
+            local.clone(),
+            UseBinding {
+                provider_key: provider_key.to_string(),
+                exported: exported.to_string(),
+            },
+        );
+    }
+    Ok(out)
 }
 
 /// Parse `[trust].advisories` (advisory-intake arc, tier 5): either a bare action string applied to
@@ -1597,6 +2174,7 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
                 .ok_or_else(|| format!("dependency `{key}`: `path` must be a string"))?;
             Ok(Dependency::Path {
                 path: PathBuf::from(path),
+                package: parse_declared_package(key, table)?,
             })
         }
         (false, true, false) => {
@@ -1632,6 +2210,7 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
             Ok(Dependency::Git {
                 url: url.to_string(),
                 git_ref,
+                package: parse_declared_package(key, table)?,
             })
         }
         (false, false, true) => {
@@ -1642,19 +2221,10 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
                 format!("dependency `{key}` version requirement `{req}` is not valid SemVer: {err}")
             })?;
             // The registry identity (`company/package`) — decoupled from the import-root key.
-            let package = match table.get("package") {
-                None => None,
-                Some(v) => {
-                    let s = v
-                        .as_str()
-                        .ok_or_else(|| format!("dependency `{key}`: `package` must be a string"))?;
-                    Some(
-                        PackageName::parse(s)
-                            .map_err(|err| format!("dependency `{key}`: {err}"))?,
-                    )
-                }
-            };
-            Ok(Dependency::Registry { package, req })
+            Ok(Dependency::Registry {
+                package: parse_declared_package(key, table)?,
+                req,
+            })
         }
         (false, false, false) => Err(format!(
             "dependency `{key}` table must name a source: `path`, `git` (+ `tag`), or `version`"
@@ -1666,6 +2236,23 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
     }
 }
 
+/// Parse the optional `package = "company/pkg"` key of a dependency table. It means the same thing —
+/// a `company/package` identity — on every source form: the *selector* for a `version` dependency,
+/// and a **claim** the resolver verifies for a `path`/`git` one (see
+/// [`Dependency::declared_package`]). One parser, so a malformed identity reads the same wherever it
+/// is written.
+fn parse_declared_package(key: &str, table: &toml::Table) -> Result<Option<PackageName>, String> {
+    let Some(value) = table.get("package") else {
+        return Ok(None);
+    };
+    let s = value
+        .as_str()
+        .ok_or_else(|| format!("dependency `{key}`: `package` must be a string"))?;
+    Ok(Some(
+        PackageName::parse(s).map_err(|err| format!("dependency `{key}`: {err}"))?,
+    ))
+}
+
 /// Whether `s` is a Noeta identifier (`[A-Za-z_][A-Za-z0-9_]*`) — the shape a package-name segment
 /// and a dependency import-root key must both have.
 fn is_identifier(s: &str) -> bool {
@@ -1675,27 +2262,6 @@ fn is_identifier(s: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// The provider package for a tier entry: a bare string (`test = "std"`) or a table whose `package`
-/// key carries it (`bench = { package = "std", samples = 100 }`); other table keys are target-level
-/// options, ignored for now.
-fn provider_of(target: &str, tier: &str, value: &toml::Value) -> Result<String, String> {
-    if let Some(s) = value.as_str() {
-        return Ok(s.to_string());
-    }
-    if let Some(table) = value.as_table() {
-        let package = table
-            .get("package")
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| {
-                format!("target `{target}`: tier `{tier}` table must have a string `package`")
-            })?;
-        return Ok(package.to_string());
-    }
-    Err(format!(
-        "target `{target}`: tier `{tier}` must be a provider string or a `{{ package = … }}` table"
-    ))
 }
 
 #[cfg(test)]
@@ -2061,8 +2627,7 @@ mod tests {
 
     #[test]
     fn reads_declared_cargo_features() {
-        let dir = std::env::temp_dir().join(format!("noeta-pm-feat-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("pm-feat");
         std::fs::write(
             dir.join("Cargo.toml"),
             "[package]\nname = \"imgfx-native\"\nversion = \"0.1.0\"\n\n\
@@ -2080,7 +2645,6 @@ mod tests {
         )
         .unwrap();
         assert!(cargo_features(&dir).unwrap().is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- `package.native` (package-manager Phase 3, N3.1) --------------------------------------
@@ -2116,6 +2680,54 @@ mod tests {
         assert!(Manifest::parse(&manifest("rust/imgfx")).is_ok());
     }
 
+    // --- `package.dev-native` (a dev-only formatter/dev-tool crate) -----------------------------
+
+    #[test]
+    fn parses_a_dev_native_crate() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/htmlfmt\"\n\
+             version = \"1.0.0\"\n\
+             dev-native = \"native\"\n",
+        )
+        .expect("valid");
+        assert_eq!(m.package().unwrap().dev_native.as_deref(), Some("native"));
+        // A dev-native package declares no runtime `native` crate.
+        assert_eq!(m.package().unwrap().native, None);
+    }
+
+    #[test]
+    fn dev_native_is_absent_for_a_pure_package() {
+        let m = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").expect("valid");
+        assert_eq!(m.package().unwrap().dev_native, None);
+    }
+
+    #[test]
+    fn dev_native_rejects_absolute_escape_and_empty() {
+        let manifest = |dir: &str| {
+            format!("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\ndev-native = \"{dir}\"\n")
+        };
+        assert!(Manifest::parse(&manifest("/abs/dir")).is_err());
+        assert!(Manifest::parse(&manifest("../outside")).is_err());
+        assert!(Manifest::parse(&manifest("")).is_err());
+        assert!(Manifest::parse(&manifest("rust/htmlfmt")).is_ok());
+    }
+
+    #[test]
+    fn native_and_dev_native_together_are_an_error() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"a/b\"\n\
+             version = \"1.0.0\"\n\
+             native = \"native\"\n\
+             dev-native = \"devnative\"\n",
+        );
+        assert!(
+            m.is_err(),
+            "declaring both native and dev-native must be rejected"
+        );
+    }
+
     // --- `[trust]` (package-manager Phase 4) ---------------------------------------------------
 
     #[test]
@@ -2131,13 +2743,66 @@ mod tests {
             "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
              [trust]\n\
              native = [\"acme/imgfx\", \"acme/simd\"]\n\
-             commands = [\"acme/scaffold\"]\n",
+             [trust.commands]\n\
+             scaffold = \"acme/scaffold\"\n\
+             gen = \"acme/scaffold:generate\"\n",
         )
         .expect("valid");
         assert!(m.trust().native.contains("acme/imgfx"));
         assert!(m.trust().native.contains("acme/simd"));
-        assert!(m.trust().commands.contains("acme/scaffold"));
-        assert!(!m.trust().commands.contains("acme/imgfx"));
+        // The no-rename form: exported name defaults to the local key.
+        let scaffold = m.trust().commands.get("scaffold").expect("bound");
+        assert_eq!(scaffold.provider, "acme/scaffold");
+        assert_eq!(scaffold.exported, "scaffold");
+        // The rename form: `local = "provider:exported"`.
+        let renamed = m.trust().commands.get("gen").expect("bound");
+        assert_eq!(renamed.provider, "acme/scaffold");
+        assert_eq!(renamed.exported, "generate");
+        assert!(!m.trust().commands.contains_key("acme/imgfx"));
+    }
+
+    #[test]
+    fn directives_bind_local_names_to_a_dependency_and_exported_name() {
+        let m = Manifest::parse(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\npara = { path = \"../para\" }\n\
+             [directives]\n\
+             openapi = \"para\"\n\
+             oapi = \"para:openapi\"\n",
+        )
+        .expect("valid");
+        // No-rename: exported defaults to the local key.
+        let openapi = m.directives().get("openapi").expect("bound");
+        assert_eq!(openapi.provider_key, "para");
+        assert_eq!(openapi.exported, "openapi");
+        // Rename: `local = "dep-key:exported"`.
+        let oapi = m.directives().get("oapi").expect("bound");
+        assert_eq!(oapi.provider_key, "para");
+        assert_eq!(oapi.exported, "openapi");
+    }
+
+    #[test]
+    fn a_directive_naming_an_undeclared_dependency_is_an_error() {
+        let err = Manifest::parse(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [directives]\nopenapi = \"para\"\n",
+        )
+        .expect_err("provider must be a declared dependency")
+        .to_string();
+        assert!(err.contains("directives.openapi"), "{err}");
+        assert!(err.contains("[dependencies]"), "{err}");
+    }
+
+    #[test]
+    fn trust_rejects_the_pre_mapping_command_array() {
+        let err = Manifest::parse(
+            "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n\
+             [trust]\ncommands = [\"acme/scaffold\"]\n",
+        )
+        .expect_err("the array form is retired")
+        .to_string();
+        assert!(err.contains("trust.commands"), "{err}");
+        assert!(err.contains("table"), "{err}");
     }
 
     #[test]
@@ -2266,13 +2931,25 @@ mod tests {
     fn trust_rejects_a_malformed_identity() {
         // A typo'd grant must fail loudly, not silently authorize nothing.
         assert!(Manifest::parse("[trust]\nnative = [\"not-an-identity\"]\n").is_err());
-        assert!(Manifest::parse("[trust]\ncommands = [42]\n").is_err());
         assert!(Manifest::parse("[trust]\nnative = \"acme/x\"\n").is_err()); // must be an array
+        // A command binding's provider is validated as an identity, and its value must be a string.
+        assert!(
+            Manifest::parse("[trust.commands]\nmigrate = \"not-an-identity\"\n").is_err(),
+            "a malformed provider identity must fail"
+        );
+        assert!(
+            Manifest::parse("[trust.commands]\nmigrate = 42\n").is_err(),
+            "a non-string binding value must fail"
+        );
+        assert!(
+            Manifest::parse("[trust.commands]\nmigrate = \"acme/db:\"\n").is_err(),
+            "an empty exported name after `:` must fail"
+        );
     }
 
     #[test]
     fn a_bare_script_has_no_package() {
-        let m = Manifest::parse("[targets.dev.tiers]\ntest = \"std\"\n").expect("valid");
+        let m = Manifest::parse("[targets.dev.tiers]\ntest = true\n").expect("valid");
         assert!(m.package().is_none());
         assert!(m.dependencies().is_empty());
     }
@@ -2303,7 +2980,8 @@ mod tests {
         assert_eq!(
             deps["local"],
             Dependency::Path {
-                path: PathBuf::from("../local")
+                path: PathBuf::from("../local"),
+                package: None,
             }
         );
         assert_eq!(
@@ -2311,6 +2989,7 @@ mod tests {
             Dependency::Git {
                 url: "https://example.com/guzzle/http".to_string(),
                 git_ref: GitRef::Tag("v1.2.0".to_string()),
+                package: None,
             }
         );
         assert_eq!(
@@ -2330,11 +3009,46 @@ mod tests {
     }
 
     #[test]
+    fn a_path_or_git_dependency_keeps_its_package_claim() {
+        // The key used to be dropped at parse time for these two forms, so nothing downstream could
+        // check it — a manifest could name a package its path did not contain. It is kept now, and
+        // reads the same on every source form.
+        let m = Manifest::parse(
+            "[dependencies]\n\
+             ai = { path = \"../para-ai\", package = \"para/ai\" }\n\
+             api = { git = \"https://example.com/para/api\", tag = \"v1.0.0\", package = \"para/api\" }\n\
+             plain = { path = \"../plain\" }\n",
+        )
+        .expect("valid");
+        let deps = m.dependencies();
+        assert_eq!(
+            deps["ai"].declared_package().map(PackageName::to_string),
+            Some("para/ai".to_string())
+        );
+        assert_eq!(
+            deps["api"].declared_package().map(PackageName::to_string),
+            Some("para/api".to_string())
+        );
+        assert_eq!(deps["plain"].declared_package(), None);
+
+        // A malformed identity is refused wherever it is written, not only on a registry entry.
+        assert!(
+            Manifest::parse("[dependencies]\nx = { path = \"../x\", package = \"nope\" }\n")
+                .is_err(),
+            "`package` must still be `company/package`"
+        );
+        assert!(
+            Manifest::parse("[dependencies]\nx = { path = \"../x\", package = 7 }\n").is_err(),
+            "`package` must still be a string"
+        );
+    }
+
+    #[test]
     fn a_git_dependency_tracks_a_tag_a_branch_or_head() {
         fn git_ref_of(toml: &str) -> GitRef {
             let m = Manifest::parse(toml).expect("valid");
             match &m.dependencies()["x"] {
-                Dependency::Git { url, git_ref } => {
+                Dependency::Git { url, git_ref, .. } => {
                     assert_eq!(url, "https://x/y");
                     git_ref.clone()
                 }
@@ -2402,8 +3116,10 @@ mod tests {
              version = \"0.1.0\"\n\
              [dependencies]\n\
              http = { git = \"https://x/guzzle/http\", tag = \"v1.0.0\" }\n\
+             [tiers]\n\
+             test = \"std\"\n\
              [targets.dev.tiers]\n\
-             test = \"std\"\n",
+             test = true\n",
         )
         .expect("valid");
         assert_eq!(m.package().unwrap().name.company, "acme");
@@ -2415,33 +3131,45 @@ mod tests {
     fn parses_and_resolves_a_simple_target() {
         let m = Manifest::parse(
             "[targets.dev.tiers]\n\
-             test = \"std\"\n\
-             debug = \"std\"\n",
+             test = true\n\
+             debug = true\n",
         )
         .expect("valid manifest");
         assert_eq!(m.active_tiers("dev").unwrap(), vec!["debug", "test"]);
     }
 
     #[test]
-    fn table_provider_form_is_accepted() {
+    fn an_inactive_tier_is_dropped_from_the_live_set() {
+        // `false` is a live-set entry that turns a tier off — it lets a derived target (`extends`)
+        // switch an inherited tier off without redeclaring the base.
         let m = Manifest::parse(
             "[targets.dev.tiers]\n\
-             bench = { package = \"std\", samples = 100 }\n",
+             test = true\n\
+             bench = false\n",
         )
         .expect("valid manifest");
-        assert_eq!(m.active_tiers("dev").unwrap(), vec!["bench"]);
+        assert_eq!(m.active_tiers("dev").unwrap(), vec!["test"]);
+    }
+
+    #[test]
+    fn a_provider_string_in_a_target_live_set_is_rejected() {
+        // The old shape (`[targets.*.tiers]` naming a provider) is gone: the live-set takes booleans,
+        // and the error points at the top-level `[tiers]` table where providers now live.
+        let err = Manifest::parse("[targets.dev.tiers]\ntest = \"std\"\n").unwrap_err();
+        assert!(err.message().contains("must be `true` or `false`"), "{err}");
+        assert!(err.message().contains("[tiers]"), "{err}");
     }
 
     #[test]
     fn extends_merges_base_then_overrides() {
         let m = Manifest::parse(
             "[targets.base.tiers]\n\
-             test = \"std\"\n\
-             doc = \"std\"\n\
+             test = true\n\
+             doc = true\n\
              [targets.ci]\n\
              extends = \"base\"\n\
              [targets.ci.tiers]\n\
-             bench = \"std\"\n",
+             bench = true\n",
         )
         .expect("valid manifest");
         // ci inherits test+doc from base and adds bench.
@@ -2452,42 +3180,188 @@ mod tests {
     }
 
     #[test]
+    fn extends_can_turn_an_inherited_tier_off() {
+        let m = Manifest::parse(
+            "[targets.base.tiers]\n\
+             test = true\n\
+             debug = true\n\
+             [targets.prod]\n\
+             extends = \"base\"\n\
+             [targets.prod.tiers]\n\
+             debug = false\n",
+        )
+        .expect("valid manifest");
+        assert_eq!(m.active_tiers("prod").unwrap(), vec!["test"]);
+    }
+
+    #[test]
     fn tier_names_are_open_but_must_be_identifiers() {
-        // The tier name-space is open (tier-providers T3): a non-builtin name is accepted — it may
-        // be a tier a dependency declares with `@tier`; whether it resolves is activation's check.
-        let m = Manifest::parse("[targets.dev.tiers]\nfuzz = \"std\"\n").expect("open name-space");
+        // The activation live-set names local tier names; only the *shape* is validated here.
+        let m = Manifest::parse("[targets.dev.tiers]\nfuzz = true\n").expect("open name-space");
         assert_eq!(m.active_tiers("dev").unwrap(), ["fuzz"]);
-        // Only the *shape* is validated here: a non-identifier key is rejected.
-        let err = Manifest::parse("[targets.dev.tiers]\n\"fu zz\" = \"std\"\n").unwrap_err();
+        let err = Manifest::parse("[targets.dev.tiers]\n\"fu zz\" = true\n").unwrap_err();
+        assert!(err.message().contains("not a valid tier name"), "{err}");
+    }
+
+    // --- `tiers = [...]` array sugar (parity with the boolean sub-table) ------------------------
+
+    #[test]
+    fn the_tiers_array_activates_exactly_those_bare_names() {
+        // A bare-name array with no `extends` makes exactly those tiers active.
+        let m = Manifest::parse("[targets.dev]\ntiers = [\"test\", \"debug\"]\n")
+            .expect("valid manifest");
+        assert_eq!(m.active_tiers("dev").unwrap(), vec!["debug", "test"]);
+    }
+
+    #[test]
+    fn a_dash_prefixed_tier_in_the_array_yields_false() {
+        // `-name` desugars to `name = false`, so on its own it activates nothing.
+        let m = Manifest::parse("[targets.dev]\ntiers = [\"-debug\"]\n").expect("valid manifest");
+        assert!(m.active_tiers("dev").unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_tiers_array_desugars_to_the_boolean_map() {
+        // `["bench", "-debug"]` ≡ `{bench = true, debug = false}` — over an `extends` base that left
+        // `debug` on, the array must subtract it exactly like the boolean table does.
+        let array = Manifest::parse(
+            "[targets.base]\n\
+             tiers = [\"test\", \"debug\"]\n\
+             [targets.ci]\n\
+             extends = \"base\"\n\
+             tiers = [\"bench\", \"-debug\"]\n",
+        )
+        .expect("valid manifest");
+        assert_eq!(array.active_tiers("ci").unwrap(), vec!["bench", "test"]);
+
+        // The boolean-table spelling of the same target resolves identically.
+        let table = Manifest::parse(
+            "[targets.base.tiers]\n\
+             test = true\n\
+             debug = true\n\
+             [targets.ci]\n\
+             extends = \"base\"\n\
+             [targets.ci.tiers]\n\
+             bench = true\n\
+             debug = false\n",
+        )
+        .expect("valid manifest");
+        assert_eq!(
+            array.active_tiers("ci").unwrap(),
+            table.active_tiers("ci").unwrap()
+        );
+    }
+
+    #[test]
+    fn the_legacy_boolean_tiers_table_still_parses() {
+        // The boolean sub-table is retained verbatim (legacy) — both forms coexist.
+        let m = Manifest::parse("[targets.dev.tiers]\ntest = true\ndebug = false\n")
+            .expect("valid manifest");
+        assert_eq!(m.active_tiers("dev").unwrap(), vec!["test"]);
+    }
+
+    #[test]
+    fn a_non_string_or_invalid_tier_array_element_is_rejected() {
+        // A non-string element.
+        let err = Manifest::parse("[targets.dev]\ntiers = [\"test\", 3]\n").unwrap_err();
+        assert!(err.message().contains("must be a string"), "{err}");
+        // An empty element.
+        let err = Manifest::parse("[targets.dev]\ntiers = [\"\"]\n").unwrap_err();
+        assert!(err.message().contains("not a valid tier name"), "{err}");
+        // A bare `-` (empty after stripping the prefix).
+        let err = Manifest::parse("[targets.dev]\ntiers = [\"-\"]\n").unwrap_err();
+        assert!(err.message().contains("not a valid tier name"), "{err}");
+        // A non-identifier name.
+        let err = Manifest::parse("[targets.dev]\ntiers = [\"fu zz\"]\n").unwrap_err();
         assert!(err.message().contains("not a valid tier name"), "{err}");
     }
 
     #[test]
-    fn an_undeclared_provider_is_rejected() {
-        // A provider that is neither `std` nor a declared dependency is an error.
-        let err = Manifest::parse("[targets.dev.tiers]\nbench = \"criterion\"\n").unwrap_err();
-        assert!(err.message().contains("declared dependency"), "{err}");
+    fn the_tiers_array_rejects_an_on_off_contradiction() {
+        // Listing a tier both live and off in one array is a contradiction, not last-wins.
+        let err = Manifest::parse("[targets.dev]\ntiers = [\"debug\", \"-debug\"]\n").unwrap_err();
+        assert!(err.message().contains("both on and off"), "{err}");
+    }
+
+    #[test]
+    fn a_tiers_value_that_is_neither_array_nor_table_is_rejected() {
+        let err = Manifest::parse("[targets.dev]\ntiers = \"test\"\n").unwrap_err();
+        assert!(err.message().contains("must be an array"), "{err}");
+    }
+
+    #[test]
+    fn an_undeclared_tier_provider_is_rejected() {
+        // A `[tiers]` provider that is neither `std` nor a declared dependency is an error.
+        let err = Manifest::parse("[tiers]\nbench = \"criterion\"\n").unwrap_err();
+        assert!(err.message().contains("[dependencies]"), "{err}");
+    }
+
+    #[test]
+    fn an_active_tier_without_a_tiers_entry_is_rejected() {
+        // Joining the two axes: activating a tier the package's `[tiers]` never mapped is an error.
+        let m = Manifest::parse("[targets.dev.tiers]\nbench = true\n").unwrap();
+        let err = m.active_tier_providers("dev").unwrap_err();
+        assert!(err.message().contains("no `[tiers]` entry"), "{err}");
     }
 
     #[test]
     fn a_declared_dependency_may_provide_a_tier() {
-        // package-manager P2.6: a resolved dependency (`bench_kit`) is a valid tier provider.
+        // package-manager P2.6: a resolved dependency (`bench_kit`) is a valid tier provider, named
+        // in `[tiers]`; the target's live-set activates the local names.
         let m = Manifest::parse(
             "[dependencies]\n\
              bench_kit = { path = \"../bench_kit\" }\n\
-             [targets.dev.tiers]\n\
+             [tiers]\n\
              bench = \"bench_kit\"\n\
-             test = \"std\"\n",
+             test = \"std\"\n\
+             [targets.dev.tiers]\n\
+             bench = true\n\
+             test = true\n",
         )
         .expect("valid");
         let providers = m.active_tier_providers("dev").unwrap();
         assert_eq!(providers["bench"], "bench_kit"); // provided by the dependency
-        assert_eq!(providers["test"], "std"); // still the built-in
+        assert_eq!(providers["test"], "std"); // the std-declared tier
+    }
+
+    #[test]
+    fn a_tier_may_be_renamed_off_its_provider() {
+        // Surface rename: a local `@crit` bound to `criterion`'s `bench`, so it does not collide
+        // with std's own `bench`.
+        let m = Manifest::parse(
+            "[dependencies]\n\
+             criterion = { path = \"../criterion\" }\n\
+             [tiers]\n\
+             bench = \"std\"\n\
+             crit = \"criterion:bench\"\n",
+        )
+        .expect("valid");
+        assert_eq!(m.tiers()["bench"].provider_key, "std");
+        assert_eq!(m.tiers()["bench"].exported, "bench");
+        assert_eq!(m.tiers()["crit"].provider_key, "criterion");
+        assert_eq!(m.tiers()["crit"].exported, "bench");
+    }
+
+    #[test]
+    fn a_local_name_cannot_be_both_a_directive_and_a_tier() {
+        let err = Manifest::parse(
+            "[dependencies]\n\
+             para = { path = \"../para\" }\n\
+             [directives]\n\
+             foo = \"para\"\n\
+             [tiers]\n\
+             foo = \"para\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.message().contains("both `[directives]` and `[tiers]`"),
+            "{err}"
+        );
     }
 
     #[test]
     fn unknown_target_is_an_error() {
-        let m = Manifest::parse("[targets.dev.tiers]\ntest = \"std\"\n").unwrap();
+        let m = Manifest::parse("[targets.dev.tiers]\ntest = true\n").unwrap();
         assert!(
             m.active_tiers("nope")
                 .unwrap_err()
@@ -2546,10 +3420,8 @@ mod tests {
     }
 
     #[test]
-    fn add_dependency_writes_and_rejects_duplicates() {
-        let dir = std::env::temp_dir().join("noeta_add_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn add_dependency_writes_and_widens_a_repeated_key_into_a_scope() {
+        let dir = crate::test_temp::TempDir::new("add-test");
         let path = dir.join(MANIFEST_NAME);
         std::fs::write(&path, "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
 
@@ -2557,16 +3429,70 @@ mod tests {
         let m = Manifest::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(matches!(m.dependencies()["http"], Dependency::Git { .. }));
 
-        // A second add of the same key is rejected (and a non-identifier key too).
-        assert!(add_dependency(&path, "http", "\"^1\"").is_err());
+        // A non-identifier key is rejected — it could never be an import root.
         assert!(add_dependency(&path, "bad-key", "\"^1\"").is_err());
+
+        // A second package under one key widens the entry into a scope array rather than failing,
+        // and a third appends to it — the shape that binds `para/aether` *and* `para/db`.
+        let scoped = dir.join("scoped");
+        std::fs::create_dir_all(&scoped).unwrap();
+        let path = scoped.join(MANIFEST_NAME);
+        std::fs::write(&path, "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
+        add_dependency(
+            &path,
+            "para",
+            "{ version = \"^0.1\", package = \"para/aether\" }",
+        )
+        .unwrap();
+        add_dependency(
+            &path,
+            "para",
+            "{ version = \"^0.1\", package = \"para/html\" }",
+        )
+        .unwrap();
+        add_dependency(
+            &path,
+            "para",
+            "{ version = \"^0.1\", package = \"para/db\" }",
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let m = Manifest::parse(&text).unwrap();
+        let Dependency::Scope(members) = &m.dependencies()["para"] else {
+            panic!(
+                "expected a scope dependency, got {:?}",
+                m.dependencies()["para"]
+            );
+        };
+        assert_eq!(members.len(), 3);
+        let packages: Vec<String> = members
+            .iter()
+            .map(|d| match d {
+                Dependency::Registry { package, .. } => {
+                    let p = package.as_ref().expect("package identity");
+                    format!("{}/{}", p.company, p.package)
+                }
+                other => panic!("expected registry members, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(packages, ["para/aether", "para/html", "para/db"]);
+        // The `[package]` table above it is untouched — the edit rewrites only the one entry.
+        assert!(text.starts_with("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n"));
+
+        // Re-adding an identical source is still refused: it would bind one package twice.
+        assert!(
+            add_dependency(
+                &path,
+                "para",
+                "{ version = \"^0.1\", package = \"para/db\" }"
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn native_rings_reads_the_native_table() {
-        let dir = std::env::temp_dir().join("noeta_native_rings_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new("native-rings-test");
         std::fs::write(
             dir.join(MANIFEST_NAME),
             "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
@@ -2660,13 +3586,15 @@ mod tests {
 
     #[test]
     fn a_tier_provider_may_be_a_target_scoped_dependency() {
-        // `dev`'s `@lint` tier is provided by a dep declared only under `dev`.
+        // A dev-only `@lint` tier: its provider is a dep declared only under `[targets.dev]`, named
+        // in the package-level `[tiers]` table and activated in `dev`'s live-set.
         let m = Manifest::parse(
             "[targets.dev.dependencies]\nlinter = { path = \"../lint\" }\n\
-             [targets.dev.tiers]\nlint = \"linter\"\n",
+             [tiers]\nlint = \"linter\"\n\
+             [targets.dev.tiers]\nlint = true\n",
         );
         assert!(m.is_ok(), "target-scoped provider should validate: {m:?}");
         // Still rejected when the provider is declared nowhere.
-        assert!(Manifest::parse("[targets.dev.tiers]\nlint = \"ghost\"\n").is_err());
+        assert!(Manifest::parse("[tiers]\nlint = \"ghost\"\n").is_err());
     }
 }

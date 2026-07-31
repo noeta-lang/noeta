@@ -1,0 +1,66 @@
+// A match-arm binding captured by a closure inside a **coroutine** body — a generator and an `async`
+// function. Both lower to a state-machine step closure, so the arm binding is a local of that step
+// closure and the capture must be celled there exactly as in an ordinary function. The neighbouring
+// non-arm shapes (a `for`-loop pattern binding and an `if x is T` narrowed local, both captured by a
+// closure) are pinned here too: they bind through the same site and must keep working.
+// expect: stdout "[20, 0]"
+// expect: stdout "2"
+// expect: stdout "2"
+// expect: stdout "[0, 1, 2]"
+// expect: stdout "[3, 7]"
+// expect: stdout "42"
+// expect: exit 0
+
+// A generator: the match runs inside the state machine and its arm binding is captured by a closure.
+fn walk(x: ?int): Iterator<int> {
+    ys = [1, 2, 3]
+    hits = match x {
+        some(v) => ys.filter(fn(n) => n == v),
+        none => [],
+    }
+    for h in hits { yield h * 10 }
+    yield 0
+}
+echo walk(some(2)).collect()
+
+// An async function: the capture happens before the suspend.
+async fn dbl(n: int): int { return n * 2 }
+async fn go(x: ?int): int {
+    ys = [1, 2, 3]
+    hits = match x {
+        some(v) => ys.filter(fn(n) => n == v).len(),
+        none => 0,
+    }
+    return dbl(hits).await
+}
+echo go(some(2)).await
+
+// An async function whose *arm body* holds the await, with the capture inside it.
+async fn go_in_arm(x: ?int): int {
+    ys = [1, 2, 3]
+    return match x {
+        some(v) => dbl(ys.filter(fn(n) => n == v).len()).await,
+        none => 0,
+    }
+}
+echo go_in_arm(some(2)).await
+
+// A `for` variable captured by a closure that outlives the iteration (one cell per iteration).
+mut singles: List<dyn> = []
+for i in 0..3 { singles ~= [fn() => i] }
+echo singles.map(fn(f) => f())
+
+// A `for` **tuple** pattern binding, captured the same way.
+mut sums: List<dyn> = []
+for (a, b) in [(1, 2), (3, 4)] { sums ~= [fn() => a + b] }
+echo sums.map(fn(f) => f())
+
+// An `if x is T` narrowing: `x` stays the same local, narrowed — a closure captures it as usual.
+fn narrowed(x: dyn): int {
+    if x is int {
+        bump = fn() => x + 1
+        return bump()
+    }
+    return 0
+}
+echo narrowed(41)

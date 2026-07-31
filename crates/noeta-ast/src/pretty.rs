@@ -7,8 +7,8 @@
 
 use crate::{
     AttrArg, AttrValue, CallArg, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl,
-    ForPattern, ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl,
-    TraitBound, TraitDecl, TypeParam, TypeRef,
+    ForPattern, ImplDecl, Name, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl,
+    TraitBound, TraitDecl, TypeOperand, TypeParam, TypeRef,
 };
 use noeta_span::Span;
 
@@ -56,6 +56,38 @@ fn param_list(params: &[Param]) -> String {
         .join(" ")
 }
 
+/// An enum variant's payload list, for the AST rendering the fmt safety gate compares.
+///
+/// Unlike [`param_list`], this renders the **type** — because for a variant payload the type is
+/// what the declaration is about, and it is the only thing distinguishing `Leaf(User)` from
+/// `Leaf(Post)`. A positional payload prints its type alone; a named one prints `name: type`, so
+/// the two spellings stay distinguishable in the snapshot (a formatter that turned one into the
+/// other would be changing the source's meaning to a reader, even though nothing binds a payload
+/// by name).
+///
+/// The gate saw neither before: a named payload rendered as its bare name, so dropping its `: T`
+/// annotation would have compared equal, and a positional one rendered as *its type in the name
+/// slot* — right by accident, and only until the representation was fixed.
+fn variant_payload_list(fields: &[Param]) -> String {
+    fields
+        .iter()
+        .map(|p| {
+            let attrs: String = p
+                .attrs
+                .iter()
+                .map(|a| format!("#[{}{}] ", a.name, attr_args_str(&a.args)))
+                .collect();
+            let ty = p.ty.as_ref().map(type_ref_str).unwrap_or_default();
+            if p.positional {
+                format!("{attrs}{ty}")
+            } else {
+                format!("{attrs}{}: {ty}", p.name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl Pretty for CallArg {
     /// A labelled argument renders its label. The fmt safety gate compares this form before and
     /// after formatting, so an unrendered label would be a label the formatter could silently
@@ -70,6 +102,26 @@ impl Pretty for CallArg {
                 out.push(')');
             }
             None => self.value.pretty(out, level),
+        }
+    }
+}
+
+/// A reflection surface's type operand. The two arms render **differently** on purpose: the fmt
+/// safety gate compares this form before and after formatting, so a formatter that turned a
+/// turbofish `field_specs_of::<T>()` into the string call `field_specs_of("T")` (or the reverse)
+/// must show up as a diff rather than as an equal-looking `(str "T")` either way.
+impl Pretty for TypeOperand {
+    fn pretty(&self, out: &mut String, level: usize) {
+        match self {
+            TypeOperand::Static(ty) => {
+                indent(out, level);
+                out.push_str(&format!(
+                    "(type-arg {} {})",
+                    type_ref_str(ty),
+                    span(ty.span())
+                ));
+            }
+            TypeOperand::Dynamic(e) => e.pretty(out, level),
         }
     }
 }
@@ -372,7 +424,7 @@ impl Pretty for EnumDecl {
                 if v.fields.is_empty() {
                     v.name.clone()
                 } else {
-                    format!("{}({})", v.name, param_list(&v.fields))
+                    format!("{}({})", v.name, variant_payload_list(&v.fields))
                 }
             })
             .collect();
@@ -414,7 +466,7 @@ fn decorators_str(d: &crate::Decorators) -> String {
         match directive {
             crate::BuiltinDirective::Derive => {
                 for spec in &d.derives {
-                    let mut s = spec.name.clone();
+                    let mut s = spec.name.to_string();
                     if !spec.args.is_empty() {
                         s.push_str(&format!(
                             "<{}>",
@@ -545,7 +597,7 @@ fn type_params_str(params: &[TypeParam]) -> String {
 /// Render one trait bound: the bare name, or `Name<args>` for an instantiated bound.
 fn trait_bound_str(b: &TraitBound) -> String {
     if b.args.is_empty() {
-        b.name.clone()
+        b.name.to_string()
     } else {
         let args: Vec<String> = b.args.iter().map(type_ref_str).collect();
         format!("{}<{}>", b.name, args.join(", "))
@@ -604,7 +656,7 @@ pub(crate) fn attr_value_str(value: &AttrValue) -> String {
         AttrValue::Struct { type_name, .. } => format!("{type_name} {{…}}"),
         // Rendered WITH its generic arguments: the fmt safety gate compares this output, so a
         // formatter dropping the `<Json>` from `@derive(Serialize<Json>)` must be detectable.
-        AttrValue::TypeRef { name, args } if args.is_empty() => name.clone(),
+        AttrValue::TypeRef { name, args } if args.is_empty() => name.to_string(),
         AttrValue::TypeRef { name, args } => format!(
             "{name}<{}>",
             args.iter().map(type_ref_str).collect::<Vec<_>>().join(", ")
@@ -713,7 +765,7 @@ impl Pretty for ObjectLit {
         // leading indent before delegating here), so we start the text directly.
         // A target-typed `.{ … }` dumps its head as `.{` — the name is not in the source, and the
         // dump is a faithful view of the AST, not of what the checker will later infer.
-        let head = self.type_name.as_deref().unwrap_or(".{");
+        let head = self.type_name.as_ref().map_or(".{", Name::as_str);
         out.push_str(&format!("(object {} {}", head, span(self.span)));
         for field in &self.fields {
             out.push('\n');
@@ -964,6 +1016,12 @@ impl Pretty for Expr {
                     out.push('\n');
                     indent(out, level + 1);
                     out.push_str(&format!("(arm {}\n", pattern_str(&arm.pattern)));
+                    if let Some(guard) = &arm.guard {
+                        indent(out, level + 2);
+                        out.push_str("(guard\n");
+                        guard.pretty(out, level + 3);
+                        out.push_str(")\n");
+                    }
                     match &arm.body {
                         ClosureBody::Expr(e) => e.pretty(out, level + 2),
                         ClosureBody::Block(stmts) => {
@@ -1029,6 +1087,9 @@ impl Pretty for Expr {
                     span(*s)
                 ));
             }
+            Expr::TypeName { ty, span: s } => {
+                out.push_str(&format!("(type_name {} {})", type_ref_str(ty), span(*s)));
+            }
             Expr::TypeOf { value, span: s } => {
                 out.push_str(&format!("(type_of {}\n", span(*s)));
                 value.pretty(out, level + 1);
@@ -1036,6 +1097,11 @@ impl Pretty for Expr {
             }
             Expr::FieldsOf { value, span: s } => {
                 out.push_str(&format!("(fields_of {}\n", span(*s)));
+                value.pretty(out, level + 1);
+                out.push(')');
+            }
+            Expr::TraitsOf { value, span: s } => {
+                out.push_str(&format!("(traits_of {}\n", span(*s)));
                 value.pretty(out, level + 1);
                 out.push(')');
             }
@@ -1062,8 +1128,18 @@ impl Pretty for Expr {
                 target.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::ReturnsOf { target, span: s } => {
+                out.push_str(&format!("(returns_of {}\n", span(*s)));
+                target.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::FieldSpecsOf { name, span: s } => {
                 out.push_str(&format!("(field_specs_of {}\n", span(*s)));
+                name.pretty(out, level + 1);
+                out.push(')');
+            }
+            Expr::VariantsOf { name, span: s } => {
+                out.push_str(&format!("(variants_of {}\n", span(*s)));
                 name.pretty(out, level + 1);
                 out.push(')');
             }
@@ -1115,6 +1191,20 @@ impl Pretty for Expr {
                     out.push('\n');
                     arg.pretty(out, level + 1);
                 }
+                out.push(')');
+            }
+            Expr::InstantiatedType {
+                recv,
+                type_args,
+                span: s,
+            } => {
+                let tys: Vec<String> = type_args.iter().map(type_ref_str).collect();
+                out.push_str(&format!(
+                    "(instantiated-type <{}> {}\n",
+                    tys.join(", "),
+                    span(*s)
+                ));
+                recv.pretty(out, level + 1);
                 out.push(')');
             }
             Expr::TypedMethodCall {
@@ -1205,28 +1295,10 @@ impl Pretty for Expr {
 }
 
 /// Render a [`TypeRef`] back to its surface spelling (`int`, `List<int>`, `?User`) for snapshots.
+///
+/// Names stay **verbatim** — a snapshot is about identity, so `app.models.User` must not shorten to
+/// `User` and hide a real difference in a diff. That is `shape::type_source`, the same walk the
+/// extension-facing `shape::type_spelling` runs with a different name transform.
 pub(crate) fn type_ref_str(ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::Optional { inner, .. } => format!("?{}", type_ref_str(inner)),
-        TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),
-        TypeRef::AssocProjection { name, .. } => format!("Self::{name}"),
-        TypeRef::Named { name, args, .. } if args.is_empty() => name.clone(),
-        TypeRef::Named { name, args, .. } => {
-            let args: Vec<String> = args.iter().map(type_ref_str).collect();
-            format!("{name}<{}>", args.join(", "))
-        }
-        TypeRef::Union { members, .. } => members
-            .iter()
-            .map(type_ref_str)
-            .collect::<Vec<_>>()
-            .join(" | "),
-        TypeRef::Tuple { elements, .. } => {
-            let elements: Vec<String> = elements.iter().map(type_ref_str).collect();
-            format!("({})", elements.join(", "))
-        }
-        TypeRef::Fn { params, ret, .. } => {
-            let params: Vec<String> = params.iter().map(type_ref_str).collect();
-            format!("({}) -> {}", params.join(", "), type_ref_str(ret))
-        }
-    }
+    crate::shape::type_source(ty)
 }

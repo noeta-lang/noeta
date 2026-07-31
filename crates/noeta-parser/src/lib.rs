@@ -31,11 +31,11 @@ use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use noeta_ast::{
-    AssocTypeDecl, AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, ClassDecl,
+    AssocTypeDecl, AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, CallArg, ClassDecl,
     ClosureBody, Decorators, DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern,
-    ImplBlock, MatchArm, MethodDirective, ObjectLit, PackedDirective, PackedLayout, Param, Pattern,
-    Program, RoleTag, Stmt, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod, TypeParam,
-    TypeRef, UnaryOp, UseName, VariantDecl,
+    ImplBlock, MatchArm, MethodDirective, Name, ObjectLit, PackedDirective, PackedLayout, Param,
+    Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod,
+    TypeOperand, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::Edition;
@@ -58,6 +58,39 @@ use literals::{
 enum DotKeyword {
     As(TypeRef),
     Await,
+}
+
+/// The member-access postfix family, folded into one pratt entry (the op-tuple is at its 26-entry
+/// cap): `.member`, its explicit method instantiation `.m::<U>(args)`, and the call-site class
+/// instantiation `::<T>.member` — the last of which may itself carry a method instantiation,
+/// `Repo::<Todo>.blank::<int>(args)`.
+///
+/// The class form is why the family is a `choice` rather than a single shape: `Repo::<Todo>.new(…)`
+/// applies the turbofish to the *receiver* (the class's own parameters), not to the member, so it
+/// leads with `::` where the other two lead with `.`. Requiring the trailing `.member` is what keeps
+/// `Repo::<Todo>` from parsing as a value and keeps `x.m::<T>` (no argument list) reporting exactly
+/// the error it reported before.
+///
+/// The two turbofishes stay distinct concepts and are checked against distinct parameter lists —
+/// the one before the `.` names the CLASS's, the one after the member names the METHOD's OWN — but
+/// they compose on one call, because a self-less member of a generic class carrying its own
+/// uninferable parameter has no other spelling: it must be called on the type (so the class's
+/// arguments can only come from the receiver turbofish) and its own parameter appears only in the
+/// return (so no argument or annotation can pin it).
+#[derive(Clone)]
+enum MemberPostfix {
+    /// `.name`, optionally `::<U, …>(args)` — a plain member access or an explicitly instantiated
+    /// method call.
+    Dot((String, Span), Option<(Vec<TypeRef>, Vec<CallArg>)>),
+    /// `::<T, …>.name`, optionally `::<U, …>(args)` — the receiver is a type reference carrying an
+    /// explicit CLASS instantiation, and the member may carry its own METHOD instantiation. The
+    /// [`Span`] is the receiver turbofish's, joined with the receiver's to span the type reference.
+    Instantiate(
+        Vec<TypeRef>,
+        Span,
+        (String, Span),
+        Option<(Vec<TypeRef>, Vec<CallArg>)>,
+    ),
 }
 
 /// A prefix operator, folded into one pratt entry: `-x`/`!x` and the Track-A `spawn e`. Kept together
@@ -83,20 +116,6 @@ enum PrefixOp {
 /// this grammar accepts (never a drifted copy).
 fn is_decorator_directive(name: &str) -> bool {
     BuiltinDirective::from_name(name).is_some()
-}
-
-/// The head name of a turbofish type argument, for lowering `field_specs_of::<T>()` /
-/// `construct::<T>(…)` to the string-keyed node both forms share. A nominal `T` (the only meaningful
-/// argument to these type-level queries) yields its written name — including a dotted qualified name
-/// like `vec.Vec2`, which is exactly the key the reflection registry stores it under. A non-nominal
-/// argument (a container, `?T`, a union) has no single type name; it yields the empty string, so the
-/// runtime query answers with the honest empty result rather than a spurious match.
-fn type_ref_head_name(ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::Named { name, .. } => name.clone(),
-        TypeRef::DynTrait { trait_name, .. } => trait_name.clone(),
-        _ => String::new(),
-    }
 }
 
 /// The chumsky "extra" type used throughout: rich errors over [`TokenKind`](T) tokens
@@ -435,8 +454,8 @@ fn expr_to_attr_value(expr: &Expr) -> Result<AttrValue, (String, Span)> {
                 Expr::Ident { name, .. } if matches!(name.as_str(), "Ok" | "Err" | "some") => {
                     let enum_name = if name == "some" { "Option" } else { "Result" };
                     Ok(AttrValue::Enum {
-                        enum_name: enum_name.to_string(),
-                        variant: name.clone(),
+                        enum_name: Name::written(enum_name),
+                        variant: name.to_string(),
                         args: conv,
                     })
                 }
@@ -466,7 +485,7 @@ fn expr_to_attr_value(expr: &Expr) -> Result<AttrValue, (String, Span)> {
         Expr::Ident { name, .. } => {
             if name == "none" {
                 Ok(AttrValue::Enum {
-                    enum_name: "Option".to_string(),
+                    enum_name: Name::canonical("Option"),
                     variant: "none".to_string(),
                     args: Vec::new(),
                 })
@@ -608,14 +627,14 @@ fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) 
 /// directive does not cascade).
 fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Option<TierDecl> {
     let mut name: Option<(String, Span)> = None;
-    let mut config: Option<(String, Span)> = None;
+    let mut config: Option<(Name, Span)> = None;
     let mut text: Option<(String, Span)> = None;
-    let mut expr: Option<(String, Span)> = None;
+    let mut expr: Option<(Name, Span)> = None;
     let mut bad = false;
     for arg in args {
         match (&arg.name, &arg.value) {
             (None, AttrValue::TypeRef { name: n, .. }) if name.is_none() => {
-                name = Some((n.clone(), arg.span));
+                name = Some((n.to_string(), arg.span));
             }
             (Some(k), AttrValue::TypeRef { name: ty, .. }) if k == "config" && config.is_none() => {
                 config = Some((ty.clone(), arg.span));
@@ -671,7 +690,7 @@ fn directive_heads(args: Vec<DirectiveArg>) -> Vec<(String, Span)> {
     args.into_iter()
         .map(|arg| {
             let name = match &arg.value {
-                AttrValue::TypeRef { name, .. } => name.clone(),
+                AttrValue::TypeRef { name, .. } => name.to_string(),
                 // A qualified or literal argument is not a plain name; the checker rejects it by
                 // name lookup (`E0030`). Rendering it keeps the diagnostic's text faithful to what
                 // was written rather than substituting a placeholder.
@@ -735,11 +754,11 @@ fn directive_derive_specs(args: Vec<DirectiveArg>, ctx: &Ctx) -> Vec<DeriveSpec>
                         ));
                         continue;
                     }
-                    spec.via = Some((target, target_span));
+                    spec.via = Some((target.to_string(), target_span));
                 } else {
                     spec.bindings.push(noeta_ast::MemberBinding {
                         member: key,
-                        target,
+                        target: target.to_string(),
                         span: key_span.merge(target_span),
                     });
                 }
@@ -763,7 +782,7 @@ fn directive_derive_specs(args: Vec<DirectiveArg>, ctx: &Ctx) -> Vec<DeriveSpec>
                     variant,
                     args,
                 } if args.is_empty() => specs.push(DeriveSpec {
-                    name: format!("{enum_name}.{variant}"),
+                    name: Name::written(format!("{enum_name}.{variant}")),
                     args: Vec::new(),
                     bindings: Vec::new(),
                     via: None,
@@ -800,14 +819,14 @@ fn directive_role_tag(arg: DirectiveArg) -> RoleTag {
             span: head.merge(v),
         },
         (AttrValue::TypeRef { name, .. }, spans) => RoleTag {
-            enum_name: String::new(),
-            variant: name.clone(),
+            enum_name: Name::default(),
+            variant: name.to_string(),
             span: spans.head(),
         },
         // Anything else (a literal, a qualified value whose spans did not survive) still produces a
         // tag so the checker reports it as an unknown role rather than the parser dropping it.
         (other, spans) => RoleTag {
-            enum_name: String::new(),
+            enum_name: Name::default(),
             variant: format!("{other:?}"),
             span: spans.head(),
         },
@@ -959,11 +978,13 @@ fn desugar_if_then_else(cond: Expr, then_expr: Expr, else_expr: Expr, span: Span
         arms: vec![
             MatchArm {
                 pattern: then_pat,
+                guard: None,
                 body: noeta_ast::ClosureBody::Expr(Box::new(then_expr)),
                 span,
             },
             MatchArm {
                 pattern: else_pat,
+                guard: None,
                 body: noeta_ast::ClosureBody::Expr(Box::new(else_expr)),
                 span,
             },
@@ -1074,24 +1095,252 @@ pub fn parse_fragment(id: SourceId, name: &str, text: &str) -> Fragment {
     }
 }
 
-/// Parse a token stream into a [`Program`].
+/// Stack one level of delimiter nesting costs the parser, **debug build, worst measured shape**.
+///
+/// This is the number every other constant in this block is derived from, so the derivation is
+/// visible rather than folded into three independently chosen magic numbers. It is measured, not
+/// guessed: parse a shape at depth *d* on a worker of size *S* and binary-search the depth at which
+/// it aborts. The cliff moves *linearly* with *S* — 16 MiB holds 38 levels, 32 MiB holds 78, 64 MiB
+/// holds 158 — which pins the slope at ~412 KiB per level. The worst shape found is nested function
+/// values (`fn() { return fn() { return … } }`); ordinary statement nesting (`if`/`while`/`for`)
+/// costs ~330 KiB and delimiter-only nesting (`[[[…]]]`, `{"k": {"k": …}}`) far less. 512 KiB is the
+/// measured worst rounded up, ~25% above it.
+///
+/// **Why a debug build is the number that matters.** In a release build the same parse survives
+/// depth 255 on a *1 MiB* stack: release frames are small enough that `chumsky`'s `recursive`
+/// combinator — which calls `stacker::maybe_grow(64 KiB, 1 MiB, …)` — can always move the recursion
+/// onto a fresh heap segment before the current one runs out, so the thread stack stops mattering
+/// entirely. A debug build's monomorphized frames cost ~412 KiB per level, six times chumsky's
+/// hard-coded **64 KiB red zone**, so `maybe_grow` waves the recursion through with far less space
+/// left than the next level needs and a fresh 1 MiB segment is overrun after two levels. That is why
+/// heap segments cannot rescue a debug parse, and why the raw thread stack is the binding resource:
+/// every budget below is sized in raw stack, and the red zone is the reason it has to be.
+const STACK_PER_NESTING_LEVEL: usize = 512 * 1024;
+
 /// The deepest delimiter nesting the parser accepts. The recursive-descent grammar uses stack
 /// proportional to `(`/`[`/`{` nesting, so unbounded depth would overflow the stack (a hard crash
-/// that the module loader's parse-error recovery cannot catch). Past this generous limit, deep
-/// nesting becomes an ordinary [`DiagnosticCode::NestingTooDeep`] (E0032) — no real program nests
-/// hundreds of delimiters deep, while an adversarial or generated one no longer crashes the process.
-const MAX_NESTING_DEPTH: usize = 256;
+/// that the module loader's parse-error recovery cannot catch). Past this limit, deep nesting
+/// becomes an ordinary [`DiagnosticCode::NestingTooDeep`] (E0032) — no real program nests a hundred
+/// delimiters deep, while an adversarial or generated one no longer crashes the process.
+///
+/// It was 256, which the parser could not actually deliver: in a debug build the deep-stack worker
+/// aborted the process between depth 159 and 202 depending on the shape, so 55 to 97 levels of
+/// *legal, under-the-limit* input crashed instead of parsing. 128 is a limit the worker can hold
+/// with room to spare (see [`DEEP_PARSE_STACK`]), and it is generous by every comparable measure:
+/// `rustc`'s default recursion limit is 128, C99 requires only 63 levels of nested parentheses, and
+/// the deepest file anywhere in this repo's corpus — 1128 `.noe` files, including generated ones —
+/// nests 8.
+const MAX_NESTING_DEPTH: usize = 128;
 
-/// Nesting depth up to which parsing runs inline on the caller's stack — chosen to stay well within
-/// the smallest stack a parse runs on (a ~2 MiB test thread). Beyond it, parsing moves to a worker
-/// thread with a large stack ([`DEEP_PARSE_STACK`]) so even input near [`MAX_NESTING_DEPTH`] cannot
-/// overflow whatever stack the caller happens to have. The overwhelming majority of programs nest
-/// far less than this and never leave the caller's thread.
-const INLINE_NESTING_DEPTH: usize = 16;
+/// Stack one `else if` continuation costs the **pipeline**, debug build, worst measured stage.
+///
+/// This is the companion to [`STACK_PER_NESTING_LEVEL`] for a shape that has no delimiter to count.
+/// An `else if` chain is *right-nested in the AST* — each `else` holds the next `if` — so every stage
+/// that walks the AST recurses once per branch, while the chain sits at a constant delimiter depth of
+/// **2** and never registers as nesting at all. The delimiter counter therefore waved a 725-branch
+/// chain (an ordinary generated dispatch) straight through to a stack overflow, with no diagnostic.
+///
+/// Measured by generating a chain of *b* branches and binary-searching the *b* at which the process
+/// aborts, per stage, on an 8 MiB main thread:
+///
+/// | stage                                       | aborts at | per branch |
+/// |---------------------------------------------|-----------|------------|
+/// | parse, with the old `recursive` `if`         | 725–730   | ~11.3 KiB  |
+/// | parse, with the iterative `if` below         | ≥ 8192    | ~0         |
+/// | check (`noeta check`)                        | 2000–5000 | ≤ 4 KiB    |
+/// | check + lower + run (`noeta run`)            | 740–800   | ~10.9 KiB  |
+/// | the conformance corpus runner (parse + eval) | 700–800   | ~10.9 KiB  |
+///
+/// So the recursive Core-IR pipeline is the binding stage once the parser stops recursing per branch,
+/// and 16 KiB is the worst measured cost rounded up (~45% above it). Both halves of the fix matter and
+/// neither is sufficient alone: flattening the grammar removes the *parser* as the binding constraint
+/// (it was the first wall, at 725), and the limit below is what keeps the stages downstream of it —
+/// which run on the caller's stack, with no worker to offload to — from aborting on legal input
+/// instead.
+const STACK_PER_ELSE_CHAIN_BRANCH: usize = 16 * 1024;
 
-/// Stack size for the deep-nesting worker thread — comfortably above what [`MAX_NESTING_DEPTH`]
-/// levels need (~tens of MiB), so the depth limit, not the stack, is the binding constraint.
-const DEEP_PARSE_STACK: usize = 64 * 1024 * 1024;
+/// The smallest stack a **whole pipeline** runs on: the CLI's main thread (the platform's 8 MiB
+/// default).
+///
+/// [`DEEP_PARSE_STACK`] bounds the *parser's* recursion and nothing else — check, IR lowering and the
+/// Core-IR interpreter all recurse over the AST on whatever stack their caller has. The servers give
+/// themselves [`SERVER_STACK_SIZE`] (16 MiB) precisely so they are not the smallest; `noeta run` on
+/// the main thread is, so it is the number a language limit protecting the whole pipeline has to be
+/// derived from.
+const MIN_PIPELINE_STACK: usize = 8 * 1024 * 1024;
+
+/// The longest `else if` chain the parser accepts. Past it, the chain is an ordinary
+/// [`DiagnosticCode::NestingTooDeep`] (E0032) — the same code deep delimiter nesting gets, because a
+/// chain *is* nesting, just without a delimiter to count.
+///
+/// Derived, not chosen: [`MIN_PIPELINE_STACK`] divided by [`STACK_PER_ELSE_CHAIN_BRANCH`]. That is
+/// 512, which the measurements above put a comfortable distance under the abort (~770 branches for
+/// the worst stage) and a very long way above anything real: the deepest chain anywhere in this
+/// repo's corpus of 1128 `.noe` files is **one** `else if`, and a generated dispatch that would want
+/// hundreds of branches is better served by a `match`. The accepting side is pinned end-to-end
+/// (`tests/conformance/diagnostics/else_chain_at_the_limit.noe`, generated from this constant by
+/// `scripts/gen-nesting-cases.py`) so a limit the pipeline cannot actually deliver is red rather than
+/// a process abort.
+pub const MAX_ELSE_CHAIN_BRANCHES: usize = MIN_PIPELINE_STACK / STACK_PER_ELSE_CHAIN_BRANCH;
+
+/// Stack one branch of the **conditional-expression** chain `if c then a else if c then b else …`
+/// costs. The same right-nesting as [`STACK_PER_ELSE_CHAIN_BRANCH`] at a much higher price: this form
+/// desugars to a nested `match` per branch ([`desugar_if_then_else`]), so a level of it is a
+/// match-with-two-arms rather than a bare `Stmt::If`, and both the parser (it recurses through the
+/// `sub` expression handle, which the flattening of the statement `if` does not touch) and the
+/// interpreter walk more per level.
+///
+/// Measured on an 8 MiB main thread. Two numbers, because the two halves have different remedies:
+///
+/// | stage                                  | aborts at        | per branch |
+/// |----------------------------------------|------------------|------------|
+/// | parse, **inline** on the caller's stack | ~200, NON-monotone | ~41 KiB |
+/// | parse, on the [`DEEP_PARSE_STACK`] worker | ≥ 8192         | —          |
+/// | everything downstream of the parse      | 300–400          | ~24 KiB    |
+///
+/// The inline parse cliff is non-monotone (200 and 210 abort, 215–230 survive, 250 aborts) — the
+/// signature of `chumsky`'s `recursive` combinator calling `stacker::maybe_grow` with a 64 KiB red
+/// zone that a debug frame of this size overruns, exactly as described on
+/// [`STACK_PER_NESTING_LEVEL`]. A cliff that is not monotone in the input cannot be bounded by a limit
+/// alone, so the parse of a long chain is **offloaded** ([`INLINE_CHAIN_BRANCHES`]) rather than priced;
+/// the limit below is then set by the stages downstream, which cannot be offloaded.
+///
+/// 64 KiB is the worse of the two measured costs rounded up, and the value the offload threshold is
+/// derived from as well.
+const STACK_PER_TERNARY_CHAIN_BRANCH: usize = 64 * 1024;
+
+/// The longest `if … then … else if …` conditional-expression chain the parser accepts — the same
+/// derivation as [`MAX_ELSE_CHAIN_BRANCHES`] over a per-branch price four times as high, which is why
+/// it is a quarter of it: **128**. Past it, E0032, exactly as for the statement chain.
+///
+/// 128 sits 2.5× under the measured downstream abort (300–400 branches), matches
+/// [`MAX_NESTING_DEPTH`] and `rustc`'s default recursion limit, and is two orders of magnitude past
+/// anything real — this repo's corpus has no `if … then … else if` chain longer than one branch.
+pub const MAX_TERNARY_CHAIN_BRANCHES: usize = MIN_PIPELINE_STACK / STACK_PER_TERNARY_CHAIN_BRANCH;
+
+/// Chain length up to which parsing *may* run inline on the caller's stack — [`INLINE_NESTING_DEPTH`]
+/// for chains, and for the same reason: a chain is flat in delimiters, so without this every chain
+/// however long would parse on whatever stack the caller happens to have. That is what made the
+/// conditional-expression chain abort inside the parser at ~200 branches while the statement chain
+/// (which no longer recurses per branch) was fine.
+///
+/// Derived: [`INLINE_PARSE_HEADROOM`] divided by the worse per-branch parse cost
+/// ([`STACK_PER_TERNARY_CHAIN_BRANCH`]). Past it the parse moves to the [`DEEP_PARSE_STACK`] worker,
+/// which holds thousands of branches — so the *parser* stops being the binding stage for either chain
+/// shape and the limits above are set by what comes after it. Real code never reaches this (the
+/// corpus's longest chain is one branch), so the thread spawn it costs is not on any real path.
+const INLINE_CHAIN_BRANCHES: usize = INLINE_PARSE_HEADROOM / STACK_PER_TERNARY_CHAIN_BRANCH;
+
+/// Nesting depth up to which parsing *may* run inline on the caller's stack. Beyond it, parsing
+/// moves to a worker thread with a large stack ([`DEEP_PARSE_STACK`]) so even input near
+/// [`MAX_NESTING_DEPTH`] cannot overflow whatever stack the caller happens to have.
+///
+/// A depth under this limit is **necessary but not sufficient** for an inline parse: the caller's
+/// stack must also have [`INLINE_PARSE_HEADROOM`] free. This limit alone used to be the whole test,
+/// against a documented assumption that the smallest stack a parse ever runs on is "a ~2 MiB test
+/// thread" — and that assumption was false in both directions. A tokio runtime gives its workers
+/// exactly 2 MiB (so the servers parse on the smallest stack in the system), and in a debug build
+/// **four** nested `if` statements in one function are enough to overflow 2 MiB.
+///
+/// It was 16, which did not fit the headroom it is paired with: 16 levels of the worst shape need
+/// ~6.6 MiB, so a caller holding just over [`INLINE_PARSE_HEADROOM`] passed the check and then
+/// overflowed — measured, a 6.2 MiB caller aborts on 15 nested function values while a 6.0 MiB one
+/// is safe *because* it falls under the headroom and gets offloaded. 8 keeps the whole inline range
+/// inside the headroom with half again to spare (the assertion below is what enforces that), and
+/// costs nothing in practice: the deepest of this repo's 1128 `.noe` files nests 8 delimiters, so
+/// real input still parses inline and only deeper-than-any-real-file input pays a thread spawn.
+const INLINE_NESTING_DEPTH: usize = 8;
+
+/// Stack a parse must find free before it runs **inline** on the caller's thread. A caller with less
+/// is served on the deep-stack worker instead, at the cost of one thread spawn per *file*.
+///
+/// Sized to cover [`INLINE_NESTING_DEPTH`] levels at [`STACK_PER_NESTING_LEVEL`] (4 MiB) with half
+/// again for margin. It stays under a `main` thread's 8 MiB default, so the CLI keeps parsing
+/// inline, and under [`SERVER_STACK_SIZE`], so the servers do too.
+///
+/// `stacker::remaining_stack()` answers "how much is left"; when it cannot tell (`None`), the
+/// conservative answer is to offload.
+const INLINE_PARSE_HEADROOM: usize = 6 * 1024 * 1024;
+
+/// Stack size for the deep-nesting worker thread — the stack that has to hold a parse at
+/// [`MAX_NESTING_DEPTH`], since the pre-pass has already rejected anything deeper.
+///
+/// [`MAX_NESTING_DEPTH`] × [`STACK_PER_NESTING_LEVEL`] is 64 MiB; this is that with a **4×** margin,
+/// which is what [`DEEP_STACK_MARGIN`] and the assertion below pin down. The margin is deliberately
+/// large because the failure it prevents is a process abort on untrusted input, not a wrong answer:
+/// it absorbs a future grammar change that makes frames heavier, a platform whose frames are wider,
+/// and any nesting shape more expensive than the worst one measured. It costs nothing to hold —
+/// thread stacks are reserved address space that commits page by page, and the worker is spawned at
+/// most once per file and joined before the next, so the resident cost is the depth actually parsed.
+///
+/// This was 64 MiB paired with a limit of 256, which is where the process abort came from. The old
+/// note here concluded that raising the stack "does not close the gap (depth 255 overflows a 1 GiB
+/// stack too)". That conclusion is wrong, and re-measuring is what showed the shape of the fix: the
+/// overflow depth is exactly linear in this constant (16 MiB → 38 levels, 32 → 78, 64 → 158, 128 →
+/// past 255), so stack size and depth limit are two knobs on the same budget. Both moved here, so
+/// the budget holds with margin instead of being met exactly.
+const DEEP_PARSE_STACK: usize = 256 * 1024 * 1024;
+
+/// How much more stack the deep worker carries than the deepest legal parse is measured to need.
+/// See [`DEEP_PARSE_STACK`] for why it is this large.
+const DEEP_STACK_MARGIN: usize = 4;
+
+// The three budgets above are a derivation, not three independent numbers, and these assertions are
+// what keep them one. Raising `MAX_NESTING_DEPTH`, lowering `DEEP_PARSE_STACK`, or widening the
+// inline range without moving its headroom stops the build instead of reintroducing a process abort
+// on deeply nested input. What they cannot catch is the grammar itself getting more expensive per
+// level — `STACK_PER_NESTING_LEVEL` is an empirical constant, and only a real parse can check it.
+// `the_deepest_legal_parse_fits_its_modeled_budget` is that check.
+const _: () = assert!(
+    INLINE_NESTING_DEPTH * STACK_PER_NESTING_LEVEL <= INLINE_PARSE_HEADROOM,
+    "an inline parse at INLINE_NESTING_DEPTH must fit INLINE_PARSE_HEADROOM"
+);
+const _: () = assert!(
+    MAX_NESTING_DEPTH * STACK_PER_NESTING_LEVEL * DEEP_STACK_MARGIN <= DEEP_PARSE_STACK,
+    "a parse at MAX_NESTING_DEPTH must fit DEEP_PARSE_STACK with DEEP_STACK_MARGIN to spare"
+);
+// The chain budgets are the same derivation over a different resource: a chain costs stack in every
+// stage that walks the AST, and only the *parse* can be moved to a bigger stack — so the limits are
+// pinned to the smallest stack a whole pipeline runs on ([`MIN_PIPELINE_STACK`]) rather than to the
+// deep worker's, while the offload threshold is pinned to the inline headroom.
+const _: () = assert!(
+    MAX_ELSE_CHAIN_BRANCHES * STACK_PER_ELSE_CHAIN_BRANCH <= MIN_PIPELINE_STACK,
+    "a chain at MAX_ELSE_CHAIN_BRANCHES must fit MIN_PIPELINE_STACK"
+);
+const _: () = assert!(
+    MAX_TERNARY_CHAIN_BRANCHES * STACK_PER_TERNARY_CHAIN_BRANCH <= MIN_PIPELINE_STACK,
+    "a chain at MAX_TERNARY_CHAIN_BRANCHES must fit MIN_PIPELINE_STACK"
+);
+const _: () = assert!(
+    INLINE_CHAIN_BRANCHES * STACK_PER_TERNARY_CHAIN_BRANCH <= INLINE_PARSE_HEADROOM,
+    "an inline parse at INLINE_CHAIN_BRANCHES must fit INLINE_PARSE_HEADROOM"
+);
+// The offload threshold must sit strictly below *both* limits, or some chain length the parser still
+// accepts is parsed inline — which is the window the conditional-expression form aborted in, and it
+// aborted non-monotonically, so no limit can stand in for the offload.
+const _: () = assert!(
+    INLINE_CHAIN_BRANCHES < MAX_TERNARY_CHAIN_BRANCHES
+        && INLINE_CHAIN_BRANCHES < MAX_ELSE_CHAIN_BRANCHES,
+    "every chain length the parser accepts must be past INLINE_CHAIN_BRANCHES"
+);
+// The deep worker has to hold the *parse* of the longest chain either limit admits, since that is
+// where a chain past INLINE_CHAIN_BRANCHES is sent.
+const _: () = assert!(
+    MAX_ELSE_CHAIN_BRANCHES * STACK_PER_TERNARY_CHAIN_BRANCH * DEEP_STACK_MARGIN
+        <= DEEP_PARSE_STACK,
+    "parsing the longest admissible chain must fit DEEP_PARSE_STACK with DEEP_STACK_MARGIN to spare"
+);
+
+/// Stack size a long-lived server should give the threads it runs the compiler front end on — the
+/// LSP/DAP/MCP runtimes, whose platform default (tokio's 2 MiB) is *below* what a parse of an
+/// ordinary real-world module needs in a debug build.
+///
+/// It lives here because the parser owns the deepest recursion in the pipeline and owns
+/// [`INLINE_PARSE_HEADROOM`], the number it has to clear: a server thread sized above the headroom
+/// keeps the inline fast path, one sized below it silently pushes every parse onto the deep-stack
+/// worker. Sized like a `main` thread's default with room to spare, so the analysis stages
+/// downstream of the parse (which recurse too, with far smaller frames) are covered as well.
+pub const SERVER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Parse a token stream into a [`Program`]. Rejects pathologically deep delimiter nesting up front
 /// (E0032) and, for merely deep input, runs the recursive-descent grammar on a large-stack worker
@@ -1120,8 +1369,12 @@ pub fn parse_in(
     edition: Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Parsed {
-    let (max_depth, overflow_span) = nesting_depth(tokens);
-    if let Some(span) = overflow_span {
+    let Prescan {
+        max_depth,
+        max_chain,
+        overflow,
+    } = recursion_prescan(tokens);
+    if let Some((span, message)) = overflow {
         // Stop before invoking the recursive parser: deeper than the stack can safely hold.
         return Parsed {
             program: Program {
@@ -1131,14 +1384,23 @@ pub fn parse_in(
             diagnostics: vec![Diagnostic::error(
                 DiagnosticCode::NestingTooDeep,
                 span,
-                format!("nesting is too deep (the limit is {MAX_NESTING_DEPTH} levels)"),
+                message,
             )],
         };
     }
-    if max_depth > INLINE_NESTING_DEPTH {
-        // Deep but legal: parse on a worker thread whose stack is large enough that the depth limit
-        // above — not the caller's stack — is what bounds recursion. A scoped thread lets the
-        // closure borrow `source`/`tokens` directly; the owned [`Parsed`] crosses the join.
+    // Three independent reasons to leave the caller's thread: the input is deeper than an inline
+    // parse is sized for, it carries a longer `if`/`else if` chain than an inline parse is sized for
+    // (the parser recurses per branch on the conditional-expression form, and a chain is invisible to
+    // the depth test — it stays at delimiter depth 2 however long it gets), or the caller's stack is
+    // too small to hold an inline parse at all. The last is what a *server* hits — its runtime
+    // threads are 2 MiB whatever the input looks like — and asking the stack directly is what makes
+    // the guarantee independent of who is calling.
+    let short_on_stack = stacker::remaining_stack().is_none_or(|left| left < INLINE_PARSE_HEADROOM);
+    if max_depth > INLINE_NESTING_DEPTH || max_chain > INLINE_CHAIN_BRANCHES || short_on_stack {
+        // Deep but legal, or a caller too near its own limit: parse on a worker thread whose stack
+        // is large enough that the depth limit above — not the caller's stack — is what bounds
+        // recursion. A scoped thread lets the closure borrow `source`/`tokens` directly; the owned
+        // [`Parsed`] crosses the join.
         std::thread::scope(|scope| {
             std::thread::Builder::new()
                 .stack_size(DEEP_PARSE_STACK)
@@ -1152,27 +1414,124 @@ pub fn parse_in(
     }
 }
 
-/// Maximum delimiter nesting depth (`(`/`[`/`{`) over the token stream, paired with the span of the
-/// token at which [`MAX_NESTING_DEPTH`] is first exceeded (if any). A cheap O(n) pre-pass over the
-/// tokens — no grammar, no recursion — so it is safe to run on any stack before the real parser.
-fn nesting_depth(tokens: &[Token]) -> (usize, Option<Span>) {
+/// What the pre-parse recursion scan found: how much stack the recursive stages are going to want, and
+/// whether any of it is past a limit.
+struct Prescan {
+    /// Maximum delimiter nesting depth (`(`/`[`/`{`) — what the recursive-descent grammar spends stack
+    /// proportionally to, and the inline-vs-worker test.
+    max_depth: usize,
+    /// Longest `if`/`else if` chain, in branches, over all delimiter depths. Also an inline-vs-worker
+    /// test, and one the depth cannot stand in for: a chain is flat in delimiters.
+    max_chain: usize,
+    /// The first limit violation: the span of the token that crossed it, and the message naming it.
+    overflow: Option<(Span, String)>,
+}
+
+/// The **recursion pre-pass**. A cheap O(n) scan over the tokens — no grammar, no recursion — so it is
+/// safe to run on any stack before the real parser, and the only place a limit can be enforced without
+/// having already spent the stack it is protecting.
+///
+/// Three budgets, because the pipeline recurses on three shapes while only one of them has a delimiter
+/// to count:
+///
+/// * **delimiter nesting**, against [`MAX_NESTING_DEPTH`].
+/// * **statement chain length** (`if … else if …`), against [`MAX_ELSE_CHAIN_BRANCHES`].
+/// * **conditional-expression chain length** (`if … then … else if …`), against the stricter
+///   [`MAX_TERNARY_CHAIN_BRANCHES`] — it desugars to a nested `match` per branch and costs about four
+///   times as much. A chain is recognized as the expression form by a `then` appearing while it is
+///   open.
+///
+/// Both chain forms are right-nested in the AST (each `else` holds the next `if`) and flat in
+/// delimiters — a chain sits at depth 2 however long it gets, which is exactly how a 725-branch chain
+/// used to reach a stack overflow with no diagnostic at all.
+///
+/// A chain is counted per delimiter depth, so sibling chains in one block never sum: a `{`/`(`/`[`
+/// starts a fresh count at the depth it opens, and an `if` that is **not** immediately preceded by
+/// `else` starts a fresh chain at the current depth. Only `else` directly followed by `if` extends
+/// one. Comments are trivia and never reach the token stream, so that adjacency is exact.
+fn recursion_prescan(tokens: &[Token]) -> Prescan {
+    /// The chain currently open at one delimiter depth: how many branches it has (1 for a bare `if`,
+    /// +1 per `else if`; 0 when no chain is open) and whether it is the conditional-expression form.
+    #[derive(Clone, Copy, Default)]
+    struct Chain {
+        branches: usize,
+        ternary: bool,
+    }
+    impl Chain {
+        /// The limit this chain's form is held to, and the name to report it under.
+        fn limit(self) -> (usize, &'static str) {
+            if self.ternary {
+                (MAX_TERNARY_CHAIN_BRANCHES, "`if … then … else` chain")
+            } else {
+                (MAX_ELSE_CHAIN_BRANCHES, "`else if` chain")
+            }
+        }
+    }
+
     let mut depth: usize = 0;
-    let mut max = 0;
-    let mut overflow: Option<Span> = None;
+    let mut max_depth = 0;
+    let mut max_chain = 0;
+    let mut overflow: Option<(Span, String)> = None;
+    // Indices past `MAX_NESTING_DEPTH` share the last slot: that input is already rejected by the
+    // depth limit, so a chain count there cannot matter, and clamping keeps a pathologically deep
+    // file from sizing this array by its own nesting.
+    const CHAIN_SLOTS: usize = MAX_NESTING_DEPTH + 2;
+    let mut chains = [Chain::default(); CHAIN_SLOTS];
+    let mut prev: Option<T> = None;
     for token in tokens {
+        let slot = depth.min(CHAIN_SLOTS - 1);
         match token.kind {
             T::LParen | T::LBracket | T::LBrace => {
                 depth += 1;
-                max = max.max(depth);
+                max_depth = max_depth.max(depth);
+                // A fresh scope opens with no chain in it.
+                chains[depth.min(CHAIN_SLOTS - 1)] = Chain::default();
                 if depth > MAX_NESTING_DEPTH && overflow.is_none() {
-                    overflow = Some(token.span);
+                    overflow = Some((
+                        token.span,
+                        format!("nesting is too deep (the limit is {MAX_NESTING_DEPTH} levels)"),
+                    ));
                 }
             }
             T::RParen | T::RBracket | T::RBrace => depth = depth.saturating_sub(1),
+            T::IfKw => {
+                if prev == Some(T::ElseKw) {
+                    // An `else if` extends the chain open at this depth by one branch, keeping the
+                    // form already established (a chain cannot be half statement, half expression:
+                    // a statement `if` demands a block, a ternary's `else` demands an expression).
+                    chains[slot].branches += 1;
+                } else {
+                    // A bare `if` — a fresh statement, the head of a conditional expression, or a
+                    // match-arm guard — starts a new chain of one branch at this depth.
+                    chains[slot] = Chain {
+                        branches: 1,
+                        ternary: false,
+                    };
+                }
+            }
+            // The marker that makes this chain the expression form, seen on its *first* branch — so
+            // the count is still 1 when the stricter limit takes effect. (A `then` from a ternary
+            // nested inside a statement chain's condition lands here too and holds the outer chain to
+            // the stricter limit; that is the conservative direction and needs no special case.)
+            T::ThenKw if chains[slot].branches > 0 => chains[slot].ternary = true,
             _ => {}
         }
+        let chain = chains[depth.min(CHAIN_SLOTS - 1)];
+        max_chain = max_chain.max(chain.branches);
+        let (limit, what) = chain.limit();
+        if chain.branches > limit && overflow.is_none() {
+            overflow = Some((
+                token.span,
+                format!("this {what} is too long (the limit is {limit} branches)"),
+            ));
+        }
+        prev = Some(token.kind);
     }
-    (max, overflow)
+    Prescan {
+        max_depth,
+        max_chain,
+        overflow,
+    }
 }
 
 fn parse_inner(
@@ -1214,7 +1573,13 @@ fn parse_inner(
         .into_iter()
         .map(|err| {
             let diag = rich_to_diag(ctx, err);
-            let specific = custom_reason(&diag.message).is_some();
+            // A reserved-word report ([`reserved_name_diag`]) is specific by the same standard: it
+            // is raised only after the rule has identified what the token *is* and why the grammar
+            // could not take it, not from an expected-vs-found set. It does not go through
+            // `custom_reason` because it carries a per-word message and help rather than a
+            // constant pair, so it is recognized by its catalog entry instead.
+            let specific =
+                custom_reason(&diag.message).is_some() || diag.code == DiagnosticCode::ReservedName;
             (diag, specific)
         })
         .collect();
@@ -1337,6 +1702,30 @@ fn weave_hard_semicolons(
 const MAP_ENTRY_NEEDS_VALUE: &str =
     "a map entry needs `: value`, or a bare field name for the shorthand";
 
+/// The reason carried by a `::<...>` type-argument list in expression position that no call
+/// follows. Same arrangement as [`MAP_ENTRY_NEEDS_VALUE`]: [`custom_reason`] keys code and help off
+/// this exact string.
+///
+/// Without it the failure renders as chumsky's expected-set (`` found `(` expected `.` ``), which
+/// names a token the writer never meant to type and says nothing about the actual rule — that a
+/// type argument list is part of a *call*, never an expression of its own.
+const TURBOFISH_NEEDS_A_CALL: &str =
+    "a `::<...>` type argument list must be followed by the call it instantiates";
+
+/// The reason a statement carries when a **reserved word stands where a fresh binding's name
+/// belongs** — `type_name = 1`, `match = 1`. Same arrangement as [`MAP_ENTRY_NEEDS_VALUE`], with
+/// one difference: [`rich_to_diag`] recovers the offending word from the error's *span* rather
+/// than from the reason text, because the message names the word and the reason is a constant.
+///
+/// This position needs a rule of its own because it is the one binder whose failure does not
+/// surface at the name. Everywhere else — a parameter, a `for` variable, a field, a type name —
+/// the grammar is asking for an identifier at exactly that token, so the expected set names it and
+/// [`rich_to_diag`] can reclassify generically. A bare `name = value` has no leading keyword, so
+/// the reserved word instead starts an *expression* statement and the parse dies one token later,
+/// at the `=` (`` found `=` expected `::` ``) — a message about a token the writer did type, in a
+/// place they were not thinking about, that never mentions the name at all.
+const RESERVED_WORD_AS_BINDING: &str = "a binding's name may not be a reserved word";
+
 /// The catalog entry a parser-stage [`Rich::custom`] reason declares for itself, if it is one this
 /// module raises deliberately. A rule that matched a token and then rejected it on its own terms
 /// knows better than the generic expected-vs-found classifier what it is complaining about, so it
@@ -1351,13 +1740,53 @@ fn custom_reason(reason: &str) -> Option<(DiagnosticCode, Option<&'static str>)>
                  into the key of the same name",
             ),
         )),
+        TURBOFISH_NEEDS_A_CALL => Some((
+            DiagnosticCode::UnexpectedToken,
+            Some(
+                "write `f::<T>(args)` for a function, `recv.method::<T>(args)` for a method, or \
+                 `Type::<T>.method(args)` to instantiate a generic type (both together where the \
+                 type AND the method are generic: `Type::<T>.method::<U>(args)`)",
+            ),
+        )),
         _ => None,
     }
+}
+
+/// A reserved word written where a **name** belongs (E0046).
+///
+/// Lives in the parser, not the checker, and could not live anywhere else: the checker is handed
+/// an AST, and there is no AST here — the parser refused the token, so no binder, no field and no
+/// declaration was ever built for the checker to rule on. Only the parser knows both halves of
+/// what happened, that the token it just rejected is a *word* the writer plausibly meant as a
+/// name, and that a name is what the grammar wanted there.
+///
+/// It shares E0046 with the checker's prelude rule ([`noeta_check`] rejects a binding named `Ok`
+/// or `panic`) because it is the same rule at a different stage: this name is spoken for, pick
+/// another. One code means a reader who has met one of them recognizes the other.
+fn reserved_name_diag(reserved: noeta_lexer::ReservedWord, span: Span) -> Diagnostic {
+    let noeta_lexer::ReservedWord { word, role } = reserved;
+    let mut diag = Diagnostic::error(
+        DiagnosticCode::ReservedName,
+        span,
+        format!(
+            "`{word}` cannot be used as a name — it is {}, reserved by the language so it means \
+             one thing everywhere it appears",
+            role.describe()
+        ),
+    );
+    // A short caret label: without one the renderer repeats the whole headline under the span, and
+    // this headline is a sentence long.
+    diag.label(span, format!("`{word}` is reserved"));
+    diag.help(format!("rename it to `{word}_`"));
+    diag
 }
 
 /// Map a chumsky [`Rich`] structural error onto the central diagnostic catalog.
 fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
     let span = ctx.to_span(*err.span());
+    // Captured before `map_token` erases the token: the reclassification below needs the *word*,
+    // and `describe()` only yields its rendering.
+    let found_reserved = err.found().and_then(|t| t.reserved_word());
     // Render `found`/`expected` via the human-facing token descriptions. The expected set is
     // rebuilt by hand with a SORTED alternative list: chumsky's own Display iterates its
     // internal set in an order that is not stable across builds, which made every pinned
@@ -1367,14 +1796,28 @@ fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
     // would stack chumsky's own quoting on top (twice, in 1.0.0-alpha.8).
     let err = err.map_token(|t| t.describe());
     let mut expected: Vec<String> = err.expected().map(pattern_text).collect();
+    expected.sort_unstable();
+    expected.dedup();
+    // A reserved word found where the grammar wanted an identifier. Reported as "this name is
+    // taken" rather than as chumsky's expected-vs-found, which names the one thing that is not the
+    // problem: `` found `type_name` expected … an identifier `` tells a reader their *syntax* is
+    // wrong, so they go looking at the punctuation instead of at the name.
+    //
+    // Keyed off the expected set rather than off each binder site, and deliberately: a parameter,
+    // a `mut` binding, a `for` variable, a closure parameter, a pattern binding, a field, a type
+    // name and a generic parameter all reach the same leaf (`just(T::Ident)`), so one rule here
+    // covers every one of them — and covers whatever binder is added next, for free.
+    if let Some(reserved) = found_reserved
+        && expected.iter().any(|e| e == T::Ident.describe())
+    {
+        return reserved_name_diag(reserved, span);
+    }
     // An empty alternative set means a labelled/custom reason rather than chumsky's own
     // expected-vs-found.
     let message = if expected.is_empty() {
         // chumsky's own rendering is already deterministic for these.
         err.to_string()
     } else {
-        expected.sort_unstable();
-        expected.dedup();
         let found = match err.found() {
             Some(d) => format!("found {d} "),
             None => "found end of input ".to_string(),
@@ -1389,6 +1832,13 @@ fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
         };
         format!("{found}expected {list}")
     };
+    // The bare-binding rule below raises this at the reserved word's own span, so the word is the
+    // source text under it — the reason itself stays a constant, like every other custom reason.
+    if message == RESERVED_WORD_AS_BINDING
+        && let Some(reserved) = noeta_lexer::ReservedWord::from_spelling(ctx.source.slice(span))
+    {
+        return reserved_name_diag(reserved, span);
+    }
     // A custom reason declares its own catalog entry; everything else is classified by whether
     // there was a token to be surprised by.
     let (code, help) = match custom_reason(&message) {
@@ -1466,7 +1916,7 @@ where
             .filter(|(name, _): &(String, Span)| name == "dyn")
             .ignore_then(dotted_name.clone())
             .map_with(move |trait_name, e| TypeRef::DynTrait {
-                trait_name,
+                trait_name: Name::written(trait_name),
                 span: ctx.to_span(e.span()),
             });
         let named = dotted_name
@@ -1481,7 +1931,7 @@ where
                     .or_not(),
             )
             .map_with(move |(name, args), e| TypeRef::Named {
-                name,
+                name: Name::written(name),
                 args: args.unwrap_or_default(),
                 span: ctx.to_span(e.span()),
             })
@@ -1623,7 +2073,7 @@ where
         )
         .then_ignore(just(T::RBracket))
         .map_with(move |((name, name_span), args), e| Attribute {
-            name,
+            name: Name::written(name),
             name_span,
             args: commit_attr_args(&ctx, args.unwrap_or_default()),
             span: ctx.to_span(e.span()),
@@ -1684,7 +2134,10 @@ where
         )
         .map(|((name, name_span), args)| {
             (
-                noeta_ast::AttrValue::TypeRef { name, args },
+                noeta_ast::AttrValue::TypeRef {
+                    name: Name::written(name),
+                    args,
+                },
                 ValueSpans::Name(name_span),
                 None,
             )
@@ -1762,6 +2215,7 @@ where
                 ty,
                 default,
                 span: ctx.to_span(e.span()),
+                positional: false,
             },
         );
     param
@@ -1769,6 +2223,77 @@ where
         .allow_trailing()
         .collect::<Vec<_>>()
         .delimited_by(just(T::LParen), just(T::RParen))
+        .boxed()
+}
+
+/// An enum variant's payload list — `(u: User)`, `(User)`, `(int, string)`, or `()`.
+///
+/// Not [`params_parser`], because a variant payload may be written **positionally**: a bare type
+/// with no name. That used to go through the same identifier-then-optional-annotation rule a
+/// function parameter uses, so the *type* landed in the name slot with `ty: None` — which meant it
+/// had to be a single bare identifier. `Leaf(App.Models.User)` was a syntax error, and every
+/// consumer reading `ty` (module qualification, most consequentially) simply did not see a type
+/// there at all.
+///
+/// Here each field is either `name: Type` or a full [`type_parser`] type, so a positional payload
+/// admits everything a type annotation does — a qualified path, generic arguments, `?T`, a tuple —
+/// and lands in `ty` like a named one. A positional field's name is the synthesized slot name
+/// `_0`, `_1`, … assigned by position, flagged by [`Param::positional`]; both backends already
+/// spell a native enum's payload slots that way, and nothing binds a payload by name — construction
+/// and patterns are both positional.
+fn variant_fields_parser<'src, I, P>(
+    ctx: Ctx<'src>,
+    expr: P,
+) -> impl Parser<'src, I, Vec<Param>, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+    P: Parser<'src, I, Expr, Extra<'src>> + Clone + 'src,
+{
+    // `name: Type` is tried first: `type_parser` would otherwise consume the name as a one-segment
+    // type and leave the `:` stranded.
+    let named = ident_parser(ctx)
+        .then_ignore(just(T::Colon))
+        .then(type_parser(ctx))
+        .map(|((name, name_span), ty)| (Some((name, name_span)), ty));
+    let positional = type_parser(ctx).map(|ty| (None, ty));
+    let field = attribute_parser(ctx, expr)
+        .repeated()
+        .collect::<Vec<_>>()
+        .then(choice((named, positional)))
+        .map_with(move |(attrs, (named, ty)), e| {
+            // A positional field's name is left empty here and filled in below, where its position
+            // in the list is known; its `name_span` points at the type it was written as.
+            let (name, name_span) = match named {
+                Some((name, name_span)) => (name, name_span),
+                None => (String::new(), ty.span()),
+            };
+            Param {
+                attrs,
+                positional: name.is_empty(),
+                name,
+                name_span,
+                ty: Some(ty),
+                default: None,
+                span: ctx.to_span(e.span()),
+            }
+        });
+    field
+        .separated_by(just(T::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(T::LParen), just(T::RParen))
+        .map(|fields: Vec<Param>| {
+            fields
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut f)| {
+                    if f.positional {
+                        f.name = format!("_{i}");
+                    }
+                    f
+                })
+                .collect()
+        })
         .boxed()
 }
 
@@ -1838,7 +2363,7 @@ where
                     type_name.push_str(&seg);
                 }
                 Pattern::Variant {
-                    type_name: Some(type_name),
+                    type_name: Some(Name::written(type_name)),
                     variant,
                     bindings: binds.unwrap_or_default(),
                     span: ctx.to_span(e.span()),
@@ -2089,7 +2614,7 @@ where
             .then(just(T::Colon).ignore_then(sub.clone()).or_not())
             .map_with(move |((name, name_span), value), e| {
                 let value = value.unwrap_or_else(|| Expr::Ident {
-                    name: name.clone(),
+                    name: Name::written(name.clone()),
                     span: name_span,
                 });
                 ObjItem::Field(FieldInit {
@@ -2178,7 +2703,7 @@ where
                     }
                 }
                 Expr::Object(ObjectLit {
-                    type_name: Some(type_name),
+                    type_name: Some(Name::written(type_name)),
                     type_name_span,
                     fields,
                     spread,
@@ -2205,7 +2730,7 @@ where
                         }
                     }
                     Expr::Object(ObjectLit {
-                        type_name: Some(name),
+                        type_name: Some(Name::written(name)),
                         type_name_span: name_span,
                         fields,
                         spread,
@@ -2213,7 +2738,7 @@ where
                     })
                 }
                 None => Expr::Ident {
-                    name,
+                    name: Name::written(name),
                     span: name_span,
                 },
             },
@@ -2256,17 +2781,40 @@ where
         // fires when the expression parse FAILS, so it depends on every brace-taking expression
         // refusing the braces it does not mean — see the map-entry grammar below, which is why
         // `=> { f(x) }` is a block rather than a one-entry map that errors after the fact.
+        //
+        // **`.memoized()` is load-bearing, not an optimization.** This is the grammar's one genuine
+        // garden path: on `=> { … }` the value-expression alternative parses the whole brace body as a
+        // map literal, fails, backtracks, and the block alternative parses it *again*. Nested one level
+        // deeper per arm, that is 2^depth — measured before this line, `match a { _ => { … } }` nested
+        // 16 deep took ~62 s of parsing and 20 deep ~162 s, so a ~1 KB file hung the compiler with no
+        // diagnostic and no timeout. Memoizing the alternative that fails makes the second attempt at
+        // the same offset return from the memo instead of re-descending, which collapses the whole
+        // shape back to linear (16 deep: 62 s → 0.02 s). A depth cap would not have fixed this: the
+        // problem is the complexity, and a cap only moves the cliff.
+        //
+        // Memoization caches *failures* only (chumsky drops the entry on success), so the cached fact
+        // is exactly "a map literal cannot start here", which is what the block alternative needs and
+        // what every level below re-asks. It is applied to this one rule rather than to `sub`
+        // generally: a garden path is a property of the ambiguity, and memoizing the whole expression
+        // grammar would cost every parse a hash lookup per node.
         let arm_body = sub
             .clone()
             .map(|e| noeta_ast::ClosureBody::Expr(Box::new(e)))
+            .memoized()
             .or(recovering_list(stmt.clone())
                 .delimited_by(just(T::LBrace), just(T::RBrace))
                 .map(noeta_ast::ClosureBody::Block));
+        // An arm may carry a **guard**: `pattern if cond => body`. The guard is a plain
+        // expression (evaluated after the pattern matches, with the pattern's bindings in
+        // scope); `if` after a pattern is unambiguous — a pattern never continues with `if` —
+        // and the guard expression stops at `=>` like any other expression operand.
         let arm = pattern_parser(ctx)
+            .then(just(T::IfKw).ignore_then(sub.clone()).or_not())
             .then_ignore(just(T::FatArrow))
             .then(arm_body)
-            .map_with(move |(pattern, body), e| MatchArm {
+            .map_with(move |((pattern, guard), body), e| MatchArm {
                 pattern,
+                guard,
                 body,
                 span: ctx.to_span(e.span()),
             });
@@ -2338,7 +2886,7 @@ where
                         None => match key {
                             Expr::Ident { name, span } => (
                                 Expr::Str {
-                                    value: name.clone(),
+                                    value: name.to_string(),
                                     span,
                                 },
                                 Expr::Ident { name, span },
@@ -2432,6 +2980,25 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `type_name::<T>()` — a type's qualified runtime identity as a `string`. Exactly
+        // `attributes_of`'s surface (keyword + turbofish + `()`), and exactly its AST discipline: `T`
+        // stays a real `TypeRef` so the linker's namespace rewrite reaches it, and only IR lowering
+        // resolves it to a name. That is the whole feature — flattening it to a string here would
+        // put it beyond qualification and hand back the *unqualified* name, which is the bug
+        // `field_specs_of::<T>()` had.
+        //
+        // There is deliberately no `type_name(expr)` surface: a runtime-string form would be the
+        // identity function on its argument.
+        let type_name = just(T::TypeNameKw)
+            .ignore_then(just(T::ColonColon))
+            .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+            .then_ignore(just(T::LParen))
+            .then_ignore(just(T::RParen))
+            .map_with(move |ty, e| Expr::TypeName {
+                ty,
+                span: ctx.to_span(e.span()),
+            });
+
         // `type_of(value)` — the runtime reflection query. A keyword + parenthesized operand (like a
         // call surface), yielding the value's `Type` descriptor.
         let type_of = just(T::TypeOfKw)
@@ -2446,6 +3013,16 @@ where
         let fields_of = just(T::FieldsOfKw)
             .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
             .map_with(move |value, e| Expr::FieldsOf {
+                value: Box::new(value),
+                span: ctx.to_span(e.span()),
+            });
+
+        // `traits_of(value)` — the trait-membership reflection query: the qualified trait names the
+        // value's nominal type has a registered `impl` for, as a sorted `List<string>`. Same
+        // surface shape as `fields_of`.
+        let traits_of = just(T::TraitsOfKw)
+            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
+            .map_with(move |value, e| Expr::TraitsOf {
                 value: Box::new(value),
                 span: ctx.to_span(e.span()),
             });
@@ -2518,7 +3095,7 @@ where
                 let (func, func_span) = func;
                 Expr::TypedModuleCall {
                     recv: Box::new(Expr::Ident {
-                        name: module_name,
+                        name: Name::written(module_name),
                         span: module_span,
                     }),
                     func,
@@ -2556,7 +3133,7 @@ where
             )
             .map_with(
                 move |(((name, name_span), type_args), args), e| Expr::TypedCall {
-                    name,
+                    name: Name::written(name),
                     name_span,
                     type_args,
                     args,
@@ -2587,6 +3164,16 @@ where
         let params_of = just(T::ParamsOfKw)
             .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
             .map_with(move |target, e| Expr::ParamsOf {
+                target: Box::new(target),
+                span: ctx.to_span(e.span()),
+            });
+
+        // `returns_of(target)` — the return-type reflection query. Same surface shape as
+        // `params_of`: a keyword + one parenthesized runtime `string` operand naming a fn or method.
+        // Yields `?Type` — the option is what tells a mistyped target apart from a `void` return.
+        let returns_of = just(T::ReturnsOfKw)
+            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
+            .map_with(move |target, e| Expr::ReturnsOf {
                 target: Box::new(target),
                 span: ctx.to_span(e.span()),
             });
@@ -2636,48 +3223,62 @@ where
 
         // `field_specs_of::<T>()` / `field_specs_of(name)` — the TYPE-level field-schema query. Two
         // disjoint surfaces under one keyword, told apart by the token after it: `::` opens the
-        // turbofish (a static type), `(` opens the dynamic string operand. The turbofish is pure
-        // sugar — its `T` is lowered HERE to the type's name as a string literal, so both forms carry
-        // the same runtime node (a name operand), exactly the string-keyed shape `params_of` takes.
+        // turbofish (a static type), `(` opens the dynamic string operand. They stay disjoint in the
+        // AST as the two arms of `TypeOperand`, and converge only at lowering, on one name-keyed
+        // runtime node — exactly the string-keyed shape `params_of` takes.
+        //
+        // The turbofish `T` is deliberately NOT flattened to a string literal here. Namespace
+        // qualification runs later, in the linker, and rewrites `TypeRef`s — a string would be
+        // invisible to it and `field_specs_of::<Todo>()` under a `namespace` would silently query the
+        // unqualified key. Keeping it a type until lowering is the same convention every other
+        // turbofish in this grammar follows (`attributes_of`, `from_bytes`, `channel`, `roles_of`,
+        // the typed call forms).
         let field_specs_of = just(T::FieldSpecsOfKw)
             .ignore_then(choice((
                 just(T::ColonColon)
                     .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
                     .then_ignore(just(T::LParen))
                     .then_ignore(just(T::RParen))
-                    .map(move |ty| {
-                        let span = ty.span();
-                        Expr::Str {
-                            value: type_ref_head_name(&ty),
-                            span,
-                        }
-                    }),
-                sub.clone().delimited_by(just(T::LParen), just(T::RParen)),
+                    .map(TypeOperand::Static),
+                sub.clone()
+                    .delimited_by(just(T::LParen), just(T::RParen))
+                    .map(|e| TypeOperand::Dynamic(Box::new(e))),
             )))
             .map_with(move |name, e| Expr::FieldSpecsOf {
-                name: Box::new(name),
+                name,
+                span: ctx.to_span(e.span()),
+            });
+
+        // `variants_of::<T>()` / `variants_of(name)` — the TYPE-level variant schema, the enum twin of
+        // `field_specs_of`. Identical surface shape by construction (same two arms, same reason the
+        // turbofish stays a `TypeRef` until lowering so the linker's namespace qualification can see
+        // it), so the two productions differ only in their keyword and node.
+        let variants_of = just(T::VariantsOfKw)
+            .ignore_then(choice((
+                just(T::ColonColon)
+                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                    .then_ignore(just(T::LParen))
+                    .then_ignore(just(T::RParen))
+                    .map(TypeOperand::Static),
+                sub.clone()
+                    .delimited_by(just(T::LParen), just(T::RParen))
+                    .map(|e| TypeOperand::Dynamic(Box::new(e))),
+            )))
+            .map_with(move |name, e| Expr::VariantsOf {
+                name,
                 span: ctx.to_span(e.span()),
             });
 
         // `construct::<T>(fields)` / `construct(name, fields)` — the dynamic struct constructor. The
-        // turbofish carries the type name (lowered here to a string, like `field_specs_of`) plus a
-        // single `fields` operand; the string form takes the type name and the fields list as two
-        // operands. Both converge on one node `{ name, fields }`.
+        // turbofish carries the type as a `TypeOperand::Static` (like `field_specs_of`, and for the
+        // same qualification reason) plus a single `fields` operand; the string form takes the type
+        // name and the fields list as two operands. Both converge on one node `{ name, fields }`.
         let construct = just(T::ConstructKw)
             .ignore_then(choice((
                 just(T::ColonColon)
                     .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
                     .then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
-                    .map(move |(ty, fields)| {
-                        let span = ty.span();
-                        (
-                            Expr::Str {
-                                value: type_ref_head_name(&ty),
-                                span,
-                            },
-                            fields,
-                        )
-                    }),
+                    .map(|(ty, fields)| (TypeOperand::Static(ty), fields)),
                 sub.clone()
                     .separated_by(just(T::Comma))
                     .at_least(2)
@@ -2687,11 +3288,11 @@ where
                     .map(|mut operands| {
                         let fields = operands.pop().expect("two operands");
                         let name = operands.pop().expect("two operands");
-                        (name, fields)
+                        (TypeOperand::Dynamic(Box::new(name)), fields)
                     }),
             )))
             .map_with(move |(name, fields), e| Expr::Construct {
-                name: Box::new(name),
+                name,
                 fields: Box::new(fields),
                 span: ctx.to_span(e.span()),
             });
@@ -2710,17 +3311,20 @@ where
             closure,
             if_then_else,
             match_,
-            attributes_of,
+            // One choice-tuple slot for the two keyword+turbofish+`()` queries (the tuple is at
+            // its arity cap): identical surface shape, disjoint keywords.
+            attributes_of.or(type_name),
             // One choice-tuple slot for the two value-reflection queries (the tuple is at its
             // arity cap): same surface shape, disjoint keywords.
-            type_of.or(fields_of),
+            type_of.or(fields_of).or(traits_of),
             from_bytes,
             channel,
             roles_of,
             // The tuple is at its arity cap, so each keyword-led reflection query shares a slot with
-            // a disjoint sibling: `params_of(target)` with the type-level `field_specs_of`, and the
-            // by-name `invoke` with the by-name `construct`. All four commit on their leading keyword.
-            params_of.or(field_specs_of),
+            // a disjoint sibling: the two signature queries `params_of`/`returns_of` with the two
+            // type-level schema queries `field_specs_of`/`variants_of`, and the by-name `invoke` with
+            // the by-name `construct`. All six commit on their leading keyword.
+            params_of.or(returns_of).or(field_specs_of).or(variants_of),
             invoke.or(construct),
             // One choice-tuple slot for the two user turbofish forms (the tuple is at its arity
             // cap): the module form (`json.parse::<T>(s)`, needs a `.`) wins over the free-function
@@ -2838,13 +3442,44 @@ where
                     expr
                 },
             ),
-            // `.member`, optionally followed by an explicit method instantiation
-            // `::<T, ...>(args)` (generic methods, D3) — folded into ONE postfix entry (the pratt
-            // op-tuple is at its arity cap): the turbofish half must see its `(` args to commit,
-            // so a bare `.member` keeps parsing exactly as before.
+            // The member-access family, folded into ONE postfix entry (the pratt op-tuple is at its
+            // arity cap) — see [`MemberPostfix`]:
+            //
+            //   * `.member` — plain member access, parsed exactly as before;
+            //   * `.member::<U, ...>(args)` — an explicit METHOD instantiation (generic methods,
+            //     D3). The turbofish half must see its `(` args to commit, so a bare `.member`
+            //     never loses its parse to it;
+            //   * `::<T, ...>.member` — an explicit CLASS instantiation at the call site
+            //     (`Repo::<Todo>.new("todos")`). The trailing `.member` is required, which is what
+            //     keeps `Repo::<Todo>` from being an expression of its own and keeps `x.m::<T>`
+            //     (a method turbofish with no argument list) failing where it failed before;
+            //   * `::<T, ...>.member::<U, ...>(args)` — BOTH, on one call
+            //     (`Repo::<Todo>.blank::<int>()`). The trailing half is the same optional shape the
+            //     `.member` arm carries and commits on the same `(`, so this is one grammar rule
+            //     rather than a new pratt entry (the op-tuple is at its 26-entry cap).
+            //
+            // `Repo<Todo>.new(…)` stays a parse error on purpose: a bare `<` after an identifier is
+            // genuinely ambiguous with less-than in expression position, and `::<>` is this
+            // grammar's established disambiguator everywhere else a type argument is spelled.
             postfix(
                 14,
-                just(T::Dot).ignore_then(member_name).then(
+                choice((
+                    just(T::Dot)
+                        .ignore_then(member_name)
+                        .then(
+                            just(T::ColonColon)
+                                .ignore_then(
+                                    type_parser(ctx)
+                                        .separated_by(just(T::Comma))
+                                        .at_least(1)
+                                        .allow_trailing()
+                                        .collect::<Vec<_>>()
+                                        .delimited_by(just(T::Lt), just(T::Gt)),
+                                )
+                                .then(member_call_args.clone())
+                                .or_not(),
+                        )
+                        .map(|(name, turbo)| MemberPostfix::Dot(name, turbo)),
                     just(T::ColonColon)
                         .ignore_then(
                             type_parser(ctx)
@@ -2852,26 +3487,105 @@ where
                                 .at_least(1)
                                 .allow_trailing()
                                 .collect::<Vec<_>>()
-                                .delimited_by(just(T::Lt), just(T::Gt)),
+                                .delimited_by(just(T::Lt), just(T::Gt))
+                                .map_with(move |tys, e| (tys, ctx.to_span(e.span()))),
                         )
-                        .then(member_call_args.clone())
-                        .or_not(),
-                ),
-                move |receiver, ((name, name_span), turbo), e| match turbo {
-                    Some((type_args, args)) => Expr::TypedMethodCall {
-                        recv: Box::new(receiver),
-                        name,
-                        name_span,
-                        type_args,
-                        args,
-                        span: ctx.to_span(e.span()),
-                    },
-                    None => Expr::Member {
+                        .then(
+                            just(T::Dot)
+                                .ignore_then(member_name)
+                                // The METHOD's own turbofish, the same optional shape (and the
+                                // same commit on `(`) the `.member` arm carries — so
+                                // `Repo::<Todo>.new("todos")` keeps its exact parse and
+                                // `Repo::<Todo>.blank::<int>()` gains one.
+                                .then(
+                                    just(T::ColonColon)
+                                        .ignore_then(
+                                            type_parser(ctx)
+                                                .separated_by(just(T::Comma))
+                                                .at_least(1)
+                                                .allow_trailing()
+                                                .collect::<Vec<_>>()
+                                                .delimited_by(just(T::Lt), just(T::Gt)),
+                                        )
+                                        .then(member_call_args.clone())
+                                        .or_not(),
+                                )
+                                .or_not(),
+                        )
+                        // A turbofish with NOTHING to instantiate — `Repo::<Todo>;`,
+                        // `b.choose::<string>;`, `Repo::<Todo>blank()`, a bare `f::<T>` — is
+                        // rejected on its own terms rather than left to the expected-set wall.
+                        // Reaching here means the `::<...>` parsed and the call it belongs to did
+                        // not follow, which the generic report could only render as `found `;`
+                        // expected `(`, or `.`` — true, and no help at all in working out that a
+                        // type argument list is not an expression. `try_map` (not a diagnostic
+                        // push) because this is a speculative branch: a `::` that some *other*
+                        // alternative can still use must backtrack cleanly, exactly as the map
+                        // shorthand's rejection does.
+                        //
+                        // `try_map_with`, not `try_map`, and the difference is the whole reason
+                        // this reaches the reader: chumsky keeps ONE alternative error, the one
+                        // located FURTHEST into the input, and `try_map` locates its error where
+                        // its sub-parser *started* (at the `::`) while `try_map_with` locates it
+                        // where the sub-parser *stopped* (past the `>`). Located at the `::` this
+                        // loses to the enclosing statement rule's own rejection there — "expected
+                        // a statement terminator", pointing at the `::` and explaining nothing.
+                        .try_map_with(|((tys, turbo_span), tail), e| match tail {
+                            Some((name, turbo)) => {
+                                Ok(MemberPostfix::Instantiate(tys, turbo_span, name, turbo))
+                            }
+                            None => Err(Rich::custom(e.span(), TURBOFISH_NEEDS_A_CALL)),
+                        }),
+                )),
+                move |receiver, op, e| match op {
+                    MemberPostfix::Dot((name, name_span), Some((type_args, args))) => {
+                        Expr::TypedMethodCall {
+                            recv: Box::new(receiver),
+                            name,
+                            name_span,
+                            type_args,
+                            args,
+                            span: ctx.to_span(e.span()),
+                        }
+                    }
+                    MemberPostfix::Dot((name, name_span), None) => Expr::Member {
                         receiver: Box::new(receiver),
                         name,
                         name_span,
                         span: ctx.to_span(e.span()),
                     },
+                    MemberPostfix::Instantiate(
+                        class_args,
+                        turbo_span,
+                        (name, name_span),
+                        method_turbo,
+                    ) => {
+                        let recv_span = receiver.span();
+                        let instantiated = Expr::InstantiatedType {
+                            recv: Box::new(receiver),
+                            type_args: class_args,
+                            span: Span::new_in(recv_span.source, recv_span.start, turbo_span.end),
+                        };
+                        match method_turbo {
+                            // BOTH turbofishes: the class's arguments ride the receiver (the
+                            // channel a value receiver's type arguments already use), the method's
+                            // own ride the call node — exactly as each does alone.
+                            Some((type_args, args)) => Expr::TypedMethodCall {
+                                recv: Box::new(instantiated),
+                                name,
+                                name_span,
+                                type_args,
+                                args,
+                                span: ctx.to_span(e.span()),
+                            },
+                            None => Expr::Member {
+                                receiver: Box::new(instantiated),
+                                name,
+                                name_span,
+                                span: ctx.to_span(e.span()),
+                            },
+                        }
+                    }
                 },
             ),
             // `receiver[index]` — index access (the `Index` trait / list element access).
@@ -3292,25 +4006,60 @@ where
                     span: ctx.to_span(e.span()),
                 });
 
-        // `else if` is an `else` whose body is a single nested `if`.
+        // `if c { … } (else if c { … })* (else { … })?`.
+        //
+        // The AST keeps `else if` right-nested — an `else` whose body is a single nested `if` — but the
+        // *grammar* is iterative: the continuations are collected with `repeated()` and folded, rather
+        // than parsed by a `recursive` handle that descends once per branch. A chain is flat in
+        // delimiters, so it never registered as nesting; a `recursive` `if` therefore spent stack per
+        // branch with nothing bounding it, and ~725 branches (an ordinary generated dispatch) overflowed
+        // the main thread with no diagnostic. Iterating here makes the parser cost of a chain O(1) in
+        // stack, and [`MAX_ELSE_CHAIN_BRANCHES`] bounds what the *later* stages spend walking the nesting.
+        //
+        // Spans are preserved exactly: each branch records where its own `if` keyword starts, and the
+        // fold gives branch *i* the span `start_i .. end of the whole chain` — which is what the
+        // recursive grammar produced, since a nested `if` consumed everything after it.
         let if_expr = head_expr.clone();
         let if_block = block.clone();
-        let if_ = recursive(move |if_| {
-            just(T::IfKw)
-                .ignore_then(if_expr.clone())
-                .then(if_block.clone())
-                .then(
-                    just(T::ElseKw)
-                        .ignore_then(if_.map(|nested| vec![nested]).or(if_block.clone()))
-                        .or_not(),
-                )
-                .map_with(move |((cond, then_body), else_body), e| Stmt::If {
+        let if_branch = just(T::IfKw)
+            .ignore_then(if_expr.clone())
+            .then(if_block.clone())
+            .map_with(move |(cond, then_body), e| {
+                let span: SimpleSpan = e.span();
+                (cond, then_body, span.start)
+            });
+        let if_ = if_branch
+            .clone()
+            .then(
+                just(T::ElseKw)
+                    .ignore_then(if_branch)
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .then(just(T::ElseKw).ignore_then(if_block.clone()).or_not())
+            .map_with(move |((head, tail), trailing_else), e| {
+                let whole: SimpleSpan = e.span();
+                let end = whole.end;
+                // Fold from the innermost branch outwards: the trailing `else` is the deepest
+                // `else_body`, each `else if` wraps what is below it, and the head branch is the
+                // statement returned.
+                let mut else_body = trailing_else;
+                for (cond, then_body, start) in tail.into_iter().rev() {
+                    else_body = Some(vec![Stmt::If {
+                        cond,
+                        then_body,
+                        else_body,
+                        span: ctx.to_span((start..end).into()),
+                    }]);
+                }
+                let (cond, then_body, start) = head;
+                Stmt::If {
                     cond,
                     then_body,
                     else_body,
-                    span: ctx.to_span(e.span()),
-                })
-        });
+                    span: ctx.to_span((start..end).into()),
+                }
+            });
 
         // Optional generic type parameters on a declaration: `<T>`, `<A, B>`, `<T: Comparable>`,
         // `<T: Comparable + Display>`, `<T: Keyed<int>>`. Bounds name built-in or user traits,
@@ -3318,8 +4067,35 @@ where
         // In declaration position a `<` right after the type name is unambiguous — no comparison
         // expression can appear there. (`>` always lexes singly, so a nested close like
         // `<T: Keyed<int>>` ends both delimiters exactly as `List<List<int>>` does.)
-        let trait_bound = id
+        // A bound's trait name may be **dotted** — `<P: para.ai.provider.Provider>`, the same
+        // qualified spelling every other type position takes (`x: http.Response`,
+        // `impl vec.Kernels for T`, `dyn para.ai.tools.ToolSource`). Without it a bound was the one
+        // place in the language that accepted only a bare identifier, so a trait reachable *only*
+        // by its qualified name had no spelling at all in a `where` position and the parser said
+        // `found '.' expected '+', ',', '<', or '>'` — which reads as a syntax error in the
+        // generics rather than a missing feature. The segments join into one name the linker
+        // resolves exactly as it resolves a dotted type.
+        let bound_path = id
             .clone()
+            .then(
+                just(T::Dot)
+                    .ignore_then(id.clone())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .map(
+                |((first, first_span), rest): ((String, Span), Vec<(String, Span)>)| {
+                    let mut name = first;
+                    let mut span = first_span;
+                    for (seg, seg_span) in rest {
+                        name.push('.');
+                        name.push_str(&seg);
+                        span.end = seg_span.end;
+                    }
+                    (name, span)
+                },
+            );
+        let trait_bound = bound_path
             .then(
                 type_parser(ctx)
                     .separated_by(just(T::Comma))
@@ -3330,7 +4106,7 @@ where
                     .map(Option::unwrap_or_default),
             )
             .map_with(move |((name, _name_span), args), e| TraitBound {
-                name,
+                name: Name::written(name),
                 args,
                 span: ctx.to_span(e.span()),
             });
@@ -3415,7 +4191,7 @@ where
                 ),
                       e| {
                     Stmt::Fn(FnDecl {
-                        name: name_pair.0,
+                        name: Name::written(name_pair.0),
                         name_span: name_pair.1,
                         is_public: pub_kw.is_some(),
                         type_params,
@@ -3442,7 +4218,7 @@ where
             .collect::<Vec<_>>()
             .then(id.clone())
             .then(choice((
-                params_parser(ctx, expr.clone(), false).map(|fields| (fields, None)),
+                variant_fields_parser(ctx, expr.clone()).map(|fields| (fields, None)),
                 just(T::Eq)
                     .ignore_then(expr.clone())
                     .map(|value| (Vec::new(), Some(value))),
@@ -3567,7 +4343,7 @@ where
                         }
                     }
                     FnDecl {
-                        name: name_pair.0,
+                        name: Name::written(name_pair.0),
                         name_span: name_pair.1,
                         is_public: false,
                         type_params,
@@ -3650,7 +4426,7 @@ where
                 move |(((trait_name, trait_span), trait_args), members), e| {
                     let (methods, assoc_bindings) = split_impl_members(members);
                     ClassMember::Impl(ImplBlock {
-                        trait_name,
+                        trait_name: Name::written(trait_name),
                         trait_span,
                         trait_args,
                         methods,
@@ -3701,7 +4477,7 @@ where
                     }
                 }
                 Stmt::Enum(EnumDecl {
-                    name: name_pair.0,
+                    name: Name::written(name_pair.0),
                     name_span: name_pair.1,
                     is_public: false,
                     type_params,
@@ -3746,10 +4522,10 @@ where
                       e| {
                     let (methods, assoc_bindings) = split_impl_members(members);
                     Stmt::Impl(noeta_ast::ImplDecl {
-                        trait_name,
+                        trait_name: Name::written(trait_name),
                         trait_span,
                         trait_args,
-                        target,
+                        target: Name::written(target),
                         target_span,
                         methods,
                         assoc_bindings,
@@ -3778,7 +4554,7 @@ where
                     let has_default = body.is_some();
                     TraitMethod {
                         sig: FnDecl {
-                            name: name_pair.0,
+                            name: Name::written(name_pair.0),
                             name_span: name_pair.1,
                             is_public: false,
                             type_params,
@@ -3837,7 +4613,7 @@ where
             .map_with(move |((name_pair, type_params), members), e| {
                 let (methods, assoc_types) = split_trait_members(members);
                 Stmt::Trait(TraitDecl {
-                    name: name_pair.0,
+                    name: Name::written(name_pair.0),
                     name_span: name_pair.1,
                     is_public: false,
                     type_params,
@@ -3883,7 +4659,7 @@ where
                     }
                 }
                 Stmt::Struct(StructDecl {
-                    name,
+                    name: Name::written(name),
                     name_span,
                     is_public: false,
                     type_params,
@@ -3928,7 +4704,7 @@ where
                     }
                 }
                 Stmt::Class(ClassDecl {
-                    name,
+                    name: Name::written(name),
                     name_span,
                     is_public: false,
                     type_params,
@@ -3941,7 +4717,12 @@ where
                 })
             });
 
-        // `namespace App.Orders;` — a dotted path. M0 records it but does not scope on it.
+        // `namespace App.Orders;` — **retired surface syntax**, refused by the *loader* rather
+        // than here (`apply_derived_paths`). The grammar keeps it for two reasons: `Stmt::Namespace`
+        // is the loader's internal carrier, so it must be constructible, and a checker/IR unit test
+        // that parses a fixture without a package on disk has no other way to say "this declaration
+        // is qualified" — deleting the production would take that seam with it. Every user-facing
+        // command routes through the loader, so no real file can declare one.
         let namespace_decl = just(T::NamespaceKw)
             .ignore_then(id.clone())
             .then(
@@ -4074,7 +4855,7 @@ where
                             };
                             Stmt::Binding {
                                 mut_decl: false,
-                                name,
+                                name: name.to_string(),
                                 name_span,
                                 ty: None,
                                 value,
@@ -4150,7 +4931,7 @@ where
                             };
                             Stmt::Binding {
                                 mut_decl: false,
-                                name,
+                                name: name.to_string(),
                                 name_span,
                                 ty: None,
                                 value,
@@ -4214,7 +4995,7 @@ where
                             };
                             Stmt::Binding {
                                 mut_decl: false,
-                                name,
+                                name: name.to_string(),
                                 name_span,
                                 ty: None,
                                 value,
@@ -4249,7 +5030,7 @@ where
                             };
                             Stmt::Binding {
                                 mut_decl: false,
-                                name,
+                                name: name.to_string(),
                                 name_span,
                                 ty,
                                 value,
@@ -4266,7 +5047,9 @@ where
                             let mut targets = Vec::with_capacity(items.len());
                             for item in items {
                                 match item {
-                                    Expr::Ident { name, span } => targets.push((name, span)),
+                                    Expr::Ident { name, span } => {
+                                        targets.push((name.into_string(), span))
+                                    }
                                     other => ctx.diags.borrow_mut().push(Diagnostic::error(
                                         DiagnosticCode::UnexpectedToken,
                                         other.span(),
@@ -4633,6 +5416,42 @@ where
                 item
             });
 
+        // A reserved word standing where a fresh binding's name belongs — `type_name = 1`, or the
+        // annotated `type_name: string = "x"`. See [`RESERVED_WORD_AS_BINDING`] for why this one
+        // binder needs a rule of its own while every other one is handled generically.
+        //
+        // **Last** in the statement `choice`, so it only ever runs on input every real statement
+        // form has already refused — it can take nothing away from a program that parses. And it
+        // *recovers* rather than failing: binding the word as though it were a name lets the rest
+        // of the file parse, so a writer sees their remaining errors in the same pass instead of
+        // one per rebuild.
+        //
+        // The entry guard is a `filter`, deliberately not a `try_map` raising a custom reason: a
+        // custom reason is a *claim about what is wrong*, and this one would be a lie everywhere
+        // the rule simply does not apply — which is every statement in every correct program. It
+        // outranked the real error in an unrelated failing statement the first time it was written
+        // that way. A `filter`'s rejection contributes an empty expected set instead, so it merges
+        // into whatever the other alternatives already said and can never speak over them.
+        let reserved_binding = any()
+            .filter(|tok: &T| tok.reserved_word().is_some())
+            .map_with(|_, e| -> SimpleSpan { e.span() })
+            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then_ignore(just(T::Eq))
+            .then(expr.clone())
+            .then_ignore(stmt_terminator(ctx))
+            .validate(move |((word_span, ty), value), e, emitter| {
+                emitter.emit(Rich::custom(word_span, RESERVED_WORD_AS_BINDING));
+                let name_span = ctx.to_span(word_span);
+                Stmt::Binding {
+                    mut_decl: false,
+                    name: ctx.source.slice(name_span).to_string(),
+                    name_span,
+                    ty,
+                    value,
+                    span: ctx.to_span(e.span()),
+                }
+            });
+
         choice((
             echo,
             mut_binding,
@@ -4654,6 +5473,7 @@ where
             namespace_decl,
             use_decl,
             assign_or_expr,
+            reserved_binding,
         ))
         .boxed()
     })
@@ -4714,6 +5534,26 @@ mod tests {
         let parsed = parse_str("x = f()\n.to_string()\n");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         assert_eq!(parsed.program.stmts.len(), 1, "{:?}", parsed.program.stmts);
+    }
+
+    #[test]
+    fn match_arm_guards_parse() {
+        // `pattern if cond => body` — the guard lands on the arm (visible as `(guard …)` in the
+        // pretty form) and sits between the pattern and the arrow for every pattern shape.
+        let dump = pretty(
+            "x = match n {\n    k if k < 0 => \"neg\",\n    Ok(v) if v > 1 => v,\n    is int if n > 9 => \"big\",\n    _ => \"rest\",\n}\n",
+        );
+        assert_eq!(dump.matches("(guard").count(), 3, "{dump}");
+
+        // The guard expression may itself be an `if … then … else` conditional (it desugars to a
+        // nested match) and still stops at the `=>`.
+        let dump =
+            pretty("x = match n {\n    k if if k > 0 then true else false => 1,\n    _ => 0,\n}\n");
+        assert_eq!(dump.matches("(guard").count(), 1, "{dump}");
+
+        // An unguarded arm carries no `(guard …)` node — the grammar is unchanged without `if`.
+        let dump = pretty("x = match n { 1 => 2, _ => 0 }\n");
+        assert!(!dump.contains("(guard"), "{dump}");
     }
 
     #[test]
@@ -5695,6 +6535,13 @@ mod tests {
     }
 
     #[test]
+    fn type_name_parses() {
+        // `type_name::<T>()` — `attributes_of`'s surface exactly — parses to a dedicated node that
+        // keeps `T` as a real TYPE (not a string), so the linker's namespace rewrite reaches it.
+        insta::assert_snapshot!(pretty("x = type_name::<Todo>();"));
+    }
+
+    #[test]
     fn type_of_parses() {
         // `type_of(value)` — a keyword + parenthesized operand — parses to a dedicated reflection
         // node carrying the operand expression.
@@ -5706,6 +6553,15 @@ mod tests {
         // `invoke(recv, name, args)` — a keyword + three parenthesized, comma-separated operands —
         // parses to a dedicated reflection node carrying the receiver, name, and argument list.
         insta::assert_snapshot!(pretty("x = invoke(obj, \"area\", [1, 2]);"));
+    }
+
+    #[test]
+    fn returns_of_parses() {
+        // `returns_of(target)` — a keyword + one parenthesized runtime-string operand — parses to
+        // its own reflection node, the return-type half of the signature index. Pinned alongside
+        // `roles_of`/`invoke` because the keyword is a strict superstring of the `return` statement
+        // keyword: this is what proves the lexer's longest-match rule picks the reflection query.
+        insta::assert_snapshot!(pretty("x = returns_of(\"Api.list\");"));
     }
 
     #[test]
@@ -5924,6 +6780,109 @@ mod tests {
         assert_eq!(parsed.diagnostics[1].message, MAP_ENTRY_NEEDS_VALUE);
     }
 
+    /// Every binder position a user can write a name in reports a reserved word *as* a reserved
+    /// word (E0046), rather than as chumsky's `` found `type_name` expected … an identifier `` —
+    /// which names the one thing that is not the problem and sends the reader to check their
+    /// punctuation. One case per position the language has.
+    #[test]
+    fn a_reserved_word_in_a_binder_position_is_reported_as_reserved() {
+        for (label, src) in [
+            (
+                "parameter",
+                "fn look(type_name: string): string {\n  return 1\n}",
+            ),
+            ("closure parameter", "f = fn(type_name: int) => 1"),
+            ("plain binding", "type_name = 1"),
+            ("annotated binding", "type_name: int = 1"),
+            ("mut binding", "mut type_name = 1"),
+            ("for variable", "for type_name in [1] {\n  echo 1\n}"),
+            (
+                "for tuple variable",
+                "for (type_name, b) in [1] {\n  echo 1\n}",
+            ),
+            ("match binding", "match x {\n  type_name => echo 1,\n}"),
+            ("field", "struct S {\n  type_name: string\n}"),
+            ("type name", "struct type_name {\n  a: int\n}"),
+            ("enum variant", "enum E {\n  type_name\n}"),
+            (
+                "generic parameter",
+                "fn id<type_name>(x: int): int {\n  return x\n}",
+            ),
+            ("function name", "fn type_name(): int {\n  return 1\n}"),
+            (
+                "method name",
+                "class C {\n  a: int\n  fn type_name(): int { return 1 }\n}",
+            ),
+        ] {
+            let parsed = parse_str(src);
+            let found = parsed
+                .diagnostics
+                .iter()
+                .find(|d| d.code == DiagnosticCode::ReservedName)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no E0046 for a reserved word in {label} position: {:?}",
+                        parsed.diagnostics
+                    )
+                });
+            assert!(
+                found
+                    .message
+                    .contains("`type_name` cannot be used as a name")
+                    && found.message.contains("one of the reflection primitives"),
+                "{label}: {}",
+                found.message
+            );
+            assert_eq!(found.help.as_deref(), Some("rename it to `type_name_`"));
+        }
+    }
+
+    /// The role travels with the word: a grammar keyword and a boolean literal are not described as
+    /// reflection primitives just because they land in the same rule.
+    #[test]
+    fn a_reserved_words_role_is_named_in_the_message() {
+        let parsed = parse_str("fn look(match: string): string {\n  return 1\n}");
+        let d = parsed
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::ReservedName)
+            .expect("E0046");
+        assert!(
+            d.message.contains("a keyword of the grammar"),
+            "{}",
+            d.message
+        );
+    }
+
+    /// The bare-binding rule is last in the statement `choice`, so it can only ever fire where no
+    /// real statement form parsed. Programs that do parse are untouched.
+    #[test]
+    fn the_reserved_binding_rule_does_not_claim_a_valid_statement() {
+        for src in [
+            "x = 1",
+            "mut x = 1",
+            "x: int = 1",
+            "match x {\n  _ => echo 1,\n}",
+            "if x {\n  echo 1\n}",
+            "for x in [1] {\n  echo 1\n}",
+            "fn f(): int {\n  return 1\n}",
+            "use std.fs",
+            "x.await = 1",
+            "echo type_of(1)",
+            "echo type_name::<int>()",
+        ] {
+            let parsed = parse_str(src);
+            assert!(
+                parsed
+                    .diagnostics
+                    .iter()
+                    .all(|d| d.code != DiagnosticCode::ReservedName),
+                "`{src}` was wrongly flagged: {:?}",
+                parsed.diagnostics
+            );
+        }
+    }
+
     #[test]
     fn map_literals_and_shorthand_survive_the_strict_entry_rule() {
         for src in [
@@ -5940,6 +6899,88 @@ mod tests {
                 parsed.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn nested_block_bodied_match_arms_parse_in_linear_time() {
+        // `=> { … }` is the grammar's one genuine ambiguity — map literal or statement block — and it
+        // used to be resolved by parsing the brace body twice: once as a map (which fails) and once as
+        // a block. Nested one level per arm, that doubled per level: measured 5 s at depth 15, 37 s at
+        // 18, 162 s at 20, so depth 30 would have been about two days and a ~1 KB file hung the
+        // compiler with no diagnostic and no timeout. `arm_body`'s `.memoized()` is what collapses it.
+        //
+        // Depth 32 is 64 delimiters, comfortably inside `MAX_NESTING_DEPTH`, and would have taken
+        // roughly 2^12 × 162 s — days — under the old grammar. So the assertion is mostly that this
+        // *finishes*; the wall-clock bound is there so an exponential regression fails with a message
+        // instead of hanging a CI run forever, and it is ~1000× the measured cost so it cannot flake.
+        const DEPTH: usize = 32;
+        let src = format!(
+            "a = 1;\nmatch a {{ _ => {{ {}42{} }} }}\n",
+            "match a { _ => { ".repeat(DEPTH),
+            " } }".repeat(DEPTH),
+        );
+        let start = std::time::Instant::now();
+        let parsed = parse_str(&src);
+        let elapsed = start.elapsed();
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "the nested match should parse cleanly: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.program.stmts.len(), 2);
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "parsing {DEPTH} nested block-bodied match arms took {elapsed:?} — the map-vs-block \
+             alternative is re-parsing the subtree again (see `arm_body`'s `.memoized()`)"
+        );
+    }
+
+    #[test]
+    fn a_block_bodied_arm_and_a_map_bodied_arm_still_mean_what_they_meant() {
+        // The behaviour `.memoized()` must not have changed: an arm body is a value EXPRESSION first,
+        // so `=> {}` and `=> {"k": v}` stay map literals, and only a brace body that is *not* an
+        // expression is a statement block. Memoization caches failures, so the map alternative still
+        // gets its chance at every offset — it just does not get it twice.
+        let parsed = parse_str(
+            "a = 1;\n\
+             m = match a { 1 => {}, 2 => {\"k\": 9}, 3 => {x}, _ => 0 };\n\
+             match a { 1 => { echo 1 }, _ => { echo 2 } }\n",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Binding { value, .. } = &parsed.program.stmts[1] else {
+            panic!("expected a binding, got {:?}", parsed.program.stmts[1]);
+        };
+        let Expr::Match { arms, .. } = value else {
+            panic!("expected a match, got {value:?}");
+        };
+        let kinds: Vec<&str> = arms
+            .iter()
+            .map(|arm| match &arm.body {
+                ClosureBody::Expr(e) => match **e {
+                    Expr::Map { .. } => "map",
+                    _ => "expr",
+                },
+                ClosureBody::Block(_) => "block",
+            })
+            .collect();
+        // `{}` empty map, `{"k": 9}` map, `{x}` map shorthand, `0` a plain expression.
+        assert_eq!(kinds, vec!["map", "map", "map", "expr"]);
+
+        let Stmt::Expr { expr, .. } = &parsed.program.stmts[2] else {
+            panic!(
+                "expected an expression statement, got {:?}",
+                parsed.program.stmts[2]
+            );
+        };
+        let Expr::Match { arms, .. } = expr else {
+            panic!("expected a match, got {expr:?}");
+        };
+        // `{ echo 1 }` is not an expression, so both arms are statement blocks.
+        assert!(
+            arms.iter()
+                .all(|arm| matches!(arm.body, ClosureBody::Block(_))),
+            "side-effecting arms should be blocks"
+        );
     }
 
     #[test]
@@ -5971,6 +7012,48 @@ mod tests {
             parsed.diagnostics
         );
         assert_eq!(parsed.program.stmts.len(), 1);
+    }
+
+    #[test]
+    fn an_ordinary_program_parses_on_a_two_mebibyte_thread() {
+        // 2 MiB is the stack a tokio runtime gives its workers — what the LSP/MCP/DAP servers used
+        // to parse on — and it is also the "~2 MiB test thread" `INLINE_NESTING_DEPTH` was
+        // documented as being sized to stay within. That documentation was wrong by a wide margin:
+        // in a debug build, monomorphized `chumsky` frames are big enough that **four** nested `if`
+        // statements in one function overflow 2 MiB, while the inline threshold happily allows
+        // sixteen levels of nesting. So an entirely unremarkable file aborted the process. Now
+        // `parse_in` asks the stack how much is left and offloads when it is short, which is what
+        // makes this pass.
+        //
+        // Depth is deliberately at the measured cliff, not far beyond it: the assertion is that
+        // *ordinary* code parses, not that pathological code does.
+        const TWO_MEBIBYTES: usize = 2 * 1024 * 1024;
+        let mut src = String::new();
+        for i in 0..4 {
+            src.push_str(&format!("fn f{i}(a: int): int {{\n"));
+            for _ in 0..4 {
+                src.push_str("  if a > 0 {\n");
+            }
+            src.push_str("    return a + 1\n");
+            for _ in 0..4 {
+                src.push_str("  }\n");
+            }
+            src.push_str("  return 0\n}\n");
+        }
+        let parsed = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(TWO_MEBIBYTES)
+                .spawn_scoped(scope, || parse_str(&src))
+                .expect("spawn the 2 MiB probe thread")
+                .join()
+                .expect("a 2 MiB thread must be able to parse an ordinary program")
+        });
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "the probe program should parse cleanly: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.program.stmts.len(), 4);
     }
 
     #[test]
@@ -6011,6 +7094,358 @@ mod tests {
         assert!(
             parsed.diagnostics.is_empty(),
             "exactly the limit should be accepted: {:?}",
+            parsed.diagnostics
+        );
+    }
+
+    /// Source nesting `depth` function values inside one another — the most stack-hungry shape
+    /// found, at ~412 KiB of debug stack per level (ordinary `if` nesting costs ~330 KiB, a bare
+    /// `[[[…]]]` far less). Its delimiter depth is `depth + 1`: the `()` of the innermost `fn`
+    /// header opens one level below the `depth` open braces.
+    fn nested_function_values(depth: usize) -> String {
+        let mut src = String::from("x = ");
+        for _ in 0..depth {
+            src.push_str("fn() { return ");
+        }
+        src.push('1');
+        for _ in 0..depth {
+            src.push_str(" }");
+        }
+        src.push_str(";\n");
+        src
+    }
+
+    #[test]
+    fn the_deepest_legal_parse_fits_its_modeled_budget() {
+        // The guard on `STACK_PER_NESTING_LEVEL` itself. The compile-time assertions next to it can
+        // only check that the three budgets are consistent *with each other*; they take the per-level
+        // cost on faith, and it is the one number in the derivation that a grammar change can
+        // invalidate silently. So parse the worst-known shape at exactly `MAX_NESTING_DEPTH`, on a
+        // thread sized to the model with **no** margin at all — the margin `DEEP_PARSE_STACK`
+        // carries is what production gets, and spending it here would hide exactly what this is
+        // watching for.
+        //
+        // It fails the way a stack overflow fails: by aborting the test process, loudly, with the
+        // message below already printed. That is the point — if the grammar grows past the model,
+        // this is red long before `DEEP_PARSE_STACK`'s 4× margin is gone and real input starts
+        // aborting. Re-measure and move `STACK_PER_NESTING_LEVEL` (and, if it has moved far, the
+        // depth limit) rather than enlarging this thread.
+        //
+        // `parse_inner` rather than `parse`, so the thread under test *is* the stack under test:
+        // `parse_in` would offload this depth to the (much larger) worker and measure nothing.
+        let budget = MAX_NESTING_DEPTH * STACK_PER_NESTING_LEVEL;
+        let src = nested_function_values(MAX_NESTING_DEPTH);
+        let source = Source::new(SourceId::FIRST, "deep.noe", src);
+        let lexed = noeta_lexer::lex(&source);
+        assert_eq!(
+            recursion_prescan(&lexed.tokens).max_depth,
+            MAX_NESTING_DEPTH,
+            "the probe must sit exactly on the limit, or it is measuring the wrong depth"
+        );
+        eprintln!(
+            "parsing {MAX_NESTING_DEPTH} levels on {} MiB — an abort here means the grammar now \
+             costs more than STACK_PER_NESTING_LEVEL ({} KiB/level); re-measure it",
+            budget / (1024 * 1024),
+            STACK_PER_NESTING_LEVEL / 1024
+        );
+        let parsed = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(budget)
+                .spawn_scoped(scope, || {
+                    parse_inner(
+                        &source,
+                        &lexed.tokens,
+                        Edition::DEFAULT,
+                        &noeta_lexer::TextTiers::default(),
+                    )
+                })
+                .expect("spawn the modeled-budget probe thread")
+                .join()
+                .expect("the modeled-budget probe panicked")
+        });
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "a parse at the limit should be clean: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.program.stmts.len(), 1);
+    }
+
+    #[test]
+    fn the_worst_shape_at_the_limit_diagnoses_one_level_deeper() {
+        // The language-visible half: `MAX_NESTING_DEPTH` is the accept/reject boundary for the
+        // *most expensive* shape too, not only for the cheap `[[[…]]]` the other tests use. Both
+        // sides run through the real `parse` entry point, so this is also the end-to-end proof that
+        // the deep-stack worker delivers the limit the pre-pass promises.
+        let at_limit = parse_str(&nested_function_values(MAX_NESTING_DEPTH));
+        assert!(
+            at_limit.diagnostics.is_empty(),
+            "the worst shape at the limit should parse: {:?}",
+            at_limit.diagnostics
+        );
+        let past_limit = parse_str(&nested_function_values(MAX_NESTING_DEPTH + 1));
+        assert_eq!(past_limit.diagnostics.len(), 1);
+        assert_eq!(
+            past_limit.diagnostics[0].code,
+            DiagnosticCode::NestingTooDeep
+        );
+    }
+
+    /// Source for a dispatch function whose body is one `else if` chain of `branches` branches (the
+    /// first `if` plus `branches - 1` continuations), plus a trailing `else`. Its delimiter depth is
+    /// **2** at every length, which is the whole reason the depth limit never saw it.
+    fn else_if_chain(branches: usize) -> String {
+        let mut src = String::from("fn dispatch(a: int): int {\n  if a == 0 {\n    return 0\n");
+        for i in 1..branches {
+            src.push_str(&format!("  }} else if a == {i} {{\n    return {i}\n"));
+        }
+        src.push_str("  } else {\n    return -1\n  }\n}\n");
+        src
+    }
+
+    #[test]
+    fn an_else_if_chain_is_flat_in_delimiters_and_right_nested_in_the_ast() {
+        // The two halves of the bug in one assertion. The pre-pass sees delimiter depth 2 no matter
+        // how long the chain gets — so the depth limit cannot bound it, which is why the chain has
+        // its own budget — while the AST is one `Stmt::If` per branch, each in the previous one's
+        // `else_body`, which is why every stage downstream recurses per branch.
+        let src = else_if_chain(4);
+        let source = Source::new(SourceId::FIRST, "chain.noe", src.clone());
+        let lexed = noeta_lexer::lex(&source);
+        assert_eq!(
+            recursion_prescan(&lexed.tokens).max_depth,
+            2,
+            "a chain must stay at delimiter depth 2 — if it does not, the depth limit would cover it"
+        );
+
+        let parsed = parse_str(&src);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Fn(decl) = &parsed.program.stmts[0] else {
+            panic!("expected a fn");
+        };
+        // Walk the chain: 4 `If`s, the last holding the trailing `else`'s block, and every span
+        // ending where the outermost one does (a nested `if` consumes the rest of the chain).
+        let mut stmt = &decl.body[0];
+        let mut seen = 0;
+        let outer_end = match stmt {
+            Stmt::If { span, .. } => span.end,
+            other => panic!("expected an if, got {other:?}"),
+        };
+        loop {
+            let Stmt::If {
+                else_body, span, ..
+            } = stmt
+            else {
+                panic!("expected an if, got {stmt:?}");
+            };
+            seen += 1;
+            assert_eq!(
+                span.end, outer_end,
+                "branch {seen} should end with the chain"
+            );
+            match else_body.as_deref() {
+                Some([nested @ Stmt::If { .. }]) => stmt = nested,
+                // The trailing `else`'s block: `return -1`.
+                Some([Stmt::Return { .. }]) => break,
+                other => panic!("unexpected else body: {other:?}"),
+            }
+        }
+        assert_eq!(seen, 4, "one `Stmt::If` per branch");
+    }
+
+    #[test]
+    fn a_chain_at_the_limit_parses_and_one_branch_longer_diagnoses() {
+        // The boundary, through the real `parse` entry point. The accepting side is the one that
+        // matters most: before the `if` grammar was flattened this shape aborted the process at ~725
+        // branches with no diagnostic, so a limit of `MAX_ELSE_CHAIN_BRANCHES` the parser could not
+        // actually deliver would be the same crash under a different name.
+        let at_limit = parse_str(&else_if_chain(MAX_ELSE_CHAIN_BRANCHES));
+        assert!(
+            at_limit.diagnostics.is_empty(),
+            "a chain at the limit should parse: {:?}",
+            at_limit.diagnostics
+        );
+        let past_limit = parse_str(&else_if_chain(MAX_ELSE_CHAIN_BRANCHES + 1));
+        assert_eq!(past_limit.diagnostics.len(), 1);
+        assert_eq!(
+            past_limit.diagnostics[0].code,
+            DiagnosticCode::NestingTooDeep
+        );
+        assert!(
+            past_limit.diagnostics[0].message.contains("else if"),
+            "the diagnostic should name the chain, not delimiter depth: {}",
+            past_limit.diagnostics[0].message
+        );
+        assert!(past_limit.program.stmts.is_empty());
+    }
+
+    /// `x = if a == 0 then 0 else if a == 1 then 1 else … else -1;` — the conditional-*expression*
+    /// chain of `branches` branches. Same right-nesting, a different price per branch, so a
+    /// different limit.
+    fn ternary_chain(branches: usize) -> String {
+        let mut src = String::from("a = 3;\nx = ");
+        for i in 0..branches {
+            src.push_str(&format!("if a == {i} then {i} else "));
+        }
+        src.push_str("-1;\n");
+        src
+    }
+
+    #[test]
+    fn the_conditional_expression_chain_has_its_own_stricter_limit() {
+        // The expression form desugars to a nested `match` per branch, which costs about four times
+        // what a statement branch does — measured, the pipeline aborted between 300 and 400 branches
+        // where the statement chain reached ~770, and the *inline* parse aborted around 200
+        // (non-monotonically) where the flattened statement chain never does. Pricing the two shapes
+        // together at the cheaper cost is exactly how a chain at the statement limit still overflowed
+        // after the statement chain had been bounded, so the pre-pass tells them apart by the `then`.
+        let at_limit = parse_str(&ternary_chain(MAX_TERNARY_CHAIN_BRANCHES));
+        assert!(
+            at_limit.diagnostics.is_empty(),
+            "a ternary chain at its limit should parse: {:?}",
+            at_limit.diagnostics
+        );
+        let past_limit = parse_str(&ternary_chain(MAX_TERNARY_CHAIN_BRANCHES + 1));
+        assert_eq!(past_limit.diagnostics.len(), 1);
+        assert_eq!(
+            past_limit.diagnostics[0].code,
+            DiagnosticCode::NestingTooDeep
+        );
+        assert!(
+            past_limit.diagnostics[0].message.contains("then"),
+            "the diagnostic should name the expression form: {}",
+            past_limit.diagnostics[0].message
+        );
+        // And the *statement* chain keeps its own, more generous limit — the stricter price must not
+        // leak across the two shapes.
+        assert!(
+            parse_str(&else_if_chain(MAX_TERNARY_CHAIN_BRANCHES + 1))
+                .diagnostics
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_long_chain_is_parsed_on_the_worker_however_shallow_it_is() {
+        // The offload half. A chain is flat in delimiters, so `INLINE_NESTING_DEPTH` can never send one
+        // to the worker however long it gets — which is why the conditional-expression form aborted
+        // *inside the parser* at ~200 branches, on a caller that had passed the headroom check. That
+        // cliff is non-monotone (the `stacker` red zone), so it cannot be bounded by a limit; the parse
+        // has to move. `INLINE_CHAIN_BRANCHES` is what moves it, and that it stays below both limits —
+        // so no admissible chain is still parsed inline — is a `const` assertion next to the constants.
+        let src = ternary_chain(MAX_TERNARY_CHAIN_BRANCHES);
+        let source = Source::new(SourceId::FIRST, "chain.noe", src);
+        let lexed = noeta_lexer::lex(&source);
+        let scan = recursion_prescan(&lexed.tokens);
+        assert!(
+            scan.max_depth <= INLINE_NESTING_DEPTH,
+            "the depth test must NOT be what offloads this — that is the whole bug"
+        );
+        assert!(
+            scan.max_chain > INLINE_CHAIN_BRANCHES,
+            "the chain test must be what offloads it"
+        );
+
+        // And it parses on a caller that clears the headroom, so the offload is not merely
+        // `short_on_stack` doing the work by accident.
+        let parsed = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(INLINE_PARSE_HEADROOM + 512 * 1024)
+                .spawn_scoped(scope, || {
+                    parse_str(&ternary_chain(MAX_TERNARY_CHAIN_BRANCHES))
+                })
+                .expect("spawn the just-over-the-headroom probe thread")
+                .join()
+                .expect("the just-over-the-headroom probe panicked")
+        });
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    }
+
+    #[test]
+    fn sibling_else_if_chains_are_counted_separately() {
+        // The over-counting hazard the per-depth reset exists to avoid: many *sibling* chains in one
+        // block must not sum into one budget, or ordinary code with a lot of `if`/`else if` in a row
+        // would be rejected. Enough chains here that a naive `else`-counter would be well past the
+        // limit.
+        let chains = (MAX_ELSE_CHAIN_BRANCHES / 2) + 1;
+        let mut src = String::from("fn f(a: int): int {\n");
+        for i in 0..chains {
+            src.push_str(&format!(
+                "  if a == {i} {{\n    return {i}\n  }} else if a == -{} {{\n    return 1\n  }}\n",
+                i + 1
+            ));
+        }
+        src.push_str("  return -1\n}\n");
+        let parsed = parse_str(&src);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{chains} two-branch chains should parse: {:?}",
+            parsed.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_chain_at_the_limit_parses_on_the_smallest_pipeline_stack() {
+        // `MAX_ELSE_CHAIN_BRANCHES` is derived from `MIN_PIPELINE_STACK`, so the parser's share of
+        // that budget has to fit inside it with the rest left over for the stages that follow. This
+        // is the parse half, on exactly that stack, through `parse_inner` so the thread under test
+        // *is* the stack under test (`parse_in` would offload a short-on-stack caller and measure
+        // nothing). The pipeline half — check, lower, run — is pinned end-to-end by
+        // `tests/conformance/diagnostics/else_chain_at_the_limit.noe`.
+        //
+        // It fails the way a stack overflow fails: by aborting the test process. If that happens, the
+        // `if` grammar has started recursing per branch again (or a chain got much more expensive per
+        // branch); re-measure `STACK_PER_ELSE_CHAIN_BRANCH` rather than enlarging this thread.
+        let src = else_if_chain(MAX_ELSE_CHAIN_BRANCHES);
+        let source = Source::new(SourceId::FIRST, "chain.noe", src);
+        let lexed = noeta_lexer::lex(&source);
+        let parsed = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(MIN_PIPELINE_STACK)
+                .spawn_scoped(scope, || {
+                    parse_inner(
+                        &source,
+                        &lexed.tokens,
+                        Edition::DEFAULT,
+                        &noeta_lexer::TextTiers::default(),
+                    )
+                })
+                .expect("spawn the pipeline-stack probe thread")
+                .join()
+                .expect("the pipeline-stack probe panicked")
+        });
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "a chain at the limit should parse on {} MiB: {:?}",
+            MIN_PIPELINE_STACK / (1024 * 1024),
+            parsed.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_caller_just_over_the_headroom_survives_the_deepest_inline_parse() {
+        // The bug the pairing of `INLINE_NESTING_DEPTH` with `INLINE_PARSE_HEADROOM` used to have:
+        // at 16 levels the inline range needed ~6.6 MiB while the headroom asked for 6, so a caller
+        // holding *just over* the headroom passed the check and then overflowed — measured, a
+        // 6.2 MiB caller aborted on 15 nested function values. Anything under the headroom was safe
+        // only by accident, because falling short is what got it offloaded.
+        //
+        // So probe the worst case for the inline path: the deepest shape that still parses inline,
+        // on the smallest stack that still counts as "enough headroom". A `stack_size` request is
+        // the whole thread, and `remaining_stack` is measured a few frames in, so ask for a little
+        // over the headroom to land just above it.
+        let src = nested_function_values(INLINE_NESTING_DEPTH);
+        let parsed = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(INLINE_PARSE_HEADROOM + 128 * 1024)
+                .spawn_scoped(scope, || parse_str(&src))
+                .expect("spawn the headroom probe thread")
+                .join()
+                .expect("a caller just over INLINE_PARSE_HEADROOM must survive an inline parse")
+        });
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "the headroom probe should parse cleanly: {:?}",
             parsed.diagnostics
         );
     }

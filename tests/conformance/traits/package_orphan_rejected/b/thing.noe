@@ -1,0 +1,4 @@
+pub class Thing {
+    pub id: int
+    fn new(id: int): Thing { return Thing { id: id } }
+}

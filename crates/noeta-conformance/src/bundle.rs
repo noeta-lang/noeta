@@ -89,7 +89,7 @@ pub fn run_bundle_roundtrip(root: &Path, only: Option<&Path>) -> BundleReport {
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry) {
+            match crate::read_case_workspace(&case.entry) {
                 Ok(raw) => roundtrip_workspace(&name, &raw, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
@@ -176,13 +176,17 @@ fn roundtrip_single(name: &str, text: &str, report: &mut BundleReport) {
     let source = Source::new(SourceId::FIRST, name, text);
     let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
 
-    if !noeta_db::tokens(&db, src).0.diagnostics.is_empty()
-        || !noeta_db::ast(&db, src).0.diagnostics.is_empty()
-    {
+    if noeta_diagnostics::has_errors(
+        noeta_db::tokens(&db, src)
+            .0
+            .diagnostics
+            .iter()
+            .chain(noeta_db::ast(&db, src).0.diagnostics.iter()),
+    ) {
         report.not_run.parse_failed += 1;
         return;
     }
-    if !noeta_db::checked(&db, src).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::checked(&db, src).diagnostics) {
         // A checker-rejected program produces no module — nothing to serialize, so it exercises no
         // round trip. Counting it matched (as this used to) inflated the headline with programs
         // that never produced bytes at all.
@@ -198,13 +202,19 @@ fn roundtrip_single(name: &str, text: &str, report: &mut BundleReport) {
 /// The workspace analogue of [`roundtrip_single`] for a multi-file fixture.
 fn roundtrip_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut BundleReport) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
+    let ws = noeta_db::workspace(
+        &db,
+        &raw.entry,
+        &raw.modules,
+        noeta_lexer::Edition::DEFAULT,
+        &raw.paths,
+    );
 
     if noeta_db::linked(&db, ws).program.is_err() {
         report.not_run.link_failed += 1;
         return;
     }
-    if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::linked_checked(&db, ws).diagnostics) {
         report.not_run.checker_rejected += 1;
         return;
     }

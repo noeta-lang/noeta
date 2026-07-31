@@ -1,0 +1,43 @@
+// A tier block's own `use` may name a **package module**, not just a std one. The block-scope
+// overlay qualifies `Thing` to `probe.side.Thing`, and the block's `use` now also drives *linking*,
+// so the declaration that identity names is actually merged into the program. Before the fix
+// nothing merged it: `noeta check` reported 0 errors (a qualified name it does not adjudicate) and
+// `noeta test` failed every use site with "cannot find type `probe.side.Thing` in this scope",
+// while the same shapes over std worked throughout — an extension module resolves through the
+// registry and never needs the unit graph.
+//
+// This case pins the **inactive** half, which is all the harness can see (it never activates a
+// tier): with no tier active the whole block is stripped before lowering, so the `use`, the fn, and
+// every reference vanish together. The merged declarations are inert — each carries a *qualified*
+// identity, so it binds no short name and nothing references it — so the program's own output is
+// unchanged and both backends lower the identical stripped program. Nothing is left behind either:
+// the import stays inside the block rather than being hoisted, so no dangling `use` binds `Thing`.
+// (The active half — the block's `use` making `Thing` resolve under `noeta test` — is gated by the
+// `noeta test` CLI tests.)
+// expect: stdout "7"
+// expect: stdout "done"
+// expect: exit 0
+
+fn double(n: int): int {
+    return n * 2
+}
+
+@test {
+    use probe.side.{Thing}
+
+    fn builds(): void {
+        x = Thing { n: 3 }
+        assert(x.n == 3)
+    }
+}
+
+@bench {
+    use probe.side
+
+    fn whole_module(): void {
+        assert(side.make() == 3)
+    }
+}
+
+echo double(3) + 1
+echo "done"

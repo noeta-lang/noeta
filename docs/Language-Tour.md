@@ -1,6 +1,6 @@
 # Language Tour
 
-A guided, example-driven walk through the whole language in one sitting. Every snippet runs with `noeta run`. If you have not built the toolchain yet, start with [Getting Started](Getting-Started).
+A guided, example-driven walk through the whole language in one sitting. Every snippet runs with `noeta run`. If you have not installed the toolchain yet, start with [Getting Started](Getting-Started).
 
 This tour teaches by building up. For the exhaustive rules on any topic, follow the links to the reference pages.
 
@@ -57,7 +57,7 @@ The `~` operator concatenates (display-concatenating non-strings):
 echo "users/" ~ 42 ~ "/profile"    // users/42/profile
 ```
 
-Strings carry a rich method set — `.upper()`, `.trim()`, `.split(",")`, `.replace(a, b)`, `.contains(s)`, and more. See [Standard Library](Standard-Library).
+Strings carry a rich method set — `.upper()`, `.trim()`, `.split(",")`, `.replace(a, b)`, `.contains(s)`, and more. See [Built-ins](Standard-Library).
 
 ---
 
@@ -97,8 +97,7 @@ for (idx, x) in ["a", "b"].enumerate() {    // destructure the (index, value) tu
 }
 ```
 
-(No shadowing: the loop variables pick names distinct from the `mut i` above — one name, one
-meaning, per scope. → E0059 in [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause).)
+(No shadowing: the loop variables pick names distinct from the `mut i` above — one name, one meaning, per scope.)
 
 `break` and `continue` work as expected. → [Control Flow & Pattern Matching](Control-Flow-and-Pattern-Matching).
 
@@ -162,7 +161,7 @@ twice = fn(f, x) => f(f(x))
 echo twice(inc, 10)         // 12
 ```
 
-The pipe `|>` threads a value as the first argument of the next call, which reads left-to-right:
+The pipe `|>` threads a value into the next call as its first argument — or, if a [label](Functions-and-Closures#piping-into-a-parameter-that-isnt-the-first) has already claimed that parameter, into the first one still free. Either way it reads left-to-right:
 
 ```noeta
 fn double(n: int): int { return n * 2 }
@@ -290,7 +289,7 @@ echo [1, 2, 3, 4, 5].iter()
     .collect()                 // [10, 20, 30]
 ```
 
-→ [Standard Library](Standard-Library).
+→ [Built-ins](Standard-Library).
 
 ---
 
@@ -313,7 +312,17 @@ echo pick(false) ?? 0          // 0
 
 The `?` operator propagates a failure, early-returning it from the current function:
 
-```noeta ignore
+```noeta
+struct Item { price: float  qty: int }
+
+enum OrderError { Empty }
+
+class Order {
+    pub items: List<Item>
+    fn new(items: List<Item>): Order { return Order { items: items } }
+}
+
+// sample:start
 fn validate(items: List<Item>): Result<void, OrderError> {
     if items.len() == 0 { return Err(OrderError.Empty) }
     return Ok()
@@ -323,6 +332,16 @@ fn place(items: List<Item>): Result<Order, OrderError> {
     validate(items)?                        // returns the Err here if invalid
     return Ok(Order.new(items))
 }
+
+echo match place([Item { price: 9.99, qty: 2 }]) {
+    Ok(o)  => "placed ${o.items.len()} item(s)",
+    Err(_) => "rejected",
+}                                           // placed 1 item(s)
+
+echo match place([]) {
+    Ok(_)  => "placed",
+    Err(_) => "rejected",
+}                                           // rejected
 ```
 
 → [Error Handling](Error-Handling).
@@ -331,7 +350,7 @@ fn place(items: List<Item>): Result<Order, OrderError> {
 
 ## Generics and traits
 
-Type parameters don't affect dispatch — one compiled shape serves every instantiation — though values carry a reflected type tag, so `type_of` and `x is List<int>` can still recover the type arguments. They can be bounded by a built-in trait:
+Generics let one definition serve many types without giving up checking — a `Box<T>` holds any `T`, and `max<T: Comparable>` accepts any type that can be ordered. Type parameters can be bounded by a built-in trait:
 
 ```noeta
 class Box<T> {
@@ -357,17 +376,18 @@ class Money {
 echo Money.new(5) < Money.new(9)     // true
 ```
 
+(Under the hood, one compiled shape serves every instantiation — type parameters do not affect dispatch — but values carry a reflected type tag, so `type_of` and `x is List<int>` still recover the type arguments.)
+
 → [Generics & Traits](Generics-and-Traits).
 
 ---
 
 ## Modules
 
-Split code across files with `namespace` and `use`. Declarations are private unless marked `pub`:
+Split code across files. A file **is** a module, and its path is derived from where the file sits — the package's import prefix plus the file's path inside the package — so there is nothing to declare. Declarations are private unless marked `pub`:
 
 ```noeta
-// models.noe
-namespace App.Models;
+// src/models.noe, in the package `local/shop`  →  the module `shop.models`
 
 pub class User {
     pub name: string
@@ -376,9 +396,9 @@ pub class User {
 ```
 
 ```noeta check
-// main.noe
-namespace App.Main;
-use App.Models.User;
+// src/main.noe  →  the module `shop.main`
+
+use shop.models.User
 
 echo User.new("Ada").name        // Ada
 ```
@@ -392,7 +412,7 @@ echo math.sqrt(16.0)             // 4.0
 echo json.stringify([1, 2, 3])   // [1,2,3]
 ```
 
-→ [Modules & Visibility](Modules), [Standard-Library Modules](Standard-Library-Modules).
+→ [Modules & Visibility](Modules), the [standard library reference](Std).
 
 ---
 
@@ -424,8 +444,6 @@ concurrent {
 Putting it together — a small order pipeline (this is `examples/orders.noe`, trimmed):
 
 ```noeta
-namespace Demo;
-
 struct Item { price: float  qty: int }
 
 enum OrderError {
@@ -465,6 +483,7 @@ total: 24.48
 
 You have seen the whole surface. For depth:
 
-- **Reference** — the [Language & standard-library section](Home#language--standard-library-reference) has one page per topic.
-- **Tools** — [Testing](Testing), [Benchmarking](Benchmarking), and [Documentation & Dev Tiers](Documentation-and-Tiers) cover the `@test`/`@bench`/`@doc` workflow.
+- **Conventions** — [how the ecosystem names things](Conventions), and which of those names the compiler enforces.
+- **Reference** — the [Language reference](Home#language-reference) has one page per topic.
+- **Tools** — [Testing](Testing), [Benchmarking](Benchmarking), [Dev Tiers](Dev-Tiers), and [Documentation](Documentation-and-Tiers) cover the `@test`/`@bench`/`@doc` workflow.
 - **Under the hood** — [The Virtual Machine](The-Virtual-Machine) and [Memory Management](Memory-Management) explain how it all runs.

@@ -15,7 +15,7 @@ Two build verbs emit WebAssembly, and they emit **different things** — deployi
 
 The edge deployment story is entirely the second row. `--serve` produces a genuine `wasi:http/incoming-handler` component (it exports the `wasi:http/proxy` world, the exact interface Spin and `wasmtime serve` consume) — not a wrapped CLI module and not a vendor-specific format. That is why the same artifact runs across `wasi:http` hosts without re-targeting.
 
-Both verbs are **binary surgery, not compilation**: your program's compiled bundle is stapled into a prebuilt engine (`noeta_bundle::staple_wasm`), so a build is milliseconds and needs no Rust toolchain at app-build time — with one packaging caveat covered under [What's missing for one-click deploy](#whats-missing-for-one-click-deploy).
+Both verbs are **binary surgery, not compilation**: your program's compiled bundle is stapled into a prebuilt engine (`noeta_bundle::staple_wasm`), so a build is milliseconds and needs no Rust toolchain at app-build time — provided the prebuilt engine is where the build can find it, covered under [What the deploy asks of you](#what-the-deploy-asks-of-you).
 
 ## The program
 
@@ -35,12 +35,12 @@ fn handle(req: Request): Response {
 server.serve(8080, handle)
 ```
 
-The `port` argument to `server.serve` is inert at the edge — the platform owns the socket and invokes your component per request — but it is what `noeta run app.noe` binds locally, so the one program serves both ways. (The `noeta serve` CLI subcommand is a different convenience — it expects a top-level `fn fetch` and drives its own `--port`; a program that calls `server.serve` itself, as here, is run directly with `noeta run`.) Routing (`req.path()`), reading the request (`req.method()`, `req.header(name)`, `req.body()`), and building the reply (`server.response(status, body, headers?)`, `Response.with_header`) are all just code; there is no framework or runtime hook to learn. See [Standard-Library Modules → Server](Standard-Library-Modules#server-httpserver) for the full API.
+The `port` argument to `server.serve` is inert at the edge — the platform owns the socket and invokes your component per request — but it is what `noeta run app.noe` binds locally, so the one program serves both ways. Don't confuse this with the similarly named CLI verb: `noeta serve` is a separate convenience that expects a top-level `fn fetch(req: Request): Response` and drives its own `--port`. A program that calls `server.serve` itself, like this one, is run directly with `noeta run`. Routing (`req.path()`), reading the request (`req.method()`, `req.header(name)`, `req.body()`), and building the reply (`server.response(status, body, headers?)`, `Response.with_header`) are all just code; there is no framework or runtime hook to learn. See [std.http](std-http) for the full API.
 
 ## Building the artifact
 
 ```sh
-noeta build --serve hello.noe          # → hello.serve.wasm (~3 MiB)
+noeta build --serve hello.noe          # → hello.serve.wasm (~4.3 MiB today; the size tracks the embedded runtime)
 noeta build --serve hello.noe -o out/app.wasm   # explicit output path
 ```
 
@@ -138,15 +138,15 @@ with a `fastly.toml` naming the prebuilt component as the artifact.
 | Every route answers `500` with "no program stapled in" | The component is the generic `noeta-wasm-serve` shell, not your app. | Rebuild with `noeta build --serve app.noe`; deploy that output, not a hand-copied component. |
 | `500` with "the program produced no HTTP response" + a traceback | Your program never called `server.serve`, or the handler aborted before replying. | The `500` body carries the stdout and diagnostics — debug it exactly as locally. Confirm the top level calls `server.serve(port, handler)`. |
 | Outbound `client.get(...)` errors at the edge but works under `noeta run` | The target host isn't allowlisted. | Add it to `allowed_outbound_hosts` in `spin.toml` (Fastly: the equivalent backend/allowlist config). |
-| `noeta build --serve` fails: "building the serve component failed (is the wasm32-wasip2 target installed?)" | The prebuilt component isn't packaged with your toolchain yet, so the build fell back to compiling it, and the target is missing. | `rustup target add wasm32-wasip2`, or point `NOETA_WASM_SERVE` at a prebuilt `noeta-wasm-serve.wasm`. See below. |
+| `noeta build --serve` fails: "building the serve component failed (is the wasm32-wasip2 target installed?)" | No prebuilt component was found, so the build fell back to compiling it, and the target is missing. | `rustup target add wasm32-wasip2`, or point `NOETA_WASM_SERVE` at a prebuilt `noeta-wasm-serve.wasm`. See below. |
 | `fs.*` calls error at the edge | No directory was preopened, or the write outlived the request. | Grant a preopen in the platform config for scratch IO; never rely on the filesystem for cross-request persistence. |
 | `os.exec` / `os.spawn` errors | WASI has no subprocesses. | Not fixable on this target — restructure to call a service instead. |
 | Telemetry emits nothing | No OTLP exporter on wasm. | Expected; spans still propagate context. Export from an upstream collector if you need it. |
 
-## What's missing for one-click deploy
+## What the deploy asks of you
 
-The emitted component is the correct shape and runs on Spin unmodified — verified. The gap to a literal one-command deploy is **packaging, not mechanics**:
+The emitted component is the correct shape and runs on Spin unmodified. Three things sit between `noeta build --serve` and a live URL:
 
-- **The prebuilt serve component isn't shipped with the toolchain yet.** `noeta build --serve` resolves the generic component to staple into via a ladder: the `NOETA_WASM_SERVE` environment variable → a `noeta-wasm-serve.wasm` sitting next to the `noeta` binary → **an on-demand `cargo build` of the `noeta-wasm-serve` crate** (`wasm32-wasip2`). A developer checkout hits the third rung transparently (it just needs `rustup target add wasm32-wasip2`), but a binary-only released toolchain has none of the first two in place today, so `--serve` cannot build offline there. Packaging the prebuilt component beside the toolchain (the same distribution decision already pending for the native AOT runtime and the wasip1 runner) closes this. Tracked in [`plans/backlog.md`](https://github.com/noeta-lang/noeta/blob/main/plans/backlog.md).
-- **Fastly Compute is unverified** (see above) — a second proven platform beyond Spin needs an account and a real deploy.
-- **The hosted deploy itself needs an account.** `spin deploy` (or `fastly compute publish`) is inherently a user action — this guide and the example script take you to the edge of it; the final push, and the screenshot/notes that prove it, are yours to run once an account exists.
+- **`--serve` needs a serve component to staple into, and resolves one via a ladder:** the `NOETA_WASM_SERVE` environment variable → a `noeta-wasm-serve.wasm` sitting next to the `noeta` binary → **an on-demand `cargo build` of the `noeta-wasm-serve` crate** (`wasm32-wasip2`). A developer checkout takes the third rung transparently, needing only `rustup target add wasm32-wasip2`. A binary-only toolchain has neither of the first two in place, so give it one — set `NOETA_WASM_SERVE`, or drop a prebuilt `noeta-wasm-serve.wasm` beside the binary — if it must build offline.
+- **Spin is the verified platform.** Fastly Compute is documented above from its published contract rather than from a deploy we have run; treat that half as a starting point, not a tested path.
+- **The hosted deploy authenticates as you.** `spin deploy` (or `fastly compute publish`) uses *your* account, so no guide can run it for you. Everything up to that point — build, manifest, local smoke test — is covered above and scripted in the example's `deploy.sh`; the final push is one command.

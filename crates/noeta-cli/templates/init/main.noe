@@ -1,5 +1,8 @@
 // The program's entry point. Top-level statements run top to bottom — there is no
-// `main` function. Sibling `.noe` files in this directory are linkable modules.
+// `main` function. Every other `.noe` file under `src/` is a module, and its import
+// path is derived from where the file sits — there is no `namespace` to declare.
+// `src/models.noe` is `<package>.models`, `src/deep/nested.noe` is
+// `<package>.deep.nested`. Import one with `use <package>.models.{Thing}`.
 
 @doc {
     Builds the greeting for `name`.

@@ -1,0 +1,33 @@
+// A payload-carrying variant pattern is CALL-SHAPED (`List(inner)`, `some(x)`, `Ok(v)`), so it can
+// never be confused with a binding, needs no qualification, and — because it emits a real test —
+// never makes a later arm unreachable (E0066). Only the payload-free spelling ever collided with
+// the binding form, and that is resolved against the scrutinee's own enum now
+// (`match_bare_variant_pattern.noe`); this case pins that the call-shaped form is unaffected.
+// expect: stdout "list of string"
+// expect: stdout "int"
+// expect: stdout "some 3"
+// expect: stdout "empty"
+// expect: exit 0
+enum Type {
+    Int;
+    List(inner: string);
+}
+
+fn describe(ty: Type): string {
+    return match ty {
+        List(inner) => "list of ${inner}",
+        Type.Int => "int",
+    }
+}
+
+fn show(o: ?int): string {
+    return match o {
+        some(n) => "some ${n}",
+        none => "empty",
+    }
+}
+
+echo describe(Type.List("string"))
+echo describe(Type.Int)
+echo show(some(3))
+echo show(none)

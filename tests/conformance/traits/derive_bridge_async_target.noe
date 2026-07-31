@@ -1,0 +1,16 @@
+// A SYNCHRONOUS trait method cannot bridge to an `async` method: the synthesized bridge would
+// return the target's `Future<int>` under a declared `int`, and its body is not an async context,
+// so there is nowhere legal to await it. Refused at plan time (E0050) rather than synthesized into
+// a method whose declared type its value does not have. (The reverse — an `async` trait method
+// bridging to a synchronous target — is fine; that is just the value the `async` wrapper wraps.)
+// expect: error E0050 at 10:9
+// expect: exit 1
+trait Sized2 { fn size(): int }
+
+@derive(Sized2, size: measure)
+struct Bag {
+    label: string
+    async fn measure(): int { return 3 }
+}
+
+echo Bag { label: "b" }.size()

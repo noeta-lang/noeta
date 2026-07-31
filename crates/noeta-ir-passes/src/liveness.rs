@@ -64,7 +64,8 @@ pub struct StmtLiveness {
     /// * `If`        → `[then, else?]` (else present only when the `If` has one);
     /// * `While`     → `[cond, body]`;
     /// * `For`       → `[body]`;
-    /// * `Match`     → one per arm, in arm order;
+    /// * `Match`     → per arm, in arm order: the arm's guard block (only when the arm is
+    ///   guarded), then its body;
     /// * `Logical`   → `[right]`;
     /// * `Coalesce`  → `[fallback]`;
     /// * `Decl(Fn)`  → `[body]` (the function body, its own scope);
@@ -258,25 +259,49 @@ fn analyze_stmt(stmt: &Stmt, live: &mut VarSet) -> StmtLiveness {
         } => {
             let live_out = live.clone();
             let mut joined = VarSet::new();
-            let mut sub = Vec::with_capacity(arms.len());
-            for arm in arms {
-                let arm_l = analyze_block(&arm.body, &live_out);
+            // A failed pattern — or a **false guard** — continues at the *next* arm's test, so a
+            // guard's live-out must include every later arm's entry set (a name whose last use
+            // sits in a later arm must survive an earlier guard's evaluation). Walk the arms in
+            // reverse, accumulating the entry sets seen so far; bodies exit the whole `match`, so
+            // they are analyzed against the plain `live_out` as before.
+            let mut fallthrough = live_out.clone();
+            let mut sub_rev: Vec<BlockLiveness> = Vec::with_capacity(arms.len());
+            for arm in arms.iter().rev() {
+                let body_l = analyze_block(&arm.body, &live_out);
                 // Names the arm pattern binds are local to the arm and do not escape it.
                 let bound = pattern_names(&arm.pattern);
-                for name in arm_l.live_in.iter() {
+                let guard_l = arm.guard.as_ref().map(|g| {
+                    // The guard's successors: the arm body (guard true) or the next arm's test
+                    // (guard false, the accumulated `fallthrough`).
+                    let mut g_out = body_l.live_in.clone();
+                    g_out.extend(fallthrough.iter().cloned());
+                    analyze_block(&g.block, &g_out)
+                });
+                let entry = match &guard_l {
+                    Some(g) => &g.live_in,
+                    None => &body_l.live_in,
+                };
+                for name in entry.iter() {
                     if !bound.contains(name) {
                         joined.insert(name.clone());
+                        fallthrough.insert(name.clone());
                     }
                 }
-                sub.push(arm_l);
+                // Reversed per-arm order (body, then guard) so the final reversal below restores
+                // the documented forward order: per arm, guard (when present) then body.
+                sub_rev.push(body_l);
+                if let Some(g) = guard_l {
+                    sub_rev.push(g);
+                }
             }
+            sub_rev.reverse();
             let scrut_uses = atom_uses(scrutinee);
             let dies = deaths(&scrut_uses, &joined);
             *live = joined;
             extend(live, scrut_uses);
             StmtLiveness {
                 dies_here: dies,
-                sub,
+                sub: sub_rev,
             }
         }
         Stmt::Logical { left, right, .. } => {
@@ -452,6 +477,9 @@ fn collect_stmt_vars(stmt: &Stmt, out: &mut VarSet) {
                 for name in pattern_names(&arm.pattern) {
                     out.insert(name);
                 }
+                if let Some(guard) = &arm.guard {
+                    collect_block_vars(&guard.block, out);
+                }
                 collect_block_vars(&arm.body, out);
             }
         }
@@ -511,12 +539,37 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(receiver);
             args.iter().for_each(&mut *f);
         }
-        Rvalue::Call { callee, args, .. } => {
+        // A forwarding call's `type_args` are operands like any other — a pass-through slot reads
+        // the enclosing fn's `$ty` local, so skipping them here would let that local look dead and
+        // be dropped out from under the call.
+        Rvalue::Call {
+            callee,
+            args,
+            type_args,
+            ..
+        } => {
             f(callee);
             args.iter().for_each(&mut *f);
+            type_args.iter().for_each(&mut *f);
         }
-        Rvalue::Method { receiver, args, .. }
-        | Rvalue::TraitMethod { receiver, args, .. } => {
+        // A forwarding METHOD call's type arguments are operands too — same reason as `Call`'s
+        // above. A `TraitMethod` route is baked and never forwards.
+        Rvalue::Method {
+            receiver,
+            args,
+            type_args,
+            // The dynamic construction tag's hidden slot is an operand like any other: a nested `fn`
+            // or closure that constructs through it CAPTURES the enclosing `$ty<i>` local, and the
+            // slot must stay live across the call it re-tags after.
+            reflect_slot,
+            ..
+        } => {
+            f(receiver);
+            args.iter().for_each(&mut *f);
+            type_args.iter().for_each(&mut *f);
+            reflect_slot.iter().for_each(&mut *f);
+        }
+        Rvalue::TraitMethod { receiver, args, .. } => {
             f(receiver);
             args.iter().for_each(&mut *f);
         }
@@ -572,16 +625,32 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
                 }
             }
         }
+        // A narrow's `dynamic` head-name atom is an operand like any other: it is the temporary the
+        // preceding `TypeArgName`/`TypeSlotName` produced, so a walk that skipped it would lose that
+        // temporary's last use.
+        Rvalue::As {
+            operand, dynamic, ..
+        }
+        | Rvalue::TypeTest {
+            operand, dynamic, ..
+        } => {
+            f(operand);
+            if let Some(name) = dynamic {
+                f(name);
+            }
+        }
         Rvalue::Try { operand, .. }
-        | Rvalue::As { operand, .. }
-        | Rvalue::TypeTest { operand, .. }
         | Rvalue::TypeOf { operand, .. }
+        | Rvalue::TypeArgName { operand, .. }
         | Rvalue::FieldsOf { operand, .. }
+        | Rvalue::TraitsOf { operand, .. }
         | Rvalue::MaskWidth { operand, .. } => f(operand),
-        // `params_of(target)` reads its runtime target-string operand.
-        Rvalue::ParamsOf { target, .. } => f(target),
-        // `field_specs_of(name)` reads its runtime type-name operand.
-        Rvalue::FieldSpecsOf { name, .. } => f(name),
+        // The forwarded `type_name::<T>()` reads the enclosing fn's hidden type-argument slot.
+        Rvalue::TypeSlotName { slot, .. } => f(slot),
+        // `params_of(target)` / `returns_of(target)` read their runtime target-string operand.
+        Rvalue::ParamsOf { target, .. } | Rvalue::ReturnsOf { target, .. } => f(target),
+        // `field_specs_of(name)` / `variants_of(name)` read their runtime type-name operand.
+        Rvalue::FieldSpecsOf { name, .. } | Rvalue::VariantsOf { name, .. } => f(name),
         // `construct(name, fields)` reads its type-name and field-list operands.
         Rvalue::Construct { name, fields, .. } => {
             f(name);

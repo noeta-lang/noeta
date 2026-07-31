@@ -67,20 +67,62 @@ use noeta_span::Span;
 
 /// Why a program could not be lowered to bytecode yet — a node outside the current subset.
 /// The differential harness treats this as "skip", not "fail".
+///
+/// **The span is the difference between a bug report and a scavenger hunt.** The compiler covers
+/// the whole language, so reaching this at all is an internal invariant break: the checker accepted
+/// the program and the backend should have compiled it. Without a location that surfaced as a bare
+/// `internal error: the VM cannot compile this program: <reason>` — no file, no line, nothing to
+/// grep — which reads exactly like a broken toolchain rather than one construct in one function.
+/// Every site that knows where it is now says so, and [`Unsupported::diagnostic`] renders it
+/// through the ordinary `ariadne` path with the offending source under a caret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unsupported {
     pub reason: String,
+    /// Where the offending construct is, when the compiler knows. `None` only where the failure
+    /// belongs to no single node — keep it that way: a `None` here costs a reader the whole file.
+    pub span: Option<Span>,
 }
 
-impl std::fmt::Display for Unsupported {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "unsupported by the VM: {}", self.reason)
+impl Unsupported {
+    /// This failure as a renderable [`Diagnostic`], when a location is known.
+    ///
+    /// `None` means "there is nothing to point at" — the caller falls back to
+    /// [`Display`](std::fmt::Display), which is the pre-span behavior and the honest one when no
+    /// span exists.
+    pub fn diagnostic(&self) -> Option<Diagnostic> {
+        self.span.map(|span| {
+            Diagnostic::error(
+                DiagnosticCode::InternalCompilerError,
+                span,
+                format!("the VM cannot compile this program: {}", self.reason),
+            )
+            .with_help(
+                "this is a compiler bug, not a mistake in your program: the type checker accepted \
+                 it, so the bytecode backend should have compiled it. Please report it with the \
+                 construct above.",
+            )
+        })
     }
 }
 
-fn unsupported<T>(reason: impl Into<String>) -> Result<T, Unsupported> {
+impl std::fmt::Display for Unsupported {
+    /// The span-less rendering — the one sentence every front-end used to compose by hand out of
+    /// `.reason`. Owning it here means a front-end with no `SourceMap` writes `{u}` and cannot word
+    /// it differently from the next one.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "internal error: the VM cannot compile this program: {}",
+            self.reason
+        )
+    }
+}
+
+/// An `Unsupported` at a known location — what every site inside this crate should build.
+fn unsupported<T>(reason: impl Into<String>, span: Span) -> Result<T, Unsupported> {
     Err(Unsupported {
         reason: reason.into(),
+        span: Some(span),
     })
 }
 
@@ -121,6 +163,8 @@ fn ext_enum_type_info(en: &noeta_ext_abi::registry::ExtEnum) -> TypeInfo {
                 VariantSlots {
                     index: i as u32,
                     fields: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
+                    // A native enum declares cases, not wire values.
+                    backing: None,
                 },
             )
         })
@@ -273,7 +317,8 @@ fn compile_inner(
     opts: CompileOptions,
 ) -> Result<Module, Unsupported> {
     let native_roles = opts.registry.native_roles();
-    let mut reflection = noeta_ast::reflect::build(program, &native_roles);
+    let native_traits = noeta_ir::native_trait_impls(opts.registry);
+    let mut reflection = noeta_ast::reflect::build(program, &native_roles, &native_traits);
     // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
     // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
     // registry now, not the AST.
@@ -291,6 +336,7 @@ fn compile_inner(
         tojson_derives: module.tojson_derives,
         deserialize_recipes: module.deserialize_recipes,
         type_args: module.type_args,
+        type_arg_reprs: module.type_arg_reprs,
         destruct_reachable,
         cache_slots: module.cache_slots,
         // The attribute manifest + type registry, built from the AST by the *same* pure builder the
@@ -377,7 +423,8 @@ pub fn compile_session_with(
         .cloned()
         .collect();
     let native_roles = opts.registry.native_roles();
-    let mut reflection = noeta_ast::reflect::build(program, &native_roles);
+    let native_traits = noeta_ir::native_trait_impls(opts.registry);
+    let mut reflection = noeta_ast::reflect::build(program, &native_roles, &native_traits);
     // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
     // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
     // registry now, not the AST.
@@ -390,6 +437,9 @@ pub fn compile_session_with(
         // carry them (session-checker C5).
         map_packed: map_packed_sites.clone(),
         reflection,
+        // Seeded from the launch program, which is where an imported package's `@tier` declaration
+        // is: a fragment swapped in later carries none of its own.
+        expr_tiers: noeta_ast::desugar::expr_tier_handlers(program),
     };
     let module = session.snapshot(map_packed_sites, destruct_reachable);
     Ok((module, session))
@@ -445,10 +495,15 @@ fn compile_to_mc(
         noeta_ir::LowerOptions {
             real_isolates,
             registry,
+            // A whole program carries its own tier declarations; nothing is ambient to it.
+            ambient_expr_tiers: HashMap::new(),
         },
     )
     .map_err(|u| Unsupported {
         reason: format!("not yet lowered to the Core IR: {}", u.feature),
+        // The IR's own `Unsupported` already knows where it stopped; dropping that here is what
+        // left the run path with nothing to render.
+        span: Some(u.span),
     })?;
     let ir = noeta_ir_passes::insert_drops(&ir, relevance.as_ref());
     // Thread in-place-reuse tokens (Phase 5) onto self-update constructors. A pure function of the
@@ -466,7 +521,9 @@ fn compile_to_mc(
         tojson_derives: Vec::new(),
         deserialize_recipes: sites.deserialize_recipes,
         type_args: ir.type_args.clone(),
+        type_arg_reprs: Vec::new(),
         structural_eq_types: HashSet::new(),
+        native_type_names: HashMap::new(),
         packed_fields: HashMap::new(),
         key_capable_types: HashSet::new(),
         types: HashMap::new(),
@@ -483,6 +540,10 @@ fn compile_to_mc(
         debug,
         registry,
     };
+    // The type-argument table's reflection projection, interned BEFORE any body compiles so a
+    // `RetagDynamic` resolves through a table that is already complete (its own indices are the
+    // checker's, not this pool's, so ordering is a determinism property only).
+    module.type_arg_reprs = module.intern_type_arg_reprs(&ir);
     // Type registration reads the surface declarations (shapes, derives, the method/destructor
     // proto table) the IR carries verbatim; bodies are lowered from the IR.
     module.register_globals(program);
@@ -496,7 +557,7 @@ fn compile_to_mc(
             fc.stmt(stmt)?;
         }
         fc.code.push(Op::Halt);
-        fc.into_chunk(0, Vec::new(), Some("main".to_string()), Some(ir.span))
+        fc.into_chunk(0, 0, 0, Vec::new(), Some("main".to_string()), Some(ir.span))
     };
     module.protos[0] = main;
     // Intern each packed `map(...)` result layout (P-PACK 2.6 category B) and pair it with the call
@@ -557,6 +618,12 @@ pub struct SessionCompiler {
     /// only see the current entry's declarations. The tree-walker `Session` accumulates identically,
     /// so the session differential stays green.
     reflection: noeta_ast::reflect::ReflectionInfo,
+    /// Expression-tier handlers (`@html` → the `@tier(html, …, expr: Html)` fn) accumulated across
+    /// the launch compile and every entry since — the ambient table a later fragment lowers
+    /// against. A hot-swapped definition contains no `@tier` declaration (it lives in the package
+    /// the program imports), so without this its `@html { … }` lowers to a panic instead of a
+    /// template. Accumulated latest-wins, like [`Self::reflection`].
+    expr_tiers: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for SessionCompiler {
@@ -589,7 +656,9 @@ impl SessionCompiler {
             tojson_derives: Vec::new(),
             deserialize_recipes: Vec::new(),
             type_args: Vec::new(),
+            type_arg_reprs: Vec::new(),
             structural_eq_types: HashSet::new(),
+            native_type_names: HashMap::new(),
             packed_fields: HashMap::new(),
             key_capable_types: HashSet::new(),
             types: HashMap::new(),
@@ -612,6 +681,7 @@ impl SessionCompiler {
             mc,
             map_packed: Vec::new(),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
+            expr_tiers: HashMap::new(),
         }
     }
 
@@ -647,11 +717,18 @@ impl SessionCompiler {
         &self.mc.type_args
     }
 
+    /// The session's live **reflection projection** of [`Self::type_args`] — the
+    /// [`Module::type_arg_reprs`] every snapshot carries, as indices into `Module::type_reprs`.
+    /// Indexed by the *same* table index, and grown with it entry for entry.
+    pub fn type_arg_reprs(&self) -> &[Option<u32>] {
+        &self.mc.type_arg_reprs
+    }
+
     /// **Absorb** a freshly-checked type-argument table into the session's persistent one, by
     /// CONTENT, and return `sites` with every table index rewritten into session space.
     ///
     /// The session's [`Module::type_args`] is addressed **by index** from live runtime values (a
-    /// hidden call argument is an `int` const that indexes it; `Op::RetagDynamic`,
+    /// hidden type-argument atom is an `int` const that indexes it; `Op::RetagDynamic`,
     /// `Op::TypeSlotName` and the dynamic `Op::TypedModuleCall` resolve through it), so — exactly
     /// like protos, shapes and global slots — the table may only ever GROW: entry `i` must mean
     /// the same instantiation for the whole life of the session. A REPL's session checker
@@ -661,22 +738,32 @@ impl SessionCompiler {
     /// the session's table with that one would silently re-point every already-emitted hidden
     /// argument at a *different* type — a wrong-type bug with no crash to notice it.
     ///
-    /// So: merge on the checker's own dedup key (the whole [`noeta_ext_abi::TypeArgInfo`] — name
-    /// plus recipe — which is what `Checker`'s interner compares), keep every existing entry at its
-    /// existing index, append only genuinely new ones, and remap the incoming
-    /// [`Sites::hidden_arg_sites`] `Table(i)` atoms through `fresh index → session index` BEFORE
-    /// lowering, so the code this entry emits carries session-space indices.
+    /// So: merge on the checker's own dedup key, keep every existing entry at its existing index,
+    /// append only genuinely new ones, and remap the incoming [`Sites::hidden_arg_sites`] `Table(i)`
+    /// atoms through `fresh index → session index` BEFORE lowering, so the code this entry emits
+    /// carries session-space indices. "The checker's own dedup key" is literal, not by convention:
+    /// the lookup-or-append is [`noeta_check::intern_type_arg_entry`], the one the checker itself
+    /// interns with — so the pair key (`TypeArgInfo` **and** its [`noeta_ast::reflect::TypeRepr`],
+    /// which is what tells `Repository<Todo>` from `Repository<Order>`) cannot drift between them.
     ///
-    /// `HiddenArg::Forward(j)` is a per-fn hidden **slot** ordinal, not a table index, and is left
-    /// alone — as are `dynamic_recipe_sites` / `dynamic_attr_sites`, whose `u32`s are the same
-    /// kind of slot ordinal (the table lookup happens at run time, through the slot's value).
+    /// The parallel [`Sites::type_arg_reprs`] merges in lockstep — same indices, same order — and
+    /// the session's `Vec<Option<u32>>` projection into `mc.type_reprs` is rebuilt from the merged
+    /// order rather than recomputed positionally from a fresh IR. `mc.type_reprs` is itself
+    /// content-interned by [`ModuleCompiler::intern_type_repr`], so a prefix entry re-interns to the
+    /// index it already had.
+    ///
+    /// `HiddenArg::Forward(j)` is a per-body hidden **slot** ordinal, not a table index, and is left
+    /// alone — as are `forwarded_slot_sites` / `dynamic_construction_sites`, whose `u32`s are the
+    /// same kind of slot ordinal (the table lookup happens at run time, through the slot's value),
+    /// and `self_type_arg_sites`, whose `u32` is a position in a type's own parameter list.
     /// `hidden_arg_sites` is the only `Sites` field that carries a type-arg TABLE index.
     ///
     /// Borrowed back unchanged when the remap is the identity (the append-only REPL case, and any
     /// re-absorption of an already-absorbed bundle — the operation is idempotent), so the common
     /// path pays a scan and no clone.
     pub fn absorb_type_args<'s>(&mut self, sites: &'s Sites) -> std::borrow::Cow<'s, Sites> {
-        let remap = self.merge_type_args(&sites.type_arg_table);
+        let (remap, merged_reprs) =
+            self.merge_type_args(&sites.type_arg_table, &sites.type_arg_reprs);
         // Identity ⟺ the session table gained nothing AND every fresh entry sits at its own index;
         // then the incoming bundle already speaks session space and needs no rewrite.
         if self.mc.type_args.len() == sites.type_arg_table.len()
@@ -685,10 +772,11 @@ impl SessionCompiler {
             return std::borrow::Cow::Borrowed(sites);
         }
         let mut owned = sites.clone();
-        // Lowering embeds this verbatim as `Program::type_args` → `Module::type_args`; it must be
-        // the merged SUPERSET, not the fresh table, or the snapshot would shrink out from under
-        // indices older code still holds.
+        // Lowering embeds these verbatim as `Program::type_args` / `Program::type_arg_reprs` →
+        // `Module::type_args` / `Module::type_arg_reprs`; they must be the merged SUPERSET, not the
+        // fresh tables, or the snapshot would shrink out from under indices older code still holds.
         owned.type_arg_table = self.mc.type_args.clone();
+        owned.type_arg_reprs = merged_reprs;
         for slots in owned.hidden_arg_sites.values_mut() {
             for slot in slots.iter_mut() {
                 if let noeta_ext_abi::HiddenArg::Table(i) = slot
@@ -701,24 +789,41 @@ impl SessionCompiler {
         std::borrow::Cow::Owned(owned)
     }
 
-    /// Merge `fresh` into the session's type-argument table by content, returning the remap
-    /// (`fresh index → session index`). An entry already present keeps its session index; a new one
-    /// appends at the end. Linear scans over a table that holds one entry per *distinct forwarded
-    /// instantiation in the program* — the same shape (and cost) as the checker's own interner and
-    /// [`ModuleCompiler::intern_type_repr`].
-    fn merge_type_args(&mut self, fresh: &[noeta_ext_abi::TypeArgInfo]) -> Vec<u32> {
-        fresh
+    /// Merge the `(fresh, fresh_reprs)` pair into the session's type-argument tables by content
+    /// through the checker's own interner, returning the remap (`fresh index → session index`) and
+    /// the merged reprs table. An entry already present keeps its session index; a new one appends
+    /// at the end of both.
+    ///
+    /// The session stores the reprs *projected* into `mc.type_reprs` (`Vec<Option<u32>>`), which is
+    /// what the `Module` carries — so the merge materializes the pre-merge reprs back out of that
+    /// pool, interns through the shared key, and re-projects. One source of truth, no shadow copy
+    /// to drift; the pool is content-interned, so re-projecting a prefix entry is a lookup, not a
+    /// push. Linear scans over a table holding one entry per *distinct forwarded instantiation in
+    /// the program* — the same shape (and cost) as the checker's own interner.
+    fn merge_type_args(
+        &mut self,
+        fresh: &[noeta_ext_abi::TypeArgInfo],
+        fresh_reprs: &[Option<noeta_ast::reflect::TypeRepr>],
+    ) -> (Vec<u32>, Vec<Option<noeta_ast::reflect::TypeRepr>>) {
+        let mut reprs: Vec<Option<noeta_ast::reflect::TypeRepr>> = self
+            .mc
+            .type_arg_reprs
             .iter()
-            .map(
-                |info| match self.mc.type_args.iter().position(|e| e == info) {
-                    Some(i) => i as u32,
-                    None => {
-                        self.mc.type_args.push(info.clone());
-                        (self.mc.type_args.len() - 1) as u32
-                    }
-                },
-            )
-            .collect()
+            .map(|slot| slot.map(|i| self.mc.type_reprs[i as usize].clone()))
+            .collect();
+        let table = &mut self.mc.type_args;
+        let remap: Vec<u32> = fresh
+            .iter()
+            .zip(fresh_reprs)
+            .map(|(info, repr)| {
+                noeta_check::intern_type_arg_entry(table, &mut reprs, info.clone(), repr.clone())
+            })
+            .collect();
+        self.mc.type_arg_reprs = reprs
+            .iter()
+            .map(|r| r.as_ref().map(|r| self.mc.intern_type_repr(r)))
+            .collect();
+        (remap, reprs)
     }
 
     fn extend_impl(
@@ -732,34 +837,42 @@ impl SessionCompiler {
         // edit must materialize the same native derive recipes the initial compile did.
         let hoisted = noeta_ir::hoist_impl_methods_with_registry(entry, Some(self.mc.registry));
         let entry: &Program = hoisted.as_ref().unwrap_or(entry);
-        // ABSORB the incoming type-argument table into the session's before anything lowers: the
-        // table is index-addressed by live values, so it may only grow, and a caller who checked
-        // the whole program afresh (a hot swap of an edited file) hands us a table numbered from
-        // zero in its own order. `absorb_type_args` merges by content and hands back the bundle
-        // with its `hidden_arg_sites` rewritten into session space — see its doc. Identity remap
-        // (the append-only REPL case) borrows straight back, so nothing is cloned.
+        // ABSORB the incoming type-argument tables into the session's before anything lowers: they
+        // are index-addressed by live values, so they may only grow, and a caller who checked the
+        // whole program afresh (a hot swap of an edited file) hands us tables numbered from zero in
+        // its own order. `absorb_type_args` merges by content and hands back the bundle with its
+        // `hidden_arg_sites` rewritten into session space — see its doc. Identity remap (the
+        // append-only REPL case) borrows straight back, so nothing is cloned.
         let absorbed = sites.map(|s| self.absorb_type_args(s));
         let sites: Option<&Sites> = absorbed.as_deref();
+        // Expression tiers this entry declares join the session's table, and the whole table
+        // lowers with the entry — so a fragment's `@html { … }` resolves the handler its *program*
+        // declared, which is never in the fragment itself.
+        self.expr_tiers
+            .extend(noeta_ast::desugar::expr_tier_handlers(entry));
         // Checkerless lowering (matches the tree-walker `Session`) unless the caller supplied the
         // checker's bundle: then the SAME lowering the file pipeline runs, sites and all. The
         // conservative path's `insert_drops(_, None)` marks every value destructor-relevant;
         // `thread_reuse` runs identically either way (a pure function of the drop-annotated IR).
+        let opts = || noeta_ir::LowerOptions {
+            // The REPL keeps cooperative isolates, exactly like the checkerless path.
+            real_isolates: false,
+            // The session's own registry (instance-registry IR5) — the default for a REPL
+            // session, an embed session's own set when it installed one.
+            registry: self.mc.registry,
+            ambient_expr_tiers: self.expr_tiers.clone(),
+        };
         let ir = match sites {
-            None => noeta_ir::lower(entry),
-            Some(sites) => noeta_ir::lower_with_sites_opts(
-                entry,
-                noeta_ir::lowering_sites!(sites),
-                noeta_ir::LowerOptions {
-                    // The REPL keeps cooperative isolates, exactly like the checkerless path.
-                    real_isolates: false,
-                    // The session's own registry (instance-registry IR5) — the default for a REPL
-                    // session, an embed session's own set when it installed one.
-                    registry: self.mc.registry,
-                },
-            ),
+            None => {
+                noeta_ir::lower_with_sites_opts(entry, noeta_ir::LoweringSites::empty(), opts())
+            }
+            Some(sites) => {
+                noeta_ir::lower_with_sites_opts(entry, noeta_ir::lowering_sites!(sites), opts())
+            }
         }
         .map_err(|u| Unsupported {
             reason: format!("not yet lowered to the Core IR: {}", u.feature),
+            span: Some(u.span),
         })?;
         let relevance = sites.map(|s| passes_relevance(&s.destructor_relevance));
         let ir = noeta_ir_passes::insert_drops(&ir, relevance.as_ref());
@@ -784,15 +897,21 @@ impl SessionCompiler {
             // derive a recipe (and does not recognize `decode_typed` at all), so this is a checked-session
             // capability by construction.
             self.mc.deserialize_recipes = sites.deserialize_recipes.clone();
-            // The forwarding type-argument table (F2b) is ALREADY the session's: `absorb_type_args`
-            // merged this bundle's entries into `mc.type_args` by content above and handed lowering
-            // the merged superset, so `ir.type_args` is that same table by construction. Asserted
-            // rather than re-assigned — a wholesale replace here is exactly the index-instability
-            // the absorption exists to prevent, and this pins the two ends together.
+            // The forwarding type-argument table (F2b) and its parallel reflection projection are
+            // ALREADY the session's: `absorb_type_args` merged this bundle's entries into
+            // `mc.type_args` / `mc.type_arg_reprs` by content above and handed lowering the merged
+            // superset, so `ir.type_args` is that same table by construction. Asserted rather than
+            // re-assigned — a wholesale replace here is exactly the index-instability the
+            // absorption exists to prevent, and this pins the two ends together.
             debug_assert_eq!(
                 self.mc.type_args, ir.type_args,
                 "the lowered type-argument table must be the session's merged one — a replace \
                  would re-point live hidden arguments at different types"
+            );
+            debug_assert_eq!(
+                self.mc.type_arg_reprs.len(),
+                ir.type_arg_reprs.len(),
+                "the reflection projection is indexed by the same table and grows in lockstep"
             );
         }
 
@@ -811,7 +930,7 @@ impl SessionCompiler {
                 fc.stmt(stmt)?;
             }
             fc.code.push(Op::Halt);
-            fc.into_chunk(0, Vec::new(), Some("main".to_string()), Some(ir.span))
+            fc.into_chunk(0, 0, 0, Vec::new(), Some("main".to_string()), Some(ir.span))
         };
         self.mc.protos[0] = main;
 
@@ -851,8 +970,12 @@ impl SessionCompiler {
         // type declared in an earlier entry resolves — the tree-walker `Session` accumulates the same
         // way, keeping the session differential green.
         let native_roles = self.mc.registry.native_roles();
-        self.reflection
-            .accumulate(noeta_ast::reflect::build(entry, &native_roles));
+        let native_traits = noeta_ir::native_trait_impls(self.mc.registry);
+        self.reflection.accumulate(noeta_ast::reflect::build(
+            entry,
+            &native_roles,
+            &native_traits,
+        ));
         // Re-embed extension attribute shapes: `accumulate` purges a redeclared name's records, and
         // the extension shapes must survive every entry (idempotent for names already present).
         noeta_check::extend_reflection(&mut self.reflection);
@@ -885,6 +1008,7 @@ impl SessionCompiler {
             tojson_derives: self.mc.tojson_derives.clone(),
             deserialize_recipes: self.mc.deserialize_recipes.clone(),
             type_args: self.mc.type_args.clone(),
+            type_arg_reprs: self.mc.type_arg_reprs.clone(),
             destruct_reachable,
             cache_slots: self.mc.cache_slots,
             reflection: self.reflection.clone(),
@@ -965,6 +1089,11 @@ enum TypeInfo {
 struct VariantSlots {
     index: u32,
     fields: Vec<String>,
+    /// The variant's **backing value** in a backed enum, folded through the shared
+    /// `fold_const_expr`; `None` for a plain enum's case, a native or prelude enum (neither is
+    /// backed), and a backing that is not a literal. Baked into `Op::EnumFromStr` so a wire→case
+    /// conversion can match the backing — the value the enum's schema advertises.
+    backing: Option<noeta_ast::AttrValue>,
 }
 
 /// Accumulates the prototype table, the shape/method side tables, and the top-level type
@@ -988,11 +1117,26 @@ struct ModuleCompiler {
     /// The program-wide type-argument table (poly-values F2b), taken from the lowered IR
     /// `Program::type_args` and copied onto [`Module::type_args`].
     type_args: Vec<noeta_ext_abi::TypeArgInfo>,
+    /// The reflection projection of [`Self::type_args`], indexed identically: each instantiation's
+    /// reflected type interned into [`Self::type_reprs`], or `None` where it has none. Becomes
+    /// [`Module::type_arg_reprs`], which [`Op::RetagDynamic`] reads through a hidden slot's value.
+    type_arg_reprs: Vec<Option<u32>>,
     /// Type names whose `==` is **structural** (baked into each instance's `Shape::structural_eq`):
     /// every `struct`, plus a `class` that is `Equatable` (derives it or hand-`impl`s `eq`). A
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
     /// `TypeDef::structural_eq` so both backends agree (object-model slice 2).
     structural_eq_types: HashSet<String>,
+    /// For a **native** type registered under a key that is not its own name — an aliased leaf
+    /// import (`use std.http.Framing as F`) or a group import's qualified identity
+    /// (`http.Framing`) — the canonical short name a value of it carries in its shape.
+    ///
+    /// The two are different questions and were previously answered by one string: the key is how
+    /// *source* names the type, the runtime name is the identity a **native-returned** value stamps
+    /// and that a `Framing.Sse` pattern compares against. Keying by the alias without this map
+    /// would build shapes named `F`, which no native value matches; keying by the canonical name
+    /// without it leaves the alias unresolvable, which is what made an aliased native type compile
+    /// and then fail at run time with `cannot find F in this scope`.
+    native_type_names: HashMap<String, String>,
     /// Every `@packed` struct's field-type names (P-PKEY, `noeta_ast::packed_named_fields`),
     /// accumulated across `register_types` passes (a session declares incrementally) — the input
     /// to the key-capability fixpoint below.
@@ -1101,8 +1245,8 @@ impl ModuleCompiler {
                     self.module_binding_names.push(name.clone());
                 }
                 noeta_ast::Stmt::Fn(decl) => {
-                    self.module_globals.insert(decl.name.clone(), false);
-                    self.module_fns.insert(decl.name.clone());
+                    self.module_globals.insert(decl.name.to_string(), false);
+                    self.module_fns.insert(decl.name.to_string());
                 }
                 noeta_ast::Stmt::Use { path, names, .. } => {
                     // A plain module import (`use std.{math}`) binds the module name; a selective
@@ -1126,51 +1270,76 @@ impl ModuleCompiler {
     /// Pass 1: register every top-level `type`/`class`/`enum`/`use` so bodies compiled later
     /// can resolve them, and reserve a placeholder prototype for each class `fn`.
     fn register_types(&mut self, program: &Program) {
-        // The built-in `Ordering` enum is namable like any other (so `Ordering.Less` can be
-        // constructed, not only received from `.compare()`); registered first so a user `enum
-        // Ordering` would shadow it. Its variants carry no data, matching `make_ordering`.
-        self.types.insert(
-            "Ordering".to_string(),
-            TypeInfo::Enum {
-                variants: ["Less", "Equal", "Greater"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        (
-                            v.to_string(),
-                            VariantSlots {
-                                index: i as u32,
-                                fields: Vec::new(),
-                            },
-                        )
-                    })
-                    .collect(),
-                fns: HashMap::new(),
-            },
-        );
+        // Every **prelude enum** is namable like any other, so `Ordering.Less`, `Type.Unit`,
+        // `Semantic.TrustBoundary`, `Layout.Row`, and `Cancelled.Cancelled` lower to `MakeEnum`
+        // rather than failing name resolution at run time. The declarations come from the one
+        // shared table (`noeta_ast::reflect::prelude_enums`) the checker and the tree-walker read
+        // too — the hand-kept list that used to sit here covered only `Ordering`, which is how
+        // everything else came to type-check and then abort with E0005. Registered first, so a user
+        // `enum Ordering` shadows the prelude one.
+        for decl in noeta_ast::reflect::prelude_enums() {
+            self.types.insert(
+                decl.name.to_string(),
+                TypeInfo::Enum {
+                    variants: decl
+                        .variants
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            (
+                                v.name.clone(),
+                                VariantSlots {
+                                    index: i as u32,
+                                    fields: v.field_names(),
+                                    // No prelude enum is backed.
+                                    backing: None,
+                                },
+                            )
+                        })
+                        .collect(),
+                    fns: HashMap::new(),
+                },
+            );
+        }
+        // The prelude **structs** — `Attributed`, `RoleBinding`, `ParamInfo`, `FieldEntry`,
+        // `FieldSpec`, `TierRoot`, `TierText` — from the same shared table the materializations
+        // read, so a source-written `FieldEntry { name: "a", value: 1 }` lowers to `MakeStruct`
+        // with the shape a materialized one carries instead of aborting with E0005 after checking
+        // clean. Value structs, so `==` is structural. Registered first, so a user declaration of
+        // the same name shadows the prelude one.
+        for decl in noeta_ast::reflect::prelude_structs() {
+            self.structural_eq_types.insert(decl.name.to_string());
+            self.types.insert(
+                decl.name.to_string(),
+                TypeInfo::Struct {
+                    fields: decl.fields,
+                    fns: HashMap::new(),
+                },
+            );
+        }
         for stmt in &program.stmts {
             match stmt {
                 noeta_ast::Stmt::Struct(decl) => {
                     let fields = decl.fields.iter().map(|f| f.name.clone()).collect();
                     // A value `struct` always compares structurally.
-                    self.structural_eq_types.insert(decl.name.clone());
+                    self.structural_eq_types.insert(decl.name.to_string());
                     // A `@packed` struct feeds the key-capability fixpoint (P-PKEY, below).
                     if let Some(named) = noeta_ast::packed_named_fields(decl) {
-                        self.packed_fields.insert(decl.name.clone(), named);
+                        self.packed_fields.insert(decl.name.to_string(), named);
                     }
                     // A hand-written `compare`/`to_json` (via an `impl` block) takes precedence over
                     // the derived version — same rule as a class.
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                         && !decl.methods.iter().any(|m| m.name == "compare")
                     {
-                        self.comparable_derives.push(decl.name.clone());
+                        self.comparable_derives.push(decl.name.to_string());
                     }
                     // `@derive(Serialize<Json>)` synthesizes the structural JSON serializer (`Json`
                     // is the only format today, so it maps to the existing `to_json` codegen).
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                         && !decl.methods.iter().any(|m| m.name == "to_json")
                     {
-                        self.tojson_derives.push(decl.name.clone());
+                        self.tojson_derives.push(decl.name.to_string());
                     }
                     // Reserve a prototype per method, shared by associated-fn and instance-method
                     // dispatch (a struct `fn` is callable both ways, exactly like a class method).
@@ -1178,15 +1347,15 @@ impl ModuleCompiler {
                     for method in &decl.methods {
                         let proto = self.protos.len() as u32;
                         self.protos.push(Chunk::placeholder());
-                        fns.insert(method.name.clone(), proto);
+                        fns.insert(method.name.to_string(), proto);
                         self.methods.push(MethodEntry {
-                            type_name: decl.name.clone(),
-                            method: method.name.clone(),
+                            type_name: decl.name.to_string(),
+                            method: method.name.to_string(),
                             proto,
                         });
                     }
                     self.types
-                        .insert(decl.name.clone(), TypeInfo::Struct { fields, fns });
+                        .insert(decl.name.to_string(), TypeInfo::Struct { fields, fns });
                 }
                 noeta_ast::Stmt::Class(decl) => {
                     let fields: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
@@ -1195,29 +1364,29 @@ impl ModuleCompiler {
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Equatable")
                         || decl.methods.iter().any(|m| m.name == "eq")
                     {
-                        self.structural_eq_types.insert(decl.name.clone());
+                        self.structural_eq_types.insert(decl.name.to_string());
                     }
                     // A hand-written `compare` (via `impl Comparable`) takes precedence over the
                     // derived structural ordering.
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                         && !decl.methods.iter().any(|m| m.name == "compare")
                     {
-                        self.comparable_derives.push(decl.name.clone());
+                        self.comparable_derives.push(decl.name.to_string());
                     }
                     // A hand-written `to_json` takes precedence over the derived serializer.
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                         && !decl.methods.iter().any(|m| m.name == "to_json")
                     {
-                        self.tojson_derives.push(decl.name.clone());
+                        self.tojson_derives.push(decl.name.to_string());
                     }
                     let mut fns = HashMap::new();
                     for method in &decl.methods {
                         let proto = self.protos.len() as u32;
                         self.protos.push(Chunk::placeholder());
-                        fns.insert(method.name.clone(), proto);
+                        fns.insert(method.name.to_string(), proto);
                         self.methods.push(MethodEntry {
-                            type_name: decl.name.clone(),
-                            method: method.name.clone(),
+                            type_name: decl.name.to_string(),
+                            method: method.name.to_string(),
                             proto,
                         });
                     }
@@ -1225,10 +1394,10 @@ impl ModuleCompiler {
                     if decl.destructor.is_some() {
                         let proto = self.protos.len() as u32;
                         self.protos.push(Chunk::placeholder());
-                        self.destructors.push((decl.name.clone(), proto));
+                        self.destructors.push((decl.name.to_string(), proto));
                     }
                     self.types
-                        .insert(decl.name.clone(), TypeInfo::Class { fields, fns });
+                        .insert(decl.name.to_string(), TypeInfo::Class { fields, fns });
                 }
                 noeta_ast::Stmt::Enum(decl) => {
                     let variants = decl
@@ -1241,6 +1410,10 @@ impl ModuleCompiler {
                                 VariantSlots {
                                     index: i as u32,
                                     fields: v.fields.iter().map(|f| f.name.clone()).collect(),
+                                    backing: v
+                                        .backed_value
+                                        .as_ref()
+                                        .and_then(noeta_ast::reflect::fold_const_expr),
                                 },
                             )
                         })
@@ -1252,12 +1425,12 @@ impl ModuleCompiler {
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                         && !decl.methods.iter().any(|m| m.name == "compare")
                     {
-                        self.comparable_derives.push(decl.name.clone());
+                        self.comparable_derives.push(decl.name.to_string());
                     }
                     if noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                         && !decl.methods.iter().any(|m| m.name == "to_json")
                     {
-                        self.tojson_derives.push(decl.name.clone());
+                        self.tojson_derives.push(decl.name.to_string());
                     }
                     // Reserve a prototype per method, shared by associated-fn and instance-method
                     // dispatch (the unified body, object-model slice 3).
@@ -1265,15 +1438,15 @@ impl ModuleCompiler {
                     for method in &decl.methods {
                         let proto = self.protos.len() as u32;
                         self.protos.push(Chunk::placeholder());
-                        fns.insert(method.name.clone(), proto);
+                        fns.insert(method.name.to_string(), proto);
                         self.methods.push(MethodEntry {
-                            type_name: decl.name.clone(),
-                            method: method.name.clone(),
+                            type_name: decl.name.to_string(),
+                            method: method.name.to_string(),
                             proto,
                         });
                     }
                     self.types
-                        .insert(decl.name.clone(), TypeInfo::Enum { variants, fns });
+                        .insert(decl.name.to_string(), TypeInfo::Enum { variants, fns });
                 }
                 noeta_ast::Stmt::Use { path, names, .. } => {
                     // A `use std.{json}` native module — or a selective member import
@@ -1282,7 +1455,7 @@ impl ModuleCompiler {
                     for imported in names {
                         use noeta_ext_abi::registry::UseKind;
                         match self.registry.classify_use(path, &imported.name) {
-                            UseKind::Module(_) | UseKind::MemberFn { .. } => continue,
+                            UseKind::MemberFn { .. } => continue,
                             // A native enum (`use shade.Hue`, native-extensibility S1b): register it
                             // as a **constructible** type handle keyed by the imported short name — so
                             // `Hue.Red` / `Hue.Labeled(x)` lower exactly like a `.noe` enum. The
@@ -1292,8 +1465,14 @@ impl ModuleCompiler {
                             // what a `TheEnum.Variant` pattern compares against (S1 identity note).
                             UseKind::ExtEnum(qualified) => {
                                 if let Some(en) = self.registry.find_enum_qualified(&qualified) {
-                                    self.types
-                                        .insert(imported.name.clone(), ext_enum_type_info(en));
+                                    // Keyed by the import's LOCAL binding — its alias when one is
+                                    // written — because that is the name source uses to reach it.
+                                    // The canonical short name is recorded beside it, since that is
+                                    // what a value of the type carries.
+                                    let key = imported.local().to_string();
+                                    self.native_type_names
+                                        .insert(key.clone(), en.name.to_string());
+                                    self.types.insert(key, ext_enum_type_info(en));
                                 }
                             }
                             // A native **fielded type** — a class (`use geo.Handle`,
@@ -1305,16 +1484,44 @@ impl ModuleCompiler {
                             // selects the class-kind or struct-kind shape off `ExtFielded::kind`.
                             UseKind::ExtClass(qualified) | UseKind::ExtStruct(qualified) => {
                                 if let Some(cl) = self.registry.resolve_fielded(&qualified) {
+                                    let key = imported.local().to_string();
+                                    self.native_type_names
+                                        .insert(key.clone(), cl.name.to_string());
                                     // A native value **struct** always compares structurally — record
                                     // its imported (runtime shape) name so `MakeStruct` builds the
                                     // shape with `structural_eq = true`, exactly as a `.noe` struct
                                     // declaration does above. A native class stays identity (`==` is
                                     // reference), so it is NOT added.
                                     if cl.kind == noeta_ext_abi::FieldedKind::Struct {
-                                        self.structural_eq_types.insert(imported.name.clone());
+                                        self.structural_eq_types.insert(key.clone());
                                     }
-                                    self.types
-                                        .insert(imported.name.clone(), ext_fielded_type_info(cl));
+                                    self.types.insert(key, ext_fielded_type_info(cl));
+                                }
+                            }
+                            // A **group** import (`use std.http`, or a concrete native module):
+                            // register every native type reachable under it, keyed by its
+                            // **qualified identity** — the name the loader's QMap rewrites the
+                            // dotted spelling (`http.Framing`) to, and the same name a leaf import
+                            // resolves to. So `http.Framing.Sse` lowers to the identical `MakeEnum`
+                            // that `use std.http.{Framing}` + `Framing.Sse` does. A namespace handle
+                            // is not a *type*, and registering it as `TypeInfo::Opaque` is what made
+                            // the dotted spelling die at compile time with a span-less internal
+                            // "type member used as a value".
+                            UseKind::Namespace(prefix) | UseKind::Module(prefix) => {
+                                for (_, qualified) in self.registry.namespace_types(&prefix) {
+                                    if let Some(en) = self.registry.find_enum_qualified(&qualified)
+                                    {
+                                        self.types
+                                            .insert(qualified.clone(), ext_enum_type_info(en));
+                                    } else if let Some(cl) =
+                                        self.registry.resolve_fielded(&qualified)
+                                    {
+                                        if cl.kind == noeta_ext_abi::FieldedKind::Struct {
+                                            self.structural_eq_types.insert(qualified.clone());
+                                        }
+                                        self.types
+                                            .insert(qualified.clone(), ext_fielded_type_info(cl));
+                                    }
                                 }
                             }
                             _ => {
@@ -1332,6 +1539,36 @@ impl ModuleCompiler {
         self.key_capable_types = noeta_ast::key_capable_packed(&self.packed_fields);
     }
 
+    /// The **runtime name** a value of the registered type `key` carries in its shape.
+    ///
+    /// For a native type addressed by its **qualified identity** — the spelling the loader rewrites
+    /// a group-imported `http.Framing` to — this is the type's *short* name, because that is the
+    /// identity a native-returned value stamps and the one a `Framing.Sse` pattern compares against.
+    /// For everything else (a `.noe` declaration, a leaf-imported native type) the key already *is*
+    /// the runtime name.
+    ///
+    /// Without the mapping the two spellings of one native type build two different shapes:
+    /// `http.Framing.Sse` and `Framing.Sse` compare unequal, `is` answers false, and a `match` on
+    /// one misses the other — a quieter failure than the compile error the qualified spelling used
+    /// to give, and a worse one.
+    fn runtime_type_name(&self, key: &str) -> String {
+        // A native type registered under a key that is not its own name — an alias, or a group
+        // import's qualified identity. Recorded at registration, so one lookup answers both.
+        if let Some(name) = self.native_type_names.get(key) {
+            return name.clone();
+        }
+        if !key.contains('.') {
+            return key.to_string();
+        }
+        if let Some(en) = self.registry.find_enum_qualified(key) {
+            return en.name.to_string();
+        }
+        if let Some(cl) = self.registry.resolve_fielded(key) {
+            return cl.name.to_string();
+        }
+        key.to_string()
+    }
+
     /// Pass 2: compile each class/struct method (and a class's `destruct` block) into its reserved
     /// prototype, from the lowered IR. Methods see all registered types (forward references work)
     /// and run with the receiver in register 0, the declared parameters in registers `1..`, and
@@ -1343,7 +1580,7 @@ impl ModuleCompiler {
             if let Stmt::Decl(Decl::Struct(strukt)) = stmt {
                 let name = strukt.decl.name.clone();
                 for (method, func) in &strukt.methods {
-                    let TypeInfo::Struct { fns, .. } = &self.types[&name] else {
+                    let TypeInfo::Struct { fns, .. } = &self.types[name.as_str()] else {
                         unreachable!("a struct registered as non-struct");
                     };
                     let proto = fns[method];
@@ -1356,7 +1593,7 @@ impl ModuleCompiler {
                     )?;
                     self.protos[proto as usize] = chunk;
                 }
-                self.compile_field_defaults(&name, &strukt.field_defaults)?;
+                self.compile_field_defaults(name.as_str(), &strukt.field_defaults)?;
                 continue;
             }
             // An enum method (object-model slice 3) compiles like a struct/class method but with an
@@ -1365,7 +1602,7 @@ impl ModuleCompiler {
             if let Stmt::Decl(Decl::Enum(en)) = stmt {
                 let name = en.decl.name.clone();
                 for (method, func) in &en.methods {
-                    let TypeInfo::Enum { fns, .. } = &self.types[&name] else {
+                    let TypeInfo::Enum { fns, .. } = &self.types[name.as_str()] else {
                         unreachable!("an enum registered as non-enum");
                     };
                     let proto = fns[method];
@@ -1385,7 +1622,7 @@ impl ModuleCompiler {
             };
             let name = class.decl.name.clone();
             for (method, func) in &class.methods {
-                let TypeInfo::Class { fns, .. } = &self.types[&name] else {
+                let TypeInfo::Class { fns, .. } = &self.types[name.as_str()] else {
                     unreachable!("a class registered as non-class");
                 };
                 let proto = fns[method];
@@ -1415,7 +1652,7 @@ impl ModuleCompiler {
                 )?;
                 self.protos[proto as usize] = chunk;
             }
-            self.compile_field_defaults(&name, &class.field_defaults)?;
+            self.compile_field_defaults(name.as_str(), &class.field_defaults)?;
         }
         Ok(())
     }
@@ -1451,6 +1688,7 @@ impl ModuleCompiler {
     ) -> Result<Chunk, Unsupported> {
         self.compile_chunk(
             &func.params,
+            func.hidden as u16,
             &func.defaults,
             &func.body,
             func.temp_count,
@@ -1471,10 +1709,14 @@ impl ModuleCompiler {
     /// functions' capturable local names (outermost first), so the function can lower its own
     /// nested closures. A body [`Block`] with a `tail` atom (a closure/arrow or a default thunk)
     /// returns that atom; a block body without one falls off the end as an implicit unit return.
+    /// `hidden` is how many leading `params` are type-argument slots rather than value parameters
+    /// (poly-values F2b) — carried straight through to [`Chunk::hidden`], and zero for everything
+    /// but a forwarding generic.
     #[allow(clippy::too_many_arguments)]
     fn compile_chunk(
         &mut self,
         params: &[String],
+        hidden: u16,
         defaults: &[Option<Thunk>],
         body: &Block,
         temp_count: u32,
@@ -1575,7 +1817,9 @@ impl ModuleCompiler {
         }
         fc.code.push(Op::Halt);
         let num_params = params.len() as u16 + if is_method { 1 } else { 0 };
-        Ok(fc.into_chunk(num_params, default_pairs, name, def_span))
+        // A method's hidden block starts at register 1: register 0 is the receiver, which the
+        // binder must not shift past the block (see `noeta_bytecode::reg_of_param`).
+        Ok(fc.into_chunk(num_params, hidden, base, default_pairs, name, def_span))
     }
 
     /// Compile an IR [`Func`] into a fresh prototype and return its index. `name` is the name a
@@ -1603,6 +1847,7 @@ impl ModuleCompiler {
     ) -> Result<u32, Unsupported> {
         let chunk = self.compile_chunk(
             &[],
+            0,
             &[],
             &thunk.body,
             thunk.temp_count,
@@ -1704,6 +1949,21 @@ impl ModuleCompiler {
         let idx = self.type_reprs.len() as u32;
         self.type_reprs.push(repr.clone());
         idx
+    }
+
+    /// Intern the lowered program's type-argument **reflection projection** into [`Self::type_reprs`],
+    /// producing [`Module::type_arg_reprs`] — the table [`Op::RetagDynamic`] resolves a hidden slot's
+    /// value through. Interned through the same pool as every other reflected type, so an
+    /// instantiation whose repr a list/object construction tag already carries is stored once.
+    ///
+    /// Recomputed wholesale on a session recompile, exactly as `type_args` is: the checker accumulates
+    /// both across entries so the indices are append-only, and re-interning an already-present repr
+    /// answers the same index.
+    fn intern_type_arg_reprs(&mut self, ir: &noeta_ir::Program) -> Vec<Option<u32>> {
+        ir.type_arg_reprs
+            .iter()
+            .map(|r| r.as_ref().map(|r| self.intern_type_repr(r)))
+            .collect()
     }
 
     /// Intern a built-in `Result`/`Option` variant shape (these display with their bare
@@ -1937,9 +2197,13 @@ impl<'m> FnCompiler<'m> {
         chain
     }
 
+    /// `hidden` is how many of the leading `num_params` registers are type-argument slots rather
+    /// than value parameters (poly-values F2b) — see [`Chunk::hidden`].
     fn into_chunk(
         self,
         num_params: u16,
+        hidden: u16,
+        hidden_base: u16,
         defaults: Vec<(u16, u32)>,
         name: Option<String>,
         def_span: Option<Span>,
@@ -1976,6 +2240,8 @@ impl<'m> FnCompiler<'m> {
             consts: self.consts,
             diagnostics: self.diags,
             num_params,
+            hidden,
+            hidden_base,
             num_registers: self.next_reg,
             defaults,
             frame_locals,
@@ -2092,7 +2358,10 @@ impl<'m> FnCompiler<'m> {
             }
             if let Some(var) = self.lookup_local(&name) {
                 if !var.celled {
-                    return unsupported("a forward capture of a not-yet-celled local");
+                    return unsupported(
+                        format!("`{name}` is captured by a closure before its binding is celled"),
+                        func.span,
+                    );
                 }
                 upvalues.push((name, var.mutable));
                 captures.push(PendingCapture::From(CaptureFrom::Local(var.reg)));
@@ -2102,7 +2371,13 @@ impl<'m> FnCompiler<'m> {
             } else {
                 // A free name the analysis flagged but that is neither a live celled local nor an
                 // upvalue here (e.g. captured before its binding was lowered) — skip the program.
-                return unsupported("a capture that could not be sourced from the enclosing frame");
+                return unsupported(
+                    format!(
+                        "`{name}` is free in a closure but is neither a celled local nor an \
+                         upvalue of the enclosing frame"
+                    ),
+                    func.span,
+                );
             }
         }
         Ok((upvalues, captures))
@@ -2299,25 +2574,28 @@ impl<'m> FnCompiler<'m> {
                     // resolved this import against, so binding can never diverge from checking.
                     match self.module.registry.classify_use(path, &imported.name) {
                         noeta_ext_abi::registry::UseKind::Module(qualified) => {
-                            // The bound global keeps the imported name (the last segment); the
-                            // module *value* carries the root-qualified identity so its member
-                            // calls dispatch to the right module (`std.http.client` ≠ a
+                            // The bound global is the import's **local** binding — the alias when
+                            // written (`use std.http.url as u`), else the imported name. That is
+                            // the name the checker bound and the name the linker α-renamed a
+                            // merged unit's references to, so binding and reference are one
+                            // decision. The module *value* carries the root-qualified identity so
+                            // its member calls dispatch to the right module (`std.http.client` ≠ a
                             // third-party `guzzle.http.client`).
                             let value = self.alloc_reg();
                             let k = self.add_const(Const::NativeModule(qualified));
                             self.code.push(Op::LoadConst { dst: value, k });
-                            let global = self.module.intern_global(&imported.name);
+                            let global = self.module.intern_global(imported.local());
                             self.code.push(Op::StoreGlobal { global, src: value });
                         }
                         noeta_ext_abi::registry::UseKind::MemberFn { module, func } => {
-                            // `use std.math.sqrt` — bind `sqrt` to a `(std.math, sqrt)`
-                            // module-function value. An unknown member is left unbound (the
+                            // `use std.math.sqrt` — bind `sqrt` (or its alias) to a `(std.math,
+                            // sqrt)` module-function value. An unknown member is left unbound (the
                             // checker reports it); a bare call then raises E0005 like any
                             // missing name.
                             let value = self.alloc_reg();
                             let k = self.add_const(Const::ModuleFn { module, func });
                             self.code.push(Op::LoadConst { dst: value, k });
-                            let global = self.module.intern_global(&imported.name);
+                            let global = self.module.intern_global(imported.local());
                             self.code.push(Op::StoreGlobal { global, src: value });
                         }
                         _ => {}
@@ -3050,6 +3328,16 @@ impl<'m> FnCompiler<'m> {
     }
 
     /// Materialize each atom in `atoms` into a register, in order.
+    /// Materialize a call's TYPE-argument atoms into its [`noeta_bytecode::TypeArgs`] channel.
+    /// Empty in, empty (allocation-free) out — the shape of every call that forwards nothing.
+    fn type_arg_regs(&mut self, atoms: &[Atom]) -> Result<noeta_bytecode::TypeArgs, Unsupported> {
+        let mut regs = Vec::with_capacity(atoms.len());
+        for a in atoms {
+            regs.push(self.atom_reg(a)?);
+        }
+        Ok(noeta_bytecode::TypeArgs::new(regs))
+    }
+
     fn atom_regs(&mut self, atoms: &[Atom]) -> Result<Box<[Reg]>, Unsupported> {
         let mut regs = Vec::with_capacity(atoms.len());
         for a in atoms {
@@ -3166,7 +3454,10 @@ impl<'m> FnCompiler<'m> {
                     self.code.push(Op::LoadNativeFn { dst, func });
                     Ok(dst)
                 }
-                None => unsupported("reference to a prelude value/builtin"),
+                None => unsupported(
+                    format!("`{name}` is a prelude name with no first-class value form"),
+                    span,
+                ),
             },
         }
     }
@@ -3331,24 +3622,44 @@ impl<'m> FnCompiler<'m> {
             Rvalue::Call {
                 callee,
                 args,
+                type_args,
                 span,
                 supplied,
-                ..
-            } => self.lower_call(callee, args, dst, *span, *supplied),
+            } => self.lower_call(callee, args, type_args, dst, *span, *supplied),
             Rvalue::Method {
                 receiver,
                 name,
                 args,
+                type_args,
                 reuse,
                 reflect,
+                reflect_slot,
                 span,
                 supplied,
-                ..
+                name_span: _,
             } => {
                 // A generic enum-variant construction carries its reflected type (R2b.2); intern it so
                 // the `MakeEnum` op can stamp it. `None` for an ordinary method call.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
-                self.lower_method(receiver, name, args, *reuse, reflect, dst, *span, *supplied)
+                // Its dynamic twin (generic-in-generic construction): the hidden slot register whose
+                // type-argument entry names the tag. Resolved to a register HERE, before the call is
+                // emitted, so the slot local is live across it — see `Op::RetagDynamic`.
+                let reflect_slot = reflect_slot
+                    .as_ref()
+                    .map(|a| self.atom_reg(a))
+                    .transpose()?;
+                self.lower_method(
+                    receiver,
+                    name,
+                    args,
+                    type_args,
+                    *reuse,
+                    reflect,
+                    reflect_slot,
+                    dst,
+                    *span,
+                    *supplied,
+                )
             }
             Rvalue::Field {
                 receiver,
@@ -3632,8 +3943,17 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            Rvalue::As { operand, ty, .. } => {
+            // A narrow whose target is an enclosing generic's type parameter carries the head name in
+            // a register instead (`dynamic`) — lowering put the same `TypeArgName`/`TypeSlotName`
+            // there that `type_name::<T>()` reads, so the two surfaces resolve one `T`.
+            Rvalue::As {
+                operand,
+                ty,
+                dynamic,
+                ..
+            } => {
                 let src = self.atom_reg(operand)?;
+                let dynamic = dynamic.as_ref().map(|a| self.atom_reg(a)).transpose()?;
                 let target = Box::new(narrow_target(ty));
                 let some_shape = self.module.builtin_enum_shape("Option", "some");
                 let none_shape = self.module.builtin_enum_shape("Option", "none");
@@ -3641,15 +3961,27 @@ impl<'m> FnCompiler<'m> {
                     dst,
                     src,
                     target,
+                    dynamic,
                     some_shape,
                     none_shape,
                 });
                 Ok(())
             }
-            Rvalue::TypeTest { operand, ty, .. } => {
+            Rvalue::TypeTest {
+                operand,
+                ty,
+                dynamic,
+                ..
+            } => {
                 let src = self.atom_reg(operand)?;
+                let dynamic = dynamic.as_ref().map(|a| self.atom_reg(a)).transpose()?;
                 let target = Box::new(narrow_target(ty));
-                self.code.push(Op::IsType { dst, src, target });
+                self.code.push(Op::IsType {
+                    dst,
+                    src,
+                    target,
+                    dynamic,
+                });
                 Ok(())
             }
             Rvalue::MakeGen { step, .. } => {
@@ -3779,6 +4111,37 @@ impl<'m> FnCompiler<'m> {
                 }
                 Ok(())
             }
+            // `type_name::<T>()` over the enclosing generic type's parameter: the name is read off
+            // the receiver's reflected type tag at run time — one compiled body serves every
+            // instantiation, so there is no constant to bake.
+            Rvalue::TypeArgName {
+                operand,
+                index,
+                type_name,
+                param,
+                span,
+            } => {
+                let src = self.atom_reg(operand)?;
+                self.code.push(Op::TypeArgName {
+                    dst,
+                    src,
+                    index: *index,
+                    names: Box::new((type_name.clone(), param.clone())),
+                    span: *span,
+                });
+                Ok(())
+            }
+            // The fn-side twin: `type_name::<T>()` over a FORWARDED parameter reads the hidden
+            // type-argument slot's table entry instead of the receiver's tag.
+            Rvalue::TypeSlotName { slot, span } => {
+                let src = self.atom_reg(slot)?;
+                self.code.push(Op::TypeSlotName {
+                    dst,
+                    src,
+                    span: *span,
+                });
+                Ok(())
+            }
             Rvalue::TypeOf { operand, span } => {
                 // Evaluate the operand for its side effects in both fidelities. When the checker
                 // resolved a concrete static type for this site, bake the precise `Type` constant
@@ -3796,6 +4159,11 @@ impl<'m> FnCompiler<'m> {
             Rvalue::FieldsOf { operand, .. } => {
                 let src = self.atom_reg(operand)?;
                 self.code.push(Op::FieldsOf { dst, src });
+                Ok(())
+            }
+            Rvalue::TraitsOf { operand, .. } => {
+                let src = self.atom_reg(operand)?;
+                self.code.push(Op::TraitsOf { dst, src });
                 Ok(())
             }
             Rvalue::AttributesOf { ty, dynamic, .. } => {
@@ -3823,7 +4191,7 @@ impl<'m> FnCompiler<'m> {
                 // Optional turbofish scope (mirrors `AttributesOf`): resolve the role enum name at
                 // compile time (closed-world); the VM keeps only bindings of that enum. `None` = all.
                 let role_enum = ty.as_ref().and_then(|ty| match ty {
-                    TypeRef::Named { name, .. } => Some(self.module.intern_name(name)),
+                    TypeRef::Named { name, .. } => Some(self.module.intern_name(name.as_str())),
                     _ => None,
                 });
                 self.code.push(Op::RolesOf { dst, role_enum });
@@ -3836,11 +4204,26 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::ParamsOf { dst, src });
                 Ok(())
             }
+            Rvalue::ReturnsOf { target, .. } => {
+                // The target is a runtime string; the VM reads the matching signature record from
+                // `Module::reflection` and materializes its return type as a `?Type`. Load the
+                // operand into a register, exactly as `ParamsOf` does.
+                let src = self.atom_reg(target)?;
+                self.code.push(Op::ReturnsOf { dst, src });
+                Ok(())
+            }
             Rvalue::FieldSpecsOf { name, .. } => {
                 // The name is a runtime string; the VM reads the type's field schema from
                 // `Module::reflection` and materializes them. Load the operand into a register.
                 let src = self.atom_reg(name)?;
                 self.code.push(Op::FieldSpecsOf { dst, src });
+                Ok(())
+            }
+            Rvalue::VariantsOf { name, .. } => {
+                // The enum twin, emitted identically: the name is a runtime string and the VM reads
+                // the variant schema off the same `Module::reflection`.
+                let src = self.atom_reg(name)?;
+                self.code.push(Op::VariantsOf { dst, src });
                 Ok(())
             }
             Rvalue::Construct {
@@ -4025,10 +4408,16 @@ impl<'m> FnCompiler<'m> {
 
     /// Lower an ordinary call `callee(args)` (a method call is [`Rvalue::Method`], lowered
     /// separately). A prelude function called directly by name routes to its dedicated op.
+    ///
+    /// `type_args` is the call's type-argument channel (poly-values F2b) — the atoms filling a
+    /// forwarding generic's leading hidden slots, empty for every other call. A prelude/builtin
+    /// callee declares no hidden slots, so a non-empty channel there is refused for the same
+    /// reason a `supplied` mask is.
     fn lower_call(
         &mut self,
         callee: &Atom,
         args: &[Atom],
+        type_args: &[Atom],
         dst: Reg,
         span: Span,
         supplied: Option<u64>,
@@ -4042,7 +4431,22 @@ impl<'m> FnCompiler<'m> {
             // hole against one. Refuse rather than drop the mask: silently lowering it would call
             // the builtin with the args shifted into the wrong positions.
             if supplied.is_some() {
-                return unsupported("named arguments that skip a parameter of a prelude function");
+                return unsupported(
+                    format!(
+                        "`{name}` is a prelude function, and prelude functions have no defaulted \
+                         parameters for a named argument to skip"
+                    ),
+                    span,
+                );
+            }
+            if !type_args.is_empty() {
+                return unsupported(
+                    format!(
+                        "`{name}` is a prelude function, and prelude functions declare no \
+                         type-argument slots for a generic to forward into"
+                    ),
+                    span,
+                );
             }
             // `Ok(x)`/`Ok()`, `Err(e)`, `some(x)`, `panic(msg)` — an arity-correct direct call
             // keeps its dedicated fast op (`MakeEnum` / `Op::Panic`, which tier-1 also compiles).
@@ -4051,13 +4455,13 @@ impl<'m> FnCompiler<'m> {
             // F3) — so the direct and indirect paths cannot diverge, and neither aborts compile.
             match name.as_str() {
                 "Ok" if args.len() <= 1 => {
-                    return self.make_result_option("Result", "Ok", args, dst);
+                    return self.make_result_option("Result", "Ok", args, dst, span);
                 }
                 "Err" if args.len() == 1 => {
-                    return self.make_result_option("Result", "Err", args, dst);
+                    return self.make_result_option("Result", "Err", args, dst, span);
                 }
                 "some" if args.len() == 1 => {
-                    return self.make_result_option("Option", "some", args, dst);
+                    return self.make_result_option("Option", "some", args, dst, span);
                 }
                 "panic" if args.len() == 1 => return self.make_panic(args, span),
                 _ => {}
@@ -4074,7 +4478,10 @@ impl<'m> FnCompiler<'m> {
                 });
                 return Ok(());
             }
-            return unsupported("prelude function not in the VM subset");
+            return unsupported(
+                format!("`{name}` is a prelude name the bytecode backend has no call form for"),
+                span,
+            );
         }
         // A statically-known top-level `fn` (immutable, zero-upvalue global) — call it directly
         // through its slot, skipping the `LoadGlobal` + per-call retain/release of the callee
@@ -4085,24 +4492,32 @@ impl<'m> FnCompiler<'m> {
             && matches!(self.resolve(name), Resolved::Global)
         {
             let global = self.module.intern_global(name);
+            // The type arguments are evaluated BEFORE the value arguments, matching the order the
+            // tree-walker evaluates the two channels — they are ordinary operands, and a
+            // pass-through slot is a plain local read, so the order is observable only through
+            // register pressure, but the two backends agree on it anyway.
+            let type_args = self.type_arg_regs(type_args)?;
             let args = self.atom_regs(args)?;
             self.code.push(Op::CallGlobal {
                 dst,
                 global,
                 args,
+                type_args,
                 span,
-                supplied,
+                supplied: noeta_bytecode::pack_supplied(supplied),
             });
             return Ok(());
         }
         let callee_reg = self.atom_reg(callee)?;
+        let type_args = self.type_arg_regs(type_args)?;
         let args = self.atom_regs(args)?;
         self.code.push(Op::Call {
             dst,
             callee: callee_reg,
             args,
+            type_args,
             span,
-            supplied,
+            supplied: noeta_bytecode::pack_supplied(supplied),
         });
         Ok(())
     }
@@ -4116,8 +4531,10 @@ impl<'m> FnCompiler<'m> {
         receiver: &Atom,
         name: &str,
         args: &[Atom],
+        type_args: &[Atom],
         reuse: bool,
         reflect: Option<u32>,
+        reflect_slot: Option<Reg>,
         dst: Reg,
         span: Span,
         supplied: Option<u64>,
@@ -4130,17 +4547,22 @@ impl<'m> FnCompiler<'m> {
         {
             if let Some(TypeInfo::Enum { fns, .. }) = self.module.types.get(type_name) {
                 // `Enum.try_from(s)` / `Enum.from(s)` — string→case conversion (intercepted before
-                // variant construction, mirroring the checker and the tree-walker).
-                if name == "try_from" || name == "from" {
+                // variant construction, mirroring the checker and the IR interpreter).
+                //
+                // A **declared** method of that name wins: an `impl From<Source>` in the enum's body
+                // hoists a `from` the checker resolves for the `?` conversion (and for an explicit
+                // `Enum.from(e)`), so lowering it to the name-string op would type-check clean and
+                // then abort at runtime with "expects a string".
+                if (name == "try_from" || name == "from") && !fns.contains_key(name) {
                     return self.lower_enum_from_str(type_name, name == "from", args, dst, span);
                 }
                 // An associated function `Enum.f(...)` (the unified body, object-model slice 3):
                 // resolved at compile time when the name is a method, not a variant. Variant
                 // construction still wins for a variant name (uppercase by convention, so no clash).
                 if let Some(&proto) = fns.get(name) {
-                    return self.call_associated(proto, args, dst, span, supplied);
+                    return self.call_associated(proto, args, type_args, dst, span, supplied);
                 }
-                return self.make_enum(type_name, name, args, reflect, dst);
+                return self.make_enum(type_name, name, args, reflect, dst, span);
             }
             // An associated function `Type.f(...)` resolves at compile time for both kinds — struct
             // and class share the dispatch table (the unified body).
@@ -4148,7 +4570,23 @@ impl<'m> FnCompiler<'m> {
                 self.module.types.get(type_name)
                 && let Some(&proto) = fns.get(name)
             {
-                return self.call_associated(proto, args, dst, span, supplied);
+                self.call_associated(proto, args, type_args, dst, span, supplied)?;
+                // A **fresh constructor** of a generic type (`Repo.new("todos")` typed `Repo<Todo>`):
+                // the instantiation is known here and not inside `fn new`, where the object literal
+                // is written, so the call site stamps the result. The checker records the site only
+                // when every `return` of the callee hands back a freshly-built literal of the type,
+                // which is what makes the in-place tag unobservable.
+                if let Some(k) = reflect {
+                    self.code.push(Op::Retag { reg: dst, repr: k });
+                }
+                // …and the same stamp with the tag chosen at run time, when the instantiation is a
+                // type parameter of the enclosing self-less member and rides its hidden slot
+                // (generic-in-generic construction). Mutually exclusive with `reflect` above: the
+                // checker's two recording arms cannot both fire at one span.
+                if let Some(slot) = reflect_slot {
+                    self.code.push(Op::RetagDynamic { reg: dst, slot });
+                }
+                return Ok(());
             }
         }
         // Otherwise the receiver is a value: a runtime-dispatched method call (a user instance
@@ -4190,6 +4628,7 @@ impl<'m> FnCompiler<'m> {
             },
             _ => (self.atom_reg(receiver)?, false),
         };
+        let type_args = self.type_arg_regs(type_args)?;
         let cache = self.module.next_cache_slot();
         let method = self.module.intern_name(name);
         self.code.push(Op::CallMethod {
@@ -4197,13 +4636,14 @@ impl<'m> FnCompiler<'m> {
             recv,
             method,
             args: arg_regs,
+            type_args,
             span,
             cache,
             reuse: recv_reuse,
             consume_key,
             // Into the callee's register space: the receiver lands in register 0 and is always
             // supplied, so every declared parameter's bit moves up by one.
-            supplied: supplied.map(|m| (m << 1) | 1),
+            supplied: noeta_bytecode::pack_supplied(supplied.map(|m| (m << 1) | 1)),
         });
         // A reuse-marked call consumes the receiver itself (the VM clears it on the in-place path); the
         // receiver is always a `Var` (never an owned `Temp`), so `drop_temp_receiver` is a no-op there.
@@ -4297,23 +4737,37 @@ impl<'m> FnCompiler<'m> {
         {
             enum Member {
                 EmptyVariant(u32),
-                Unsupported(&'static str),
+                Unsupported(String),
                 FieldAccess,
             }
+            // Every message names the offending expression. The compiler's `Unsupported` carries no
+            // span (it surfaces as `internal error: the VM cannot compile this program: <reason>`
+            // with nothing to grep for), so the reason string is the only handle a reader gets —
+            // "type member used as a value" told them neither which member nor which type.
             let kind = match self.module.types.get(type_name) {
                 Some(TypeInfo::Enum { variants, .. }) => match variants.get(name) {
                     Some(v) if v.fields.is_empty() => Member::EmptyVariant(v.index),
-                    Some(_) => Member::Unsupported("data-carrying variant used without arguments"),
-                    None => Member::Unsupported("unknown enum variant"),
+                    Some(_) => Member::Unsupported(format!(
+                        "`{type_name}.{name}` is a data-carrying variant used without arguments"
+                    )),
+                    None => Member::Unsupported(format!("`{type_name}` has no variant `{name}`")),
                 },
-                Some(_) => Member::Unsupported("type member used as a value"),
+                Some(_) => Member::Unsupported(format!(
+                    "`{type_name}.{name}`: `{type_name}` is a type, and `{name}` is not one of its \
+                     values"
+                )),
                 None => Member::FieldAccess,
             };
             match kind {
                 Member::EmptyVariant(index) => {
                     let shape = self.module.intern_shape(
-                        Shape::enum_variant(type_name.clone(), name.to_string(), Vec::new(), false)
-                            .with_variant_index(index),
+                        Shape::enum_variant(
+                            self.module.runtime_type_name(type_name),
+                            name.to_string(),
+                            Vec::new(),
+                            false,
+                        )
+                        .with_variant_index(index),
                     );
                     self.code.push(Op::MakeEnum {
                         dst,
@@ -4325,7 +4779,7 @@ impl<'m> FnCompiler<'m> {
                     });
                     return Ok(());
                 }
-                Member::Unsupported(reason) => return unsupported(reason),
+                Member::Unsupported(reason) => return unsupported(reason, span),
                 Member::FieldAccess => {}
             }
         }
@@ -4391,7 +4845,10 @@ impl<'m> FnCompiler<'m> {
             // apply; the reuse pass never marks them (it excludes nothing here, but `make_opaque`
             // simply ignores the token — the copying path is always correct).
             Some(TypeInfo::Opaque) => self.make_opaque(type_name, fields, spread, dst),
-            Some(TypeInfo::Enum { .. }) => unsupported("enum type used as a record literal"),
+            Some(TypeInfo::Enum { .. }) => unsupported(
+                format!("`{type_name}` is an enum, and an enum has no record-literal form"),
+                span,
+            ),
             None => {
                 // The tree-walker looks the type up first and errors before touching fields.
                 let idx = self.add_diag(unknown_type_diag(type_name, type_name_span));
@@ -4422,7 +4879,7 @@ impl<'m> FnCompiler<'m> {
         let shape = self.module.intern_shape(
             Shape::object_equatable(
                 kind,
-                type_name.to_string(),
+                self.module.runtime_type_name(type_name),
                 decl_fields.to_vec(),
                 structural_eq,
             )
@@ -4549,17 +5006,20 @@ impl<'m> FnCompiler<'m> {
         args: &[Atom],
         reflect: Option<u32>,
         dst: Reg,
+        span: Span,
     ) -> Result<(), Unsupported> {
         let slots = match self.module.types.get(type_name) {
             Some(TypeInfo::Enum { variants, .. }) => match variants.get(variant) {
                 Some(slots) => slots.clone(),
-                None => return unsupported("unknown enum variant"),
+                None => {
+                    return unsupported(format!("`{type_name}` has no variant `{variant}`"), span);
+                }
             },
             _ => unreachable!("make_enum is only reached for enum types"),
         };
         let shape = self.module.intern_shape(
             Shape::enum_variant(
-                type_name.to_string(),
+                self.module.runtime_type_name(type_name),
                 variant.to_string(),
                 slots.fields,
                 false,
@@ -4581,10 +5041,15 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// `Enum.try_from(s)` / `Enum.from(s)` (`panic` = the `from` form) — lower the string→case
-    /// conversion. Interns the shape of every **payload-free** variant (the name-constructible ones)
-    /// plus the `Option` wrappers, and emits `Op::EnumFromStr`; the VM matches the runtime string
-    /// against the case names. The checker guarantees a single string argument.
+    /// `Enum.try_from(v)` / `Enum.from(v)` (`panic` = the `from` form) — lower the wire→case
+    /// conversion. Interns the shape of every **payload-free** variant (the only constructible ones
+    /// here) plus the `Option` wrappers, and emits `Op::EnumFromStr` carrying each case's name AND
+    /// its backing; the VM matches the runtime value through the shared
+    /// [`noeta_ast::reflect::variant_for_wire`]. The name and backing are baked alongside the
+    /// interned shape rather than read back through reflection at run time: the artifact does carry
+    /// them for a prelude/native enum now (it is seeded from the very tables `self.module.types` is),
+    /// but a **shape id** can only be minted here, so the dynamic path would need runtime interning
+    /// to buy nothing. Bake all three together and the case table stays one fact.
     fn lower_enum_from_str(
         &mut self,
         type_name: &str,
@@ -4597,23 +5062,28 @@ impl<'m> FnCompiler<'m> {
             Some(TypeInfo::Enum { variants, .. }) => variants.clone(),
             _ => unreachable!("lower_enum_from_str is only reached for enum types"),
         };
-        let mut cases: Vec<(String, u32)> = variants
+        let runtime_name = self.module.runtime_type_name(type_name);
+        let mut cases: Vec<(u32, String, Option<noeta_ast::AttrValue>)> = variants
             .into_iter()
             .filter(|(_, slots)| slots.fields.is_empty())
-            .map(|(vname, slots)| {
-                let shape = self.module.intern_shape(
-                    Shape::enum_variant(type_name.to_string(), vname.clone(), Vec::new(), false)
-                        .with_variant_index(slots.index),
-                );
-                (vname, shape)
-            })
+            .map(|(vname, slots)| (slots.index, vname, slots.backing))
             .collect();
-        // Stable order keeps the case list deterministic (the source `HashMap` is not ordered).
-        // Sort by name *before* interning, since ids follow emission order, not lexical order.
-        cases.sort_by(|a, b| a.0.cmp(&b.0));
-        let cases: Vec<(NameId, u32)> = cases
+        // Ordered by **declaration index**, not by name. The source table is a `HashMap`, so some
+        // deterministic order is needed either way — and declaration order is the one the shared
+        // matcher documents and the tree-walker walks, so ordering by it is what keeps the two
+        // backends resolving an ambiguous probe (a backing that is also another case's name) to the
+        // same case, rather than each to merely *a* stable one.
+        cases.sort_by_key(|(index, _, _)| *index);
+        // Interned after sorting, since shape/name ids follow emission order, not lexical order.
+        let cases: Vec<(NameId, Option<noeta_ast::AttrValue>, u32)> = cases
             .into_iter()
-            .map(|(vname, shape)| (self.module.intern_name(&vname), shape))
+            .map(|(index, vname, backing)| {
+                let shape = self.module.intern_shape(
+                    Shape::enum_variant(runtime_name.clone(), vname.clone(), Vec::new(), false)
+                        .with_variant_index(index),
+                );
+                (self.module.intern_name(&vname), backing, shape)
+            })
             .collect();
         let some_shape = self.module.builtin_enum_shape("Option", "some");
         let none_shape = self.module.builtin_enum_shape("Option", "none");
@@ -4636,14 +5106,17 @@ impl<'m> FnCompiler<'m> {
 
     /// Call an associated function `Type.f(args)`. The method prototype reserves register 0 for
     /// `self`; an associated call has no receiver, so unit is passed there.
+    #[allow(clippy::too_many_arguments)]
     fn call_associated(
         &mut self,
         proto: u32,
         args: &[Atom],
+        type_args: &[Atom],
         dst: Reg,
         span: Span,
         supplied: Option<u64>,
     ) -> Result<(), Unsupported> {
+        let type_args = self.type_arg_regs(type_args)?;
         let self_reg = self.alloc_reg();
         let k = self.add_const(Const::Unit);
         self.code.push(Op::LoadConst { dst: self_reg, k });
@@ -4662,9 +5135,10 @@ impl<'m> FnCompiler<'m> {
             dst,
             callee,
             args: arg_regs.into_boxed_slice(),
+            type_args,
             span,
             // A unit receiver occupies register 0 above, so the declared parameters shift by one.
-            supplied: supplied.map(|m| (m << 1) | 1),
+            supplied: noeta_bytecode::pack_supplied(supplied.map(|m| (m << 1) | 1)),
         });
         Ok(())
     }
@@ -4677,11 +5151,22 @@ impl<'m> FnCompiler<'m> {
         variant: &str,
         args: &[Atom],
         dst: Reg,
+        span: Span,
     ) -> Result<(), Unsupported> {
         let arg_regs = self.atom_regs(args)?;
         let allowed = if variant == "Ok" { 0..=1 } else { 1..=1 };
         if !allowed.contains(&arg_regs.len()) {
-            return unsupported("Result/Option constructor with an unexpected argument count");
+            return unsupported(
+                format!(
+                    "`{variant}` takes {}, not {}",
+                    match variant {
+                        "Ok" => "no argument or one",
+                        _ => "exactly one argument",
+                    },
+                    arg_regs.len()
+                ),
+                span,
+            );
         }
         let shape = self.module.builtin_enum_shape(enum_name, variant);
         self.code.push(Op::MakeEnum {
@@ -4698,7 +5183,10 @@ impl<'m> FnCompiler<'m> {
     fn make_panic(&mut self, args: &[Atom], span: Span) -> Result<(), Unsupported> {
         let arg_regs = self.atom_regs(args)?;
         if arg_regs.len() != 1 {
-            return unsupported("`panic` with an unexpected argument count");
+            return unsupported(
+                format!("`panic` takes exactly one argument, not {}", arg_regs.len()),
+                span,
+            );
         }
         self.code.push(Op::Panic {
             msg: arg_regs[0],
@@ -4782,6 +5270,12 @@ impl<'m> FnCompiler<'m> {
     /// pattern (jumping to the next arm on mismatch), binds, evaluates its body, and jumps to the
     /// end. A value matching no arm hits `MatchFail` (E0007). In expression position (`dst`
     /// `Some`) each arm body is a value block whose tail is moved into the destination.
+    ///
+    /// A guarded arm (`pattern if cond`) evaluates its guard block after the pattern test and
+    /// bindings, still inside the arm scope (the guard sees the bindings), then branches with the
+    /// same fused `CondBranch` an `if`/`while` condition compiles to: false jumps to the next
+    /// arm's test (fall-through, exactly like a failed pattern), a non-bool raises the
+    /// `if`-condition E0007 — matching the reference interpreter byte for byte.
     fn match_stmt(
         &mut self,
         scrutinee: &Atom,
@@ -4797,6 +5291,10 @@ impl<'m> FnCompiler<'m> {
             self.scopes.push(HashMap::new());
             self.emit_pattern(&arm.pattern, s, &mut fail_jumps);
             let body = (|| {
+                if let Some(guard) = &arm.guard {
+                    let g = self.value_block(&guard.block)?;
+                    fail_jumps.push(self.push_cond_branch(g, guard.span));
+                }
                 self.hoist_nested_fn_cells(&arm.body.stmts);
                 for stmt in &arm.body.stmts {
                     self.stmt(stmt)?;
@@ -4864,7 +5362,13 @@ impl<'m> FnCompiler<'m> {
                 ..
             } => {
                 fail_jumps.push(self.code.len());
-                let type_name = type_name.as_ref().map(|n| self.module.intern_name(n));
+                // Through `runtime_type_name`, like every construction site: a pattern compares
+                // against the name the VALUE carries, and for a native type reached under an alias
+                // or a qualified spelling that is not the name written here.
+                let type_name = type_name.as_ref().map(|n| {
+                    self.module
+                        .intern_name(&self.module.runtime_type_name(n.as_str()))
+                });
                 let variant = self.module.intern_name(variant);
                 self.code.push(Op::MatchVariant {
                     src: reg,
@@ -4887,10 +5391,15 @@ impl<'m> FnCompiler<'m> {
             // fall through on `true` / jump to the next arm on `false`. Binds nothing.
             Pattern::IsType { ty, .. } => {
                 let test = self.alloc_reg();
+                // Always the baked target: a `match` arm's `is T` over a type parameter is refused at
+                // check time (E0058), because a pattern is tested in place — the IR reuses the AST
+                // `Pattern`, which has no operand position an instantiation's name could be computed
+                // into. The expression form `v.as<T>()` carries one and resolves.
                 self.code.push(Op::IsType {
                     dst: test,
                     src: reg,
                     target: Box::new(narrow_target(ty)),
+                    dynamic: None,
                 });
                 fail_jumps.push(self.code.len());
                 self.code.push(Op::JumpIfFalse {
@@ -5030,48 +5539,6 @@ fn unknown_field_diag(type_name: &str, field: &str, span: Span) -> Diagnostic {
     )
 }
 
-/// The runtime head constructor a **built-in type name** narrows to, or `None` when the name has
-/// no dedicated head and falls back to a nominal (`NarrowTarget::Named`) match by shape name.
-///
-/// Exhaustive over [`BuiltinTy`] so this and the tree-walker's `runtime_matches` — the two halves
-/// of the differential — cannot drift: a new built-in fails to compile in both until handled.
-///
-/// This funnel dropped a bare `tuple` head the VM alone recognized. `tuple` is not a built-in type
-/// name (`Type::is_builtin_name` rejects it, so the checker reports an unknown type before any
-/// narrowing runs) and the tree-walker always treated it nominally — so the two backends now agree
-/// on an unreachable case they used to answer differently. A tuple target is written `(A, B)`,
-/// which reaches [`NarrowTarget::Tuple`] through `TypeRef::Tuple`.
-fn narrow_head(name: &str) -> Option<NarrowTarget> {
-    use noeta_ast::BuiltinTy;
-    Some(match BuiltinTy::from_name_any(name)? {
-        BuiltinTy::Int => NarrowTarget::Int,
-        BuiltinTy::Float => NarrowTarget::Float,
-        // `f32` is reified at runtime (distinct NaN-box tag), so it gets a head; the matcher's
-        // `F32 <: float` edge makes `(f32) is float` true while `(float) is f32` stays false.
-        BuiltinTy::F32 => NarrowTarget::F32,
-        BuiltinTy::Bool => NarrowTarget::Bool,
-        BuiltinTy::Str => NarrowTarget::String,
-        BuiltinTy::Bytes => NarrowTarget::Bytes,
-        BuiltinTy::Unit => NarrowTarget::Unit,
-        BuiltinTy::Dyn => NarrowTarget::Dyn,
-        BuiltinTy::List => NarrowTarget::List,
-        BuiltinTy::Map => NarrowTarget::Map,
-        BuiltinTy::Set => NarrowTarget::Set,
-        // Abstract kind-types match any value of that declaration kind.
-        BuiltinTy::KindEnum => NarrowTarget::AnyEnum,
-        BuiltinTy::KindStruct => NarrowTarget::AnyStruct,
-        BuiltinTy::KindClass => NarrowTarget::AnyClass,
-        // `Option`/`Result` are enums whose shape name *is* the type name, so they narrow through
-        // the nominal path like a user enum rather than needing a head of their own.
-        BuiltinTy::Option | BuiltinTy::Result => return None,
-        // The erased widths (`f64`, `i8..u64`) carry no runtime tag on a scalar, so they fall to the
-        // nominal path and never match a scalar. The checker warns on a bare-scalar `is i32`/`is f64`
-        // (statically always-false); giving them heads would need scalar reification, which the arc
-        // deliberately declines. `f32` alone is reified and handled above. Both backends agree.
-        BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
-    })
-}
-
 /// Reduce a narrowing target type (`x.as<T>()`) to its runtime head constructor. Mirrors the
 /// tree-walker's `runtime_matches` mapping exactly so both backends decide a narrowing the same
 /// way. `Option`/`Result` and user records/classes/enums all become `Named` (matched by shape
@@ -5082,11 +5549,17 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
             NarrowTarget::AnyOf(members.iter().map(narrow_target).collect())
         }
         TypeRef::Optional { .. } => NarrowTarget::Named("Option".to_string()),
-        // Narrowing to a trait object reduces to the dynamic top (a permissive over-approximation;
-        // `x.as<dyn Trait>()` is a rare corner and a precise implementor test is future work).
-        TypeRef::DynTrait { .. } => NarrowTarget::Dyn,
-        // A `Self::Name` projection has no static runtime head (resolution is per-impl at the checker);
-        // narrowing to one reduces to the permissive dynamic top, like a trait object (slice 1a).
+        // A trait object narrows PRECISELY: the target carries the trait's canonical identity
+        // (resolved at lowering by `resolve_type_aliases`), and the VM's `narrow_matches` tests the
+        // value's nominal type against the module reflection's membership table — mirroring the
+        // tree-walker's `runtime_matches` on the same shared table, so the differential holds by
+        // construction.
+        TypeRef::DynTrait { trait_name, .. } => NarrowTarget::DynTrait(trait_name.to_string()),
+        // A `Self::Name` projection has no static runtime head (resolution is per-impl at the
+        // checker); narrowing to one stays the permissive dynamic top — deliberately, and now
+        // UNLIKE the precise `dyn Trait` above: a projection names a concrete per-impl type, not a
+        // trait, and the erased value carries no impl identity to reconstruct that binding from
+        // (slice 1a).
         TypeRef::AssocProjection { .. } => NarrowTarget::Dyn,
         TypeRef::Tuple { .. } => NarrowTarget::Tuple,
         // Function types are erased: narrowing to one is a head-constructor "is callable" test
@@ -5094,7 +5567,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         // element type.
         TypeRef::Fn { .. } => NarrowTarget::Fn,
         TypeRef::Named { name, args, .. } => {
-            let head = narrow_head(name).unwrap_or_else(|| NarrowTarget::Named(name.clone()));
+            let head = NarrowTarget::from_runtime_name(name.as_str());
             // A parametrized target (`List<int>`, `Box<int>`) additionally checks its type arguments
             // against the value's reflected tag (R3); a bare name (`List`, `Box`, `Struct`) stays the
             // head-only target, preserving the widening `x is List` and the untagged fallback.
@@ -5145,6 +5618,10 @@ mod tests {
     use noeta_lexer::lex;
     use noeta_parser::parse;
     use noeta_span::{Source, SourceId};
+
+    use super::{Unsupported, unsupported};
+    use noeta_diagnostics::DiagnosticCode;
+    use noeta_span::Span;
 
     /// Compile `src` in **debug** mode (as `noeta dap` does), threading the checker's site maps into
     /// `compile_with_sites` with `debug = true` so the per-prototype debug info is emitted.
@@ -5201,6 +5678,51 @@ mod tests {
         let main = m.main();
         assert_eq!(main.name.as_deref(), Some("main"));
         assert!(main.def_span.is_some());
+    }
+
+    /// A closure capturing a **match-arm pattern binding** must compile: the binding is a local of the
+    /// enclosing function (like a `for` variable), so the celling analysis has to promote it to a cell
+    /// at its binding site. It once did not, and the capture then found a plain register — the
+    /// compiler aborted with `Unsupported("a forward capture of a not-yet-celled local")`, surfacing to
+    /// the author as a spanless `noeta: internal error`. Asserted here as well as in the corpus because
+    /// the differential oracle counts an `Unsupported` as *not run* rather than as a failure, so a
+    /// regression would silently drop the conformance cases out of VM coverage instead of failing.
+    #[test]
+    fn a_closure_capturing_a_match_arm_binding_compiles() {
+        let compiles = |src: &str| {
+            let source = Source::new(SourceId::FIRST, "test.noe", src);
+            let lexed = lex(&source);
+            let parsed = parse(&source, &lexed.tokens);
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "must parse cleanly: {:?}",
+                parsed.diagnostics
+            );
+            compile(&parsed.program)
+        };
+        // The reported reproduction: an arm binding captured by a `filter` callback.
+        let m = compiles(
+            "x = some(2)\nys = [1, 2, 3]\necho match x {\n  some(want) => ys.filter(fn(n) => n == want).len(),\n  none => 0,\n}\n",
+        ).expect("a closure over a match-arm binding compiles");
+        // The binding really is celled (not merely tolerated): the arm emits a `MakeCell`.
+        assert!(
+            m.protos
+                .iter()
+                .flat_map(|c| c.code.iter())
+                .any(|op| matches!(op, noeta_bytecode::Op::MakeCell { .. })),
+            "the captured arm binding must be boxed into a cell"
+        );
+        // The same mechanism through the neighbouring pattern shapes.
+        compiles(
+            "fn dig(r: Result<?int, string>): int {\n  return match r {\n    Ok(some(v)) => (fn() => v * 2)(),\n    Ok(none) => -1,\n    Err(e) => -2,\n  }\n}\necho dig(Ok(some(4)))\n",
+        )
+        .expect("a nested variant pattern's binding is capturable");
+        compiles("p = (1, 2)\necho match p {\n  (a, b) => (fn() => a + b)(),\n}\n")
+            .expect("a tuple pattern's bindings are capturable");
+        compiles(
+            "x = some(7)\nf = match x {\n  some(v) => fn(n) => n + v,\n  none => fn(n) => n,\n}\necho f(1)\n",
+        )
+        .expect("a capture escaping the arm compiles");
     }
 
     #[test]
@@ -5403,14 +5925,41 @@ mod tests {
         // same embedding to the raw builder output.
         // `compile` builds reflection against the process-global registry (`CompileOptions::default`),
         // so the parity comparison must feed the raw builder the same native-role table.
-        let native_roles = noeta_ext_abi::registry::single_registry_process().native_roles();
-        let mut from_builder = noeta_ast::reflect::build(&parsed.program, &native_roles);
+        let registry = noeta_ext_abi::registry::single_registry_process();
+        let native_roles = registry.native_roles();
+        let native_traits = noeta_ir::native_trait_impls(registry);
+        let mut from_builder =
+            noeta_ast::reflect::build(&parsed.program, &native_roles, &native_traits);
         noeta_check::extend_reflection(&mut from_builder);
         assert_eq!(from_module, from_builder);
         // Deterministic: the same AST always yields the same artifact.
-        let mut again = noeta_ast::reflect::build(&parsed.program, &native_roles);
+        let mut again = noeta_ast::reflect::build(&parsed.program, &native_roles, &native_traits);
         noeta_check::extend_reflection(&mut again);
         assert_eq!(from_builder, again);
+    }
+
+    /// The membership table behind the precise `is dyn Trait` / `traits_of`: a standalone
+    /// `impl Trait for T`, an in-body `impl` block, and a `@derive` (built-in and user traits
+    /// alike) all register — and a type with none registers nothing (the row-absence that makes
+    /// the runtime test answer `false` where it used to answer `true`).
+    #[test]
+    fn reflection_records_trait_impls_from_every_declaration_form() {
+        let src = "trait Speaks { fn speak(): string }\n\
+                   trait Greets { fn hello(): string { return \"hi\"; } }\n\
+                   struct Dog { name: string }\n\
+                   impl Speaks for Dog { fn speak(): string { return \"woof\"; } }\n\
+                   @derive(Greets)\n\
+                   struct Robot { id: int  impl Display { fn to_string(): string { return \"r\"; } } }\n\
+                   struct Plain { n: int }\n";
+        let source = Source::new(SourceId::FIRST, "t.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let reflection = compile(&parsed.program).expect("compiles").reflection;
+        assert_eq!(reflection.traits_for("Dog"), vec!["Speaks"]);
+        assert_eq!(reflection.traits_for("Robot"), vec!["Display", "Greets"]);
+        assert!(reflection.traits_for("Plain").is_empty());
+        assert!(reflection.type_implements("Dog", "Speaks"));
+        assert!(!reflection.type_implements("Plain", "Speaks"));
     }
 
     #[test]
@@ -5443,17 +5992,38 @@ mod tests {
     // A whole-program re-check (what an edited file produces) numbers its table from zero in its own
     // discovery order, so the session must ABSORB it by content, not adopt it wholesale.
 
-    use super::{SessionCompiler, Sites, Span};
+    use super::{SessionCompiler, Sites};
+    use noeta_ast::reflect::TypeRepr;
     use noeta_ext_abi::{HiddenArg, TypeArgInfo};
     use std::borrow::Cow;
 
-    /// A table entry named `name`. The merge's key is the whole [`TypeArgInfo`] — exactly the
-    /// checker's own interning key — so a distinct name is a distinct entry.
-    fn ta(name: &str) -> TypeArgInfo {
-        TypeArgInfo {
-            name: name.to_string(),
-            recipe: None,
-        }
+    /// One entry of the parallel tables: a plain `struct T` instantiation, distinguished by name.
+    /// The merge's key is the PAIR (`TypeArgInfo`, `TypeRepr`) — exactly the checker's own interning
+    /// key, applied through the very same `noeta_check::intern_type_arg_entry`.
+    fn ta(name: &str) -> (TypeArgInfo, Option<TypeRepr>) {
+        (
+            TypeArgInfo {
+                name: name.to_string(),
+                recipe: None,
+            },
+            Some(TypeRepr::Struct(name.to_string(), Vec::new())),
+        )
+    }
+
+    /// One `Repository<arg>` entry — the case the pair key exists for. A generic **class** interns a
+    /// head-keyed `name` and carries no decode recipe, so `Repository<Todo>` and `Repository<Order>`
+    /// produce IDENTICAL [`TypeArgInfo`]s and are told apart only by the repr.
+    fn repo(arg: &str) -> (TypeArgInfo, Option<TypeRepr>) {
+        (
+            TypeArgInfo {
+                name: "Repository".to_string(),
+                recipe: None,
+            },
+            Some(TypeRepr::Class(
+                "Repository".to_string(),
+                vec![TypeRepr::Struct(arg.to_string(), Vec::new())],
+            )),
+        )
     }
 
     fn ta_names(table: &[TypeArgInfo]) -> Vec<&str> {
@@ -5465,11 +6035,12 @@ mod tests {
         Span::new(i, i + 1)
     }
 
-    /// A synthetic checker bundle: a type-argument table plus one hidden-argument call site per
-    /// entry of `calls`, keyed by [`call_span`].
-    fn ta_sites(table: &[&str], calls: &[Vec<HiddenArg>]) -> Sites {
+    /// A synthetic checker bundle: the parallel type-argument tables plus one hidden-argument call
+    /// site per entry of `calls`, keyed by [`call_span`].
+    fn ta_sites(table: &[(TypeArgInfo, Option<TypeRepr>)], calls: &[Vec<HiddenArg>]) -> Sites {
         Sites {
-            type_arg_table: table.iter().map(|n| ta(n)).collect(),
+            type_arg_table: table.iter().map(|(info, _)| info.clone()).collect(),
+            type_arg_reprs: table.iter().map(|(_, repr)| repr.clone()).collect(),
             hidden_arg_sites: calls
                 .iter()
                 .enumerate()
@@ -5481,8 +6052,9 @@ mod tests {
 
     /// The absorption's oracle: a remap may renumber, but it may never re-MEAN. Every `Table(i)`
     /// of the fresh bundle must, after the remap, name the very same instantiation through the
-    /// merged table — and a `Forward(j)` (a per-fn hidden SLOT ordinal, not a table index) must
-    /// pass through untouched.
+    /// merged tables — **both halves of the key**, so a merge that collapsed two entries differing
+    /// only in their repr is caught here and not three swaps later. A `Forward(j)` (a per-body
+    /// hidden SLOT ordinal, not a table index) must pass through untouched.
     fn assert_meaning_preserved(fresh: &Sites, absorbed: &Sites) {
         for (span, before) in &fresh.hidden_arg_sites {
             let after = absorbed
@@ -5492,10 +6064,17 @@ mod tests {
             assert_eq!(before.len(), after.len(), "slot count is preserved");
             for (b, a) in before.iter().zip(after) {
                 match (b, a) {
-                    (HiddenArg::Table(i), HiddenArg::Table(j)) => assert_eq!(
-                        fresh.type_arg_table[*i as usize], absorbed.type_arg_table[*j as usize],
-                        "remapped table index {j} must mean what fresh index {i} meant"
-                    ),
+                    (HiddenArg::Table(i), HiddenArg::Table(j)) => {
+                        assert_eq!(
+                            fresh.type_arg_table[*i as usize], absorbed.type_arg_table[*j as usize],
+                            "remapped table index {j} must mean what fresh index {i} meant"
+                        );
+                        assert_eq!(
+                            fresh.type_arg_reprs[*i as usize], absorbed.type_arg_reprs[*j as usize],
+                            "…including the repr half of the key, which is all that tells two \
+                             instantiations of one generic class apart"
+                        );
+                    }
                     (b, a) => {
                         assert_eq!(b, a, "a `Forward` slot ordinal is not a table index")
                     }
@@ -5509,7 +6088,7 @@ mod tests {
         let mut session = SessionCompiler::new();
         // Entry 1 — the running program's table: [A, B].
         let first = ta_sites(
-            &["A", "B"],
+            &[ta("A"), ta("B")],
             &[
                 vec![HiddenArg::Table(0)],
                 vec![HiddenArg::Table(1), HiddenArg::Forward(3)],
@@ -5523,7 +6102,7 @@ mod tests {
         // The swap: a FRESH whole-program check whose table is [B, C] — numbered from zero in its
         // own order. Live values still hold session index 0 = A and 1 = B.
         let fresh = ta_sites(
-            &["B", "C"],
+            &[ta("B"), ta("C")],
             &[
                 vec![HiddenArg::Table(0)],
                 vec![HiddenArg::Table(1), HiddenArg::Forward(3)],
@@ -5550,7 +6129,7 @@ mod tests {
     fn a_permuted_fresh_type_arg_table_adds_no_entries() {
         let mut session = SessionCompiler::new();
         let first = ta_sites(
-            &["A", "B", "C"],
+            &[ta("A"), ta("B"), ta("C")],
             &[vec![
                 HiddenArg::Table(0),
                 HiddenArg::Table(1),
@@ -5563,7 +6142,7 @@ mod tests {
         // The same three instantiations, discovered in a different order by a fresh check: pure
         // remap, not one new entry — the table must not grow on every swap of an unchanged program.
         let permuted = ta_sites(
-            &["C", "A", "B"],
+            &[ta("C"), ta("A"), ta("B")],
             &[vec![
                 HiddenArg::Table(0),
                 HiddenArg::Table(1),
@@ -5592,6 +6171,64 @@ mod tests {
         let again = session.absorb_type_args(&absorbed);
         assert!(matches!(again, Cow::Borrowed(_)));
         assert_eq!(session.type_args().len(), 3);
+    }
+
+    #[test]
+    fn two_instantiations_of_one_generic_class_stay_distinct_through_an_absorb() {
+        // The case the PAIR key exists for. `Repository<Todo>` and `Repository<Order>` intern the
+        // identical `TypeArgInfo` — a class's `name` is head-keyed and it carries no decode recipe —
+        // and are told apart *only* by the parallel `TypeRepr`. A merge keyed on `TypeArgInfo` alone
+        // would fold them into one entry, and the two construction sites would then stamp each
+        // other's type argument onto the objects they build.
+        let mut session = SessionCompiler::new();
+        let first = ta_sites(
+            &[repo("Todo"), repo("Order")],
+            &[vec![HiddenArg::Table(0)], vec![HiddenArg::Table(1)]],
+        );
+        assert_eq!(
+            first.type_arg_table[0], first.type_arg_table[1],
+            "the premise: the `TypeArgInfo` half cannot tell these apart"
+        );
+        assert_ne!(
+            first.type_arg_reprs[0], first.type_arg_reprs[1],
+            "…and the repr half is what can"
+        );
+        let absorbed = session.absorb_type_args(&first);
+        assert!(matches!(absorbed, Cow::Borrowed(_)));
+        assert_eq!(
+            session.type_args().len(),
+            2,
+            "equal `TypeArgInfo`s with different reprs are TWO entries, not one"
+        );
+        assert_ne!(
+            session.type_arg_reprs()[0],
+            session.type_arg_reprs()[1],
+            "the session's parallel projection keeps them apart too"
+        );
+
+        // The swap: the same program re-checked, discovering `Order` first. Session index 0 still
+        // means `Repository<Todo>`, so the sites must CROSS OVER rather than stay put.
+        let fresh = ta_sites(
+            &[repo("Order"), repo("Todo")],
+            &[vec![HiddenArg::Table(0)], vec![HiddenArg::Table(1)]],
+        );
+        let absorbed = session.absorb_type_args(&fresh);
+        assert_eq!(
+            session.type_args().len(),
+            2,
+            "a permutation of the pair appends nothing"
+        );
+        assert_eq!(
+            absorbed.hidden_arg_sites[&call_span(0)],
+            vec![HiddenArg::Table(1)],
+            "fresh 0 (`Order`) is session 1"
+        );
+        assert_eq!(
+            absorbed.hidden_arg_sites[&call_span(1)],
+            vec![HiddenArg::Table(0)],
+            "fresh 1 (`Todo`) is session 0"
+        );
+        assert_meaning_preserved(&fresh, &absorbed);
     }
 
     /// Parse + check `src` as `file.noe` (always the same [`SourceId`] — a hot swap re-checks the
@@ -5635,6 +6272,8 @@ mod tests {
         let mut session = SessionCompiler::new();
         let m1 = session.extend_checked(&p1, &s1).expect("v1 compiles");
         assert_eq!(ta_names(&m1.type_args), ["Order", "User"]);
+        let reprs_v1 = m1.type_arg_reprs.clone();
+        assert_eq!(reprs_v1.len(), m1.type_args.len(), "parallel tables");
 
         // v2 — the edited file, re-checked WHOLE from scratch: User first, then Order, then a new
         // Item. Its own table is [User, Order, Item], numbered from zero in its own order.
@@ -5650,6 +6289,25 @@ mod tests {
         // means User — the meanings live values already hold — and only Item appends.
         assert_eq!(ta_names(&m2.type_args), ["Order", "User", "Item"]);
         assert_eq!(m1.type_args, m2.type_args[..m1.type_args.len()]);
+        // The parallel reflection projection moved WITH it — reordered into the merged order, not
+        // recomputed positionally from v2's own IR (which would have put `User`'s repr at 0).
+        assert_eq!(m2.type_arg_reprs.len(), m2.type_args.len(), "lockstep");
+        assert_eq!(
+            reprs_v1,
+            m2.type_arg_reprs[..reprs_v1.len()],
+            "`Op::RetagDynamic` resolves a live slot's index through this table — its prefix is as \
+             load-bearing as `type_args`'"
+        );
+        let repr_at =
+            |m: &Module, i: usize| m.type_arg_reprs[i].map(|k| m.type_reprs[k as usize].clone());
+        assert_eq!(
+            repr_at(&m2, 0),
+            Some(noeta_ast::reflect::TypeRepr::Struct(
+                "Order".to_string(),
+                Vec::new()
+            )),
+            "session index 0 still reflects as `Order`"
+        );
 
         // …and the code v2 emitted indexes that session table, not its own: re-absorbing the same
         // bundle (idempotent) exposes the remap the install used.
@@ -5660,5 +6318,48 @@ mod tests {
             ["Order", "User", "Item"]
         );
         assert_eq!(session.type_args().len(), 3, "re-absorbing appends nothing");
+    }
+
+    /// An internal compile failure must be *locatable*. The whole cost of the span-less version was
+    /// that `internal error: the VM cannot compile this program: <reason>` reads as a broken
+    /// toolchain, so this pins both halves: a located failure renders as a real diagnostic, and a
+    /// span-less one still says the one sentence every front-end used to compose by hand.
+    #[test]
+    fn an_unsupported_renders_as_a_located_diagnostic() {
+        let span = Span::new_in(SourceId::FIRST, 10, 20);
+        let located = Unsupported {
+            reason: "`Shape.Circle` is a data-carrying variant used without arguments".to_string(),
+            span: Some(span),
+        };
+        let diagnostic = located
+            .diagnostic()
+            .expect("a located failure has a diagnostic");
+        assert_eq!(diagnostic.code, DiagnosticCode::InternalCompilerError);
+        assert_eq!(diagnostic.span, span);
+        assert!(diagnostic.message.contains("`Shape.Circle`"));
+        assert!(
+            diagnostic.help.is_some(),
+            "reaching this is a compiler bug, and the render must say so"
+        );
+
+        let bare = Unsupported {
+            reason: "something".to_string(),
+            span: None,
+        };
+        assert!(bare.diagnostic().is_none());
+        assert_eq!(
+            bare.to_string(),
+            "internal error: the VM cannot compile this program: something"
+        );
+    }
+
+    /// Every `Unsupported` this crate raises through its own helper carries a span. The type allows
+    /// `None` (the IR seam and any future site with nothing to point at), but a *reason* with no
+    /// location is what cost two agents an afternoon, so the helper cannot produce one.
+    #[test]
+    fn the_unsupported_helper_always_carries_a_location() {
+        let span = Span::new_in(SourceId::FIRST, 3, 4);
+        let raised: Result<(), Unsupported> = unsupported("a reason", span);
+        assert_eq!(raised.unwrap_err().span, Some(span));
     }
 }

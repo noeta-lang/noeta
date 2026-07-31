@@ -17,6 +17,8 @@ use noeta_ast::{
 };
 use noeta_span::Span;
 
+use super::VariantPatternSites;
+
 /// The synthetic dispatch discriminant cell of a desugared generator/async state machine. `$`-prefixed,
 /// so it can never collide with a source name (the lexer forbids `$` in identifiers).
 const STATE_VAR: &str = "$state";
@@ -80,6 +82,7 @@ pub(super) fn desugar_state_machine(
     mode: SuspendMode,
     module_globals: &HashSet<String>,
     params: &[String],
+    variant_patterns: &VariantPatternSites,
 ) -> StateMachineDesugar {
     // A bare reassignment of a module global that this function does not shadow (no param, no fresh
     // `mut` local of the same name) is a global store, never a capturable local — so it must not be
@@ -106,7 +109,7 @@ pub(super) fn desugar_state_machine(
     // a generator has no awaits). After this the flattener only ever sees head/hoisted-binding awaits.
     let hoisted_body;
     let body = if mode == SuspendMode::Async {
-        hoisted_body = hoist_await_body(body);
+        hoisted_body = hoist_await_body(body, variant_patterns);
         &hoisted_body[..]
     } else {
         body
@@ -159,6 +162,7 @@ pub(super) fn desugar_state_machine(
             ty: None,
             default: None,
             span,
+            positional: false,
         }],
         ret: None,
         body: ClosureBody::Block(vec![dispatch]),
@@ -576,6 +580,52 @@ impl Flattener<'_> {
                 };
                 self.new_block()
             }
+            // A nested `fn` declaration binds a name in this scope exactly as a local does, so it is
+            // a hoist candidate for the same reason: the declaration executes in ONE state, and
+            // every later state must still see the name. Without this the name never entered
+            // `binds`, so it was never a cell and died at the first suspend — `fn helper()` declared
+            // above a `yield` was gone below it (E0005), while the equivalent
+            // `helper = fn() => …` worked, because that spelling *is* a `Binding`.
+            //
+            // It is rewritten into the binding form `name = fn(params) { body }` — a `Binding` of a
+            // closure — because that spelling already works across suspends today, for exactly the
+            // reason the declaration form does not: a `Binding` is a hoist candidate, so liveness
+            // makes it a prelude cell and `rewrite_hoisted` turns it into an assignment against
+            // that cell. Registering the name without rewriting is not enough — the declaration
+            // would still shadow the cell inside its own state and leave it unset.
+            //
+            // Sound because a named fn is SEALED: its body sees its parameters and statics, never
+            // the enclosing scope implicitly. A capture-free one therefore has nothing an
+            // auto-capturing closure could newly bind, so no program that compiles today changes
+            // meaning. `mut_decl: false` matches the hand-written spelling and lands the name on
+            // the always-hoist path.
+            //
+            // Anything the closure form cannot faithfully carry stays on the old path (declared
+            // in-state, unusable after a suspend as before, rather than silently mis-lowered): a
+            // capturing fn (`use (x)`, whose upvalues are themselves cells here), an `async fn`, a
+            // generic fn, and a nested generator.
+            AstStmt::Fn(decl)
+                if decl.captures.is_empty()
+                    && !decl.is_async
+                    && decl.type_params.is_empty()
+                    && !body_has_yield(&decl.body) =>
+            {
+                self.record(decl.name.as_str(), false, true);
+                self.blocks[cur].stmts.push(AstStmt::Binding {
+                    mut_decl: false,
+                    name: decl.name.to_string(),
+                    name_span: decl.name_span,
+                    ty: None,
+                    value: Expr::Closure {
+                        params: decl.params.clone(),
+                        ret: decl.ret.clone(),
+                        body: ClosureBody::Block(decl.body.clone()),
+                        span: decl.span,
+                    },
+                    span: decl.span,
+                });
+                cur
+            }
             // A flattened-level local: record it as a hoist candidate, preserving its original
             // declaration form (`mut x` vs bare `x =`). Liveness later decides whether it becomes a
             // captured cell (used across a state) or stays a block-local (used within one state); a
@@ -885,18 +935,22 @@ fn value_replace_await(value: &Expr, aw: &str) -> Expr {
 /// poll-states. The checker (E0040) has already rejected awaits in conditionally-evaluated positions
 /// (short-circuit `&&`/`||`/`??` operands, `match`/`if…then…else` arm bodies) and in condition/loop
 /// heads, so those never reach here; this pass mirrors that by not recursing into them.
-fn hoist_await_body(stmts: &[AstStmt]) -> Vec<AstStmt> {
+fn hoist_await_body(stmts: &[AstStmt], vp: &VariantPatternSites) -> Vec<AstStmt> {
     let mut ctr = 0u32;
-    hoist_await_body_ctr(stmts, &mut ctr)
+    hoist_await_body_ctr(stmts, &mut ctr, vp)
 }
 
 /// [`hoist_await_body`] threading an existing synthetic-name counter, so a body hoisted *inside* an
 /// ongoing rewrite (a `??`/`match` arm-body desugar) keeps its `$hw`/`$sc`/… names globally unique
 /// rather than restarting at `0` and colliding with the outer pass's cells.
-fn hoist_await_body_ctr(stmts: &[AstStmt], ctr: &mut u32) -> Vec<AstStmt> {
+fn hoist_await_body_ctr(
+    stmts: &[AstStmt],
+    ctr: &mut u32,
+    vp: &VariantPatternSites,
+) -> Vec<AstStmt> {
     let mut out = Vec::new();
     for stmt in stmts {
-        hoist_await_stmt(stmt, ctr, &mut out);
+        hoist_await_stmt(stmt, ctr, vp, &mut out);
     }
     out
 }
@@ -904,7 +958,12 @@ fn hoist_await_body_ctr(stmts: &[AstStmt], ctr: &mut u32) -> Vec<AstStmt> {
 /// Rewrite one statement, appending its hoisted-await preludes and then the rewritten statement to
 /// `out`. Recurses into control-flow bodies so a mid-expression await deep inside an `if`/`while`/
 /// `for`/`concurrent` is hoisted within that body.
-fn hoist_await_stmt(stmt: &AstStmt, ctr: &mut u32, out: &mut Vec<AstStmt>) {
+fn hoist_await_stmt(
+    stmt: &AstStmt,
+    ctr: &mut u32,
+    vp: &VariantPatternSites,
+    out: &mut Vec<AstStmt>,
+) {
     let mut pre = Vec::new();
     let rewritten = match stmt {
         AstStmt::Binding {
@@ -916,7 +975,7 @@ fn hoist_await_stmt(stmt: &AstStmt, ctr: &mut u32, out: &mut Vec<AstStmt>) {
             span,
         } => {
             let mut value = value.clone();
-            hoist_value_keep_head(&mut value, &mut pre, ctr);
+            hoist_value_keep_head(&mut value, &mut pre, ctr, vp);
             AstStmt::Binding {
                 mut_decl: *mut_decl,
                 name: name.clone(),
@@ -928,12 +987,12 @@ fn hoist_await_stmt(stmt: &AstStmt, ctr: &mut u32, out: &mut Vec<AstStmt>) {
         }
         AstStmt::Expr { expr, span } => {
             let mut expr = expr.clone();
-            hoist_value_keep_head(&mut expr, &mut pre, ctr);
+            hoist_value_keep_head(&mut expr, &mut pre, ctr, vp);
             AstStmt::Expr { expr, span: *span }
         }
         AstStmt::Echo { value, span } => {
             let mut value = value.clone();
-            hoist_value_keep_head(&mut value, &mut pre, ctr);
+            hoist_value_keep_head(&mut value, &mut pre, ctr, vp);
             AstStmt::Echo { value, span: *span }
         }
         AstStmt::Return {
@@ -941,7 +1000,7 @@ fn hoist_await_stmt(stmt: &AstStmt, ctr: &mut u32, out: &mut Vec<AstStmt>) {
             span,
         } => {
             let mut v = v.clone();
-            hoist_value_keep_head(&mut v, &mut pre, ctr);
+            hoist_value_keep_head(&mut v, &mut pre, ctr, vp);
             AstStmt::Return {
                 value: Some(v),
                 span: *span,
@@ -956,7 +1015,7 @@ fn hoist_await_stmt(stmt: &AstStmt, ctr: &mut u32, out: &mut Vec<AstStmt>) {
             span,
         } => {
             let mut value = value.clone();
-            hoist_in_expr(&mut value, &mut pre, ctr);
+            hoist_in_expr(&mut value, &mut pre, ctr, vp);
             AstStmt::Destructure {
                 mut_decl: *mut_decl,
                 targets: targets.clone(),
@@ -971,13 +1030,13 @@ fn hoist_await_stmt(stmt: &AstStmt, ctr: &mut u32, out: &mut Vec<AstStmt>) {
             span,
         } => AstStmt::If {
             cond: cond.clone(),
-            then_body: hoist_await_body(then_body),
-            else_body: else_body.as_deref().map(hoist_await_body),
+            then_body: hoist_await_body(then_body, vp),
+            else_body: else_body.as_deref().map(|b| hoist_await_body(b, vp)),
             span: *span,
         },
         AstStmt::While { cond, body, span } => AstStmt::While {
             cond: cond.clone(),
-            body: hoist_await_body(body),
+            body: hoist_await_body(body, vp),
             span: *span,
         },
         AstStmt::For {
@@ -988,11 +1047,11 @@ fn hoist_await_stmt(stmt: &AstStmt, ctr: &mut u32, out: &mut Vec<AstStmt>) {
         } => AstStmt::For {
             pattern: pattern.clone(),
             iterable: iterable.clone(),
-            body: hoist_await_body(body),
+            body: hoist_await_body(body, vp),
             span: *span,
         },
         AstStmt::Concurrent { body, span } => AstStmt::Concurrent {
-            body: hoist_await_body(body),
+            body: hoist_await_body(body, vp),
             span: *span,
         },
         other => other.clone(),
@@ -1004,15 +1063,20 @@ fn hoist_await_stmt(stmt: &AstStmt, ctr: &mut u32, out: &mut Vec<AstStmt>) {
 /// Hoist mid-expression awaits in a value-bearing statement's value, **keeping a head `.await`**
 /// (optionally under `?`) in place — the flattener turns that head await into the statement's own
 /// poll-state, so only awaits *nested below* the head need hoisting.
-fn hoist_value_keep_head(value: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
+fn hoist_value_keep_head(
+    value: &mut Expr,
+    pre: &mut Vec<AstStmt>,
+    ctr: &mut u32,
+    vp: &VariantPatternSites,
+) {
     match value {
-        Expr::Await { expr, .. } => hoist_in_expr(expr, pre, ctr),
+        Expr::Await { expr, .. } => hoist_in_expr(expr, pre, ctr, vp),
         Expr::Try { expr, .. } if matches!(expr.as_ref(), Expr::Await { .. }) => {
             if let Expr::Await { expr, .. } = expr.as_mut() {
-                hoist_in_expr(expr, pre, ctr);
+                hoist_in_expr(expr, pre, ctr, vp);
             }
         }
-        other => hoist_in_expr(other, pre, ctr),
+        other => hoist_in_expr(other, pre, ctr, vp),
     }
 }
 
@@ -1021,10 +1085,10 @@ fn hoist_value_keep_head(value: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32
 /// hoisted before their enclosing one and children are visited left-to-right, so the emitted bindings
 /// run in source evaluation order. Conditionally-evaluated operands (short-circuit RHS, `??` fallback,
 /// `match` arm bodies) and closures are not descended into (the checker guarantees no await there).
-fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
+fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32, vp: &VariantPatternSites) {
     if let Expr::Await { .. } = e {
         if let Expr::Await { expr, .. } = e {
-            hoist_in_expr(expr, pre, ctr);
+            hoist_in_expr(expr, pre, ctr, vp);
         }
         let span = e.span();
         let name = format!("$hw{}", *ctr);
@@ -1034,7 +1098,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         return;
     }
     match e {
-        Expr::Unary { operand, .. } => hoist_in_expr(operand, pre, ctr),
+        Expr::Unary { operand, .. } => hoist_in_expr(operand, pre, ctr, vp),
         Expr::Binary { .. } => {
             // Read the operator and whether the (conditional) RHS holds an await without keeping the
             // destructuring borrow alive across the rewrites below.
@@ -1046,24 +1110,24 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
             };
             // The LHS is always evaluated unconditionally — hoist its awaits.
             if let Expr::Binary { lhs, .. } = e {
-                hoist_in_expr(lhs, pre, ctr);
+                hoist_in_expr(lhs, pre, ctr, vp);
             }
             if is_short_circuit && rhs_await {
                 // Track A.6b — a short-circuit RHS holding an await becomes control flow so the await
                 // runs only when the operator would evaluate it.
-                desugar_short_circuit_await(e, pre, ctr);
+                desugar_short_circuit_await(e, pre, ctr, vp);
             } else if !is_short_circuit {
                 // A non-short-circuit binary evaluates both operands unconditionally.
                 if let Expr::Binary { rhs, .. } = e {
-                    hoist_in_expr(rhs, pre, ctr);
+                    hoist_in_expr(rhs, pre, ctr, vp);
                 }
             }
             // else: a short-circuit with an await-free RHS — leave it, it evaluates conditionally at
             // runtime with no suspension inside the guarded operand.
         }
         Expr::Pipeline { left, right, .. } => {
-            hoist_in_expr(left, pre, ctr);
-            hoist_in_expr(right, pre, ctr);
+            hoist_in_expr(left, pre, ctr, vp);
+            hoist_in_expr(right, pre, ctr, vp);
         }
         // `??`: the value is evaluated unconditionally (hoist its awaits); the fallback is
         // conditionally-evaluated (only on the `none`/`Err` path). A fallback holding an await becomes
@@ -1071,45 +1135,49 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         Expr::Coalesce {
             value, fallback, ..
         } => {
-            hoist_in_expr(value, pre, ctr);
+            hoist_in_expr(value, pre, ctr, vp);
             if fallback.has_await() {
-                desugar_coalesce_await(e, pre, ctr);
+                desugar_coalesce_await(e, pre, ctr, vp);
             }
             // else: an await-free fallback stays lazy at runtime with no suspension inside it.
         }
         Expr::Index {
             receiver, index, ..
         } => {
-            hoist_in_expr(receiver, pre, ctr);
-            hoist_in_expr(index, pre, ctr);
+            hoist_in_expr(receiver, pre, ctr, vp);
+            hoist_in_expr(index, pre, ctr, vp);
         }
         Expr::Range { start, end, .. } => {
-            hoist_in_expr(start, pre, ctr);
-            hoist_in_expr(end, pre, ctr);
+            hoist_in_expr(start, pre, ctr, vp);
+            hoist_in_expr(end, pre, ctr, vp);
         }
         Expr::Call { callee, args, .. } => {
-            hoist_in_expr(callee, pre, ctr);
+            hoist_in_expr(callee, pre, ctr, vp);
             for a in args {
-                hoist_in_expr(&mut a.value, pre, ctr);
+                hoist_in_expr(&mut a.value, pre, ctr, vp);
             }
         }
         Expr::List { items, .. } | Expr::Tuple { items, .. } => {
             for it in items {
-                hoist_in_expr(it, pre, ctr);
+                hoist_in_expr(it, pre, ctr, vp);
             }
         }
-        Expr::TupleIndex { receiver, .. } => hoist_in_expr(receiver, pre, ctr),
+        Expr::TupleIndex { receiver, .. } => hoist_in_expr(receiver, pre, ctr, vp),
         Expr::Map { entries, .. } => {
             for (k, v) in entries {
-                hoist_in_expr(k, pre, ctr);
-                hoist_in_expr(v, pre, ctr);
+                hoist_in_expr(k, pre, ctr, vp);
+                hoist_in_expr(v, pre, ctr, vp);
             }
         }
-        Expr::Member { receiver, .. } => hoist_in_expr(receiver, pre, ctr),
+        Expr::Member { receiver, .. } => hoist_in_expr(receiver, pre, ctr, vp),
+        // A call-site instantiation is a check-time carrier over a type reference; only its
+        // underlying reference can hold anything to hoist (in practice nothing, a type name being
+        // await-free — but recursing keeps the walk total rather than assuming that).
+        Expr::InstantiatedType { recv, .. } => hoist_in_expr(recv, pre, ctr, vp),
         Expr::Interp { parts, .. } => {
             for part in parts {
                 if let StrPart::Hole(h) = part {
-                    hoist_in_expr(h, pre, ctr);
+                    hoist_in_expr(h, pre, ctr, vp);
                 }
             }
         }
@@ -1119,18 +1187,18 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         Expr::Match {
             scrutinee, arms, ..
         } => {
-            hoist_in_expr(scrutinee, pre, ctr);
+            hoist_in_expr(scrutinee, pre, ctr, vp);
             if arms.iter().any(|a| a.body.has_await()) {
-                desugar_match_await(e, pre, ctr);
+                desugar_match_await(e, pre, ctr, vp);
             }
             // else: no arm awaits — the match runs whole within one state (emitted verbatim).
         }
         Expr::Object(lit) => {
             for f in &mut lit.fields {
-                hoist_in_expr(&mut f.value, pre, ctr);
+                hoist_in_expr(&mut f.value, pre, ctr, vp);
             }
             if let Some(s) = &mut lit.spread {
-                hoist_in_expr(s, pre, ctr);
+                hoist_in_expr(s, pre, ctr, vp);
             }
         }
         Expr::Try { expr, .. }
@@ -1139,45 +1207,54 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         | Expr::TypeTest { expr, .. }
         | Expr::TypeOf { value: expr, .. }
         | Expr::FieldsOf { value: expr, .. }
+        | Expr::TraitsOf { value: expr, .. }
         | Expr::ParamsOf { target: expr, .. }
-        | Expr::FieldSpecsOf { name: expr, .. }
-        | Expr::FromBytes { blob: expr, .. } => hoist_in_expr(expr, pre, ctr),
-        Expr::Channel { capacity, .. } => hoist_in_expr(capacity, pre, ctr),
+        | Expr::ReturnsOf { target: expr, .. }
+        | Expr::FromBytes { blob: expr, .. } => hoist_in_expr(expr, pre, ctr, vp),
+        Expr::Channel { capacity, .. } => hoist_in_expr(capacity, pre, ctr, vp),
+        // A turbofish operand is a type — no expression to hoist; a dynamic one is ordinary.
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
+            if let Some(e) = name.dynamic_mut() {
+                hoist_in_expr(e, pre, ctr, vp);
+            }
+        }
         Expr::Invoke {
             recv, name, args, ..
         } => {
             if let Some(recv) = recv {
-                hoist_in_expr(recv, pre, ctr);
+                hoist_in_expr(recv, pre, ctr, vp);
             }
-            hoist_in_expr(name, pre, ctr);
-            hoist_in_expr(args, pre, ctr);
+            hoist_in_expr(name, pre, ctr, vp);
+            hoist_in_expr(args, pre, ctr, vp);
         }
         Expr::Construct { name, fields, .. } => {
-            hoist_in_expr(name, pre, ctr);
-            hoist_in_expr(fields, pre, ctr);
+            if let Some(e) = name.dynamic_mut() {
+                hoist_in_expr(e, pre, ctr, vp);
+            }
+            hoist_in_expr(fields, pre, ctr, vp);
         }
         Expr::TypedModuleCall { recv, args, .. } => {
-            hoist_in_expr(recv, pre, ctr);
+            hoist_in_expr(recv, pre, ctr, vp);
             for a in args {
-                hoist_in_expr(&mut a.value, pre, ctr);
+                hoist_in_expr(&mut a.value, pre, ctr, vp);
             }
         }
         Expr::TypedCall { args, .. } => {
             for a in args {
-                hoist_in_expr(&mut a.value, pre, ctr);
+                hoist_in_expr(&mut a.value, pre, ctr, vp);
             }
         }
         Expr::TypedMethodCall { recv, args, .. } => {
-            hoist_in_expr(recv, pre, ctr);
+            hoist_in_expr(recv, pre, ctr, vp);
             for a in args {
-                hoist_in_expr(&mut a.value, pre, ctr);
+                hoist_in_expr(&mut a.value, pre, ctr, vp);
             }
         }
         Expr::FieldSet {
             receiver, value, ..
         } => {
-            hoist_in_expr(receiver, pre, ctr);
-            hoist_in_expr(value, pre, ctr);
+            hoist_in_expr(receiver, pre, ctr, vp);
+            hoist_in_expr(value, pre, ctr, vp);
         }
         // A closure is a separate callable (an expression-tier block's holes desugar to
         // closures); leaves have no sub-expressions; `Await` is handled above.
@@ -1194,6 +1271,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         | Expr::Bool { .. }
         | Expr::Ident { .. }
         | Expr::AttributesOf { .. }
+        | Expr::TypeName { .. }
         | Expr::RolesOf { .. } => {}
     }
 }
@@ -1273,7 +1351,7 @@ fn state_arm(k: i64, body: Vec<AstStmt>, span: Span) -> AstStmt {
         cond: Expr::Binary {
             op: BinaryOp::Eq,
             lhs: Box::new(Expr::Ident {
-                name: STATE_VAR.to_string(),
+                name: noeta_ast::Name::canonical(STATE_VAR),
                 span,
             }),
             rhs: Box::new(Expr::Int { value: k, span }),
@@ -1301,7 +1379,7 @@ fn assign_state(k: i64, span: Span) -> AstStmt {
 /// `name` — an identifier reference (a hoisted generator cell).
 fn ident(name: &str, span: Span) -> Expr {
     Expr::Ident {
-        name: name.to_string(),
+        name: noeta_ast::Name::canonical(name),
         span,
     }
 }
@@ -1348,7 +1426,12 @@ fn mut_binding(name: &str, value: Expr, span: Span) -> AstStmt {
 /// through [`hoist_in_expr`] inside the guard body, so a *nested* short-circuit await (`a && (b &&
 /// c.await)`) desugars recursively. Any other conditional await inside the RHS (a `??` fallback, a
 /// `match` arm) was already rejected by the checker (E0040), so it never reaches here.
-fn desugar_short_circuit_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
+fn desugar_short_circuit_await(
+    e: &mut Expr,
+    pre: &mut Vec<AstStmt>,
+    ctr: &mut u32,
+    vp: &VariantPatternSites,
+) {
     let span = e.span();
     let name = format!("$sc{}", *ctr);
     *ctr += 1;
@@ -1361,7 +1444,7 @@ fn desugar_short_circuit_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u
     // The guarded body: hoist the RHS's awaits (now in statement position) then `$sc = rhs`.
     let mut body = Vec::new();
     let mut rhs = rhs;
-    hoist_in_expr(&mut rhs, &mut body, ctr);
+    hoist_in_expr(&mut rhs, &mut body, ctr, vp);
     body.push(bare_assign_expr(&name, rhs, span));
     // `&&` runs the RHS iff `$sc` is true; `||` iff it is false.
     let cond = match op {
@@ -1400,7 +1483,12 @@ fn desugar_short_circuit_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u
 /// remains inside it — laziness holds by construction (the flip, and hence the real fallback, run only
 /// when `??` takes the fallback path). The real fallback then runs in statement position, where the
 /// flattener turns its await into a poll-state.
-fn desugar_coalesce_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
+fn desugar_coalesce_await(
+    e: &mut Expr,
+    pre: &mut Vec<AstStmt>,
+    ctr: &mut u32,
+    vp: &VariantPatternSites,
+) {
     let span = e.span();
     let n = *ctr;
     *ctr += 1;
@@ -1425,7 +1513,7 @@ fn desugar_coalesce_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         span,
     ));
     // if $md == 1 { $co = <fallback, awaits hoisted to statement position> }
-    let guarded = hoist_await_body_ctr(&[bare_assign_expr(&co, fallback, span)], ctr);
+    let guarded = hoist_await_body_ctr(&[bare_assign_expr(&co, fallback, span)], ctr, vp);
     pre.push(AstStmt::If {
         cond: eq_int(&md, 1, span),
         then_body: guarded,
@@ -1460,7 +1548,12 @@ fn desugar_coalesce_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
 /// rebound from the cells so its references resolve unchanged, and any nested await (including a further
 /// short-circuit / `??` / `match` await) is desugared recursively by the hoist. Laziness holds: only the
 /// selected arm's guard fires, so only its await runs.
-fn desugar_match_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
+fn desugar_match_await(
+    e: &mut Expr,
+    pre: &mut Vec<AstStmt>,
+    ctr: &mut u32,
+    vp: &VariantPatternSites,
+) {
     let span = e.span();
     let n = *ctr;
     *ctr += 1;
@@ -1481,8 +1574,11 @@ fn desugar_match_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         let arm_span = arm.span;
         if !arm.body.has_await() {
             // Non-awaiting arm: assign its value to the result cell, verbatim (no await inside).
+            // The guard (await-free by the checker's guard rule) selects the arm exactly as in
+            // the source.
             phase1_arms.push(MatchArm {
                 pattern: arm.pattern,
+                guard: arm.guard,
                 body: ClosureBody::Block(arm_body_to_result(&mr, arm.body, arm_span)),
                 span: arm_span,
             });
@@ -1491,7 +1587,7 @@ fn desugar_match_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         // Awaiting arm: capture its pattern bindings into cells, select it by discriminant.
         let disc = (i + 1) as i64;
         let mut names = Vec::new();
-        pattern_bound_names(&arm.pattern, &mut names);
+        pattern_bound_names(&arm.pattern, vp, &mut names);
         let mut select = Vec::new();
         let mut rebind = Vec::new();
         for (bname, bspan) in &names {
@@ -1505,8 +1601,12 @@ fn desugar_match_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
             rebind.push(mut_binding(bname, ident(&cell, *bspan), *bspan));
         }
         select.push(bare_assign_expr(&md, int_expr(disc, arm_span), arm_span));
+        // The guard (await-free by the checker's guard rule) stays on the Phase-1 selection arm:
+        // pattern + guard together decide whether this arm's discriminant is flipped, so a false
+        // guard falls through to the next Phase-1 arm exactly as in the source.
         phase1_arms.push(MatchArm {
             pattern: arm.pattern,
+            guard: arm.guard,
             body: ClosureBody::Block(select),
             span: arm_span,
         });
@@ -1515,7 +1615,7 @@ fn desugar_match_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         guarded.extend(arm_body_to_result(&mr, arm.body, arm_span));
         phase2.push(AstStmt::If {
             cond: eq_int(&md, disc, arm_span),
-            then_body: hoist_await_body_ctr(&guarded, ctr),
+            then_body: hoist_await_body_ctr(&guarded, ctr, vp),
             else_body: None,
             span: arm_span,
         });
@@ -1549,17 +1649,29 @@ fn arm_body_to_result(mr: &str, body: ClosureBody, span: Span) -> Vec<AstStmt> {
 /// arm's selection to its guarded body (captured into `$`-cells). `Binding` binds its name; `Variant`
 /// and `Tuple` recurse into their sub-patterns; the rest (`Wildcard`/literals/`IsType`) bind nothing —
 /// an `IsType` only narrows an existing scrutinee identifier, which stays in scope in the guarded body.
-fn pattern_bound_names(pat: &noeta_ast::Pattern, out: &mut Vec<(String, Span)>) {
+///
+/// A `Binding` the checker resolved to a payload-free variant (`vp`) binds nothing either: the
+/// lowering rewrites it into a variant test, so capturing "its value" would synthesize a read of a
+/// name that never exists. This pass runs *before* that rewrite, which is why it needs the map.
+fn pattern_bound_names(
+    pat: &noeta_ast::Pattern,
+    vp: &VariantPatternSites,
+    out: &mut Vec<(String, Span)>,
+) {
     match pat {
-        noeta_ast::Pattern::Binding { name, span } => out.push((name.clone(), *span)),
+        noeta_ast::Pattern::Binding { name, span } => {
+            if !vp.contains_key(span) {
+                out.push((name.clone(), *span));
+            }
+        }
         noeta_ast::Pattern::Variant { bindings, .. } => {
             for b in bindings {
-                pattern_bound_names(b, out);
+                pattern_bound_names(b, vp, out);
             }
         }
         noeta_ast::Pattern::Tuple { elements, .. } => {
             for el in elements {
-                pattern_bound_names(el, out);
+                pattern_bound_names(el, vp, out);
             }
         }
         noeta_ast::Pattern::Wildcard { .. }
@@ -1593,6 +1705,7 @@ fn block_arm_expr(body: ClosureBody, span: Span) -> Expr {
         scrutinee: Box::new(int_expr(0, span)),
         arms: vec![MatchArm {
             pattern: noeta_ast::Pattern::Wildcard { span },
+            guard: None,
             body,
             span,
         }],
@@ -1711,11 +1824,13 @@ fn is_some_test(opt: Expr, span: Span) -> Expr {
                     bindings: vec![noeta_ast::Pattern::Wildcard { span }],
                     span,
                 },
+                guard: None,
                 body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Bool { value: true, span })),
                 span,
             },
             noeta_ast::MatchArm {
                 pattern: noeta_ast::Pattern::Wildcard { span },
+                guard: None,
                 body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Bool { value: false, span })),
                 span,
             },
@@ -1728,7 +1843,7 @@ fn is_some_test(opt: Expr, span: Span) -> Expr {
 fn call_some(value: Expr, span: Span) -> Expr {
     Expr::Call {
         callee: Box::new(Expr::Ident {
-            name: "some".to_string(),
+            name: noeta_ast::Name::canonical("some"),
             span,
         }),
         args: vec![noeta_ast::CallArg::positional(value)],
@@ -1740,7 +1855,7 @@ fn call_some(value: Expr, span: Span) -> Expr {
 /// always reassigned before it is read in a well-formed generator).
 fn none_expr(span: Span) -> Expr {
     Expr::Ident {
-        name: "none".to_string(),
+        name: noeta_ast::Name::canonical("none"),
         span,
     }
 }

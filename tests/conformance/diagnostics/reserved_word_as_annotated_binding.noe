@@ -1,0 +1,5 @@
+// The annotated binding form `name: T = value` takes the same rule as the bare one.
+// expect: error E0046 at 4:1
+// expect: exit 1
+type_name: int = 1
+echo 1

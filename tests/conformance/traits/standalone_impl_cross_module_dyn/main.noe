@@ -1,0 +1,29 @@
+// A **standalone** `impl Trait for Type` is part of its type wherever the type goes — including
+// into a consumer that never names the type. The implementor here (`pkg.lib`'s `Hidden`) is not
+// `pub` and is never imported; it reaches this program only because another standalone impl's body
+// returns one, and its `impl Decoder for Hidden` has to travel with it.
+//
+// It did not. The linker merged a pooled standalone impl only when its target type was already in
+// the merged program, decided from a snapshot taken *before* any impl body's own dependency closure
+// ran — so the impl that pulls the implementor in always ran too late to make the implementor's own
+// impl eligible, and no source order could fix that (`Late` below is written the other way round for
+// exactly that reason). The type still linked and its inherent methods still dispatched; only its
+// trait membership went missing, so the library's own tests stayed green and every *consumer* broke
+// with "expected `dyn Decoder`, found `Hidden`". Writing the same impl in the class body worked, so
+// two spellings of one declaration disagreed across a module boundary.
+//
+// Every surface that reads the membership table is pinned, because they all read the same one: the
+// `dyn Decoder` coercion, trait-method dispatch, the precise `is dyn Trait` test, a `<T: Decoder>`
+// bound, and `traits_of`. A **directory** case on purpose — a single-file case never goes through
+// the loader, so it cannot observe any of this.
+// expect: stdout "HI"
+// expect: stdout "DIRECT"
+// expect: stdout "BOUND"
+// expect: stdout "true"
+// expect: stdout "[\"pkg.lib.Decoder\"]"
+// expect: stdout "late-hi"
+// expect: exit 0
+
+use pkg.lib.{MyCodec, Codec};
+
+MyCodec.new().run()

@@ -1,0 +1,32 @@
+// An INSTANCE method with its own uninferable parameter needs exactly ONE turbofish, on the member.
+//
+// A value already carries its own instantiation — the reflected tag its construction site stamped —
+// so the class's parameters are read off the receiver and only the method's own are left to spell.
+// This is the existing `member_turbofish.noe` surface, retested beside the composed associated form
+// because the parser change that composed the two turbofishes is precisely the change that could
+// have let a class turbofish leak onto a value receiver (the refusal that keeps it from doing so is
+// `both_turbofishes_on_a_value.noe`).
+//
+// The receiver need not be a bound name: `Repo::<Todo>.new("todos")` is itself an expression of type
+// `Repo<Todo>`, so the composed form chains into the instance form on one line.
+// expect: stdout "todos/Todo/int"
+// expect: stdout "todos/Todo/string"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    // An INSTANCE method (it reads `self`) with its own uninferable parameter.
+    fn tagged<U>(): string {
+        return self.tbl ~ "/" ~ type_name::<T>() ~ "/" ~ type_name::<U>();
+    }
+}
+r = Repo::<Todo>.new("todos");
+echo r.tagged::<int>();
+echo Repo::<Todo>.new("todos").tagged::<string>();

@@ -4,6 +4,11 @@
 // sandbox they resolve deterministically at spawn via the same responder, so the differential
 // pins them. No backend code changed — the descriptor is handed out by the Network capability's
 // `net_spawn`. `all(...)` (from std.task) awaits a batch concurrently into a list, in order.
+//
+// `run` declares `Result<void, HttpError>` because it uses `?`: the operator early-returns the
+// transport failure, so the signature has to be able to carry one (E0012 otherwise). The top-level
+// `?` then propagates it out of the program, where an unhandled `Err` aborts with its `message()` and
+// a non-zero exit — the whole request chain is observable from CI without a single `match`.
 // expect: stdout "200"
 // expect: stdout "{"body":"","method":"GET","path":"/echo"}"
 // expect: stdout "true"
@@ -13,9 +18,10 @@
 // expect: exit 0
 use std.http.client
 use std.http.Response
+use std.http.HttpError
 use std.task.{all}
 
-async fn run(): void {
+async fn run(): Result<void, HttpError> {
     r = client.get_async("https://svc.test/echo").await?
     echo r.status()
     echo r.body()
@@ -32,5 +38,6 @@ async fn run(): void {
 
     echo client.post_async("https://svc.test/echo", "yo").await?.body()
     echo client.request_async("PATCH", "https://svc.test/echo").await?.body()
+    return Ok()
 }
-run().await
+run().await?

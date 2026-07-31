@@ -1,0 +1,79 @@
+// A JSON decode fills a field's declared **literal default** when the document omits it, so decoding
+// agrees with every other way of building the struct (a `T { … }` literal, `construct`). The rule a
+// decode applies to an absent field: a `?T` field is `none`, a field whose default is a literal is
+// that default, anything else is the missing-field error — and a field whose default is NOT a literal
+// (a call, a name) says so, because a decode is pure data and has no thunk to run.
+// One walk serves every door, so `json.try_parse::<T>`, `json.decode_typed(name, text)` and
+// `Response.json::<T>()` answer identically. Runs identically on both backends.
+// expect: stdout "full: 7/Rex/[\"collar\"]/tagged"
+// expect: stdout "defaulted: 7/(unnamed)/[\"none\"]/none"
+// expect: stdout "nested: (unnamed),Rex"
+// expect: stdout "required: missing field `id` for `Pet`"
+// expect: stdout "typed default: name: expected string, found JSON number"
+// expect: stdout "decode_typed: (unnamed)"
+// expect: stdout "dynamic: missing field `tag` for `Note`: its default is not a literal, so a JSON decode cannot fill it"
+// expect: stdout "literal Note: hi/auto"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+@derive(Deserialize<Json>)
+struct Pet {
+    id: int
+    name: string = "(unnamed)"
+    tags: List<string> = ["none"]
+    nickname: ?string
+}
+
+fn show(r: Result<Pet, JsonError>, label: string): string {
+    return match r {
+        Ok(p) => "${label}: ${p.id}/${p.name}/${p.tags}/${p.nickname ?? "none"}",
+        Err(e) => "${label}: ${e}",
+    }
+}
+
+// Every field supplied — the document always wins over a default.
+echo show(json.try_parse::<Pet>("{\"id\": 7, \"name\": \"Rex\", \"tags\": [\"collar\"], \"nickname\": \"tagged\"}"), "full")
+// Only the required field supplied: the two defaulted fields fill from their declared defaults, and
+// the `?string` field is `none` (it declares no default at all).
+echo show(json.try_parse::<Pet>("{\"id\": 7}"), "defaulted")
+
+// Defaults fill at depth: each element of a `List<Pet>` is filled independently.
+pets = json.try_parse::<List<Pet>>("[{\"id\": 1}, {\"id\": 2, \"name\": \"Rex\"}]")
+echo match pets {
+    Ok(list) => "nested: " ~ list.map(fn (p: Pet): string { return p.name }).join(","),
+    Err(e) => "nested: ${e}",
+}
+
+// A field with NO default is still required.
+echo show(json.try_parse::<Pet>("{}"), "required")
+// A default makes the field optional, not untyped: a supplied value of the wrong kind still fails.
+echo show(json.try_parse::<Pet>("{\"id\": 1, \"name\": 5}"), "typed default")
+
+// The router-facing door decodes by runtime type name through the same recipe, so it fills too.
+echo match json.decode_typed("Pet", "{\"id\": 3}") {
+    Ok(p) => "decode_typed: ${p.name}",
+    Err(e) => "decode_typed: ${e}",
+}
+
+// --- the boundary: a default that is not a literal ------------------------------------------
+// The decode walk is pure data — it cannot run `tag_default()` — so the field stays REQUIRED in
+// JSON, and the error names the reason rather than reporting a bare omission.
+fn tag_default(): string {
+    return "auto"
+}
+
+@derive(Deserialize<Json>)
+struct Note {
+    body: string
+    tag: string = tag_default()
+}
+
+echo match json.try_parse::<Note>("{\"body\": \"hi\"}") {
+    Ok(n) => "dynamic: unexpectedly ok",
+    Err(e) => "dynamic: ${e}",
+}
+// The same field IS optional in a struct literal, which runs the default's thunk — the documented
+// difference between an in-process construction and a data-only decode.
+literal = Note { body: "hi" }
+echo "literal Note: ${literal.body}/${literal.tag}"

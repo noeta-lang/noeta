@@ -1,0 +1,43 @@
+// `?`-boundary error conversion into an **enum** target. An `impl From<Source>` in an enum's body
+// hoists a `from` exactly as it does on a struct — and it must win over the name-string builtin
+// `Enum.from(s)`/`Enum.try_from(s)`, which every enum also carries. Before this was fixed the
+// program type-checked clean and then aborted at runtime with "`AppError.from` expects a string,
+// found LowError", because both backends intercepted the name before consulting the declared
+// methods. An enum WITHOUT such an impl keeps the builtin, which the `Status` half pins.
+// expect: stdout "Ok(42)"
+// expect: stdout "Err(AppError.Wrapped(7))"
+// expect: stdout "explicit: 1"
+// expect: stdout "some(Status.Paid)"
+// expect: stdout "Status.Pending"
+// expect: exit 0
+struct LowError { code: int }
+
+enum AppError {
+    Wrapped(code: int)
+    Other
+
+    impl From<LowError> {
+        fn from(e: LowError): AppError {
+            return AppError.Wrapped(code: e.code)
+        }
+    }
+}
+
+enum Status { Pending; Paid }
+
+fn low(fail: bool): Result<int, LowError> {
+    if fail { return Err(LowError { code: 7 }) }
+    return Ok(40)
+}
+
+fn high(fail: bool): Result<int, AppError> {
+    n = low(fail)?
+    return Ok(n + 2)
+}
+
+echo high(false)
+echo high(true)
+echo "explicit: ${match AppError.from(LowError { code: 1 }) { AppError.Wrapped(c) => c, AppError.Other => -1 }}"
+// An enum that declares no `From` impl still gets the name-string pair.
+echo Status.try_from("Paid")
+echo Status.from("Pending")

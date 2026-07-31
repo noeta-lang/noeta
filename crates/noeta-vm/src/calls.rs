@@ -129,9 +129,34 @@ impl<'m> Vm<'m> {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, Abort> {
+        self.call_value_masked(callee, args, span, None)
+    }
+
+    /// [`Self::call_value`] carrying a **supplied mask** — which declared parameters the arguments
+    /// fill, for a call that skips a defaulted one in the middle. `None` is the ordinary prefix rule
+    /// and is what every caller but the named `invoke` passes; the mask is indexed over the callee's
+    /// declared parameters, matching the tree-walker (a first-class closure reserves no receiver
+    /// register, so nothing is shifted here).
+    pub(crate) fn call_value_masked(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+        span: Span,
+        supplied: Option<u64>,
+    ) -> Result<Value, Abort> {
         match callee.as_closure() {
             Some(proto) => {
                 let chunk = &self.module.protos[proto as usize];
+                // A closure reached as a first-class VALUE carries no type-argument channel, so a
+                // callee declaring hidden slots cannot be served here: binding positionally would
+                // put the first value argument into `$ty0` and read it as a type-table index.
+                if chunk.hidden != 0 {
+                    let (hidden, name) = (chunk.hidden as usize, chunk.name.clone());
+                    for a in args {
+                        release(a);
+                    }
+                    return Err(self.no_instantiation(name.as_deref(), hidden, 0, span));
+                }
                 let num_params = chunk.num_params as usize;
                 let num_registers = chunk.num_registers as usize;
                 let required = num_params - chunk.defaults.len();
@@ -150,16 +175,17 @@ impl<'m> Vm<'m> {
                 let n_args = args.len();
                 let (mut frames, mut regs) = self.pooled_run_stacks(num_registers);
                 for (i, v) in args.into_iter().enumerate() {
-                    regs[i] = v;
+                    regs[noeta_bytecode::param_of_arg(i, supplied)] = v;
                 }
                 // A first-class closure may capture upvalues; carry its cells into the re-entrant
                 // frame (one owned reference each) and hand them to each default thunk, which shares
                 // the closure's upvalue layout so a capture-referencing default reads the right cell.
                 let count = callee.closure_upvalue_count();
                 let cells: Vec<Value> = (0..count).map(|i| callee.closure_upvalue(i)).collect();
-                // Fill any omitted trailing parameters from their default thunks.
+                // Fill every parameter the call left out from its default thunk — the trailing
+                // ones under the ordinary prefix rule, plus any the mask says was skipped.
                 for (reg, dproto) in &defaults {
-                    if !noeta_bytecode::is_param_filled(*reg as usize, n_args, None) {
+                    if !noeta_bytecode::is_param_filled(*reg as usize, n_args, supplied) {
                         let value = self.run_thunk(*dproto, &cells)?;
                         regs[*reg as usize] = value;
                     }
@@ -285,6 +311,24 @@ impl<'m> Vm<'m> {
                     format!("cannot compare {} and {}", v.type_name(), other.type_name()),
                 )),
             };
+        }
+        // `type_of(x).name()` — the reflected type's **head name**, total over every `Type` case
+        // (`reflection_head_name` → the shared `reflect::adt_head_name`, so the two backends cannot
+        // word a name differently). Reached only after the `Op::CallMethod` enum arm failed to
+        // resolve a user method proto, so a program declaring its own `enum Type` with a `name`
+        // method keeps it — the tree-walker orders the two the same way.
+        if hk == Some(HeapKind::Enum)
+            && method == noeta_ast::reflect::TYPE_NAME_METHOD
+            && let Some(head) = crate::values::reflection_head_name(v)
+        {
+            if !args.is_empty() {
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    arity_message("method", 0, 0, args.len()),
+                ));
+            }
+            return Ok(Value::string(&head));
         }
         // Ring 1 string methods (`upper`/`split`/`replace`/...) — dispatched through
         // the shared `noeta-stdlib` surface so the tree-walker and the VM cannot drift.
@@ -545,6 +589,23 @@ impl<'m> Vm<'m> {
             arg_vals.push(v);
             arg_vals.extend_from_slice(args);
             return self.call_builtin(builtin, &arg_vals, span);
+        }
+        // `bytes.slice(start, end?)` — the byte-buffer twin of `string.slice`/`List.slice`, and the
+        // only `bytes` method taking arguments, so it is handled ahead of the zero-arg table. The
+        // bounds rule is the shared `noeta_stdlib::bytes_slice`, so both backends agree; the buffer
+        // is borrowed in place rather than cloned whole.
+        if method == "slice" && v.is_bytes() {
+            self.stdlib_arity_range(method, args, 1, 2, span)?;
+            let start = self.stdlib_int(method, args[0], span)?;
+            let len = v.bytes_len().expect("checked `is_bytes` above");
+            let end = self.stdlib_opt_int(method, args, 1, len as i64, span)?;
+            let sliced = v
+                .with_bytes(|data| noeta_stdlib::bytes_slice(data, start, Some(end)))
+                .expect("checked `is_bytes` above");
+            return match sliced {
+                Ok(bytes) => Ok(Value::bytes(bytes)),
+                Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
+            };
         }
         // Built-in zero-argument methods on lists/maps/strings. `len()` is the collection
         // length (P1.3 — `count` is iterator-only, a consuming terminal).
@@ -866,6 +927,16 @@ impl<'m> Vm<'m> {
                 ));
             };
             let chunk = &self.module.protos[proto as usize];
+            // A method HANDLE is name-keyed with no static callee type, so it carries no
+            // instantiation: a forwarding generic reached this way aborts rather than bind a value
+            // argument into a type slot.
+            if chunk.hidden != 0 {
+                let (hidden, name) = (chunk.hidden as usize, chunk.name.clone());
+                for a in args {
+                    release(a);
+                }
+                return Err(self.no_instantiation(name.as_deref(), hidden, 0, span));
+            }
             // Register 0 is the (unit) receiver slot, so declared arity is one more than the args.
             let total = chunk.num_params as usize - 1;
             let required = total - chunk.defaults.len();
@@ -948,6 +1019,15 @@ impl<'m> Vm<'m> {
             return result;
         };
         let chunk = &self.module.protos[proto as usize];
+        // As above: this path is reached by name (a handle, a `dyn` receiver), never with an
+        // instantiation, so a forwarding generic aborts rather than misbind.
+        if chunk.hidden != 0 {
+            let (hidden, name) = (chunk.hidden as usize, chunk.name.clone());
+            for a in args {
+                release(a);
+            }
+            return Err(self.no_instantiation(name.as_deref(), hidden, 0, span));
+        }
         let num_params = chunk.num_params as usize; // includes register 0 = self (the receiver)
         let num_registers = chunk.num_registers as usize;
         let required = num_params - chunk.defaults.len();
@@ -1019,6 +1099,11 @@ impl<'m> Vm<'m> {
     /// its window — `continue 'reload`), or `Ok(false)` when the call completed synchronously (a
     /// first-class builtin, result already in `regs[caller_base + dst]`; the caller advances to
     /// `resume_pc`).
+    ///
+    /// `ty_regs` is the call's **type-argument** channel: the registers filling the callee's
+    /// leading `Chunk::hidden` slots (poly-values F2b), empty for every call that forwards
+    /// nothing. They lay into the callee window ahead of the value arguments, which is why
+    /// `supplied` — indexed over the value parameters — is unaffected by forwarding.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn setup_closure_call(
         &mut self,
@@ -1029,6 +1114,7 @@ impl<'m> Vm<'m> {
         dst: u16,
         callee_val: Value,
         arg_regs: &[u16],
+        ty_regs: &[u16],
         span: Span,
         resume_pc: usize,
         supplied: Option<u64>,
@@ -1036,7 +1122,22 @@ impl<'m> Vm<'m> {
         match callee_val.as_closure() {
             Some(proto_idx) => {
                 let callee_chunk = &self.module.protos[proto_idx as usize];
-                let num_params = callee_chunk.num_params as usize;
+                let hidden = callee_chunk.hidden as usize;
+                if ty_regs.len() != hidden {
+                    let name = callee_chunk.name.clone();
+                    return Err(self.no_instantiation(
+                        name.as_deref(),
+                        hidden,
+                        ty_regs.len(),
+                        span,
+                    ));
+                }
+                // Arity is reckoned over the VALUE parameters alone — the hidden slots are filled
+                // from `ty_regs` above, never from `arg_regs`. (An ASSOCIATED call reaches here
+                // with a unit receiver in argument position 0 and a receiver-shifted mask, so its
+                // "value parameters" include that slot; `reg_of_param` is what keeps it out of the
+                // hidden block's way.)
+                let num_params = callee_chunk.num_params as usize - hidden;
                 let required = num_params - callee_chunk.defaults.len();
                 if arg_regs.len() < required || arg_regs.len() > num_params {
                     return Err(self.error(
@@ -1045,12 +1146,19 @@ impl<'m> Vm<'m> {
                         arity_message("function", required, num_params, arg_regs.len()),
                     ));
                 }
+                let hidden_base = callee_chunk.hidden_base as usize;
                 let num_registers = callee_chunk.num_registers as usize;
                 let new_base = reserve_window(regs, num_registers);
+                for (j, &ty_reg) in ty_regs.iter().enumerate() {
+                    let v = regs[caller_base + ty_reg as usize];
+                    retain(v);
+                    regs[new_base + hidden_base + j] = v;
+                }
                 for (i, &arg_reg) in arg_regs.iter().enumerate() {
                     let v = regs[caller_base + arg_reg as usize];
                     retain(v);
-                    regs[new_base + noeta_bytecode::param_of_arg(i, supplied)] = v;
+                    let p = noeta_bytecode::param_of_arg(i, supplied);
+                    regs[new_base + noeta_bytecode::reg_of_param(p, hidden, hidden_base)] = v;
                 }
                 let count = callee_val.closure_upvalue_count();
                 // Fast path (B): a plain function — no defaults to fill and no upvalues to carry —
@@ -1064,7 +1172,13 @@ impl<'m> Vm<'m> {
                         (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
                     let n_args = arg_regs.len();
                     for (reg, proto) in &defaults {
-                        if !noeta_bytecode::is_param_filled(*reg as usize, n_args, supplied) {
+                        // `reg` is an absolute callee register; the mask indexes value parameters,
+                        // so shift past the hidden slots (which never carry a default).
+                        if !noeta_bytecode::is_param_filled(
+                            *reg as usize - hidden,
+                            n_args,
+                            supplied,
+                        ) {
                             let value = self.run_thunk(*proto, &cells)?;
                             regs[new_base + *reg as usize] = value;
                         }

@@ -2,8 +2,6 @@
 //! structured [`noeta_prof::Report`]. The profiler is outside the differential oracle (its signal is
 //! time, not output), so it is tested this way rather than through the conformance corpus.
 
-use std::path::PathBuf;
-
 /// The counting allocator the `noeta` binary registers — the alloc-profile test needs the same
 /// thread-local allocated-bytes counter present in THIS test binary, or the collector reads 0.
 #[global_allocator]
@@ -13,12 +11,18 @@ static ALLOC: noeta_alloc_probe::TrackingAlloc =
 /// Write a one-off program into its own private temp *directory* and return its path. Each program
 /// gets its own directory because the loader treats the containing directory as the module directory
 /// (M1.9), so sibling test files must not share one.
-fn fixture(name: &str, src: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("noeta_prof_test_{name}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    let path = dir.join(format!("{name}.noe"));
-    std::fs::write(&path, src).expect("write fixture");
-    path
+///
+/// Private per *process* as well as per program: the directory used to be
+/// `/tmp/noeta_prof_test_<name>`, one path for every checkout and every concurrent test binary on the
+/// machine. Nothing here deleted it, so the sharing looked harmless — but `fs::write` truncates
+/// before it writes, and a run that read the program inside another run's truncation window profiled
+/// an *empty* file: `assertion failed: program stdout is forwarded verbatim, left: ""`. The returned
+/// `TempPath` carries its directory's guard, so the tree lives exactly as long as the path does.
+fn fixture(name: &str, src: &str) -> noeta_test_temp::TempPath {
+    let dir = noeta_test_temp::TempDir::new(&format!("prof-{name}"));
+    let file = format!("{name}.noe");
+    std::fs::write(dir.join(&file), src).expect("write fixture");
+    dir.into_child(file)
 }
 
 #[test]
@@ -616,8 +620,7 @@ fn top_functions_ranks_the_hot_leaf_with_its_percentage() {
 /// unresolved-import panic while running fine under `noeta run`.
 #[test]
 fn profiles_a_program_with_a_path_dependency() {
-    let base = std::env::temp_dir().join("noeta_prof_test_path_dep");
-    let _ = std::fs::remove_dir_all(&base);
+    let base = noeta_test_temp::TempDir::new("prof-path-dep");
     let app = base.join("app");
     let lib = base.join("lib");
     std::fs::create_dir_all(&app).unwrap();
@@ -638,11 +641,7 @@ fn profiles_a_program_with_a_path_dependency() {
         "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        lib.join("api.noe"),
-        "namespace lib.api;\npub fn answer(): int { return 42; }\n",
-    )
-    .unwrap();
+    std::fs::write(lib.join("api.noe"), "pub fn answer(): int { return 42; }\n").unwrap();
 
     let report = noeta_prof::profile(&app.join("main.noe"), noeta_prof::Mode::Summary);
     assert_eq!(

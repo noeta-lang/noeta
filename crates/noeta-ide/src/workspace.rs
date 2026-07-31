@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use noeta_db::{DepModule, LangDatabase, SourceProgram, Workspace};
+use noeta_db::{DepModule, LangDatabase, SourceProgram, Workspace, WorkspaceUses};
 use noeta_span::SourceId;
 use salsa::Setter as _;
 
@@ -287,6 +287,10 @@ pub(crate) struct ResolvedDeps {
     pub(crate) modules: Vec<DepModule>,
     pub(crate) uris: Vec<String>,
     pub(crate) programs: Vec<SourceProgram>,
+    /// The whole program's per-package `@name` resolution tables (`[directives]`/`[tiers]`), from the
+    /// same query-path graph resolve that produced the modules. Threaded onto the [`Workspace`] input
+    /// so the editor lexes a package's renamed text tiers verbatim (per-package tier-naming arc, 3g).
+    pub(crate) package_uses: noeta_span::PackageUses,
     /// A hard resolution failure worth the user's attention (see [`WorkspaceCache::dep_error`]).
     pub(crate) error: Option<noeta_pm::PmError>,
     /// Previously-resolved dependency sources that vanished from this resolution (finding a): their
@@ -358,11 +362,20 @@ pub(crate) fn sync(
                     tomb.set_name(db).to(u.clone());
                     tomb.set_text(db).to(text.clone());
                     tomb.set_edition(db).to(edition_of_uri(u));
+                    // A repurposed tombstone points at a different file, so its derived module path
+                    // changes with it.
+                    tomb.set_module_path(db)
+                        .to(noeta_db::DerivedPath(derived_path_of_uri(u)));
                     tomb
                 }
-                None => {
-                    SourceProgram::new(db, id as u32, u.clone(), text.clone(), edition_of_uri(u))
-                }
+                None => SourceProgram::new(
+                    db,
+                    id as u32,
+                    u.clone(),
+                    text.clone(),
+                    edition_of_uri(u),
+                    noeta_db::DerivedPath(derived_path_of_uri(u)),
+                ),
             },
         })
         .collect();
@@ -380,6 +393,12 @@ pub(crate) fn sync(
         Some(mut cache) => {
             cache.workspace.set_members(db).to(programs.clone());
             cache.workspace.set_dep_modules(db).to(deps.modules.clone());
+            // Backdates when the dependency graph's `@name` tables are unchanged (a member-text edit),
+            // so re-syncing an open directory does not invalidate the per-package text-tier lexes.
+            cache
+                .workspace
+                .set_package_uses(db)
+                .to(WorkspaceUses(deps.package_uses.clone()));
             cache.source_uris = uris;
             cache.programs = programs;
             cache.dep_uris = deps.uris;
@@ -390,7 +409,12 @@ pub(crate) fn sync(
             cache
         }
         None => WorkspaceCache {
-            workspace: Workspace::new(db, programs.clone(), deps.modules.clone()),
+            workspace: Workspace::new(
+                db,
+                programs.clone(),
+                deps.modules.clone(),
+                WorkspaceUses(deps.package_uses.clone()),
+            ),
             source_uris: uris,
             programs,
             dep_uris: deps.uris,
@@ -435,8 +459,11 @@ fn resolve_dep_modules(
     let Some(entry_path) = member_uris.first().and_then(|uri| uri_to_path(uri)) else {
         return deps;
     };
-    let packages = match noeta_pm::manifest::dependency_packages_query(&entry_path) {
-        Ok(packages) => packages,
+    // The query-path graph resolve (no lockfile refresh — opening a file must not rewrite
+    // `noeta.lock`): it yields both the dependency packages AND the per-package `@name` tables
+    // (`package_uses`), so a renamed text tier lexes verbatim in the editor exactly as under the CLI.
+    let graph = match noeta_pm::graph::resolve_graph_query(&entry_path) {
+        Ok(graph) => graph,
         // Not a project / environmental: the quiet degrade IS the right behavior (formatting and
         // single-file analysis must not nag about a flaky network).
         Err(
@@ -456,6 +483,10 @@ fn resolve_dep_modules(
             return deps;
         }
     };
+    let packages = graph.packages;
+    // The per-package `@name` tables travel onto the workspace even when the package has no linkable
+    // modules (the root's own `[tiers]` bindings live here), so carry them before the module walk.
+    deps.package_uses = graph.package_uses;
     // Previous dep inputs by URI, for reuse.
     let mut old_by_uri: HashMap<String, (DepModule, SourceProgram)> = match previous {
         Some(cache) => cache
@@ -486,8 +517,10 @@ fn resolve_dep_modules(
                     src.set_id(db).to(next_id);
                     src.set_text(db).to(module.text.clone());
                     src.set_edition(db).to(package.edition);
+                    src.set_module_path(db)
+                        .to(noeta_db::DerivedPath(module.path.clone()));
                     dep.set_root(db).to(package.root.clone());
-                    dep.set_key(db).to(package.key.clone());
+                    dep.set_prefix(db).to(package.prefix.clone());
                     dep.set_renames(db).to(renames.clone());
                     (dep, src)
                 }
@@ -499,12 +532,14 @@ fn resolve_dep_modules(
                         module.text.clone(),
                         // The dependency package's own edition (typed end to end).
                         package.edition,
+                        // …and the module path its location in that package derives.
+                        noeta_db::DerivedPath(module.path.clone()),
                     );
                     let dep = DepModule::new(
                         db,
                         src,
                         package.root.clone(),
-                        package.key.clone(),
+                        package.prefix.clone(),
                         renames.clone(),
                     );
                     (dep, src)
@@ -526,6 +561,16 @@ fn resolve_dep_modules(
 /// editor overlays open buffers before the sort). A directory that cannot be read is an empty
 /// member set, not an error: the consumer degrades exactly as for an empty directory.
 pub(crate) fn disk_noe_uris(dir: &Path) -> Vec<String> {
+    // A directory inside a **package** contributes the whole package, walked as the compiler walks
+    // it — otherwise the editor would analyze `src/main.noe` against an empty sibling pool while
+    // `noeta run` links `src/deep/nested.noe` beside it, and report an unresolved import on a
+    // program that compiles.
+    if let Some(root) = noeta_pm::sources::package_root_of(dir) {
+        return noeta_loader::read_package_modules(&root)
+            .into_iter()
+            .map(|m| path_to_uri(Path::new(&m.name)))
+            .collect();
+    }
     let mut uris = Vec::new();
     if let Ok(read_dir) = std::fs::read_dir(dir) {
         uris.extend(
@@ -543,6 +588,23 @@ pub(crate) fn disk_noe_uris(dir: &Path) -> Vec<String> {
 /// `untitled:`), which the caller treats as a lone, directory-less document. A minimal decoder: the
 /// path component after `file://`, with `%`-escapes not yet decoded (paths with escaped bytes are
 /// rare and degrade to a lone workspace, never a wrong file).
+/// The module path a member file's **location** derives — its package's prefix plus its path inside
+/// the package (namespace-derivation arc). `Declared` for a file in no package, and for a URI that is
+/// not a local path at all: with no package there is no prefix, so the file's own `namespace`
+/// declaration stands, exactly as before derivation.
+fn derived_path_of_uri(uri: &str) -> noeta_loader::ModulePath {
+    let Some(path) = uri_to_path(uri) else {
+        return noeta_loader::ModulePath::Declared;
+    };
+    let Some(root) = noeta_pm::sources::package_root(&path) else {
+        return noeta_loader::ModulePath::Declared;
+    };
+    root.relative(&path)
+        .map_or(noeta_loader::ModulePath::Declared, |relative| {
+            noeta_loader::derive_module_path(&root.prefix, relative)
+        })
+}
+
 pub(crate) fn uri_to_path(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     // `file:///abs` → `/abs`; a leading host (`file://host/p`) is not expected for local files.
@@ -605,22 +667,43 @@ mod tests {
         let programs: Vec<SourceProgram> = members
             .iter()
             .enumerate()
-            .map(|(i, u)| SourceProgram::new(db, i as u32, (*u).to_string(), String::new(), ed))
+            .map(|(i, u)| {
+                SourceProgram::new(
+                    db,
+                    i as u32,
+                    (*u).to_string(),
+                    String::new(),
+                    ed,
+                    noeta_db::DerivedPath::default(),
+                )
+            })
             .collect();
         let first = first_dep_id(programs.len());
         let dep_programs: Vec<SourceProgram> = deps
             .iter()
             .enumerate()
             .map(|(i, u)| {
-                SourceProgram::new(db, first + i as u32, (*u).to_string(), String::new(), ed)
+                SourceProgram::new(
+                    db,
+                    first + i as u32,
+                    (*u).to_string(),
+                    String::new(),
+                    ed,
+                    noeta_db::DerivedPath::default(),
+                )
             })
             .collect();
         let dep_modules: Vec<DepModule> = dep_programs
             .iter()
-            .map(|src| DepModule::new(db, *src, "root".into(), "key".into(), Vec::new()))
+            .map(|src| DepModule::new(db, *src, "root".into(), vec!["key".to_string()], Vec::new()))
             .collect();
         WorkspaceCache {
-            workspace: Workspace::new(db, programs.clone(), dep_modules.clone()),
+            workspace: Workspace::new(
+                db,
+                programs.clone(),
+                dep_modules.clone(),
+                WorkspaceUses::default(),
+            ),
             source_uris: members.iter().map(|u| (*u).to_string()).collect(),
             programs,
             dep_uris: deps.iter().map(|u| (*u).to_string()).collect(),

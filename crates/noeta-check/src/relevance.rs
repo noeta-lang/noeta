@@ -23,9 +23,19 @@ pub(crate) fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
         | Type::IntN { .. }
         | Type::Bool
         | Type::String
-        | Type::Bytes => false,
-        // Missing information / the dynamic top / an abstract kind / a function value: assume relevant.
-        Type::Unknown | Type::Dyn | Type::DynTrait(_) | Type::Kind(_) | Type::Fn { .. } => true,
+        | Type::Bytes
+        // Uninhabited: there is no value of this type to drop, so no destructor to run.
+        | Type::Never => false,
+        // Missing information / the dynamic top / an abstract kind / a function value: assume
+        // relevant. So is a still-un-instantiated type PARAMETER, for the same reason and the same
+        // direction: it could be instantiated with a destructor-bearing type. (Reached only where
+        // the caller did not already substitute it to `dyn` — `params_to_dyn` normally has.)
+        Type::Unknown
+        | Type::Dyn
+        | Type::DynTrait(_)
+        | Type::Kind(_)
+        | Type::Param(_)
+        | Type::Fn { .. } => true,
         // Aggregates are relevant exactly when a part they own is.
         Type::List(e) | Type::Set(e) | Type::Option(e) => type_relevant(e, reachable),
         Type::Map(k, v) => type_relevant(k, reachable) || type_relevant(v, reachable),
@@ -57,7 +67,7 @@ impl Checker {
         // materializes a fresh substituted tree); the common non-generic field is queried in
         // place, clone-free — this fixpoint re-walks every declared field per iteration per
         // check, so the per-field clone was a standing allocation tax (audit-3 Finding 12).
-        let relevant = |ty: &Type, params: &[String], reachable: &HashSet<String>| {
+        let relevant = |ty: &Type, params: &ParamSet, reachable: &HashSet<String>| {
             if params.is_empty() {
                 type_relevant(ty, reachable)
             } else {
@@ -73,32 +83,32 @@ impl Checker {
             // payload mentions a parameter. Substituting each parameter to `dyn` (which is relevant)
             // before the check achieves exactly that; a concrete field is unaffected.
             for (name, fields) in &self.symbols.records {
-                let params = self
+                let params: ParamSet = self
                     .symbols
                     .generic_types
                     .get(name)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
+                    .map(|ps| ps.iter().map(|p| p.id).collect())
+                    .unwrap_or_default();
                 if !reachable.contains(name)
                     && fields
                         .iter()
-                        .any(|(_, ty)| relevant(ty, params, &reachable))
+                        .any(|(_, ty)| relevant(ty, &params, &reachable))
                 {
                     reachable.insert(name.clone());
                     changed = true;
                 }
             }
             for (name, variants) in &self.symbols.enums {
-                let params = self
+                let params: ParamSet = self
                     .symbols
                     .generic_types
                     .get(name)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
+                    .map(|ps| ps.iter().map(|p| p.id).collect())
+                    .unwrap_or_default();
                 if !reachable.contains(name)
                     && variants
                         .iter()
-                        .any(|v| v.fields.iter().any(|ty| relevant(ty, params, &reachable)))
+                        .any(|v| v.fields.iter().any(|ty| relevant(ty, &params, &reachable)))
                 {
                     reachable.insert(name.clone());
                     changed = true;
@@ -139,7 +149,7 @@ impl Checker {
         body: &[Stmt],
     ) {
         for p in params {
-            if self.type_relevant(&param_type(p, &self.imports.extern_types)) {
+            if self.type_relevant(&self.annot_param(p)) {
                 self.relevance.params.insert((fn_span, p.name.clone()));
             }
         }

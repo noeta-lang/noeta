@@ -32,8 +32,9 @@ const SCHEMA: u32 = 1;
 
 /// Generate the documentation artifact for the package containing `entry` into `out`.
 pub fn generate(entry: &Path, out: &Path) -> Result<Generated, String> {
-    let workspace = noeta_loader::read_workspace(entry)
-        .map_err(|e| format!("cannot read {}: {e}", entry.display()))?;
+    let workspace =
+        noeta_loader::read_workspace(entry, noeta_pm::sources::package_root(entry).as_ref())
+            .map_err(|e| format!("cannot read {}: {e}", entry.display()))?;
     let package = package_meta(entry.parent().unwrap_or_else(|| Path::new(".")));
 
     // Parse each module independently: docs and signatures are per-file facts (adjacency never
@@ -118,16 +119,20 @@ pub enum ApiScope<'a> {
 
 /// The unit names of the extensions the toolchain itself installs — [`run_cli`](crate::run_cli)'s
 /// exact builtin set, derived from the same statics it assembles (the `std` family from
-/// `std_units()` plus the first-party `html`/`css` formatter units), never a parallel string list.
-/// The complement of this set in any composed registry is the composition's own package surface.
+/// `std_units()`), never a parallel string list. Tier-body formatters (`html`/`css`) are no longer
+/// among the toolchain's own units — they arrive as a `package.dev-native` dependency, composed
+/// formatter-only. The complement of this set in any composed registry is the composition's own
+/// package surface.
 pub fn builtin_extension_names() -> Vec<&'static str> {
     use noeta_stdlib::Extension;
     let mut names: Vec<&'static str> = noeta_stdlib::registry::std_units()
         .iter()
         .map(|e| e.name())
         .collect();
-    names.push(noeta_html::HTML_EXTENSION.name());
-    names.push(noeta_css::CSS_EXTENSION.name());
+    // The CLI-layer unit that registers std's native dev-tier runners (Part B). It attaches to the
+    // `std` root but ships no documented surface, so the publish lint must count it among the
+    // toolchain's own units rather than flagging it as a package squatting `std`.
+    names.push(crate::tier_runner::STD_TIER_RUNNERS_UNIT.name());
     names
 }
 
@@ -136,13 +141,10 @@ pub fn builtin_extension_names() -> Vec<&'static str> {
 /// claim. Assembly-time validation cannot catch this squat (a fresh module under `std.` collides
 /// with nothing), so the lint is where it surfaces.
 pub fn toolchain_roots() -> Vec<&'static str> {
-    use noeta_stdlib::Extension;
     let mut roots: Vec<&'static str> = noeta_stdlib::registry::std_units()
         .iter()
         .map(|e| e.root())
         .collect();
-    roots.push(noeta_html::HTML_EXTENSION.root());
-    roots.push(noeta_css::CSS_EXTENSION.root());
     roots.extend_from_slice(noeta_pm::reserved::builtin_scopes());
     roots.sort_unstable();
     roots.dedup();
@@ -388,7 +390,10 @@ fn module_docs(source: &Source) -> Option<ModuleDocs> {
     let local = Source::new(SourceId::FIRST, source.name(), source.text().to_string());
     let lexed = noeta_lexer::lex(&local);
     let parsed = noeta_parser::parse(&local, &lexed.tokens);
-    if !lexed.diagnostics.is_empty() || !parsed.diagnostics.is_empty() {
+    // Only a real lex/parse **error** means there is no tree to document. An advisory diagnostic
+    // still leaves a well-formed program, and dropping a module's whole API reference over a lint
+    // would be a silent documentation hole.
+    if noeta_diagnostics::has_errors(lexed.diagnostics.iter().chain(parsed.diagnostics.iter())) {
         return None;
     }
     let program: &Program = &parsed.program;
@@ -479,9 +484,9 @@ fn fn_docs(f: &FnDecl, docs: &std::collections::HashMap<String, String>) -> Decl
     }
     DeclDocs {
         kind: "fn",
-        name: f.name.clone(),
+        name: f.name.to_string(),
         signature: sig,
-        doc: docs.get(&f.name).cloned(),
+        doc: docs.get(f.name.as_str()).cloned(),
         public: f.is_public,
     }
 }
@@ -514,9 +519,9 @@ fn struct_docs(s: &StructDecl, docs: &std::collections::HashMap<String, String>)
     sig.push_str(&format!("struct {}{}", s.name, fields_block(&s.fields)));
     DeclDocs {
         kind: "struct",
-        name: s.name.clone(),
+        name: s.name.to_string(),
         signature: sig,
-        doc: docs.get(&s.name).cloned(),
+        doc: docs.get(s.name.as_str()).cloned(),
         public: s.is_public,
     }
 }
@@ -529,9 +534,9 @@ fn class_docs(c: &ClassDecl, docs: &std::collections::HashMap<String, String>) -
     sig.push_str(&format!("class {}{}", c.name, fields_block(&c.fields)));
     DeclDocs {
         kind: "class",
-        name: c.name.clone(),
+        name: c.name.to_string(),
         signature: sig,
-        doc: docs.get(&c.name).cloned(),
+        doc: docs.get(c.name.as_str()).cloned(),
         public: c.is_public,
     }
 }
@@ -560,9 +565,9 @@ fn enum_docs(e: &EnumDecl, docs: &std::collections::HashMap<String, String>) -> 
     sig.push('}');
     DeclDocs {
         kind: "enum",
-        name: e.name.clone(),
+        name: e.name.to_string(),
         signature: sig,
-        doc: docs.get(&e.name).cloned(),
+        doc: docs.get(e.name.as_str()).cloned(),
         public: e.is_public,
     }
 }
@@ -596,9 +601,9 @@ fn trait_docs(t: &TraitDecl, docs: &std::collections::HashMap<String, String>) -
     sig.push('}');
     DeclDocs {
         kind: "trait",
-        name: t.name.clone(),
+        name: t.name.to_string(),
         signature: sig,
-        doc: docs.get(&t.name).cloned(),
+        doc: docs.get(t.name.as_str()).cloned(),
         public: t.is_public,
     }
 }
@@ -719,16 +724,16 @@ mod tests {
         );
         let sqrt = items.iter().find(|i| i["name"] == "sqrt").unwrap();
         assert_eq!(sqrt["kind"], "fn");
-        assert_eq!(sqrt["signature"], "fn sqrt(float): float");
+        // A rendered signature names its parameters wherever the native declaration does — the
+        // same `param_names` a `name:` label at a call site binds against.
+        assert_eq!(sqrt["signature"], "fn sqrt(x: float): float");
         assert!(sqrt["doc"].as_str().unwrap().contains("square root"));
         assert_eq!(sqrt["public"], true);
 
         // The whole artifact round-trips through the registry-render path (schema-only).
-        let out = std::env::temp_dir().join("noeta_docgen_api_test");
-        let _ = std::fs::remove_dir_all(&out);
+        let out = noeta_test_temp::TempDir::new("docgen-api");
         render_json_to(&out, &text).expect("renders from schema alone");
         assert!(out.join("std-math.md").exists());
-        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]

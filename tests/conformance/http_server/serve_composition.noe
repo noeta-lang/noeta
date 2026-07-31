@@ -15,7 +15,11 @@
 // expect: stdout "-> 404"
 // expect: stdout "log: DELETE /users/42"
 // expect: stdout "-> 404"
+// expect: stdout "log: POST /form"
+// expect: stdout "-> 404"
 // expect: stdout "log: GET /ws"
+// expect: stdout "-> 404"
+// expect: stdout "log: GET /events"
 // expect: stdout "-> 404"
 // expect: stdout "served"
 // expect: exit 0

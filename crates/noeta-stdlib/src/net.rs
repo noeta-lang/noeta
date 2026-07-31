@@ -12,8 +12,9 @@
 pub use noeta_ext_abi::net::{
     HTTP_ERROR_TYPE_IDENTITY, HTTP_ERROR_TYPE_NAME, NetError, NetErrorKind, NetFetchIo, NetRequest,
     NetResponse, REQUEST_TYPE_IDENTITY, REQUEST_TYPE_NAME, RESPONSE_TYPE_IDENTITY,
-    RESPONSE_TYPE_NAME, Request, WS_ACCEPT_GUID, accept_outcome, fetch_outcome, query_value,
-    request_header, request_path, ws_recv_outcome,
+    RESPONSE_TYPE_NAME, Request, WS_ACCEPT_GUID, accept_outcome, fetch_outcome, form_pairs,
+    form_value, percent_decode, percent_encode, query_value, request_header, request_path,
+    ws_recv_outcome,
 };
 
 use serde_json::json;
@@ -29,10 +30,22 @@ use serde_json::json;
 ///   3. `POST /echo`  body `hello`  header `content-type: text/plain`  — a body + a header
 ///   4. `GET /users/42?active=true`            — a path segment + a query string
 ///   5. `DELETE /users/42`                     — a non-GET/POST verb
-///   6. `GET /ws`  headers `upgrade: websocket`, `sec-websocket-key: <fixed>`  — a websocket
+///   6. `POST /form`  body `title=buy+milk&note=caf%C3%A9`  header
+///      `content-type: application/x-www-form-urlencoded` — a form submission whose fields need
+///      percent-decoding, including a multi-byte character (`req.form(name)`/`form_all()`)
+///   7. `GET /ws`  headers `upgrade: websocket`, `sec-websocket-key: <fixed>`  — a websocket
 ///      upgrade request (server-hmr L0). A handler that upgrades it is driven by the fixed
 ///      client conversation ([`sandbox_ws_client_frames`]); one that responds normally treats
 ///      it as any other GET.
+///   8. `GET /events`  header `accept: text/event-stream`  — a request a handler may answer with
+///      `server.sse` (http-streaming arc). It carries no upgrade headers because SSE needs none:
+///      any request can be answered with an event stream, so a handler that ignores it serves it
+///      as an ordinary GET, exactly like `/ws`.
+///
+/// **Adding an entry here is not free.** Several conformance cases pin one output line per
+/// scripted request, and the Rust tests that count them derive their expected count from
+/// `sandbox_request_script().len()` — keep it that way rather than hardcoding a number, so the
+/// next entry costs a corpus update and not a hunt for stale integers.
 pub fn sandbox_request_script() -> Vec<NetRequest> {
     let req = |method: &str, path: &str, body: &str, headers: Vec<(&str, &str)>| NetRequest {
         method: method.to_string(),
@@ -56,6 +69,12 @@ pub fn sandbox_request_script() -> Vec<NetRequest> {
         req("GET", "/users/42?active=true", "", vec![]),
         req("DELETE", "/users/42", "", vec![]),
         req(
+            "POST",
+            "/form",
+            "title=buy+milk&note=caf%C3%A9",
+            vec![("content-type", "application/x-www-form-urlencoded")],
+        ),
+        req(
             "GET",
             "/ws",
             "",
@@ -68,6 +87,7 @@ pub fn sandbox_request_script() -> Vec<NetRequest> {
                 ("sec-websocket-key", "c2FuZGJveC13cy1rZXkhIQ=="),
             ],
         ),
+        req("GET", "/events", "", vec![("accept", "text/event-stream")]),
     ]
 }
 
@@ -77,6 +97,102 @@ pub fn sandbox_request_script() -> Vec<NetRequest> {
 /// the serve loop terminates in-oracle.
 pub fn sandbox_ws_client_frames() -> Vec<String> {
     vec!["first frame".to_string(), "second frame".to_string()]
+}
+
+/// The sandbox's deterministic **streaming** response body (http-streaming arc) — the incremental
+/// twin of [`sandbox_respond`], and a pure function of the request for the same reason: both
+/// backends must compute the identical byte sequence or the differential cannot hold.
+///
+/// A real streaming host hands over bytes as the network produces them. The sandbox has no
+/// network, so it produces the whole body up front and the stream doles it out; what matters for
+/// the oracle is that the *frames* are identical, not that the chunking is realistic. Chunk-split
+/// behavior is covered exhaustively by the decoder's own byte-by-byte unit tests, where it can be
+/// asserted directly instead of inferred from a program's output.
+///
+/// Control grammar (by request path), chosen so conformance can pin every framing and every
+/// interesting body shape:
+/// - `/stream/sse` → an event stream exercising the corners a provider actually leans on: a named
+///   event, a multi-line `data:`, an `id:` that persists, a `retry:`, a `: keepalive` comment that
+///   dispatches nothing, and a terminal `[DONE]`.
+/// - `/stream/ndjson` → three JSON documents, one per line.
+/// - `/stream/lines` → three lines with a blank one in the middle (which `Lines` keeps and
+///   `Ndjson` would drop).
+/// - `/stream/empty` → a zero-byte body: the stream ends immediately, `recv` yields `none` first
+///   time.
+/// - `/stream/truncated` → an SSE body cut off mid-block, with no terminating blank line: the
+///   complete frame arrives and the partial one is discarded.
+/// - `/stream/error` → what a rate-limited vendor actually answers: a bare JSON error document,
+///   served with a non-2xx head ([`sandbox_stream_head`]). It is **not** an event stream, so under
+///   [`noeta_ext_abi::stream::Framing::Sse`] it decodes to zero frames — which is precisely the
+///   failure `FrameStream.status()` exists to make visible, and why the body is scripted here
+///   rather than described in prose.
+/// - anything else → a single-frame body, so a stream against any URL still terminates.
+pub fn sandbox_stream_body(request: &NetRequest) -> String {
+    match path_of(&request.url) {
+        "/stream/sse" => concat!(
+            "event: token\ndata: He\n\n",
+            "data: multi\ndata: line\n\n",
+            ": keepalive\n\n",
+            "id: 7\nretry: 1500\ndata: tagged\n\n",
+            "data: [DONE]\n\n",
+        )
+        .to_string(),
+        "/stream/ndjson" => "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n".to_string(),
+        "/stream/lines" => "alpha\n\nbeta\n".to_string(),
+        "/stream/empty" => String::new(),
+        // No terminating blank line after `partial` — the truncated-body case.
+        "/stream/truncated" => "data: complete\n\ndata: partial".to_string(),
+        // A vendor's rate-limit document, verbatim in the shape one arrives in: one line of JSON,
+        // no `data:` prefix, no blank line. Deliberately NOT event-stream syntax.
+        "/stream/error" => {
+            "{\"error\":{\"message\":\"rate limit exceeded\",\"type\":\"rate_limit_error\"}}"
+                .to_string()
+        }
+        path => format!("data: noeta sandbox: {} {path}\n\n", request.method),
+    }
+}
+
+/// The **head** of the sandbox's scripted streaming response: the status and headers that come back
+/// with the opening handshake, before a single body byte is decoded.
+///
+/// The status grammar is [`sandbox_respond`]'s, not a second one: every path takes the status the
+/// buffered responder would have given it, so `/status/503` means the same thing streamed as it does
+/// buffered and there is one table to reason about. `/stream/error` is the single exception, and it
+/// exists to script the case the buffered grammar cannot express — a non-2xx whose body is a JSON
+/// document rather than an event stream, carrying the `retry-after` a backoff actually needs.
+pub fn sandbox_stream_head(request: &NetRequest) -> (u16, Vec<(String, String)>) {
+    let header = |name: &str, value: &str| (name.to_string(), value.to_string());
+    match path_of(&request.url) {
+        "/stream/error" => (
+            429,
+            vec![
+                header("content-type", "application/json"),
+                header("retry-after", "30"),
+            ],
+        ),
+        _ => (
+            sandbox_respond(request).status,
+            vec![header(
+                "content-type",
+                noeta_ext_abi::stream::SSE_CONTENT_TYPE,
+            )],
+        ),
+    }
+}
+
+/// Decode the sandbox's scripted body for `request` into the frames a `FrameStream` will hand out.
+///
+/// Shared by the sandbox host so the *same* [`noeta_ext_abi::stream::FrameDecoder`] the real host
+/// uses does the cutting — the framing semantics are proven once and cannot diverge between the
+/// oracle and production.
+pub fn sandbox_stream_frames(
+    request: &NetRequest,
+    framing: noeta_ext_abi::stream::Framing,
+) -> Vec<noeta_ext_abi::stream::Frame> {
+    let mut decoder = noeta_ext_abi::stream::FrameDecoder::new(framing);
+    decoder.feed_str(&sandbox_stream_body(request));
+    decoder.finish();
+    std::iter::from_fn(|| decoder.next_frame()).collect()
 }
 
 /// A response with a single `content-type` header (the responder's shorthand).
@@ -226,6 +342,44 @@ mod tests {
             String::from_utf8(resp.body).unwrap(),
             r#"{"x-a":"1","x-b":"2"}"#
         );
+    }
+
+    #[test]
+    fn the_scripted_stream_head_carries_a_non_2xx_and_its_retry_hint() {
+        // The case `FrameStream.status()` exists for: a rate limit whose BODY is a JSON document,
+        // which under SSE framing decodes to nothing at all. Both halves are asserted together,
+        // because either one alone would look fine.
+        let (status, headers) = sandbox_stream_head(&get("https://x.test/stream/error"));
+        assert_eq!(status, 429);
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(header("retry-after"), Some("30"));
+        assert_eq!(header("content-type"), Some("application/json"));
+        assert_eq!(
+            crate::net::sandbox_stream_frames(
+                &get("https://x.test/stream/error"),
+                noeta_ext_abi::stream::Framing::Sse,
+            ),
+            vec![],
+            "a JSON error document is not an event stream, so SSE cuts it into zero frames"
+        );
+    }
+
+    #[test]
+    fn the_stream_head_shares_the_buffered_status_grammar() {
+        // One status table, not two: `/status/{n}` means the same thing streamed as buffered.
+        for path in ["/status/503", "/status/204", "/echo", "/anything"] {
+            let request = get(&format!("https://x.test{path}"));
+            assert_eq!(
+                sandbox_stream_head(&request).0,
+                sandbox_respond(&request).status,
+                "{path}"
+            );
+        }
     }
 
     #[test]

@@ -27,7 +27,7 @@ use std::collections::HashMap as StdHashMap;
 
 use noeta_ast::{
     BinaryOp, Expr, FnDecl, ForPattern as AstForPattern, Param, Program as AstProgram,
-    Stmt as AstStmt, StrPart, TypeRef,
+    Stmt as AstStmt, StrPart, TypeOperand, TypeRef,
 };
 use noeta_ext_abi::NominalType;
 use noeta_span::Span;
@@ -71,6 +71,60 @@ enum BodyKind<'a> {
     Block(&'a [AstStmt]),
 }
 
+/// The checker's bare-payload-free-variant resolutions: a `match`-arm binding pattern's span → the
+/// `(qualifier, variant)` it names. See [`LoweringSites::variant_pattern_sites`].
+pub type VariantPatternSites = HashMap<Span, (Option<String>, String)>;
+
+/// Rewrite the bare-identifier patterns the checker resolved to payload-free variants into ordinary
+/// [`noeta_ast::Pattern::Variant`] tests, recursing so a nested one (`Ok(none)`, a tuple element, a
+/// variant payload) resolves against the type it was actually matched on. Everything else is
+/// returned verbatim: a binding the checker did not record stays a binding.
+pub(crate) fn resolve_variant_patterns(
+    pattern: &noeta_ast::Pattern,
+    sites: &VariantPatternSites,
+) -> noeta_ast::Pattern {
+    use noeta_ast::Pattern;
+    match pattern {
+        Pattern::Binding { span, .. } => match sites.get(span) {
+            Some((type_name, variant)) => Pattern::Variant {
+                type_name: type_name.clone().map(noeta_ast::Name::canonical),
+                variant: variant.clone(),
+                bindings: Vec::new(),
+                span: *span,
+            },
+            None => pattern.clone(),
+        },
+        Pattern::Variant {
+            type_name,
+            variant,
+            bindings,
+            span,
+        } => Pattern::Variant {
+            type_name: type_name.clone(),
+            variant: variant.clone(),
+            bindings: bindings
+                .iter()
+                .map(|b| resolve_variant_patterns(b, sites))
+                .collect(),
+            span: *span,
+        },
+        Pattern::Tuple { elements, span } => Pattern::Tuple {
+            elements: elements
+                .iter()
+                .map(|e| resolve_variant_patterns(e, sites))
+                .collect(),
+            span: *span,
+        },
+        // Leaves — no sub-pattern can carry a resolution. Spelled out rather than wildcarded so a
+        // new pattern form has to decide here.
+        Pattern::Wildcard { .. }
+        | Pattern::Int { .. }
+        | Pattern::Str { .. }
+        | Pattern::Bool { .. }
+        | Pattern::IsType { .. } => pattern.clone(),
+    }
+}
+
 /// The checker's **lowering-site maps**, bundled so the lowering takes one reference rather than six
 /// span-keyed side channels. Every field is a pure function of the program, so the representation
 /// choices they drive stay invisible to `RunResult`; the REPL / IR-corpus path passes an all-empty
@@ -107,12 +161,23 @@ pub struct LoweringSites<'a> {
     /// Fixed-width arithmetic sites (Tier W) → the result's `(signed, bits)`, wrapping the op's result
     /// in [`Rvalue::MaskWidth`] so the erased i64 is masked back into the declared width.
     pub width_sites: &'a HashMap<Span, (bool, u8)>,
+    /// `Expr::TypeTest` spans the checker answered statically → the answer. The test lowers to that
+    /// constant (the scrutinee still evaluated, for its effects) instead of an [`Rvalue::TypeTest`],
+    /// so no runtime matcher is consulted for a question it cannot answer. See
+    /// `noeta_check::Sites::folded_type_tests` for which tests land here and why.
+    pub folded_type_tests: &'a HashMap<Span, bool>,
     /// Collection-construction sites → the resolved element [`noeta_ast::reflect::TypeRepr`] baked onto
     /// [`Rvalue::List`] so `type_of` recovers it after a `dyn` launder (R1 reflection).
     pub construction_sites: &'a HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// The nominal type each target-typed `.{ … }` literal resolved to (see
     /// `noeta_check::Sites::inferred_object_types`) → the name baked into [`Rvalue::Object`].
     pub inferred_object_types: &'a HashMap<Span, String>,
+    /// Bare payload-free variant patterns (see `noeta_check::Sites::variant_pattern_sites`): each
+    /// `match`-arm [`noeta_ast::Pattern::Binding`] span the checker resolved to a variant of the
+    /// scrutinee's own enum → `(qualifier, variant)`. Rewritten here into a
+    /// [`noeta_ast::Pattern::Variant`] with no bindings, so both backends keep seeing an ordinary
+    /// qualified variant pattern and neither has to know the bare spelling exists.
+    pub variant_pattern_sites: &'a VariantPatternSites,
     /// Unbound method-handle sites (`Type.method` in value position) → the resolved
     /// `(ty, method, associated)`, emitted as an [`Rvalue::MethodHandle`] instead of a field load.
     pub handle_sites: &'a HashMap<Span, (String, String, bool)>,
@@ -148,15 +213,32 @@ pub struct LoweringSites<'a> {
     /// The program-wide type-argument table (poly-values F2b) — embedded into
     /// [`Program::type_args`] so both backends resolve a hidden slot's instantiation identically.
     pub type_arg_table: &'a Vec<noeta_ext_abi::TypeArgInfo>,
-    /// Forwarding-generic call spans → the hidden type-argument slots to PREPEND to the call's
-    /// arguments (`Table(i)` → an int const; `Forward(j)` → the enclosing fn's `$ty<j>` local).
+    /// The type-argument table's reflection projection, indexed identically — embedded into
+    /// [`Program::type_arg_reprs`] so a dynamic construction site resolves the same interned
+    /// `TypeRepr` in either backend.
+    pub type_arg_reprs: &'a Vec<Option<noeta_ast::reflect::TypeRepr>>,
+    /// Forwarding-generic call spans → the type-argument slots the call supplies, in slot order
+    /// (`Table(i)` → an int const; `Forward(j)` → the enclosing body's `$ty<j>` local). They land
+    /// in the call node's own `type_args` channel, beside the value arguments.
     pub hidden_arg_sites: &'a HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
-    /// `TypedModuleCall` spans whose recipe is per-instantiation → the hidden slot index; lowered
-    /// with a dynamic table-index operand instead of a baked recipe.
-    pub dynamic_recipe_sites: &'a HashMap<Span, u32>,
-    /// `attributes_of::<T>` spans whose type is per-instantiation → the hidden slot index.
-    pub dynamic_attr_sites: &'a HashMap<Span, u32>,
-    /// Forwarding generic fns → their hidden-parameter count (prepended as `$ty0`, `$ty1`, …).
+    /// **Dynamic** construction sites (generic-in-generic construction): a fresh-constructor call
+    /// span → the enclosing body's hidden slot index whose table entry names the instantiation to
+    /// stamp on the object the call built. Lowered onto [`Rvalue::Method::reflect_slot`].
+    pub dynamic_construction_sites: &'a HashMap<Span, u32>,
+    /// Spans whose turbofish is a FORWARDED type parameter of the enclosing top-level generic fn →
+    /// the hidden slot index whose table entry names the instantiation. One map over three
+    /// surfaces, each consulted from its own expression arm: a `TypedModuleCall` lowers with a
+    /// dynamic table-index operand instead of a baked recipe, an `attributes_of::<T>` resolves the
+    /// type name through the table at run time, and a `type_name::<T>()` becomes an
+    /// [`Rvalue::TypeSlotName`]. Same slot, same entry — which is why a forwarded name and a
+    /// forwarded manifest cannot disagree about what `T` is.
+    pub forwarded_slot_sites: &'a HashMap<Span, u32>,
+    /// `type_name::<T>()` spans where `T` is a parameter of the ENCLOSING generic type, inside one
+    /// of its instance methods → `(enclosing type name, the parameter's declaration index)`. The
+    /// name is read off argument `index` of the receiver's reflected type tag at run time.
+    pub self_type_arg_sites: &'a HashMap<Span, (String, u32)>,
+    /// Forwarding generic fns and methods → their hidden-slot count, keyed as the callable traces
+    /// (a bare `fn` name, or `Type.method`); lowered as the leading parameters `$ty0`, `$ty1`, … .
     pub forwarding_fns: &'a HashMap<String, u32>,
     /// Forwarding-fn-as-value sites (poly-deferrals D2c): `Expr::Ident` spans → `(fn name,
     /// adopted arity)`. The reference lowers to a synthesized closure calling the fn; the inner
@@ -173,13 +255,18 @@ impl LoweringSites<'static> {
         static SPANS: OnceLock<HashSet<Span>> = OnceLock::new();
         static RECIPES: OnceLock<HashMap<Span, noeta_ext_abi::TypeRecipe>> = OnceLock::new();
         static WIDTHS: OnceLock<HashMap<Span, (bool, u8)>> = OnceLock::new();
+        static FOLDED: OnceLock<HashMap<Span, bool>> = OnceLock::new();
         static REPRS: OnceLock<HashMap<Span, noeta_ast::reflect::TypeRepr>> = OnceLock::new();
         static HANDLES: OnceLock<HashMap<Span, (String, String, bool)>> = OnceLock::new();
         static PAIRS: OnceLock<HashMap<Span, (String, String)>> = OnceLock::new();
         static NAMES: OnceLock<HashMap<Span, String>> = OnceLock::new();
+        static VARIANT_PATTERNS: OnceLock<VariantPatternSites> = OnceLock::new();
         static TYPE_ARGS: OnceLock<Vec<noeta_ext_abi::TypeArgInfo>> = OnceLock::new();
+        static TYPE_ARG_REPRS: OnceLock<Vec<Option<noeta_ast::reflect::TypeRepr>>> =
+            OnceLock::new();
         static HIDDEN: OnceLock<HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>> = OnceLock::new();
         static SLOTS: OnceLock<HashMap<Span, u32>> = OnceLock::new();
+        static SELF_TY: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
         static COUNTS: OnceLock<HashMap<String, u32>> = OnceLock::new();
         static FN_VALUES: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
         static ORDERS: OnceLock<HashMap<Span, Vec<Option<usize>>>> = OnceLock::new();
@@ -193,8 +280,10 @@ impl LoweringSites<'static> {
             decode_typed_sites: SPANS.get_or_init(HashSet::new),
             for_stream_sites: SPANS.get_or_init(HashSet::new),
             width_sites: WIDTHS.get_or_init(HashMap::new),
+            folded_type_tests: FOLDED.get_or_init(HashMap::new),
             construction_sites: REPRS.get_or_init(HashMap::new),
             inferred_object_types: NAMES.get_or_init(HashMap::new),
+            variant_pattern_sites: VARIANT_PATTERNS.get_or_init(HashMap::new),
             handle_sites: HANDLES.get_or_init(HashMap::new),
             bound_handle_sites: SPANS.get_or_init(HashSet::new),
             field_call_sites: SPANS.get_or_init(HashSet::new),
@@ -204,9 +293,11 @@ impl LoweringSites<'static> {
             namespace_module_sites: NAMES.get_or_init(HashMap::new),
             try_conversion_sites: NAMES.get_or_init(HashMap::new),
             type_arg_table: TYPE_ARGS.get_or_init(Vec::new),
+            type_arg_reprs: TYPE_ARG_REPRS.get_or_init(Vec::new),
+            dynamic_construction_sites: SLOTS.get_or_init(HashMap::new),
             hidden_arg_sites: HIDDEN.get_or_init(HashMap::new),
-            dynamic_recipe_sites: SLOTS.get_or_init(HashMap::new),
-            dynamic_attr_sites: SLOTS.get_or_init(HashMap::new),
+            forwarded_slot_sites: SLOTS.get_or_init(HashMap::new),
+            self_type_arg_sites: SELF_TY.get_or_init(HashMap::new),
             forwarding_fns: COUNTS.get_or_init(HashMap::new),
             fn_value_sites: FN_VALUES.get_or_init(HashMap::new),
         }
@@ -234,8 +325,10 @@ macro_rules! lowering_sites {
             decode_typed_sites: &$s.decode_typed_sites,
             for_stream_sites: &$s.for_stream_sites,
             width_sites: &$s.width_sites,
+            folded_type_tests: &$s.folded_type_tests,
             construction_sites: &$s.construction_sites,
             inferred_object_types: &$s.inferred_object_types,
+            variant_pattern_sites: &$s.variant_pattern_sites,
             handle_sites: &$s.handle_sites,
             bound_handle_sites: &$s.bound_handle_sites,
             field_call_sites: &$s.field_call_sites,
@@ -245,9 +338,11 @@ macro_rules! lowering_sites {
             namespace_module_sites: &$s.namespace_module_sites,
             try_conversion_sites: &$s.try_conversion_sites,
             type_arg_table: &$s.type_arg_table,
+            type_arg_reprs: &$s.type_arg_reprs,
+            dynamic_construction_sites: &$s.dynamic_construction_sites,
             hidden_arg_sites: &$s.hidden_arg_sites,
-            dynamic_recipe_sites: &$s.dynamic_recipe_sites,
-            dynamic_attr_sites: &$s.dynamic_attr_sites,
+            forwarded_slot_sites: &$s.forwarded_slot_sites,
+            self_type_arg_sites: &$s.self_type_arg_sites,
             forwarding_fns: &$s.forwarding_fns,
             fn_value_sites: &$s.fn_value_sites,
         }
@@ -283,6 +378,18 @@ pub struct LowerOptions {
     /// default; an embed session threads its own assembled set, so a session's compile honors
     /// its extensions.
     pub registry: &'static noeta_ext_abi::registry::Registry,
+    /// Expression-tier handlers declared **outside** the program being lowered (tier name → handler
+    /// fn), for a lowering that is a *fragment* of a larger program: a hot-swapped definition, a
+    /// REPL entry in a session whose earlier entries declared the tier.
+    ///
+    /// `@html { … }` is a value only because some `@tier(html, …, expr: Html)` fn says so, and
+    /// [`expr_tier_handlers`](noeta_ast::desugar::expr_tier_handlers) reads that declaration off the
+    /// program in hand. A fragment does not contain it — the declaration lives in the package the
+    /// fragment imports — so lowering one in isolation resolved no handler and emitted the
+    /// "`@html` is not an expression tier" panic *in place of the template*: a hot swap that
+    /// compiled cleanly and then failed every request. The session carries the table forward
+    /// instead; the program's own declarations still win over it.
+    pub ambient_expr_tiers: HashMap<String, String>,
 }
 
 impl Default for LowerOptions {
@@ -290,6 +397,7 @@ impl Default for LowerOptions {
         LowerOptions {
             real_isolates: false,
             registry: noeta_ext_abi::registry::single_registry_process(),
+            ambient_expr_tiers: HashMap::new(),
         }
     }
 }
@@ -300,6 +408,44 @@ impl std::fmt::Debug for LowerOptions {
             .field("real_isolates", &self.real_isolates)
             // The registry is a `&'static` handle whose contents aren't `Debug`.
             .finish_non_exhaustive()
+    }
+}
+
+/// Project a registry's **native trait data** into the plain-data form
+/// [`noeta_ast::reflect::build`] joins with a program's own declarations (the trait-membership
+/// twin of `Registry::native_roles`): every native trait's qualified identity, every native
+/// type/class/struct/enum's ABI-advertised trait impls (keyed by the qualified identity an extern
+/// value reports at runtime), and every native derive recipe's name (excluded from membership —
+/// a recipe synthesizes methods but implements no trait). Shared by both backends' reflection
+/// builds so the membership table agrees across the differential by construction.
+pub fn native_trait_impls(
+    registry: &'static noeta_ext_abi::registry::Registry,
+) -> noeta_ast::reflect::NativeTraitImpls {
+    let traits: Vec<String> = registry.traits().map(|t| t.qualified()).collect();
+    let advertised = |names: &'static [&'static str]| -> Option<Vec<String>> {
+        (!names.is_empty()).then(|| names.iter().map(|n| (*n).to_string()).collect())
+    };
+    let type_impls: Vec<(String, Vec<String>)> = registry
+        .extensions()
+        .iter()
+        .flat_map(|ext| ext.types())
+        .filter_map(|ty| Some((ty.qualified(), advertised(ty.traits)?)))
+        .chain(
+            registry
+                .fielded()
+                .filter_map(|f| Some((f.qualified(), advertised(f.traits)?))),
+        )
+        .chain(
+            registry
+                .enums()
+                .filter_map(|e| Some((e.qualified(), advertised(e.traits)?))),
+        )
+        .collect();
+    let derives: Vec<String> = registry.ext_derives().map(|d| d.name.to_string()).collect();
+    noeta_ast::reflect::NativeTraitImpls {
+        traits,
+        type_impls,
+        derives,
     }
 }
 
@@ -401,12 +547,12 @@ pub fn hoist_impl_methods_with_registry(
     let mut additions: StdHashMap<String, Vec<FnDecl>> = StdHashMap::new();
     for stmt in &program.stmts {
         if let AstStmt::Impl(decl) = stmt {
-            let entry = additions.entry(decl.target.clone()).or_default();
+            let entry = additions.entry(decl.target.to_string()).or_default();
             entry.extend(decl.methods.iter().cloned());
             // Default-method fallback (UT5): the impl'd trait's omitted defaults ride along,
             // after the impl's own methods so a provided override wins the name-skip below.
             entry.extend(omitted_defaults(
-                &decl.trait_name,
+                decl.trait_name.as_str(),
                 &decl.trait_args,
                 &decl.methods,
             ));
@@ -435,7 +581,7 @@ pub fn hoist_impl_methods_with_registry(
         derives.iter().any(|d| {
             d.via.is_some()
                 || d.name == "Error"
-                || registry.is_some_and(|r| r.find_ext_derive(&d.name).is_some())
+                || registry.is_some_and(|r| r.find_ext_derive(d.name.as_str()).is_some())
         })
     };
     let body_needs = body_needs
@@ -484,7 +630,7 @@ pub fn hoist_impl_methods_with_registry(
         let mut synthesized: Vec<FnDecl> = Vec::new();
         for block in impls {
             synthesized.extend(omitted_defaults(
-                &block.trait_name,
+                block.trait_name.as_str(),
                 &block.trait_args,
                 methods,
             ));
@@ -499,7 +645,7 @@ pub fn hoist_impl_methods_with_registry(
         };
         for spec in derives {
             if let Some(Ok(planned)) =
-                noeta_ast::derive::plan_derive(&ctx, spec, name, fields, methods)
+                noeta_ast::derive::plan_derive(&ctx, spec, name.as_str(), fields, methods)
             {
                 synthesized.extend(planned);
             }
@@ -525,6 +671,7 @@ pub fn lower_with_sites_opts(
     let LowerOptions {
         real_isolates,
         registry,
+        mut ambient_expr_tiers,
     } = opts;
     // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) before lowering,
     // so `(type, method)` dispatch resolves them — against THIS lowering's registry, so an embed
@@ -539,9 +686,13 @@ pub fn lower_with_sites_opts(
         synth_step_name: None,
         synth_step_captures: None,
         type_aliases: collect_type_aliases(program, registry),
-        expr_tiers: noeta_ast::desugar::expr_tier_handlers(program)
-            .into_iter()
-            .collect(),
+        native_type_imports: collect_native_type_imports(program, registry),
+        expr_tiers: {
+            // The program's own declarations shadow the ambient ones (a fragment redeclaring a
+            // tier means its handler), and are the whole table for a whole-program lowering.
+            ambient_expr_tiers.extend(noeta_ast::desugar::expr_tier_handlers(program));
+            ambient_expr_tiers
+        },
         registry,
         module_globals: module_global_names(program),
     };
@@ -550,6 +701,7 @@ pub fn lower_with_sites_opts(
         top,
         temp_count: lowerer.temps,
         type_args: sites.type_arg_table.clone(),
+        type_arg_reprs: sites.type_arg_reprs.clone(),
         span: program.span,
     })
 }
@@ -592,6 +744,15 @@ struct Lowerer<'a> {
     ///
     /// A plain (non-aliased) *user* import needs no entry — its local name is already the tag.
     type_aliases: HashMap<String, String>,
+    /// The **qualified identity** each leaf-imported native type's local name denotes (`Framing` →
+    /// `std.http.Framing`), built from the program's own `use` statements — the rewrite
+    /// [`Lowerer::lower_type_operand`] applies so a reflection turbofish keys on the name the
+    /// reflection artifact registers the type under. Every native nominal kind (enum, fielded,
+    /// extern handle) is resolved; see [`collect_native_type_imports`]. Import-driven rather than a
+    /// registry-wide short-name lookup on purpose: only a name this program actually imported is
+    /// rewritten, so a program's own `Framing` is never redirected to a native type it never
+    /// mentioned.
+    native_type_imports: HashMap<String, String>,
     /// The program's declared expression-tier handlers (tier name → handler fn name), so an
     /// [`Expr::TierExpr`] lowers as the handler call it means — the same
     /// [`noeta_ast::desugar::tier_expr_call`] construction the checker typed. The checker gated
@@ -622,7 +783,7 @@ struct Lowerer<'a> {
 /// pointing at the `?`.
 fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
     let ident = |name: &str| Expr::Ident {
-        name: name.to_string(),
+        name: noeta_ast::Name::canonical(name),
         span,
     };
     let call = |callee: Expr, args: Vec<Expr>| Expr::Call {
@@ -635,6 +796,7 @@ fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
         span,
     };
     let arm = |variant: &str, body: Expr| noeta_ast::MatchArm {
+        guard: None,
         pattern: noeta_ast::Pattern::Variant {
             type_name: None,
             variant: variant.to_string(),
@@ -675,13 +837,29 @@ fn is_hoistable_fn(stmt: &AstStmt) -> bool {
     matches!(stmt, AstStmt::Fn(decl) if decl.captures.is_empty())
 }
 
+/// `stmts` reordered so every hoistable `fn` declaration precedes everything else, each group
+/// keeping its source order — the declaration-hoist as a pure **AST** rewrite.
+///
+/// Extracted from [`Lowerer::lower_stmts_hoisting_fns`] because the coroutine paths need the same
+/// rule one stage earlier: [`Lowerer::lower_generator`] / [`Lowerer::lower_async`] hand the raw body
+/// to [`desugar_state_machine`], which splits it into states *before* any lowering runs, so a
+/// declaration-hoist applied during lowering never reaches them. Sharing this keeps the hoist ONE
+/// rule across every scope — bodies, top level, and now state-machine bodies — rather than a second
+/// copy that can drift from the first.
+fn hoisted_fn_order(stmts: &[AstStmt]) -> impl Iterator<Item = &AstStmt> {
+    stmts
+        .iter()
+        .filter(|s| is_hoistable_fn(s))
+        .chain(stmts.iter().filter(|s| !is_hoistable_fn(s)))
+}
+
 fn module_global_names(program: &AstProgram) -> HashSet<String> {
     program
         .stmts
         .iter()
         .filter_map(|stmt| match stmt {
             AstStmt::Binding { name, .. } => Some(name.clone()),
-            AstStmt::Fn(decl) => Some(decl.name.clone()),
+            AstStmt::Fn(decl) => Some(decl.name.to_string()),
             _ => None,
         })
         .collect()
@@ -707,6 +885,11 @@ fn collect_type_aliases(
                 // A native type: narrows against its qualified identity, whichever local name it
                 // was bound to.
                 map.insert(local, ext.qualified());
+            } else if let Some(tr) = registry.find_trait_qualified(&qualified) {
+                // A native trait import (`use fx.Widget`): a `dyn Widget` narrowing target
+                // resolves to the trait's qualified identity — the name the shared membership
+                // table (`ReflectionInfo::trait_impls`) keys the implementor set on.
+                map.insert(local, tr.qualified());
             } else if registry.is_namespace(&qualified) {
                 // A namespace group (`use std.http`): expose its types so a *dotted* narrowing
                 // target (`http.Response`) resolves to the same qualified identity a value carries,
@@ -714,9 +897,92 @@ fn collect_type_aliases(
                 for (rel, q) in registry.namespace_types(&qualified) {
                     map.insert(format!("{local}.{rel}"), q);
                 }
+                // A module's kernel traits project the same way (`use std.vec` → a dotted
+                // `dyn vec.Kernels` target resolves to `std.vec.Kernels`).
+                for tr in registry.traits() {
+                    let q = tr.qualified();
+                    if let Some(rest) = q.strip_prefix(&qualified)
+                        && let Some(short) = rest.strip_prefix('.')
+                        && !short.contains('.')
+                    {
+                        map.insert(format!("{local}.{short}"), q);
+                    }
+                }
             } else if n.alias.is_some() {
                 // A renamed user (or opaque) import: narrows against the imported leaf name.
                 map.insert(local, n.name.clone());
+            }
+        }
+    }
+    map
+}
+
+/// The **qualified identity** each leaf-imported native type's local name denotes (`use
+/// std.http.{Framing}` → `Framing` ⇒ `std.http.Framing`, honoring `as` renames) — the key the
+/// reflection artifact registers a native type under, and the name `type_of` reports for one of its
+/// values.
+///
+/// Every native nominal kind is resolved, not just enums: an **enum**, a **fielded** type (a native
+/// class or value struct), and an **extern handle** type. It covered enums only until the native
+/// fielded types reached the reflection artifact, and the omission had the same shape for each kind —
+/// `field_specs_of::<Frame>()` answered the empty schema right after `use std.http.{Frame}`, and
+/// `type_name::<Uuid>()` answered `"Uuid"`, a name nothing is registered under. The latter is the
+/// worse of the two: `type_name`'s whole job is to hand a key to something that looks it up, so a
+/// plausible-looking wrong name travels silently, which is exactly what the surface exists to prevent.
+///
+/// Only the *leaf* form needs an entry: a group import (`use std.http` → `http.Framing`) is already
+/// rewritten to the qualified identity by the loader's native-type aliasing, and a name written
+/// qualified in source needs no rewrite at all. Built from this program's own `use` statements, so a
+/// short name the program never imported is left exactly as written.
+///
+/// **A local declaration wins**, the same shadowing rule the loader's own native-type aliasing
+/// follows: a name the linked program declares itself is never rewritten to a native type of that
+/// name. (A declaration under a `namespace` links to a qualified name and could not collide in the
+/// first place; the guard is what covers the un-namespaced case.)
+fn collect_native_type_imports(
+    program: &AstProgram,
+    registry: &'static noeta_ext_abi::registry::Registry,
+) -> HashMap<String, String> {
+    let declared: HashSet<&str> = program
+        .stmts
+        .iter()
+        .filter_map(|stmt| match stmt {
+            AstStmt::Struct(d) => Some(d.name.as_str()),
+            AstStmt::Class(d) => Some(d.name.as_str()),
+            AstStmt::Enum(d) => Some(d.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut map = HashMap::new();
+    for stmt in &program.stmts {
+        let AstStmt::Use { path, names, .. } = stmt else {
+            continue;
+        };
+        let prefix = path.join(".");
+        for n in names {
+            let local = n.local();
+            if declared.contains(local) {
+                continue;
+            }
+            let qualified = format!("{prefix}.{}", n.name);
+            // One probe per native nominal kind, all keyed on the qualified identity the import
+            // spells out; a name that resolves to none of them is not a native type and is left as
+            // written.
+            let resolved = registry
+                .find_enum_qualified(&qualified)
+                .map(|t| t.qualified())
+                .or_else(|| {
+                    registry
+                        .find_fielded_qualified(&qualified)
+                        .map(|t| t.qualified())
+                })
+                .or_else(|| {
+                    registry
+                        .find_type_qualified(&qualified)
+                        .map(|t| t.qualified())
+                });
+            if let Some(q) = resolved {
+                map.insert(local.to_string(), q);
             }
         }
     }
@@ -736,8 +1002,8 @@ impl Lowerer<'_> {
             TypeRef::Named { name, args, span } => TypeRef::Named {
                 name: self
                     .type_aliases
-                    .get(name)
-                    .cloned()
+                    .get(name.as_str())
+                    .map(noeta_ast::Name::canonical)
                     .unwrap_or_else(|| name.clone()),
                 args: args.iter().map(|a| self.resolve_type_aliases(a)).collect(),
                 span: *span,
@@ -768,9 +1034,22 @@ impl Lowerer<'_> {
                 inner: Box::new(self.resolve_type_aliases(inner)),
                 span: *span,
             },
-            // Neither a trait object's trait name nor a `Self::Name` projection is an import alias —
-            // narrowing never targets them (slice 1a).
-            TypeRef::DynTrait { .. } | TypeRef::AssocProjection { .. } => ty.clone(),
+            // A trait object's trait name resolves like a nominal leaf: a native trait's local
+            // `use` spelling (`Widget`, `vec.Kernels`) becomes its qualified identity — the key
+            // the shared membership table uses — so the precise `is dyn Trait` test compares one
+            // canonical string. A `.noe` trait misses the map and keeps its (loader-qualified)
+            // linked name, which is already the table's key.
+            TypeRef::DynTrait { trait_name, span } => TypeRef::DynTrait {
+                trait_name: self
+                    .type_aliases
+                    .get(trait_name.as_str())
+                    .map(noeta_ast::Name::canonical)
+                    .unwrap_or_else(|| trait_name.clone()),
+                span: *span,
+            },
+            // A `Self::Name` projection is never an import alias — resolution is per-impl at the
+            // checker (slice 1a).
+            TypeRef::AssocProjection { .. } => ty.clone(),
         }
     }
 
@@ -822,15 +1101,8 @@ impl Lowerer<'_> {
         stmts: &[AstStmt],
         out: &mut Vec<Stmt>,
     ) -> Result<(), Unsupported> {
-        for stmt in stmts {
-            if is_hoistable_fn(stmt) {
-                self.lower_stmt(stmt, out)?;
-            }
-        }
-        for stmt in stmts {
-            if !is_hoistable_fn(stmt) {
-                self.lower_stmt(stmt, out)?;
-            }
+        for stmt in hoisted_fn_order(stmts) {
+            self.lower_stmt(stmt, out)?;
         }
         Ok(())
     }
@@ -1050,11 +1322,11 @@ impl Lowerer<'_> {
                     decl.span,
                     true,
                     decl.is_async,
-                    Some(decl.name.clone()),
+                    Some(decl.name.to_string()),
                     Some(decl.captures.iter().map(|(n, _)| n.clone()).collect()),
                 )?;
                 out.push(Stmt::Decl(Decl::Fn {
-                    name: decl.name.clone(),
+                    name: decl.name.to_string(),
                     func: Rc::new(func),
                     span: decl.span,
                 }));
@@ -1073,7 +1345,7 @@ impl Lowerer<'_> {
                         Some(format!("{}.{}", decl.name, m.name)),
                         Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
                     )?;
-                    methods.push((m.name.clone(), Rc::new(func)));
+                    methods.push((m.name.to_string(), Rc::new(func)));
                 }
                 // The `destruct` block lowers to a parameterless block [`Func`] (fields resolve
                 // against the receiver, like a method), so the VM can compile it to a prototype.
@@ -1117,7 +1389,7 @@ impl Lowerer<'_> {
                         Some(format!("{}.{}", decl.name, m.name)),
                         Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
                     )?;
-                    methods.push((m.name.clone(), Rc::new(func)));
+                    methods.push((m.name.to_string(), Rc::new(func)));
                 }
                 out.push(Stmt::Decl(Decl::Enum(EnumDef {
                     decl: Rc::new(decl.clone()),
@@ -1142,7 +1414,7 @@ impl Lowerer<'_> {
                         Some(format!("{}.{}", decl.name, m.name)),
                         Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
                     )?;
-                    methods.push((m.name.clone(), Rc::new(func)));
+                    methods.push((m.name.to_string(), Rc::new(func)));
                 }
                 let field_defaults = self.lower_field_defaults(&decl.fields)?;
                 out.push(Stmt::Decl(Decl::Struct(StructDef {
@@ -1190,21 +1462,44 @@ impl Lowerer<'_> {
     /// enclosing frame's temporary counter is saved and restored, so a nested function (a
     /// closure inside a function body) is numbered independently and the outer numbering
     /// continues afterward.
-    /// Prepend a forwarding-generic call's hidden type-argument atoms (poly-values F2b), when the
-    /// checker recorded slots for this call span: a concrete instantiation passes its table index
-    /// as an int const; a pass-through reads the enclosing fn's own hidden slot local.
-    fn prepend_hidden_args(&mut self, args: &mut Vec<Atom>, span: &Span) {
+    /// A forwarding-generic call's **type arguments** (poly-values F2b), in slot order, when the
+    /// checker recorded slots for this call span: a concrete instantiation passes its interned
+    /// table index as an int const; a pass-through reads the enclosing fn's own `$ty` slot.
+    ///
+    /// These travel in the call node's own `type_args` channel rather than prepended onto the
+    /// value arguments, so a forwarding call's parameter positions — and therefore its `supplied`
+    /// binding map — are exactly those of the same call without forwarding.
+    fn type_arg_atoms(&mut self, span: &Span) -> Vec<Atom> {
         let Some(slots) = self.sites.hidden_arg_sites.get(span) else {
-            return;
+            return Vec::new();
         };
-        let hidden = slots.iter().map(|slot| match slot {
-            noeta_ext_abi::HiddenArg::Table(i) => Atom::Const(Const::Int(*i as i64)),
-            noeta_ext_abi::HiddenArg::Forward(j) => Atom::Var {
-                name: hidden_param_name(*j),
+        slots
+            .iter()
+            .map(|slot| match slot {
+                noeta_ext_abi::HiddenArg::Table(i) => Atom::Const(Const::Int(*i as i64)),
+                noeta_ext_abi::HiddenArg::Forward(j) => Atom::Var {
+                    name: hidden_param_name(*j),
+                    span: *span,
+                },
+            })
+            .collect()
+    }
+
+    /// The **dynamic construction tag** operand for a call span (generic-in-generic construction):
+    /// the enclosing body's `$ty<i>` hidden local whose table entry names the instantiation to stamp
+    /// on the freshly-built object. `None` at every ordinary call — the overwhelming majority.
+    ///
+    /// A `Var` reference to a hidden parameter, exactly as [`Self::type_arg_atoms`]'s pass-through
+    /// arm builds: a nested `fn` or closure reaches the enclosing slot the same way it reaches any
+    /// other local, through closure conversion, so no separate capture rule is needed.
+    fn reflect_slot_atom(&self, span: &Span) -> Option<Atom> {
+        self.sites
+            .dynamic_construction_sites
+            .get(span)
+            .map(|slot| Atom::Var {
+                name: hidden_param_name(*slot),
                 span: *span,
-            },
-        });
-        args.splice(0..0, hidden);
+            })
     }
 
     // The lowering inputs for one function/closure body — a bundle, not a signature worth a struct.
@@ -1221,13 +1516,15 @@ impl Lowerer<'_> {
     ) -> Result<Func, Unsupported> {
         let outer = self.temps;
         self.temps = 0;
-        // A FORWARDING generic fn (poly-values F2b) carries its hidden type-argument slots as
-        // PREPENDED parameters (`$ty0`, `$ty1`, …): prepending — not appending — keeps the
-        // declaration's trailing defaults trailing, so omitted-argument filling is untouched.
-        // Every call site prepends the matching hidden atoms (`hidden_arg_sites`). Keyed by the
-        // top-level fn name — only at depth 0: a NESTED fn (D2b) may share a top-level name but
-        // never carries hidden parameters (it captures the enclosing `$ty` locals instead), and
-        // methods/closures never appear in the map.
+        // A FORWARDING generic fn (poly-values F2b) carries its type-argument slots as LEADING
+        // parameters (`$ty0`, `$ty1`, …) so the body can name them and register allocation places
+        // them like any other — but they are filled from the call node's own `type_args` channel,
+        // never from its value arguments, and `Func::hidden` is what tells every binder how many
+        // leading slots to lay down before the value arguments start. Keyed by the name this
+        // callable traces under — a bare `fn` name, or `Type.method` for a forwarding generic
+        // method (Axis A) — and only at depth 0: a NESTED fn (D2b) may share a top-level name but
+        // never carries slots of its own (it captures the enclosing `$ty` locals instead), and
+        // closures never appear in the map.
         let hidden = if self.fn_depth == 0 {
             name.as_deref()
                 .and_then(|n| self.sites.forwarding_fns.get(n).copied())
@@ -1283,6 +1580,7 @@ impl Lowerer<'_> {
             name,
             captures,
             params: param_names,
+            hidden,
             defaults,
             body,
             temp_count,
@@ -1311,19 +1609,58 @@ impl Lowerer<'_> {
     /// rejected by the checker (E0039, "not yet supported — Track G.2") and never reaches a *run*; if
     /// one survives in a check-failed program it stays a `Stmt::Yield` inside a segment and lowers
     /// through the interim discard arm, keeping lowering total.
+    /// The module globals a state machine's body may actually **store** to — what
+    /// [`desugar_state_machine`] excludes from cell-hoisting, because a bare `g = …` against one is
+    /// a global store rather than a fresh local.
+    ///
+    /// The seal decides this, exactly as it decides bare-assignment locality everywhere else. A
+    /// named `async fn`/generator is SEALED: its body reaches an outer binding only through
+    /// `use (…)`, so a bare `x = …` naming anything *not* in that allow-list is a fresh local — a
+    /// module global of the same name is unrelated and unreachable. Only an auto-capturing closure
+    /// (no armed seal) keeps the outward rule over the whole global set.
+    ///
+    /// Taking every global as storable regardless — what this did before — made a coroutine's
+    /// locality disagree with the synchronous path's, and the disagreement is not confined to one
+    /// file: a program's globals include everything the **linker merged in**, so a *dependency
+    /// package's* `async fn` had its locals decided against its **consumer's** top-level names. A
+    /// package binding `page = render_page()` silently became a store to whatever `page` the
+    /// consuming program happened to declare, and the reads that followed loaded that global. The
+    /// package author cannot see, predict, or defend against those names.
+    fn storable_globals(&self) -> HashSet<String> {
+        match &self.synth_step_captures {
+            // Sealed: only the globals the function explicitly named in `use (…)`.
+            Some(allow) => {
+                let allowed: HashSet<&str> = allow.iter().map(String::as_str).collect();
+                self.module_globals
+                    .iter()
+                    .filter(|g| allowed.contains(g.as_str()))
+                    .cloned()
+                    .collect()
+            }
+            // An auto-capturing closure keeps the full outward rule.
+            None => self.module_globals.clone(),
+        }
+    }
+
     fn lower_generator(
         &mut self,
         stmts: &[AstStmt],
         span: Span,
         params: &[String],
     ) -> Result<Block, Unsupported> {
+        // Hoist nested `fn` declarations before the body is split into states: the flattener cuts
+        // at each `yield`, so a declaration left below one lands in a later state than its callers.
+        // Same rule every other scope gets (see [`hoisted_fn_order`]).
+        let hoisted: Vec<AstStmt> = hoisted_fn_order(stmts).cloned().collect();
+        let storable = self.storable_globals();
         let desugar = desugar_state_machine(
-            stmts,
+            &hoisted,
             span,
             self.sites.for_stream_sites,
             SuspendMode::Gen,
-            &self.module_globals,
+            &storable,
             params,
+            self.sites.variant_pattern_sites,
         );
         // The sealed step closure must keep writing the machine's PERSISTENT locals — the
         // desugar's hoisted prelude cells (`$state`, awaited-future cells, and any USER local
@@ -1373,13 +1710,18 @@ impl Lowerer<'_> {
         span: Span,
         params: &[String],
     ) -> Result<Block, Unsupported> {
+        // Same declaration-hoist the generator gets: the flattener cuts at each `.await`, so a
+        // nested `fn` must be declared before the first cut to be visible to every state.
+        let hoisted: Vec<AstStmt> = hoisted_fn_order(stmts).cloned().collect();
+        let storable = self.storable_globals();
         let desugar = desugar_state_machine(
-            stmts,
+            &hoisted,
             span,
             self.sites.for_stream_sites,
             SuspendMode::Async,
-            &self.module_globals,
+            &storable,
             params,
+            self.sites.variant_pattern_sites,
         );
         // The sealed step closure must keep writing the machine's PERSISTENT locals — the
         // desugar's hoisted prelude cells (`$state`, awaited-future cells, and any USER local
@@ -1447,6 +1789,104 @@ impl Lowerer<'_> {
         })
     }
 
+    /// Lower a reflection surface's type operand to the **type-name atom** both its surfaces share.
+    ///
+    /// This is where the turbofish finally becomes a name, and it is deliberately *here* rather than
+    /// in the parser: lowering runs on the already-linked program, so the [`TypeRef`] now carries its
+    /// **qualified** identity (`app.storage.Todo`) — exactly the key the reflection registry stores
+    /// the type under, and exactly what the dynamic string surface would have been handed. Flattening
+    /// it at parse time instead put it beyond the linker's namespace rewrite, and
+    /// `field_specs_of::<Todo>()` under a `namespace` silently answered with the empty schema.
+    ///
+    /// One spelling the linker deliberately leaves short is a **leaf**-imported native type
+    /// (`use std.http.{Framing}`): the loader aliases only native *attribute* structs there, since
+    /// rewriting the rest would also rewrite the value spelling the backends bind under. Those
+    /// resolve through the checker instead — so the head name arrives short, while the reflection
+    /// artifact keys a native type on the qualified identity `type_of` stamps on its values. Left
+    /// alone, `variants_of::<Framing>()` / `field_specs_of::<Frame>()` folded to a name nothing is
+    /// registered under and answered the empty list, right after the program imported the type, and
+    /// `type_name::<Uuid>()` handed out that unregistered name as a key.
+    /// [`Self::native_type_imports`] carries the one rewrite that closes it.
+    fn lower_type_operand(
+        &mut self,
+        operand: &TypeOperand,
+        out: &mut Vec<Stmt>,
+    ) -> Result<Atom, Unsupported> {
+        match operand {
+            TypeOperand::Static(ty) => Ok(Atom::Const(Const::Str(self.reflection_head_name(ty)))),
+            TypeOperand::Dynamic(e) => self.lower_expr(e, out),
+        }
+    }
+
+    /// The **name a reflection surface keys on** for a statically written type: its linked head
+    /// name, with a leaf-imported native type's short spelling resolved to the qualified identity
+    /// the reflection artifact registers it under (see [`Lowerer::native_type_imports`]).
+    ///
+    /// Shared by the turbofish operands (`field_specs_of::<T>()`, `variants_of::<T>()`,
+    /// `construct::<T>(…)`) and by `type_name::<T>()`, which is the surface whose whole job is to
+    /// hand that name to the others — so the two agree by construction rather than by convention,
+    /// and `variants_of(type_name::<Framing>())` answers what `variants_of::<Framing>()` does.
+    fn reflection_head_name(&self, ty: &TypeRef) -> String {
+        let name = ty.head_name();
+        self.native_type_imports
+            .get(name.as_str())
+            .cloned()
+            .unwrap_or(name)
+    }
+
+    /// The **run-time name atom** of a target type whose head the checker resolved to a
+    /// per-instantiation channel at `span` — `Some` exactly for a bare type parameter of an
+    /// enclosing generic, `None` for every statically-written type (which stays a folded constant).
+    ///
+    /// One helper over three surfaces, because there is one fact — what `T` *is* here.
+    /// `type_name::<T>()` answers with it, and `v.as<T>()` / `v is T` match on it; routing all three
+    /// through this function is what makes them agree by construction rather than by convention,
+    /// which is the whole reason the narrow works: `Expr::As` is a head-constructor match on a
+    /// name, and this is the name.
+    ///
+    /// The two channels, mirroring the checker's [`Sites::self_type_arg_sites`] /
+    /// [`Sites::forwarded_slot_sites`] split: a generic TYPE's parameter travels on the receiver's
+    /// reflected type tag (read off `self` — a generic fn has no receiver), and a generic FN's or
+    /// METHOD's own parameter travels in the hidden `$ty<i>` slot that also carries a forwarded
+    /// decode recipe, of which this reads only the name.
+    fn type_param_name_atom(
+        &mut self,
+        ty: &TypeRef,
+        span: &Span,
+        out: &mut Vec<Stmt>,
+    ) -> Option<Atom> {
+        if let Some((owner, index)) = self.sites.self_type_arg_sites.get(span).cloned() {
+            return Some(self.emit(
+                out,
+                Rvalue::TypeArgName {
+                    operand: Atom::Var {
+                        name: "self".to_string(),
+                        span: *span,
+                    },
+                    index,
+                    type_name: owner,
+                    param: ty.head_name(),
+                    span: *span,
+                },
+                *span,
+            ));
+        }
+        if let Some(&slot) = self.sites.forwarded_slot_sites.get(span) {
+            return Some(self.emit(
+                out,
+                Rvalue::TypeSlotName {
+                    slot: Atom::Var {
+                        name: hidden_param_name(slot),
+                        span: *span,
+                    },
+                    span: *span,
+                },
+                *span,
+            ));
+        }
+        None
+    }
+
     /// Lower an expression to an [`Atom`], emitting the `let`s that compute any
     /// sub-expressions into `out` first (A-normal form). Literals and identifiers reduce
     /// directly to an atom with no `let`.
@@ -1463,7 +1903,27 @@ impl Lowerer<'_> {
                 },
                 *span,
             )),
+            // `Repo::<Todo>` — a type reference carrying an explicit instantiation. Generics are
+            // erased at runtime and the instantiation already reached the value at check time (the
+            // construction-site tag recorded at the enclosing call's span), so the node is
+            // TRANSPARENT here: it lowers as the type reference it wraps, and `Repo::<Todo>.new(x)`
+            // emits byte-for-byte what `Repo.new(x)` emits.
+            Expr::InstantiatedType { recv, .. } => self.lower_expr(recv, out),
             Expr::Str { value, .. } => Ok(Atom::Const(Const::Str(value.clone()))),
+            // `type_name::<T>()` — a **compile-time constant string**, with no runtime node at all:
+            // by the time lowering runs the program is linked, so this `TypeRef` already carries its
+            // qualified identity (`app.storage.Todo`) and there is nothing left to look up. Resolved
+            // through the same `TypeRef::head_name` the name-keyed reflection queries use, which is
+            // what makes the two agree by construction rather than by convention.
+            // …unless the checker recognized `T` as a parameter of an ENCLOSING generic (a type's,
+            // read off the receiver's reflected tag — Gap B; or a fn's own, read off the hidden
+            // type-argument slot — F2b). One compiled body serves every instantiation, so there is
+            // no constant to fold: the name arrives per call, from `type_param_name_atom` — the same
+            // helper the narrow surfaces read, so `type_name::<T>()` and `v.as<T>()` agree on `T`.
+            Expr::TypeName { ty, span } => match self.type_param_name_atom(ty, span, out) {
+                Some(atom) => Ok(atom),
+                None => Ok(Atom::Const(Const::Str(self.reflection_head_name(ty)))),
+            },
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
             // magnitude's bit pattern is the runtime i64 word (a `u64` with the high bit set boxes as
@@ -1490,7 +1950,7 @@ impl Lowerer<'_> {
             // A FORWARDING generic fn used as a VALUE (poly-deferrals D2c): the checker resolved
             // the instantiation's hidden slots at this span — wrap the reference in a synthesized
             // closure `($fv0, …) => name($fv0, …)` whose inner call carries THIS span, so
-            // `prepend_hidden_args` binds the resolved atoms into the value (a partial
+            // `type_arg_atoms` binds the resolved atoms into the value (a partial
             // application over the type-argument slots; a `Forward` slot captures the enclosing
             // `$ty` local like any closure upvalue). The inner callee gets a zero-width span so
             // it cannot re-trigger this arm.
@@ -1510,18 +1970,19 @@ impl Lowerer<'_> {
                         ty: None,
                         default: None,
                         span: *span,
+                        positional: false,
                     })
                     .collect();
                 let call = Expr::Call {
                     callee: Box::new(Expr::Ident {
-                        name: fname,
+                        name: noeta_ast::Name::canonical(fname),
                         span: callee_span,
                     }),
                     args: params
                         .iter()
                         .map(|p| {
                             noeta_ast::CallArg::positional(Expr::Ident {
-                                name: p.name.clone(),
+                                name: noeta_ast::Name::canonical(p.name.clone()),
                                 span: *span,
                             })
                         })
@@ -1551,7 +2012,7 @@ impl Lowerer<'_> {
                 ))
             }
             Expr::Ident { name, span } => Ok(Atom::Var {
-                name: name.clone(),
+                name: name.to_string(),
                 span: *span,
             }),
             Expr::Unary { op, operand, span } => {
@@ -1866,11 +2327,13 @@ impl Lowerer<'_> {
                             *span,
                         );
                         let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
+                        let type_args = self.type_arg_atoms(span);
                         return Ok(self.emit(
                             out,
                             Rvalue::Call {
                                 callee,
                                 args: arg_atoms,
+                                type_args,
                                 supplied,
                                 span: *span,
                             },
@@ -1931,6 +2394,14 @@ impl Lowerer<'_> {
                             *span,
                         ));
                     }
+                    // A call of a FORWARDING generic METHOD (Axis A) supplies its type arguments
+                    // through their own channel, exactly as a free function's call does — so
+                    // `supplied` still indexes the value parameters.
+                    let type_args = self.type_arg_atoms(span);
+                    let reflect = self.sites.construction_sites.get(span).cloned();
+                    // …and its dynamic twin: a generic type's fresh constructor whose instantiation
+                    // is the enclosing self-less member's own type parameter, delivered on a slot.
+                    let reflect_slot = self.reflect_slot_atom(span);
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -1941,7 +2412,9 @@ impl Lowerer<'_> {
                             reuse: false,
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
-                            reflect: self.sites.construction_sites.get(span).cloned(),
+                            reflect,
+                            reflect_slot,
+                            type_args,
                             supplied,
                             span: *span,
                         },
@@ -1949,15 +2422,16 @@ impl Lowerer<'_> {
                     ))
                 } else {
                     let callee = self.lower_expr(callee, out)?;
-                    let (mut arg_atoms, supplied) = self.lower_args(args, *span, out)?;
-                    // A call of a FORWARDING generic (F2b): prepend its hidden type-argument
-                    // atoms, mirroring the callee's prepended hidden parameters.
-                    self.prepend_hidden_args(&mut arg_atoms, span);
+                    let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
+                    // A call of a FORWARDING generic (F2b) supplies its type arguments through
+                    // their own channel, so the value arguments — and `supplied` — are untouched.
+                    let type_args = self.type_arg_atoms(span);
                     Ok(self.emit(
                         out,
                         Rvalue::Call {
                             callee,
                             args: arg_atoms,
+                            type_args,
                             supplied,
                             span: *span,
                         },
@@ -1977,33 +2451,34 @@ impl Lowerer<'_> {
                 ..
             } => {
                 let callee = Atom::Var {
-                    name: name.clone(),
+                    name: name.to_string(),
                     span: *name_span,
                 };
-                let (mut arg_atoms, supplied) = self.lower_args(args, *span, out)?;
-                // A call of a FORWARDING generic (F2b): prepend its hidden type-argument atoms.
-                self.prepend_hidden_args(&mut arg_atoms, span);
+                let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
+                // A call of a FORWARDING generic (F2b) supplies its type arguments through their
+                // own channel. `supplied` therefore survives verbatim: it indexes the VALUE
+                // parameters, and those no longer shift. While the type arguments rode in the
+                // argument list this had to be thrown away at every forwarding call site, so a
+                // forwarding call could not use a named argument that skipped a default.
+                let type_args = self.type_arg_atoms(span);
                 Ok(self.emit(
                     out,
                     Rvalue::Call {
                         callee,
                         args: arg_atoms,
-                        // Hidden type-argument atoms are prepended above, shifting every parameter
-                        // position, so a binding recorded for the surface call does not apply.
-                        supplied: if self.sites.hidden_arg_sites.contains_key(span) {
-                            None
-                        } else {
-                            supplied
-                        },
+                        type_args,
+                        supplied,
                         span: *span,
                     },
                     *span,
                 ))
             }
             // `recv.m::<U, ...>(args)` (generic methods, D3): the explicit instantiation is a
-            // checker-only fact — the method's own type parameters are erased, and a generic
-            // method never forwards (the pinned D3 boundary, so no hidden slot) — so this lowers
-            // EXACTLY as the plain `recv.m(args)` method call does. Rebuild the equivalent
+            // checker-only fact — the method's own type parameters are erased — so this lowers
+            // EXACTLY as the plain `recv.m(args)` method call does, and the desugared call keeps
+            // THIS span, so a forwarding method's resolved type-argument slots (keyed on that
+            // span) are picked up either way: an inferred instantiation and a spelled one produce
+            // the same node. Rebuild the equivalent
             // member-call `Expr` at the same span and reuse the one method-dispatch path (instance
             // → `Rvalue::Method`, `Type.assoc` → the associated-call lowering), so every
             // site-keyed dispatch decision is shared by construction.
@@ -2175,7 +2650,7 @@ impl Lowerer<'_> {
                     ),
                     None => Expr::Call {
                         callee: Box::new(Expr::Ident {
-                            name: "panic".to_string(),
+                            name: noeta_ast::Name::canonical("panic"),
                             span: *tier_span,
                         }),
                         args: vec![noeta_ast::CallArg::positional(Expr::Str {
@@ -2197,6 +2672,19 @@ impl Lowerer<'_> {
                 let scrut = self.lower_expr(scrutinee, out)?;
                 let mut ir_arms = Vec::with_capacity(arms.len());
                 for arm in arms {
+                    // The guard lowers to a lazily-evaluated value block (tail = the bool), run
+                    // by the backends only after the pattern matches — like a `while` condition,
+                    // it must not be hoisted into the pre-computed statement stream.
+                    let guard = arm
+                        .guard
+                        .as_ref()
+                        .map(|g| {
+                            Ok::<_, Unsupported>(crate::Guard {
+                                block: self.lower_value_block(g)?,
+                                span: g.span(),
+                            })
+                        })
+                        .transpose()?;
                     // An expression arm's value block yields its value; a statement-block arm
                     // (aether F1) lowers its statements in the SAME frame (so `return` exits the
                     // enclosing function) and yields `unit`.
@@ -2216,7 +2704,14 @@ impl Lowerer<'_> {
                         }
                     };
                     ir_arms.push(crate::Arm {
-                        pattern: arm.pattern.clone(),
+                        // A bare identifier the checker resolved to a payload-free variant becomes
+                        // the variant test it reads as — the ONE place that rewrite happens, so
+                        // both backends consume ordinary IR and neither knows the form exists.
+                        pattern: resolve_variant_patterns(
+                            &arm.pattern,
+                            self.sites.variant_pattern_sites,
+                        ),
+                        guard,
                         body,
                         span: arm.span,
                     });
@@ -2333,25 +2828,45 @@ impl Lowerer<'_> {
                 });
                 Ok(Atom::Temp(dst))
             }
+            // A narrow is a head-constructor match on the target's runtime NAME, so a target that is
+            // an enclosing generic's type parameter needs exactly what `type_name::<T>()` reads and
+            // nothing more — the same helper supplies it, and the backends match on that string
+            // instead of the erased letter `T` (which nothing is ever registered under).
             Expr::As { expr, ty, span } => {
                 let operand = self.lower_expr(expr, out)?;
+                let dynamic = self.type_param_name_atom(ty, span, out);
                 Ok(self.emit(
                     out,
                     Rvalue::As {
                         operand,
                         ty: self.resolve_type_aliases(ty),
+                        dynamic,
                         span: *span,
                     },
                     *span,
                 ))
             }
             Expr::TypeTest { expr, ty, span } => {
+                // A test the checker already answered (`Sites::folded_type_tests` — an erased-width
+                // target on a scrutinee whose static type fixes the width) becomes its constant.
+                // The scrutinee is still lowered: `f() is i32` must still call `f`. Its temp is
+                // released right here, exactly as a statement-position expression's is, since
+                // nothing downstream reads it.
+                if let Some(&answer) = self.sites.folded_type_tests.get(span) {
+                    let operand = self.lower_expr(expr, out)?;
+                    if let Atom::Temp(t) = operand {
+                        out.push(Stmt::Drop(t));
+                    }
+                    return Ok(Atom::Const(Const::Bool(answer)));
+                }
                 let operand = self.lower_expr(expr, out)?;
+                let dynamic = self.type_param_name_atom(ty, span, out);
                 Ok(self.emit(
                     out,
                     Rvalue::TypeTest {
                         operand,
                         ty: self.resolve_type_aliases(ty),
+                        dynamic,
                         span: *span,
                     },
                     *span,
@@ -2373,6 +2888,17 @@ impl Lowerer<'_> {
                 Ok(self.emit(
                     out,
                     Rvalue::FieldsOf {
+                        operand,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            Expr::TraitsOf { value, span } => {
+                let operand = self.lower_expr(value, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::TraitsOf {
                         operand,
                         span: *span,
                     },
@@ -2433,7 +2959,7 @@ impl Lowerer<'_> {
                     return self.lower_expr(&desugared, out);
                 }
                 let module = match recv.as_ref() {
-                    Expr::Ident { name, .. } => name.clone(),
+                    Expr::Ident { name, .. } => name.to_string(),
                     _ => String::new(),
                 };
                 let args = args
@@ -2448,7 +2974,7 @@ impl Lowerer<'_> {
                 let recipe = self.sites.typed_module_call_sites.get(span).cloned();
                 let dynamic = self
                     .sites
-                    .dynamic_recipe_sites
+                    .forwarded_slot_sites
                     .get(span)
                     .map(|&i| Atom::Var {
                         name: hidden_param_name(i),
@@ -2482,10 +3008,14 @@ impl Lowerer<'_> {
             Expr::AttributesOf { ty, span } => {
                 // A forwarded type parameter (F2b) resolves its concrete NAME at runtime through
                 // the hidden slot; a concrete `T` stays a compile-time name as before.
-                let dynamic = self.sites.dynamic_attr_sites.get(span).map(|&i| Atom::Var {
-                    name: hidden_param_name(i),
-                    span: *span,
-                });
+                let dynamic = self
+                    .sites
+                    .forwarded_slot_sites
+                    .get(span)
+                    .map(|&i| Atom::Var {
+                        name: hidden_param_name(i),
+                        span: *span,
+                    });
                 Ok(self.emit(
                     out,
                     Rvalue::AttributesOf {
@@ -2515,12 +3045,27 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
+            Expr::ReturnsOf { target, span } => {
+                let target = self.lower_expr(target, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::ReturnsOf {
+                        target,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::FieldSpecsOf { name, span } => {
-                let name = self.lower_expr(name, out)?;
+                let name = self.lower_type_operand(name, out)?;
                 Ok(self.emit(out, Rvalue::FieldSpecsOf { name, span: *span }, *span))
             }
+            Expr::VariantsOf { name, span } => {
+                let name = self.lower_type_operand(name, out)?;
+                Ok(self.emit(out, Rvalue::VariantsOf { name, span: *span }, *span))
+            }
             Expr::Construct { name, fields, span } => {
-                let name = self.lower_expr(name, out)?;
+                let name = self.lower_type_operand(name, out)?;
                 let fields = self.lower_expr(fields, out)?;
                 Ok(self.emit(
                     out,
@@ -2609,7 +3154,8 @@ impl Lowerer<'_> {
                 // program, so the empty name cannot reach a backend.
                 let type_name = lit
                     .type_name
-                    .clone()
+                    .as_ref()
+                    .map(noeta_ast::Name::to_string)
                     .or_else(|| self.sites.inferred_object_types.get(&lit.span).cloned())
                     .unwrap_or_default();
                 Ok(self.emit(
@@ -2634,9 +3180,15 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Lower `left |> right`, desugaring to a call/method with `left` threaded as the leading
-    /// argument — mirroring `eval_pipeline`. `left` is evaluated first (matching the
-    /// tree-walker), then the callee/receiver, then any remaining arguments.
+    /// Lower `left |> right`, desugaring to a call/method with `left` threaded as an argument —
+    /// mirroring `eval_pipeline`. `left` is evaluated first (matching the tree-walker), then the
+    /// callee/receiver, then any remaining arguments.
+    ///
+    /// Which *parameter* the piped value ends up in is the checker's answer, not this pass's: a
+    /// labelled right-hand side (`x |> f(b: 1)`) records a binding at the call span exactly as a
+    /// labelled direct call does, and [`Self::permute_args`] applies it here. The desugared
+    /// argument list this builds — piped value first, written arguments after — is the same list
+    /// the checker bound, so the two agree by construction.
     fn lower_pipeline(
         &mut self,
         left: &Expr,
@@ -2680,6 +3232,12 @@ impl Lowerer<'_> {
                     for a in args {
                         arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
+                    let (arg_atoms, supplied) = self.permute_args(arg_atoms, *span);
+                    let type_args = self.type_arg_atoms(span);
+                    let reflect = self.sites.construction_sites.get(span).cloned();
+                    // …and its dynamic twin: a generic type's fresh constructor whose instantiation
+                    // is the enclosing self-less member's own type parameter, delivered on a slot.
+                    let reflect_slot = self.reflect_slot_atom(span);
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -2690,9 +3248,10 @@ impl Lowerer<'_> {
                             reuse: false,
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
-                            reflect: self.sites.construction_sites.get(span).cloned(),
-                            // A `|>` desugar builds its argument list positionally.
-                            supplied: None,
+                            reflect,
+                            reflect_slot,
+                            type_args,
+                            supplied,
                             span: *span,
                         },
                         *span,
@@ -2703,15 +3262,15 @@ impl Lowerer<'_> {
                     for a in args {
                         arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
+                    let (arg_atoms, supplied) = self.permute_args(arg_atoms, *span);
+                    let type_args = self.type_arg_atoms(span);
                     Ok(self.emit(
                         out,
                         Rvalue::Call {
                             callee,
                             args: arg_atoms,
-                            // A pipeline prepends its left operand, so the parameter positions are
-                            // shifted by one and the checker's binding does not describe this list.
-                            // Labels through a pipeline are rejected at the call site instead.
-                            supplied: None,
+                            type_args,
+                            supplied,
                             span: *span,
                         },
                         *span,
@@ -2726,6 +3285,9 @@ impl Lowerer<'_> {
                 span,
             } => {
                 let receiver = self.lower_expr(receiver, out)?;
+                let type_args = self.type_arg_atoms(span);
+                let reflect = self.sites.construction_sites.get(span).cloned();
+                let reflect_slot = self.reflect_slot_atom(span);
                 Ok(self.emit(
                     out,
                     Rvalue::Method {
@@ -2734,8 +3296,11 @@ impl Lowerer<'_> {
                         name_span: *name_span,
                         args: vec![left_atom],
                         reuse: false,
-                        reflect: self.sites.construction_sites.get(span).cloned(),
-                        // A `|>` desugar builds its argument list positionally.
+                        reflect,
+                        reflect_slot,
+                        type_args,
+                        // A bare callee takes the piped value and nothing else, so there is no
+                        // argument list to rebind.
                         supplied: None,
                         span: *span,
                     },
@@ -2745,11 +3310,13 @@ impl Lowerer<'_> {
             // `x |> f` ⟶ `f(x)`.
             _ => {
                 let callee = self.lower_expr(right, out)?;
+                let type_args = self.type_arg_atoms(&span);
                 Ok(self.emit(
                     out,
                     Rvalue::Call {
                         callee,
                         args: vec![left_atom],
+                        type_args,
                         supplied: None,
                         span,
                     },
@@ -2777,8 +3344,19 @@ impl Lowerer<'_> {
         for arg in noeta_ast::CallArg::values(args) {
             atoms.push(self.lower_expr(arg, out)?);
         }
+        Ok(self.permute_args(atoms, call_span))
+    }
+
+    /// Reorder an already-evaluated argument list into **parameter** order, and say which
+    /// parameters it supplies.
+    ///
+    /// `atoms` is in the order the arguments were evaluated, which for a pipeline means the piped
+    /// value at index 0 — the same list the checker bound, so the binding it recorded indexes into
+    /// this one. A call with no recorded binding is already in parameter order and passes through
+    /// untouched.
+    fn permute_args(&self, atoms: Vec<Atom>, call_span: Span) -> (Vec<Atom>, Option<u64>) {
         let Some(binding) = self.sites.arg_orders.get(&call_span) else {
-            return Ok((atoms, None));
+            return (atoms, None);
         };
         // Permute into parameter order, and say which parameters were supplied. A skipped one
         // contributes no atom — the callee fills its default, over its own upvalues, exactly as it
@@ -2802,7 +3380,7 @@ impl Lowerer<'_> {
         // `mask` has exactly `permuted.len()` bits set by construction, so "the low `len` bits are
         // all set" is the same as "the set bits are the prefix" — and it does not overflow at 64.
         let is_prefix = mask.trailing_ones() as usize == permuted.len();
-        Ok((permuted, if is_prefix { None } else { Some(mask) }))
+        (permuted, if is_prefix { None } else { Some(mask) })
     }
 
     /// Lower `a && b` / `a || b` to a [`Stmt::Logical`] writing into a fresh temp, so the
@@ -2854,7 +3432,7 @@ impl Lowerer<'_> {
         let recipe = self.sites.typed_method_call_sites.get(&span).cloned();
         let dynamic = self
             .sites
-            .dynamic_recipe_sites
+            .forwarded_slot_sites
             .get(&span)
             .map(|&i| Atom::Var {
                 name: hidden_param_name(i),

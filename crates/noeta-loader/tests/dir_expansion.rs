@@ -88,13 +88,11 @@ fn dir(modules: &[(&str, &str)]) -> ParsedDir {
     parse_dir(
         modules
             .iter()
-            .map(|(name, text)| RawModule {
-                name: (*name).to_string(),
-                text: (*text).to_string(),
-            })
+            .map(|(name, text)| RawModule::declared(*name, *text))
             .collect(),
         noeta_lexer::Edition::default(),
         &[] as &[DepPackage],
+        &noeta_span::PackageUses::new(),
     )
 }
 
@@ -118,7 +116,7 @@ fn methods_of(linked: &EntryLink, name: &str) -> Vec<String> {
         .iter()
         .find_map(|s| match s {
             noeta_ast::Stmt::Struct(d) if d.name == name => {
-                Some(d.methods.iter().map(|m| m.name.clone()).collect())
+                Some(d.methods.iter().map(|m| m.name.to_string()).collect())
             }
             _ => None,
         })

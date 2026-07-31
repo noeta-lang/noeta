@@ -37,6 +37,69 @@ use crate::store::{Store, hash_tree};
 
 /// The resolved dependency graph: the packages the loader links (each a re-rooted [`DepPackage`]),
 /// plus the pinned coordinates for the lockfile (P2.4c).
+/// A resolved `[trust.commands]` binding — the manifest's local-name → `{provider, exported}`
+/// [`Binding`](crate::manifest::Binding) with its provider validated against the resolved graph (a
+/// native package actually present). The composer turns each into a shim registration that exposes
+/// the provider's `exported` command under `local`.
+#[derive(Debug, Clone)]
+pub struct ResolvedCommandBinding {
+    /// The name the command is registered under (`noeta <local>`) — the `[trust.commands]` key.
+    pub local: String,
+    /// The providing package identity (`company/package`).
+    pub provider: String,
+    /// The command name the provider's extension declared (its `ExtCommand::name`).
+    pub exported: String,
+}
+
+/// Resolve a package's `[directives]`/`[tiers]` bindings against **its own** dependency edges: each
+/// local `@name` → the provider namespace root segment(s) (its dependency key → the resolved provider
+/// identities → their `root_segment`) and the exported name. A scope dependency key covers several
+/// members, hence a list; the built-in `"std"` provider resolves to root `"std"`. This is what makes a
+/// `@name` resolve in the package's own context — the same edges a `use <key>.…` resolves through.
+fn resolve_package_uses(
+    bindings: &BTreeMap<String, crate::manifest::UseBinding>,
+    edges: &BTreeMap<String, Vec<String>>,
+    instances: &BTreeMap<String, Instance>,
+    global: &BTreeMap<String, String>,
+) -> std::collections::HashMap<String, noeta_span::PackageUse> {
+    bindings
+        .iter()
+        .map(|(local, b)| {
+            let provider_roots = if b.provider_key == crate::manifest::BUILTIN_PROVIDER {
+                vec![crate::manifest::BUILTIN_PROVIDER.to_string()]
+            } else {
+                // A provider is addressed under two roots in the linked program, and a `@name` may
+                // resolve to either: a **native** package keeps its own namespace root (`root_segment`
+                // — what a native `ExtTier`/`ExtDirective` unit's `root()` reports), while a **program**
+                // (`.noe`) package's modules are re-rooted under the consumer's link segment (`global` —
+                // what a `@tier` runner's qualified name carries). Carry both so an ext-scoped lookup
+                // and a program-declared-tier lookup each land, whichever kind the provider is.
+                edges
+                    .get(&b.provider_key)
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|id| {
+                        instances
+                            .get(id)
+                            .map(|i| i.root_segment.clone())
+                            .into_iter()
+                            .chain(global.get(id).cloned())
+                    })
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            };
+            (
+                local.clone(),
+                noeta_span::PackageUse {
+                    provider_roots,
+                    exported: b.exported.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 pub struct ResolvedGraph {
     /// One entry per resolved package identity, ready for [`noeta_loader::link_with_deps`], sorted by
@@ -49,13 +112,25 @@ pub struct ResolvedGraph {
     /// composed-toolchain build (N3.2) compiles in. Empty for a pure-Noeta graph, which is the
     /// signal that no composition is needed. Sorted by identity (deterministic compose key).
     pub native_crates: Vec<NativeCrate>,
-    /// The **package identities** (`company/package`) of the native packages the root app authorized
-    /// to contribute CLI commands (`[trust].commands`, package-manager Phase 4). The composer ties
-    /// command registration to these entries' extension units in the shim, so `run_cli` registers a
-    /// dependency's `noeta <cmd>` only when its *package* is command-trusted — never by namespace-root
-    /// name matching, which would over-trust every package sharing a scope root (trusting `para/db`
-    /// must not trust all of `para/*`). std's own commands are always allowed. Sorted + deduped.
-    pub trusted_command_identities: Vec<String>,
+    /// The resolved `[trust.commands]` bindings (package-manager Phase 4): each local name a
+    /// dependency command is registered under, tied to the providing package identity and the name
+    /// that package exported. The composer emits these into the shim so `run_cli` registers a
+    /// dependency's command *under its local name* — trust keyed by package identity (never by
+    /// namespace-root name matching, which would over-trust every package sharing a scope root), and
+    /// the local name resolving collisions between two packages exporting the same command name.
+    /// std's own commands are always allowed and never appear here. Sorted by local name.
+    pub command_bindings: Vec<ResolvedCommandBinding>,
+    /// The **root** package's resolved `@name` bindings (its `[directives]` and `[tiers]` merged; local
+    /// `@name` → provider namespace root(s) + exported), in the root's own dependency context. Each
+    /// dependency's are carried on its [`noeta_loader::DepPackage`]; this is the root's, which has no
+    /// `DepPackage`. Kept separate (rather than only inside [`Self::package_uses`]) because the
+    /// reuse/query paths thread it back through `DepPackage`s + this, and rebuild the combined map.
+    pub root_directives: std::collections::HashMap<String, noeta_span::PackageUse>,
+    /// The whole program's per-package `@`-name resolution tables (`[directives]` and `[tiers]` alike):
+    /// every dependency's keyed by its [`PackageOrigin::Dependency`] link segment, the root's by
+    /// [`PackageOrigin::Root`]. The checker reads this via a span's `SourceId`. Built once here where
+    /// every package's `@name` bindings and its link segment are both known.
+    pub package_uses: noeta_span::PackageUses,
     /// scope (`company`) → the trust root established for it during the walk (provenance, Phase 4
     /// #2 / Phase 5) — a registry-served Ed25519 key or a keyless-verified OIDC identity — to be
     /// **pinned** in `noeta.lock` (trust-on-first-use). Empty when no registry dependency carried
@@ -73,6 +148,21 @@ pub struct ResolvedGraph {
     pub registry_identities: std::collections::BTreeSet<String>,
 }
 
+impl ResolvedGraph {
+    /// The native crates that contribute **runtime** code — every entry crate except the dev-only
+    /// formatter/dev-tool crates (`package.dev-native`). This is what decides whether `run`/`build`/
+    /// `check` must delegate to a composed toolchain: a dev-only crate never contributes runtime
+    /// modules, commands, or tiers, so its mere presence must not force composition of a prod path.
+    /// `noeta fmt` uses the full [`Self::native_crates`] set instead (it wants the formatters too).
+    pub fn runtime_native_crates(&self) -> Vec<NativeCrate> {
+        self.native_crates
+            .iter()
+            .filter(|nc| !nc.dev_only)
+            .cloned()
+            .collect()
+    }
+}
+
 /// A resolved package's native entry crate (Phase 3, N3.1): where the composed build finds its
 /// `Cargo.toml`, validated to exist at resolve time.
 #[derive(Debug, Clone)]
@@ -86,6 +176,13 @@ pub struct NativeCrate {
     /// edit (unlike a store-materialized git/registry dep, whose dir is per-SHA), so without the
     /// content hash an edit to the crate's source would keep serving the stale composed binary.
     pub content_hash: String,
+    /// A **dev-only** crate (reached via `package.dev-native`): a formatter/dev-tool that runs only
+    /// at `noeta fmt`, admitted untrusted and stripped to formatter-only at composition. A dev-only
+    /// crate is present in a [`ShimKind::Toolchain`] composition (built at `default-features = false,
+    /// features = ["fmt"]`) but **excluded** from `Runner`/`AotRuntime` prod shims, and it never
+    /// forces composition for `run`/`build`/`check` (see [`ResolvedGraph::runtime_native_crates`]).
+    /// `false` for a normal runtime `native` crate.
+    pub dev_only: bool,
 }
 
 /// A resolved package pinned for the lockfile (package-manager P2.4c).
@@ -127,30 +224,60 @@ pub enum ResolvedSource {
     },
 }
 
-/// Which namespace root segment a dependency's modules re-root from ([`Walker::walk_one`]). A normal
-/// dependency authored `namespace <package>.…`, so its root is the package half; a **scope** member
-/// authored `namespace <scope>.<package>.…`, so its root is the company/scope segment.
+/// Which half of a dependency's identity names the **group** it links under ([`Walker::walk_one`]).
+/// A normal dependency stands alone, so it is its package half; a **scope** member shares one import
+/// root with its siblings, so it is the company/scope segment — the base a transitive-only scope
+/// group synthesizes its shared global segment from ([`assemble`]).
+///
+/// Never what a module's path is re-rooted *from*: that is always the package half, which is what the
+/// package's own modules derive under standalone ([`Instance::package_segment`]).
 #[derive(Clone, Copy)]
 enum ScopeRoot {
     Package,
     Scope,
 }
 
-/// A materialized package during the walk — its identity, version, its own namespace root segment,
-/// its on-disk tree, and its dependency edges (local key → child identity).
+/// A materialized package during the walk — its identity, version, the segments it links under, its
+/// on-disk tree, and its dependency edges (local key → child identity).
 struct Instance {
     version: Version,
     edition: crate::edition::Edition,
+    /// The segment this package's link **group** is named from ([`ScopeRoot`]) — its package half
+    /// standing alone, the scope half as a scope member. Read only when a global segment has to be
+    /// synthesized for a transitive group; never as a re-root source.
     root_segment: String,
+    /// The package half of the identity (`db` for `para/db`) — always, unlike [`Self::root_segment`],
+    /// which is the *scope* for a scope member. Two things come from it: the last segment of a scope
+    /// member's derived prefix (`para` + `db` → `para.db.…`), and the segment the loader re-roots the
+    /// package's intra-package `use`s *from* (what those files derive under standalone).
+    package_segment: String,
+    /// Whether this package was reached as a member of a **scope** dependency (`key = [ … ]`). It
+    /// decides the prefix its modules derive under: a plain entry's is the key alone, a scope
+    /// member's is `{key}.{package segment}`. The two are otherwise indistinguishable from the
+    /// outside (both have a key and a root segment), which is why it is recorded here rather than
+    /// re-derived.
+    scoped: bool,
     dir: PathBuf,
     content_hash: String,
     source: ResolvedSource,
     /// The manifest's relative native-crate dir, validated against `dir` (Phase 3, N3.1).
     native: Option<String>,
+    /// The manifest's relative **dev-only** native-crate dir (`package.dev-native`) — a
+    /// formatter/dev-tool crate, admitted untrusted and composed formatter-only. Mutually exclusive
+    /// with [`Self::native`] (the manifest parser rejects declaring both).
+    dev_native: Option<String>,
     /// This package's own `[dependencies]`: local key → the resolved child identities. A normal
     /// dependency contributes exactly one identity; a **scope** dependency (`key = [ … ]`) contributes
     /// one per member package, all sharing the scope, so a key may map to several.
     edges: BTreeMap<String, Vec<String>>,
+    /// This package's own `[directives]` table (local `@name` → dependency key + exported), captured
+    /// from its manifest. Resolved to provider namespace roots in [`assemble`], once every edge is
+    /// known, using **this** package's own edges — so a `@name` resolves in the package's own context.
+    directives: BTreeMap<String, crate::manifest::UseBinding>,
+    /// This package's own `[tiers]` table (local `@name` → provider key + exported). Resolved through
+    /// the same edges as [`Self::directives`] and merged with them into one per-package `@name` map —
+    /// a `@test { … }` block and a `@openapi` attribute share one namespace, told apart at the use site.
+    tiers: BTreeMap<String, crate::manifest::UseBinding>,
     /// Whether this instance was materialized from a root `[patch]` override (dev-time path
     /// override) — carried into [`LockedPackage::patched`] so the lock writer can omit it.
     patched: bool,
@@ -241,7 +368,9 @@ fn resolve_graph_impl(
             packages: Vec::new(),
             locked: Vec::new(),
             native_crates: Vec::new(),
-            trusted_command_identities: Vec::new(),
+            command_bindings: Vec::new(),
+            root_directives: std::collections::HashMap::new(),
+            package_uses: noeta_span::PackageUses::new(),
             scope_trust: BTreeMap::new(),
             root_edition: crate::edition::Edition::DEFAULT,
             log_trust: None,
@@ -333,15 +462,21 @@ fn resolve_graph_impl(
     // under the default edition.
     let root_edition = manifest.package().map(|p| p.edition()).unwrap_or_default();
     let registry_ids = walker.registry_ids;
+    // The root's two `@name` tables merged into one (a `@name` is one namespace; the manifest forbids
+    // a local name naming both a directive and a tier), resolved together in the root's own context.
+    let mut root_uses = manifest.directives().clone();
+    root_uses.extend(manifest.tiers().clone());
     #[allow(unused_mut)]
     let mut graph = assemble(
         walker.instances,
         &root_edges,
         &manifest.trust().commands,
+        // (assemble validates each binding's provider against the resolved native packages)
+        &root_uses,
         scope_trust,
         root_edition,
         registry_ids,
-    );
+    )?;
 
     // The root package's OWN native crate. A dependency's native crate becomes a `NativeCrate`
     // during the walk, but the root package is never walked as its own dependency — so a package
@@ -356,7 +491,11 @@ fn resolve_graph_impl(
     // package trusting its own native code is redundant friction — the same reason cargo never asks
     // you to authorize your own `build.rs`.
     if let Some(pkg) = manifest.package()
-        && let Some(native) = &pkg.native
+        && let Some((native, dev_only)) = pkg
+            .native
+            .as_ref()
+            .map(|n| (n, false))
+            .or_else(|| pkg.dev_native.as_ref().map(|n| (n, true)))
     {
         let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
         // Guard against double-linking if the root ever appears as its own instance (a
@@ -380,6 +519,7 @@ fn resolve_graph_impl(
                 identity,
                 crate_dir,
                 content_hash,
+                dev_only,
             });
         }
     }
@@ -638,6 +778,9 @@ impl Walker<'_> {
             .map_err(|err| err.map_msg(|m| format!("dependency `{key}`: {m}")))?;
         let identity = {
             let pkg = package_of(&child_manifest, key, &dir)?;
+            // The declared tree is what a `package = …` claim is about — check it here, before a
+            // `[patch]` can swap `dir` out from under it.
+            check_declared_identity(key, dep, &pkg.name, &dir)?;
             format!("{}/{}", pkg.name.company, pkg.name.package)
         };
         // Dev-time path override (`[patch]`): the ROOT manifest re-points this identity at a local
@@ -667,6 +810,8 @@ impl Walker<'_> {
             ScopeRoot::Package => pkg.name.root().to_string(),
             ScopeRoot::Scope => pkg.name.company.clone(),
         };
+        let package_segment = pkg.name.root().to_string();
+        let scoped = matches!(root, ScopeRoot::Scope);
 
         if let Some(existing) = self.instances.get(&identity) {
             if existing.version != pkg.version {
@@ -698,6 +843,17 @@ impl Walker<'_> {
                 )));
             }
             validate_native_crate(&dir, native).map_err(|err| {
+                err.map_msg(|m| format!("dependency `{key}` (`{identity}`): {m}"))
+            })?;
+        }
+        // A **dev-only** native crate (`package.dev-native`) is admitted UNTRUSTED — no
+        // `[trust].native` gate. It runs only at `noeta fmt` as a pure `str→str` formatter,
+        // composed formatter-only (its runtime surface stripped), and never in a prod `run`/`build`.
+        // Because it can neither run at runtime nor contribute a command/tier/module, authorizing it
+        // would grant nothing a consumer needs protection from. Its dir must still exist (a typo is
+        // still an error), so `validate_native_crate` runs unchanged.
+        if let Some(dev_native) = &pkg.dev_native {
+            validate_native_crate(&dir, dev_native).map_err(|err| {
                 err.map_msg(|m| format!("dependency `{key}` (`{identity}`): {m}"))
             })?;
         }
@@ -738,11 +894,16 @@ impl Walker<'_> {
                 version: pkg.version.clone(),
                 edition: pkg.edition(),
                 root_segment,
+                package_segment,
+                scoped,
                 dir: dir.clone(),
                 content_hash,
                 source,
                 native: pkg.native.clone(),
+                dev_native: pkg.dev_native.clone(),
                 edges: BTreeMap::new(),
+                directives: child_manifest.directives().clone(),
+                tiers: child_manifest.tiers().clone(),
                 patched,
             },
         );
@@ -770,8 +931,8 @@ impl Walker<'_> {
         base_dir: &Path,
     ) -> Result<(PathBuf, ResolvedSource, Option<String>), PmError> {
         let memo_key = match dep {
-            Dependency::Path { path } => format!("path:{}", base_dir.join(path).display()),
-            Dependency::Git { url, git_ref } => format!("git:{url}@{}", git_ref.lock_key()),
+            Dependency::Path { path, .. } => format!("path:{}", base_dir.join(path).display()),
+            Dependency::Git { url, git_ref, .. } => format!("git:{url}@{}", git_ref.lock_key()),
             Dependency::Registry {
                 package: Some(p), ..
             } => format!("reg:{}/{}", p.company, p.package),
@@ -797,7 +958,7 @@ impl Walker<'_> {
         base_dir: &Path,
     ) -> Result<(PathBuf, ResolvedSource, Option<String>), PmError> {
         match dep {
-            Dependency::Path { path } => {
+            Dependency::Path { path, .. } => {
                 // Canonicalize the joined directory so module names/spans (and the editor URIs built
                 // from them) are clean absolute paths, not `…/app/../dep/…`. The manifest-relative
                 // `path` is kept verbatim in the lock entry.
@@ -807,7 +968,7 @@ impl Walker<'_> {
                 // walk hashes it fresh each resolve.
                 Ok((dir, ResolvedSource::Path { path: path.clone() }, None))
             }
-            Dependency::Git { url, git_ref } => self.fetch_git(key, url, git_ref, None, None),
+            Dependency::Git { url, git_ref, .. } => self.fetch_git(key, url, git_ref, None, None),
             // A scope is a group of member packages, not a single source — [`Walker::walk`] and
             // [`Walker::gather`] expand it into its members before ever materializing, so a bare
             // scope never reaches here.
@@ -868,8 +1029,12 @@ impl Walker<'_> {
                 if let Some((url, tag, sha)) = self.lock.registry_coords(&name)
                     && self.lock.locked_version(&name) == Some(&version)
                 {
-                    if let Some(pin) = self.lock.scope_trust(&scope) {
-                        self.scope_trust.insert(scope.clone(), pin.clone());
+                    // Carry both pins the lock may hold for this release forward into the rewrite:
+                    // the scope's key root and this package's own keyless root (see `ScopeTrust`).
+                    for pin_key in [scope.clone(), name.clone()] {
+                        if let Some(pin) = self.lock.scope_trust(&pin_key) {
+                            self.scope_trust.insert(pin_key, pin.clone());
+                        }
                     }
                     let (url, tag, sha) = (url.to_string(), tag.to_string(), sha.to_string());
                     let git_ref = crate::manifest::GitRef::Tag(tag);
@@ -1004,7 +1169,7 @@ impl Walker<'_> {
             )));
         }
         let action = provenance_decision(
-            self.lock.scope_trust(scope),
+            self.lock.trust_for(name),
             release.signature.as_deref(),
             release.bundle.as_deref(),
             served_key,
@@ -1049,9 +1214,12 @@ impl Walker<'_> {
                             err.map_msg(|m| format!("dependency `{key}` (`{name}`): {m}"))
                         })?;
                     // Pin what verification *proved* (== the pin when one existed, since the
-                    // policy enforced it); on first use this is the TOFU identity pin.
+                    // policy enforced it); on first use this is the TOFU identity pin. Keyed by the
+                    // package, not the scope: the certificate names the publishing workflow in this
+                    // package's own repository, so a sibling package of the same scope legitimately
+                    // carries a different identity (see `ScopeTrust`).
                     self.scope_trust.insert(
-                        scope.to_string(),
+                        name.to_string(),
                         crate::lock::ScopeTrust::Keyless {
                             issuer: verified.issuer,
                             identity: verified.identity,
@@ -1066,7 +1234,7 @@ impl Walker<'_> {
                     // so it waits for a CLI resolve.
                     if let Some((issuer, identity)) = pinned {
                         self.scope_trust.insert(
-                            scope.to_string(),
+                            name.to_string(),
                             crate::lock::ScopeTrust::Keyless { issuer, identity },
                         );
                     }
@@ -1311,6 +1479,7 @@ impl Walker<'_> {
                         dir.display()
                     ))
                 })?;
+                check_declared_identity(key, dep, &pkg.name, &dir)?;
                 let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
                 // Dev-time path override (`[patch]`): the patched tree (seeded by
                 // `gather_patches`) is the sole candidate for this identity — the declared tree's
@@ -1759,20 +1928,40 @@ fn provenance_decision(
 fn assemble(
     instances: BTreeMap<String, Instance>,
     root_edges: &BTreeMap<String, Vec<String>>,
-    trusted_commands: &std::collections::BTreeSet<String>,
+    command_trust: &BTreeMap<String, crate::manifest::Binding>,
+    // `root_uses`: the root's merged `@name` bindings (its `[directives]` and `[tiers]`), resolved
+    // against the root's own edges — the same context its source `use`s and `@name`s resolve in.
+    root_uses: &BTreeMap<String, crate::manifest::UseBinding>,
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
     root_edition: crate::edition::Edition,
     registry_identities: std::collections::BTreeSet<String>,
-) -> ResolvedGraph {
+) -> Result<ResolvedGraph, PmError> {
     // Global segment per identity. Direct dependencies keep the consumer's key (so the entry's
     // `use <key>.…` needs no rewrite); transitive-only packages get a unique synthesized segment.
     let mut global: BTreeMap<String, String> = BTreeMap::new();
     let mut used: HashSet<String> = HashSet::new();
     for (key, identities) in root_edges {
         // A direct dependency keeps the consumer's key; every member of a root **scope** dependency
-        // shares that one key, so they all land under the scope root in the flat pool. First root key
-        // wins if an identity is aliased under several keys.
+        // shares that one key, so they all land under the scope root in the flat pool.
+        //
+        // One package under TWO root keys is refused rather than resolved. A package has one
+        // identity and its modules are re-rooted to one segment, so a second key cannot name the
+        // same modules — it can only be dropped, and dropping it made the manifest lie: whichever
+        // key lost simply did not exist, and `use <that key>.…` failed far away with "no module",
+        // helpfully suggesting the OTHER dependency entry. (The reverse — several packages under
+        // one key — is the supported scope form and is what the `[…]` array is for.)
         for identity in identities {
+            if let Some(first) = global.get(identity)
+                && first != key
+            {
+                return Err(PmError::Conflict(format!(
+                    "`{identity}` is bound under two import roots, `{first}` and `{key}` — a \
+                     package has one identity and its modules re-root to one segment, so only one \
+                     of them could ever resolve and the other would silently not exist. Keep \
+                     the key you write `use …` with and drop the other. (The reverse — several \
+                     packages sharing ONE root — is the array form, `root = [ {{ … }}, {{ … }} ]`.)"
+                )));
+            }
             global
                 .entry(identity.clone())
                 .or_insert_with(|| key.clone());
@@ -1814,12 +2003,12 @@ fn assemble(
     let mut packages = Vec::with_capacity(instances.len());
     let mut locked = Vec::with_capacity(instances.len());
     let mut native_crates = Vec::new();
-    // A native package's commands register only if the root app command-trusts its identity; record
-    // the trusted identities so the composer can tie command registration to exactly those packages'
-    // extension units (Phase 4). Identity — never the root segment: a scope-keyed package's segment
+    // A command can only come from a native package (its `ExtCommand`s live in the compiled crate),
+    // so record which resolved identities are native — the `[trust.commands]` bindings validate
+    // against this set below. Identity — never the root segment: a scope-keyed package's segment
     // (`db` for `para/db`) is not what its extensions report as root, and root-name matching would
     // over-trust every package sharing a scope root.
-    let mut trusted_command_identities: Vec<String> = Vec::new();
+    let mut native_identities: HashSet<String> = HashSet::new();
     for (identity, inst) in &instances {
         let key = global[identity].clone();
         // A local dependency key re-roots to the global segment of the package it resolves to. A
@@ -1830,12 +2019,37 @@ fn assemble(
             .iter()
             .map(|(local_key, children)| (local_key.clone(), global[&children[0]].clone()))
             .collect();
-        let modules = noeta_loader::read_package_sources(&inst.dir).unwrap_or_default();
+        // The prefix the package's modules derive under — the consumer's key, plus the package
+        // segment for a scope member (`para = [ { package = "para/db" }, … ]` → `para.db.…`). This
+        // is what makes the key *real*: keying `para/cli` as `mycli` gives `mycli.cli`, where
+        // re-rooting a declared `namespace para.cli` silently did nothing.
+        let mut prefix = vec![key.clone()];
+        if inst.scoped {
+            prefix.push(inst.package_segment.clone());
+        }
+        let modules = crate::sources::read_package_sources(&inst.dir, &prefix);
+        // Resolve this dependency's own `[directives]` and `[tiers]` against ITS edges — a `@name` in
+        // this package's source resolves in this package's dependency context, not the root's — and
+        // merge them into one per-package `@name` map (the manifest forbids a local name naming both).
+        let mut directives =
+            resolve_package_uses(&inst.directives, &inst.edges, &instances, &global);
+        directives.extend(resolve_package_uses(
+            &inst.tiers,
+            &inst.edges,
+            &instances,
+            &global,
+        ));
         packages.push(noeta_loader::DepPackage {
-            key,
-            root: inst.root_segment.clone(),
+            // The loader re-roots the package's intra-package `use`s from the segment its modules
+            // derive under **standalone** — always the package half of the identity — to the prefix
+            // they derive under here. Never `root_segment` (the *scope* half for a scope member):
+            // that segment is not what any of this package's own modules ever derive under, so a
+            // scope member's internal `use db.query` matched nothing and was silently left alone.
+            root: inst.package_segment.clone(),
+            prefix,
             modules,
             dep_renames,
+            directives,
             // A native package's modules live in its Rust extension (composed in downstream), not the
             // link pool — so the loader retains, rather than flags, a `use` under its key.
             native: inst.native.is_some(),
@@ -1853,33 +2067,90 @@ fn assemble(
             edition: inst.edition,
             patched: inst.patched,
         });
+        // A runtime `native` crate contributes to the loader (`native_identities`) and the composed
+        // toolchain; a `dev-native` crate contributes ONLY the latter, formatter-only, so it is a
+        // `NativeCrate` with `dev_only = true` but is never recorded as a runtime native identity (it
+        // adds no loader modules and no `noeta <command>`). The two dirs are mutually exclusive.
         if let Some(native) = &inst.native {
             native_crates.push(NativeCrate {
                 identity: identity.clone(),
                 crate_dir: inst.dir.join(native),
                 content_hash: inst.content_hash.clone(),
+                dev_only: false,
             });
-            // Commands only exist inside a native package; grant its commands only if command-trusted.
-            if trusted_commands.contains(identity) {
-                trusted_command_identities.push(identity.clone());
-            }
+            native_identities.insert(identity.clone());
+        } else if let Some(dev_native) = &inst.dev_native {
+            native_crates.push(NativeCrate {
+                identity: identity.clone(),
+                crate_dir: inst.dir.join(dev_native),
+                content_hash: inst.content_hash.clone(),
+                dev_only: true,
+            });
         }
     }
-    // Sort by global segment so the loader's SourceId assignment and the startup-cache key are
-    // deterministic regardless of walk order.
-    packages.sort_by(|a, b| a.key.cmp(&b.key));
-    trusted_command_identities.sort();
-    trusted_command_identities.dedup();
-    ResolvedGraph {
+    // Resolve each `[trust.commands]` binding against the native packages actually in the graph. A
+    // binding is the grant, so a provider that is not a native dependency is a manifest error worth
+    // naming — never a silent no-op. (Whether the exported command actually exists is decided in the
+    // composed toolchain, where the compiled `ExtCommand` names are visible; the graph never sees
+    // them.)
+    let mut command_bindings: Vec<ResolvedCommandBinding> = Vec::new();
+    for (local, binding) in command_trust {
+        if !instances.contains_key(&binding.provider) {
+            return Err(PmError::Conflict(format!(
+                "`[trust.commands]` binds `{local}` to `{provider}`, which is not a dependency — \
+                 add `{provider}` to `[dependencies]` (and `[trust].native`) to use its commands",
+                provider = binding.provider
+            )));
+        }
+        if !native_identities.contains(&binding.provider) {
+            return Err(PmError::Conflict(format!(
+                "`[trust.commands]` binds `{local}` to `{provider}`, but `{provider}` ships no \
+                 native crate — only a native package contributes `noeta <command>` commands",
+                provider = binding.provider
+            )));
+        }
+        command_bindings.push(ResolvedCommandBinding {
+            local: local.clone(),
+            provider: binding.provider.clone(),
+            exported: binding.exported.clone(),
+        });
+    }
+    // Sort by derived prefix so the loader's SourceId assignment and the startup-cache key are
+    // deterministic regardless of walk order. The whole prefix, not just its first segment: every
+    // member of one scope shares that segment, so sorting by it alone left their order to the walk.
+    packages.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+    // `command_trust` is a BTreeMap, so `command_bindings` is already in local-name order.
+    // The root's merged `@name` bindings resolve against the root's edges (the same context its
+    // source uses). Named `root_directives` on the graph for historical continuity; it is the root's
+    // whole `@name` table (directives and tiers alike).
+    let root_directives = resolve_package_uses(root_uses, root_edges, &instances, &global);
+    // The whole-program per-package table: the root under `Root`, each dependency under its link
+    // segment (`dep.key`), keyed exactly as the loader's `PackageMap` records each source's origin.
+    let mut package_uses = noeta_span::PackageUses::new();
+    for (local, u) in &root_directives {
+        package_uses.set(noeta_span::PackageOrigin::Root, local.clone(), u.clone());
+    }
+    for dep in &packages {
+        for (local, u) in &dep.directives {
+            package_uses.set(
+                noeta_span::PackageOrigin::Dependency(dep.key().to_string()),
+                local.clone(),
+                u.clone(),
+            );
+        }
+    }
+    Ok(ResolvedGraph {
         packages,
         locked,
         native_crates,
-        trusted_command_identities,
+        command_bindings,
+        root_directives,
+        package_uses,
         scope_trust,
         root_edition,
         log_trust: None,
         registry_identities,
-    }
+    })
 }
 
 /// Enforce a manifest's `package.toolchain` requirement against the **running binary's** version.
@@ -1956,6 +2227,40 @@ fn package_of<'m>(
     })
 }
 
+/// Verify the identity a **non-registry** dependency claims against the tree it actually points at.
+///
+/// A `package = "company/pkg"` on a `path`/`git` entry selects nothing — the source already picked
+/// the tree. It is documentation, and on a scope-array member it is documentation that earns its
+/// place: `{ path = "../..", package = "para/ai" }` says *which* package of the `para` scope this
+/// member is, which the path alone does not. Keeping it therefore obliges us to check it; an
+/// unverified claim is a comment that can lie, and a manifest naming a package its path does not
+/// contain would build happily while reading as though it did.
+///
+/// **A target with no `[package]` table** never reaches a mismatch here, by construction: a path/git
+/// dependency's identity *and* its namespace root both come from that table, so both entry points
+/// ([`Walker::gather_one`] and [`Walker::walk_one`]) already refuse such a tree whether or not a
+/// claim was written. This check deliberately runs *after* the identity is read, so that case is
+/// reported as the missing table — the actionable fact — rather than as a mismatch against nothing.
+fn check_declared_identity(
+    key: &str,
+    dep: &Dependency,
+    actual: &crate::manifest::PackageName,
+    dir: &Path,
+) -> Result<(), PmError> {
+    let Some(claimed) = dep.declared_package() else {
+        return Ok(());
+    };
+    if claimed == actual {
+        return Ok(());
+    }
+    Err(PmError::Manifest(format!(
+        "dependency `{key}` declares `package = \"{claimed}\"`, but the package at `{}` is \
+         `{actual}` — on a path/git dependency `package` is a claim about the tree the source \
+         points at, and it is checked; correct the identity or point the source at `{claimed}`",
+        dir.display()
+    )))
+}
+
 /// The stderr warning for a `[patch]`ed tree whose version fails a requirement the dependency
 /// graph imposes on that identity. **Warn, never error** — the documented semantics: a dev
 /// override means the developer knows best (they are typically mid-version-bump, testing
@@ -1983,10 +2288,12 @@ mod tests {
     use super::*;
 
     /// A tiny two-package fixture on disk: `app` with one path dependency `lib`.
-    fn path_dep_fixture(name: &str) -> PathBuf {
-        let base =
-            std::env::temp_dir().join(format!("noeta_graph_test_{name}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+    ///
+    /// Returns the fixture guard beside the `app` directory: the guard owns the whole tree and
+    /// deletes it on drop, so a caller that wants the path to keep existing must keep the guard
+    /// bound (`let (_fixture, app) = …`) rather than discard it.
+    fn path_dep_fixture(name: &str) -> (crate::test_temp::TempDir, PathBuf) {
+        let base = crate::test_temp::TempDir::new(name);
         let lib = base.join("lib");
         std::fs::create_dir_all(&lib).unwrap();
         std::fs::write(
@@ -2003,12 +2310,213 @@ mod tests {
         )
         .unwrap();
         std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
-        app
+        (base, app)
+    }
+
+    #[test]
+    fn one_package_under_two_import_roots_is_refused() {
+        // Silently picking one was worse than refusing: the manifest declared two roots, only one
+        // existed, and `use <the other>.…` failed far away with "no module" — suggesting the OTHER
+        // dependency entry, which is a different package as far as the author knows.
+        let (_fixture, app) = path_dep_fixture("two_roots");
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nlib = { path = \"../lib\" }\nalso = { path = \"../lib\" }\n",
+        )
+        .unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("two roots for one package");
+        let msg = err.message().to_string();
+        assert!(msg.contains("acme/lib"), "names the package: {msg}");
+        assert!(msg.contains("`also`"), "names both keys: {msg}");
+        assert!(msg.contains("`lib`"), "names both keys: {msg}");
+        assert!(
+            msg.contains("array form"),
+            "points at the supported shape: {msg}"
+        );
+    }
+
+    #[test]
+    fn several_packages_under_one_root_still_resolve() {
+        // The reverse is the *supported* form — the `para` scope binds `para/aether` and `para/api`
+        // under one root — so the guard above must not touch it.
+        let (_fixture, app) = path_dep_fixture("one_root_many");
+        let base = app.parent().unwrap().to_path_buf();
+        let other = base.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("noeta.toml"),
+            "[package]\nname = \"acme/other\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(other.join("other.noe"), "pub fn two(): int { return 2; }\n").unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nacme = [ { path = \"../lib\" }, { path = \"../other\" } ]\n",
+        )
+        .unwrap();
+        let graph = resolve_graph(&app.join("main.noe")).expect("a scope array resolves");
+        assert_eq!(graph.packages.len(), 2, "both members are present");
+        assert!(
+            graph.packages.iter().all(|p| p.key() == "acme"),
+            "and they share the one root they were listed under"
+        );
+    }
+
+    #[test]
+    fn a_path_dependencys_package_claim_is_verified() {
+        // `package` on a path/git dependency selects nothing — the source already did. It is a claim
+        // about the tree, and it is CHECKED: a claim that matches resolves as if it were absent, one
+        // that disagrees is a manifest error naming both identities and the path, and no claim at
+        // all is the ordinary spelling. Before this, the key was dropped at parse time, so a
+        // manifest could name a package its path did not contain and still build.
+
+        // Absent — the baseline.
+        let (_absent, app) = path_dep_fixture("claim_absent");
+        resolve_graph(&app.join("main.noe")).expect("no claim resolves");
+
+        // Matching — accepted, and the identity is still the tree's own.
+        let (_match, app) = path_dep_fixture("claim_match");
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nlib = { path = \"../lib\", package = \"acme/lib\" }\n",
+        )
+        .unwrap();
+        let graph = resolve_graph(&app.join("main.noe")).expect("a true claim resolves");
+        assert_eq!(graph.packages.len(), 1);
+        assert_eq!(graph.packages[0].root, "lib");
+        assert!(graph.locked.iter().any(|l| l.identity == "acme/lib"));
+
+        // Mismatched — refused, naming what was claimed, what is actually there, and where.
+        let (_wrong, app) = path_dep_fixture("claim_mismatch");
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nlib = { path = \"../lib\", package = \"totally/wrong\" }\n",
+        )
+        .unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("a false claim is refused");
+        let msg = err.message().to_string();
+        assert!(msg.contains("totally/wrong"), "names the claim: {msg}");
+        assert!(msg.contains("acme/lib"), "names the real identity: {msg}");
+        assert!(msg.contains("lib"), "names the source: {msg}");
+        assert!(msg.contains("`lib`"), "names the dependency key: {msg}");
+    }
+
+    #[test]
+    fn a_scope_members_package_claim_is_verified() {
+        // The form the claim exists for: on a scope-array member the path alone cannot say which
+        // package of the scope the member is, so the identity is documentation worth writing — and
+        // therefore worth checking. One member's wrong claim fails the whole resolve.
+        let (_fixture, app) = path_dep_fixture("claim_scope_member");
+        let other = app.parent().unwrap().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("noeta.toml"),
+            "[package]\nname = \"acme/other\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(other.join("other.noe"), "pub fn two(): int { return 2; }\n").unwrap();
+
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nacme = [ { path = \"../lib\", package = \"acme/lib\" }, \
+             { path = \"../other\", package = \"acme/other\" } ]\n",
+        )
+        .unwrap();
+        let graph = resolve_graph(&app.join("main.noe")).expect("true claims resolve");
+        assert_eq!(graph.packages.len(), 2);
+
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nacme = [ { path = \"../lib\", package = \"acme/lib\" }, \
+             { path = \"../other\", package = \"acme/lib\" } ]\n",
+        )
+        .unwrap();
+        let err =
+            resolve_graph(&app.join("main.noe")).expect_err("a false member claim is refused");
+        assert!(
+            err.message().contains("acme/other"),
+            "names the member's real identity: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn a_dependency_with_no_package_table_is_refused_as_such() {
+        // The decided answer for a target with NO `[package]` table: it is already refused, because
+        // a path/git dependency's identity and namespace root both come from that table. The claim
+        // check runs after the identity is read, so this reports the missing table — the actionable
+        // fact — rather than a mismatch against nothing. Claim or no claim, one message.
+        let (_fixture, app) = path_dep_fixture("claim_no_package_table");
+        let lib = app.parent().unwrap().join("lib");
+        std::fs::write(lib.join("noeta.toml"), "[targets.dev.tiers]\ntest = true\n").unwrap();
+        for entry in [
+            "[dependencies]\nlib = { path = \"../lib\" }\n",
+            "[dependencies]\nlib = { path = \"../lib\", package = \"acme/lib\" }\n",
+        ] {
+            std::fs::write(app.join("noeta.toml"), entry).unwrap();
+            let err = resolve_graph(&app.join("main.noe")).expect_err("no identity to resolve");
+            assert!(
+                err.message().contains("no `[package]` table"),
+                "reports the missing table, not the claim: {}",
+                err.message()
+            );
+        }
+    }
+
+    #[test]
+    fn an_untrusted_native_dependency_is_refused() {
+        // A `native`-declaring dependency runs arbitrary Rust, so it is refused without a
+        // `[trust].native` grant — the baseline the dev-native path deliberately diverges from.
+        let (_fixture, app) = path_dep_fixture("untrusted_native");
+        let lib = app.parent().unwrap().join("lib");
+        std::fs::write(
+            lib.join("noeta.toml"),
+            "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(lib.join("native")).unwrap();
+        std::fs::write(
+            lib.join("native").join("Cargo.toml"),
+            "[package]\nname = \"lib-native\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("untrusted native is refused");
+        let msg = err.message().to_string();
+        assert!(msg.contains("acme/lib"), "names the package: {msg}");
+        assert!(msg.contains("[trust].native"), "points at the grant: {msg}");
+    }
+
+    #[test]
+    fn a_dev_native_dependency_is_admitted_untrusted() {
+        // A `dev-native` (formatter/dev-tool) dependency is admitted WITHOUT any `[trust].native`
+        // grant: it runs only at `noeta fmt` as a formatter, never at runtime. It contributes a
+        // `NativeCrate` marked `dev_only`, excluded from the runtime set.
+        let (_fixture, app) = path_dep_fixture("dev_native_untrusted");
+        let lib = app.parent().unwrap().join("lib");
+        std::fs::write(
+            lib.join("noeta.toml"),
+            "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\ndev-native = \"native\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(lib.join("native")).unwrap();
+        std::fs::write(
+            lib.join("native").join("Cargo.toml"),
+            "[package]\nname = \"lib-fmt\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let graph = resolve_graph(&app.join("main.noe"))
+            .expect("a dev-native dependency needs no trust grant");
+        assert_eq!(graph.native_crates.len(), 1, "the dev crate is present");
+        assert!(graph.native_crates[0].dev_only, "and marked dev-only");
+        assert!(
+            graph.runtime_native_crates().is_empty(),
+            "but excluded from the runtime set (never composes a prod path)"
+        );
     }
 
     #[test]
     fn a_dependency_requiring_a_newer_toolchain_fails_with_an_upgrade_message() {
-        let app = path_dep_fixture("toolchain_req_dep");
+        let (_fixture, app) = path_dep_fixture("toolchain_req_dep");
         std::fs::write(
             app.parent().unwrap().join("lib").join("noeta.toml"),
             "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\ntoolchain = \">=999.0\"\n",
@@ -2026,7 +2534,7 @@ mod tests {
 
     #[test]
     fn the_root_packages_own_toolchain_requirement_is_enforced() {
-        let app = path_dep_fixture("toolchain_req_root");
+        let (_fixture, app) = path_dep_fixture("toolchain_req_root");
         std::fs::write(
             app.join("noeta.toml"),
             "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\ntoolchain = \">=999.0\"\n\
@@ -2069,7 +2577,7 @@ mod tests {
         // The IDE (and `noeta fmt`) resolve the graph purely to SEE dependency modules — a query
         // must not mutate project state on disk. The build-command resolve refreshes the lock;
         // the query resolve leaves the directory untouched.
-        let app = path_dep_fixture("query_no_lock");
+        let (_fixture, app) = path_dep_fixture("query_no_lock");
         let entry = app.join("main.noe");
         let graph = resolve_graph_query(&entry).expect("query resolves");
         assert_eq!(graph.packages.len(), 1, "the path dep resolves");
@@ -2105,12 +2613,8 @@ mod tests {
     }
 
     /// A fresh fixture base directory for one `[patch]` test.
-    fn patch_base(name: &str) -> PathBuf {
-        let base =
-            std::env::temp_dir().join(format!("noeta_patch_test_{name}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        base
+    fn patch_base(name: &str) -> crate::test_temp::TempDir {
+        crate::test_temp::TempDir::new(name)
     }
 
     /// The locked entry for `identity`, panicking helpfully when absent.
@@ -2500,9 +3004,15 @@ mod tests {
     /// Lay out an app + one path dep under a fresh temp base; the dep declares `native = "native"`
     /// when `with_crate` says to create the crate dir (Phase 3, N3.1). When `trusted`, the app's
     /// `[trust].native` authorizes `acme/imgfx` (Phase 4) — otherwise resolution refuses the native.
-    fn native_dep_project(name: &str, with_crate: bool, trusted: bool) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("noeta_graph_test_{name}"));
-        let _ = std::fs::remove_dir_all(&base);
+    ///
+    /// Returns the fixture guard beside the app's entry file; the guard deletes the tree on drop, so
+    /// the caller keeps it bound for as long as it uses the path.
+    fn native_dep_project(
+        name: &str,
+        with_crate: bool,
+        trusted: bool,
+    ) -> (crate::test_temp::TempDir, PathBuf) {
+        let base = crate::test_temp::TempDir::new(name);
         let app = base.join("app");
         let dep = base.join("imgfx");
         std::fs::create_dir_all(&app).unwrap();
@@ -2538,15 +3048,15 @@ mod tests {
             )
             .unwrap();
         }
-        app.join("main.noe")
+        let entry = app.join("main.noe");
+        (base, entry)
     }
 
     #[test]
     fn a_target_scoped_dependency_resolves_only_for_its_target() {
         // An app with a runtime dep `fx` and a dev-only dep `tool` (dev-deps arc): the global graph
         // sees `fx`; `--target dev` also sees `tool`.
-        let base = std::env::temp_dir().join("noeta_graph_test_target_deps");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("target-deps");
         let app = base.join("app");
         std::fs::create_dir_all(&app).unwrap();
         for (name, ver) in [("fx", "1.0.0"), ("tool", "1.0.0")] {
@@ -2596,8 +3106,7 @@ mod tests {
         // Two packages of the same scope `para` (`para/aether` + `para/db`) bound under one array
         // key: both resolve, and both get the scope key `para` as their global segment (so the app's
         // `use para.aether.…` and `use para.db.…` both reach the flat pool).
-        let base = std::env::temp_dir().join("noeta_graph_test_scope_dep");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("scope-dep");
         let app = base.join("app");
         std::fs::create_dir_all(&app).unwrap();
         for pkg in ["aether", "db"] {
@@ -2609,7 +3118,7 @@ mod tests {
             )
             .unwrap();
             std::fs::write(
-                d.join(format!("{pkg}.noe")),
+                d.join("m.noe"),
                 format!("namespace para.{pkg}.m;\npub fn one(): int {{ return 1; }}\n"),
             )
             .unwrap();
@@ -2627,7 +3136,8 @@ mod tests {
         assert!(ids.contains(&"para/aether".to_string()));
         assert!(ids.contains(&"para/db".to_string()));
         // Both members share the scope key `para` as their global segment, and each re-roots from its
-        // company (`para`) — an identity re-root here — so its literal `para.<pkg>.…` lands in the pool.
+        // own **package** segment (`aether`/`db` — what it derives under standalone) to the scope
+        // prefix, so one intra-package `use db.query` resolves in both builds.
         for pkg in ["aether", "db"] {
             let p = graph
                 .packages
@@ -2639,20 +3149,75 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("package para/{pkg} missing from the link set"));
             assert_eq!(
-                p.key, "para",
+                p.key(),
+                "para",
                 "scope member para/{pkg} must key on the scope"
             );
             assert_eq!(
-                p.root, "para",
-                "scope member para/{pkg} re-roots from its scope"
+                p.root, pkg,
+                "scope member para/{pkg} re-roots FROM its own package segment — never the scope \
+                 half, which none of its modules ever derive under, so its intra-package `use`s \
+                 were silently left unrewritten"
+            );
+            assert_eq!(
+                p.prefix,
+                vec!["para".to_string(), pkg.to_string()],
+                "scope member para/{pkg} re-roots TO the two-segment prefix its modules derive under"
+            );
+            // …and its modules derive under `{key}.{package segment}` — the scope-array prefix, so
+            // `m.noe` is `para.<pkg>.m`, exactly what it declares. (A *plain* key would give the
+            // shallower `para.m`: which of the two applies is a property of the manifest entry, not
+            // of the package, which is why the resolver records it rather than guessing.)
+            assert_eq!(
+                p.modules[0].path.derived(),
+                Some(["para".to_string(), pkg.to_string(), "m".to_string()].as_slice()),
+                "scope member para/{pkg} derives under the scope prefix"
             );
         }
     }
 
     #[test]
+    fn a_plain_key_reroots_from_the_package_segment_to_the_key_alone() {
+        // The plain-entry twin of the scope-array case above: `mycli = { path = … }` on `acme/cli`
+        // derives the ONE-segment prefix `mycli`, and re-roots from the package's own segment `cli`.
+        // So the package's internal `use cli.args` becomes `use mycli.args` — which is what makes
+        // the import key real, and what a non-conventional key had no way to express before.
+        let base = crate::test_temp::TempDir::new("plain-key-dep");
+        let app = base.join("app");
+        let lib = base.join("acme-cli");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(
+            lib.join("noeta.toml"),
+            "[package]\nname = \"acme/cli\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(lib.join("args.noe"), "pub fn one(): int { return 1; }\n").unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nmycli = { path = \"../acme-cli\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+
+        let graph = resolve_graph(&app.join("main.noe")).expect("resolves");
+        let p = &graph.packages[0];
+        assert_eq!(p.key(), "mycli");
+        assert_eq!(p.prefix, vec!["mycli".to_string()]);
+        assert_eq!(
+            p.root, "cli",
+            "re-roots from the package half of the identity"
+        );
+        assert_eq!(
+            p.modules[0].path.derived(),
+            Some(["mycli".to_string(), "args".to_string()].as_slice()),
+        );
+    }
+
+    #[test]
     fn a_scope_dependency_rejects_members_from_different_scopes() {
-        let base = std::env::temp_dir().join("noeta_graph_test_scope_mixed");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("scope-mixed");
         let app = base.join("app");
         std::fs::create_dir_all(&app).unwrap();
         for (dir, ident) in [
@@ -2713,8 +3278,7 @@ mod tests {
     fn the_resolved_graph_carries_per_package_and_root_editions() {
         // An app pinning edition 2026 explicitly, with a dependency that omits `edition` (so it
         // defaults). The root edition is the app's; each package's own edition is on its LockedPackage.
-        let base = std::env::temp_dir().join("noeta_graph_test_editions");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("editions");
         let app = base.join("app");
         let dep = base.join("dep");
         std::fs::create_dir_all(&app).unwrap();
@@ -2763,8 +3327,7 @@ mod tests {
     fn an_unknown_dependency_edition_fails_resolution_actionably() {
         // A dependency pinned to an edition this toolchain doesn't understand must fail the resolve
         // (not be silently miscompiled under the root's edition) — naming the dependency and the fix.
-        let base = std::env::temp_dir().join("noeta_graph_test_future_edition");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("future-edition");
         let app = base.join("app");
         let dep = base.join("dep");
         std::fs::create_dir_all(&app).unwrap();
@@ -2802,8 +3365,7 @@ mod tests {
         // root — so `noeta check`/`run` on a file inside it resolves a `use` of its own namespace.
         // Before this, the root was never walked as its own dependency, so its native never entered
         // `native_crates` and the package was checkable only as somebody else's dependency.
-        let base = std::env::temp_dir().join("noeta_graph_test_root_native");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("root-native");
         let pkg = base.join("imgfx");
         std::fs::create_dir_all(pkg.join("native")).unwrap();
         // No `[trust].native` here on purpose: a package does not authorize its own native code,
@@ -2843,7 +3405,7 @@ mod tests {
 
     #[test]
     fn a_native_dep_surfaces_its_entry_crate_and_lock_records_it() {
-        let entry = native_dep_project("native_ok", true, true);
+        let (_fixture, entry) = native_dep_project("native_ok", true, true);
         let graph = resolve_graph(&entry).expect("resolves");
         assert_eq!(graph.native_crates.len(), 1);
         let nc = &graph.native_crates[0];
@@ -2867,25 +3429,125 @@ mod tests {
     #[test]
     fn a_missing_native_crate_fails_at_resolve_time_naming_the_dep() {
         // Trusted, so it clears the authority gate and reaches the crate-existence check.
-        let entry = native_dep_project("native_missing", false, true);
+        let (_fixture, entry) = native_dep_project("native_missing", false, true);
         let err = resolve_graph(&entry).expect_err("must fail");
         assert!(err.message().contains("acme/imgfx"), "{err}");
         assert!(err.message().contains("Cargo.toml"), "{err}");
     }
 
     #[test]
+    fn directive_bindings_resolve_to_the_provider_namespace_root() {
+        // A `[directives]` binding resolves, in the ROOT's own dependency context, to the provider
+        // package's namespace root + exported name — what the checker matches an `ExtDirective`
+        // against. Renaming (`local = "dep-key:exported"`) is carried through.
+        let base = crate::test_temp::TempDir::new("directives");
+        let app = base.join("app");
+        let dep = base.join("imgfx");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nfx = { path = \"../imgfx\" }\n\
+             [directives]\nblur = \"fx\"\nsharpen = \"fx:crispen\"\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        std::fs::write(
+            dep.join("noeta.toml"),
+            "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dep.join("imgfx.noe"),
+            "namespace imgfx;\npub fn one(): int { return 1; }\n",
+        )
+        .unwrap();
+
+        let g = resolve_graph(&app.join("main.noe")).expect("resolves");
+        // The provider `fx` (dep-key) → the dependency `acme/imgfx`, whose namespace root is `imgfx`.
+        let blur = g.root_directives.get("blur").expect("bound");
+        // The provider is reachable under its namespace root (`imgfx`, what a native unit's `root()`
+        // reports) and its link segment (the dep key `fx`); a `@name` may resolve to either, so both
+        // are carried.
+        assert!(blur.provider_roots.contains(&"imgfx".to_string()));
+        assert_eq!(blur.exported, "blur");
+        // Rename: `sharpen` locally, `crispen` as the provider exports it.
+        let sharpen = g.root_directives.get("sharpen").expect("bound");
+        assert!(sharpen.provider_roots.contains(&"imgfx".to_string()));
+        assert_eq!(sharpen.exported, "crispen");
+        // And the whole-program table keys the root's bindings under `PackageOrigin::Root`.
+        let via_uses = g
+            .package_uses
+            .get(&noeta_span::PackageOrigin::Root, "blur")
+            .expect("root binds blur");
+        assert_eq!(via_uses.exported, "blur");
+    }
+
+    #[test]
+    fn tier_bindings_resolve_into_the_same_per_package_name_table() {
+        // A `[tiers]` binding resolves like a `[directives]` one — to the provider namespace root +
+        // exported name — and lands in the SAME per-package `@name` table (a `@test` block and a
+        // `@openapi` attribute share one namespace). `std` resolves to root `"std"`; renaming carries.
+        let base = crate::test_temp::TempDir::new("tiers");
+        let app = base.join("app");
+        let dep = base.join("fuzzkit");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nfx = { path = \"../fuzzkit\" }\n\
+             [tiers]\ntest = \"std\"\nfuzz = \"fx\"\nsoak = \"fx:endurance\"\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        std::fs::write(
+            dep.join("noeta.toml"),
+            "[package]\nname = \"acme/fuzzkit\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dep.join("fuzzkit.noe"),
+            "namespace fuzzkit;\npub fn one(): int { return 1; }\n",
+        )
+        .unwrap();
+
+        let g = resolve_graph(&app.join("main.noe")).expect("resolves");
+        // The built-in provider `std` resolves to root `"std"`.
+        let test = g.root_directives.get("test").expect("bound");
+        assert_eq!(test.provider_roots, vec!["std".to_string()]);
+        assert_eq!(test.exported, "test");
+        // A dependency provider `fx` → `acme/fuzzkit`, namespace root `fuzzkit`.
+        let fuzz = g.root_directives.get("fuzz").expect("bound");
+        assert!(fuzz.provider_roots.contains(&"fuzzkit".to_string()));
+        assert_eq!(fuzz.exported, "fuzz");
+        // Rename: `soak` locally, `endurance` as the provider declares it.
+        let soak = g.root_directives.get("soak").expect("bound");
+        assert_eq!(soak.exported, "endurance");
+        // The whole-program table carries the tier binding under `PackageOrigin::Root`.
+        let via_uses = g
+            .package_uses
+            .get(&noeta_span::PackageOrigin::Root, "fuzz")
+            .expect("root binds fuzz");
+        assert!(via_uses.provider_roots.contains(&"fuzzkit".to_string()));
+    }
+
+    #[test]
     fn command_trust_gates_which_native_packages_may_add_commands() {
-        // A native dep trusted for native but NOT for commands contributes no trusted command
-        // identity; adding it to `[trust].commands` surfaces its package identity for the composer.
-        let base = std::env::temp_dir().join("noeta_graph_test_cmd_trust");
-        let make = |commands_trust: bool| -> Vec<String> {
-            let _ = std::fs::remove_dir_all(&base);
+        // A native dep with no `[trust.commands]` entry contributes no binding; adding one binds a
+        // local name to the package identity + exported command for the composer.
+        let base = crate::test_temp::TempDir::new("graph-test-cmd-trust");
+        let make = |commands_trust: bool| -> Vec<ResolvedCommandBinding> {
+            // Deliberate: each call rebuilds the same fixture from scratch. The path is this
+            // process's alone, so the wipe can only ever hit our own previous pass.
+            let _ = std::fs::remove_dir_all(&*base);
             let app = base.join("app");
             let dep = base.join("imgfx");
             std::fs::create_dir_all(&app).unwrap();
             std::fs::create_dir_all(dep.join("native")).unwrap();
             let commands = if commands_trust {
-                "commands = [\"acme/imgfx\"]\n"
+                "[trust.commands]\nblur = \"acme/imgfx\"\n"
             } else {
                 ""
             };
@@ -2916,21 +3578,25 @@ mod tests {
             .unwrap();
             resolve_graph(&app.join("main.noe"))
                 .expect("resolves")
-                .trusted_command_identities
+                .command_bindings
         };
-        // Native-trusted but not command-trusted → the package composes, but no command identity.
+        // No `[trust.commands]` entry → the package composes, but contributes no command binding.
         assert!(make(false).is_empty());
-        // Command-trusted → its package IDENTITY (not its root segment) is surfaced, so the shim
-        // ties command registration to exactly this package's extension units — a scope-keyed
-        // package (`para/db`) must not be matched (or over-matched) by root-name strings.
-        assert_eq!(make(true), vec!["acme/imgfx".to_string()]);
+        // A binding surfaces the local name, the package IDENTITY (not its root segment), and the
+        // exported command — so the shim ties registration to exactly this package's units. A
+        // scope-keyed package (`para/db`) must not be matched (or over-matched) by root-name strings.
+        let bindings = make(true);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].local, "blur");
+        assert_eq!(bindings[0].provider, "acme/imgfx");
+        assert_eq!(bindings[0].exported, "blur");
     }
 
     #[test]
     fn an_untrusted_native_dep_is_refused() {
         // Phase 4: a native-declaring dependency the app did not authorize in `[trust].native` is
         // refused — the mere presence of native code no longer runs arbitrary Rust.
-        let entry = native_dep_project("native_untrusted", true, false);
+        let (_fixture, entry) = native_dep_project("native_untrusted", true, false);
         let err = resolve_graph(&entry).expect_err("must be refused");
         assert!(err.message().contains("acme/imgfx"), "{err}");
         assert!(
@@ -2945,8 +3611,7 @@ mod tests {
         // The anti-supply-chain invariant: a native package reached *transitively* (app → mid →
         // imgfx) is still refused unless the ROOT app trusts it — a dependency can't authorize its
         // own native sub-dependency.
-        let base = std::env::temp_dir().join("noeta_graph_test_native_transitive");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("native-transitive");
         let app = base.join("app");
         let mid = base.join("mid");
         let dep = base.join("imgfx");
@@ -3001,8 +3666,7 @@ mod tests {
         // is refused at resolve time — the compiler provides these, so a registry serving `std/…` is a
         // shadow-core supply-chain attack. Refusal happens in `solve`/`gather` before any index query,
         // so this needs no network and no configured registry.
-        let base = std::env::temp_dir().join("noeta_graph_test_reserved_scope");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_temp::TempDir::new("reserved-scope");
         let app = base.join("app");
         std::fs::create_dir_all(&app).unwrap();
         std::fs::write(
@@ -3023,7 +3687,7 @@ mod tests {
 
     #[test]
     fn a_pure_graph_has_no_native_crates() {
-        let entry = native_dep_project("native_pure", true, false);
+        let (_fixture, entry) = native_dep_project("native_pure", true, false);
         // Rewrite the dep manifest without the `native` key.
         let dep_manifest = entry
             .parent()

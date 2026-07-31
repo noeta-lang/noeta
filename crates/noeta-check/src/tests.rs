@@ -28,6 +28,21 @@ fn type_of_reprs(text: &str) -> Vec<TypeRepr> {
         .collect()
 }
 
+/// Parse `text` and return the checker's diagnostics themselves, for the assertions that pin a
+/// message, a help line, or a diagnostic's secondary labels rather than just its code.
+fn diagnostics(text: &str) -> Vec<noeta_diagnostics::Diagnostic> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "test program must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    check(&parsed.program)
+}
+
 /// Parse `text` and return the checker's diagnostic codes (wire form), in order.
 fn codes(text: &str) -> Vec<String> {
     seed_std();
@@ -155,6 +170,43 @@ fn try_on_result_is_clean() {
     assert!(codes(src).is_empty());
 }
 
+// ----- E0012: the `?` POSITION rule, both halves -----
+//
+// `?` is an early return, so the declared return has to carry what it returns: `?T` for an `Option`'s
+// `none`, `Result<T, E>` for a `Result`'s `Err`. The `Result` half was missing, which made
+// `fn work(): void { fallible()? }` check clean, discard the error, and exit 0.
+
+#[test]
+fn try_on_result_in_a_void_function_is_invalid() {
+    let src = "fn g(): Result<int, string> { return Err(\"no\"); }\n\
+               fn f(): void { g()?; }\n";
+    assert_eq!(codes(src), ["E0012"]);
+}
+
+#[test]
+fn try_on_result_in_a_typed_function_is_invalid() {
+    // A concrete non-`Result` return is the same rule as `void`: an `int` slot cannot hold an `Err`.
+    let src = "fn g(): Result<int, string> { return Err(\"no\"); }\n\
+               fn f(): int { return g()?; }\n";
+    assert_eq!(codes(src), ["E0012"]);
+}
+
+#[test]
+fn try_on_option_in_a_void_function_is_invalid() {
+    // The absence half, asserted beside its twin so the symmetry is visible here and not just in prose.
+    let src = "fn f(xs: List<int>): void { xs.first()?; }\n";
+    assert_eq!(codes(src), ["E0012"]);
+}
+
+#[test]
+fn try_on_result_in_a_deferring_function_still_defers() {
+    // `dyn` is the gradual escape: the checker cannot say what the early return must fit, so it does
+    // not pretend to. The judgement lands at runtime (E0069 if the `Err` reaches the top).
+    let src = "fn g(): Result<int, string> { return Err(\"no\"); }\n\
+               fn f(): dyn { return g()?; }\n";
+    assert!(codes(src).is_empty());
+}
+
 #[test]
 fn undeclared_type_annotation_is_e0013() {
     // M1.9 lit up unknown-type checking: an annotation naming nothing declared, imported, or
@@ -209,9 +261,12 @@ fn namespaced_type_resolves_in_type_position() {
 #[test]
 fn namespace_group_binds_and_resolves() {
     // `use std.http` binds `http` as a navigable group; `http.client.get(...)` resolves the client
-    // submodule and type-checks clean (identical to the leaf form `use std.http.client`).
+    // submodule and type-checks clean (identical to the leaf form `use std.http.client`). The `?`
+    // is load-bearing, not decoration: a verb returns `Result<Response, HttpError>`, so without it
+    // `r` is the Result and `status()` is a method it does not have. This fixture asserted the
+    // unspent form was clean until closed-type method resolution started catching that.
     assert!(
-        codes("use std.http;\nr = http.client.get(\"https://x\");\necho r.status();\n").is_empty()
+        codes("use std.http;\nr = http.client.get(\"https://x\")?;\necho r.status();\n").is_empty()
     );
 }
 
@@ -378,37 +433,26 @@ fn generic_call_violating_a_bound_is_reported() {
     assert_eq!(codes(src), ["E0025"]);
 }
 
-// --- The `Mergeable` bound (p2p P2): CRDT extern types satisfy it, nothing else does, and it is
-//     intrinsic (not user-implementable). The bound is seeded from the extension registry.
-
-// The positive case — every registered CRDT *satisfies* `T: Mergeable` — needs the actual CRDT
-// types, which left `std` for the `para.crdt` package (para-namespace S2) and now live in the
-// standalone para-p2p repo (github.com/noeta-lang/para-p2p). It can't be checked against this
-// std-only registry, so it lives in that repo's conformance corpus, where the p2p extension is
-// installed (`tests/conformance/crdt/mergeable_bound_satisfied.noe`). The bound *name* itself is
-// still checker-intrinsic, so the negative/intrinsic cases below stay here.
+// --- `Mergeable` is no longer a built-in ------------------------------------------------------
+//
+// It was a closed `BuiltinTrait` satisfied only by the CRDT extern types, with `impl`/`@derive`
+// rejected outright, so that a value with no runtime merge could not pass the checker. That closed
+// the door on the legitimate case too: an app cannot define its own CRDT. It is now an ordinary
+// native `ExtTrait` declared by the para-p2p package (`para.crdt.Mergeable`) with a REQUIRED
+// `merge` method, so the checker enforces that an implementor actually supplies one — the failure
+// mode the closure existed to prevent — while a user type may join the bound like any other trait.
+//
+// Nothing about it is checkable against this std-only registry any more (the trait ships with the
+// package), so its tests live in that repo's conformance corpus:
+// `tests/conformance/crdt/{mergeable_bound_satisfied,user_mergeable}.noe`.
 
 #[test]
-fn a_non_crdt_violates_the_mergeable_bound() {
-    // A plain value has no convergence story, so it cannot satisfy `Mergeable`: `E0025`.
+fn a_name_no_built_in_trait_claims_is_not_a_bound() {
+    // With `Mergeable` gone from the built-in set and no extension installed, the name is simply
+    // unknown — the generic path reports the bad bound rather than silently accepting it.
     let src = "fn store<T: Mergeable>(v: T): T { return v; }\n\
                echo store(42);\n";
-    assert_eq!(codes(src), ["E0025"]);
-}
-
-#[test]
-fn mergeable_is_intrinsic_so_a_user_impl_is_rejected() {
-    // `Mergeable` is a built-in capability of the CRDT types, not something a user type may claim —
-    // otherwise a non-convergent value would pass the checker but have no runtime merge: `E0015`.
-    let src = "class Thing {\n  x: int\n  impl Mergeable {}\n}\n";
-    assert_eq!(codes(src), ["E0015"]);
-}
-
-#[test]
-fn mergeable_cannot_be_derived() {
-    // Nor is it derivable (its behavior is not field-wise synthesizable): `E0014`.
-    let src = "@derive(Mergeable)\nclass Thing { x: int }\n";
-    assert_eq!(codes(src), ["E0014"]);
+    assert!(!codes(src).is_empty(), "an unknown bound must be reported");
 }
 
 #[test]
@@ -572,6 +616,17 @@ fn map_keys_without_a_runtime_key_form_are_rejected_statically() {
     assert!(codes(src).is_empty());
     let src = "fn f(m: Map<int, string>): int { return m.len() }\necho 1\n";
     assert!(codes(src).is_empty(), "{:?}", codes(src));
+    for width in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
+        let src = format!("fn f(m: Map<{width}, string>): int {{ return m.len() }}\necho 1\n");
+        assert!(codes(&src).is_empty(), "{width}: {:?}", codes(&src));
+    }
+    // The whole float family is barred as a key — including `f64`, which the stringly
+    // predecessor of this gate did not know, so `Map<f64, _>` slipped through while
+    // `Map<float, _>` was rejected (the funnel-drift bug class).
+    for float in ["float", "f32", "f64"] {
+        let src = format!("fn f(m: Map<{float}, int>): int {{ return m.len() }}\necho 1\n");
+        assert_eq!(codes(&src), ["E0007"], "float-family key `{float}`");
+    }
 }
 
 #[test]
@@ -657,6 +712,44 @@ fn standalone_impl_counts_toward_coherence() {
     // same trait for one type conflict, just like two derives or two in-body impls.
     let src = "@derive(Clone)\nstruct Route { path: string }\nimpl Clone for Route {}\n";
     assert_eq!(codes(src), ["E0027"]);
+}
+
+#[test]
+fn a_coherence_conflict_labels_both_implementations() {
+    // E0027 must be *locatable*: it labels the offending site AND the one it collides with, so a
+    // reader can find both. It used to name only the later occurrence and describe the other as
+    // "above" — false the moment the two live in different modules (or packages), which is the
+    // common case now that coherence runs over the whole linked program.
+    let src = "@derive(Clone)\nstruct Route { path: string }\nimpl Clone for Route {}\n";
+    let diagnostics = diagnostics(src);
+    let conflict = diagnostics
+        .iter()
+        .find(|d| d.code == noeta_diagnostics::DiagnosticCode::ConflictingTraitImpl)
+        .expect("the duplicate implementation is E0027");
+    assert_eq!(
+        conflict.labels.len(),
+        2,
+        "both sites are labelled: {:?}",
+        conflict.labels
+    );
+    // The primary span is the offending (later) site, and it is also the first label — so the
+    // rendered report's header and its first group agree with every non-rendered consumer.
+    assert_eq!(conflict.labels[0].span, conflict.span);
+    assert!(
+        conflict.labels[0].message.contains("standalone `impl"),
+        "the later site names its own spelling: {:?}",
+        conflict.labels[0]
+    );
+    assert!(
+        conflict.labels[1].message.contains("`@derive`"),
+        "the first site names its own spelling: {:?}",
+        conflict.labels[1]
+    );
+    let help = conflict.help.as_deref().unwrap_or_default();
+    assert!(
+        !help.contains("above"),
+        "the positional wording is gone — the other site may be in another file: {help}"
+    );
 }
 
 #[test]
@@ -1002,6 +1095,43 @@ fn type_of_synthesizes_the_prelude_type_enum() {
     // `type_of(v)` is the prelude `Type` enum, pattern-matchable; its payload bindings carry `Type`
     // (here `Type.List(e)` binds `e: Type`, matched again against `Type.Dyn`) — all check clean.
     let src = "x = type_of(5);\nlabel = match x {\n  Type.Int => \"int\",\n  Type.List(e) => match e { Type.Dyn => \"dyn\", _ => \"?\" },\n  _ => \"other\",\n};\necho label;\n";
+    assert!(codes(src).is_empty());
+}
+
+/// Every prelude enum is a *declared* enum to the checker, registered from the one shared table
+/// both backends seed their runtime type environments from — so naming a case checks clean and a
+/// `match` on it is exhaustiveness-checked. `Ordering` was the hole on this side: the two backends
+/// knew it and the checker did not, so a non-exhaustive `match o { Ordering.Less => … }` passed
+/// E0011 and then aborted with "no match arm matched the value Ordering.Greater" at run time.
+#[test]
+fn every_prelude_enum_is_registered_and_nameable() {
+    for decl in noeta_ast::reflect::prelude_enums() {
+        let variant = &decl.variants[0].name;
+        // A payload-carrying first variant would need arguments; every prelude enum's is fieldless
+        // today, and this says so rather than silently skipping if that ever changes.
+        assert!(
+            decl.variants[0].fields.is_empty(),
+            "`{}.{variant}` grew a payload — the naming probe below needs updating",
+            decl.name
+        );
+        let src = format!("x = {}.{variant};\necho x;\n", decl.name);
+        assert!(
+            codes(&src).is_empty(),
+            "`{}.{variant}` must name a prelude enum case: {:?}",
+            decl.name,
+            codes(&src)
+        );
+    }
+}
+
+#[test]
+fn a_non_exhaustive_match_on_a_prelude_enum_is_reported() {
+    // `Ordering` has three cases; two arms and no catch-all is E0011 — the same rule every other
+    // enum gets, now that the checker registers it from the shared prelude table.
+    let src = "o = 5.compare(2);\nlabel = match o { Ordering.Less => \"l\", Ordering.Equal => \"e\" };\necho label;\n";
+    assert_eq!(codes(src), vec!["E0011"]);
+    // With the third arm it checks clean.
+    let src = "o = 5.compare(2);\nlabel = match o { Ordering.Less => \"l\", Ordering.Equal => \"e\", Ordering.Greater => \"g\" };\necho label;\n";
     assert!(codes(src).is_empty());
 }
 
@@ -1704,6 +1834,186 @@ fn pipeline_threads_the_piped_value_as_first_arg() {
 }
 
 #[test]
+fn pipeline_binds_named_arguments() {
+    // A label on the right of a pipe binds to the parameter it names; the piped value takes the
+    // first parameter no label claimed. Both orders type-check, and both are the SAME call.
+    let add = "fn add(a: int, b: string): string { return b ~ a; }\n";
+    assert!(codes(&format!("{add}echo 5 |> add(b: \"x\");\n")).is_empty());
+    assert!(codes(&format!("{add}echo \"x\" |> add(a: 5);\n")).is_empty());
+    // The types follow the binding, not the written position: piping a `string` into the call whose
+    // label already claimed `b` leaves it bound to `a: int`, which is the ordinary mismatch. This
+    // is what silently passed while `|>` discarded labels.
+    assert_eq!(
+        codes(&format!("{add}echo \"x\" |> add(b: \"y\");\n")),
+        ["E0007"]
+    );
+    // A label naming no parameter is caught through a pipe, exactly as in a direct call.
+    assert_eq!(
+        codes(&format!("{add}echo 5 |> add(zzz: \"x\");\n")),
+        ["E0061"]
+    );
+    // …as is naming the same parameter twice.
+    assert_eq!(
+        codes(&format!("{add}echo 5 |> add(b: \"x\", b: \"y\");\n")),
+        ["E0061"]
+    );
+    // A label may skip a defaulted parameter through a pipe: the piped value supplies `a` and `b`
+    // keeps its default.
+    let f = "fn f(a: int, b: int = 2, c: int = 3): int { return a + b + c; }\n";
+    assert!(codes(&format!("{f}echo 1 |> f(c: 9);\n")).is_empty());
+    // The piped value counts toward arity — `sub` is fully supplied by the pipe plus its label, so
+    // the extra positional is one argument too many and reports as an ordinary arity error.
+    assert_eq!(
+        codes("fn sub(a: int, b: int): int { return a - b; }\necho 1 |> sub(2, a: 3);\n"),
+        ["E0007"]
+    );
+}
+
+#[test]
+fn pipeline_passes_argument_expressions_for_literal_adaptation() {
+    // A bare literal adapts into a fixed-width parameter through a pipe, on both sides of the `|>`
+    // — `takes(200, 5)` always did, but the piped form reported TWO spurious `E0007`s because the
+    // pipeline handed the checker no argument expressions to adapt.
+    let src = "fn takes(x: u8, y: u8): u8 { return x + y; }\necho 200 |> takes(5);\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn a_label_that_cannot_bind_is_rejected_not_ignored() {
+    // A callee that declares no parameter names has nothing for a label to name. Every one of these
+    // used to check CLEAN with the label silently discarded, which is the same silent-wrongness
+    // that labelled user calls were fixed for.
+    //
+    // A built-in METHOD — resolved from the receiver's type rather than a module signature, so it
+    // has no `ExtFn::param_names` to consult. Including a label naming nothing at all.
+    assert_eq!(
+        codes("echo \"abc\".replace(zzz: \"a\", \"b\");\n"),
+        ["E0061"]
+    );
+    assert_eq!(codes("echo [1, 2, 3].map(f: fn(n) => n * 2);\n"), ["E0061"]);
+    // A function VALUE: the closure had parameter names, but `Type::Fn` carries only types, so the
+    // call site cannot see them. No registry entry can ever fix this one.
+    assert_eq!(
+        codes("g = fn(a: int, b: int): int => a - b;\necho g(b: 1, a: 10);\n"),
+        ["E0061", "E0061"]
+    );
+}
+
+/// A **skipping** named call carries a supplied mask — one `u64`, shifted up by one for a method's
+/// receiver — so it can only name parameters within `MASKED_PARAM_LIMIT`.
+///
+/// Regression: the bound was checked over the position of the first *hole*, so `f(1, z: 5)` over 66
+/// parameters (hole at 1, `z` at 65) checked clean, lowering dropped `z`'s out-of-range bit from the
+/// mask, and the argument landed on whichever parameter the shortened bit-count pointed at — where
+/// that parameter's own default then overwrote it. An explicitly written argument vanished with
+/// nothing said, which is the exact failure named arguments exist to remove.
+///
+/// Only skipping is bounded: a dense prefix carries no mask, and neither does a pure reordering.
+#[test]
+fn a_skipping_named_call_is_bounded_by_the_parameter_it_names() {
+    let wide = |call: &str| {
+        let mut params = vec!["a: int".to_string()];
+        params.extend((1..65).map(|i| format!("p{i}: int = {i}")));
+        params.push("z: int = 999".to_string());
+        format!(
+            "fn f({}): int {{ return a }}\necho {call};\n",
+            params.join(", ")
+        )
+    };
+    // Skips `p1..`, then names parameter 65 — refused rather than silently dropped.
+    assert_eq!(codes(&wide("f(1, z: 5)")), ["E0061"]);
+    // The same wide signature is fine when the call does not skip: a dense prefix, and a pure
+    // reordering of one.
+    assert!(codes(&wide("f(1, 7)")).is_empty());
+    assert!(codes(&wide("f(p1: 7, a: 1)")).is_empty());
+    // A skip within the limit is exactly what the named form is for.
+    assert!(codes(&wide("f(1, p2: 7)")).is_empty());
+}
+
+#[test]
+fn a_named_native_signature_binds_labels() {
+    // `math.pow` declares `param_names: &["base", "exp"]`, so it accepts labels and REORDERS by
+    // them — through exactly the binding a declared Noeta function uses. Written positionally it is
+    // unchanged, and the reordered form used to compute 3² because the labels were discarded.
+    let math = "use std.math;\n";
+    assert!(codes(&format!("{math}echo math.pow(2.0, 3.0);\n")).is_empty());
+    assert!(codes(&format!("{math}echo math.pow(base: 2.0, exp: 3.0);\n")).is_empty());
+    assert!(codes(&format!("{math}echo math.pow(exp: 3.0, base: 2.0);\n")).is_empty());
+    // And through a pipe: the label claims `exp`, so the piped value fills `base`.
+    assert!(codes(&format!("{math}echo 2.0 |> math.pow(exp: 3.0);\n")).is_empty());
+    // A label naming no parameter is caught precisely, and ONLY once — the recovery path must not
+    // also report "does not take named arguments" for a signature that plainly does.
+    assert_eq!(
+        codes(&format!("{math}echo math.pow(zzz: 2.0, exp: 3.0);\n")),
+        ["E0061"]
+    );
+}
+
+#[test]
+fn kernel_operands_are_typed_against_the_implementor() {
+    // `SigType::SelfTy` resolves to the CONCRETE implementor at the call site, so a component-wise
+    // operand must be the same shape and a bulk one a list of it. Both were `Dyn` before, so both of
+    // these reached the runtime to fail there.
+    let prelude = "use std.vec;\n\
+                   @packed struct V3 { x: f32; y: f32; z: f32 }\n\
+                   impl vec.Kernels for V3 {}\n\
+                   a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 };\n\
+                   b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 };\n";
+    assert!(codes(&format!("{prelude}echo a.add(b).x;\n")).is_empty());
+    assert!(codes(&format!("{prelude}echo [a].add_all([b])[0].x;\n")).is_empty());
+    assert_eq!(codes(&format!("{prelude}echo a.add(5).x;\n")), ["E0007"]);
+    assert_eq!(
+        codes(&format!("{prelude}echo [a].add_all(a)[0].x;\n")),
+        ["E0007"]
+    );
+    // `scale` is `SigType::Numeric`, NOT `Self::Elem`: the factor is width-agnostic on purpose, so
+    // every numeric kind is accepted — including one that is not the element's own width — while a
+    // non-number is refused. Typing it as the element would reject the `f32` factor on a `u8` shape
+    // that the corpus relies on.
+    assert!(codes(&format!("{prelude}echo a.scale(2.0f32).x;\n")).is_empty());
+    assert!(codes(&format!("{prelude}echo a.scale(2).x;\n")).is_empty());
+    assert!(codes(&format!("{prelude}echo a.scale(2.0).x;\n")).is_empty());
+    assert!(codes(&format!("{prelude}echo a.scale(2i32).x;\n")).is_empty());
+    assert_eq!(codes(&format!("{prelude}echo a.scale(a).x;\n")), ["E0007"]);
+    assert_eq!(
+        codes(&format!("{prelude}echo a.scale(\"x\").x;\n")),
+        ["E0007"]
+    );
+}
+
+#[test]
+fn kernel_methods_bind_labels() {
+    // A kernel method's names carry the ROLE its type cannot: `Self` says `other` must be the same
+    // shape, but only the name says which of `scale`'s two readings is meant. This path used to pass
+    // no argument expressions at all, so a label was dropped before anything could bind or refuse it.
+    let prelude = "use std.vec;\n\
+                   @packed struct V3 { x: f32; y: f32; z: f32 }\n\
+                   impl vec.Kernels for V3 {}\n\
+                   a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 };\n\
+                   b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 };\n";
+    assert!(codes(&format!("{prelude}echo a.add(other: b).x;\n")).is_empty());
+    assert!(codes(&format!("{prelude}echo a.scale(factor: 2.0f32).x;\n")).is_empty());
+    assert_eq!(
+        codes(&format!("{prelude}echo a.add(zzz: b).x;\n")),
+        ["E0061"]
+    );
+}
+
+#[test]
+fn binding_consumes_labels_so_a_bound_call_is_not_rejected() {
+    // The rejection above keys on "a label survived binding", so the callees that DO bind must come
+    // out of `order_arguments` label-free. This is the guard on that: a declared function and
+    // method still accept labels, positionally-out-of-order, skipping a default, and through a pipe.
+    let src = "fn sub(a: int, b: int): int { return a - b; }\n\
+               fn f(a: int, b: int = 2, c: int = 3): int { return a + b + c; }\n\
+               echo sub(b: 1, a: 10);\necho f(1, c: 9);\necho 1 |> sub(a: 10);\n";
+    assert!(codes(src).is_empty());
+    let method = "class Box { pub v: int\n  fn scale(k: int, off: int): int { return self.v * k + off } }\n\
+                  b = Box { v: 3 };\necho b.scale(off: 1, k: 2);\necho 2 |> b.scale(off: 1);\n";
+    assert!(codes(method).is_empty());
+}
+
+#[test]
 fn parameter_default_omitted_at_call_is_clean() {
     // A trailing default makes its argument optional: the call may omit it or supply it.
     let src = "fn greet(name: string, greeting: string = \"Hi\"): string { return greeting ~ name; }\n\
@@ -2154,6 +2464,143 @@ fn function_returning_or_diverging_on_every_path_is_clean() {
     assert!(codes("fn w(n: int): int { while true { if n > 0 { return 1 } } }\n").is_empty());
     // `dyn` admits `unit`, so falling through is well-typed and not flagged.
     assert!(codes("fn d(n: int): dyn { echo \"hi\" }\n").is_empty());
+}
+
+#[test]
+fn exhaustive_match_whose_arms_all_return_is_a_return() {
+    // `Ok`/`Err` is the whole of `Result` and `some`/`none` the whole of `Option`, so a two-arm
+    // `match` over either is exhaustive: control always enters an arm, and every arm returns.
+    // Blocks never yield values (E0055), so a bailing arm MUST be a block with a `return` — this
+    // is the idiomatic fallible pipeline and needs no unreachable trailing `return`.
+    assert!(
+        codes(
+            "fn f(r: Result<int, string>): int { match r { Ok(v) => { return v }, \
+             Err(_) => { return 0 }, } }\n"
+        )
+        .is_empty()
+    );
+    assert!(
+        codes(
+            "fn g(o: ?int): int { match o { some(v) => { return v }, none => { return 0 }, } }\n"
+        )
+        .is_empty()
+    );
+    // A user enum with every variant covered.
+    assert!(
+        codes(
+            "enum C { A; B }\n\
+             fn f(c: C): int { match c { C.A => { return 1 }, C.B => { return 2 }, } }\n"
+        )
+        .is_empty()
+    );
+    // A `_` catch-all is irrefutable, so even an open `int` domain is exhaustive.
+    assert!(
+        codes("fn f(n: int): int { match n { 1 => { return 1 }, _ => { return 0 }, } }\n")
+            .is_empty()
+    );
+    // An arm that `panic`s diverges just as a returning one does.
+    assert!(
+        codes(
+            "fn f(r: Result<int, string>): int { match r { Ok(v) => { return v }, \
+             Err(_) => { panic(\"no\") }, } }\n"
+        )
+        .is_empty()
+    );
+    // Expression-bodied arms that all diverge.
+    assert!(
+        codes(
+            "fn f(r: Result<int, string>): int { match r { Ok(_) => panic(\"a\"), \
+             Err(_) => panic(\"b\"), } }\n"
+        )
+        .is_empty()
+    );
+    // Nested: a `match` inside a block arm.
+    assert!(
+        codes(
+            "enum C { A; B }\n\
+             fn f(c: C, r: Result<int, string>): int { match c { \
+             C.A => { match r { Ok(v) => { return v }, Err(_) => { return 0 }, } }, \
+             C.B => { return 9 }, } }\n"
+        )
+        .is_empty()
+    );
+    // A `match` in the tail position of an `if` branch: the `if` diverges because both blocks do.
+    assert!(
+        codes(
+            "fn f(b: bool, r: Result<int, string>): int { if b { \
+             match r { Ok(v) => { return v }, Err(_) => { return 0 }, } } else { return 9 } }\n"
+        )
+        .is_empty()
+    );
+    // Inside a `while true`, which never exits normally on its own.
+    assert!(
+        codes(
+            "fn f(r: Result<int, string>): int { while true { \
+             match r { Ok(v) => { return v }, Err(_) => { return 0 }, } } }\n"
+        )
+        .is_empty()
+    );
+    // The type domain rides the same judgement: `is` arms covering every member of a closed union
+    // are exhaustive, so an all-returning type-pattern `match` returns too.
+    assert!(
+        codes(
+            "fn f(x: int | string): int { match x { is int => { return 1 }, \
+             is string => { return 2 }, } }\n"
+        )
+        .is_empty()
+    );
+    // …but `dyn` is the open top: no finite set of `is` arms exhausts it, so E0048 stands
+    // (alongside the E0011 the open domain already earns).
+    assert_eq!(
+        codes(
+            "fn f(x: dyn): int { match x { is int => { return 1 }, \
+             is string => { return 2 }, } }\n"
+        ),
+        ["E0011", "E0048"]
+    );
+}
+
+#[test]
+fn match_that_is_not_provably_exhaustive_still_falls_through_e0048() {
+    // The rule is gated on EXHAUSTIVENESS — the checker's own E0011 judgement, not a second
+    // approximation. Counting a `match` that can fail would let a function fall off its end.
+    //
+    // A guarded arm proves nothing (the guard may be false), so `C.A` stays uncovered: E0011 for
+    // the coverage hole, E0048 for the path it leaves open to the end of the body.
+    assert_eq!(
+        codes(
+            "enum C { A; B }\n\
+             fn f(c: C, hot: bool): int { match c { C.A if hot => { return 1 }, \
+             C.B => { return 2 }, } }\n"
+        ),
+        ["E0011", "E0048"]
+    );
+    // An `int` scrutinee has an open domain and there is no `_`. E0011 stays silent (open domains
+    // are the runtime backstop's job) but the path to the end is real, so E0048 fires.
+    assert_eq!(
+        codes("fn f(n: int): int { match n { 1 => { return 1 }, 2 => { return 2 }, } }\n"),
+        ["E0048"]
+    );
+    // Exhaustive, but one arm falls out of its own block instead of returning.
+    assert_eq!(
+        codes(
+            "enum C { A; B }\n\
+             fn f(c: C): int { match c { C.A => { return 1 }, C.B => { echo \"b\" }, } }\n"
+        ),
+        ["E0048"]
+    );
+    // Exhaustive with expression arms that produce values rather than diverging: the `match` is a
+    // discarded statement, so the body still reaches its end.
+    assert_eq!(
+        codes("fn f(r: Result<int, string>): int { match r { Ok(v) => v, Err(_) => 0, } }\n"),
+        ["E0048"]
+    );
+    // A guarded arm followed by an irrefutable `_` IS total — the `_` covers what the guard
+    // declines — so this one is clean, and the two cases above are not a blanket "guards lose".
+    assert!(
+        codes("fn f(n: int, hot: bool): int { match n { 1 if hot => { return 1 }, _ => { return 0 }, } }\n")
+            .is_empty()
+    );
 }
 
 // --- SessionChecker (session-checker C0/C1): per-entry checking against an accumulated session ---
@@ -2646,14 +3093,19 @@ fn the_checker_visits_every_body_it_is_given() {
     );
 }
 
-// ----- E0063: erased-width scalar `is` narrowing (packed-widths slice 2) -----
+// ----- E0063: unanswerable width `is` test (packed-widths slice 2) -----
 //
-// A bare-scalar `x is iN` / `x is f64` is statically always false: an erased width carries no
-// runtime tag on a scalar. Rather than silently compile an always-false test, the checker emits an
-// advisory **warning** (E0063). Warnings are not corpus-pinnable — the `.noe` `// expect:` header
-// has no `warning` directive and the differential harness treats any diagnostic as a rejection — so
-// this rule is pinned here instead. (The reified `f32` narrowing is corpus-pinned in
-// `tests/conformance/narrowing/f32_width_subtype.noe`.)
+// A bare-scalar `x is iN` / `x is f64` is the one test the *runtime* cannot answer: an erased width
+// carries no tag on a scalar, so the shared matcher reaches no head and always says `false`. Where
+// the scrutinee's static type settles the question the **checker** answers it instead and the
+// constant is folded at lowering (`Sites::folded_type_tests`) — no warning, because a decided
+// answer is not an erasure problem. E0063 is left for a scrutinee that leaves the width genuinely
+// unrecoverable: a `dyn` launder, a union, an erased type parameter.
+//
+// The observable end of that (what the folded test *prints*, and the surviving warning) is
+// corpus-pinned in `tests/conformance/narrowing/is_erased_width_static.noe`; what is pinned here is
+// the checker-side rule — which scrutinees warn, which fold, and to what. (The reified `f32`
+// narrowing is corpus-pinned in `tests/conformance/narrowing/f32_width_subtype.noe`.)
 
 /// Return every warning-severity diagnostic's code for `text`, in order.
 fn warn_codes(text: &str) -> Vec<String> {
@@ -2720,9 +3172,101 @@ fn scalar_is_base_types_do_not_warn() {
 #[test]
 fn container_of_erased_width_does_not_warn() {
     // A container target reifies its element width (packed storage, sibling slice), so
-    // `x is List<i32>` is legitimate — only a *bare scalar* width target is always-false.
+    // `x is List<i32>` is legitimate — only a *bare scalar* width target is unanswerable.
     assert!(codes("fn f(x: dyn): bool { return x is List<i32>; }\n").is_empty());
     assert!(codes("fn f(x: dyn): bool { return x is List<f64>; }\n").is_empty());
+}
+
+/// Every answer the checker folded for `text`, in span order — the `folded_type_tests` channel.
+fn folded_answers(text: &str) -> Vec<bool> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
+    let mut folded: Vec<(noeta_span::Span, bool)> = super::check_all(&parsed.program)
+        .sites
+        .folded_type_tests
+        .into_iter()
+        .collect();
+    folded.sort_by_key(|(span, _)| span.start);
+    folded.into_iter().map(|(_, answer)| answer).collect()
+}
+
+#[test]
+fn a_width_test_the_checker_can_answer_is_folded_not_warned() {
+    // `a`'s declared type IS `i32`, so the test is decided — `true`, and silently. Answering
+    // `false` (what the runtime does, having no width to look at) would be simply wrong, and
+    // warning about it was noise on a program that had nothing wrong with it.
+    let src = "fn f(): bool { a: i32 = 5; return a is i32; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+    assert_eq!(folded_answers(src), [true]);
+}
+
+#[test]
+fn a_width_test_decided_false_is_folded_silently_too() {
+    // A *different* width, or a different signedness, is equally decided — `i32` is not `i64` and
+    // not `u32`, since widths have identity-only subtyping. This is a decided answer, not an
+    // erasure problem, so it gets no E0063. (Whether an always-false test deserves a complaint of
+    // its own is a separate question from erasure, and no code makes it today: `s is int` on a
+    // `string` is just as impossible and just as silent.)
+    for target in ["i64", "u32", "i8"] {
+        let src = format!("fn f(): bool {{ a: i32 = 5; return a is {target}; }}\n");
+        assert!(codes(&src).is_empty(), "`is {target}` should be silent");
+        assert_eq!(
+            folded_answers(&src),
+            [false],
+            "`is {target}` should fold false"
+        );
+    }
+}
+
+#[test]
+fn float_and_f64_are_distinct_static_types_so_both_directions_fold() {
+    // `f64` is bit-identical to `float` at runtime, which is exactly why the runtime cannot tell
+    // them apart. Statically they are distinct types that do not widen into each other, so both
+    // tests are decided.
+    assert_eq!(
+        folded_answers("fn f(): bool { x: f64 = 1.5; return x is f64; }\n"),
+        [true]
+    );
+    assert_eq!(
+        folded_answers("fn f(): bool { x: float = 1.5; return x is f64; }\n"),
+        [false]
+    );
+}
+
+#[test]
+fn a_scrutinee_that_does_not_fix_the_width_still_warns_and_folds_nothing() {
+    // The genuinely unanswerable scrutinees: the `dyn` top, a union (`number` is one), and an
+    // erased type parameter. In each the checker knows a *set* — or nothing — and the value cannot
+    // be asked, so no answer exists to fold.
+    for scrut in ["dyn", "number", "int | string"] {
+        let src = format!("fn f(x: {scrut}): bool {{ return x is i32; }}\n");
+        assert_eq!(codes(&src), ["E0063"], "`{scrut}` should warn");
+        assert!(folded_answers(&src).is_empty(), "`{scrut}` must not fold");
+    }
+    let param = "fn f<T>(x: T): bool { return x is i32; }\n";
+    assert_eq!(codes(param), ["E0063"]);
+    assert!(folded_answers(param).is_empty());
+}
+
+#[test]
+fn f32_needs_no_special_case_and_gets_none() {
+    // `f32` is reified — it has a real runtime tag — so it is not an erased width, nothing folds,
+    // and the runtime answers it. That holds whether or not the checker also knows the answer.
+    assert!(folded_answers("fn f(): bool { x: f32 = 1.5f32; return x is f32; }\n").is_empty());
+    assert!(codes("fn f(): bool { x: f32 = 1.5f32; return x is f32; }\n").is_empty());
+}
+
+#[test]
+fn a_folded_true_test_still_narrows_its_branch() {
+    // Folding must not cost the narrowing the test performs. Inside the branch `a` is still seen
+    // as an `i32`, so `b: i32 = a` and the `i32` method on it both check; the E0007 that a lost
+    // narrowing would produce is what this asserts the absence of.
+    let src =
+        "fn f(): int { a: i32 = 5; if a is i32 { b: i32 = a; return b.to_int(); } return 0; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
 
 // ----- associated types on traits (ExtBundle→ExtTrait convergence, slice 1a) -----
@@ -2834,4 +3378,728 @@ class Boxx {
 fn f(b: Boxx): int { return b.get(); }
 ";
     assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+// ----- E0065 / E0007: reified containers are not their payloads (dev-story sweep) -----
+//
+// `Option` and `Result` carry their own runtime head constructor (`some`/`none`, `Ok`/`Err`), never
+// the payload's — so `x is P` on an `Option<P>` is statically always false. It used to type-check
+// *and flow-narrow*, so the dead branch read the payload's fields and only the runtime disagreed
+// (E0005, "no field `x` on enum"). Now the test warns (E0065, advisory like E0063) and, crucially,
+// narrows nothing — which is what turns a misuse of the branch into a real error.
+
+#[test]
+fn is_payload_on_an_option_warns_impossible() {
+    let src = "\
+struct P { x: int }
+fn f(p: ?P): bool { return p is P; }
+";
+    assert_eq!(warn_codes(src), ["E0065"]);
+}
+
+#[test]
+fn is_payload_on_a_result_warns_impossible() {
+    let src = "fn f(r: Result<int, string>): bool { return r is int; }\n";
+    assert_eq!(warn_codes(src), ["E0065"]);
+}
+
+#[test]
+fn the_impossible_test_diagnostic_is_a_warning_not_an_error() {
+    // Advisory, exactly like E0063: the program is well-formed and still compiles.
+    let src = "fn f(r: Result<int, string>): bool { return r is int; }\n";
+    assert_eq!(codes(src), ["E0065"]);
+}
+
+#[test]
+fn is_the_container_itself_does_not_warn() {
+    // The true test — the value really is an `Option`/`Result`.
+    assert!(codes("fn f(p: ?int): bool { return p is Option<int>; }\n").is_empty());
+    assert!(
+        codes("fn f(r: Result<int, string>): bool { return r is Result<int, string>; }\n")
+            .is_empty()
+    );
+}
+
+#[test]
+fn is_a_kind_type_does_not_warn_because_containers_are_enums() {
+    // `Option`/`Result` ARE enums at runtime, so `x is Enum` is genuinely `true`; flagging it
+    // would be wrong, not merely noisy.
+    assert!(codes("fn f(p: ?int): bool { return p is Enum; }\n").is_empty());
+    assert!(codes("fn f(r: Result<int, string>): bool { return r is Enum; }\n").is_empty());
+}
+
+#[test]
+fn is_an_open_target_does_not_warn() {
+    // `dyn` and a `dyn Trait` membership test are the runtime's call, not a provable constant.
+    assert!(codes("fn f(p: ?int): bool { return p is dyn; }\n").is_empty());
+    let src = "\
+trait Speaks { fn speak(): string }
+fn f(p: ?int): bool { return p is dyn Speaks; }
+";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn is_a_bare_type_parameter_does_not_warn() {
+    // `T` is erased and may instantiate to the container itself.
+    let src = "fn f<T>(p: ?T): bool { return p is T; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn an_impossible_test_narrows_nothing_in_an_if() {
+    // The whole point: the dead branch must stop type-checking as the payload. Reading `p.x`
+    // inside it is now the E0007 the member path reports, not silence.
+    let src = "\
+struct P { x: int }
+fn f(p: ?P): int {
+  if p is P { return p.x; }
+  return 0;
+}
+";
+    assert_eq!(codes(src), ["E0065", "E0007"]);
+}
+
+#[test]
+fn an_impossible_test_narrows_nothing_in_a_match_arm() {
+    let src = "\
+struct P { x: int }
+fn f(p: ?P): int {
+  return match p {
+    is P => p.x,
+    _ => 0,
+  };
+}
+";
+    assert_eq!(codes(src), ["E0065", "E0007"]);
+}
+
+#[test]
+fn a_real_is_narrowing_still_narrows() {
+    // The guard must not disturb the ordinary `dyn`/union narrowing it sits beside.
+    let src = "\
+struct P { x: int }
+fn f(d: dyn): int {
+  if d is P { return d.x; }
+  return 0;
+}
+";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn a_member_on_a_closed_builtin_is_an_error_in_value_position() {
+    // The call path already caught `s.nope()`; the *member* path silently answered `Unknown`, so
+    // `s.nope`, `[1].nope` and `p.x`-through-an-optional passed `check` and failed at run time.
+    assert_eq!(
+        codes("fn f(s: string): dyn { return s.nope; }\n"),
+        ["E0007"]
+    );
+    assert_eq!(
+        codes("fn f(xs: List<int>): dyn { return xs.nope; }\n"),
+        ["E0007"]
+    );
+    let src = "\
+struct P { x: int }
+fn f(p: ?P): dyn { return p.x; }
+";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
+fn a_member_on_an_open_receiver_stays_lenient() {
+    // `dyn` and a user `Named` type keep deferring — a trait impl or runtime dispatch this pass
+    // cannot see may still supply the member.
+    assert!(codes("fn f(d: dyn): dyn { return d.whatever; }\n").is_empty());
+}
+
+#[test]
+fn a_real_member_on_a_closed_builtin_still_resolves() {
+    // The guard fires only when nothing resolved; a genuine built-in method handle is untouched.
+    assert!(codes("fn f(s: string): dyn { return s.upper; }\n").is_empty());
+    assert!(codes("fn f(xs: List<int>): dyn { return xs.len; }\n").is_empty());
+}
+
+#[test]
+fn an_optional_constructor_named_as_a_type_gets_the_idiom() {
+    // `x is none` / `x is Ok` name a *value* constructor. It stays E0013 (there is no such type),
+    // but the help points at the spelling that works instead of at the type catalog — and the
+    // E0065 warning is suppressed, since a second diagnostic about a type that does not exist is
+    // noise.
+    assert_eq!(
+        codes("fn f(p: ?int): bool { return p is none; }\n"),
+        ["E0013"]
+    );
+    assert_eq!(
+        codes("fn f(p: ?int): bool { return p is some; }\n"),
+        ["E0013"]
+    );
+    assert_eq!(
+        codes("fn f(r: Result<int, string>): bool { return r is Ok; }\n"),
+        ["E0013"]
+    );
+}
+
+// ----- E0065: comparing a reified container with its payload (dev-story sweep) -----
+//
+// The trap this closes is reached invisibly: `??=` deliberately *unwraps*, retyping its binding
+// from `Option<int>` to `int` (the documented one-place exception to reassignment stability). A
+// `mut column: ?int` that has been `??=`-assigned once therefore stops comparing equal to the
+// `?int` it is tested against — silently, because `==` is universal and imposes no bound.
+
+#[test]
+fn comparing_an_option_to_its_payload_warns() {
+    let src = "fn f(p: ?int, n: int): bool { return p == n; }\n";
+    assert_eq!(warn_codes(src), ["E0065"]);
+    let src = "fn f(p: ?int, n: int): bool { return n != p; }\n";
+    assert_eq!(warn_codes(src), ["E0065"]);
+}
+
+#[test]
+fn comparing_a_result_to_its_payload_warns() {
+    let src = "fn f(r: Result<int, string>, n: int): bool { return r == n; }\n";
+    assert_eq!(warn_codes(src), ["E0065"]);
+}
+
+#[test]
+fn the_container_compare_diagnostic_is_a_warning_not_an_error() {
+    assert_eq!(
+        codes("fn f(p: ?int, n: int): bool { return p == n; }\n"),
+        ["E0065"]
+    );
+}
+
+#[test]
+fn comparing_two_options_does_not_warn() {
+    // Like with like — including `x == none`, which is *the* presence test.
+    assert!(codes("fn f(a: ?int, b: ?int): bool { return a == b; }\n").is_empty());
+    assert!(codes("fn f(p: ?int): bool { return p == none; }\n").is_empty());
+    assert!(codes("fn f(p: ?int): bool { return p != none; }\n").is_empty());
+    assert!(codes("fn f(p: ?int, n: int): bool { return p == some(n); }\n").is_empty());
+}
+
+#[test]
+fn comparing_a_container_to_an_open_type_does_not_warn() {
+    // A `dyn` operand really could hold the container at runtime.
+    assert!(codes("fn f(p: ?int, d: dyn): bool { return p == d; }\n").is_empty());
+}
+
+#[test]
+fn comparing_a_container_to_a_bare_type_parameter_does_not_warn() {
+    let src = "fn f<T>(p: ?T, t: T): bool { return p == t; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn ordinary_cross_type_equality_is_still_unflagged() {
+    // Deliberately narrow: this rule is about the container/payload confusion, not a general
+    // "these types can never be equal" analysis, which `==`'s universality does not support.
+    assert!(codes("fn f(n: int, s: string): bool { return n == s; }\n").is_empty());
+}
+
+// ----- Expectation propagation into `match` arms / `if…then…else` branches -----
+//
+// The bidirectional expectation a `match` expression is checked against now reaches its ARMS. It
+// used to stop at the `match`, so every arm synthesized blind and a form that can only be typed
+// against an expectation — a heterogeneous `Map<string, dyn>`, an empty `{}`/`[]`, a `.{ … }`, a
+// bare numeric literal narrowing to a fixed width — worked after a bare `return` but not inside an
+// arm. `if c then a else b` desugars to a `match`, so its branches ride the same path.
+
+/// Parse `text` and return `(code, span)` for every checker diagnostic, in order.
+fn coded_spans(text: &str) -> Vec<(String, noeta_span::Span)> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "test program must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    check(&parsed.program)
+        .iter()
+        .map(|d| (d.code.to_string(), d.span))
+        .collect()
+}
+
+#[test]
+fn return_position_mixed_map_literal_is_clean() {
+    // The baseline the arms below have to match: a `return` already supplies the expectation.
+    let src = "fn f(): Map<string, dyn> { return {\"type\": \"array\", \"n\": 1}; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn match_arm_absorbs_the_expected_map_value_type() {
+    let src = "fn f(x: int): Map<string, dyn> {\n\
+               \x20   return match x { 1 => {\"type\": \"array\", \"n\": 1}, _ => {\"t\": \"x\"} };\n\
+               }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn if_then_else_branches_absorb_the_expected_map_value_type() {
+    let src = "fn f(x: int): Map<string, dyn> {\n\
+               \x20   return if x == 1 then {\"type\": \"array\", \"n\": 1} else {\"t\": \"x\"};\n\
+               }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn an_empty_map_arm_absorbs_the_expected_map_type() {
+    // The originating repro: the mixed arm needs the expectation to be a `Map<string, dyn>` and the
+    // empty arm needs it to be a map at all.
+    let src = "fn f(x: int): Map<string, dyn> {\n\
+               \x20   return match x { 1 => {\"type\": \"array\", \"n\": 1}, _ => {} };\n\
+               }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn an_empty_map_branch_of_an_if_then_else_absorbs_the_expected_map_type() {
+    let src = "fn f(x: int): Map<string, dyn> {\n\
+               \x20   return if x == 1 then {\"type\": \"array\", \"n\": 1} else {};\n\
+               }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn match_arm_absorbs_the_expected_list_element_type() {
+    let src = "fn f(x: int): List<dyn> { return match x { 1 => [1, \"two\", true], _ => [] }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn match_arm_absorbs_a_fixed_width_numeric_literal() {
+    // `try_adapt_literal` is reached through `check`, so it only fires once the arm has an
+    // expectation — before, `200` synthesized as `int` and failed to subsume into `u8`.
+    let src = "fn f(x: int): u8 { return match x { 1 => 200, _ => 0 }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn match_arm_absorbs_a_target_typed_struct_literal() {
+    let src = "struct Point { x: int; y: int }\n\
+               fn f(k: int): Point { return match k { 1 => .{ x: 1, y: 2 }, _ => .{ x: 0, y: 0 } }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn if_then_else_branches_absorb_a_target_typed_struct_literal() {
+    let src = "struct Point { x: int; y: int }\n\
+               fn f(b: bool): Point { return if b then .{ x: 1, y: 2 } else .{ x: 0, y: 0 }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn match_arm_absorbs_an_expected_option() {
+    // `none` and `some(…)` absorb their expected `Option<T>` in an arm exactly as at a `return`.
+    let src = "fn f(x: int): ?int { return match x { 1 => some(1), _ => none }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn an_ill_typed_match_arm_still_reports_on_the_arm() {
+    // The expectation makes the arm the *reporting* site: E0007 lands on the offending arm body,
+    // not on the whole `match`.
+    let src = "fn f(x: int): Map<string, int> { return match x { 1 => {\"a\": 1}, _ => 5 }; }\n";
+    let diags = coded_spans(src);
+    assert_eq!(
+        diags.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(),
+        ["E0007"],
+        "{diags:?}"
+    );
+    let (_, span) = &diags[0];
+    let text = &src[span.start as usize..span.end as usize];
+    assert_eq!(
+        text, "5",
+        "the diagnostic must point at the arm body, got {text:?}"
+    );
+}
+
+#[test]
+fn a_statement_position_match_still_synthesizes_its_arms() {
+    // No expectation exists there, so nothing changes: a heterogeneous map literal in a
+    // statement-position arm is the same E0007 it always was, reported by map synthesis.
+    let src = "fn f(x: int): void {\n\
+               \x20   match x { 1 => {\"a\": 1, \"b\": \"two\"}, _ => {\"a\": 2} };\n\
+               }\n";
+    assert_eq!(codes(src), ["E0007"], "{:?}", codes(src));
+}
+
+#[test]
+fn a_block_bodied_arm_in_a_checked_position_is_still_not_a_value() {
+    // Value position is unchanged by the expectation: a block arm produces no value (E0055), and it
+    // is the ONLY diagnostic — the expectation is not additionally re-tested against the arm's
+    // `unit`, which would bury the real message under a spurious E0007.
+    let src = "fn f(x: int): int { return match x { 1 => { echo 1; }, _ => 0 }; }\n";
+    assert_eq!(codes(src), ["E0055"], "{:?}", codes(src));
+}
+
+#[test]
+fn an_open_expectation_leaves_match_arms_synthesizing() {
+    // `dyn` is an open position with nothing to push down, so a mixed map in an arm is still the
+    // synthesis-position error — the guard on the new arm keeps `Unknown`/`dyn` behavior identical.
+    let src = "fn f(x: int): dyn { return match x { 1 => {\"a\": 1, \"b\": \"two\"}, _ => 0 }; }\n";
+    assert_eq!(codes(src), ["E0007"], "{:?}", codes(src));
+}
+
+// ----- Bare variant patterns + E0066 arm reachability -----
+//
+// A bare identifier pattern resolves to a **payload-free variant of the scrutinee's own enum** when
+// one of that name exists, and is a binding otherwise. So `String => …` on a `Type` scrutinee is the
+// `Type.String` case (refutable, binding nothing, counting toward exhaustiveness), while `rest => …`
+// on the same scrutinee — or `String` on an `int` — is the ordinary catch-all binding. E0066 still
+// reports the arms a genuine catch-all swallows.
+
+/// The rendered help lines, so a test can assert the suggestion actually names the fix.
+fn helps(text: &str) -> Vec<String> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
+    check(&parsed.program)
+        .iter()
+        .filter_map(|d| d.help.clone())
+        .collect()
+}
+
+const TYPE_ENUM: &str = "enum Type { String; Int; Bool; List(inner: string) }\n";
+
+#[test]
+fn a_bare_payload_free_variant_pattern_resolves_to_the_variant() {
+    // The flip: the unambiguous-once-typed spelling is the short one. A lone `String` arm is now a
+    // case test, so the `match` is NOT exhaustive — E0011 names exactly the cases still missing,
+    // which is proof the arm covered `String` and nothing else.
+    let src =
+        format!("{TYPE_ENUM}fn f(t: Type): string {{ return match t {{ String => \"s\" }}; }}\n");
+    assert_eq!(codes(&src), ["E0011"], "{:?}", codes(&src));
+    assert!(
+        !helps(&src).iter().any(|h| h.contains("Type.String")),
+        "nothing is left to qualify: {:?}",
+        helps(&src)
+    );
+}
+
+#[test]
+fn every_payload_free_variant_spelled_bare_is_exhaustive() {
+    // No `_` needed: each bare name covers its own case, so naming them all closes the match.
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ String => \"s\", Int => \"i\", Bool => \"b\", List(i) => i }};\n}}\n"
+    );
+    assert!(codes(&src).is_empty(), "{:?}", codes(&src));
+}
+
+#[test]
+fn a_resolved_variant_pattern_binds_nothing() {
+    // It is the variant, not a name for the value — so the arm body cannot refer to it. (E0005 is
+    // the unknown-name code; the point is that *some* error fires rather than the whole value
+    // silently flowing through under the variant's name.)
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ String => \"${{String}}\", _ => \"o\" }};\n}}\n"
+    );
+    assert_eq!(codes(&src), ["E0005"], "{:?}", codes(&src));
+}
+
+#[test]
+fn arms_below_a_resolved_variant_stay_reachable() {
+    // What used to be E0067 + two E0066s is now simply a correct `match`.
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ String => \"s\", Int => \"i\", _ => \"o\" }};\n}}\n"
+    );
+    assert!(codes(&src).is_empty(), "{:?}", codes(&src));
+}
+
+#[test]
+fn resolution_is_scrutinee_directed() {
+    // A payload-free variant of a DIFFERENT enum is not this scrutinee's case, so it stays a
+    // binding — and being irrefutable, it kills the arm after it (E0066).
+    let other = "enum Other { String; Int }\n";
+    let src = format!(
+        "{TYPE_ENUM}{other}fn f(o: Other): string {{\n  return match o {{ Bool => \"b\", _ => \"o\" }};\n}}\n"
+    );
+    assert_eq!(codes(&src), ["E0066"], "{:?}", codes(&src));
+    // …and a gradual scrutinee resolves nothing at all: `String` binds the whole `dyn` value.
+    let dynamic = format!(
+        "{TYPE_ENUM}fn f(d: dyn): string {{ return match d {{ String => \"s\", _ => \"o\" }}; }}\n"
+    );
+    assert_eq!(codes(&dynamic), ["E0066"], "{:?}", codes(&dynamic));
+}
+
+#[test]
+fn a_nested_bare_variant_resolves_against_the_field_type() {
+    // The inner pattern's scrutinee is the payload's type, not the outer one.
+    let src = "fn f(r: Result<?int, string>): string {\n  return match r {\n    Ok(none) => \"empty\",\n    Ok(some(v)) => \"${v}\",\n    Err(e) => e,\n  };\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn a_qualified_payload_free_variant_pattern_is_clean() {
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ Type.String => \"s\", _ => \"o\" }};\n}}\n"
+    );
+    assert!(codes(&src).is_empty(), "{:?}", codes(&src));
+}
+
+#[test]
+fn a_payload_carrying_variant_pattern_needs_no_qualification() {
+    // Call-shaped, so it can never be read as a binding — and it emits a real test, so the arms
+    // below it stay reachable.
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ List(i) => i, _ => \"o\" }};\n}}\n"
+    );
+    assert!(codes(&src).is_empty(), "{:?}", codes(&src));
+}
+
+#[test]
+fn a_binding_that_is_not_a_variant_of_the_scrutinee_is_clean() {
+    // Deliberately narrow: the rule fires only on a payload-free variant of the SCRUTINEE's own
+    // enum, never on an ordinary catch-all binding.
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ Type.Int => \"i\", rest => \"other\" }};\n}}\n"
+    );
+    assert!(codes(&src).is_empty(), "{:?}", codes(&src));
+    assert!(
+        codes("fn f(n: int): string { return match n { 0 => \"z\", rest => \"${rest}\" }; }\n")
+            .is_empty()
+    );
+}
+
+#[test]
+fn an_arm_after_a_wildcard_is_unreachable() {
+    let src = "fn f(n: int): string { return match n { _ => \"m\", 1 => \"o\" }; }\n";
+    assert_eq!(codes(src), ["E0066"]);
+    assert!(
+        helps(src)[0].contains("last position"),
+        "the help must say where the catch-all belongs: {:?}",
+        helps(src)
+    );
+}
+
+#[test]
+fn an_arm_after_a_bare_binding_is_unreachable() {
+    let src = "fn f(n: int): string { return match n { rest => \"${rest}\", 1 => \"o\" }; }\n";
+    assert_eq!(codes(src), ["E0066"]);
+}
+
+#[test]
+fn a_catch_all_in_last_position_is_clean() {
+    assert!(
+        codes("fn f(n: int): string { return match n { 0 => \"z\", _ => \"m\" }; }\n").is_empty()
+    );
+    assert!(
+        codes("fn f(n: int): string { return match n { 0 => \"z\", rest => \"${rest}\" }; }\n")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_guarded_catch_all_leaves_the_arms_below_it_reachable() {
+    // The checker cannot prove a guard ever true, so a guarded arm closes nothing.
+    let src = "fn f(n: int): string { return match n { big if big > 9 => \"b\", _ => \"m\" }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn a_bare_none_arm_resolves_on_an_option_scrutinee() {
+    // `none` is the correct bare spelling of the Option case, so it is a case test in EITHER order
+    // — the ordering bug the old always-binds rule forced on every author.
+    let none_first =
+        "fn f(o: ?int): string { return match o { none => \"n\", some(v) => \"${v}\" }; }\n";
+    assert!(codes(none_first).is_empty(), "{:?}", codes(none_first));
+    let some_first =
+        "fn f(o: ?int): string { return match o { some(v) => \"${v}\", none => \"n\" }; }\n";
+    assert!(codes(some_first).is_empty(), "{:?}", codes(some_first));
+    // A `none` arm alone covers only the none case — the some case is still missing.
+    let lone = "fn f(o: ?int): string { return match o { none => \"n\" }; }\n";
+    assert_eq!(codes(lone), ["E0011"], "{:?}", codes(lone));
+}
+
+#[test]
+fn a_bare_none_on_a_non_option_scrutinee_is_still_a_binding() {
+    // Resolution is scrutinee-directed, so on a `dyn` there is no Option case to resolve to and
+    // `none` is an ordinary irrefutable binding — it swallows the arm below it.
+    let src = "fn f(d: dyn): string { return match d { none => \"n\", some(v) => \"${v}\" }; }\n";
+    assert_eq!(codes(src), ["E0066"], "{:?}", codes(src));
+    assert!(
+        helps(src)[0].contains("plain binding"),
+        "the help must say why it did not resolve: {:?}",
+        helps(src)
+    );
+}
+
+/// The rendered diagnostic MESSAGES, for a rule whose identity lives in its wording rather than
+/// only in its code — two diagnostics may share a code and mean different things.
+fn messages(text: &str) -> Vec<String> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
+    check(&parsed.program)
+        .iter()
+        .map(|d| d.message.clone())
+        .collect()
+}
+
+/// **Which** E0058 a structurally-unrecordable construction gets.
+///
+/// Two diagnostics share the code and say opposite things about the cause: "records no type
+/// argument … nothing supplies an instantiation" (the type was *erased*, no instantiation reached
+/// the call at all) and "`T` is a type parameter of the enclosing declaration" (an instantiation
+/// exists, it just cannot travel to this position). Which one fires turns on
+/// `open_only_by_erasure`, whose parameter case was spelled as "a `Named` head in the in-scope name
+/// set" — a trigger that stopped firing the moment a parameter became its own lattice variant, and
+/// silently downgraded every such site to the wrong explanation.
+///
+/// `generics/generic_in_generic_unrecordable.noe` covers this case in the corpus but pins only the
+/// CODE and the span, so it stayed green through the regression. This is the test that would not
+/// have.
+#[test]
+fn an_unrecordable_construction_names_the_type_parameter_not_erasure() {
+    let src = "\
+struct Todo { id: int }
+class Repository<T> {
+  pub tbl: string
+  fn new(tbl: string): Repository<T> { return Repository { tbl: tbl }; }
+  fn label(): string { return \"${self.tbl}\" ~ type_name::<T>(); }
+  fn rebuild(): string {
+    r: Repository<T> = Repository.new(self.tbl ~ \"2\");
+    return r.label();
+  }
+}
+r: Repository<Todo> = Repository::<Todo>.new(\"todos\");
+echo r.rebuild();
+";
+    assert_eq!(codes(src), vec!["E0058"], "{:?}", codes(src));
+    let m = &messages(src)[0];
+    assert!(
+        m.contains("is a type parameter of the enclosing declaration"),
+        "an in-scope parameter is open BY THE PARAMETER, not by erasure — got: {m}"
+    );
+}
+
+/// **The type walkers must be total over the lattice.** `erase_type_params`, `apply_subst` and
+/// `bind_type_params` descended into every container the language has EXCEPT `Tuple` and `Union`,
+/// so a parameter written inside one was neither erased nor instantiated — it survived as a
+/// `Type::Param`, and a parameter is a subtype of nothing, so the argument check rejected a
+/// perfectly ordinary call: `f((1, 2))` against `fn f<T>(p: (T, int))` reported *"argument of type
+/// `(int, int)` is not assignable to `(T, int)`"*, naming a parameter the caller cannot even spell.
+#[test]
+fn a_type_parameter_inside_a_tuple_erases_like_one_inside_a_list() {
+    let src = "fn f<T>(p: (T, int)): int { return 1; }\necho \"${f((1, 2))}\";\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// The other half: a tuple element **instantiates** from the argument, so the call's result is the
+/// caller's type and not a leaked parameter. The un-erased form escaped all the way into a
+/// caller-visible type — `p = mk(3)` was `(T, int)` in a scope where `T` means nothing.
+#[test]
+fn a_type_parameter_inside_a_tuple_substitutes_from_the_argument() {
+    let src = "fn mk<T>(v: T): (T, int) { return (v, 1); }\np = mk(3);\ns: string = p;\necho s;\n";
+    assert_eq!(codes(src), ["E0007"], "{:?}", messages(src));
+    assert!(
+        messages(src)[0].contains("found `(int, int)`"),
+        "the tuple element must be the instantiated `int`, not a leaked `T`: {:?}",
+        messages(src)
+    );
+}
+
+/// A union member is the same gap. `T | string` erases to `dyn | string` — which **is** `dyn`, so
+/// the parameter accepts any argument, the honest answer when nothing determines `T`. It used to
+/// stay `T | string` and reject every argument that was not already a `string`.
+#[test]
+fn a_type_parameter_inside_a_union_erases_to_dyn() {
+    let src = "fn h<T>(x: T | string): int { return 1; }\necho \"${h(1)}\";\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// And a union member instantiates like any other: a bound `T` is substituted inside the union, so
+/// the returned type names the caller's `int` rather than the callee's parameter.
+#[test]
+fn a_type_parameter_inside_a_union_substitutes() {
+    let src = "fn k<T>(v: T): T | string { return \"s\"; }\ns: string = k(1);\necho s;\n";
+    assert_eq!(codes(src), ["E0007"], "{:?}", messages(src));
+    assert!(
+        messages(src)[0].contains("found `int | string`"),
+        "the union member must be the instantiated `int`, not a leaked `T`: {:?}",
+        messages(src)
+    );
+}
+
+/// A **declaration-position** consequence of the same gap: a default value is checked against its
+/// declared type with the enclosing parameters erased, so `(T, int) = (0, 0)` was rejected at the
+/// declaration itself — no call site involved.
+#[test]
+fn a_tuple_typed_default_is_checked_against_the_erased_type() {
+    let src =
+        "struct Holder<T> {\n  pair: (T, int) = (0, 0)\n}\nh = Holder { };\necho \"${h.pair}\";\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// **A method's `<T>` inside a `class Repo<T>` warns (E0075).** The shadowing is sound — the two
+/// are different parameters and the inner one wins — but a reader of `Repo::<Todo>.label::<User>()`
+/// cannot tell which `T` the body means, so the compiler says so and keeps going.
+#[test]
+fn a_method_type_parameter_that_shadows_its_class_warns() {
+    let src = "class Repo<T> {\n  fn label<T>(): string { return \"x\"; }\n}\n";
+    assert_eq!(codes(src), ["E0075"], "{:?}", messages(src));
+    let d = &diagnostics(src)[0];
+    assert_eq!(d.severity, noeta_diagnostics::Severity::Warning);
+    assert!(
+        d.message
+            .contains("`T` shadows the enclosing `T` of `Repo`"),
+        "the message must name both declarations: {}",
+        d.message
+    );
+    // The second label points at the CLASS's `<T>`, so "where the outer one is declared" is in the
+    // rendered report rather than left to the reader.
+    assert_eq!(d.labels.len(), 2, "primary + the outer declaration: {d:?}");
+    assert!(
+        d.labels[1].message.contains("declared here"),
+        "{:?}",
+        d.labels
+    );
+    let outer = src.find("<T>").expect("the class's own `<T>`") as u32 + 1;
+    assert_eq!(
+        (d.labels[1].span.start, d.labels[1].span.end),
+        (outer, outer + 1),
+        "the label must span the CLASS's `T`, not the method's"
+    );
+}
+
+/// It does not fire on a **different name** — the ordinary generic method, which reaches both
+/// parameters and is exactly what the warning tells you to write.
+#[test]
+fn a_method_type_parameter_with_its_own_name_is_silent() {
+    let src = "class Repo<T> {\n  fn label<U>(): string { return \"x\"; }\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// It does not fire on a **nominal type** of the same name. `struct T { }` beside a `class Repo<T>`
+/// is legitimate — the parameter's author does not control what somebody named a type — and the
+/// scope the check consults holds parameters only, so there is nothing there to hide.
+#[test]
+fn a_type_parameter_that_shares_a_name_with_a_declared_type_is_silent() {
+    let src =
+        "struct T {\n  id: int\n}\nclass Repo<T> {\n  fn label(): string { return \"x\"; }\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// It does not fire across **sibling scopes**: two methods may each declare `<T>`, because neither
+/// is inside the other. The scope is saved and restored per declaration, so the second method's
+/// `<T>` is compared against the class's — a non-generic class here — and not the first method's.
+#[test]
+fn two_sibling_methods_may_each_declare_the_same_parameter_name() {
+    let src = "class Repo {\n  fn a<T>(x: T): string { return \"a\"; }\n  fn b<T>(x: T): string { return \"b\"; }\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
+}
+
+/// And a top-level generic `fn` beside a generic class is not nested in it, so a shared name is
+/// nobody's shadow.
+#[test]
+fn a_top_level_generic_fn_does_not_shadow_a_generic_class() {
+    let src = "class Repo<T> {\n  pub v: int\n}\nfn label<T>(x: T): string { return \"x\"; }\necho label(1);\n";
+    assert!(codes(src).is_empty(), "{:?}", messages(src));
 }

@@ -28,8 +28,8 @@
 
 use crate::pretty::type_ref_str;
 use crate::{
-    BinaryOp, CallArg, DeriveSpec, Expr, FieldDecl, FieldInit, FnDecl, ObjectLit, Param, Stmt,
-    StrPart, TraitDecl, TypeRef,
+    BinaryOp, CallArg, DeriveSpec, Expr, FieldDecl, FieldInit, FnDecl, Name, ObjectLit, Param,
+    Stmt, StrPart, TraitDecl, TypeOperand, TypeRef,
 };
 use noeta_span::Span;
 
@@ -86,16 +86,21 @@ pub fn plan_derive(
     fields: &[FieldDecl],
     existing: &[FnDecl],
 ) -> Option<Result<Vec<FnDecl>, DerivePlanError>> {
-    if let Some(tr) = ctx.user_trait(&spec.name) {
+    if let Some(tr) = ctx.user_trait(spec.name.as_str()) {
         return Some(plan_user_trait_derive(&tr, fields, existing, spec));
     }
     if spec.via.is_some() {
-        return Some(plan_builtin_via(&spec.name, type_name, fields, spec));
+        return Some(plan_builtin_via(
+            spec.name.as_str(),
+            type_name,
+            fields,
+            spec,
+        ));
     }
     if spec.name == ERROR_TRAIT {
         return Some(Ok(plan_error_derive(spec.span)));
     }
-    ctx.native_recipe(&spec.name)
+    ctx.native_recipe(spec.name.as_str())
         .map(|methods| Ok(plan_native_derive(&methods, spec.span)))
 }
 
@@ -162,7 +167,7 @@ pub fn plan_user_trait_derive(
                 existing,
                 &binding.target,
                 spec.span,
-                &tr.name,
+                tr.name.as_str(),
             )?);
             continue;
         }
@@ -172,7 +177,7 @@ pub fn plan_user_trait_derive(
         }
         // Required and unbound: deduce a field bridge — same-name first, else a unique
         // type-compatible candidate; ambiguity or absence is an error naming the options.
-        out.push(deduce_field_bridge(m, fields, spec.span, &tr.name)?);
+        out.push(deduce_field_bridge(m, fields, spec.span, tr.name.as_str())?);
     }
     Ok(out)
 }
@@ -195,18 +200,23 @@ fn plan_user_trait_via(
             "`via:` forwards the whole trait through the field; drop the `member: target` pairs",
         ));
     }
-    require_field(fields, via_field, &tr.name, spec.span)?;
+    require_field(fields, via_field, tr.name.as_str(), spec.span)?;
     Ok(tr
         .methods
         .iter()
         .filter(|tm| !existing.iter().any(|e| e.name == tm.sig.name))
         .map(|tm| {
             let m = &tm.sig;
-            // fn m(a: T, …): R { return self.<via>.m(a, …) }
+            // fn m(a: T, …): R { return self.<via>.m(a, …) }        — or, for an `async` method,
+            // async fn m(a: T, …): R { return self.<via>.m(a, …).await }
+            //
+            // `via:` delegates the WHOLE trait through the field, so the field's type implements the
+            // trait and its `m` has the trait's `async`-ness by the impl-conformance rule (E0015).
+            // The forwarder therefore awaits exactly when the trait declares the method `async`.
             let call = Expr::Call {
                 callee: Box::new(member(
                     member(ident("self", spec.span), via_field, spec.span),
-                    &m.name,
+                    m.name.as_str(),
                     spec.span,
                 )),
                 args: m
@@ -216,6 +226,7 @@ fn plan_user_trait_via(
                     .collect(),
                 span: spec.span,
             };
+            let call = maybe_await(call, m.is_async, spec.span);
             synth_fn(m, ret_stmt(call, spec.span), spec.span)
         })
         .collect())
@@ -263,8 +274,26 @@ fn bridge_to_target(
             span,
         ));
     }
-    if existing.iter().any(|e| e.name == target) {
-        // fn m(a: T, …): R { return self.<target>(a, …) }
+    if let Some(t) = existing.iter().find(|e| e.name == target) {
+        // A SYNC trait method cannot bridge to an `async` one: the bridge would return the target's
+        // `Future<R>` under a declared `R`, and there is no legal place to `.await` it (the
+        // synthesized body is not an async context). The reverse is fine — an `async` trait method
+        // bridging to a sync target is just a value the `async` wrapper wraps.
+        if t.is_async && !m.is_async {
+            return Err(DerivePlanError::new(
+                format!(
+                    "`{target}` is an `async fn`, but `{trait_name}.{}` is not",
+                    m.name
+                ),
+                format!(
+                    "bind `{}` to a synchronous method, or declare `async fn {}` on `{trait_name}`",
+                    m.name, m.name
+                ),
+            ));
+        }
+        // fn m(a: T, …): R { return self.<target>(a, …) }         — awaiting the call when the
+        // bridged-to method is itself `async` (an `async fn m` forwarding to an `async` target
+        // must unwrap the target's future before returning `R`).
         let call = Expr::Call {
             callee: Box::new(member(ident("self", span), target, span)),
             args: m
@@ -274,6 +303,7 @@ fn bridge_to_target(
                 .collect(),
             span,
         };
+        let call = maybe_await(call, t.is_async, span);
         return Ok(synth_fn(m, ret_stmt(call, span), span));
     }
     Err(DerivePlanError::new(
@@ -394,6 +424,7 @@ pub fn plan_builtin_via(
             ty: Some(named(type_name, span)),
             default: None,
             span,
+            positional: false,
         }],
         ret: Some(ret),
         ..empty_fn(name, span)
@@ -412,7 +443,7 @@ pub fn plan_builtin_via(
         }
         // fn add(other: T): T { return T { f: self.f + other.f } }
         let construct = Expr::Object(ObjectLit {
-            type_name: Some(type_name.to_string()),
+            type_name: Some(Name::canonical(type_name)),
             type_name_span: span,
             fields: vec![FieldInit {
                 name: via_field.clone(),
@@ -533,6 +564,7 @@ pub fn plan_native_derive(methods: &[(String, usize, String)], span: Span) -> Ve
                     ty: Some(named("dyn", span)),
                     default: None,
                     span,
+                    positional: false,
                 })
                 .collect();
             let callee = match handler.rsplit_once('.') {
@@ -719,6 +751,15 @@ fn visit_stmt_types(stmt: &mut Stmt, f: &mut impl FnMut(&mut TypeRef)) {
     }
 }
 
+/// Apply `f` to a reflection surface's type operand: the turbofish arm IS a [`TypeRef`], the
+/// dynamic arm an ordinary expression to recurse into.
+fn visit_type_operand_types(op: &mut TypeOperand, f: &mut impl FnMut(&mut TypeRef)) {
+    match op {
+        TypeOperand::Static(ty) => f(ty),
+        TypeOperand::Dynamic(e) => visit_expr_types(e, f),
+    }
+}
+
 /// Apply `f` to every [`TypeRef`] reachable from `expr`. Exhaustive over the expression grammar.
 fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
     match expr {
@@ -730,7 +771,7 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
             f(ty);
             visit_expr_types(blob, f);
         }
-        Expr::AttributesOf { ty, .. } => f(ty),
+        Expr::AttributesOf { ty, .. } | Expr::TypeName { ty, .. } => f(ty),
         Expr::RolesOf { ty, .. } => {
             if let Some(ty) = ty {
                 f(ty);
@@ -813,6 +854,12 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
             args.iter_mut()
                 .for_each(|a| visit_expr_types(&mut a.value, f));
         }
+        Expr::InstantiatedType {
+            recv, type_args, ..
+        } => {
+            visit_expr_types(recv, f);
+            type_args.iter_mut().for_each(&mut *f);
+        }
         Expr::Member { receiver, .. } | Expr::TupleIndex { receiver, .. } => {
             visit_expr_types(receiver, f)
         }
@@ -856,6 +903,9 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
         } => {
             visit_expr_types(scrutinee, f);
             for arm in arms.iter_mut() {
+                if let Some(guard) = &mut arm.guard {
+                    visit_expr_types(guard, f);
+                }
                 match &mut arm.body {
                     crate::ClosureBody::Expr(e) => visit_expr_types(e, f),
                     crate::ClosureBody::Block(stmts) => {
@@ -871,12 +921,19 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
                 }
             }
         }
-        Expr::TypeOf { value, .. } | Expr::FieldsOf { value, .. } => visit_expr_types(value, f),
-        Expr::ParamsOf { target, .. } | Expr::FieldSpecsOf { name: target, .. } => {
+        Expr::TypeOf { value, .. }
+        | Expr::FieldsOf { value, .. }
+        | Expr::TraitsOf { value, .. } => visit_expr_types(value, f),
+        Expr::ParamsOf { target, .. } | Expr::ReturnsOf { target, .. } => {
             visit_expr_types(target, f)
         }
+        // A turbofish operand IS a type reference (and the only one the derive rewrite can reach
+        // here); a dynamic one is an ordinary expression.
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
+            visit_type_operand_types(name, f)
+        }
         Expr::Construct { name, fields, .. } => {
-            visit_expr_types(name, f);
+            visit_type_operand_types(name, f);
             visit_expr_types(fields, f);
         }
         Expr::TierExpr { holes, .. } => holes.iter_mut().for_each(|h| visit_expr_types(h, f)),
@@ -921,7 +978,7 @@ fn require_field<'f>(
 
 fn ident(name: &str, span: Span) -> Expr {
     Expr::Ident {
-        name: name.to_string(),
+        name: Name::canonical(name),
         span,
     }
 }
@@ -937,7 +994,7 @@ fn member(receiver: Expr, name: &str, span: Span) -> Expr {
 
 fn named(name: &str, span: Span) -> TypeRef {
     TypeRef::Named {
-        name: name.to_string(),
+        name: Name::canonical(name),
         args: Vec::new(),
         span,
     }
@@ -953,7 +1010,7 @@ fn ret_stmt(value: Expr, span: Span) -> Vec<Stmt> {
 /// A bare synthesized `FnDecl` skeleton — name only, everything else empty/default.
 fn empty_fn(name: &str, span: Span) -> FnDecl {
     FnDecl {
-        name: name.to_string(),
+        name: Name::canonical(name),
         name_span: span,
         is_public: false,
         type_params: Vec::new(),
@@ -970,12 +1027,35 @@ fn empty_fn(name: &str, span: Span) -> FnDecl {
     }
 }
 
-/// A synthesized method carrying `template`'s signature (name/params/return) and the given body.
+/// A synthesized method carrying `template`'s signature (name/params/return/`async`) and the given
+/// body.
+///
+/// `is_async` is as much a part of a signature as the return type — a call to an `async fn m(): T`
+/// is typed `Future<T>` everywhere — so a synthesized method that dropped the flag declared a
+/// *different* method than the trait it stands in for, while its body forwarded to a real
+/// implementation that does hand back a future. That is how `@derive(Fetcher, via: inner)` over a
+/// trait with an `async fn` produced a synchronous `fn` whose value was a `<future>`.
 fn synth_fn(template: &FnDecl, body: Vec<Stmt>, span: Span) -> FnDecl {
     FnDecl {
         params: template.params.clone(),
         ret: template.ret.clone(),
+        is_async: template.is_async,
         body,
-        ..empty_fn(&template.name, span)
+        ..empty_fn(template.name.as_str(), span)
+    }
+}
+
+/// `expr` or `expr.await`, per `unwrap_future` — a forwarding body calls *another* callable, and an
+/// `async` one hands back a `Future<T>` the forwarder must unwrap before returning `T`. (The
+/// reverse needs nothing: an `async fn` whose body produces a plain value is exactly what `async`
+/// wraps.)
+fn maybe_await(expr: Expr, unwrap_future: bool, span: Span) -> Expr {
+    if unwrap_future {
+        Expr::Await {
+            expr: Box::new(expr),
+            span,
+        }
+    } else {
+        expr
     }
 }

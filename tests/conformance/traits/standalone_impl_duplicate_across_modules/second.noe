@@ -1,0 +1,7 @@
+// (No `namespace`: this file sits at `second.noe` in package `pkg`, so it IS `pkg.second`.)
+
+use pkg.types.{Decoder, Target};
+
+impl Decoder for Target {
+    fn step(s: string): string { return "second" }
+}

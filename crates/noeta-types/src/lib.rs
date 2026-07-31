@@ -26,6 +26,11 @@
 //! So the checker reports an error wherever a type is concretely known and unambiguously wrong, and
 //! tolerates only the interior holes above — never a hole at a typed boundary.
 //!
+//! [`Type::Never`] closes the lattice at the other end: the **bottom**, the declared return of a
+//! function that does not return. It is the mirror of `dyn` (everything widens into the top;
+//! the bottom widens into everything) and, like [`Type::Union`], it is *declared and never
+//! inferred*.
+//!
 //! ## `TypeId` interning — deferred
 //!
 //! The architecture calls for interning types behind a `TypeId`. That is a throughput
@@ -34,9 +39,127 @@
 //! therefore deferred until a benchmark justifies it; today `Type` is a plain owned tree.
 
 use noeta_ast::TypeRef;
+use noeta_span::{SourceId, Span};
 
 mod traits;
 pub use traits::{BUILTIN_TRAITS, BuiltinTrait, SERIALIZE_FORMATS, operator_trait};
+
+/// The **identity** of one generic type parameter: *where it was declared*.
+///
+/// A parameter is not its spelling. `class Repo<T>` and a method `fn label<T>()` inside it declare
+/// two different parameters that happen to share the letter `T`, and the inner one shadows the
+/// outer exactly as a local binding shadows a global. Keying identity on the name cannot express
+/// that — it makes the two the same thing, which is precisely how an explicit `Repo::<Todo>
+/// .label::<User>()` used to answer `Todo`: the class's argument occupied the key `"T"` and the
+/// method's own binding hit an `or_insert` on an occupied slot, silently discarding what the user
+/// wrote.
+///
+/// So identity is the parameter's own `<T>` declaration site — a fact carried as **data** from the
+/// declaration to every reference, never inferred from a spelling. Two parameters declared in
+/// different places are different parameters however they are spelled; two references that
+/// resolved to the same declaration are the same parameter even across modules, because the span
+/// travels with the collected signature.
+///
+/// Synthetic parameters (the prelude constructors `Ok`/`Err`/`some`, which have no source
+/// declaration) get reserved ids from [`ParamId::synthetic`] — a distinct [`SourceId`] no parser
+/// ever stamps, so they can never alias a real declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParamId(Span);
+
+/// Ordering exists only so a diagnostic can list parameters deterministically; it is source
+/// position, which is also declaration order within a file.
+impl Ord for ParamId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.0.source.0, self.0.start, self.0.end).cmp(&(
+            other.0.source.0,
+            other.0.start,
+            other.0.end,
+        ))
+    }
+}
+
+impl PartialOrd for ParamId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// The [`SourceId`] reserved for synthetic type parameters. `u32::MAX` is never assigned by the
+/// source map (ids are handed out from 0 upward), so a synthetic id cannot collide with the span
+/// of any real declaration.
+const SYNTHETIC_SOURCE: SourceId = SourceId(u32::MAX);
+
+impl ParamId {
+    /// The identity of a parameter declared at `span` — the span of its own `<T>` in the source.
+    pub fn at(span: Span) -> ParamId {
+        ParamId(span)
+    }
+
+    /// A reserved identity for a parameter with no source declaration (the prelude constructors'
+    /// `T`/`E`). Distinct per `index`, and distinct from every real declaration.
+    pub fn synthetic(index: u32) -> ParamId {
+        ParamId(Span::new_in(SYNTHETIC_SOURCE, index, index))
+    }
+
+    /// The declaration span, for a diagnostic that wants to point at the parameter itself.
+    /// [`None`] for a synthetic id, which points at no source.
+    pub fn decl_span(self) -> Option<Span> {
+        (self.0.source != SYNTHETIC_SOURCE).then_some(self.0)
+    }
+}
+
+/// A **reference to** a generic type parameter: its identity plus its spelling.
+///
+/// Equality, ordering and hashing consider **only** [`ParamId`]. The name is carried for display
+/// and diagnostics and is deliberately excluded — that exclusion is the invariant the whole
+/// representation exists to enforce, and making it a property of the type rather than a rule in a
+/// comment is what stops a future substitution map from quietly keying on the string again.
+#[derive(Debug, Clone, Eq)]
+pub struct ParamRef {
+    /// Identity — the *only* thing compared.
+    pub id: ParamId,
+    /// The spelling (`"T"`), for rendering and diagnostics only.
+    pub name: String,
+}
+
+impl ParamRef {
+    pub fn new(id: ParamId, name: impl Into<String>) -> ParamRef {
+        ParamRef {
+            id,
+            name: name.into(),
+        }
+    }
+}
+
+impl PartialEq for ParamRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl std::hash::Hash for ParamRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl PartialOrd for ParamRef {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ParamRef {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl std::fmt::Display for ParamRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
+}
 
 /// The kind of a declared nominal type — the discriminant of an abstract [`Type::Kind`] supertype.
 /// Mirrors the three declaration forms the language has.
@@ -74,6 +197,32 @@ pub enum Type {
     /// escape. Every type widens into it (`T <: dyn`); narrowing out (`dyn → T`) is explicit and
     /// checked. Operations on a `dyn` defer to the runtime dynamic dispatch path.
     Dyn,
+    /// The **bottom type** `never` — inhabited by no value, the declared return of a function that
+    /// **does not return** (`os.exit`, `server.serve`, a `panic`-like abort).
+    ///
+    /// It is the exact dual of [`Type::Dyn`], and the two are deliberately symmetric: every type
+    /// widens *into* `dyn` (`T <: dyn`), and `never` widens into *every* type (`never <: T`). So a
+    /// call to a `never`-returning function type-checks in any position — there is no value to
+    /// mis-use — and nothing after it can run.
+    ///
+    /// **Declared, never inferred** (the same rule [`Type::Union`] follows). Inference never
+    /// *produces* `never`: a function's return is `never` because its signature says so, and a call
+    /// expression is `never` because its callee's declared return is. That keeps the whole feature a
+    /// property of signatures — which is exactly what the tier runners need to ask about a top-level
+    /// statement ("does this call return?") without a reachability analysis.
+    ///
+    /// Consequences worth stating, because each one is a decision:
+    /// - **`dyn`**: `never <: dyn` holds by the bottom rule, and `dyn <: never` is false — narrowing
+    ///   out of the top is always explicit, and there is nothing to narrow *to* here anyway.
+    /// - **Unions**: `never` is the identity element, so [`Type::union`] drops it (`int | never` is
+    ///   `int`). It contributes no inhabitants, and leaving it in would make two spellings of the
+    ///   same set compare unequal.
+    /// - **Generics**: no special case. `never` substitutes into a type parameter like any other
+    ///   type, and `never <: T` makes a `never`-typed argument acceptable at every bound.
+    /// - **Reflection**: it gets its own [`noeta_ast::reflect::TypeRepr::Never`] rather than folding
+    ///   into `Unit` or a nominal `never` — see that variant for why the fold is the bug the
+    ///   `BuiltinTy` funnel exists to prevent.
+    Never,
     /// `void` / the empty tuple — the type of statements and `Ok()`-style unit payloads.
     Unit,
     Int,
@@ -117,6 +266,19 @@ pub enum Type {
     /// the arguments lets a generic container keep its element type through an instance (so
     /// `box.get()` is `int`, not `dyn`, and an instance method enforces the class's bounds).
     Named(String, Vec<Type>),
+    /// A **generic type parameter** in the scope of its declaration — the `T` of `class Repo<T>`
+    /// or of `fn label<T>()`, as written inside that declaration's own signatures and bodies.
+    ///
+    /// Its own variant rather than a [`Type::Named`] whose name happens to be in a side-table of
+    /// in-scope spellings, because a parameter *is* a different thing from a nominal type and the
+    /// two were indistinguishable while both were `Named`. Everything that must treat a parameter
+    /// specially — erasure to `dyn`, binding from an argument, substitution, bound enforcement,
+    /// forwarding-slot templates — now asks the lattice instead of consulting a `HashSet<String>`,
+    /// so the question "is this a parameter, and *which* one" has exactly one answer and the
+    /// compiler enumerates every site that asks it.
+    ///
+    /// Identity is [`ParamRef::id`] — the declaration site — never the spelling. See [`ParamId`].
+    Param(ParamRef),
     /// A function value.
     Fn {
         params: Vec<Type>,
@@ -156,6 +318,57 @@ pub enum Type {
 pub use noeta_ast::{BuiltinTy, Spelling, parse_int_width};
 
 impl Type {
+    /// The type's **name-keyed identity** — the qualified head name every name-keyed runtime
+    /// registry is stored under (`attributes_of`'s manifest, `field_specs_of`, `variants_of`,
+    /// `construct`, `invoke`), and the string `type_name::<T>()` answers with.
+    ///
+    /// The lattice twin of [`noeta_ast::TypeRef::head_name`], and deliberately head-only for the
+    /// same reason: a registry is keyed on the constructor, never on the instantiation, so
+    /// `List<int>` keys under `List` exactly as the surface `type_name::<List<int>>()` folds to
+    /// `"List"`. Keeping the two in lock-step is what lets a *forwarded* type parameter answer
+    /// identically to the concrete turbofish it was instantiated from — the property
+    /// [`Display`](std::fmt::Display) cannot serve, since it renders the **short** name
+    /// (`Todo`, not `app.storage.Todo`) and spells the arguments out.
+    ///
+    /// Empty for the forms that have no name-keyed head at the surface either — a function type, a
+    /// union, a tuple, an inference hole — matching `TypeRef::head_name`'s own empty answer.
+    pub fn head_name(&self) -> String {
+        match self {
+            Type::Named(name, _) => name.clone(),
+            // A parameter's name-key is its spelling — what `type_name::<T>()` answered when a
+            // parameter was a `Named`, and what a *forwarded* parameter must keep answering so it
+            // agrees with the concrete turbofish it was instantiated from. This is the one place
+            // the spelling is legitimately load-bearing: it is the surface key, not the identity.
+            Type::Param(p) => p.name.clone(),
+            Type::DynTrait(name) => name.clone(),
+            Type::List(_) => "List".to_string(),
+            Type::Set(_) => "Set".to_string(),
+            Type::Map(..) => "Map".to_string(),
+            Type::Option(_) => "Option".to_string(),
+            Type::Result(..) => "Result".to_string(),
+            Type::Unit
+            | Type::Int
+            | Type::Float
+            | Type::F32
+            | Type::F64
+            | Type::IntN { .. }
+            | Type::Bool
+            | Type::String
+            // The bottom type is spelled `never` at the surface (`BuiltinTy::Never`), so its
+            // name-key is that same word — what `Display` already writes, and what
+            // `TypeRef::head_name` folds for the surface spelling. No instantiation can be
+            // `never`, so this arm is unreachable through the forwarding table; it is here
+            // because the match is exhaustive on purpose, which is what turned the semantic
+            // merge conflict that produced it into a compile error rather than a silent wrong
+            // answer.
+            | Type::Never
+            | Type::Bytes
+            | Type::Dyn
+            | Type::Kind(_) => self.to_string(),
+            Type::Unknown | Type::Fn { .. } | Type::Union(_) | Type::Tuple(_) => String::new(),
+        }
+    }
+
     /// Whether this is one of the two numeric types arithmetic (`+ - * / %`) accepts. (The
     /// checker separately lets an interior hole / `dyn` operand through via
     /// [`Self::defers_to_runtime`], so this is the strict concrete test only.)
@@ -176,6 +389,40 @@ impl Type {
             self,
             Type::Int | Type::Float | Type::F32 | Type::F64 | Type::IntN { .. }
         )
+    }
+
+    /// [`Self::is_arith_numeric`]'s set **as a type** — the union of every numeric scalar, in a
+    /// stable order (`int`, `float`, the strict floats, then the widths ascending).
+    ///
+    /// A native signature declaring `SigType::Numeric` — a parameter that takes any number, like a
+    /// kernel's scale factor — resolves to this, which is what makes such a parameter accept every
+    /// numeric kind and reject everything else. It is a union rather than a distinct variant because
+    /// that is what it *is*: adding a `Type::Numeric` would put a second spelling of the same set
+    /// into every match in the checker.
+    pub fn arith_numeric() -> Type {
+        let widths = [8u8, 16, 32, 64]
+            .into_iter()
+            .flat_map(|bits| [true, false].map(move |signed| Type::IntN { signed, bits }));
+        Type::union(
+            [Type::Int, Type::Float, Type::F32, Type::F64]
+                .into_iter()
+                .chain(widths),
+        )
+    }
+
+    /// Whether this is exactly [`Self::arith_numeric`] — every numeric scalar and nothing else.
+    ///
+    /// Both its renderings key off this: `Display` writes the short name `number` rather than
+    /// spelling twelve members, and a diagnostic about such a parameter can expand it on demand. It
+    /// compares as a SET, so it does not depend on `Type::union`'s ordering staying put.
+    pub fn is_arith_numeric_union(&self) -> bool {
+        let Type::Union(members) = self else {
+            return false;
+        };
+        let Type::Union(all) = Type::arith_numeric() else {
+            return false;
+        };
+        members.len() == all.len() && all.iter().all(|t| members.contains(t))
     }
 
     /// This numeric type's rank in the widening lattice `int (0) < float (1)`. Arithmetic over two
@@ -262,6 +509,12 @@ impl Type {
         if matches!(sup, Dyn) {
             return true;
         }
+        // `never` is the bottom type: it widens into everything. Checked before the arms below so a
+        // diverging call is accepted in *every* position, container and function types included —
+        // there is no value to be wrong about.
+        if matches!(sub, Never) {
+            return true;
+        }
         let rec = |a: &Type, b: &Type| Type::subtype_with(a, b, nominal);
         match (sub, sup) {
             // Narrowing out of `dyn` is never implicit (only via a checked `.as<T>()`).
@@ -315,6 +568,15 @@ impl Type {
             // A `Named(n)` is a member of an abstract kind when the registry says so — the one rule
             // the pure lattice defers to the `nominal` hook (`Named(n) <: Enum` iff `n` is an enum).
             (Named(n, _), Kind(k)) => nominal(n, *k),
+            // Two type parameters relate only by IDENTITY — the same declaration, whatever either
+            // is spelled. `ParamRef`'s `PartialEq` compares the id alone, so this is `sub == sup`;
+            // it is written out rather than left to the catch-all because "a parameter is a
+            // subtype of a same-named parameter" is exactly the wrong answer this arc removes.
+            (Param(a), Param(b)) => a.id == b.id,
+            // A parameter and anything else are unrelated in the pure lattice. Instantiation is
+            // substitution, not subtyping: an argument reaches a parameter by binding it, and a
+            // still-open parameter reaches a concrete slot only after erasure to `dyn`.
+            (Param(_), _) | (_, Param(_)) => false,
             // Abstract kind-types: a kind is a subtype only of the same kind (widening into `dyn`
             // is handled above).
             (Kind(a), Kind(b)) => a == b,
@@ -336,6 +598,9 @@ impl Type {
     /// stay simple:
     ///
     /// - **`dyn` absorbs**: a union that includes the open top *is* the open top (`int | dyn` = `dyn`).
+    /// - **`never` vanishes**: the bottom is the union's identity element (`int | never` = `int`) —
+    ///   it contributes no inhabitants, and keeping it would let two spellings of the same set
+    ///   compare unequal. A union of nothing but `never`s collapses to `never` by the singleton rule.
     /// - **singleton collapses**: one distinct member is just that member (`int | int` = `int`).
     ///
     /// This is the only constructor for a union; nothing builds the variant directly. An empty
@@ -343,13 +608,21 @@ impl Type {
     /// has members — but defined for totality).
     pub fn union(members: impl IntoIterator<Item = Type>) -> Type {
         let mut flat: Vec<Type> = Vec::new();
+        // A `never` member is dropped rather than pushed — the bottom adds no inhabitants. Tracked
+        // so an all-`never` input still answers `never` instead of degenerating to a hole.
+        let mut saw_never = false;
         for m in members {
             match m {
                 Type::Dyn => return Type::Dyn,
+                Type::Never => saw_never = true,
                 Type::Union(inner) => {
                     for t in inner {
                         if t == Type::Dyn {
                             return Type::Dyn;
+                        }
+                        if t == Type::Never {
+                            saw_never = true;
+                            continue;
                         }
                         if !flat.contains(&t) {
                             flat.push(t);
@@ -364,6 +637,7 @@ impl Type {
             }
         }
         match flat.len() {
+            0 if saw_never => Type::Never,
             0 => Type::Unknown,
             1 => flat.pop().unwrap(),
             _ => Type::Union(flat),
@@ -385,15 +659,18 @@ impl Type {
                 ret: Box::new(Type::from_ref(ret)),
             },
             TypeRef::Optional { inner, .. } => Type::Option(Box::new(Type::from_ref(inner))),
-            TypeRef::DynTrait { trait_name, .. } => Type::DynTrait(trait_name.clone()),
+            TypeRef::DynTrait { trait_name, .. } => Type::DynTrait(trait_name.to_string()),
             // `Self::Name` with no resolution context (a `dyn` receiver, or any site lacking the
             // impl's binding map) degrades to a gradual hole — the associated type never enters the
             // lattice (slice 1a). A concrete receiver's projection is baked at collect *before* this
             // conversion, so it never reaches here as a projection.
             TypeRef::AssocProjection { .. } => Type::Unknown,
             TypeRef::Named { name, args, .. } => {
-                let Some((builtin, spelling)) = BuiltinTy::from_name(name) else {
-                    return Type::Named(name.clone(), args.iter().map(Type::from_ref).collect());
+                let Some((builtin, spelling)) = BuiltinTy::from_name(name.as_str()) else {
+                    return Type::Named(
+                        name.to_string(),
+                        args.iter().map(Type::from_ref).collect(),
+                    );
                 };
                 // The bare lowercase collection spellings (`list`, `map`, `set`) leave their
                 // element types *unspecified* — an inference hole the checker fills by forward
@@ -415,6 +692,7 @@ impl Type {
                     BuiltinTy::Bytes => Type::Bytes,
                     BuiltinTy::Unit => Type::Unit,
                     BuiltinTy::Dyn => Type::Dyn,
+                    BuiltinTy::Never => Type::Never,
                     BuiltinTy::List => Type::List(Box::new(arg(0))),
                     BuiltinTy::Set => Type::Set(Box::new(arg(0))),
                     BuiltinTy::Map => Type::Map(Box::new(arg(0)), Box::new(arg(1))),
@@ -423,6 +701,12 @@ impl Type {
                     BuiltinTy::KindEnum => Type::Kind(TypeKind::Enum),
                     BuiltinTy::KindStruct => Type::Kind(TypeKind::Struct),
                     BuiltinTy::KindClass => Type::Kind(TypeKind::Class),
+                    // The one built-in that desugars to a UNION rather than a lattice variant. That
+                    // is what makes `number` a name for a set the lattice already had, instead of a
+                    // thirteenth scalar the lattice would then have to relate to the other twelve —
+                    // assignability, narrowing and widening all come from `Type::Union` unchanged.
+                    // `Display` maps the union back to this spelling, so the round trip closes.
+                    BuiltinTy::Number => Type::arith_numeric(),
                 }
             }
         }
@@ -438,6 +722,7 @@ impl std::fmt::Display for Type {
         match self {
             Type::Unknown => f.write_str("?"),
             Type::Dyn => f.write_str("dyn"),
+            Type::Never => f.write_str("never"),
             Type::Unit => f.write_str("void"),
             Type::Int => f.write_str("int"),
             Type::Float => f.write_str("float"),
@@ -456,6 +741,9 @@ impl std::fmt::Display for Type {
             Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Type::Kind(k) => f.write_str(k.name()),
             Type::DynTrait(tr) => write!(f, "dyn {}", short_type_name(tr)),
+            // A parameter renders as the user wrote it — identically to the `Named("T")` it used
+            // to be, so no diagnostic or hover text changes.
+            Type::Param(p) => f.write_str(&p.name),
             Type::Named(n, args) if args.is_empty() => f.write_str(short_type_name(n)),
             Type::Named(n, args) => {
                 write!(f, "{}<", short_type_name(n))?;
@@ -477,6 +765,12 @@ impl std::fmt::Display for Type {
                 }
                 write!(f, ") -> {ret}")
             }
+            // "Every numeric scalar" has a name, and printing it beats spelling twelve members in
+            // the middle of a sentence — `not assignable to `number`` says the same thing as
+            // `not assignable to `int | float | f32 | f64 | i8 | u8 | …`` and can be read at a
+            // glance. The full membership is still available where it helps: a diagnostic about
+            // such a parameter expands it in its help line.
+            _ if self.is_arith_numeric_union() => f.write_str("number"),
             Type::Union(members) => {
                 for (i, m) in members.iter().enumerate() {
                     if i > 0 {
@@ -507,7 +801,7 @@ mod tests {
 
     fn named(name: &str, args: Vec<TypeRef>) -> TypeRef {
         TypeRef::Named {
-            name: name.to_string(),
+            name: noeta_ast::Name::written(name),
             args,
             span: Span::new(0, 0),
         }
@@ -518,6 +812,96 @@ mod tests {
         assert_eq!(Type::from_ref(&named("int", vec![])), Type::Int);
         assert_eq!(Type::from_ref(&named("string", vec![])), Type::String);
         assert_eq!(Type::from_ref(&named("void", vec![])), Type::Unit);
+    }
+
+    /// One sample of **every** `Type` variant — the census the numeric-set equivalence test below
+    /// runs over. Widths are enumerated because `IntN` is eight distinct types, not one.
+    fn every_variant() -> Vec<Type> {
+        let mut census = vec![
+            Type::Unknown,
+            Type::Dyn,
+            Type::Never,
+            Type::Unit,
+            Type::Int,
+            Type::Float,
+            Type::F32,
+            Type::F64,
+            Type::Bool,
+            Type::String,
+            Type::Bytes,
+            Type::List(Box::new(Type::Int)),
+            Type::Map(Box::new(Type::String), Box::new(Type::Int)),
+            Type::Set(Box::new(Type::Int)),
+            Type::Option(Box::new(Type::Int)),
+            Type::Result(Box::new(Type::Int), Box::new(Type::String)),
+            Type::Named("Order".into(), vec![]),
+            Type::Fn {
+                params: vec![Type::Int],
+                ret: Box::new(Type::Int),
+            },
+            Type::Kind(TypeKind::Struct),
+            Type::Union(vec![Type::Int, Type::String]),
+            Type::Tuple(vec![Type::Int, Type::String]),
+            Type::DynTrait("Show".into()),
+            Type::Param(ParamRef::new(ParamId::at(Span::new(1, 2)), "T")),
+        ];
+        for bits in [8u8, 16, 32, 64] {
+            for signed in [true, false] {
+                census.push(Type::IntN { signed, bits });
+            }
+        }
+        census
+    }
+
+    /// The numeric set has **two** definitions — the predicate [`Type::is_arith_numeric`] and the
+    /// union [`Type::arith_numeric`] — and they must describe the same types.
+    ///
+    /// Nothing in the type system ties them together: the predicate is a `matches!` pattern, the
+    /// union an enumerated list, and a future numeric type (an `f16`, an `i128`) would be added to
+    /// whichever one the author happened to be looking at. The failure would be quiet and nasty —
+    /// a parameter declared `SigType::Numeric` would reject a type the rest of the checker treats as
+    /// a number, or `Display` would stop recognizing the set and print twelve members again.
+    ///
+    /// This is a **tripwire, not a proof**: it can only check the types [`every_variant`] lists. The
+    /// count assertion is what makes it bite — adding a `Type` variant fails here, and fixing the
+    /// count means reading this comment and adding the sample.
+    #[test]
+    fn the_numeric_predicate_and_the_numeric_union_agree() {
+        let census = every_variant();
+        assert_eq!(
+            census
+                .iter()
+                .map(std::mem::discriminant)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            24,
+            "a `Type` variant was added or removed — add a sample to `every_variant` and update this \
+             count, so the numeric-set check below keeps covering the whole lattice"
+        );
+
+        let Type::Union(members) = Type::arith_numeric() else {
+            panic!("`arith_numeric` must be a union");
+        };
+        for t in &census {
+            assert_eq!(
+                members.contains(t),
+                t.is_arith_numeric(),
+                "`{t}` is in one definition of the numeric set but not the other"
+            );
+        }
+        // And the union recognizes itself, which is what `Display` keys on to write `number`.
+        assert!(Type::arith_numeric().is_arith_numeric_union());
+        assert_eq!(Type::arith_numeric().to_string(), "number");
+        // The name ROUND-TRIPS: the surface spelling desugars to the union, and the union prints
+        // back as the spelling. This is what makes `number` a declared type rather than a rendering
+        // convention — break either direction and the two stop agreeing here.
+        let from_surface = Type::from_ref(&named("number", vec![]));
+        assert_eq!(from_surface, Type::arith_numeric());
+        assert_eq!(from_surface.to_string(), "number");
+        // A union that is merely numeric-ish is NOT the set, so it still prints its members.
+        let partial = Type::union([Type::Int, Type::Float]);
+        assert!(!partial.is_arith_numeric_union());
+        assert_eq!(partial.to_string(), "int | float");
     }
 
     #[test]
@@ -703,5 +1087,135 @@ mod tests {
         };
         assert!(Type::subtype(&sub, &sup));
         assert!(!Type::subtype(&sup, &sub));
+    }
+    /// `never` is the **bottom**: it widens into every type, and nothing widens into it. The exact
+    /// mirror of the [`Type::Dyn`] tests above, which is the whole design — a lattice with a top and
+    /// no bottom cannot say "this call does not return".
+    #[test]
+    fn subtype_never_widens_into_everything_but_nothing_into_it() {
+        for sup in [
+            Type::Int,
+            Type::String,
+            Type::Unit,
+            Type::Dyn,
+            Type::List(Box::new(Type::Int)),
+            Type::Named("Order".into(), vec![]),
+            Type::union([Type::Int, Type::String]),
+            Type::Fn {
+                params: vec![Type::Int],
+                ret: Box::new(Type::Int),
+            },
+            Type::Never,
+        ] {
+            assert!(Type::subtype(&Type::Never, &sup), "never <: {sup}");
+        }
+        // Nothing narrows INTO the bottom — there is no value to narrow. (`Unknown` is exempt: an
+        // inference hole is bidirectionally compatible with everything, by design.)
+        for sub in [
+            Type::Int,
+            Type::String,
+            Type::Unit,
+            Type::Dyn,
+            Type::Named("Order".into(), vec![]),
+        ] {
+            assert!(!Type::subtype(&sub, &Type::Never), "{sub} </: never");
+        }
+    }
+
+    /// `never` is the union's **identity element**, the dual of `dyn`'s absorption: `dyn` swallows a
+    /// union because it contributes every value, `never` disappears from one because it contributes
+    /// none. Without this, `int | never` and `int` would be two spellings of one set that compare
+    /// unequal.
+    #[test]
+    fn union_drops_never_members() {
+        assert_eq!(Type::union([Type::Int, Type::Never]), Type::Int);
+        assert_eq!(
+            Type::union([Type::Int, Type::Never, Type::String]),
+            Type::Union(vec![Type::Int, Type::String])
+        );
+        assert_eq!(
+            Type::union([Type::union([Type::Int, Type::Never]), Type::String]),
+            Type::Union(vec![Type::Int, Type::String])
+        );
+        // A union of nothing but bottoms is the bottom — NOT the inference hole an empty input
+        // gives, which would quietly turn "no values" into "no information".
+        assert_eq!(Type::union([Type::Never, Type::Never]), Type::Never);
+        assert_ne!(Type::union([Type::Never]), Type::Unknown);
+    }
+
+    /// A type parameter is its **declaration**, not its spelling. Both halves are load-bearing and
+    /// both are regressions waiting to happen, so both are pinned here rather than only in the
+    /// conformance corpus:
+    ///
+    /// - Same declaration, different spelling → the **same** parameter. Nothing may re-key on the
+    ///   name; if a future `#[derive(PartialEq)]` on `ParamRef` (or a map keyed on `p.name`)
+    ///   sneaks back in, this half fails.
+    /// - Same spelling, different declaration → **different** parameters. This is the whole bug:
+    ///   `class Repo<T>`'s `T` and `fn label<T>()`'s `T` are two parameters, and a substitution
+    ///   that keys on `"T"` silently makes the outer one win.
+    #[test]
+    fn a_parameter_is_its_declaration_not_its_spelling() {
+        let outer = ParamId::at(Span::new(10, 11));
+        let inner = ParamId::at(Span::new(30, 31));
+        let same_decl_other_name = Type::Param(ParamRef::new(outer, "U"));
+        assert_eq!(Type::Param(ParamRef::new(outer, "T")), same_decl_other_name);
+        assert_ne!(
+            Type::Param(ParamRef::new(outer, "T")),
+            Type::Param(ParamRef::new(inner, "T")),
+            "two `T`s declared in different places are different parameters"
+        );
+        // …and the subtype relation agrees, in both directions.
+        let (o, i) = (
+            Type::Param(ParamRef::new(outer, "T")),
+            Type::Param(ParamRef::new(inner, "T")),
+        );
+        assert!(Type::subtype(&o, &o));
+        assert!(!Type::subtype(&o, &i));
+        assert!(!Type::subtype(&i, &o));
+        // A parameter relates to nothing concrete: instantiation is substitution, not subtyping.
+        assert!(!Type::subtype(&o, &Type::Int));
+        assert!(!Type::subtype(&Type::Int, &o));
+        // …except through the lattice's own top and bottom, which are prior to every arm.
+        assert!(Type::subtype(&o, &Type::Dyn));
+        assert!(Type::subtype(&Type::Never, &o));
+        // Hashing must agree with equality, or an identity-keyed substitution map would miss.
+        let mut m = std::collections::HashMap::new();
+        m.insert(ParamRef::new(outer, "T"), Type::Int);
+        assert_eq!(m.get(&ParamRef::new(outer, "U")), Some(&Type::Int));
+        assert_eq!(m.get(&ParamRef::new(inner, "T")), None);
+        // The spelling survives for display and for the name-keyed reflection surface.
+        assert_eq!(o.to_string(), "T");
+        assert_eq!(o.head_name(), "T");
+    }
+
+    /// A synthetic parameter (the prelude constructors' `T`/`E`, which have no source
+    /// declaration) can never alias a real one, however the real one is spelled or placed.
+    #[test]
+    fn synthetic_parameter_ids_are_disjoint_from_real_ones() {
+        assert_ne!(ParamId::synthetic(0), ParamId::synthetic(1));
+        assert_eq!(ParamId::synthetic(0), ParamId::synthetic(0));
+        assert_eq!(ParamId::synthetic(0).decl_span(), None);
+        for offset in [0u32, 1, u32::MAX] {
+            assert_ne!(
+                ParamId::synthetic(offset),
+                ParamId::at(Span::new(0, offset))
+            );
+        }
+        let real = ParamId::at(Span::new(4, 5));
+        assert_eq!(real.decl_span(), Some(Span::new(4, 5)));
+    }
+
+    /// The bottom is a **concrete declared type**, not an inference hole and not the dynamic escape:
+    /// it must not inherit either one's leniency. A hole suppresses diagnostics because information
+    /// is missing; `never` carries complete information — that there is nothing here.
+    #[test]
+    fn never_is_neither_a_hole_nor_dyn() {
+        assert!(!Type::Never.is_gradual());
+        assert!(!Type::Never.defers_to_runtime());
+        assert!(!Type::Never.contains_unknown());
+        assert!(!Type::Never.is_arith_numeric());
+        assert_eq!(Type::Never.to_string(), "never");
+        // The surface name round-trips, like every other built-in spelling.
+        assert_eq!(Type::from_ref(&named("never", vec![])), Type::Never);
     }
 }

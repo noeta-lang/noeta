@@ -1,0 +1,26 @@
+// The load-bearing half of "a tier block's `use` drives linking": because the block's imports now
+// go through the same resolution a top-level `use` does, an import naming **no such module** is a
+// link error — at check time, with the usual "did you mean" over the modules that do exist.
+//
+// Before the fix the block's `use` was never resolved at all, so this program checked **clean**
+// (0 errors) and failed only at `noeta test`, at every use site, with "cannot find type
+// `probe.nope.Missing` in this scope" — a runtime symptom for a plainly static mistake, pointing at
+// the uses rather than at the typo. This case is the one shape of the bug the harness can observe
+// without activating a tier, so it is what pins the fix: it fails on the pre-fix loader.
+//
+// The error is reported inside the block, where it is written, even though the block itself is
+// stripped for a run with no tier active.
+// expect: error E0019 at 18:21
+// expect: exit 1
+// (No `namespace`: this case is not a package, so the entry declares no module path at all.)
+
+@test {
+    use probe.nope.{Missing}
+
+    fn builds(): void {
+        x = Missing { n: 3 }
+        assert(x.n == 3)
+    }
+}
+
+echo "unreachable — the link fails"

@@ -25,7 +25,7 @@ fn run_target_activates_its_tiers() {
     // `--tier debug` would — but driven by `noeta.toml`.
     let file = temp_project(
         "prof_run",
-        "[targets.dev.tiers]\ndebug = \"std\"\n",
+        "[tiers]\ndebug = \"std\"\n[targets.dev.tiers]\ndebug = true\n",
         TIERED_PROGRAM,
     );
     lang()
@@ -36,6 +36,54 @@ fn run_target_activates_its_tiers() {
         .assert()
         .success()
         .stdout("dbg 5\nout 5\n");
+}
+
+#[test]
+fn run_target_activates_its_tiers_via_the_array_spelling() {
+    // The canonical array form (`tiers = ["debug"]` on the target) activates the tier exactly like
+    // the boolean sub-table does — end to end through a real `noeta run`.
+    let file = temp_project(
+        "prof_run_array",
+        "[tiers]\ndebug = \"std\"\n[targets.dev]\ntiers = [\"debug\"]\n",
+        TIERED_PROGRAM,
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .arg("--target")
+        .arg("dev")
+        .assert()
+        .success()
+        .stdout("dbg 5\nout 5\n");
+}
+
+#[test]
+fn a_renamed_std_tier_activates_and_strips_under_its_local_name() {
+    // The headline of per-package tier naming: a package renames std's `debug` tier to a local
+    // `@dbg` (`[tiers] dbg = "std:debug"`). `@dbg` is judged by its identity `(std, debug)`, so it
+    // activates under `--tier dbg` (the block runs) and strips without it — exactly as `@debug` would,
+    // proving activation keys on the tier's identity, not the hardcoded built-in name.
+    let src = "fn f(x: int): void {\n\
+               @dbg { echo \"dbg ${x}\" }\n\
+               echo \"out ${x}\"\n\
+               }\n\
+               f(5)\n";
+    let file = temp_project("rename_dbg", "[tiers]\ndbg = \"std:debug\"\n", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .arg("--tier")
+        .arg("dbg")
+        .assert()
+        .success()
+        .stdout("dbg 5\nout 5\n");
+    // Without activating it, the renamed block strips like any inactive tier.
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("out 5\n");
 }
 
 #[test]
@@ -72,7 +120,7 @@ fn test_target_gates_the_runner() {
 fn test_target_with_tier_live_runs() {
     let file = temp_project(
         "prof_test_live",
-        "[targets.dev.tiers]\ntest = \"std\"\n",
+        "[tiers]\ntest = \"std\"\n[targets.dev.tiers]\ntest = true\n",
         TIERED_PROGRAM,
     );
     lang()
@@ -89,7 +137,7 @@ fn test_target_with_tier_live_runs() {
 fn run_unknown_target_is_an_error() {
     let file = temp_project(
         "prof_unknown",
-        "[targets.dev.tiers]\ndebug = \"std\"\n",
+        "[tiers]\ndebug = \"std\"\n[targets.dev.tiers]\ndebug = true\n",
         TIERED_PROGRAM,
     );
     lang()

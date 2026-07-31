@@ -64,18 +64,7 @@ while (running) { tick() }
 for x in (items) { echo x }
 ```
 
-### Formatting: `noeta fmt` canonicalizes both
-
-`noeta fmt` normalizes header parentheses and trailing semicolons. Configure it in the `[fmt]` table of `noeta.toml`, or override per-run with `--parens` / `--semicolons`:
-
-```toml
-[fmt]
-parens = "remove"       # "remove" (default) strips header parens; "add" wraps them: `if (x) {`
-semicolons = "remove"   # "remove" (default) strips redundant `;`; "add" terminates every simple
-                        # statement; "preserve" keeps them exactly as written
-```
-
-`remove` only strips a `;` that is genuinely redundant — one that the newline the formatter puts after the statement could replace. A `;` that is structurally required is kept: when the next statement begins with a token that would otherwise continue this line (e.g. a leading `-`), the `;` is the only thing separating them.
+Both choices — header parentheses and trailing semicolons — are normalized by `noeta fmt`, configured in the `[fmt]` table of `noeta.toml`; see [The `noeta` CLI](The-CLI#noeta-fmt).
 
 ## `echo`
 
@@ -136,7 +125,34 @@ xs: List<int> = [1, 2, 3]
 count: int = 3
 ```
 
-**There is no shadowing** — one name means one thing per scope stack (E0059). A binder — a closure parameter, `for` variable, or match-pattern binding — may not reuse a name already bound in a scope it can see, and a binding may not reuse an imported name (E0020); rename one side. A plain `name = expr` never introduces a second binding either: the first use in a scope declares it, and a later one (in the same or an inner scope) reassigns it — E0006 if it is immutable, E0007 if the type would change. Named functions make this ergonomic by being **sealed** — their bodies don't see surrounding value bindings at all (import one explicitly with `use (…)`), so their parameters conflict with nothing. See [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause).
+**There is no shadowing** — one name means one thing per scope stack: a binder (closure parameter, `for` variable, match-pattern binding) may not reuse a name already bound in a scope it can see (E0059), a binding may not reuse an imported name (E0020), and a plain `name = expr` never introduces a second binding — the first use in a scope declares it, and a later one reassigns it (E0006 if immutable, E0007 if the type would change). Named functions stay ergonomic because they are **sealed** — their bodies don't see surrounding value bindings, so their parameters conflict with nothing (see [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause)).
+
+### Reserved words
+
+A name has to be one the language has not already taken. The reserved words are the keywords of the grammar (`fn`, `for`, `match`, `mut`, `struct`, `use`, `is`, `in`, …), the two boolean literals `true`/`false`, the reflection primitives (`type_of`, `type_name`, `fields_of`, `field_specs_of`, `variants_of`, `construct`, `invoke`, `params_of`, `returns_of`, `roles_of`, `traits_of`, `attributes_of`, `from_bytes`), and the six prelude names `Ok`, `Err`, `some`, `none`, `panic`, `assert`. None of them can be bound — not as a parameter, a binding, a `for` variable, a closure parameter, a pattern binding, a field, a type, a generic parameter, or a function name.
+
+Writing one where a name belongs is **E0046**, and the message names the word and what took it:
+
+```noeta error
+fn field_help(type_name: string, field: string): string {
+    return type_name ~ "." ~ field
+}
+```
+
+```text
+[E0046] Error: `type_name` cannot be used as a name — it is one of the reflection primitives,
+        reserved by the language so it means one thing everywhere it appears
+   ╭─[ app.noe:1:15 ]
+   │
+ 1 │ fn field_help(type_name: string, field: string): string {
+   │               ────┬────
+   │                   ╰────── `type_name` is reserved
+   │
+   help: rename it to `type_name_`
+───╯
+```
+
+The reflection primitives are keywords for a specific reason: each has a call form — `type_name::<T>()`, `construct(name, fields)` — that a *user* function of the same name would be indistinguishable from at the call site, so the name cannot be shared.
 
 **Compound assignment** `name OP= expr` desugars to `name = name OP expr` for `+= -= *= /= %= ~=`:
 
@@ -229,7 +245,7 @@ echo `
 // Order #7 shipped.
 ```
 
-String methods (`.upper()`, `.split(",")`, …) are covered in the [Standard Library](Standard-Library).
+String methods (`.upper()`, `.split(",")`, …) are covered in [Built-ins](Standard-Library).
 
 ## Operators
 
@@ -253,13 +269,15 @@ echo [1, 2] ~ [3, 4]              // [1, 2, 3, 4]
 echo "users/" ~ 42 ~ "/profile"  // users/42/profile
 ```
 
-**`|>` pipe** — threads the left value as the *first argument* of the right call, reading left-to-right:
+**`|>` pipe** — threads the left value in as an *argument* of the right call, reading left-to-right. It takes the first parameter no [label](Functions-and-Closures#named-arguments) claimed, which by default is the first one:
 
 ```noeta
 fn inc(x: int): int { return x + 1 }
 fn add(a: int, b: int): int { return a + b }
+fn div(a: int, b: int): int { return a / b }
 echo 5 |> inc |> inc      // inc(inc(5))  -> 7
 echo 5 |> add(10)         // add(5, 10)   -> 15
+echo 5 |> div(a: 100)     // div(100, 5)  -> 20  (`a` is named, so the pipe fills `b`)
 ```
 
 **`??` coalesce** supplies a fallback for `none`/absent (short-circuiting — the fallback runs only when needed); **`??=`** is `x = x ?? y`. The `?` try operator and these are covered in [Error Handling](Error-Handling).
@@ -274,6 +292,13 @@ echo 5..2    // []
 
 ### Precedence
 
-Tightest to loosest: unary `!`/`-` → `* / %` → `+ -` → shifts `<< >>` → bitwise `& ^ |` → comparison/equality → `&&` → `||`. Parentheses override. Bitwise binds *tighter* than comparison, so `5 & 3 == 1` is `(5 & 3) == 1`.
+Tightest to loosest: postfix (call, `.`, `[i]`, try `?`) → unary `!`/`-` → `* / %` → `+ -` → shifts `<< >>` → `&` → `^` → `|` → `~` and ranges `..`/`..=` → comparison `< <= > >=` and `is T` → equality `== != === !==` → `&&` → `||` and `??` → `|>` (loosest). Parentheses override.
+
+The consequences worth knowing:
+
+- Bitwise binds *tighter* than comparison, so `5 & 3 == 1` is `(5 & 3) == 1`.
+- `~` and `..` sit between bitwise and comparison: `1 + 2 ~ "x"` is `(1 + 2) ~ "x"` (→ `3x`), `"a" ~ "b" == "ab"` is `("a" ~ "b") == "ab"` (→ `true`), and `0..n-1` is `0..(n-1)`.
+- `is` is at the comparison tier: `a + b is int` is `(a + b) is int`, and `x is int == true` is `(x is int) == true`.
+- `??` sits alongside `||`, tighter only than the pipeline: `a ?? b |> f` is `(a ?? b) |> f`.
 
 See also [Fixed-Width Integers & Bitwise](Fixed-Width-Integers) for the bitwise operators in depth.

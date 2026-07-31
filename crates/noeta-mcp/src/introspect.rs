@@ -156,7 +156,7 @@ pub fn module_graph(p: &Prepared) -> ModuleGraphOutput {
         std::collections::HashMap::new();
     if let Ok(program) = &linked.program {
         let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
-        for r in &noeta_ast::reflect::build(program, &native_roles).roles {
+        for r in &noeta_ast::reflect::build(program, &native_roles, &Default::default()).roles {
             roles_by_source
                 .entry(r.target_span.source.0)
                 .or_default()
@@ -168,13 +168,20 @@ pub fn module_graph(p: &Prepared) -> ModuleGraphOutput {
     }
     // The workspace's own member inputs (entry + siblings, in `sources` order) — reading their
     // memoized per-file parses instead of minting duplicate inputs per call (ide-workspaces).
+    //
+    // `Prepared::sources` is the *whole* canonical ordering — members first, then every dependency
+    // package's modules — while `members` is only the leading member run. Zipping pairs each member
+    // with its own source and stops at the shorter of the two, so a program that has dependencies
+    // cannot index past the members: iterating `sources` and indexing `members` panicked with
+    // `index out of bounds` on any project with a `noeta.toml` dependency, which is to say on every
+    // real package.
     let members = p.ws.members(&p.db);
-    let modules = p
-        .sources
+    let modules = members
         .iter()
+        .zip(p.sources.iter())
         .enumerate()
-        .map(|(source_idx, src)| {
-            let parsed = noeta_db::ast(&p.db, members[source_idx]);
+        .map(|(source_idx, (member, src))| {
+            let parsed = noeta_db::ast(&p.db, *member);
             let mut namespace = String::new();
             let mut imports = Vec::new();
             for stmt in &parsed.0.program.stmts {
@@ -265,7 +272,7 @@ pub fn reflect(p: &Prepared, role: Option<&str>) -> ReflectOutput {
         Err(_) => &entry.0.program,
     };
     let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
-    let info = noeta_ast::reflect::build(program, &native_roles);
+    let info = noeta_ast::reflect::build(program, &native_roles, &Default::default());
 
     let want = role.map(|r| r.trim().to_ascii_lowercase());
     let roles = info
@@ -468,5 +475,108 @@ enum Color { Red; Green }
         assert_eq!(reflect(&prep(), Some("EntryPoint")).roles.len(), 1);
         assert_eq!(reflect(&prep(), Some("Semantic.EntryPoint")).roles.len(), 1);
         assert_eq!(reflect(&prep(), Some("Sink")).roles.len(), 0);
+    }
+
+    /// A two-package project on disk: `acme/toolkit` declares a `@role(Semantic.TrustBoundary)`
+    /// attribute struct, and `acme/app` depends on it by path and applies the attribute to a
+    /// function (alongside a same-file role, as the control). Returns the app's entry path.
+    ///
+    /// The root is per-process: `/tmp/noeta-mcp-tests/<name>` was shared by every checkout and every
+    /// concurrent test binary, each of which opened by `remove_dir_all`ing it. The returned path
+    /// carries the root's guard, so the project survives until the caller is done with it — returning
+    /// a bare `PathBuf` would delete the tree at this function's `return`.
+    fn dep_role_project(name: &str) -> noeta_test_temp::TempPath {
+        let root = noeta_test_temp::TempDir::new(&format!("mcp-{name}"));
+        let (app, toolkit) = (root.join("app"), root.join("toolkit"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&toolkit).unwrap();
+        std::fs::write(
+            toolkit.join("noeta.toml"),
+            "[package]\nname = \"acme/toolkit\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            toolkit.join("api.noe"),
+            "@attribute(Function)\n@role(Semantic.TrustBoundary)\npub struct Tool { name: string }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\ntoolkit = { path = \"../toolkit\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("main.noe"),
+            "use toolkit.api.Tool\n\
+             @attribute(Function)\n@role(Semantic.Sink)\nstruct Local { name: string }\n\
+             #[Tool(\"dep\")]\nfn from_dep(): void { return }\n\
+             #[Local(\"own\")]\nfn from_local(): void { return }\n\
+             echo \"ok\";\n",
+        )
+        .unwrap();
+        root.into_child("app/main.noe")
+    }
+
+    /// A role conferred by a **dependency package's** `@role`-bearing attribute reaches `reflect`.
+    ///
+    /// It used not to: the MCP built its workspace from the entry and its *siblings* only, so the
+    /// package declaring the `@role` was never linked. The attribute *application* sits in the
+    /// entry, so `attributes` listed it while `roles` came back empty — the half-delivered feature
+    /// where "what can a language model reach in this program?" is answerable in-language
+    /// (`roles_of()`) but not off the agent surface. The same-file `@role` is the control: it
+    /// always worked, and must keep working.
+    #[test]
+    fn reflect_sees_a_role_conferred_by_a_dependency_package() {
+        noeta_stdlib::registry::default_seeded();
+        let entry = dep_role_project("mcp_reflect_dep_role");
+        let p = prepare(&None, &Some(entry.display().to_string())).expect("prepare");
+
+        let out = reflect(&p, None);
+        let roles: Vec<(&str, &str)> = out
+            .roles
+            .iter()
+            .map(|r| (r.target.as_str(), r.role.as_str()))
+            .collect();
+        // Targets are **qualified** now: the entry sits inside a package, so it derives a module
+        // path (`app.main`) and its declarations carry qualified identities. What this test is
+        // about — that a role conferred by a *dependency* is indexed at all — is unchanged; only
+        // the spelling of the target moved.
+        assert!(
+            roles.contains(&("app.main.from_dep", "Semantic.TrustBoundary")),
+            "the dependency-conferred role must be indexed: {roles:?}"
+        );
+        assert!(
+            roles.contains(&("app.main.from_local", "Semantic.Sink")),
+            "the same-file role still reports: {roles:?}"
+        );
+        // The attribute is listed under the package's **qualified** identity — proof the link
+        // resolved, rather than falling back to the entry's own unlinked AST.
+        assert!(
+            out.attributes
+                .iter()
+                .any(|a| a.target == "app.main.from_dep" && a.name == "toolkit.api.Tool"),
+            "attributes: {:?}",
+            out.attributes
+        );
+        // Filtering by the dependency-conferred role finds it too.
+        assert_eq!(reflect(&p, Some("TrustBoundary")).roles.len(), 1);
+    }
+
+    /// The same resolution makes `check` see the dependency: before it, a program importing a
+    /// package was analyzed as one whose import does not exist, so the agent surface reported
+    /// errors on code `noeta run` compiles cleanly.
+    #[test]
+    fn check_resolves_a_dependency_package() {
+        noeta_stdlib::registry::default_seeded();
+        let entry = dep_role_project("mcp_check_dep_package");
+        let resolved =
+            crate::resolve_workspace(&None, &Some(entry.display().to_string())).expect("resolve");
+        assert!(
+            !resolved.deps.is_empty(),
+            "the path dependency must resolve into the workspace"
+        );
+        let out = crate::run_check(&resolved);
+        assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
     }
 }

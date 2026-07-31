@@ -946,6 +946,34 @@ mod tests {
     }
 
     #[test]
+    fn author_break_keeps_a_non_continuing_operator_trailing() {
+        // A newline ends a statement unless the *next* line's first token continues it, so `~` (and
+        // `&`/`^`/`<<`) can only ever sit at the END of the broken line. The printer used to move
+        // every operator to the head of the second line, turning `x = "a" ~⏎"b"` into
+        // `x = "a"⏎~ "b"` — which lexes as `x = "a"; ~ "b"` and does not re-parse, so `noeta fmt`
+        // refused the file outright ("printer bug"). Each of these must format, keep the author's
+        // break, and be idempotent; `fmt` itself enforces the re-parse (the safety gate).
+        for (src, want) in [
+            ("x = \"a\" ~\n    \"b\"", "x = \"a\" ~\n    \"b\"\n"),
+            ("m = 10 &\n    6", "m = 10 &\n    6\n"),
+            ("x = 6 ^\n    3", "x = 6 ^\n    3\n"),
+            ("s = 1 <<\n    4", "s = 1 <<\n    4\n"),
+            // A three-operand chain breaks at the author's break only, operator still trailing.
+            (
+                "t = \"a\" ~ \"b\" ~\n    \"c\"",
+                "t = \"a\" ~ \"b\" ~\n    \"c\"\n",
+            ),
+        ] {
+            let once = fmt(src).expect("formats and re-parses");
+            assert_eq!(once, want, "unexpected layout for {src:?}");
+            assert_eq!(fmt(&once).expect("re-formats"), once, "not idempotent");
+        }
+        // A line-continuing operator keeps the leading-operator layout it always had — `+` at the
+        // head of the second line joins the lines, so the break is preserved that way.
+        assert_eq!(fmt("n = 1 +\n    2").unwrap(), "n = 1\n    + 2\n");
+    }
+
+    #[test]
     fn wrap_keeps_precedence_parens_in_a_broken_chain() {
         // A tighter-binding operand (`bbbb * cccc`) stays a single grouped unit on its line rather
         // than being flattened into the `+` chain — precedence is preserved across the wrap.
@@ -1302,6 +1330,34 @@ mod tests {
     }
 
     #[test]
+    fn match_guards_round_trip() {
+        // A guarded arm (`pattern if cond => body`) prints back exactly; the safety gate inside
+        // `format_source` proves the guard survives the reparse (a dropped guard would change the
+        // compared AST).
+        let src = "r = match x {\n    Ok(n) if n >= 18 => \"adult\",\n    Ok(_) => \"minor\",\n    Err(e) => e,\n}\n";
+        assert_eq!(fmt(src).unwrap(), src);
+    }
+
+    #[test]
+    fn match_guard_is_part_of_aligned_arrow_column() {
+        // In `match_arm_arrows = "align"` mode the left column is `pattern if guard`, so the
+        // arrows pad past the widest guarded arm.
+        let out = format_source(
+            "test.noe",
+            "r = match x {\n    Ok(n) if n >= 18 => \"adult\",\n    Ok(_) => \"minor\",\n    Err(e) => e,\n}\n",
+            &FmtConfig {
+                match_arm_arrows: ArrowStyle::Align,
+                ..FmtConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "r = match x {\n    Ok(n) if n >= 18 => \"adult\",\n    Ok(_)            => \"minor\",\n    Err(e)           => e,\n}\n"
+        );
+    }
+
+    #[test]
     fn places_leading_trailing_and_dangling_comments() {
         let src = "fn main() {\n    // leading\n    echo 1 // trailing\n    // dangling\n}";
         assert_eq!(
@@ -1393,5 +1449,137 @@ mod tests {
         // it as `\u{1b}` so the output is printable and re-parses to the same scalar.
         let out = fmt("echo \"\u{1b}[0m\"").unwrap();
         assert_eq!(out, "echo \"\\u{1b}[0m\"\n");
+    }
+
+    /// A comment written inside a **block body** stays inside it.
+    ///
+    /// The corpus harness proves every comment survives and that formatting is idempotent — neither
+    /// of which notices a comment that moved. A match arm's block body and an anonymous closure's
+    /// were printed with an empty comment region, so they claimed none of the comments inside them
+    /// and every one fell through to the enclosing interleave, which re-emitted them *outside* the
+    /// braces and against the following item. Idempotent, complete, and documenting the wrong line.
+    #[test]
+    fn a_comment_inside_a_block_body_stays_inside_it() {
+        let src = "\
+f = fn(x: int): int {
+    // inside the closure
+    return x + 1
+}
+
+fn pick(x: ?int): string {
+    match x {
+        some(v) => {
+            // first statement of the arm
+            a = v + 1
+            // last statement of the arm
+            return \"got ${a}\"
+        },
+        // between the arms
+        none => {
+            return \"nothing\"
+        },
+    }
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a block body");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    #[test]
+    fn a_comment_between_object_fields_stays_between_them() {
+        // Mirrors test-p2p `parse_line`: a `//` comment written between two fields of an object
+        // literal must stay on its own line inside the `{ … }`, not migrate past the closing `}`.
+        let src = "\
+fn parse_line(parts: List<string>): Line {
+    return Line {
+        at: parts[0],
+        who: if parts.len() > 1 then parts[1] else \"?\",
+        // The text half may itself contain \"|\", which is why the split is capped at 3.
+        text: if parts.len() > 2 then parts[2] else \"\",
+    }
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of an object literal");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    #[test]
+    fn a_leading_and_dangling_comment_in_an_object_literal_stay_put() {
+        let src = "\
+p = Point {
+    // above the first field
+    x: 1,
+    y: 2,
+    // dangling before the close
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(
+            out, src,
+            "fmt moved a leading/dangling object-literal comment"
+        );
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    #[test]
+    fn a_trailing_comment_on_an_object_field_stays_trailing() {
+        let src = "\
+p = Point {
+    x: 1, // the abscissa
+    y: 2,
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(
+            out, src,
+            "fmt moved a trailing field comment onto its own line"
+        );
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    #[test]
+    fn a_comment_between_list_elements_stays_between_them() {
+        let src = "\
+xs = [
+    1,
+    // the middle one
+    2,
+    3,
+]
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a list literal");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    #[test]
+    fn a_comment_between_map_entries_stays_between_them() {
+        let src = "\
+m = {
+    \"a\": 1,
+    // the second entry
+    \"b\": 2,
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a map literal");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    #[test]
+    fn a_comment_between_set_elements_stays_between_them() {
+        let src = "\
+s = #{
+    1,
+    // the middle one
+    2,
+    3,
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a set literal");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
     }
 }

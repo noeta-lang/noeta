@@ -103,6 +103,7 @@ const CONFIG: ExtStruct = ExtStruct {
         is_mut: false,
     }],
     methods: &[ExtFn {
+        param_names: &[],
         name: "validate",
         params: &[],
         ret: RetTy::Concrete(SigType::Result(&SigType::Unit, &SigType::String)),
@@ -177,6 +178,7 @@ const LOOSE: ExtStruct = ExtStruct {
 /// code is exempt from E0060, like a `.noe` in-`impl` constructor). Returns a real `Config` value
 /// (`NativeOut::Instance` with `FieldedKind::Struct`).
 const KIT_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "make",
     params: &[SigType::Int],
     ret: RetTy::Concrete(SigType::Named("Config")),
@@ -281,9 +283,6 @@ fn ensure_installed() {
 /// so the installs/counters do not race (mirrors `ext_struct_seam.rs`).
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// A per-process sequence for unique temp-entry directories (the linked-role runner writes a file).
-static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 // --- Helpers -------------------------------------------------------------------------------------
 
 /// Check + run a program on both backends, asserting they agree, exit 0, and each leaves the heap
@@ -366,16 +365,14 @@ fn check_codes(program: &str) -> Vec<String> {
 #[track_caller]
 fn run_linked_both_agree(program: &str) -> String {
     ensure_installed();
-    let dir = std::env::temp_dir().join(format!(
-        "noeta_d3_role_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).expect("temp dir is creatable");
+    // Per process and per call: the program below is *linked*, and the loader takes an entry's
+    // sibling files as modules of the same project — a fixture in the shared system temp dir would
+    // compile whatever `.noe` files another process happened to leave there.
+    let dir = noeta_test_temp::TempDir::new("d3-role");
     let entry = dir.join("main.noe");
     std::fs::write(&entry, program).expect("entry file is writable");
 
-    let linked = match noeta_loader::load(&entry, noeta_lexer::Edition::DEFAULT) {
+    let linked = match noeta_loader::load(&entry, noeta_lexer::Edition::DEFAULT, None) {
         Ok(Ok(linked)) => linked,
         other => panic!("program must load + link cleanly: {other:?}"),
     };

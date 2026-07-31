@@ -431,26 +431,31 @@ use crate::{CtxError, CtxOut, CtxResult, NativeCtx, PackedField, PackedView, Slo
 /// reductions a `List<f32>` — the same rows the checker's hand-written fallback carried before.
 pub(crate) const VEC_CTX_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["a", "b"],
         name: "add_all",
         params: &[SigType::Dyn, SigType::Dyn],
         ret: RetTy::SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "sub_all",
         params: &[SigType::Dyn, SigType::Dyn],
         ret: RetTy::SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "factor"],
         name: "scale_all",
         params: &[SigType::Dyn, SigType::Dyn],
         ret: RetTy::SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "dot_all",
         params: &[SigType::Dyn, SigType::Dyn],
         ret: RetTy::Concrete(SigType::List(&SigType::F32)),
     },
     ExtFn {
+        param_names: &["a"],
         name: "length_all",
         params: &[SigType::Dyn],
         ret: RetTy::Concrete(SigType::List(&SigType::F32)),

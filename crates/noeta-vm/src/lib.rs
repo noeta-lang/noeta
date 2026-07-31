@@ -289,6 +289,11 @@ struct RunOutput {
     /// [`noeta_ext_abi::NativeCtx::write_stderr`], the stderr twin of `stdout`. Observable output,
     /// drained into the [`RunResult`] at teardown and compared by the differential oracle.
     stderr: String,
+    /// Whether this run streams output as it is produced ([`noeta_stdlib::Console::streams_output`],
+    /// cached at load — fixed per host, and the write path must not re-ask per `echo`). `false` (the
+    /// sandbox, the `@test` runner) keeps every write in the buffers above; the drain is
+    /// `lifecycle.rs`'s `Vm::emit_stdout` / `flush_live`.
+    live: bool,
     diagnostics: Vec<Diagnostic>,
     /// A deliberate `os.exit(code)` (stdlib-gaps): the requested exit code, set when the
     /// distinguished `ErrorKind::Exit` unwinds. Not a diagnostic — the run halts cleanly

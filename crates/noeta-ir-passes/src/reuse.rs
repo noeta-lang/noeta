@@ -68,6 +68,7 @@ pub fn thread_reuse(program: &Program) -> Program {
         top: rewrite_block(&program.top, &own_destructors, &HashSet::new()),
         temp_count: program.temp_count,
         type_args: program.type_args.clone(),
+        type_arg_reprs: program.type_arg_reprs.clone(),
         span: program.span,
     }
 }
@@ -90,7 +91,7 @@ fn collect_own_destructors_into(block: &Block, out: &mut HashSet<String>) {
         match stmt {
             Stmt::Decl(Decl::Class(class)) => {
                 if class.destructor.is_some() {
-                    out.insert(class.decl.name.clone());
+                    out.insert(class.decl.name.to_string());
                 }
                 for (_, f) in &class.methods {
                     collect_own_destructors_into(&f.body, out);
@@ -493,6 +494,10 @@ fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>, bound: &HashSet<String>) -> S
                 .iter()
                 .map(|arm| Arm {
                     pattern: arm.pattern.clone(),
+                    guard: arm.guard.as_ref().map(|g| noeta_ir::Guard {
+                        block: rewrite_block(&g.block, od, bound),
+                        span: g.span,
+                    }),
                     body: rewrite_block(&arm.body, od, bound),
                     span: arm.span,
                 })
@@ -558,6 +563,7 @@ fn rewrite_func(func: &Func, od: &HashSet<String>) -> Func {
         name: func.name.clone(),
         captures: func.captures.clone(),
         params: func.params.clone(),
+        hidden: func.hidden,
         defaults: func.defaults.clone(),
         body: rewrite_block(&func.body, od, &params),
         temp_count: func.temp_count,

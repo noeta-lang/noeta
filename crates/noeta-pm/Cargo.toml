@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+noeta-span = { workspace = true }
 noeta-edition = { workspace = true }
 noeta-cache = { workspace = true }
 noeta-check = { workspace = true }
@@ -48,6 +49,11 @@ x509-cert = { workspace = true, optional = true }
 tls_codec = { workspace = true, optional = true }
 const-oid = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Fixture directories for the unit tests (see `src/test_temp.rs`): per-process roots, so two test
+# processes or two checkouts never share — and delete — one fixture path.
+noeta-test-temp = { workspace = true }
 
 [features]
 # The `[fmt]` config resolver (`resolve_fmt_config` + `noeta-fmt`). Off by default; the CLI (which

@@ -1,0 +1,12 @@
+// The aborting write door is kept, and still aborts. `Process.write` to a child that is gone is
+// `E0021` — "fatal by default, recoverable when you ask" is the language's established shape, and
+// removing the aborting half would break every program that legitimately treats a dead child as
+// the end of the run. The recoverable half is `try_write` (see os_try_write.noe), which reports
+// the identical message as a value.
+// expect: error E0021 at 11:1
+// expect: exit 1
+use std.{os}
+
+gone = os.spawn("dead", [])
+gone.write("input")
+echo "unreached"

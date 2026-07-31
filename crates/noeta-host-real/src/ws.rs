@@ -24,8 +24,24 @@ use crate::io_error;
 /// sit in `recv().await` while `send`s proceed (and so a ping arriving mid-recv can pong).
 #[derive(Debug, Clone)]
 pub(crate) struct WsConn {
-    read: Arc<tokio::sync::Mutex<OwnedReadHalf>>,
+    read: Arc<tokio::sync::Mutex<ReadSide>>,
     write: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+}
+
+/// The read half plus the bytes read off it that have not yet been parsed into a frame.
+///
+/// The buffer is what makes [`RealWsRecvIo`] **cancel-safe**. A recv future can be dropped before
+/// it completes — that is precisely what `std.task.race`'s loser gets, and how a session races a
+/// client event against a timer. Parsing straight off the socket with a chain of `read_exact`s
+/// into locals loses whatever was already consumed when the future is dropped, and the *next*
+/// recv then reads the middle of a frame as a header: a silently desynchronized stream, which
+/// shows up much later as a bogus opcode or a wild frame length. Every byte read lands here
+/// first, and frames are parsed out of it, so a dropped future costs at most the parse — never
+/// the bytes.
+#[derive(Debug)]
+pub(crate) struct ReadSide {
+    half: OwnedReadHalf,
+    buf: Vec<u8>,
 }
 
 /// The shared upgraded-connection table on [`crate::RealHost`].
@@ -54,7 +70,7 @@ fn handshake_response(key: &str) -> String {
 /// Read one complete text message: transparently answers pings and swallows pongs; `None` on a
 /// close frame (answered) or a clean EOF at a frame boundary.
 async fn read_message(
-    read: &mut OwnedReadHalf,
+    read: &mut ReadSide,
     write: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
 ) -> Result<Option<String>, StdError> {
     loop {
@@ -86,54 +102,108 @@ async fn read_message(
     }
 }
 
+/// The largest frame accepted. A dev/LiveView frame is small; a multi-megabyte claim is a broken
+/// or hostile peer.
+const MAX_FRAME: u64 = 16 * 1024 * 1024;
+
 /// Read one raw frame `(fin, opcode, unmasked payload)`; `None` on clean EOF at a frame boundary.
-async fn read_frame(read: &mut OwnedReadHalf) -> Result<Option<(bool, u8, Vec<u8>)>, StdError> {
-    let mut header = [0u8; 2];
-    match read.read_exact(&mut header).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(io_error(format!("websocket read failed: {e}"))),
+///
+/// **Cancel-safe**: the only `.await` is [`ReadSide::fill`], which appends to `side.buf` and
+/// nothing else, so dropping this future between polls loses no bytes — the next call re-parses
+/// from the same buffer. Consumption is deliberately deferred to the very end (`drain`), so a
+/// drop part-way through parsing a frame is not observable either.
+async fn read_frame(side: &mut ReadSide) -> Result<Option<(bool, u8, Vec<u8>)>, StdError> {
+    // The 2-byte prefix. EOF here — with nothing buffered — is a clean close between frames.
+    while side.buf.len() < 2 {
+        if !side.fill().await? {
+            return if side.buf.is_empty() {
+                Ok(None)
+            } else {
+                Err(io_error(
+                    "websocket read failed mid-frame: unexpected EOF".to_string(),
+                ))
+            };
+        }
     }
-    let fin = header[0] & 0x80 != 0;
-    let opcode = header[0] & 0x0F;
-    let masked = header[1] & 0x80 != 0;
-    let mut len = (header[1] & 0x7F) as u64;
-    if len == 126 {
-        let mut ext = [0u8; 2];
-        read_all(read, &mut ext).await?;
-        len = u16::from_be_bytes(ext) as u64;
-    } else if len == 127 {
-        let mut ext = [0u8; 8];
-        read_all(read, &mut ext).await?;
-        len = u64::from_be_bytes(ext);
-    }
-    // A dev/LiveView frame is small; a multi-megabyte claim is a broken or hostile peer.
-    if len > 16 * 1024 * 1024 {
+    let fin = side.buf[0] & 0x80 != 0;
+    let opcode = side.buf[0] & 0x0F;
+    let masked = side.buf[1] & 0x80 != 0;
+    let short = (side.buf[1] & 0x7F) as u64;
+    // Where the payload starts, and how long it is: the 2-byte prefix, then the extended length
+    // (0/2/8 bytes), then the 4-byte mask key when present.
+    let len_bytes = match short {
+        126 => 2,
+        127 => 8,
+        _ => 0,
+    };
+    let mask_bytes = if masked { 4 } else { 0 };
+    let header = 2 + len_bytes + mask_bytes;
+    side.want(header).await?;
+    let len = match short {
+        126 => u16::from_be_bytes([side.buf[2], side.buf[3]]) as u64,
+        127 => u64::from_be_bytes(
+            side.buf[2..10]
+                .try_into()
+                .expect("8 bytes present — `want` filled the header"),
+        ),
+        n => n,
+    };
+    if len > MAX_FRAME {
         return Err(io_error(format!("websocket frame too large ({len} bytes)")));
     }
-    let mask = if masked {
-        let mut key = [0u8; 4];
-        read_all(read, &mut key).await?;
-        Some(key)
-    } else {
-        None
-    };
-    let mut payload = vec![0u8; len as usize];
-    read_all(read, &mut payload).await?;
-    if let Some(key) = mask {
+    let total = header + len as usize;
+    side.want(total).await?;
+    // Everything is buffered — from here on there is no await, so the frame is consumed atomically.
+    let mut payload = side.buf[header..total].to_vec();
+    if masked {
+        let key = &side.buf[header - 4..header];
         for (i, byte) in payload.iter_mut().enumerate() {
             *byte ^= key[i % 4];
         }
     }
+    side.drain(total);
     Ok(Some((fin, opcode, payload)))
 }
 
-/// `read_exact` with EOF mid-frame reported as an error (EOF is only clean *between* frames).
-async fn read_all(read: &mut OwnedReadHalf, buf: &mut [u8]) -> Result<(), StdError> {
-    read.read_exact(buf)
-        .await
-        .map(|_| ())
-        .map_err(|e| io_error(format!("websocket read failed mid-frame: {e}")))
+impl ReadSide {
+    fn new(half: OwnedReadHalf) -> ReadSide {
+        ReadSide {
+            half,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Read once from the socket into the buffer. `Ok(false)` on EOF.
+    async fn fill(&mut self) -> Result<bool, StdError> {
+        let mut chunk = [0u8; 8192];
+        let n = self
+            .half
+            .read(&mut chunk)
+            .await
+            .map_err(|e| io_error(format!("websocket read failed: {e}")))?;
+        if n == 0 {
+            return Ok(false);
+        }
+        self.buf.extend_from_slice(&chunk[..n]);
+        Ok(true)
+    }
+
+    /// Buffer at least `n` bytes. EOF before that is mid-frame, which is never clean.
+    async fn want(&mut self, n: usize) -> Result<(), StdError> {
+        while self.buf.len() < n {
+            if !self.fill().await? {
+                return Err(io_error(
+                    "websocket read failed mid-frame: unexpected EOF".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop the first `n` bytes — one consumed frame.
+    fn drain(&mut self, n: usize) {
+        self.buf.drain(..n);
+    }
 }
 
 /// Write one unmasked (server→client) frame.
@@ -204,11 +274,60 @@ impl ExternIo for RealWsUpgradeIo {
             ws_conns.lock().unwrap().insert(
                 conn,
                 WsConn {
-                    read: Arc::new(tokio::sync::Mutex::new(read)),
+                    read: Arc::new(tokio::sync::Mutex::new(ReadSide::new(read))),
                     write: Arc::new(tokio::sync::Mutex::new(write)),
                 },
             );
             Ok(NativeOut::Unit)
+        })))
+    }
+}
+
+/// Timed receive descriptor: one message off the read half, or `none` once `ms` elapses.
+///
+/// The deadline wraps the read rather than racing it. That distinction is the whole point: a
+/// `race(recv, timer)` cancels the losing recv, and a message it had already consumed is lost with
+/// the cancelled task. Here the timeout expires *inside* the read, and because [`ReadSide`] buffers
+/// every byte it pulls, expiring part-way through a frame keeps that frame's bytes for the next
+/// call. Nothing is dropped either way — a partial frame or a whole message.
+#[derive(Debug)]
+pub(crate) struct RealWsRecvTimeoutIo {
+    pub(crate) ws_conns: WsConns,
+    pub(crate) conn: u64,
+    pub(crate) ms: u64,
+}
+
+impl ExternIo for RealWsRecvTimeoutIo {
+    fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
+        Err(runtime_only("websocket receive"))
+    }
+
+    fn run_real(&mut self) -> Option<RealBody> {
+        let ws_conns = self.ws_conns.clone();
+        let conn = self.conn;
+        let ms = self.ms;
+        Some(RealBody::Async(Box::pin(async move {
+            let Some(ws) = ws_conns.lock().unwrap().get(&conn).cloned() else {
+                return Ok(ws_recv_outcome(None));
+            };
+            let mut read = ws.read.lock().await;
+            let waited = tokio::time::timeout(
+                std::time::Duration::from_millis(ms),
+                read_message(&mut read, &ws.write),
+            )
+            .await;
+            match waited {
+                // The deadline passed with no complete message. Whatever bytes arrived stay in the
+                // read buffer, so the next call resumes the same frame.
+                Err(_) => Ok(ws_recv_outcome(None)),
+                Ok(result) => {
+                    let message = result?;
+                    if message.is_none() {
+                        ws_conns.lock().unwrap().remove(&conn);
+                    }
+                    Ok(ws_recv_outcome(message))
+                }
+            }
         })))
     }
 }
@@ -320,5 +439,104 @@ mod tests {
         assert!(resp.contains("Upgrade: websocket\r\n"));
         assert!(resp.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"));
         assert!(resp.ends_with("\r\n\r\n"));
+    }
+
+    /// One masked client→server TEXT frame carrying `text`.
+    fn masked_text_frame(text: &str, mask: [u8; 4]) -> Vec<u8> {
+        let payload = text.as_bytes();
+        assert!(payload.len() < 126, "test frames use the short length form");
+        let mut frame = vec![0x81, 0x80 | payload.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        frame
+    }
+
+    /// Dropping a recv future part-way through a frame must not eat the bytes it had already
+    /// pulled off the socket.
+    ///
+    /// This is the shape `std.task.race` produces — the loser's future is dropped at its next
+    /// suspension — so a session racing a client event against a timer hits it on every tick that
+    /// lands mid-frame. Parsing with `read_exact` into locals lost those bytes, and the *next*
+    /// recv read the middle of a frame as a header: a desynchronized stream that surfaces later
+    /// as a bogus opcode or a wild length, far from the cancellation that caused it.
+    #[test]
+    fn a_recv_dropped_mid_frame_keeps_the_bytes_it_already_read() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind loopback");
+            let addr = listener.local_addr().expect("local addr");
+            let client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            let (server, _) = listener.accept().await.expect("accept");
+            let (read, write) = server.into_split();
+            let mut side = ReadSide::new(read);
+            let write = Arc::new(tokio::sync::Mutex::new(write));
+            let mut client = client;
+
+            let frame = masked_text_frame("hello world", [0xA1, 0xB2, 0xC3, 0xD4]);
+            // Split inside the mask key, so a lost prefix cannot resync by luck.
+            let (head, tail) = frame.split_at(5);
+
+            client.write_all(head).await.expect("write frame head");
+            // Drive the read until it is waiting for the rest, then drop it — the cancellation.
+            let cancelled = tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                read_message(&mut side, &write),
+            )
+            .await;
+            assert!(cancelled.is_err(), "the partial frame must not complete");
+
+            client.write_all(tail).await.expect("write frame tail");
+            let got = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                read_message(&mut side, &write),
+            )
+            .await
+            .expect("the completed frame arrives")
+            .expect("no read error");
+            assert_eq!(got.as_deref(), Some("hello world"));
+        });
+    }
+
+    /// The buffer must also not *over*-consume: two frames arriving in one TCP segment both parse,
+    /// in order. (The `read_exact` codec got this right by construction; a buffered one has to be
+    /// held to it, since a frame is now parsed out of a buffer that may hold the next one too.)
+    #[test]
+    fn two_frames_in_one_segment_both_parse_in_order() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind loopback");
+            let addr = listener.local_addr().expect("local addr");
+            let client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            let (server, _) = listener.accept().await.expect("accept");
+            let (read, write) = server.into_split();
+            let mut side = ReadSide::new(read);
+            let write = Arc::new(tokio::sync::Mutex::new(write));
+            let mut client = client;
+
+            let mut both = masked_text_frame("first", [1, 2, 3, 4]);
+            both.extend(masked_text_frame("second", [9, 8, 7, 6]));
+            client.write_all(&both).await.expect("write both frames");
+
+            for want in ["first", "second"] {
+                let got = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    read_message(&mut side, &write),
+                )
+                .await
+                .expect("frame arrives")
+                .expect("no read error");
+                assert_eq!(got.as_deref(), Some(want));
+            }
+        });
     }
 }

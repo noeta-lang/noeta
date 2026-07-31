@@ -1,0 +1,36 @@
+// The **recoverable** wire→case door: `Enum.try_from(v)` selects a case by its BACKING value, so a
+// value that came off a wire resolves without the aborting `Enum.from` — the `json.parse`/
+// `json.try_parse` shape, applied to enums.
+//
+// The backing is what a backed enum's JSON Schema advertises, so it is what a wire-facing conversion
+// must read; matching only the case name is what left this door unusable on untrusted input. Backings
+// of any scalar type work, so an `int`-backed enum accepts an `int`.
+//
+// The case name stays accepted as a second pass, so a plain enum is unchanged and every program that
+// already spelled a backed enum's case name keeps working. An unknown value is `none` — recoverable,
+// never an abort — while `from` keeps aborting, so both halves of the pair remain.
+// expect: stdout "backing: Plan.Free"
+// expect: stdout "name still works: Plan.Free"
+// expect: stdout "unknown: none"
+// expect: stdout "int backing: Code.Missing"
+// expect: stdout "int by name: Code.Ok"
+// expect: stdout "unknown int: none"
+// expect: stdout "aborting door: Plan.Paid"
+// expect: exit 0
+enum Plan: string { Free = "free"; Paid = "paid" }
+enum Code: int { Ok = 200; Missing = 404 }
+
+fn say(o: ?dyn): string {
+    return match o {
+        some(v) => "${v}",
+        none => "none",
+    }
+}
+
+echo "backing: " ~ say(Plan.try_from("free"))
+echo "name still works: " ~ say(Plan.try_from("Free"))
+echo "unknown: " ~ say(Plan.try_from("gold"))
+echo "int backing: " ~ say(Code.try_from(404))
+echo "int by name: " ~ say(Code.try_from("Ok"))
+echo "unknown int: " ~ say(Code.try_from(500))
+echo "aborting door: ${Plan.from("paid")}"

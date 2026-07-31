@@ -435,6 +435,7 @@ module.exports = grammar({
       $.identifier,
       $.self,
       $.turbofish_call,
+      $.instantiated_call_expression,
       $.field_expression,
       $.index_expression,
       $.call_expression,
@@ -488,6 +489,24 @@ module.exports = grammar({
     turbofish_call: $ => prec(PREC.call, seq(
       field('function', $.identifier),
       '::', '<', commaSep1($._type), '>',
+      field('arguments', $.arguments),
+    )),
+
+    // Call-site class instantiation: `Repo::<Todo>.new("todos")` — the turbofish applies to the
+    // generic TYPE, and the associated call that consumes it is part of the rule (the compiler
+    // requires the trailing `.member`, and including it keeps this disjoint from `turbofish_call`,
+    // which takes `(` where this takes `.`).
+    //
+    // The member may carry a turbofish of its OWN — `Repo::<Todo>.blank::<int>()` — naming the
+    // METHOD's type parameters where the leading one names the CLASS's. Optional here for the same
+    // reason it is optional in `method_call_expression`, and spelled the same way, because it is
+    // the same construct: only its receiver differs.
+    instantiated_call_expression: $ => prec(PREC.call + 2, seq(
+      field('type', $.identifier),
+      '::', '<', commaSep1($._type), '>',
+      '.',
+      field('method', $.identifier),
+      optional(seq('::', '<', commaSep1($._type), '>')),
       field('arguments', $.arguments),
     )),
 
@@ -666,7 +685,11 @@ module.exports = grammar({
       '->', field('return', $._type),
     )),
     primitive_type: _ => choice(
-      'int', 'float', 'f32', 'bool', 'string', 'bytes', 'void', 'unit', 'dyn',
+      'int', 'float', 'f32', 'f64', 'number', 'bool', 'string', 'bytes', 'void', 'unit', 'dyn',
+      // The bottom type. A type NAME, not a keyword — it is listed here (like 'unit' and
+      // 'number') so it highlights as a primitive in type position; an ordinary identifier
+      // spelled 'never' elsewhere still parses as one, since $.identifier is also a $._type.
+      'never',
       'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64',
     ),
     generic_type: $ => prec(3, seq(

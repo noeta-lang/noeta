@@ -77,7 +77,7 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
         match stmt {
             Stmt::Fn(decl) => symbols.push(fn_symbol(decl, SymbolKind::Function)),
             Stmt::Struct(decl) => symbols.push(SymbolNode {
-                name: decl.name.clone(),
+                name: decl.name.to_string(),
                 detail: None,
                 kind: SymbolKind::Struct,
                 full_span: decl.span,
@@ -86,7 +86,7 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
                 children: type_members(&decl.fields, &decl.methods),
             }),
             Stmt::Class(decl) => symbols.push(SymbolNode {
-                name: decl.name.clone(),
+                name: decl.name.to_string(),
                 detail: None,
                 kind: SymbolKind::Class,
                 full_span: decl.span,
@@ -97,7 +97,7 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
             Stmt::Enum(decl) => symbols.push(enum_symbol(decl)),
             Stmt::Impl(decl) => symbols.push(impl_symbol(decl)),
             Stmt::Trait(decl) => symbols.push(SymbolNode {
-                name: decl.name.clone(),
+                name: decl.name.to_string(),
                 detail: None,
                 kind: SymbolKind::Trait,
                 full_span: decl.span,
@@ -119,7 +119,7 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
 /// A function or method symbol, with its signature as detail.
 fn fn_symbol(decl: &FnDecl, kind: SymbolKind) -> SymbolNode {
     SymbolNode {
-        name: decl.name.clone(),
+        name: decl.name.to_string(),
         detail: Some(fn_signature(decl)),
         kind,
         full_span: decl.span,
@@ -169,7 +169,7 @@ fn enum_symbol(decl: &EnumDecl) -> SymbolNode {
         children.push(fn_symbol(method, SymbolKind::Method));
     }
     SymbolNode {
-        name: decl.name.clone(),
+        name: decl.name.to_string(),
         detail: None,
         kind: SymbolKind::Enum,
         full_span: decl.span,
@@ -229,56 +229,29 @@ pub(crate) fn fn_signature(decl: &FnDecl) -> String {
 
 /// One parameter (or variant field) rendered as `name: T`, or just `name` when it has no annotation.
 /// Shared with signature help.
+///
+/// A variant's **positional** payload (`Circle(float)`) renders as its type alone: the source gave
+/// it no name, and the `_0` the AST carries is a synthesized slot name that must never surface in a
+/// hover.
 pub(crate) fn param_detail(param: &Param) -> String {
-    match &param.ty {
-        Some(ty) => format!("{}: {}", param.name, render_type_ref(ty)),
-        None => param.name.clone(),
+    match (&param.ty, param.positional) {
+        (Some(ty), true) => render_type_ref(ty),
+        (Some(ty), false) => format!("{}: {}", param.name, render_type_ref(ty)),
+        (None, _) => param.name.clone(),
     }
-}
-
-/// The leaf of a possibly linker-qualified type name: `geometry.vec.Vec2` → `Vec2`, `Vec2` → `Vec2`.
-/// The linker rewrites an imported type reference in the merged program to its fully-qualified
-/// identity; for display we want the name the author wrote. A type identifier never contains a `.`,
-/// so any `.` is unambiguously a module-qualifier separator (mirrors `render_fn_signature`, which
-/// shows a function's leaf name for the same reason).
-fn type_leaf(name: &str) -> &str {
-    name.rsplit('.').next().unwrap_or(name)
 }
 
 /// Render a surface [`TypeRef`] back to compact source syntax for symbol detail (`List<int>`, `?T`,
 /// `A | B`, `(A, B)`, `(A) -> R`). Shared with member completion. A linker-qualified type name is
-/// shown by its leaf (`Vec2`, not `geometry.vec.Vec2`) — see [`type_leaf`].
+/// shown by its leaf (`Vec2`, not `geometry.vec.Vec2`): the linker rewrites an imported type
+/// reference in the merged program to its fully-qualified identity, and for display we want the name
+/// the author wrote.
+///
+/// One line, because that is exactly `noeta_ast::shape::type_spelling` — the same rendering, for the
+/// same reason, that an extension's `ExtDerive::validate` and `DirectiveCtx::fields` are given. Kept
+/// as a named function here so the IDE's call sites read in the IDE's vocabulary.
 pub fn render_type_ref(ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::Named { name, args, .. } => {
-            if args.is_empty() {
-                type_leaf(name).to_string()
-            } else {
-                format!("{}<{}>", type_leaf(name), join(args))
-            }
-        }
-        TypeRef::DynTrait { trait_name, .. } => format!("dyn {}", type_leaf(trait_name)),
-        TypeRef::AssocProjection { name, .. } => format!("Self::{name}"),
-        TypeRef::Optional { inner, .. } => format!("?{}", render_type_ref(inner)),
-        TypeRef::Union { members, .. } => members
-            .iter()
-            .map(render_type_ref)
-            .collect::<Vec<_>>()
-            .join(" | "),
-        TypeRef::Tuple { elements, .. } => format!("({})", join(elements)),
-        TypeRef::Fn { params, ret, .. } => {
-            format!("({}) -> {}", join(params), render_type_ref(ret))
-        }
-    }
-}
-
-/// Render a comma-separated list of type references.
-fn join(types: &[TypeRef]) -> String {
-    types
-        .iter()
-        .map(render_type_ref)
-        .collect::<Vec<_>>()
-        .join(", ")
+    noeta_ast::shape::type_spelling(ty)
 }
 
 #[cfg(test)]

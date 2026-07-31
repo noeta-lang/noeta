@@ -1,0 +1,24 @@
+// A type parameter satisfies its own declared bounds, but only AT THE INSTANTIATION it declares:
+// `<T: Keyed<int>>` does not license a call demanding `Keyed<string>`. The in-scope-parameter
+// shortcut must match argument-wise, or it would turn every instantiated bound into a bare one.
+// E0025.
+// expect: error E0025 at 21:12
+// expect: exit 1
+trait Keyed<K> {
+    fn key(): K
+}
+
+struct Door {
+    code: int
+    impl Keyed<int> {
+        fn key(): int { return self.code }
+    }
+}
+
+fn wants_string_keys<T: Keyed<string>>(item: T): string { return item.key() }
+
+fn forwards<T: Keyed<int>>(item: T): string {
+    return wants_string_keys(item)
+}
+
+echo forwards(Door { code: 7 })

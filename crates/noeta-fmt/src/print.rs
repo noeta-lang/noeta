@@ -11,9 +11,9 @@
 
 use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
-    FieldDecl, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, ObjectLit,
-    Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod, TypeParam, TypeRef,
-    UseName, VariantDecl,
+    FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective,
+    ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod,
+    TypeOperand, TypeParam, TypeRef, UseName, VariantDecl,
 };
 use std::cell::Cell;
 
@@ -54,6 +54,22 @@ enum Member<'a> {
     Method(&'a FnDecl),
     Impl(&'a ImplBlock),
     Destructor(&'a [Stmt]),
+}
+
+/// One item of an object literal, unified so comments interleave across the named fields and the
+/// trailing record-update spread in source order.
+enum ObjItem<'a> {
+    Field(&'a FieldInit),
+    Spread(&'a Expr),
+}
+
+impl ObjItem<'_> {
+    fn span(&self) -> Span {
+        match self {
+            ObjItem::Field(f) => f.span,
+            ObjItem::Spread(e) => e.span(),
+        }
+    }
 }
 
 /// An enum body member, unified so comments interleave across variants, methods, and `impl` blocks.
@@ -928,7 +944,7 @@ impl Printer<'_> {
             parts.push(Doc::text("async "));
         }
         parts.push(Doc::text("fn "));
-        parts.push(Doc::text(decl.name.clone()));
+        parts.push(Doc::text(decl.name.to_string()));
         parts.push(self.type_params(&decl.type_params)?);
         parts.push(self.params(&decl.params)?);
         // The sealed-fn capture clause (`use (a, b)`) — dropping it would silently strip the
@@ -1027,6 +1043,24 @@ impl Printer<'_> {
         Ok(Doc::concat(parts))
     }
 
+    /// One enum-variant payload field. A **positional** one (`Leaf(User)`) prints its type alone:
+    /// the source wrote no name, and the `_0` in the AST is a synthesized slot name that must not
+    /// reach the output. A named one (`Leaf(u: User)`) prints exactly like a parameter.
+    fn variant_field(&self, field: &Param) -> Result<Doc, FmtError> {
+        if !field.positional {
+            return self.param(field);
+        }
+        let mut parts = Vec::new();
+        for a in &field.attrs {
+            parts.push(self.attribute(a)?);
+            parts.push(Doc::text(" "));
+        }
+        if let Some(ty) = &field.ty {
+            parts.push(self.type_ref(ty)?);
+        }
+        Ok(Doc::concat(parts))
+    }
+
     fn type_params(&self, tps: &[TypeParam]) -> Result<Doc, FmtError> {
         if tps.is_empty() {
             return Ok(Doc::nil());
@@ -1044,7 +1078,7 @@ impl Printer<'_> {
                         // An instantiated bound (`T: Keyed<int>`) renders its arguments through
                         // the ordinary type printer; a bare bound is just the name.
                         Ok(Doc::concat([
-                            Doc::text(b.name.clone()),
+                            Doc::text(b.name.to_string()),
                             self.trait_args_doc(&b.args)?,
                         ]))
                     })
@@ -1068,7 +1102,7 @@ impl Printer<'_> {
             parts.push(Doc::text("pub "));
         }
         parts.push(Doc::text("struct "));
-        parts.push(Doc::text(d.name.clone()));
+        parts.push(Doc::text(d.name.to_string()));
         parts.push(self.type_params(&d.type_params)?);
         parts.push(Doc::text(" "));
         parts.push(self.type_body(&d.fields, &d.methods, &d.impls, None, d.span)?);
@@ -1081,7 +1115,7 @@ impl Printer<'_> {
             parts.push(Doc::text("pub "));
         }
         parts.push(Doc::text("class "));
-        parts.push(Doc::text(d.name.clone()));
+        parts.push(Doc::text(d.name.to_string()));
         parts.push(self.type_params(&d.type_params)?);
         parts.push(Doc::text(" "));
         parts.push(self.type_body(
@@ -1267,7 +1301,7 @@ impl Printer<'_> {
             parts.push(Doc::text("pub "));
         }
         parts.push(Doc::text("trait "));
-        parts.push(Doc::text(d.name.clone()));
+        parts.push(Doc::text(d.name.to_string()));
         parts.push(self.type_params(&d.type_params)?);
         parts.push(Doc::text(" "));
         // The body lists associated types first (`type Name;` / `type Name = Default;`), then method
@@ -1309,7 +1343,7 @@ impl Printer<'_> {
             parts.push(Doc::text("async "));
         }
         parts.push(Doc::text("fn "));
-        parts.push(Doc::text(m.sig.name.clone()));
+        parts.push(Doc::text(m.sig.name.to_string()));
         // A trait method's own `<...>` is rejected by the checker (E0058 — trait method sets stay
         // monomorphic, poly-deferrals D3), but the formatter must still round-trip it faithfully:
         // dropping it here would make the formatted source re-parse to a different AST (the fmt
@@ -1333,7 +1367,7 @@ impl Printer<'_> {
             parts.push(Doc::text("pub "));
         }
         parts.push(Doc::text("enum "));
-        parts.push(Doc::text(d.name.clone()));
+        parts.push(Doc::text(d.name.to_string()));
         parts.push(self.type_params(&d.type_params)?);
         if let Some(backing) = &d.backing {
             parts.push(Doc::text(": "));
@@ -1388,7 +1422,7 @@ impl Printer<'_> {
         if !v.fields.is_empty() {
             let mut fs = Vec::new();
             for f in &v.fields {
-                fs.push(self.param(f)?);
+                fs.push(self.variant_field(f)?);
             }
             parts.push(Doc::concat([
                 Doc::text("("),
@@ -1506,7 +1540,7 @@ impl Printer<'_> {
 
     fn derive_spec(&self, d: &DeriveSpec) -> Result<Doc, FmtError> {
         let head = if d.args.is_empty() {
-            Doc::text(d.name.clone())
+            Doc::text(d.name.to_string())
         } else {
             let mut args = Vec::new();
             for a in &d.args {
@@ -1584,7 +1618,7 @@ impl Printer<'_> {
             // instantiation a `@derive(Serialize<Json>)` synthesizes. Rendered through the same
             // `type_ref` printer a type annotation uses, so a nested `Serialize<List<Json>>` and a
             // plain `List<Json>` format identically rather than through a second, drifting path.
-            AttrValue::TypeRef { name, args } if args.is_empty() => Doc::text(name.clone()),
+            AttrValue::TypeRef { name, args } if args.is_empty() => Doc::text(name.to_string()),
             AttrValue::TypeRef { name, args } => {
                 let ds: Result<Vec<_>, _> = args.iter().map(|a| self.type_ref(a)).collect();
                 Doc::concat([
@@ -1667,7 +1701,7 @@ impl Printer<'_> {
         Ok(match ty {
             TypeRef::Named { name, args, .. } => {
                 if args.is_empty() {
-                    Doc::text(name.clone())
+                    Doc::text(name.to_string())
                 } else {
                     let ds: Result<Vec<_>, _> = args.iter().map(|a| self.type_ref(a)).collect();
                     Doc::concat([
@@ -1985,7 +2019,7 @@ impl Printer<'_> {
                 if *signed { "i" } else { "u" }
             )),
             Expr::Bool { value, .. } => Doc::text(value.to_string()),
-            Expr::Ident { name, .. } => Doc::text(name.clone()),
+            Expr::Ident { name, .. } => Doc::text(name.to_string()),
             Expr::Unary { op, operand, .. } => {
                 // A prefix op binds looser than postfix (13); parenthesize a looser operand.
                 Doc::concat([Doc::text(op.symbol()), self.operand(operand, 13, true)?])
@@ -2045,10 +2079,24 @@ impl Printer<'_> {
             }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let p = binop_prec(*op);
-                // Source-directed: preserve a break the author put around the operator.
+                // Source-directed: preserve a break the author put around the operator. **Which side
+                // of the break the operator lands on is a parse question, not a taste one.** A
+                // newline ends the statement unless the next line's first token continues it
+                // ([`noeta_lexer::token_continues_line`]), so an operator that does *not* continue a
+                // line — `~`, `&`, `^`, `<<`, `>>` — must stay at the END of the first line, exactly
+                // where the author wrote it (`"a" ~⏎ "b"`). Emitting it at the start of the second
+                // line turned `x = "a" ~⏎ "b"` into `x = "a"⏎ ~ "b"`, which lexes as two statements
+                // (`x = "a"; ~ "b"`) — the printer bug `noeta fmt`'s re-parse safety check caught,
+                // refusing to write the file at all. The wrapping arm above only handles
+                // line-continuing operators, so this arm is the sole place either shape is chosen.
                 let sep = if self.broke_between(lhs.span().end, rhs.span().start) {
-                    Doc::concat([Doc::hardline(), Doc::text(format!("{} ", op.symbol()))])
-                        .nest(self.indent_step())
+                    if noeta_lexer::token_continues_line(binop_token(*op)) {
+                        Doc::concat([Doc::hardline(), Doc::text(format!("{} ", op.symbol()))])
+                            .nest(self.indent_step())
+                    } else {
+                        Doc::concat([Doc::text(format!(" {}", op.symbol())), Doc::hardline()])
+                            .nest(self.indent_step())
+                    }
                 } else {
                     Doc::text(format!(" {} ", op.symbol()))
                 };
@@ -2099,14 +2147,16 @@ impl Printer<'_> {
                 let items = self
                     .set_literal_items(callee, *span)
                     .expect("guard checked");
-                let mut ds = Vec::new();
-                for i in items {
-                    ds.push(self.expr(i)?);
-                }
-                let broke = items
-                    .first()
-                    .is_some_and(|f| self.seq_broke(span.start, f.span().start));
-                self.delimited("#{", ds, "}", false, broke)
+                self.delimited_seq(
+                    "#{",
+                    "}",
+                    false,
+                    items,
+                    span.start,
+                    span.end,
+                    |i: &Expr| i.span(),
+                    |i| self.expr(i),
+                )?
             }
             Expr::Call { callee, args, .. } => Doc::concat([
                 self.receiver(callee)?,
@@ -2126,36 +2176,36 @@ impl Printer<'_> {
                 self.expr(index)?,
                 Doc::text("]"),
             ]),
-            Expr::List { items, span } => {
-                let mut ds = Vec::new();
-                for i in items {
-                    ds.push(self.expr(i)?);
-                }
-                let broke = items
-                    .first()
-                    .is_some_and(|f| self.seq_broke(span.start, f.span().start));
-                self.delimited("[", ds, "]", false, broke)
-            }
-            Expr::Tuple { items, span } => {
-                let mut ds = Vec::new();
-                for i in items {
-                    ds.push(self.expr(i)?);
-                }
-                let broke = items
-                    .first()
-                    .is_some_and(|f| self.seq_broke(span.start, f.span().start));
-                self.delimited("(", ds, ")", false, broke)
-            }
-            Expr::Map { entries, span } => {
-                let mut ds = Vec::new();
-                for (k, v) in entries {
-                    ds.push(Doc::concat([self.expr(k)?, Doc::text(": "), self.expr(v)?]));
-                }
-                let broke = entries
-                    .first()
-                    .is_some_and(|(k, _)| self.seq_broke(span.start, k.span().start));
-                self.delimited("{", ds, "}", false, broke)
-            }
+            Expr::List { items, span } => self.delimited_seq(
+                "[",
+                "]",
+                false,
+                items,
+                span.start,
+                span.end,
+                |i: &Expr| i.span(),
+                |i| self.expr(i),
+            )?,
+            Expr::Tuple { items, span } => self.delimited_seq(
+                "(",
+                ")",
+                false,
+                items,
+                span.start,
+                span.end,
+                |i: &Expr| i.span(),
+                |i| self.expr(i),
+            )?,
+            Expr::Map { entries, span } => self.delimited_seq(
+                "{",
+                "}",
+                false,
+                entries,
+                span.start,
+                span.end,
+                |(k, v): &(Expr, Expr)| Span::new(k.span().start, v.span().end),
+                |(k, v)| Ok(Doc::concat([self.expr(k)?, Doc::text(": "), self.expr(v)?])),
+            )?,
             Expr::Range {
                 start,
                 end,
@@ -2171,8 +2221,12 @@ impl Printer<'_> {
                 None => self.interp(parts)?,
             },
             Expr::Closure {
-                params, ret, body, ..
-            } => self.closure(params, ret.as_ref(), body)?,
+                params,
+                ret,
+                body,
+                span,
+                ..
+            } => self.closure(params, ret.as_ref(), body, *span)?,
             Expr::Match {
                 scrutinee,
                 arms,
@@ -2211,38 +2265,65 @@ impl Printer<'_> {
                 self.type_ref(ty)?,
                 Doc::text(">()"),
             ]),
+            // Turbofish only — there is no call form to resugar into, by design.
+            Expr::TypeName { ty, .. } => Doc::concat([
+                Doc::text("type_name::<"),
+                self.type_ref(ty)?,
+                Doc::text(">()"),
+            ]),
             Expr::TypeOf { value, .. } => {
                 Doc::concat([Doc::text("type_of("), self.expr(value)?, Doc::text(")")])
             }
             Expr::FieldsOf { value, .. } => {
                 Doc::concat([Doc::text("fields_of("), self.expr(value)?, Doc::text(")")])
             }
+            Expr::TraitsOf { value, .. } => {
+                Doc::concat([Doc::text("traits_of("), self.expr(value)?, Doc::text(")")])
+            }
             Expr::ParamsOf { target, .. } => {
                 Doc::concat([Doc::text("params_of("), self.expr(target)?, Doc::text(")")])
             }
-            // The turbofish surface `field_specs_of::<T>()` was lowered to a string operand at parse
-            // time, so it is reconstructed here when the operand is a bare type-name literal (the
-            // canonical form); a genuinely dynamic operand (a variable, a computed string) prints as
-            // the call form `field_specs_of(name)`. Both parse back to the same node.
-            Expr::FieldSpecsOf { name, .. } => match turbofish_type_name(name) {
-                Some(tn) => Doc::text(format!("field_specs_of::<{tn}>()")),
-                None => Doc::concat([
-                    Doc::text("field_specs_of("),
-                    self.expr(name)?,
-                    Doc::text(")"),
+            Expr::ReturnsOf { target, .. } => {
+                Doc::concat([Doc::text("returns_of("), self.expr(target)?, Doc::text(")")])
+            }
+            // The turbofish surface `field_specs_of::<T>()` keeps its `T` as a type operand, so it is
+            // reconstructed verbatim; a dynamic operand (a variable, a computed string, a literal)
+            // prints as the call form `field_specs_of(name)`. Both parse back to the same node.
+            Expr::FieldSpecsOf { name, .. } => match name {
+                TypeOperand::Static(ty) => Doc::concat([
+                    Doc::text("field_specs_of::<"),
+                    self.type_ref(ty)?,
+                    Doc::text(">()"),
                 ]),
+                TypeOperand::Dynamic(e) => {
+                    Doc::concat([Doc::text("field_specs_of("), self.expr(e)?, Doc::text(")")])
+                }
+            },
+            // `variants_of` prints through the identical two-arm reconstruction — one surface, so
+            // one shape.
+            Expr::VariantsOf { name, .. } => match name {
+                TypeOperand::Static(ty) => Doc::concat([
+                    Doc::text("variants_of::<"),
+                    self.type_ref(ty)?,
+                    Doc::text(">()"),
+                ]),
+                TypeOperand::Dynamic(e) => {
+                    Doc::concat([Doc::text("variants_of("), self.expr(e)?, Doc::text(")")])
+                }
             },
             // `construct::<T>(fields)` reconstructs its turbofish likewise; the dynamic form prints
             // both operands as `construct(name, fields)`.
-            Expr::Construct { name, fields, .. } => match turbofish_type_name(name) {
-                Some(tn) => Doc::concat([
-                    Doc::text(format!("construct::<{tn}>(")),
+            Expr::Construct { name, fields, .. } => match name {
+                TypeOperand::Static(ty) => Doc::concat([
+                    Doc::text("construct::<"),
+                    self.type_ref(ty)?,
+                    Doc::text(">("),
                     self.expr(fields)?,
                     Doc::text(")"),
                 ]),
-                None => Doc::concat([
+                TypeOperand::Dynamic(e) => Doc::concat([
                     Doc::text("construct("),
-                    self.expr(name)?,
+                    self.expr(e)?,
                     Doc::text(", "),
                     self.expr(fields)?,
                     Doc::text(")"),
@@ -2310,6 +2391,22 @@ impl Printer<'_> {
                 parts.push(Doc::text(">"));
                 let anchor = type_args.last().map(|t| t.span().end).unwrap_or(0);
                 parts.push(self.arg_list(args, anchor)?);
+                Doc::concat(parts)
+            }
+            // `Repo::<Todo>` — a call-site class instantiation, printed as one unbreakable head
+            // (`receiver` handles any parenthesization the underlying type reference needs). The
+            // `.member` that must follow is printed by the enclosing `Expr::Member`.
+            Expr::InstantiatedType {
+                recv, type_args, ..
+            } => {
+                let mut parts = vec![self.receiver(recv)?, Doc::text("::<")];
+                for (i, t) in type_args.iter().enumerate() {
+                    if i > 0 {
+                        parts.push(Doc::text(", "));
+                    }
+                    parts.push(self.type_ref(t)?);
+                }
+                parts.push(Doc::text(">"));
                 Doc::concat(parts)
             }
             Expr::RolesOf { ty: Some(ty), .. } => Doc::concat([
@@ -2418,6 +2515,73 @@ impl Printer<'_> {
         }
     }
 
+    /// A comma-delimited literal (`[…]`, `(…)`, `#{…}`, `{k: v}`, `T { … }`) that keeps a comment
+    /// written **between** its elements on its own line inside the literal, instead of letting it
+    /// migrate past the closing delimiter.
+    ///
+    /// `region_start` is the byte of the open delimiter and `region_end` the byte just past the
+    /// close, so a leading comment above the first element and a dangling one before the close both
+    /// attach here. `item_span` yields each element's span; `render_item` prints one element's body
+    /// (no trailing comma — this adds it).
+    ///
+    /// When no comment falls **between** elements (every comment in the region is nested inside an
+    /// element's own span, or there are none), this is exactly [`Self::delimited`] — identical
+    /// output, zero behavior change. Only a *structural* comment routes through
+    /// [`Self::interleave_comments`], which forces the broken layout (a comment cannot be flattened)
+    /// and emits every comment exactly once — own-line comments on their own line, a same-line
+    /// comment trailing its element.
+    #[allow(clippy::too_many_arguments)]
+    fn delimited_seq<T>(
+        &self,
+        open: &str,
+        close: &str,
+        spaced: bool,
+        items: &[T],
+        region_start: u32,
+        region_end: u32,
+        item_span: impl Fn(&T) -> Span,
+        render_item: impl Fn(&T) -> Result<Doc, FmtError>,
+    ) -> Result<Doc, FmtError> {
+        if items.is_empty() {
+            return Ok(Doc::text(format!("{open}{close}")));
+        }
+        let broke = self.seq_broke(region_start, item_span(&items[0]).start);
+
+        // A *structural* comment is one inside the region that is not nested inside any element's own
+        // span — i.e. between two elements, above the first, or before the close. Only these need the
+        // interleave treatment; a comment inside an element is consumed by that element's own
+        // recursion, so it stays in the `delimited` fast path (unchanged behavior).
+        let structural = self.comments.iter().any(|c| {
+            c.span.start >= region_start
+                && c.span.start < region_end
+                && !items.iter().any(|it| {
+                    let s = item_span(it);
+                    s.start <= c.span.start && c.span.end <= s.end
+                })
+        });
+
+        if !structural {
+            let mut ds = Vec::with_capacity(items.len());
+            for it in items {
+                ds.push(render_item(it)?);
+            }
+            return Ok(self.delimited(open, ds, close, spaced, broke));
+        }
+
+        // Force the broken layout and interleave. Every element carries its own trailing comma (the
+        // parser accepts a uniform trailing one) so a comment can slot in between elements on its own
+        // line, and `interleave_comments` keeps a same-line comment trailing its element.
+        let body = self.interleave_comments(items, region_start, region_end, &item_span, |it| {
+            Ok(Doc::concat([render_item(it)?, Doc::text(",")]))
+        })?;
+        Ok(Doc::concat([
+            Doc::text(open),
+            Doc::concat([Doc::hardline(), body]).nest(self.indent_step()),
+            Doc::hardline(),
+            Doc::text(close),
+        ]))
+    }
+
     /// Whether the author broke a delimited sequence across lines — detected by a newline between the
     /// opening delimiter (byte `open_ref`, e.g. the `[` or the `{` after a type name) and the first
     /// element (byte `first`). This is the source-directed signal [`Self::delimited`] keys off: the
@@ -2488,11 +2652,17 @@ impl Printer<'_> {
         Ok(Doc::concat(docs))
     }
 
+    /// An anonymous closure. `span` is the whole `fn(…) { … }` expression, and it is what lets a
+    /// block body interleave the comments **inside** it: `block` attaches a comment by asking which
+    /// region it falls in, so a body handed the empty region `(0, 0)` claims none of them and every
+    /// comment in the body is left for whatever encloses the closure to re-emit — outside the braces,
+    /// against a different statement than the author wrote it against.
     fn closure(
         &self,
         params: &[Param],
         ret: Option<&TypeRef>,
         body: &ClosureBody,
+        span: Span,
     ) -> Result<Doc, FmtError> {
         let mut parts = vec![Doc::text("fn"), self.params(params)?];
         if let Some(ret) = ret {
@@ -2506,7 +2676,7 @@ impl Printer<'_> {
             }
             ClosureBody::Block(stmts) => {
                 parts.push(Doc::text(" "));
-                parts.push(self.block(stmts, 0, 0)?);
+                parts.push(self.block(stmts, span.start, span.end)?);
             }
         }
         Ok(Doc::concat(parts))
@@ -2527,6 +2697,10 @@ impl Printer<'_> {
         span: Span,
     ) -> Result<Option<Doc>, FmtError> {
         if arms.len() != 2 || !self.source_starts_with_if(span) {
+            return Ok(None);
+        }
+        // The desugar never produces guarded arms; a guard means a literal (guarded) `match`.
+        if arms.iter().any(|a| a.guard.is_some()) {
             return Ok(None);
         }
         let cond = match (&arms[0].pattern, &arms[1].pattern) {
@@ -2834,18 +3008,27 @@ impl Printer<'_> {
         if arms.is_empty() {
             return Ok(Doc::concat([head, Doc::text(" {}")]));
         }
-        // Optional column alignment of the `=>` arrows (config): pad each pattern to the widest.
+        // The arm's left column is `pattern` or `pattern if guard` — the guard is part of the
+        // column, so the `align` mode pads the whole of it to the widest.
+        let arm_left = |a: &MatchArm| -> Result<Doc, FmtError> {
+            let pat = self.pattern(&a.pattern)?;
+            Ok(match &a.guard {
+                Some(guard) => Doc::concat([pat, Doc::text(" if "), self.expr(guard)?]),
+                None => pat,
+            })
+        };
+        // Optional column alignment of the `=>` arrows (config): pad each left column to the widest.
         let arrow_col = if self.config.match_arm_arrows == ArrowStyle::Align {
             let mut widths = Vec::new();
             for a in arms {
-                widths.push(pattern_width(self.pattern(&a.pattern)?));
+                widths.push(pattern_width(arm_left(a)?));
             }
             widths.into_iter().max().unwrap_or(0)
         } else {
             0
         };
         let render_arm = |a: &MatchArm| -> Result<Doc, FmtError> {
-            let pat = self.pattern(&a.pattern)?;
+            let pat = arm_left(a)?;
             let pad = if self.config.match_arm_arrows == ArrowStyle::Align {
                 " ".repeat(arrow_col.saturating_sub(pattern_width_ref(&pat)))
             } else {
@@ -2853,7 +3036,12 @@ impl Printer<'_> {
             };
             let body = match &a.body {
                 ClosureBody::Expr(e) => self.expr(e)?,
-                ClosureBody::Block(stmts) => self.block(stmts, 0, 0)?,
+                // Bounded by the arm's own span, so a comment written INSIDE a block arm stays
+                // inside it. Handed the empty region `(0, 0)`, the block claimed no comment at all
+                // and every one of them fell through to the arm-level interleave below — which
+                // re-emitted them *between* arms, silently reattaching each to the following arm.
+                // `noeta fmt` is supposed to be safe; moving a comment across a brace is not.
+                ClosureBody::Block(stmts) => self.block(stmts, a.span.start, a.span.end)?,
             };
             Ok(Doc::concat([
                 pat,
@@ -2874,37 +3062,41 @@ impl Printer<'_> {
     }
 
     fn object(&self, obj: &ObjectLit) -> Result<Doc, FmtError> {
-        let mut ds = Vec::new();
-        for f in &obj.fields {
-            ds.push(Doc::concat([
-                Doc::text(format!("{}: ", f.name)),
-                self.expr(&f.value)?,
-            ]));
-        }
-        if let Some(spread) = &obj.spread {
-            ds.push(Doc::concat([Doc::text("..."), self.expr(spread)?]));
-        }
         // The head is either `Name ` (name, space, then the brace) or the target-typed `.` that
         // fuses straight into the brace — `.{` is one token, so a space would not round-trip.
         let head = match &obj.type_name {
             Some(name) => format!("{name} "),
             None => ".".to_string(),
         };
-        if ds.is_empty() {
+        if obj.fields.is_empty() && obj.spread.is_none() {
             return Ok(Doc::text(format!("{head}{{}}")));
         }
+        // The fields, then the record-update spread, in source order — so a comment written between
+        // any two of them interleaves onto its own line instead of migrating past `}`.
+        let mut items: Vec<ObjItem> = obj.fields.iter().map(ObjItem::Field).collect();
+        if let Some(spread) = &obj.spread {
+            items.push(ObjItem::Spread(spread));
+        }
         // The `{` sits just after the type name; a break before the first field (or spread) means the
-        // author wrote the literal across lines, so keep it broken.
-        let first = obj
-            .fields
-            .first()
-            .map(|f| f.span.start)
-            .or_else(|| obj.spread.as_ref().map(|s| s.span().start));
-        let broke = first.is_some_and(|f| self.seq_broke(obj.type_name_span.end, f));
-        Ok(Doc::concat([
-            Doc::text(head),
-            self.delimited("{", ds, "}", true, broke),
-        ]))
+        // author wrote the literal across lines. `type_name_span.end` is the source-directed break
+        // reference the previous form keyed off, kept verbatim.
+        let body = self.delimited_seq(
+            "{",
+            "}",
+            true,
+            &items,
+            obj.type_name_span.end,
+            obj.span.end,
+            ObjItem::span,
+            |it| match it {
+                ObjItem::Field(f) => Ok(Doc::concat([
+                    Doc::text(format!("{}: ", f.name)),
+                    self.expr(&f.value)?,
+                ])),
+                ObjItem::Spread(e) => Ok(Doc::concat([Doc::text("..."), self.expr(e)?])),
+            },
+        )?;
+        Ok(Doc::concat([Doc::text(head), body]))
     }
 
     fn pattern(&self, pat: &Pattern) -> Result<Doc, FmtError> {
@@ -2959,26 +3151,6 @@ impl Printer<'_> {
 /// postfix-headed expressions are maximal (never need parenthesizing as an operand). Used to insert
 /// the minimum parentheses that preserve the parse — parentheses are not in the AST, so a naive
 /// printer would re-associate `Sub(Shl(a,b),c)` into `a << b - c`.
-/// The type name to reconstruct a `field_specs_of::<T>()` / `construct::<T>(…)` turbofish from — the
-/// operand is a string literal (the parser lowered the turbofish to it) whose value is a valid
-/// type-name token: identifier segments (`[A-Za-z_][A-Za-z0-9_]*`) joined by dots (a qualified name
-/// like `vec.Vec2`). `None` for any other operand (a variable, a computed string, or a literal that
-/// is not a bare type name — a CLI framework's runtime type name), which prints as the call form.
-fn turbofish_type_name(operand: &Expr) -> Option<String> {
-    let Expr::Str { value, .. } = operand else {
-        return None;
-    };
-    if value.is_empty() {
-        return None;
-    }
-    let valid = value.split('.').all(|seg| {
-        let mut chars = seg.chars();
-        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-    });
-    valid.then(|| value.clone())
-}
-
 fn prec(e: &Expr) -> u8 {
     match e {
         Expr::Pipeline { .. } => 1,
@@ -2986,6 +3158,19 @@ fn prec(e: &Expr) -> u8 {
         Expr::Binary { op, .. } => binop_prec(*op),
         Expr::Range { .. } => 6,
         Expr::Unary { .. } | Expr::Spawn { .. } => 13,
+        // `x is T`. Postfix in SHAPE but not in binding power: the parser registers it at the
+        // COMPARISON tier (bp 5, beside `< <= > >=`), so `a + b is int` is `(a + b) is int` and
+        // `x is int && y` is `(x is int) && y`.
+        //
+        // It sat in the 14 group below, which claims a form never needs parenthesizing as an
+        // operand — true of a call or a member access, false of this. `!(d is int)` therefore
+        // printed as `!d is int`, which the parser reads back as `(!d) is int`: a different AST, and
+        // the safety gate refused to format any file containing the construct. `(x is int).f()` was
+        // the same latent bug one step further along.
+        //
+        // Because this only ever LOWERS the reported binding power, it can add parentheses that
+        // preserve a parse and can never remove ones that were holding one together.
+        Expr::TypeTest { .. } => 5,
         // Postfix-position forms (bind tightest among operators).
         Expr::Call { .. }
         | Expr::Member { .. }
@@ -2994,9 +3179,9 @@ fn prec(e: &Expr) -> u8 {
         | Expr::Try { .. }
         | Expr::Await { .. }
         | Expr::As { .. }
-        | Expr::TypeTest { .. }
         | Expr::TypedModuleCall { .. }
-        | Expr::TypedMethodCall { .. } => 14,
+        | Expr::TypedMethodCall { .. }
+        | Expr::InstantiatedType { .. } => 14,
         // `receiver.field = value` — only ever a binding's RHS; parenthesize if it somehow nests.
         Expr::FieldSet { .. } => 0,
         // Atoms and self-delimiting forms never need parentheses as an operand.

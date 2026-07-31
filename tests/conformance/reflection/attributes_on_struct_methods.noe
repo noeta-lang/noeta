@@ -1,0 +1,39 @@
+// A `#[...]` data attribute on a **struct** method reaches the reflection manifest exactly as one on
+// a class or enum method does — same qualified `Type.method` target key, same source order. The
+// checker has always validated a struct method's attributes (they run through the same `check_fn`
+// every other method does), so before this the annotation type-checked cleanly and then silently
+// failed to appear in `attributes_of::<T>()`: a route declared on a struct controller vanished with
+// no diagnostic at all. The manifest is built statically from the AST, so both backends agree by
+// construction.
+// expect: stdout "Repo.users /users"
+// expect: stdout "Api.list /api"
+// expect: stdout "Kind.render /kind"
+// expect: exit 0
+@attribute
+struct Route { path: string }
+
+struct Repo {
+    id: int
+
+    #[Route("/users")]
+    fn users(): string { return "[]"; }
+}
+
+class Api {
+    id: int
+
+    #[Route("/api")]
+    fn list(): string { return "[]"; }
+}
+
+enum Kind {
+    One
+    Two
+
+    #[Route("/kind")]
+    fn render(): string { return "kind"; }
+}
+
+for r in attributes_of::<Route>() {
+    echo "${r.target} ${r.value.path}";
+}

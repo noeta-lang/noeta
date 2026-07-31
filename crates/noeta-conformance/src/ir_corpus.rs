@@ -84,7 +84,7 @@ pub fn run_ir_corpus(root: &Path, only: Option<&Path>) -> IrCorpusReport {
             continue;
         }
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry) {
+            match crate::read_case_workspace(&case.entry) {
                 Ok(raw) => run_workspace(&raw, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
@@ -105,14 +105,20 @@ fn run_single(text: &str, report: &mut IrCorpusReport) {
 
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
-    if !tokens.0.diagnostics.is_empty() || !parsed.0.diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(
+        tokens
+            .0
+            .diagnostics
+            .iter()
+            .chain(parsed.0.diagnostics.iter()),
+    ) {
         report.not_run.parse_failed += 1;
         return;
     }
     // A program the checker rejects never runs; its diagnostics are its whole result. Its own
     // reason, not "parse-failed" — that conflation made an unparseable program and a rejected one
     // indistinguishable in the summary.
-    if !noeta_db::checked(&db, src).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::checked(&db, src).diagnostics) {
         report.not_run.checker_rejected += 1;
         return;
     }
@@ -122,7 +128,13 @@ fn run_single(text: &str, report: &mut IrCorpusReport) {
 
 fn run_workspace(raw: &noeta_loader::RawWorkspace, report: &mut IrCorpusReport) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
+    let ws = noeta_db::workspace(
+        &db,
+        &raw.entry,
+        &raw.modules,
+        noeta_lexer::Edition::DEFAULT,
+        &raw.paths,
+    );
 
     let program = match &noeta_db::linked(&db, ws).program {
         Ok(program) => program,
@@ -131,7 +143,7 @@ fn run_workspace(raw: &noeta_loader::RawWorkspace, report: &mut IrCorpusReport) 
             return;
         }
     };
-    if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::linked_checked(&db, ws).diagnostics) {
         report.not_run.checker_rejected += 1;
         return;
     }

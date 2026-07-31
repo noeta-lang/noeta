@@ -179,8 +179,10 @@ impl Value {
     /// `@derive(Serialize<Json>)`. Mirrors the reference interpreter's `value_to_native_deep`
     /// (`noeta-eval/src/lib.rs`) — per-representation glue, mirrored by design (see
     /// `plans/backend-mirror.md`); divergence is caught by `std/json_encoder_one_engine.noe` and
-    /// the differential. Numbers become scalars; strings, enum variants, and the opaque
-    /// length/`<fn>`/`<module …>` summaries become [`NativeValue::Str`]; lists/tuples/sets become a
+    /// the differential. Numbers become scalars; strings and the opaque
+    /// `<fn>`/`<module …>` summaries become [`NativeValue::Str`]; a `bytes` buffer becomes
+    /// [`NativeValue::Bytes`]; an enum value a [`NativeValue::Variant`] carrying its
+    /// payload; lists/tuples/sets become a
     /// [`NativeValue::List`]; maps and objects a [`NativeValue::Map`]. Read-only — it never changes a
     /// refcount (a packed list materializes a temporary that is released here).
     pub fn to_native_deep(self) -> noeta_ext_abi::NativeValue {
@@ -203,9 +205,14 @@ impl Value {
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => NativeValue::Str(s.as_str().to_owned()),
-                // A byte buffer has no JSON representation (it is the *binary* alternative): a length
-                // summary string, so `json.stringify` never panics.
-                Payload::Bytes(b) => NativeValue::Str(format!("<{} bytes>", b.len())),
+                // A byte buffer crosses as ITSELF, exactly as the shallow projection
+                // (`noeta_vm::values::marshal_native_arg`) sends it. It used to marshal to the human
+                // summary `"<N bytes>"` — the display form standing in for the value — so a `bytes`
+                // argument to any `deep_marshal` consumer (`http.client.post(url, body)`, a SQL bind
+                // parameter) silently arrived as that ASCII text instead of the buffer. JSON's lack
+                // of a byte type is the *serializer's* problem, not the projection's:
+                // `json_text::stringify` renders the buffer as an array of its byte values.
+                Payload::Bytes(b) => NativeValue::Bytes(b.to_vec()),
                 // An extern-type value marshals as itself; the shared serializer renders its
                 // display form as a JSON string (a `Uuid` is its canonical string).
                 Payload::Extern(e) => NativeValue::Extern(e.clone()),
@@ -253,11 +260,19 @@ impl Value {
                         _ => noeta_ext_abi::NativeValue::Unit,
                     }
                 }
-                // Any other enum marshals to its variant name (the tag) — the JSON convention for a
-                // nominal sum type.
-                Payload::Enum { shape, .. } => {
-                    NativeValue::Str(shape.variant.as_deref().unwrap_or(&shape.name).to_string())
-                }
+                // Any other enum crosses as ITSELF — the full variant (enum name + case +
+                // declaration index + payload), exactly as the shallow projection
+                // (`noeta_vm::values::marshal_native_arg`) sends it, so a value's shallow and deep
+                // projections agree. It used to flatten to `NativeValue::Str(variant)`, the *display*
+                // vocabulary standing in for the value: the payload was dropped with no error, so
+                // `json.stringify(Shape.Circle(3))` was `"Circle"` and every `deep_marshal` consumer
+                // received a tag where it was handed a value. The payload marshals recursively.
+                Payload::Enum { shape, data } => NativeValue::Variant {
+                    enum_name: shape.name.clone(),
+                    variant: shape.variant.clone().unwrap_or_default(),
+                    variant_index: shape.variant_index.unwrap_or(0),
+                    fields: data.iter().map(|v| v.to_native_deep()).collect(),
+                },
                 Payload::NativeModule(name) => NativeValue::Str(format!("<module {name}>")),
                 // An iterator has no JSON analog either — its opaque display form.
                 Payload::Iter { .. } => NativeValue::Str("<iterator>".to_string()),

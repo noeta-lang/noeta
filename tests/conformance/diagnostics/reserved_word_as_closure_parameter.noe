@@ -1,0 +1,5 @@
+// A closure's parameter list is the same binder as a named function's, and reports the same way:
+// a reserved word there is E0046, not an identifier the parser failed to find.
+// expect: error E0046 at 5:8
+// expect: exit 1
+f = fn(type_name: int) => 1

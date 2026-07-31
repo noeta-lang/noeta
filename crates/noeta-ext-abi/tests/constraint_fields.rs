@@ -101,13 +101,16 @@ impl Row {
 
 const CHECK_DIRECTIVES: &str = "crates/noeta-check/src/directives.rs";
 const CHECK_STDLIB: &str = "crates/noeta-check/src/stdlib.rs";
+const CHECK_ARGS: &str = "crates/noeta-check/src/args.rs";
 const CHECK_PRELUDE: &str = "crates/noeta-check/src/prelude.rs";
 const EVAL_LIB: &str = "crates/noeta-eval/src/lib.rs";
 const CHECK_TRAITS: &str = "crates/noeta-check/src/traits.rs";
 const CHECK_TIERS: &str = "crates/noeta-check/src/tiers.rs";
 const REGISTRY: &str = "crates/noeta-ext-abi/src/registry.rs";
+const STDLIB_JSON: &str = "crates/noeta-stdlib/src/json.rs";
 const VM_NATIVE_CTX: &str = "crates/noeta-vm/src/native_ctx.rs";
 const CLI_SERVE: &str = "crates/noeta-cli/src/cmd/serve.rs";
+const CLI_LIB: &str = "crates/noeta-cli/src/lib.rs";
 const EMBED_CONSTRAINTS: &str = "crates/noeta-embed/tests/ext_constraint_enforcement.rs";
 const EMBED_INSTANCE: &str = "crates/noeta-embed/tests/instance_registry.rs";
 const CONFORMANCE_STRUCT_SEAM: &str = "crates/noeta-conformance/tests/ext_struct_seam.rs";
@@ -123,6 +126,30 @@ use Verdict::{Constraint, Data, Prose};
 /// The classification. One row per `pub` field of every ABI declaration type; the completeness
 /// check below keeps it exhaustive.
 const TABLE: &[Row] = &[
+    // --- FieldRecipe: one field of a call-site struct recipe --------------------------------------
+    Row(
+        "FieldRecipe",
+        "name",
+        Data(Anchor(STDLIB_JSON, "fn decode(")),
+    ),
+    Row(
+        "FieldRecipe",
+        "recipe",
+        Data(Anchor(STDLIB_JSON, "fn decode(")),
+    ),
+    // Optionality is a rule about every document decoded into the type: an absent field is filled
+    // (a `?T` is `none`, a literal default is that default) or it is a missing-field error.
+    Row(
+        "FieldRecipe",
+        "default",
+        Constraint(
+            Anchor(STDLIB_JSON, "fn fill_absent_field("),
+            Anchor(
+                "tests/conformance/di/json_field_defaults.noe",
+                "its default is not a literal",
+            ),
+        ),
+    ),
     // --- ExtFn: one native function's static signature -------------------------------------------
     Row(
         "ExtFn",
@@ -139,6 +166,21 @@ const TABLE: &[Row] = &[
             Anchor(
                 "tests/conformance/diagnostics/optional_param_arity.noe",
                 "expect: error E0007",
+            ),
+        ),
+    ),
+    // Declaring names is what opts a native function into NAMED arguments, and each name then
+    // states a rule about every call site: `name:` binds to the parameter it names (so the call may
+    // reorder), and a label naming no parameter is E0061 rather than a silently discarded one.
+    // Declaring none is the opt-out, and a label on such a callee is refused by the same code.
+    Row(
+        "ExtFn",
+        "param_names",
+        Constraint(
+            Anchor(CHECK_ARGS, "fn bind_sig_args("),
+            Anchor(
+                "tests/conformance/functions/named_arguments_native.noe",
+                "expect: error E0061",
             ),
         ),
     ),
@@ -244,8 +286,9 @@ const TABLE: &[Row] = &[
         "arena_getter",
         Data(Anchor("crates/noeta-vm/src/methods.rs", "arena_getter")),
     ),
-    // The built-in traits this type claims: what makes a `T: Mergeable` / `T: Error` bound
-    // accept it. A bound is a rule, and the claim is what satisfies it.
+    // The traits this type claims: what makes a `T: Comparable` / `T: Error` bound accept it, and
+    // (for a native `ExtTrait` name) what makes it satisfy a package-declared trait. A bound is a
+    // rule, and the claim is what satisfies it.
     Row(
         "ExtType",
         "traits",
@@ -254,7 +297,7 @@ const TABLE: &[Row] = &[
                 "crates/noeta-check/src/prelude.rs",
                 "fn seed_native_builtin_traits(",
             ),
-            Anchor("crates/noeta-check/src/tests.rs", "Mergeable"),
+            Anchor("crates/noeta-check/src/tests.rs", "Comparable"),
         ),
     ),
     Row(
@@ -899,7 +942,10 @@ const TABLE: &[Row] = &[
     Row(
         "ExtCommand",
         "name",
-        Data(Anchor(CLI_SERVE, "clap::Command::new(ext.name)")),
+        // Slice-1 command binding: the exported `name` is matched against a `[trust.commands]`
+        // binding's `exported` to register a dependency command under its local name (the clap
+        // subcommand is then `Command::new(local)`, no longer `Command::new(ext.name)`).
+        Data(Anchor(CLI_LIB, "c.name == binding.exported")),
     ),
     Row(
         "ExtCommand",
@@ -934,10 +980,15 @@ const TABLE: &[Row] = &[
 ];
 
 /// The ABI declaration types whose fields `TABLE` must cover, by source file.
+///
+/// `FieldRecipe` is the one non-`Ext*` entry: it is not something an extension *declares*, but it is
+/// something an extension's typed dispatch **reads** (a call-site `TypeRecipe` is handed to it), and
+/// its `default` field states a rule about programs — exactly the shape this gate exists for.
 const SCANNED: &[(&str, &[&str])] = &[
     (
         "crates/noeta-ext-abi/src/registry.rs",
         &[
+            "FieldRecipe",
             "ExtFn",
             "ExtModule",
             "ExtType",

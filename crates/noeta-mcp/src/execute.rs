@@ -154,10 +154,11 @@ pub fn run(
 ) -> Result<RunOutput, ErrorData> {
     let source_map = SourceMap::new(p.sources.clone());
 
-    // Gate: a program that does not type-check never runs — surface the diagnostics and stop. The
-    // compiler emits no warnings today, so any diagnostic is a blocking error (see `check`).
+    // Gate: a program that does not type-check never runs — surface the diagnostics and stop. Only
+    // an **error** stops it; warnings are carried into the run's own `diagnostics` below, so an
+    // agent sees the lint *and* the program's behavior instead of one standing in for the other.
     let checked = noeta_db::linked_checked(&p.db, p.ws);
-    if !checked.diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return Ok(RunOutput {
             ok: false,
             ran: false,
@@ -199,10 +200,14 @@ pub fn run(
     let (stdout, stdout_truncated) = truncate_utf8(result.stdout, cap);
     let limit_hit = limit_signal(&tripped);
     let traceback = (trace.len() >= 2).then(|| noeta_vm::render_trace(&trace, &source_map));
-    let diagnostics = map_diagnostics(&source_map, &result.diagnostics);
+    // The compile's warnings first, then whatever the run itself reported.
+    let mut diagnostics = map_diagnostics(&source_map, &checked.diagnostics);
+    diagnostics.extend(map_diagnostics(&source_map, &result.diagnostics));
+    // A warning does not make the run "not ok" — only an abort or a tripped limit does.
+    let aborted = noeta_diagnostics::has_errors(&result.diagnostics);
 
     Ok(RunOutput {
-        ok: limit_hit.is_none() && result.exit_code == 0 && diagnostics.is_empty(),
+        ok: limit_hit.is_none() && result.exit_code == 0 && !aborted,
         ran: true,
         host: host_label(real),
         stdout,
@@ -385,24 +390,31 @@ pub fn test(p: &Prepared, filter: Option<&str>, real: bool, limits: &RunLimits) 
     };
 
     let activated = noeta_check::activate_tiers(program, &["test"]);
-    if !activated.diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(&activated.diagnostics) {
         return empty(map_diagnostics(&source_map, &activated.diagnostics));
     }
-    let checked = noeta_check::check_all_with_editions(
+    let checked = noeta_check::check_all_with(
         &activated.program,
-        noeta_db::workspace_editions(&p.db, p.ws),
+        noeta_check::CheckOptions {
+            editions: noeta_db::workspace_editions(&p.db, p.ws),
+            packages: noeta_db::workspace_packages(&p.db, p.ws),
+            ..noeta_check::CheckOptions::default()
+        },
     );
-    if !checked.diagnostics.is_empty() {
+    // A lint in the file must not swallow the whole suite — only a real error can.
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return empty(map_diagnostics(&source_map, &checked.diagnostics));
     }
 
-    // Setup shared by every case: the program's declarations and top-level bindings, minus its own
-    // "main" effect statements (so the file's `echo`s don't run and cases can't observe each other).
+    // Setup shared by every case, decided by the one shared policy in `noeta_check::setup` rather
+    // than by a third verbatim copy of a statement-shape denylist: declarations, top-level
+    // bindings, and every top-level effect that *finishes*. A `conn.migrate(…)` runs; an
+    // `os.exit(…)` or `server.serve(…)` does not, so this tool cannot exit or block the MCP server.
     let setup: Vec<Stmt> = activated
         .program
         .stmts
         .iter()
-        .filter(|s| is_tier_setup(s))
+        .filter(|s| noeta_check::is_tier_setup(s, &checked.diverging_stmts))
         .cloned()
         .collect();
 
@@ -502,10 +514,12 @@ fn run_case(
             limit_hit: Some(hit),
         };
     }
-    let passed = out.diagnostics.is_empty() && out.trace.is_empty();
+    // An abort fails the case; an advisory diagnostic does not.
+    let passed = !noeta_diagnostics::has_errors(&out.diagnostics) && out.trace.is_empty();
     let message = (!passed).then(|| {
         out.diagnostics
-            .first()
+            .iter()
+            .find(|d| d.is_error())
             .map(|d| d.message.clone())
             .unwrap_or_else(|| "the test aborted".to_string())
     });
@@ -638,7 +652,7 @@ fn call_stmt(name: &str, args: Vec<Expr>, span: noeta_span::Span) -> Stmt {
     Stmt::Expr {
         expr: Expr::Call {
             callee: Box::new(Expr::Ident {
-                name: name.to_string(),
+                name: noeta_ast::Name::canonical(name),
                 span,
             }),
             // A synthesized call is positional by construction.
@@ -650,22 +664,6 @@ fn call_stmt(name: &str, args: Vec<Expr>, span: noeta_span::Span) -> Stmt {
         },
         span,
     }
-}
-
-/// Whether a top-level statement is tier-runner *setup* (a declaration or global binding the tests
-/// depend on) as opposed to the program's own "main" effects (which `noeta test` does not run).
-fn is_tier_setup(stmt: &Stmt) -> bool {
-    !matches!(
-        stmt,
-        Stmt::Echo { .. }
-            | Stmt::Return { .. }
-            | Stmt::If { .. }
-            | Stmt::For { .. }
-            | Stmt::While { .. }
-            | Stmt::Break { .. }
-            | Stmt::Continue { .. }
-            | Stmt::Expr { .. }
-    )
 }
 
 /// A host + async-executor pair — what an execution runs against.

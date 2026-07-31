@@ -1,0 +1,7 @@
+// A declared function's name is a name — and this one especially: `type_name` is a keyword because
+// a user function of that name would be indistinguishable from the primitive at every call site.
+// expect: error E0046 at 5:4
+// expect: exit 1
+fn type_name(): int {
+    return 1
+}

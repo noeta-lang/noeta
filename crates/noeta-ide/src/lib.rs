@@ -933,7 +933,7 @@ impl DocumentStore {
         let key = path.first()?;
         let db = &self.db;
         for (i, sp) in cache.dep_programs.iter().enumerate() {
-            if cache.dep_modules.get(i)?.key(db) != key {
+            if cache.dep_modules.get(i)?.import_key(db) != key.as_str() {
                 continue;
             }
             let ast = noeta_db::ast(db, *sp);
@@ -1801,6 +1801,11 @@ impl DocumentStore {
                 .and_then(nominal_name)
                 .map(|type_name| completion::members_of(program, type_name))
                 .unwrap_or_default();
+            // A TYPE reference receiver (`Repo.n|`, `Repo::<Todo>.n|`) has no value type to read a
+            // nominal off — offer the named type's members instead.
+            if members.is_empty() {
+                members = type_receiver_members(entry_text, receiver_span, program);
+            }
             // Bundle-contributed methods (kernel-methods K4): a bound `@packed` type offers its
             // bundles' Element methods, a `List<T>` of one their Bulk methods.
             if let Some(repr) = checked.expr_types.get(&receiver_span) {
@@ -2441,9 +2446,9 @@ impl DocumentStore {
                     .collect();
                 let mut deps = Vec::new();
                 for (i, ast) in dep_asts.iter().enumerate() {
-                    // A dep module's `key` is its consumer-facing import root (what the manifest
-                    // names); `root` is the package's own namespace segment.
-                    let root = cache.dep_modules[i].key(db).clone();
+                    // A dep module's import key is its consumer-facing import root (what the
+                    // manifest names); `root` is the package's own namespace segment.
+                    let root = cache.dep_modules[i].import_key(db).to_string();
                     if !direct.contains(&root) {
                         continue;
                     }
@@ -2592,7 +2597,12 @@ impl DocumentStore {
             .collect();
         let graph = callgraph::build(program, &ide.expr_types, &texts);
         let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
-        (graph, noeta_ast::reflect::build(program, &native_roles))
+        // Role/manifest/type views only — the trait-membership table is a runtime-narrowing
+        // concern, so the IDE view passes the empty native-trait join.
+        (
+            graph,
+            noeta_ast::reflect::build(program, &native_roles, &Default::default()),
+        )
     }
 
     /// Resolve graph function `idx` to a located [`HierarchyItem`] (roles joined by declaration
@@ -2855,7 +2865,7 @@ impl StoreDocEnv<'_> {
             .cache
             .dep_modules
             .iter()
-            .map(|d| d.key(&self.store.db).clone())
+            .map(|d| d.import_key(&self.store.db).to_string())
             .collect();
         roots.sort();
         roots.dedup();
@@ -2893,20 +2903,41 @@ impl StoreDocEnv<'_> {
 fn describe_dep(dep: &noeta_pm::manifest::Dependency) -> String {
     use noeta_pm::manifest::Dependency;
     match dep {
-        Dependency::Path { path } => format!("path {}", path.display()),
-        Dependency::Git { url, git_ref } => {
+        // A path/git dep may also *claim* an identity (`package = "para/ai"`, the scope-array
+        // member form) — show it, since on a row like `path ../..` the claim is the only thing
+        // saying which package this is.
+        Dependency::Path { path, package } => {
+            format!("path {}{}", path.display(), claimed_suffix(package))
+        }
+        Dependency::Git {
+            url,
+            git_ref,
+            package,
+        } => {
             let name = url
                 .rsplit('/')
                 .next()
                 .unwrap_or(url)
                 .trim_end_matches(".git");
-            format!("git {name}@{}", git_ref.describe())
+            format!(
+                "git {name}@{}{}",
+                git_ref.describe(),
+                claimed_suffix(package)
+            )
         }
         Dependency::Registry { package, req } => match package {
             Some(p) => format!("{}/{} {req}", p.company, p.package),
             None => req.to_string(),
         },
         Dependency::Scope(members) => format!("scope · {} packages", members.len()),
+    }
+}
+
+/// ` · company/pkg` for a path/git dependency that names the identity it claims, else empty.
+fn claimed_suffix(package: &Option<noeta_pm::manifest::PackageName>) -> String {
+    match package {
+        Some(p) => format!(" · {p}"),
+        None => String::new(),
     }
 }
 
@@ -2959,10 +2990,10 @@ fn module_members(program: &noeta_ast::Program, prefix: &str) -> Vec<String> {
     };
     for stmt in &program.stmts {
         match stmt {
-            noeta_ast::Stmt::Fn(decl) => push_leaf(&decl.name),
-            noeta_ast::Stmt::Struct(decl) => push_leaf(&decl.name),
-            noeta_ast::Stmt::Class(decl) => push_leaf(&decl.name),
-            noeta_ast::Stmt::Enum(decl) => push_leaf(&decl.name),
+            noeta_ast::Stmt::Fn(decl) => push_leaf(decl.name.as_str()),
+            noeta_ast::Stmt::Struct(decl) => push_leaf(decl.name.as_str()),
+            noeta_ast::Stmt::Class(decl) => push_leaf(decl.name.as_str()),
+            noeta_ast::Stmt::Enum(decl) => push_leaf(decl.name.as_str()),
             _ => {}
         }
     }
@@ -2983,7 +3014,7 @@ enum ResolvedCallable<'a> {
 }
 
 impl ResolvedCallable<'_> {
-    /// The signature line, e.g. `fn abs(dyn): int | float`.
+    /// The signature line, e.g. `fn abs(x: dyn): int | float`.
     fn signature(&self) -> String {
         match self {
             ResolvedCallable::Source(decl) => render_fn_signature(decl),
@@ -3008,7 +3039,12 @@ impl ResolvedCallable<'_> {
 /// (`geo.area`, `App.Hot.simulate`) renders under its leaf (`area`, `simulate`), the name the
 /// caller wrote — an identifier never contains a `.`, so the qualifier is unambiguously the prefix.
 fn render_fn_signature(decl: &noeta_ast::FnDecl) -> String {
-    let name = decl.name.rsplit('.').next().unwrap_or(&decl.name);
+    let name = decl
+        .name
+        .as_str()
+        .rsplit('.')
+        .next()
+        .unwrap_or(decl.name.as_str());
     let params: Vec<String> = decl.params.iter().map(symbols::param_detail).collect();
     let head = format!("fn {}({})", name, params.join(", "));
     match &decl.ret {
@@ -3341,6 +3377,7 @@ fn tier_name_at(
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
             | Expr::FieldsOf { value: expr, .. }
+            | Expr::TraitsOf { value: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => in_expr(expr, offset, source),
             _ => None,
         }
@@ -3416,6 +3453,33 @@ fn is_bare_dot(text: &str, offset: u32) -> bool {
     o >= 1 && o <= bytes.len() && bytes[o - 1] == b'.' && (o < 2 || bytes[o - 2] != b'.')
 }
 
+/// Members of the **type a receiver names**, when the receiver is a type reference rather than a
+/// value — `Repo.n|` (associated functions) and `Repo::<Todo>.n|` (the same, with a call-site
+/// instantiation whose type arguments do not change *which* type's members are offered).
+///
+/// A type name is not an expression, so it has no `expr_types` entry for the nominal lookup to read,
+/// and both spellings completed to nothing at all before this: a type's associated functions were
+/// simply unreachable from member completion. Text-driven on purpose — the receiver of a static call
+/// is never synthesized, so there is no checking result to consult — and narrow: the text before any
+/// `::` must name a declared type of this program, or nothing is offered and the caller falls
+/// through to ordinary identifier completion.
+fn type_receiver_members(
+    text: &str,
+    receiver_span: Span,
+    program: &noeta_ast::Program,
+) -> Vec<completion::Candidate> {
+    let Some(head) = text.get(receiver_span.range()).map(|t| {
+        t.split("::")
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .trim_start()
+    }) else {
+        return Vec::new();
+    };
+    completion::members_of(program, head)
+}
+
 /// Member candidates for a bare dot (`receiver.|`): the statement does not parse with a dangling dot,
 /// so a synthetic member name is spliced in at `offset`, and the copy is re-lexed/parsed/checked off
 /// the salsa graph to recover the receiver's type. The members themselves are listed from `program`
@@ -3442,10 +3506,17 @@ fn bare_dot_members(
     if let Some(prefix) = namespaces.get(&munged[receiver_span.range()]) {
         return Some(completion::namespace_members(prefix));
     }
-    let repr = checked.expr_types.get(&receiver_span)?;
+    let Some(repr) = checked.expr_types.get(&receiver_span) else {
+        // No value type at the receiver: it may be a TYPE reference (`Repo.|`, `Repo::<Todo>.|`),
+        // whose associated functions are still worth offering.
+        return Some(type_receiver_members(&munged, receiver_span, program));
+    };
     let mut members = nominal_name(repr)
         .map(|type_name| completion::members_of(program, type_name))
         .unwrap_or_default();
+    if members.is_empty() {
+        members = type_receiver_members(&munged, receiver_span, program);
+    }
     // Bundle-contributed methods (kernel-methods K4), as in the parsed-member path above.
     members.extend(bundle_members_for(repr, &checked.bundle_bindings));
     Some(members)
@@ -3607,7 +3678,7 @@ mod tests {
         let (item, _) = store
             .hover_use("file:///a.noe", Position::new(0, 14), enc)
             .expect("hover on the imported name");
-        assert!(item.contains("fn sqrt(float): float"), "got: {item}");
+        assert!(item.contains("fn sqrt(x: float): float"), "got: {item}");
         // A path segment: the module it names, with members.
         let (module, _) = store
             .hover_use("file:///a.noe", Position::new(0, 9), enc)
@@ -4049,6 +4120,115 @@ mod tests {
         );
     }
 
+    /// A **generic instantiation** hints with its type arguments, not head-only.
+    ///
+    /// `inlay.rs` had no generic coverage at all, and the risk is specific: the hint reads
+    /// `expr_types`, and a head-only entry (`Repo` for a `Repo<Todo>`) would render a *misleading*
+    /// hint rather than none — the failure mode the whole index exists to avoid. It does not
+    /// happen, because `expr_types` records `type_to_repr_top` of the full resolved `Type`, so a
+    /// nominal's arguments are in the `TypeRepr` and `display_short` prints them. This pins it.
+    ///
+    /// It matters most for the call-site turbofish: every other way of instantiating a generic is
+    /// ANNOTATED, and an annotated binding shows no hint (the type is already on screen), so this
+    /// is the first spelling where the hint is the only place the instantiation appears un-typed.
+    #[test]
+    fn inlay_hints_show_a_generic_instantiations_type_arguments() {
+        let mut store = test_store();
+        store.open(
+            "file:///generic.noe",
+            "struct Todo { id: int }\n\
+             class Repo<T> {\n  \
+             pub tbl: string\n  \
+             fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }\n\
+             }\n\
+             class Box2<T> {\n  \
+             pub v: T\n  \
+             fn new(v: T): Box2<T> { return Box2 { v: v } }\n\
+             }\n\
+             r = Repo::<Todo>.new(\"todos\")\n\
+             b = Box2.new(7)\n\
+             a: Repo<Todo> = Repo.new(\"annotated\")\n"
+                .to_string(),
+        );
+        let hints = hints_of(&store, "file:///generic.noe");
+        // The call-site turbofish: un-annotated, so the hint fires — and it must carry `<Todo>`.
+        assert!(
+            hints.contains(&(9, ": Repo<Todo>".to_string())),
+            "call-site instantiation: {hints:?}"
+        );
+        // The argument-inferred instantiation, for the same reason.
+        assert!(
+            hints.contains(&(10, ": Box2<int>".to_string())),
+            "argument-inferred instantiation: {hints:?}"
+        );
+        // An annotated binding still shows nothing — the new form did not widen that rule.
+        assert!(
+            !hints.iter().any(|(line, _)| *line == 11),
+            "annotated binding must not hint: {hints:?}"
+        );
+    }
+
+    /// Member completion after a call-site instantiation offers the TYPE's members, exactly as a
+    /// bare type receiver does — the turbofish must not turn the receiver into something the
+    /// completion path no longer recognizes.
+    #[test]
+    fn completions_after_a_call_site_instantiation_offer_the_types_members() {
+        let mut store = test_store();
+        let text = "struct Todo { id: int }\n\
+                    class Repo<T> {\n  \
+                    pub tbl: string\n  \
+                    fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }\n  \
+                    fn open(tbl: string): Repo<T> { return Repo { tbl: tbl } }\n\
+                    }\n\
+                    r = Repo::<Todo>.ne\n";
+        store.open("file:///comp.noe", text.to_string());
+        let line = text.lines().count() as u32 - 1;
+        let character = text.lines().last().unwrap().chars().count() as u32;
+        let items = store
+            .completions(
+                "file:///comp.noe",
+                Position { line, character },
+                Encoding::Utf8,
+            )
+            .expect("open document offers completions");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"new"),
+            "members after `::<T>.`: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"open"),
+            "members after `::<T>.`: {labels:?}"
+        );
+    }
+
+    /// The same for the **bare-dot** trigger (`Repo::<Todo>.|`), which takes the other completion
+    /// path entirely (the dangling dot does not parse, so the buffer is re-checked with a synthetic
+    /// member spliced in) — and for a bare type receiver (`Repo.|`), whose associated functions were
+    /// unreachable from completion before the type-reference fallback existed.
+    #[test]
+    fn completions_after_a_bare_dot_on_a_type_offer_its_associated_functions() {
+        let head = "struct Todo { id: int }\n                    class Repo<T> {\n                      pub tbl: string\n                      fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }\n                      fn open(tbl: string): Repo<T> { return Repo { tbl: tbl } }\n                    }\n";
+        for tail in ["r = Repo::<Todo>.", "r = Repo."] {
+            let mut store = test_store();
+            let text = format!("{head}{tail}\n");
+            store.open("file:///baredot.noe", text.clone());
+            let items = store
+                .completions(
+                    "file:///baredot.noe",
+                    Position {
+                        line: text.lines().count() as u32 - 1,
+                        character: tail.chars().count() as u32,
+                    },
+                    Encoding::Utf8,
+                )
+                .expect("open document offers completions");
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(labels.contains(&"new"), "`{tail}|` offers: {labels:?}");
+            assert!(labels.contains(&"open"), "`{tail}|` offers: {labels:?}");
+        }
+    }
+
     #[test]
     fn inlay_hints_mark_packed_storage_compactly() {
         let mut store = test_store();
@@ -4330,11 +4510,11 @@ mod tests {
             );
             assert_eq!(
                 sig(&store, "file:///nat.noe", 1, 4).as_deref(),
-                Some("fn abs(dyn): int | float")
+                Some("fn abs(x: dyn): int | float")
             );
             let hover = md(&store, "file:///nat.noe", 1, 4).expect("hover on native call");
             assert!(
-                hover.contains("fn abs(dyn): int | float"),
+                hover.contains("fn abs(x: dyn): int | float"),
                 "native call shows its signature: {hover}"
             );
             assert!(
@@ -4386,10 +4566,12 @@ mod tests {
 
     /// Create a fresh temp directory with the given `(filename, content)` files on disk, for the
     /// multi-file workspace tests (sibling discovery reads the real directory).
-    fn temp_workspace(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("noeta_lsp_{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    ///
+    /// The guard comes back with it: hold it for as long as the workspace is queried, since dropping
+    /// it removes the tree. The path used to be `/tmp/noeta_lsp_<name>`, shared by every checkout and
+    /// every concurrent test process, each of which opened by deleting it.
+    fn temp_workspace(name: &str, files: &[(&str, &str)]) -> noeta_test_temp::TempDir {
+        let dir = noeta_test_temp::TempDir::new(&format!("lsp-{name}"));
         for (filename, content) in files {
             std::fs::write(dir.join(filename), content).unwrap();
         }
@@ -4492,6 +4674,51 @@ mod tests {
         assert!(
             diags.is_empty(),
             "sibling-declared text tier should capture; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_captures_a_renamed_text_tier_bound_in_the_manifest() {
+        // Per-package tier-naming arc (3g), editor seam: a `noeta.toml` binds std's `doc` **text**
+        // tier under a local `@docs` (`[tiers] docs = "std:doc"`). The IDE lexes through its own salsa
+        // `ast`/`tokens_in` query, not the loader — so it must resolve the SAME per-package text-tier
+        // set the loader now does, or the `@docs { … }` markdown body (a bare `"` opens an
+        // unterminated string when tokenized as code, `<`/`>` are stray operators) is a hard lex error
+        // and the file diagnoses red. The editor twin of the CLI's
+        // `a_renamed_text_tier_captures_under_its_local_name`; `test_store` seeds std so `doc` is a
+        // known verbatim ext tier and the `docs = "std:doc"` binding lands on it.
+        let dir = temp_workspace(
+            "renamed_text_tier_manifest",
+            &[(
+                "noeta.toml",
+                "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n[tiers]\ndocs = \"std:doc\"\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = test_store();
+        store.open(
+            &entry_uri,
+            "@docs {\n# Widget\n\nA bare \" quote and <angle> bits: invalid as code, fine as markdown.\n}\nfn add(a: int, b: int): int { return a + b }\n".to_string(),
+        );
+
+        // Load-bearing: without the per-package resolution the body lexes as code and the bare quote
+        // is an unterminated-string lex error. With the manifest's `docs` bound to a text tier for the
+        // root package, the body captures verbatim and the document is clean.
+        let (diags, _text) = store.diagnostics(&entry_uri).unwrap();
+        assert!(
+            diags.is_empty(),
+            "a manifest-renamed text tier must capture in the editor; got {diags:?}"
+        );
+
+        // And directly: the workspace-aware lex emits the body as one verbatim `DocText` token — the
+        // salsa twin of the loader's per-package re-lex — rather than a stream of code tokens.
+        let (cache, program, _sid) = store
+            .doc_cache(&entry_uri)
+            .expect("entry is an open member");
+        let toks = noeta_db::tokens_in(&store.db, cache.workspace, program);
+        assert!(
+            toks.0.tokens.iter().any(|t| t.kind == TokenKind::DocText),
+            "the renamed tier's body must be captured as one DocText token"
         );
     }
 
@@ -5066,10 +5293,13 @@ mod tests {
     #[test]
     fn goto_definition_jumps_into_a_dependency_package() {
         // package-manager P2.1c: with dependency resolution wired into the salsa workspace, a
-        // cross-package `use hi.hello.greeting` resolves in-editor — goto-definition on the call
+        // cross-package `use hi.hello.Greeter` resolves in-editor — goto-definition on the type
         // jumps into the dependency package's own source file.
-        let base = std::env::temp_dir().join("noeta_lsp_crosspkg");
-        let _ = std::fs::remove_dir_all(&base);
+        //
+        // The dependency's module is addressed `hi.hello` with nothing in the file saying so: `hi`
+        // is the dependency key, `hello` the file stem. It used to also declare `greet.hello`,
+        // which named a module no consumer could reach.
+        let base = noeta_test_temp::TempDir::new("lsp-crosspkg");
         let app = base.join("app");
         let lib = base.join("greetlib");
         std::fs::create_dir_all(&app).unwrap();
@@ -5085,11 +5315,7 @@ mod tests {
             "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
         )
         .unwrap();
-        std::fs::write(
-            lib.join("hello.noe"),
-            "namespace greet.hello;\npub struct Greeter { n: int }\n",
-        )
-        .unwrap();
+        std::fs::write(lib.join("hello.noe"), "pub struct Greeter { n: int }\n").unwrap();
 
         let entry_uri = path_to_uri(&app.join("main.noe"));
         // The dependency's modules are addressed by their canonical path (the walk canonicalizes a
@@ -5116,7 +5342,7 @@ mod tests {
     }
 
     /// A workspace whose sibling `models.noe` declares `App.Models` but does not parse.
-    fn broken_sibling_workspace(name: &str) -> PathBuf {
+    fn broken_sibling_workspace(name: &str) -> noeta_test_temp::TempDir {
         temp_workspace(
             name,
             &[(
@@ -5180,8 +5406,7 @@ mod tests {
         // one the editor checks in its own right and nothing else would ever mention it. The
         // module is named by the CONSUMER's dependency key (`hi.hello`, not the package's own
         // `greet.hello`), which is how the `use` spells it.
-        let base = std::env::temp_dir().join("noeta_lsp_broken_dep");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = noeta_test_temp::TempDir::new("lsp-broken-dep");
         let app = base.join("app");
         let lib = base.join("greetlib");
         std::fs::create_dir_all(&app).unwrap();
@@ -5283,8 +5508,7 @@ mod tests {
         // audit-5 #7: a broken manifest (or a trust refusal / version conflict) used to degrade
         // silently to "no dependencies", leaving the user with inexplicable unknown-import
         // errors. The typed pm error now reaches diagnostics with the real cause.
-        let base = std::env::temp_dir().join("noeta_lsp_dep_error");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = noeta_test_temp::TempDir::new("lsp-dep-error");
         let app = base.join("app");
         std::fs::create_dir_all(&app).unwrap();
         // `dep = 5` is not a valid dependency source — a Manifest-kind resolution failure.

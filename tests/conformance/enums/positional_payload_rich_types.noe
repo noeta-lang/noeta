@@ -1,0 +1,29 @@
+// A positional payload is a **type**, so it admits everything a type annotation does: generic
+// arguments, `?T`, a tuple, a function type. It used to be parsed by the identifier rule that reads
+// a parameter's name, so it had to be one bare word — `Many(List<int>)` was a syntax error, and the
+// only way to write it was to invent a name (`Many(xs: List<int>)`).
+// expect: stdout "3"
+// expect: stdout "7"
+// expect: stdout "a/2"
+// expect: stdout "9"
+// expect: exit 0
+enum Shape {
+    Many(List<int>);
+    Maybe(?int);
+    Pair(string, int);
+    Mapper((int) -> int);
+}
+
+fn describe(s: Shape): string {
+    return match s {
+        Shape.Many(xs) => "${xs.len()}",
+        Shape.Maybe(m) => "${m}",
+        Shape.Pair(a, b) => "${a}/${b}",
+        Shape.Mapper(f) => "${f(4)}",
+    };
+}
+
+echo describe(Shape.Many([1, 2, 3]));
+echo describe(Shape.Maybe(7));
+echo describe(Shape.Pair("a", 2));
+echo describe(Shape.Mapper(fn(n: int): int { return n + 5 }));

@@ -63,7 +63,19 @@ echo match digit("x") {
 }
 ```
 
-`Error` is independent of `Display`: implementing it never changes how the value renders (an `Err(e)` echoes with the payload's ordinary display), and an error type may *also* implement `Display` when its message is the natural rendering. `<E: Error>` works as a generic bound, so helpers can be polymorphic over any error type. The standard library's first implementor is [`JsonError`](Standard-Library-Modules#json), the payload of `json.try_parse::<T>` and `json.decode_typed`.
+`Error` is independent of `Display`: implementing it never changes how the value renders (an `Err(e)` echoes with the payload's ordinary display), and an error type may *also* implement `Display` when its message is the natural rendering. `<E: Error>` works as a generic bound, so helpers can be polymorphic over any error type. The standard library's first implementor is [`JsonError`](std-json), the payload of `json.try_parse` (the dynamic door), `json.try_parse::<T>`, and `json.decode_typed`.
+
+> [!TIP]
+> **Reading a document whose shape is not yours.** A body off a wire carries the *remote party's* shape, so a malformed one is bad input rather than a bug in your program — it must be a value you handle. `json.try_parse(text)` is that door: it needs no declared type, returns `Result<dyn, JsonError>`, and carries the same `path()`/`kind()`/`line()`/`column()` detail the typed doors do. `json.parse(text)` stays the aborting spelling, for when a malformed document really does mean the program is wrong (E0007).
+
+```noeta
+use std.json
+
+echo match json.try_parse("{ nope") {
+    Ok(doc) => "read ${doc["id"]}",
+    Err(e)  => "bad payload (${e.kind()}) at line ${e.line() ?? 0}: ${e.message()}",
+}
+```
 
 ### Deriving `Error`
 
@@ -101,7 +113,7 @@ struct ConfigError {
 
 ## `?` — propagate a failure
 
-On a `Result` or `Option`, the postfix `?` unwraps the success value, or **early-returns** the `Err`/`none` from the enclosing function. Using `?` on any other type is E0012. When the propagated `Err`'s type differs from the function's declared error type, `?` converts it through a declared `From` conversion — see [Converting errors at `?`](#converting-errors-at---impl-fromsource).
+On a `Result` or `Option`, the postfix `?` unwraps the success value, or **early-returns** the `Err`/`none` from the enclosing function. Using `?` on any other type is E0012, and so is using it where the early return has nowhere to go — see [The enclosing function has to be able to return what `?` returns](#the-enclosing-function-has-to-be-able-to-return-what--returns). When the propagated `Err`'s type differs from the function's declared error type, `?` converts it through a declared `From` conversion — see [Converting errors at `?`](#converting-errors-at---impl-fromsource).
 
 ```noeta ignore
 use std.id.{next_id}
@@ -119,6 +131,63 @@ fn pipeline(path: string): Result<Report, Error> {
     parsed = parse(raw)?         // returns Err on parse failure
     return Ok(analyze(parsed))
 }
+```
+
+`?` works the same on an **Option**: it unwraps a `some`, or early-returns the `none` from the enclosing (Option-returning) function:
+
+```noeta
+fn head(xs: List<int>): ?int { return xs.first() }
+
+fn first_doubled(xs: List<int>): ?int {
+    n = head(xs)?          // a `none` short-circuits out of the function here
+    return some(n * 2)
+}
+
+echo first_doubled([3, 4])   // some(6)
+echo first_doubled([])       // none
+```
+
+### The enclosing function has to be able to return what `?` returns
+
+`?` is an early return, so the signature must carry what it returns — one rule, applied to whichever half you used:
+
+| `?` on | Needs a return of | Otherwise |
+|---|---|---|
+| an `Option` (it early-returns `none`) | `?T` | **E0012** |
+| a `Result` (it early-returns the `Err`) | `Result<T, E>` | **E0012** |
+
+```noeta error
+fn head(xs: List<string>): string {
+    return xs.first()?   // E0012: `?` on an `Option` early-returns `none`, but this returns `string`
+}
+echo head([])
+```
+
+```noeta error
+use std.http.client
+fn fetch(url: string): void {
+    r = client.get(url)?   // E0012: `?` on a `Result` early-returns its `Err`, but this returns `void`
+    echo r.status()
+}
+fetch("https://example.com")
+```
+
+The fix is whichever of these fits the caller you have in mind:
+
+- **Declare the return.** `?T` for the absence, `Result<T, E>` for the failure — and if the propagated `Err` type differs from `E`, [convert it through `From`](#converting-errors-at---impl-fromsource).
+- **Handle it here.** `match` the `Option`/`Result` and answer with a value of your own, or supply a fallback with [`??`](#--coalesce).
+
+A return type that **defers** — `dyn`, an unannotated closure, or top-level code, which declares no return at all — accepts `?` without a diagnostic, as everywhere in the gradual checker. The judgement then lands at runtime instead of being discarded:
+
+- An `Err` that propagates all the way **out of the top level** aborts the program with the error's `message()` and a **non-zero exit** (**E0069**). Output produced before it is kept and nothing after it runs, exactly as [`panic`](#panic-and-assert) behaves. So a top-level `?` is a legitimate shape for a script's entry point — "do the work, and let a failure stop the program loudly" — and a broken run can never be mistaken for a clean one.
+- A `none` reaching the top is not a failure and ends the program normally.
+
+```noeta ignore
+use std.http.client
+// No declared return at the top level, so `?` is accepted here. A transport failure aborts with
+// E0069 and the error's message rather than exiting 0 in silence.
+r = client.get("https://api.example.com/health")?
+echo r.status()
 ```
 
 ## Converting errors at `?` — `impl From<Source>`
@@ -152,7 +221,7 @@ echo load("{ nope")
 The rules keep the language explicit:
 
 - **`?` is the only implicit conversion position.** A `return Err(jsonErr)` or an assignment with a mismatched error type stays the plain type mismatch (E0007) it always was; write `Err(AppError.from(e))` there — `from` is an ordinary associated function, callable anywhere as `Target.from(x)`.
-- **Exactly one conversion path.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which the orphan rule would bar from carrying your impl). A type carries at most one `From` impl — a second, whatever its source, is a coherence conflict (E0027) — and conversions never chain.
+- **Exactly one conversion path.** The conversion is declared on the target (`impl From<Source>` names the source; the source may be an extern type like `JsonError`, which could not carry your impl anyway — an `impl` targets a struct, class, or enum the program [declares](Generics-and-Traits#implementing-a-trait), never a built-in or an extern). A type carries at most one `From` impl — a second, whatever its source, is a coherence conflict (E0027) — and conversions never chain. Declaring it on the target is also what satisfies the [orphan rule](Generics-and-Traits#the-orphan-rule): `From` is built into the language and so belongs to no package, which means the `impl` must live in the target type's own package. A conversion *into* a dependency's error type therefore goes on your own wrapper, never on theirs.
 - **No conversion, no propagation.** A `?` whose `Err` type neither matches the declared error type nor has a `From` conversion is E0057. (A `dyn`/unannotated context defers to runtime, as everywhere in the gradual checker.)
 - `from` is an **associated** conversion: it builds a new target value from its argument, so a body referencing `self` is rejected (E0015), as is a parameter that disagrees with the declared source.
 
@@ -160,13 +229,64 @@ The rules keep the language explicit:
 
 `expr ?? fallback` unwraps a `some`, or evaluates the fallback for a `none`/absent value. It short-circuits — the fallback runs only when needed:
 
-```noeta check
-echo find(false) ?? "guest"      // "guest" if find returns none
+```noeta
+fn find(hit: bool): ?string {
+    if hit { return some("ada") }
+    return none
+}
+fn compute(): ?int { return some(9) }
+
+echo find(false) ?? "guest"      // guest  (find returned none)
 
 mut present = some(5)
 present ??= compute()            // ??= is  present = present ?? compute()
 echo present                     // 5  (compute() was never called)
 ```
+
+## Aborting and recoverable doors
+
+Some standard-library operations come in **pairs**: an aborting door named for the operation, and a recoverable twin prefixed `try_` that returns a `Result` instead. The pair exists wherever the same call is a *bug* in one program and an *ordinary condition* in another, and the language refuses to guess which:
+
+| Aborting | Recoverable | The condition |
+|---|---|---|
+| `json.parse(text)` | `json.try_parse(text)` | a malformed document |
+| `os.spawn(cmd, args)` | `os.try_spawn(cmd, args)` | the program is not installed, or is not executable |
+| `p.write(text)` | `p.try_write(text)` | the child's stdin is gone — it exited, or you closed it |
+| `regex.compile(pattern)` | `regex.try_compile(pattern)` | the pattern is not a valid regular expression |
+
+The rule for choosing is **whose mistake is it**. A configuration file your own build produced is your program's shape, so `json.parse` aborting on it is the right report; a body off a wire carries the *remote party's* shape, so `json.try_parse` is. A tool your own installer placed is yours; a language server, an MCP server, or a formatter the user may or may not have installed is not — and a library whose contract is "a failing tool is a turn, not an outage" cannot call the aborting door at all. A pattern you wrote into the source is yours, so `regex.compile` aborting on it is the right report too; a redaction or routing rule loaded from configuration is the operator's, and validating one before compiling it would mean shipping a second, worse regex engine.
+
+What rides the `Err` side is whatever carries the failure's information. `JsonError` and `OsError` are types because a caller must *branch* on which failure it was — `e.kind()` distinguishes `"not_found"` from `"permission_denied"`, and the two want different handling. `regex.try_compile` answers a plain `string`: a pattern has exactly one way to be invalid, so a `kind()` there would be a constant, and the engine's own caret-carrying diagnostic is the whole value.
+
+```noeta
+use std.{regex}
+
+rule = '(user-\d+'                  // as if read from configuration
+
+echo match regex.try_compile(rule) {
+    Ok(p) => "redacting ${p.source()}",
+    Err(e) => "ignoring an unusable rule",
+}
+```
+
+Both halves of a pair report the **identical message** — the aborting one is derived from the recoverable one — so moving between them never changes what the user sees, only who decides what happens next.
+
+```noeta
+use std.{os}
+
+echo match os.try_spawn("mcp-server-filesystem", ["/tmp"]) {
+    Ok(p)  => "started pid ${p.pid()}",
+    Err(e) => match e.kind() {
+        "not_found" => "install mcp-server-filesystem to use this tool",
+        _           => "could not start it: ${e.message()}",
+    },
+}
+```
+
+> [!IMPORTANT]
+> **A liveness check is not a substitute for the recoverable door.** Polling a child with `try_wait()` before writing to it looks like it makes `p.write(…)` safe, and it does not: the child can exit in the gap between the poll and the write. That race cannot be closed from inside the language, which is exactly why `try_write` exists. Branch on `e.kind()` — `"broken_pipe"` means the child is gone (restart it), `"stdin_closed"` means you closed the pipe yourself (a bug in your own code).
+
+The aborting door is never *removed* when a recoverable twin is added. "Fatal by default, recoverable when you ask" is the shape, and a script that legitimately wants a missing program to stop the run should not have to write a `match` to get it.
 
 ## `panic` and `assert`
 
@@ -174,6 +294,7 @@ For genuinely unrecoverable states:
 
 - `panic(msg)` aborts the program (recorded as E0010) with a nonzero exit; output produced before it is kept.
 - `assert(cond)` / `assert(cond, msg)` checks a condition and panics if it is false. It is the basis of the [test runner](Testing); the message is materialized only on failure.
+- An unhandled `Err` reaching the top level is the *third* way a program aborts (E0069, above) — the difference is that nobody wrote it: it is where an ordinary recoverable failure ends up when no frame handled it.
 
 ```noeta
 balance = 5
@@ -186,11 +307,13 @@ assert(balance >= 0, "balance went negative")
 |---|---|
 | A value might be missing | `?T` (`some`/`none`) |
 | An operation might fail, and the caller should decide | `Result<T, E>` |
-| Thread a failure up several call frames | `?` |
+| Thread a failure up several call frames | `?` (the frames in between declare `Result<T, E>`) |
+| Let a failure stop a script, loudly | `?` at the top level (aborts with the error's message, non-zero exit) |
 | Supply a default for a missing value | `??` |
+| A failure that is a bug in one caller and routine in another | an [aborting/recoverable door pair](#aborting-and-recoverable-doors) (`parse` / `try_parse`) |
 | A bug / impossible state | `panic` / `assert` |
 
 ## See also
 
 - [The Type System](Type-System) — how `?T`, `Result`, and unions fit the type lattice.
-- [Standard Library](Standard-Library) — the option-returning stdlib methods.
+- [Built-ins](Standard-Library) — the option-returning built-in methods.

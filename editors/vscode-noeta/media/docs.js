@@ -21,6 +21,29 @@
       .replace(/>/g, "&gt;");
   }
 
+  const attr = (s) => String(s).replace(/"/g, "&quot;");
+
+  // The guide pages that exist, sent by the extension with every page. Only a target in this set
+  // becomes a clickable page link — an unknown one stays plain text, so a stale cross-link reads as
+  // it always has rather than opening an empty panel.
+  let knownPages = new Set();
+  function setKnownPages(list) {
+    knownPages = new Set(list || []);
+  }
+
+  // GitHub-style heading anchor: lowercase, keep word characters (`_` included — GitHub and the
+  // website's slugger both treat it as one), spaces and hyphens become hyphens, everything else
+  // (backticks, punctuation, em dashes) drops. Mirrors `github_anchor` in noeta-ide/src/guide.rs,
+  // so `Page#heading` resolves to the same id here, on the website, and in the server's search hits.
+  function anchorSlug(text) {
+    let out = "";
+    for (const ch of String(text).toLowerCase()) {
+      if (/[\p{L}\p{N}_]/u.test(ch)) out += ch;
+      else if (ch === " " || ch === "-") out += "-";
+    }
+    return out;
+  }
+
   // Inline spans: `code` first (its content is escaped and left literal), then links, then emphasis.
   function renderInline(text) {
     // Split on inline code so emphasis/link rules never touch code content.
@@ -31,11 +54,30 @@
           return "<code>" + escapeHtml(part.slice(1, -1)) + "</code>";
         }
         let out = escapeHtml(part);
-        // [label](url) — only http(s) and mailto get an href; anything else renders as plain text.
-        out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, url) => {
-          if (/^(https?:|mailto:)/i.test(url)) {
-            const safe = url.replace(/"/g, "&quot;");
-            return '<a href="' + safe + '">' + label + "</a>";
+        // [label](target), in three shapes:
+        //   http(s)/mailto      → a real href, opened by the host as before;
+        //   `Page` / `Page#sec` → an in-panel link to that guide page (only when the page exists);
+        //   `#section`          → a link that scrolls this page.
+        // Anything else (a repo-relative path, an unknown page) renders as plain text — the same
+        // conservative default this renderer has always had.
+        out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, target) => {
+          if (/^(https?:|mailto:)/i.test(target)) {
+            return '<a href="' + attr(target) + '">' + label + "</a>";
+          }
+          const local = target.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)?(?:#([^\s#]*))?$/);
+          if (local) {
+            const page = local[1] || "";
+            const frag = local[2] || "";
+            if (page && knownPages.has(page)) {
+              return (
+                '<a class="doc-link" data-page="' + attr(page) + '" data-anchor="' + attr(frag) + '">' +
+                label +
+                "</a>"
+              );
+            }
+            if (!page && frag) {
+              return '<a class="doc-link" data-anchor="' + attr(frag) + '">' + label + "</a>";
+            }
           }
           return label;
         });
@@ -133,7 +175,12 @@
       const heading = line.match(/^(#{1,6})\s+(.*)$/);
       if (heading) {
         const level = Math.min(heading[1].length, 4);
-        html.push("<h" + level + ">" + renderInline(heading[2].trim()) + "</h" + level + ">");
+        const raw = heading[2].trim();
+        // The id is what a `#fragment` link scrolls to, whether it comes from this page or from
+        // another one. Slugged from the RAW heading text (backticks and all), like the server does.
+        html.push(
+          "<h" + level + ' id="' + attr(anchorSlug(raw)) + '">' + renderInline(raw) + "</h" + level + ">",
+        );
         i++;
         continue;
       }
@@ -265,7 +312,14 @@
     return node;
   }
 
-  function renderPage(page, sourceUri, highlights) {
+  /** Scroll to a heading id. A stale fragment simply does nothing. */
+  function scrollToAnchor(id) {
+    if (!id || !app.querySelector) return;
+    const target = app.querySelector('[id="' + String(id).replace(/["\\]/g, "\\$&") + '"]');
+    if (target && target.scrollIntoView) target.scrollIntoView({ block: "start" });
+  }
+
+  function renderPage(page, sourceUri, highlights, anchor) {
     app.textContent = "";
 
     // Language-guide pages carry their own `# Title` H1 in the markdown; rendering an injected
@@ -303,6 +357,21 @@
     } else if (!isGuide) {
       body.appendChild(el("p", "doc-empty-note", "No prose documentation for this declaration."));
     }
+    // Prose links are delegated here rather than bound per link: a page link asks the extension to
+    // open that guide page (at an anchor when the link carried one), an anchor-only link scrolls
+    // this page. Both are hrefless <a>s, so the webview itself never navigates.
+    if (body.addEventListener) {
+      body.addEventListener("click", (event) => {
+        const node = event.target;
+        const link = node && node.closest ? node.closest("a[data-page], a[data-anchor]") : null;
+        if (!link) return;
+        event.preventDefault();
+        const page = link.getAttribute("data-page");
+        const frag = link.getAttribute("data-anchor") || "";
+        if (page) vscode.postMessage({ type: "navigate", page, anchor: frag, sourceUri });
+        else if (frag) scrollToAnchor(frag);
+      });
+    }
     app.appendChild(body);
 
     // Cross-references ("See also"): clickable, unlike the old markdown preview.
@@ -338,6 +407,9 @@
       section.appendChild(btn);
       app.appendChild(section);
     }
+
+    // Last, once the whole document is laid out: land on the requested heading.
+    if (anchor) scrollToAnchor(anchor);
   }
 
   function renderPlaceholder(text) {
@@ -348,11 +420,18 @@
   window.addEventListener("message", (event) => {
     const msg = event.data;
     if (msg.type === "page") {
-      renderPage(msg.page, msg.sourceUri, msg.highlights);
+      if (Array.isArray(msg.pageSlugs)) setKnownPages(msg.pageSlugs);
+      renderPage(msg.page, msg.sourceUri, msg.highlights, msg.anchor);
     } else if (msg.type === "placeholder") {
       renderPlaceholder(msg.text || "");
     }
   });
 
   vscode.postMessage({ type: "ready" });
+
+  // Test hook: the pure renderer pieces, for `test/docs-links.test.js`. A webview has no `module`,
+  // so this is inert there.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { renderMarkdown, renderInline, anchorSlug, setKnownPages };
+  }
 })();

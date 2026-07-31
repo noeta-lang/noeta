@@ -1,0 +1,27 @@
+// A sibling module that declares an `@html` expression tier. Its `expr: Html` type and the
+// handler's return type are the same local `Html` — the linker must qualify BOTH to `Tmpl.Html`
+// in lockstep, or the E0051 return-match rejects a valid handler. Importing `render` also drags
+// the internal `wrap` helper and the `Html` type into the merged program (cross-module linker).
+
+pub struct Html {
+    text: string
+}
+
+fn wrap(s: string): string {
+    return "[${s}]"
+}
+
+@tier(html, text: "html", expr: Html)
+pub fn render(statics: List<string>, holes: List<() -> string>): Html {
+    mut out = ""
+    mut i = 0
+    for s in statics {
+        out = out ~ s
+        if i < holes.len() {
+            h = holes[i]
+            out = out ~ wrap(h())
+        }
+        i = i + 1
+    }
+    return Html { text: out }
+}

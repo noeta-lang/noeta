@@ -1,0 +1,7 @@
+pub trait Decoder {
+    fn step(s: string): string
+}
+
+pub class Target {
+    fn new(): Target { return Target {} }
+}

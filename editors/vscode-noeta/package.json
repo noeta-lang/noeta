@@ -457,6 +457,6 @@
     "vscode-textmate": "^9.3.2"
   },
   "scripts": {
-    "test": "node test/grammar-indent.test.js && node test/grammar-interpolation.test.js"
+    "test": "node test/grammar-indent.test.js && node test/grammar-interpolation.test.js && node test/docs-links.test.js"
   }
 }

@@ -22,6 +22,7 @@ pub mod lock;
 pub mod manifest;
 pub mod registry;
 pub mod reserved;
+pub mod sources;
 
 /// The crate's typed error, re-exported at the root — `noeta_pm::PmError` is the name consumers
 /// match on (audit-5 #7 / cross-cutting #3).
@@ -76,6 +77,11 @@ mod git;
 mod git_auth;
 mod resolve;
 mod store;
+
+/// Hermetic, per-process fixture directories for this crate's unit tests — the one place a test
+/// temp path is built, so no two processes ever share one. Test builds only.
+#[cfg(test)]
+mod test_temp;
 
 /// The git **authorship** helpers backing the committer signal (`noeta update`/`add`) — re-exported so
 /// front-ends reach them without the rest of the git-fetch internals (which keep `Store` private).

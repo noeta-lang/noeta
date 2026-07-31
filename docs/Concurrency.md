@@ -2,6 +2,36 @@
 
 The language has lazy iterators, generators, `async`/`await` with structured concurrency, and true-parallel isolates communicating over typed channels — all built on one stackless state-machine substrate (see [Concurrency Internals](Concurrency-Internals) for how). This page is the surface.
 
+Here is the heart of it in one complete program — two tasks spawned, both in flight at once, joined with `.await`:
+
+```noeta
+use std.task.{sleep}
+
+async fn fetch_user(id: int): string {
+    sleep(20).await                     // stand-in for a real request
+    return "user-${id}"
+}
+
+concurrent {
+    a = spawn fetch_user(1)             // both requests start now…
+    b = spawn fetch_user(2)
+    echo "requests in flight"
+    echo a.await                        // …and run while we wait
+    echo b.await
+}
+echo "done"
+```
+
+```console
+$ noeta run fetch.noe
+requests in flight
+user-1
+user-2
+done
+```
+
+An `async fn` suspends instead of blocking, `spawn` schedules a call as a task inside a `concurrent` scope, and `.await` waits for a result. The rest of this page builds the full picture: iterators and generators first (the same state-machine substrate in synchronous form), then async/await, structured scopes, cancellation, isolates, and channels.
+
 ## Lazy iterators
 
 `xs.iter()` produces an `Iterator<T>` — a **reference** value with a shared cursor. Adapters are lazy and fuse (no intermediate lists are built); a terminal like `.collect()` or `.sum()` drives them.
@@ -62,12 +92,38 @@ What stays E0040: `.await` inside a **closure** (function coloring — a closure
 | `if` / `while` condition, `for` iterable (heads) | ❌ E0040 |
 | Inside a closure | ❌ E0040 |
 
+### `async` methods and traits
+
+A method may be `async`, including a trait method — required or defaulted. The rule is the one above with nothing added: calling it produces a `Future<T>`, and that is true of *every* way the receiver is reached — a concrete type, a `<F: Fetcher>` bound, a `dyn Fetcher` trait object, or a `dyn` narrowed with `x is dyn Fetcher`.
+
+```noeta
+use std.task.{sleep}
+
+trait Fetcher {
+    async fn fetch(url: string): string
+}
+
+struct Http {
+    impl Fetcher {
+        async fn fetch(url: string): string {
+            sleep(1).await
+            return "body:" ~ url
+        }
+    }
+}
+
+async fn via_dyn(f: dyn Fetcher): string { return f.fetch("one").await }
+echo via_dyn(Http {}).await   // body:one
+```
+
+What makes that uniform typing honest is that an implementation must match its trait's `async`-ness: a plain `fn` satisfying an `async` trait method — or an `async fn` satisfying a synchronous one — is E0015. Forgetting the `.await` is then an ordinary E0007 (`expected string, found Future<string>`) wherever the call is reached from.
+
 ## Structured concurrency
 
 A `concurrent { … }` scope runs tasks concurrently and joins them at the closing brace. Inside it:
 
 - **`spawn expr()`** schedules a future as a task, yielding a handle you can `.await` (or `.cancel()` / `.join()` — see [Cancellation](#cancellation)).
-- **`isolate f(args)`** runs in a fresh isolate (own heap, true parallelism); its arguments and result must be `Send` (see below).
+- **`isolate f(args)`** runs in a fresh isolate (own heap, true parallelism); its arguments and result must be `Send` (see below). Like `spawn`, it takes a **future** — so `f` must be an `async fn`; handing it a synchronous call is E0041.
 
 ```noeta
 use std.task.{sleep, all}
@@ -93,7 +149,7 @@ concurrent {
 
 ### Nested `concurrent` interleaves
 
-A `concurrent { … }` block opened **inside a spawned task's own body** is a genuine suspension point, not an atomic step: its join yields out of the task's poll while the inner scope's tasks are still pending, so those inner tasks interleave with the outer scope's siblings across scheduler rounds (rather than the inner scope being driven to completion inside one poll of the outer task). Two sibling tasks that each open their own `concurrent` therefore run interleaved, not one-after-the-other. Scopes close by identity, so a nested block can finish while a sibling's block is still open — structured guarantees (a block joins all its tasks before it returns) hold regardless of interleaving. Under the sandbox clock the interleaving is deterministic and both backends agree.
+A `concurrent { … }` block opened **inside a spawned task's own body** does not run as one atomic step: the inner scope's tasks interleave with the outer scope's siblings. Two sibling tasks that each open their own `concurrent` therefore run interleaved, not one-after-the-other, and a nested block can finish while a sibling's block is still open. The structured guarantee is unaffected by any of this — every block joins all of its tasks before it returns. For the scheduler mechanics behind the interleaving, see [Concurrency Internals](Concurrency-Internals).
 
 ### Cancellation
 
@@ -154,14 +210,11 @@ async fn produce(tx: Sender<int>): void {
 
 async fn consume(rx: Receiver<int>): int {
     mut total = 0
-    mut running = true
-    while running {
-        (delta, keep) = match rx.recv().await {
-            some(v) => (v, true),
-            none    => (0, false),
+    while true {
+        match rx.recv().await {
+            some(v) => { total = total + v },
+            none    => { return total },        // channel closed and drained
         }
-        total = total + delta
-        running = keep
     }
     return total
 }
@@ -189,6 +242,99 @@ concurrent {
 | **Explicit close** | `tx.close()` still works and is idempotent; it composes with auto-close (whichever happens first closes the channel). |
 | **Deadlock** | A channel that can make no progress — every party blocked on channel ops with no live counterparty, no timer, and no pending IO — is a deterministic deadlock: the sandbox catches it as `E0010`, and the real (parallel) scheduler raises the same `E0010` rather than spinning. |
 
+## Streaming I/O
+
+Some sources produce values *over time* rather than all at once. The ones in the standard library share the channel shape above — an awaited read yielding `none` when the source is finished — so one `while` loop drains any of them:
+
+| Source | Read | Ends when |
+|---|---|---|
+| `Receiver<T>` (a channel) | `rx.recv().await` → `?T` | the channel is closed and drained |
+| `FrameStream` (an HTTP response body) | `stream.recv().await` → `?Frame` | the body ends |
+| `Socket` (a websocket session) | `sock.recv().await` → `?string` | the peer closes |
+| `Process` (a child's output) | `p.read_line_async().await` → `?string` | the child's output ends |
+
+```noeta
+use std.http.client
+use std.http.{Framing, Frame, HttpError}
+
+// `Result<void, HttpError>` rather than `void`, because the body uses `?`: the operator early-returns
+// the failure, so the signature has to be able to carry one — see [`?` — propagate a
+// failure](Error-Handling#--propagate-a-failure).
+async fn tokens(body: string): Result<void, HttpError> {
+    api = client.new("https://api.example.com")
+    opened = client.stream(api.prepare("post", "/v1/chat", body), Framing.Sse)?
+    // Check the head before draining the body — see below.
+    stream = opened.error_for_status()?
+    mut going = true
+    while going {
+        next = stream.recv().await
+        if next == none {
+            going = false
+        } else {
+            f: Frame = next ?? Frame { event: "", data: "", id: "", retry: none }
+            echo f.data
+        }
+    }
+    return Ok()
+}
+```
+
+### The response head
+
+A streamed response has the same two halves as a buffered one — a head and a body — and only the body arrives over time. `FrameStream` therefore carries the head, readable **before** the first `recv()`: `status()`, `ok()`, `header(name)`, and the opt-in `error_for_status()` mirror the same methods on `Response`.
+
+Check it. A rate-limited provider answers a streaming request with `429` and a bare JSON error document, which is not an event stream — so `Framing.Sse` correctly cuts it into **zero** frames, and a reader that only drains cannot tell a rate limit from a model with nothing to say. The head is also where the actionable part lives: `stream.header("retry-after")` tells a backoff loop how long to wait, and a provider's `x-ratelimit-*` headers report the remaining budget.
+
+The split follows the one-shot verbs exactly. Opening a stream returns `Err` only when the request never got off the ground — a transport failure — so plain `?` keeps its single meaning, and `error_for_status()` is how a caller opts a non-2xx into the same short-circuit.
+
+A `FrameStream` is a **handle** on a single consumable body: copies alias it, and it belongs to the task that opened it. A **`Frame`, by contrast, is a value struct** — so by the rule in [Isolates and `Send`](#isolates-and-send) it is `Send`. That is deliberate rather than incidental: it lets one task own the body while others receive frames over a channel, which is the natural shape of a streaming pipeline.
+
+```noeta ignore
+concurrent {
+    spawn read_into(stream, tx)     // one task owns the FrameStream
+    spawn forward(rx)               // others receive Frames over a channel
+}
+```
+
+Backpressure runs end to end: the real host's reader holds a bounded number of decoded frames and then stops reading the socket, so a slow consumer slows the *server* down instead of growing memory.
+
+Serving a stream is the mirror image. `server.sse(handler)` runs `handler(sink)` as a session and `sink.send(frame)` pushes to the client, exactly as `server.websocket` does for a socket — both are ordinary in-flight handlers to the serve loop, so a long-lived session interleaves with other requests rather than blocking them.
+
+## Streaming a subprocess
+
+A spawned child (`os.spawn` / `os.try_spawn` — see [Error Handling](Error-Handling#aborting-and-recoverable-doors) for which door to use) has both a **blocking** and an **awaitable** form of every read, and the choice matters more here than anywhere else in the standard library.
+
+| Blocking | Awaitable twin | Reads |
+|---|---|---|
+| `p.read_line(): ?string` | `p.read_line_async(): Future<?string>` | the next line of the child's stdout |
+| `p.read_err_line(): ?string` | `p.read_err_line_async(): Future<?string>` | the next line of its stderr, on its own cursor |
+| `p.read(n): ?string` | `p.read_async(n): Future<?string>` | up to `n` characters of stdout |
+| `p.wait(): ExecResult` | `p.wait_async(): Future<ExecResult>` | the child's exit |
+
+The blocking reads park the **whole isolate**, not just the calling task: a sibling task spawned as a watchdog does not get to run while a `read_line` waits on a child that has not spoken yet. So a synchronous read cannot be bounded from inside the language — the only escapes are killing the child or standing up a second isolate to kill it by pid.
+
+The awaitable twin makes a bounded read ordinary. `race` returns the first result, so pair the read with a deadline that resolves to the same type:
+
+```noeta
+use std.{os, task}
+use std.os.Process
+
+async fn deadline(ms: int): ?string {
+    task.sleep(ms).await
+    return none
+}
+
+async fn first_line(p: Process, ms: int): ?string {
+    return task.race([p.read_line_async(), deadline(ms)])
+}
+```
+
+Both reads share one cursor per stream, so an awaited read and a blocking one interleave on the same position — `p.read_async(3).await` then `p.read(5)` continues where the first stopped.
+
+A child's stdout and stderr are drained continuously in the background, so a chatty child never deadlocks on a full pipe while you supervise it, and `p.wait()` still returns the *whole* captured output regardless of how much was streamed.
+
 ## Determinism
 
 In the sandbox executor (used for the differential oracle) time is a logical clock, so interleavings are reproducible and both backends agree. On the CLI, `noeta run` uses a real (tokio) executor and real OS-thread isolates. See [Concurrency Internals](Concurrency-Internals) for the "simulate deterministically, deploy real" design.
+
+A streaming body is deterministic under the sandbox too: the responder decodes a scripted body that is a pure function of the request, so a reading loop terminates in-oracle and both backends observe the identical frames.

@@ -1,6 +1,6 @@
-# Fixed-Width Integers & Bitwise
+# Fixed-Width Ints & Packed Types
 
-Beyond `int` (a 64-bit signed integer), the language has eight explicit fixed-width integer types and a full set of bitwise operators. These matter for binary formats, hashing, protocol code, and packed numeric data.
+Beyond `int` (a 64-bit signed integer), the language has eight explicit fixed-width integer types with a full set of bitwise operators, and `@packed` value types — structs stored as flat numeric buffers instead of heap objects. The first half of this page covers the widths and bit operations (binary formats, hashing, protocol code); the second half covers packed and column layouts (bulk numeric data).
 
 ## The fixed-width types
 
@@ -15,7 +15,8 @@ d = 1_000u32
 
 - There is **no implicit widening** — moving a value between widths is explicit (via the conversion methods below).
 - An untyped literal **coerces** into a fixed-width annotation when it is in range: `x: u16 = 1000`.
-- At runtime a fixed-width value is erased to a 64-bit word, so `type_of(255u8)` reports `Type.Int`.
+- At runtime a fixed-width value is erased to a 64-bit word, so `type_of(255u8)` reports `Type.Int`. Declared-type reflection agrees by construction: a top-level `i32`/`u8` parameter reflects `Type.Int` through `params_of` too (and a top-level `f64` reflects `Type.Float`; `f32` is reified everywhere and reports `Type.F32`). In **container-element position** a width is a real storage slot and is preserved: a `List<i32>` annotation reflects `Type.List(Type.IntN(32, true))`, at any depth. See [Attributes & Reflection](Attributes-and-Reflection#params_ofname-listparaminfo).
+- A **type test against a width** (`x is i32`, `x is f64`) is answered by the checker, not at runtime: `a: i32` makes `a is i32` `true` and `a is i64` `false`, decided where the width actually lives — in the static type. Once a value is laundered through `dyn` the width is gone and nothing can recover it, so a test there is **E0063** (a warning) and you should test the base type instead (`x is int`, `x is float`). `f32` is exempt — it is reified, so the runtime answers it — and so is a container target like `List<i32>`.
 
 Arithmetic **wraps** at the type's width, sign-appropriately:
 
@@ -91,7 +92,7 @@ Int→float is value-preserving (rounding to nearest on `f32`); float→int trun
 
 ## Packed value types — `@packed`
 
-The `@packed` directive marks a **struct** as a *packed value type*: a `List` of it is stored as a flat, unboxed, contiguous numeric buffer rather than an array of heap-object pointers. This is a pure *representation* change — the flat layout is invisible to program behavior (a packed list `==`, displays, and iterates exactly like a boxed one), but it is dramatically more cache-friendly and unlocks vectorized bulk math.
+The `@packed` directive marks a **struct** as a *packed value type*: a `List` of it is stored as a flat, unboxed, contiguous numeric buffer rather than an array of heap-object pointers. This is a pure *representation* change — the flat layout is invisible to program behavior (a packed list `==`, displays, and iterates exactly like a boxed one), but it is dramatically more cache-friendly and unlocks vectorized bulk math. For *why* that pays off — cache behavior, autovectorization, and the benchmarks — see [Performance Techniques](Performance-Techniques).
 
 ```noeta
 @packed struct V { x: int  y: int }
@@ -104,9 +105,22 @@ echo acc.len()                          // 3
 
 Rules:
 
-- `@packed` marks a **struct** only. On a class it is E0054, a misplaced directive (a class has identity; a packed value type is a value). E0038 is reserved for a packed struct's *field* constraints.
+- `@packed` marks a **struct** only. On a class it is E0054, a misplaced directive (a class has identity; a packed value type is a value).
 - Fields must be packable — fixed-width ints, `int`, `f32`, `bool`, or a nested `@packed` struct. A non-primitive field is rejected.
 - Every list operation (index, field read, iteration, `set`, `~`/concat, `slice`/`reverse`/`filter`/`map`) yields exactly what the boxed layout would.
+
+A packed struct whose fields are all integers/`bool` (or nested such structs) is also **key-capable**: it can key a `Map` (or element a `Set`) **by content** — the spatial-hash idiom:
+
+```noeta
+@packed struct Cell { x: int; y: int }
+
+mut grid: Map<Cell, int> = {}
+grid[Cell { x: 3, y: 4 }] = 42          // keyed by value, not identity
+echo grid[Cell { x: 3, y: 4 }]          // 42 — a fresh equal value finds it
+echo grid.keys()                        // [Cell {x: 3, y: 4}] — full struct values again
+```
+
+Iteration/display order over packed keys is field-wise (declaration order, negatives before positives) — the same total order sets and `sorted()` use. Float/`f32` fields disqualify a struct as a key (`NaN != NaN` makes float keys a footgun). See [Built-ins: Map](Standard-Library#map) for the key-capability rules.
 
 ## Column (SoA) layout — `@packed(Layout.Column)`
 
@@ -135,7 +149,7 @@ echo ys == xs                           // true
 echo blob.len()                         // 24  (2 elements × 3 × 4-byte f32)
 ```
 
-`bytes` is an opaque binary buffer: `b.len()` gives its length, `b.to_hex()` renders it as lowercase hex (the usual way to display a `crypto` digest), `b.decode()` decodes it as UTF-8 (`?string` — `none` when the bytes are not valid UTF-8; the inverse of `string.to_bytes()`), it compares by content, and `type_of(b)` is `Type.Bytes`.
+`bytes` is an opaque binary buffer — for its general API (`len`, `to_hex`, `decode`, content comparison), see [Built-ins: bytes](Standard-Library#bytes).
 
 ## Bulk vector kernels
 
@@ -150,4 +164,4 @@ echo vec.length_all(ps)                 // [5.0, 3.0]     (reduction → f32 lis
 echo vec.add_all(ps, ps)                // a column V3 list, element-wise doubled
 ```
 
-See [Standard-Library Modules](Standard-Library-Modules#vec--quat) for the full `vec`/`quat` surface, and [Performance Techniques](Performance-Techniques) for *why* the column layout beats hand-written SIMD here (LLVM autovectorization).
+See [std.vec](std-vec) and [std.quat](std-quat) for the full `vec`/`quat` surface, and [Performance Techniques](Performance-Techniques) for *why* the column layout beats hand-written SIMD here (LLVM autovectorization).

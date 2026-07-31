@@ -22,6 +22,7 @@ fn sum_to(n: int): int {
     return total
 }
 
+// sample:start
 @bench(iterations: 1000) {
     fn sum_100(): void { assert(sum_to(100) == 5050) }
 }
@@ -31,12 +32,14 @@ fn sum_to(n: int): int {
 
 ### Iteration count
 
-The block directive is **distribution sugar**: `@bench(iterations: N) { … }` stamps the `std.bench.Bench` attribute (`#[Bench(iterations: N)]`) onto each contained fn — validated like any attribute construction, visible to reflection, and stamped already-qualified so the block form needs no `use`. A fn can carry its own `#[Bench(…)]` to override the block's, but writing the attribute yourself needs `use std.bench.Bench` (or the qualified form, `#[std.bench.Bench(iterations: 50)]`) — it is not prelude. The count comes from the first of these that is set:
+Fix a benchmark's iteration count on the block — `@bench(iterations: 1000) { … }`, as in the example above — or leave it off and let calibration pick one. Positional `@bench(1000)` and named `@bench(iterations: 1000)` are equivalent, and a single fn can carry its own `#[Bench(iterations: N)]` attribute to override the block's. The count each fn runs with comes from the first of these that is set:
 
 1. `--iterations N` on the command line (overrides everything).
 2. The fn's own `#[Bench(iterations: N)]` attribute.
-3. The block's `@bench(iterations: N)` directive — positional `@bench(1000)` and named `@bench(iterations: 1000)` are equivalent.
+3. The block's `@bench(iterations: N)` directive.
 4. **Calibration**: a short probe grows the count until one measurement run takes ~50ms, so fast and slow bodies alike get a statistically meaningful count automatically.
+
+Under the hood the block directive is **distribution sugar**: `@bench(iterations: N) { … }` stamps the `std.bench.Bench` attribute (`#[Bench(iterations: N)]`) onto each contained fn — validated like any attribute construction, visible to reflection, and stamped already-qualified so the block form needs no `use`. Writing the attribute yourself is what needs `use std.bench.Bench` (or the qualified form, `#[std.bench.Bench(iterations: 50)]`) — it is not prelude.
 
 ## How timing works
 
@@ -50,8 +53,12 @@ The reported unit adapts to the magnitude: `ns`, `µs`, `ms`, or `s`.
 ## Command reference
 
 ```text
-noeta bench [OPTIONS] <FILE>
+noeta bench [OPTIONS] [PATH]
 ```
+
+`PATH` (default `.`) is a file **or a directory**, exactly like [`noeta check`](The-CLI#noeta-check) and [`noeta test`](Testing#command-reference). A directory measures every `.noe` beneath it as its own entry into one report, labelling each result with the file it came from (`src/util.noe::parse_bench`) — the only way a multi-module project's benchmarks all run, since linking merges a module's declarations without its `@bench` blocks. A file measures just that file.
+
+Baselines stay keyed **per entry file**, so a directory run writes exactly the baselines a per-file run writes, and the two compare against each other.
 
 | Flag | Effect |
 |---|---|
@@ -61,7 +68,7 @@ noeta bench [OPTIONS] <FILE>
 | `--save-baseline <NAME>` | Save this run's measurements as a named baseline (per entry file, in the noeta cache — timings are machine-local, not project artifacts). |
 | `--baseline <NAME>` | Compare each result against the named baseline: the report gains `(+5.2% vs NAME)`, the JSON `baselineDeltaPct`. |
 | `--max-regress <PCT>` | The CI gate (requires `--baseline`): exit `1` when any bench regresses more than `PCT`% against the baseline, naming the offenders on stderr. Save a baseline on your main branch, gate PRs with `noeta bench app.noe --baseline main --max-regress 10 --json`. |
-| `--target <NAME>` | Only run when the `bench` tier is live in this `noeta.toml` build target; otherwise no-op with exit `0`. A target may also map `bench` to another **provider** (see [Documentation & Dev Tiers](Documentation-and-Tiers)). |
+| `--target <NAME>` | Only run when the `bench` tier is live in this `noeta.toml` build target; otherwise no-op with exit `0`. A target may also map `bench` to another **provider** (see [Extending Tiers](Extending-Tiers)). |
 
 ### Output and exit codes
 
@@ -75,10 +82,20 @@ running <N> benchmarks
 
 Exit `0` when nothing failed, `1` otherwise. `no benchmarks found` exits `0`.
 
+With `--baseline`, each line gains the delta against the named baseline:
+
+```console
+$ noeta bench sort.noe --baseline main
+running 1 benchmark
+  sum_100                          2.55 µs/iter  (1000 iterations)  (-5.2% vs main)
+
+1 ran, 0 failed, 1 total
+```
+
 > [!NOTE]
 > `noeta bench` measures *your program's* `@bench` blocks. It is unrelated to the `criterion` benches the compiler developers run against the VM itself (`cargo bench -p noeta-vm`) — those are covered in the [Contributing guide](Contributing).
 
 ## See also
 
 - [Testing](Testing) — the `@test` sibling.
-- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model and `noeta.toml` targets.
+- [Dev Tiers](Dev-Tiers) — the tier model and `noeta.toml` targets.

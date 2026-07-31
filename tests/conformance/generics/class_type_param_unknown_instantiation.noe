@@ -1,0 +1,30 @@
+// `r = Repo.new("todos")` binds no `T` — no argument mentions it, and the binding carries no
+// annotation — so nothing records an instantiation on the object.
+//
+// This case used to pin the RUN-TIME abort: it checked clean (`0 error(s)`) and died at the first
+// `type_name::<T>()`. It was a hole for exactly one reason — there was no way to say the type at
+// the call site, so erroring would have rejected code with no fix. `Repo::<Todo>.new("todos")` is
+// that fix, and its existence is what turns the silence into a diagnostic.
+//
+// The error now lands on the CONSTRUCTION, not on the far-away `type_name::<T>()` that was merely
+// the first to notice it, and the help names both routes: state the instantiation at the call, or
+// put the call in a position that declares it. The shared abort message stays for what a static
+// check cannot reach — see `literal_type_argument_unrecorded.noe`.
+// expect: error E0058 at 29:5
+// expect: exit 1
+struct Todo {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+r = Repo.new("todos");
+echo r.model();

@@ -106,6 +106,7 @@ const BUTTON: ExtType = ExtType {
     name: "Button",
     namespace: "fx",
     methods: &[ExtFn {
+        param_names: &[],
         name: "describe",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -125,6 +126,7 @@ const WIDGET: ExtTrait = ExtTrait {
     namespace: "fx",
     methods: &[ExtTraitMethod {
         sig: ExtFn {
+            param_names: &[],
             name: "describe",
             params: &[],
             ret: RetTy::Concrete(SigType::String),
@@ -158,6 +160,7 @@ const PANEL: ExtClass = ExtClass {
         is_mut: false,
     }],
     methods: &[ExtFn {
+        param_names: &[],
         name: "describe",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -222,6 +225,7 @@ const MODE: ExtEnum = ExtEnum {
     ],
     backing: EnumBacking::None,
     methods: &[ExtFn {
+        param_names: &[],
         name: "describe",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -273,6 +277,7 @@ const BADGE: ExtStruct = ExtStruct {
         is_mut: false,
     }],
     methods: &[ExtFn {
+        param_names: &[],
         name: "describe",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -318,21 +323,25 @@ fn badge_dispatch(
 
 const KIT_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "make",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Button")),
     },
     ExtFn {
+        param_names: &[],
         name: "panel",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Panel")),
     },
     ExtFn {
+        param_names: &[],
         name: "mode",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Mode")),
     },
     ExtFn {
+        param_names: &[],
         name: "badge",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Badge")),
@@ -371,6 +380,7 @@ fn kit_dispatch(
                 variant: "Dark".to_string(),
                 variant_index: 0,
                 fields: vec![],
+                has_validator: false,
             })
         }
         "badge" => {
@@ -626,5 +636,73 @@ echo announce(Plain { n: 1 })
     assert!(
         diags.iter().any(|m| m.contains("Widget")),
         "expected a bound-violation diagnostic naming `Widget`, got {diags:?}"
+    );
+}
+
+/// **Precise `is dyn Trait` + `traits_of` over native impls.** The runtime membership test and the
+/// `traits_of` query read the reflection `trait_impls` table, whose native rows come from the
+/// registry's ABI advertisements (`ExtType`/`ExtClass`/`ExtEnum`/`ExtStruct::traits`) — so every
+/// native value kind that dispatches `Widget.describe()` also answers `is dyn Widget` true, a
+/// non-implementor answers false (it was permissively `true` before this arc), and `traits_of`
+/// reports the trait's QUALIFIED identity (`fx.Widget`; a built-in trait keeps its bare name).
+/// Differential: both backends read the same shared table.
+#[test]
+fn is_dyn_trait_and_traits_of_cover_native_impls_on_both_backends() {
+    const SRC: &str = r#"
+use fx.kit
+use fx.Widget
+
+struct Card {
+    title: string
+}
+impl Widget for Card {
+    fn describe(): string {
+        return "card:${self.title}"
+    }
+}
+
+struct Plain {
+    n: int
+}
+
+fn implements(x: dyn): bool {
+    return x is dyn Widget
+}
+
+// A user implementor and every native value kind answer the precise test true...
+echo implements(Card { title: "hi" })
+echo implements(kit.make("go"))
+echo implements(kit.panel("cls"))
+echo implements(kit.mode())
+echo implements(kit.badge("v"))
+// ...and a non-implementor answers false (permissively true before this arc).
+echo implements(Plain { n: 1 })
+echo implements(42)
+
+// `.as<dyn Widget>()` is the same membership test, checked: some for the native implementor,
+// none for the non-implementor.
+fn try_render(x: dyn): string {
+    return match x.as<dyn Widget>() {
+        some(w) => w.describe(),
+        none => "not-a-widget",
+    }
+}
+echo try_render(kit.make("go"))
+echo try_render(Plain { n: 1 })
+
+// `traits_of` reports the qualified native-trait identity; `Badge`'s mixed ABI list surfaces the
+// built-in `Comparable` (bare name) beside it, sorted.
+echo traits_of(Card { title: "hi" })
+echo traits_of(kit.make("go"))
+echo traits_of(kit.panel("cls"))
+echo traits_of(kit.badge("v"))
+echo traits_of(Plain { n: 1 })
+"#;
+    let stdout = run_both_agree(SRC);
+    assert_eq!(
+        stdout,
+        "true\ntrue\ntrue\ntrue\ntrue\nfalse\nfalse\n\
+         button:go\nnot-a-widget\n\
+         [\"fx.Widget\"]\n[\"fx.Widget\"]\n[\"fx.Widget\"]\n[\"Comparable\", \"fx.Widget\"]\n[]\n"
     );
 }

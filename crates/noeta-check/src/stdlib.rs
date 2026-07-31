@@ -97,12 +97,12 @@ pub(crate) fn sig_to_typeref(
     use noeta_span::Span;
     let sp = Span::new(0, 0);
     let named = |name: &str| TypeRef::Named {
-        name: name.to_string(),
+        name: noeta_ast::Name::canonical(name),
         args: Vec::new(),
         span: sp,
     };
     let named_args = |name: &str, args: Vec<TypeRef>| TypeRef::Named {
-        name: name.to_string(),
+        name: noeta_ast::Name::canonical(name),
         args,
         span: sp,
     };
@@ -116,6 +116,7 @@ pub(crate) fn sig_to_typeref(
         SigType::Bytes => named("bytes"),
         SigType::Unit => named("void"),
         SigType::Dyn => named("dyn"),
+        SigType::Never => named("never"),
         SigType::List(t) => named_args("List", vec![sig_to_typeref(reg, t)]),
         SigType::Option(t) => named_args("Option", vec![sig_to_typeref(reg, t)]),
         SigType::Map(k, v) => {
@@ -153,6 +154,23 @@ pub(crate) fn sig_to_typeref(
             name: (*n).to_string(),
             span: sp,
         },
+        // `Self` carries into the synthesized `TraitDecl` under the name a `.noe` trait spells it
+        // with — the parser produces a plain `TypeRef::Named { name: "Self" }` for a bare `Self`
+        // (only `Self::Name` becomes an `AssocProjection`) — so the user-trait machinery sees the
+        // native and declared spellings as one thing.
+        SigType::SelfTy => named("Self"),
+        // "Any number" as a declared type is the union of every numeric scalar — the same set
+        // `arith_numeric_union` builds for the lattice side, spelled in the AST's type language.
+        // "Any number" as a declared type is the union of every numeric scalar, spelled in the AST's
+        // type language. The members come from `Type::arith_numeric` rather than a second literal
+        // list, so the two vocabularies cannot drift apart.
+        SigType::Numeric => TypeRef::Union {
+            members: match Type::arith_numeric() {
+                Type::Union(members) => members.iter().map(|t| named(&t.to_string())).collect(),
+                other => vec![named(&other.to_string())],
+            },
+            span: sp,
+        },
     }
 }
 
@@ -168,7 +186,7 @@ pub(crate) fn ret_to_typeref(
     match ret {
         registry::RetTy::Concrete(s) => sig_to_typeref(reg, s),
         _ => noeta_ast::TypeRef::Named {
-            name: "dyn".to_string(),
+            name: noeta_ast::Name::canonical("dyn"),
             args: Vec::new(),
             span: Span::new(0, 0),
         },
@@ -193,6 +211,7 @@ fn sig_to_type_bound(
         SigType::Bytes => Type::Bytes,
         SigType::Unit => Type::Unit,
         SigType::Dyn => Type::Dyn,
+        SigType::Never => Type::Never,
         SigType::List(t) => list(sig_to_type_bound(reg, t, bindings)),
         SigType::Option(t) => opt(sig_to_type_bound(reg, t, bindings)),
         SigType::Map(k, v) => Type::Map(
@@ -243,6 +262,11 @@ fn sig_to_type_bound(
         // type — it is resolved per-implementor against `trait_assoc` at the concrete call site
         // (`Checker::native_method_assoc_return`), so here it is a gradual hole.
         SigType::Assoc(_) => Type::Unknown,
+        // `Self` is receiver-relative and this resolver has no receiver — a bundle/trait method call
+        // routes through `bundle_method_params` instead, which does. A gradual hole here, for the
+        // same reason `Assoc` is one: better an un-inferred argument than a confidently wrong type.
+        SigType::SelfTy => Type::Unknown,
+        SigType::Numeric => Type::arith_numeric(),
     }
 }
 
@@ -317,7 +341,7 @@ fn receiver_bindings(receiver_args: &[Type]) -> Vec<Option<Type>> {
 /// The **trait bounds** on a registry function's bounded type variables (p2p P2), each paired with
 /// the concrete type the call's arguments bound it to — for the checker to enforce (`E0025`). A
 /// bound whose variable the arguments left undetermined (a gradual hole) yields nothing: no
-/// information, so no error. `synced_signal(initial: BoundedVar(0, "Mergeable"), …)` called with a
+/// information, so no error. `synced_signal(initial: BoundedVar(0, &["Mergeable"]), …)` called with a
 /// `GCounter` argument yields `[(GCounter, "Mergeable")]`; called with `int`, `[(int, "Mergeable")]`
 /// — which the caller then rejects.
 pub(super) fn module_var_bounds(
@@ -351,7 +375,8 @@ pub(super) fn module_var_bounds(
 fn collect_bounded_vars(sig: &registry::SigType, out: &mut Vec<(u8, &'static str)>) {
     use registry::SigType;
     match sig {
-        SigType::BoundedVar(n, trait_name) => out.push((*n, trait_name)),
+        // Each bound is enforced separately, so a conjunction contributes one pair per name.
+        SigType::BoundedVar(n, bounds) => out.extend(bounds.iter().map(|t| (*n, *t))),
         SigType::List(t) | SigType::Option(t) | SigType::Future(t) | SigType::Optional(t) => {
             collect_bounded_vars(t, out)
         }
@@ -448,6 +473,21 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
                 registry::RetTy::Concrete(s) => sig_to_type(reg, &s),
                 _ => Type::Dyn,
             })
+        }
+        // The prelude `Type` enum's `.name()` accessor: the reflected type's **head name**
+        // (`type_of(todo).name()` → `"app.storage.Todo"`, `type_of([1]).name()` → `"List"`). Total
+        // over every case, which is the point — a consumer hand-rolling
+        // `match type_of(v) { Type.Class(n, _) => n, Type.Struct(n, _) => n, _ => "" }` answers the
+        // empty string for every shape its match forgot, and that name then travels into a table or
+        // a route. Keyed on the enum name like the `value()` arm below. A program that declares its
+        // own `enum Type` (shadowing the prelude one) keeps its own `name` method, in the checker and
+        // in both backends: a declared type's method resolves before this table, and each backend
+        // reaches its accessor only after the receiver's own method table missed.
+        Type::Named(n, _)
+            if n == noeta_ast::reflect::TYPE_ENUM
+                && name == noeta_ast::reflect::TYPE_NAME_METHOD =>
+        {
+            Some(Type::String)
         }
         // A native **backed** enum's `.value()` accessor (native-extensibility S1): the constraint
         // `ExtEnum.backing` states the accessor's type — a `String`-backed enum's `.value()` is
@@ -546,6 +586,9 @@ fn bytes_method(name: &str) -> Option<Type> {
         "len" => Type::Int,            // the buffer length in bytes
         "to_hex" => Type::String,      // lowercase hex rendering (crypto arc C1)
         "decode" => opt(Type::String), // UTF-8 decode — `none` on invalid UTF-8
+        // The sequence-reading pair `bytes` was missing next to `string`/`List<T>`: `b.slice(a, b?)`
+        // here and the index `b[i]` in `index_return`. A slice of a byte buffer is a byte buffer.
+        "slice" => Type::Bytes,
         _ => return None,
     })
 }
@@ -720,6 +763,8 @@ pub(super) fn method_params(
         Type::Set(elem) => set_params(name, elem),
         Type::Map(key, val) => map_params(name, key, val),
         Type::Bytes if name == "len" || name == "to_hex" || name == "decode" => Some(vec![]),
+        // `slice(start, end?)` — the trailing `end` is optional (see `builtin_method_required`).
+        Type::Bytes if name == "slice" => Some(vec![Type::Int, Type::Int]),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
         }
@@ -766,6 +811,14 @@ pub(super) fn method_params(
         Type::Named(n, _) if reg.find_enum_method(n, name).is_some() => {
             let sig = reg.find_enum_method(n, name)?;
             Some(sig.params.iter().map(|p| sig_to_type(reg, p)).collect())
+        }
+        // The prelude `Type` enum's `.name()` head-name accessor takes nothing — stated here so a
+        // stray argument is an arity error at check time rather than a runtime abort.
+        Type::Named(n, _)
+            if n == noeta_ast::reflect::TYPE_ENUM
+                && name == noeta_ast::reflect::TYPE_NAME_METHOD =>
+        {
+            Some(Vec::new())
         }
         _ => None,
     }
@@ -825,6 +878,8 @@ fn builtin_method_required(receiver: &Type, name: &str) -> Option<usize> {
         // `list.slice(start, end?)` — end optional; `list.join(sep?)` — separator optional.
         (Type::List(_), "slice") => 1,
         (Type::List(_), "join") => 0,
+        // `bytes.slice(start, end?)` — the same shape as its string/list siblings.
+        (Type::Bytes, "slice") => 1,
         _ => return None,
     };
     Some(required)
@@ -972,8 +1027,13 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
             Box::new(args.first().cloned().unwrap_or(Type::Unknown)),
         ),
         "some" => opt(args.first().cloned().unwrap_or(Type::Unknown)),
-        // `panic` diverges (raises `E0010`); no value flows out of it.
-        "panic" => Type::Unknown,
+        // `panic` diverges (raises `E0010`): no value flows out of it, which is exactly what the
+        // bottom type says. It was `Unknown` — the *inference hole* — before `never` existed, which
+        // said "we do not know what this returns" about the one call we know best. `Never <: T`
+        // keeps every position that accepted the hole accepting this, and it additionally lets the
+        // tier runners see a top-level `panic(…)` for what it is: a statement that does not finish,
+        // so it must not join the shared setup and abort every test.
+        "panic" => Type::Never,
         // `assert(cond)` / `assert(cond, msg)` — checked for effect, yields nothing.
         "assert" => Type::Unit,
         // `signal`/`computed`/`effect` left the prelude (P2a) for `use std.reactive`, and
@@ -989,6 +1049,10 @@ pub(super) fn index_return(receiver: &Type) -> Option<Type> {
         Type::List(elem) => (**elem).clone(),
         Type::Map(_, val) => (**val).clone(),
         Type::String => Type::String,
+        // `b[i]` reads one byte as an `int` (0..=255). `bytes` was the one sequence with a `len()`
+        // and no element read at all, so a byte buffer could be produced but never taken apart —
+        // which made every decoder (base64, a binary frame, a checksum) inexpressible in-language.
+        Type::Bytes => Type::Int,
         Type::Dyn => Type::Dyn,
         _ => return None,
     })
@@ -1115,16 +1179,61 @@ pub(super) fn typed_type_method(
 /// A bundle method's parameter types under the receiver-at-0 convention (kernel-methods K2):
 /// the receiver is NOT in `params` (it rides as ctx slot 0), so binding and substitution run
 /// over the call's own arguments exactly like a module function's.
+///
+/// The **receiver-relative** parameter forms resolve here, against the concrete implementor, which
+/// is the whole reason this exists apart from [`sig_to_type_bound`]: `Self` is `self_ty` and
+/// `Self::Name` folds the trait's [`registry::ExtAssocType`] over the bound element — the same two
+/// resolutions [`bundle_method_return`] performs, now available on the argument side. Before this,
+/// every kernel operand was declared `Dyn`, so `v.add(5)` and `v.scale(some_vector)` both checked
+/// clean and only misbehaved at runtime.
 pub(super) fn bundle_method_params(
     reg: &registry::Registry,
     f: &registry::ExtFn,
     args: &[Type],
+    self_ty: &Type,
+    assoc_types: &[registry::ExtAssocType],
+    elem: Option<&Type>,
 ) -> Vec<Type> {
     let bindings = bind_params(f.params, args);
     f.params
         .iter()
-        .map(|p| sig_to_type_bound(reg, p, &bindings))
+        .map(|p| sig_to_type_bundle(reg, p, &bindings, self_ty, assoc_types, elem))
         .collect()
+}
+
+/// [`sig_to_type_bound`] plus the two receiver-relative forms, which it cannot resolve because it
+/// has no receiver: `Self` and `Self::Name`. Everything else defers to it unchanged, so there is one
+/// signature-to-type mapping with a receiver-aware wrapper — not two that must be kept in step.
+///
+/// Recurses through `List`/`Optional` so a bulk method's `List<Self>` operand resolves as precisely
+/// as an element method's bare `Self`.
+fn sig_to_type_bundle(
+    reg: &registry::Registry,
+    sig: &registry::SigType,
+    bindings: &[Option<Type>],
+    self_ty: &Type,
+    assoc_types: &[registry::ExtAssocType],
+    elem: Option<&Type>,
+) -> Type {
+    use registry::SigType;
+    match sig {
+        SigType::SelfTy => self_ty.clone(),
+        SigType::Assoc(name) => resolve_bundle_assoc(name, assoc_types, elem),
+        SigType::List(inner) => Type::List(Box::new(sig_to_type_bundle(
+            reg,
+            inner,
+            bindings,
+            self_ty,
+            assoc_types,
+            elem,
+        ))),
+        // A trailing-optional's type IS the wrapped type; the optionality rides in the required
+        // count, exactly as in `sig_to_type_bound`.
+        SigType::Optional(inner) => {
+            sig_to_type_bundle(reg, inner, bindings, self_ty, assoc_types, elem)
+        }
+        other => sig_to_type_bound(reg, other, bindings),
+    }
 }
 
 /// A bundle method's return type under the receiver-at-0 convention (kernel-methods K2):

@@ -13,6 +13,82 @@ use super::*;
 pub(crate) struct VariantInfo {
     pub(crate) name: String,
     pub(crate) fields: Vec<Type>,
+    /// The variant's **backing value** in a backed enum (`enum Tier: string { Free = "free" }`),
+    /// folded through the shared [`noeta_ast::reflect::fold_const_expr`]; `None` for a plain enum's
+    /// variant, for a native/prelude enum (neither is backed), and for a backed variant whose value
+    /// is not a literal.
+    ///
+    /// Carried here rather than read back off the reflection manifest because the checker builds
+    /// decode recipes (`type_to_recipe`) and has no manifest — and because the backing belongs with
+    /// the variant's other declared facts, next to the payload types, so one lookup answers
+    /// everything an enum's construction surfaces need to know about a case.
+    pub(crate) backing: Option<noeta_ast::AttrValue>,
+}
+
+/// How a user method may be **reached** — the receiver discipline behind E0047 (prelude-redesign
+/// EX.2). Three-valued, because "does the body need a receiver?" and "may it be called on a value?"
+/// are not the same question once a trait is involved.
+///
+/// This used to be a `bool` ("is it an instance method?") with the third state encoded as *absence
+/// from the table* — which worked only by accident: the associated-call site read a missing entry
+/// with `unwrap_or(false)` and the instance-call site with `unwrap_or(true)`, so an unclassified
+/// method happened to be permitted both ways. Two call sites with opposite defaults is a
+/// coincidence, not a design, and it reads as a bug from either side alone; the turbofish site,
+/// which used one default for both directions, had already drifted out of agreement with it. The
+/// state is named here instead, so a reader sees three cases and a `match` makes them decide.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Receiver {
+    /// The body reads `self`, so a call must supply one: `x.m(…)` only. `T.m(…)` is E0047 — and
+    /// really does fail at run time ("no field `f` on unit"), because nothing binds `self`.
+    Instance,
+    /// A self-less **inherent** function: `T.m(…)` only. `x.m(…)` is E0047 — the receiver would be
+    /// evaluated and then silently discarded.
+    Associated,
+    /// A self-less method belonging to a **trait's interface**: reachable **both** ways. The trait's
+    /// contract puts it in the instance interface (`x.m(…)` — and that is how `dyn Trait` dispatches
+    /// it), while the body needs no receiver, so calling it on the type (`T.m(…)`) is equally
+    /// well-defined. Both spellings reach the same prototype at run time.
+    Either,
+}
+
+impl Receiver {
+    /// The classification of a method that is **not** part of a trait's interface: derived purely
+    /// from whether the body mentions `self` (well-defined because member access is explicit, EX.1).
+    pub(crate) fn inherent(uses_self: bool) -> Self {
+        if uses_self {
+            Receiver::Instance
+        } else {
+            Receiver::Associated
+        }
+    }
+
+    /// The classification of a method a trait's interface supplies — an `impl Trait` block's own
+    /// method (in-body or standalone) or a hoisted default. A body that reads `self` still needs a
+    /// receiver; a self-less one is reachable either way.
+    pub(crate) fn trait_method(uses_self: bool) -> Self {
+        if uses_self {
+            Receiver::Instance
+        } else {
+            Receiver::Either
+        }
+    }
+
+    /// Whether `T.m(…)` (no receiver) is legal.
+    pub(crate) fn allows_associated_call(self) -> bool {
+        !matches!(self, Receiver::Instance)
+    }
+
+    /// Whether `x.m(…)` (with a receiver) is legal.
+    pub(crate) fn allows_instance_call(self) -> bool {
+        !matches!(self, Receiver::Associated)
+    }
+
+    /// Whether a handle bound off the **type** (`T.m` in value position) carries the receiver as its
+    /// first parameter. `Either` reads as instance here — which is exactly what the absent entry
+    /// already meant, so a trait method's handle keeps its instance shape.
+    pub(crate) fn handle_takes_receiver(self) -> bool {
+        !matches!(self, Receiver::Associated)
+    }
 }
 
 /// A callable signature, as far as annotations reveal it: the parameter types (for arity +
@@ -45,18 +121,48 @@ pub(crate) struct FnSig {
 /// bounds, and return the substituted result type.
 #[derive(Clone)]
 pub(crate) struct GenericInfo {
-    /// `(type-parameter name, trait bounds)` in declaration order. For a METHOD with its own
+    /// `(type parameter, trait bounds)` in declaration order. For a METHOD with its own
     /// type parameters (generic methods, poly-deferrals D3) this is the CLASS's parameters
     /// followed by the method's own — the two substitutions compose because the receiver's type
     /// arguments seed exactly the first `class_params` entries (positionally) and the method's
     /// own are filled by turbofish/arguments/expectation.
-    pub(crate) params: Vec<(String, Vec<BoundReq>)>,
+    pub(crate) params: Vec<(ParamRef, Vec<BoundReq>)>,
     /// How many leading entries of `params` belong to the enclosing class/struct/enum (`0` for a
     /// free function). A member-call turbofish binds the REMAINING (method-own) parameters only.
     pub(crate) class_params: usize,
     pub(crate) raw_params: Vec<Type>,
     pub(crate) raw_ret: Type,
 }
+
+/// One generic type parameter **as it is in scope** at a point in the checker: which parameter the
+/// spelling resolves to, and what its declaration demands of it.
+#[derive(Clone)]
+pub(crate) struct ScopedParam {
+    /// The parameter this spelling resolves to, identity and all.
+    pub(crate) param: ParamRef,
+    /// Its declared trait bounds (`<T: Comparable>`), including an instantiated bound's arguments.
+    pub(crate) bounds: Vec<BoundReq>,
+}
+
+/// The generic type parameters in scope, keyed by the **spelling** that resolves to each.
+///
+/// A *resolver*, not a membership set — and the distinction is the whole point of this arc. The
+/// old `HashSet<String>` answered "is `T` a parameter here?", a question with no useful answer
+/// once two declarations both spell one `T`; this answers "*which* parameter does `T` name here?",
+/// and an inner declaration's entry simply replaces the outer's, which is what shadowing is. It is
+/// consulted at exactly one boundary — turning a written annotation into a [`Type`]
+/// ([`crate::subst::resolve_params`]) — after which identity travels in the lattice itself and
+/// nothing downstream needs the map at all.
+pub(crate) type ParamScope = HashMap<String, ScopedParam>;
+
+/// A set of type parameters identified by **declaration**, never by spelling — what erasure and
+/// binding quantify over ("the callee's own parameters", "this class's parameters").
+pub(crate) type ParamSet = HashSet<ParamId>;
+
+/// A substitution from type parameters to the types instantiating them, keyed by **identity**.
+/// Two same-spelled parameters from different declarations occupy different entries, which is
+/// precisely what a name-keyed map could not do.
+pub(crate) type Subst = HashMap<ParamId, Type>;
 
 /// One demanded trait bound, checker-side: the trait name plus the demanded instantiation's type
 /// arguments (`T: Keyed<int>` → `args = [int]`; empty for a bare bound, which a generic trait
@@ -123,8 +229,14 @@ pub(crate) fn builtin_receiver_type(name: &str) -> Option<Type> {
         BuiltinTy::Bool
         | BuiltinTy::Unit
         | BuiltinTy::Dyn
+        // Uninhabited: no value is a `never`, so nothing can receive a method call on one.
+        | BuiltinTy::Never
         | BuiltinTy::Option
         | BuiltinTy::Result => return None,
+        // `number` names a SET of scalars, not a receiver: no value *is* a `number` (each is an
+        // `int`, an `f32`, …), and the members that do have method tables are handle-able by their
+        // own names.
+        BuiltinTy::Number => return None,
         // The abstract kind-types are static-only: no value *is* an `Enum`, so none is a receiver.
         BuiltinTy::KindEnum | BuiltinTy::KindStruct | BuiltinTy::KindClass => return None,
     })

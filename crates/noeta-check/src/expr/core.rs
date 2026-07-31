@@ -5,7 +5,7 @@
 //! left this file are only the delegated siblings (`ops`/`calls`/`member`/`patterns`).
 
 use crate::*;
-use noeta_ast::{CallArg, ObjectLit};
+use noeta_ast::{CallArg, ObjectLit, TypeOperand};
 
 impl Checker {
     // ----- bidirectional judgments -----
@@ -25,13 +25,41 @@ impl Checker {
     /// index — check-position expressions (an absorbed closure, an annotation-driven literal)
     /// previously never recorded, so hover and inlay hints missed them.
     pub(crate) fn check(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
+        // A NAMED object literal in a position that HAS an expectation publishes it, so the
+        // construction can adopt type arguments its field values leave unconstrained (`r:
+        // Repo<Todo> = Repo { tbl: "todos" }` — no field mentions `T`, so inference alone yields
+        // `Repo` with no arguments, and the instance would record nothing to reflect). Keyed by the
+        // literal's own span so a nested literal cannot pick up an outer expectation.
+        let saved_expected_object = match expr {
+            Expr::Object(lit) if lit.type_name.is_some() => Some(
+                self.coloring
+                    .expected_object
+                    .replace((lit.span, expected.clone())),
+            ),
+            _ => None,
+        };
         let ty = self.check_inner(expr, expected, env);
+        if let Some(saved) = saved_expected_object {
+            self.coloring.expected_object = saved;
+        }
+        self.note_if_never(expr, &ty);
         if self.config.record_expr_types
             && let Some(repr) = type_to_repr_top(&ty, &self.symbols.type_kinds)
         {
             self.sites.expr_types.insert(expr.span(), repr);
         }
         ty
+    }
+
+    /// Record an expression that types as the **bottom** — a call to something that does not
+    /// return. Unconditional (unlike the `expr_types` index beside it): it is one insert on the rare
+    /// expression that diverges, and both consumers — E0048's must-diverge analysis and the tier
+    /// runners' shared-setup filter — need it on the ordinary compile path, not only under the IDE
+    /// flag. See [`crate::sites::SiteMaps::never_exprs`].
+    fn note_if_never(&mut self, expr: &Expr, ty: &Type) {
+        if *ty == Type::Never {
+            self.sites.never_exprs.insert(expr.span());
+        }
     }
 
     pub(crate) fn check_inner(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
@@ -211,8 +239,8 @@ impl Checker {
                 let (name, callee_span, generic) =
                     self.seedable_generic_call(expr, env).expect("guarded");
                 let required = self.symbols.functions[&name].required;
-                let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
-                let mut seed: HashMap<String, Type> = HashMap::new();
+                let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
+                let mut seed: Subst = Subst::new();
                 bind_type_params(&generic.raw_ret, expected, &tps, &mut seed);
                 let actual = self.check_seeded_generic_call(
                     &name,
@@ -249,8 +277,8 @@ impl Checker {
                     unreachable!("seedable_generic_call matches plain calls only")
                 };
                 let required = self.symbols.functions[&name].required;
-                let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
-                let mut seed: HashMap<String, Type> = HashMap::new();
+                let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
+                let mut seed: Subst = Subst::new();
                 // Bind the declared SUCCESS arm against the expectation; a declared return that is
                 // not a `Result`/`Option` leaves the seed empty (the unwrap below then reports the
                 // ordinary `?`-misuse, exactly as synthesis position would).
@@ -321,7 +349,7 @@ impl Checker {
                     .enumerate()
                     .map(|(i, p)| {
                         p.ty.as_ref()
-                            .map(|t| from_ref_q(t, &self.imports.extern_types))
+                            .map(|t| self.annot(t))
                             .or_else(|| expected_params.get(i).cloned())
                             .unwrap_or(Type::Unknown)
                     })
@@ -339,9 +367,7 @@ impl Checker {
                 // result" shape (`map` expects `(T) -> dyn`): checking against `dyn` would erase the
                 // body's real type and starve the call-site refinements (`xs.map(f) → List<R>`), so
                 // the body is inferred instead; `dyn` accepts whatever comes out.
-                let declared = ann
-                    .as_ref()
-                    .map(|t| from_ref_q(t, &self.imports.extern_types));
+                let declared = ann.as_ref().map(|t| self.annot(t));
                 let body_expected = declared
                     .clone()
                     .or_else(|| (!matches!(**ret, Type::Dyn)).then(|| (**ret).clone()));
@@ -355,6 +381,32 @@ impl Checker {
                     ret: Box::new(declared.unwrap_or(body_ty)),
                 }
             }
+            // A `match` in a checked position pushes the expectation THROUGH into every arm, so an
+            // arm is checked against exactly the type the whole expression is. Without this the
+            // expectation stopped at the `match` and each arm synthesized blind, so a form that can
+            // only be typed against an expectation — a mixed `{"type": "array", "n": 1}` against
+            // `Map<string, dyn>`, an empty `{}`/`[]`, a `.{ … }` — worked after `return` but not
+            // inside a `match` arm, forcing the author to lift each arm into its own function purely
+            // so the literal had a return type to read.
+            //
+            // `if c then a else b` is parsed as a desugared `match`, so both of its branches ride
+            // this same arm.
+            //
+            // Guarded on a *real* expectation: `Unknown`/`Dyn` is an open position with nothing to
+            // push (the sibling absorbing arms guard identically), and a statement-position `match`
+            // never reaches `check` at all — it routes through `synth_match` with `value_used`
+            // false — so neither behavior changes.
+            Expr::Match {
+                scrutinee,
+                arms,
+                span,
+            } if !matches!(expected, Type::Unknown | Type::Dyn) => {
+                // No outer `subsume` here, deliberately: every arm was just checked against this
+                // same expectation, so a mismatching arm has already reported at ITS span. Re-testing
+                // the joined result would only report the identical mismatch a second time, on the
+                // whole `match` — the exact double-diagnostic the arm-level span is meant to replace.
+                self.match_type(scrutinee, arms, *span, env, true, Some(expected))
+            }
             // A bare numeric literal adapts into a fixed-width context — `x: u8 = 200`, `y: i8 = -5`,
             // `z: f32 = 1.5`, `w: f64 = 1.5` (P-NUM-SYM). Shared with call-argument checking via
             // `try_adapt_literal`; a non-adapting pair falls through to synthesize-and-check.
@@ -367,7 +419,8 @@ impl Checker {
                 // `results.map(Ok)` see the precise monomorphic signature instead of the erased
                 // one. Subsumption still runs, so an incompatible instantiation reports.
                 if let Expr::Ident { name, span } = expr
-                    && let Some(fn_ty) = self.instantiate_fn_value(name, expected, *span, env)
+                    && let Some(fn_ty) =
+                        self.instantiate_fn_value(name.as_str(), expected, *span, env)
                 {
                     self.subsume(&fn_ty, expected, *span);
                     return fn_ty;
@@ -502,6 +555,51 @@ impl Checker {
         self.assignable(arg, param) || arg.defers_to_runtime() || param.defers_to_runtime()
     }
 
+    /// Whether `expr` is a **literal form that would absorb** `expected` — whether one of
+    /// [`Self::check_inner`]'s absorbing arms fires for this exact pair.
+    ///
+    /// Checking mode is only worth entering when the expectation actually reaches the literal. For
+    /// a *reassignment* (`Stmt::Binding`'s un-annotated arm) that distinction is what keeps the
+    /// tailored `E0007` — the one that names the binding and offers the union — as the single
+    /// report on a mismatch: an expectation the value cannot absorb would be enforced anonymously
+    /// by [`Self::subsume`] first, and then reported a second time by the reassignment's own check.
+    ///
+    /// Deliberately literal-only. A call, a `?`, and a `??` also have absorbing arms above, but
+    /// each ends in its own `subsume`, so routing a reassignment through them buys precision the
+    /// reassignment check already provides, at the cost of that double report. A literal arm
+    /// returns the expectation unchanged and reports only about its *elements*, which is strictly
+    /// more precise than one message about the whole value.
+    ///
+    /// Kept adjacent to the arms it mirrors: a new absorbing literal arm needs a line here.
+    pub(crate) fn absorbs_expectation(&self, expr: &Expr, expected: &Type) -> bool {
+        match expr {
+            Expr::List { .. } => matches!(expected, Type::List(_)),
+            Expr::Map { .. } => matches!(expected, Type::Map(..)),
+            Expr::Ident { name, .. } => name == "none" && matches!(expected, Type::Option(_)),
+            Expr::Closure { .. } => matches!(expected, Type::Fn { .. }),
+            // A target-typed `.{ … }` absorbs the expected type's *name*, and only a concrete
+            // named record type supplies one.
+            Expr::Object(lit) => {
+                lit.type_name.is_none()
+                    && matches!(expected, Type::Named(n, _) if self.symbols.records.contains_key(n))
+            }
+            Expr::Call { callee, args, .. } => match callee.as_ref() {
+                Expr::Ident { name, .. } if name == "some" => {
+                    args.len() == 1 && matches!(expected, Type::Option(_))
+                }
+                // `Ok()` is the unit-payload form, so zero or one argument.
+                Expr::Ident { name, .. } if name == "Ok" => {
+                    args.len() <= 1 && matches!(expected, Type::Result(..))
+                }
+                Expr::Ident { name, .. } if name == "Err" => {
+                    args.len() == 1 && matches!(expected, Type::Result(..))
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     pub(crate) fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {
         if !self.assignable(actual, expected) {
             self.error(
@@ -520,12 +618,383 @@ impl Checker {
     /// through this one choke point, so the index covers the whole tree with a single insertion site.
     pub(crate) fn synth(&mut self, expr: &Expr, env: &mut Env) -> Type {
         let ty = self.synth_inner(expr, env);
+        self.note_if_never(expr, &ty);
         if self.config.record_expr_types
             && let Some(repr) = type_to_repr_top(&ty, &self.symbols.type_kinds)
         {
             self.sites.expr_types.insert(expr.span(), repr);
         }
         ty
+    }
+
+    /// Reject a name-keyed reflection turbofish whose type is an **erased type parameter**, and
+    /// report whether it did.
+    ///
+    /// These queries are keyed on a type NAME, and a type parameter has no name at run time: generics
+    /// are erased, so one compiled body serves every instantiation and `T` is only ever the literal
+    /// three characters `T`. Nothing is registered under that key, so `field_specs_of::<T>()` inside
+    /// `fn count_of<T>()` matched nothing and returned the EMPTY schema — indistinguishable from a
+    /// real type that happens to have no fields, and with no diagnostic at all. `construct::<T>(…)`
+    /// answered `Err` the same way. That silent wrong answer is the whole reason this is an error.
+    ///
+    /// Reported as `E0058` — the code for a turbofish instantiation that cannot apply — because that
+    /// is exactly what this is: the type argument is well-formed and in scope, it simply cannot serve
+    /// this application. The alternative is always available and is what the help points at: reflect
+    /// where the type is concrete and pass the result in.
+    ///
+    /// Only the **head** is rejected, matching [`TypeRef::head_name`] — what the query actually keys
+    /// on. `field_specs_of::<List<T>>()` heads at `List`, a real type with no field schema, and keeps
+    /// its honest empty answer.
+    ///
+    /// The turbofish arm stays a **compile-time** key: it resolves like an annotation, follows a
+    /// `namespace`/`use … as`/rename, and folds to a constant. What changed is that inside a
+    /// top-level generic fn the erased parameter now *has* a runtime name — `type_name::<T>()`
+    /// reads it off the same hidden slot that carries a forwarded decode recipe — so these
+    /// queries' own **runtime-string** arm reaches it: `field_specs_of(type_name::<T>())`. The help
+    /// says so where that route is actually open ([`Checker::forwardable_params`]), rather than
+    /// sending the author to restructure a signature that no longer needs it.
+    fn reject_erased_type_param(&mut self, ty: &TypeRef, surface: &str) -> bool {
+        let TypeRef::Named { args, span, .. } = ty else {
+            return false;
+        };
+        if !args.is_empty() {
+            return false;
+        }
+        let Type::Param(param) = self.annot(ty) else {
+            return false;
+        };
+        let name = &param.name;
+        // A parameter of the ENCLOSING generic type that this site cannot reach. The instantiation
+        // DOES exist at run time — it is on the receiver's reflected type tag — so the blanket
+        // "generics are erased" would send the author looking for a fix that is not the one. Two
+        // distinct reasons, each with its own fix, so each says which it is:
+        //
+        //   * this member has no receiver to read the tag from (an associated function, or a
+        //     method whose body never touches `self` — which is what makes it associated);
+        //   * the name is shadowed by the METHOD's own type parameter, which is a different `T`
+        //     entirely and has no per-call channel of its own.
+        //
+        // `self_type_params` is non-empty exactly inside an instance method of a generic type, and
+        // holds a blank in the slot of any parameter the method's own `<…>` shadows — so "in scope
+        // on the type, but not reachable here" splits cleanly on it.
+        //
+        // A self-less member whose class parameter DOES reach it — through the hidden type-argument
+        // slot, which is that member's only channel — is excluded here and falls through to the
+        // blanket branch, whose help points at the route that is actually open
+        // (`field_specs_of(type_name::<T>())`). Saying "this member has no receiver" there would be
+        // true and useless: the parameter is reachable, just not as a compile-time key.
+        if let Some(owner) = self.coloring.current_type.clone()
+            && !self.coloring.forwardable_params.contains(&param)
+            && self
+                .symbols
+                .generic_types
+                .get(&owner)
+                .is_some_and(|ps| ps.iter().any(|p| p.name == *name))
+        {
+            let shadowed = !self.coloring.self_type_params.is_empty();
+            let msg = if shadowed {
+                format!(
+                    "`{surface}` cannot reflect over `{name}` here: this method declares its own \
+                     `{name}`, which shadows `{owner}`'s and is erased"
+                )
+            } else {
+                format!(
+                    "`{surface}` cannot reflect over `{name}` here: this member of `{owner}` has \
+                     no receiver, and `{name}` is carried by the instance"
+                )
+            };
+            let help = if shadowed {
+                format!(
+                    "rename the method's parameter if you meant `{owner}`'s `{name}` (an \
+                     instance's own type arguments are recorded at construction and reachable \
+                     from `self`); a method's own type parameter has no such channel"
+                )
+            } else {
+                format!(
+                    "an instance of a generic type records its type arguments at construction, so \
+                     `{surface}::<{name}>()` resolves in a method that takes `self` — read a field \
+                     of `self` (or take the value as a parameter and reflect at the call site)"
+                )
+            };
+            self.error(DiagnosticCode::InvalidTypeArguments, *span, msg)
+                .help(help);
+            return true;
+        }
+        // Inside a top-level generic fn the parameter DOES have a runtime name — the hidden
+        // type-argument slot carries it — so the fix is the surface's own runtime-string arm, not
+        // a signature change. Point at it; the turbofish arm stays the compile-time key.
+        // `type_name` itself is excluded: it IS the route, so pointing it at itself says nothing.
+        // (Reaching here from that surface means the slot did not resolve — a session-incremental
+        // entry whose forwarding table is still growing — where the general advice still applies.)
+        let help = if surface != "type_name" && self.coloring.forwardable_params.contains(&param) {
+            format!(
+                "pass the name instead of the type: `{surface}(type_name::<{name}>())` — \
+                 `type_name` resolves a forwarded parameter per instantiation, which the \
+                 compile-time `{surface}::<...>` key cannot"
+            )
+        } else {
+            format!(
+                "reflect where the type is concrete and pass the result in — give this function a \
+                 parameter for it and let the caller supply `{surface}::<TheRealType>`"
+            )
+        };
+        self.error(
+            DiagnosticCode::InvalidTypeArguments,
+            *span,
+            format!(
+                "`{surface}` cannot reflect over the type parameter `{name}` — generics are \
+                 erased, so `{name}` names no type at run time"
+            ),
+        )
+        .help(help);
+        true
+    }
+
+    /// Record the run-time channel that carries a **type parameter's instantiation NAME** into the
+    /// body being checked at `span`, and report whether one reaches it at all.
+    ///
+    /// Generics are erased — one compiled body serves every instantiation — so a parameter is only
+    /// *nameable* at run time where some channel delivers the instantiation per call. The language
+    /// has exactly two, and this is the single place that decides between them, so every
+    /// name-keyed surface over a parameter (`type_name::<T>()`, `v.as<T>()`, `v is T`) answers with
+    /// the same `T`:
+    ///
+    ///   * a parameter of the enclosing generic **TYPE**, inside one of its instance methods — it
+    ///     rides the receiver's reflected type tag, stamped at the construction site
+    ///     ([`SiteMaps::self_type_arg_sites`](crate::sites::SiteMaps));
+    ///   * a parameter of the enclosing generic **fn or method** — it rides the hidden
+    ///     type-argument slot that also carries `json.try_parse::<T>`'s decode recipe, of which
+    ///     this reads only the NAME ([`SiteMaps::forwarded_slot_sites`](crate::sites::SiteMaps)).
+    ///
+    /// The receiver is consulted **first**: inside an instance method of a generic type the class's
+    /// parameters deliberately take no hidden slot (two channels for one fact would let a call
+    /// through a receiverless entry point supply nothing where the tag was right there), so the tag
+    /// is the only one populated there and the slot list holds the *method's own* parameters.
+    ///
+    /// `false` means neither reaches this body — the caller reports it, because what to *say* about
+    /// it depends on the surface.
+    fn record_type_param(&mut self, param: &ParamRef, span: Span) -> bool {
+        if let Some(i) = self
+            .coloring
+            .self_type_params
+            .iter()
+            .position(|p| p.as_ref() == Some(param))
+        {
+            let owner = self.coloring.current_type.clone().unwrap_or_default();
+            self.sites
+                .self_type_arg_sites
+                .insert(span, (owner, i as u32));
+            return true;
+        }
+        if let Some(idx) = self
+            .coloring
+            .current_forwarding
+            .iter()
+            .position(|t| matches!(t, Type::Param(p) if p == param))
+        {
+            self.sites.forwarded_slot_sites.insert(span, idx as u32);
+            return true;
+        }
+        false
+    }
+
+    /// The first type parameter a **narrow's** target mentions in a position the runtime match
+    /// actually *tests*, other than a bare head — the composite shapes a head-constructor match
+    /// cannot express.
+    ///
+    /// A narrow tests the head constructor and, for a parametrized target, its reflected type
+    /// arguments (R3) — recursing through a union, whose members are each tested. Every other
+    /// position is **erased** by the match and so cannot be wrong about a parameter: an
+    /// `?T`/`(T, int)`/`fn(T)` target checks only "is an `Option`" / "is a tuple" / "is callable",
+    /// exactly as it does for a concrete `?int`, and a `Self::Name` projection stays the permissive
+    /// top. Those are left alone; only a *tested* position is reported.
+    fn narrow_tested_param(&self, ty: &TypeRef) -> Option<String> {
+        match ty {
+            TypeRef::Union { members, .. } => members.iter().find_map(|m| {
+                match m {
+                    // A union member's head is itself tested, so a bare parameter there counts —
+                    // unlike the whole target's head, which the caller resolves through a channel.
+                    TypeRef::Named { name, args, .. }
+                        if args.is_empty()
+                            && self.coloring.type_params.contains_key(name.as_str()) =>
+                    {
+                        Some(name.to_string())
+                    }
+                    other => self.narrow_tested_param(other),
+                }
+            }),
+            TypeRef::Named { name, args, .. } => {
+                if !args.is_empty() && self.coloring.type_params.contains_key(name.as_str()) {
+                    return Some(name.to_string());
+                }
+                args.iter().find_map(|a| match a {
+                    TypeRef::Named { name, args, .. }
+                        if args.is_empty()
+                            && self.coloring.type_params.contains_key(name.as_str()) =>
+                    {
+                        Some(name.to_string())
+                    }
+                    other => self.narrow_tested_param(other),
+                })
+            }
+            // Erased by the head-constructor match — see the doc above.
+            _ => None,
+        }
+    }
+
+    /// Check a **narrowing target** (`x.as<T>()`, `x is T`) that names a type parameter, wiring the
+    /// site to the channel that carries the instantiation's name — or reporting `E0058` where none
+    /// can.
+    ///
+    /// A narrow is a head-constructor match on the target's runtime **name**
+    /// ([`noeta_ast::Expr::As`]), which is exactly what `type_name::<T>()` answers with, so a
+    /// parameter target needs no more than that surface already has and rides the very same two
+    /// channels ([`Self::record_type_param_name`]). Left unwired it matched the literal letter `T`,
+    /// which nothing is ever registered under, and `.as<T>()` answered `none` — and `x is T`
+    /// `false` — for every value, with no diagnostic. That silent wrong answer is why the
+    /// unresolvable cases below are errors rather than a permissive miss.
+    ///
+    /// Reported as `E0058` — a type argument that is well-formed and in scope but cannot serve this
+    /// application — the same code [`Self::reject_erased_type_param`] and the forwarding call sites
+    /// raise for the same situation.
+    /// `span` is the **whole narrowing expression's** span — the key lowering looks the site up
+    /// under, since that is the node it emits the name atom beside. The diagnostics point at the
+    /// target type instead, which is the part the author would change.
+    fn check_narrow_target(&mut self, ty: &TypeRef, span: Span, surface: &str) {
+        // The target's own head is the parameter: the resolvable shape, and the only one.
+        if let TypeRef::Named { args, .. } = ty
+            && args.is_empty()
+            && let Type::Param(param) = self.annot(ty)
+        {
+            if self.record_type_param(&param, span) {
+                return;
+            }
+            let name = &param.name;
+            let span = &ty.span();
+            let owner = self.coloring.current_type.clone();
+            let help = match &owner {
+                Some(owner) => format!(
+                    "an instance of a generic type records its type arguments at construction, so \
+                     `{surface}` over `{owner}`'s `{name}` resolves in a method that takes `self` \
+                     — read a field of `self`, or declare `{name}` as this member's own type \
+                     parameter so the call site supplies it"
+                ),
+                None => format!(
+                    "declare `{name}` as this function's own type parameter and spell the \
+                     turbofish at the call site — a nested `fn`'s own parameter has no per-call \
+                     channel, and neither does a parameter this body only inherited by name"
+                ),
+            };
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                *span,
+                format!(
+                    "`{surface}` cannot narrow to the type parameter `{name}` here: a narrow \
+                     matches the instantiation's runtime name, and no channel carries `{name}`'s \
+                     into this body"
+                ),
+            )
+            .help(help);
+            return;
+        }
+        // A parameter the match would TEST but cannot name: one narrow reads one name, so a
+        // composite has nowhere to put the rest. Refused rather than answered — the arguments are
+        // compared against the value's reflected tag, where a bare `T` matches nothing at all.
+        if let Some(param) = self.narrow_tested_param(ty) {
+            let target = self.annot(ty);
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                ty.span(),
+                format!(
+                    "`{surface}` cannot narrow to `{target}`: the type parameter `{param}` sits in \
+                     a position the runtime match tests, and a narrow resolves one name — the \
+                     target's head"
+                ),
+            )
+            .help(format!(
+                "narrow to the head first and check the payload yourself — `{surface}` over the \
+                 bare `{param}` resolves per instantiation, an argument position does not"
+            ));
+        }
+    }
+
+    /// Refuse a **`match` arm's** `is T` whose target names a type parameter (`Pattern::IsType`).
+    ///
+    /// The pattern form shares the runtime matcher with the expression form but not its operand
+    /// plumbing, and cannot: a pattern is tested in place, and the IR reuses the *AST*
+    /// [`noeta_ast::Pattern`] verbatim, so there is no operand position an instantiation's name could
+    /// be computed into — the expression form carries exactly one such position (`Rvalue::As`'s
+    /// `dynamic`) and that is what makes it resolvable. Rather than invent a third way to deliver a
+    /// type argument, the arm says so and points at the form that works.
+    ///
+    /// Left alone it matched the letter `T`, so the arm was simply never taken — the same silent
+    /// wrong answer `.as<T>()` gave, and reported for the same reason.
+    pub(crate) fn reject_type_param_pattern(&mut self, ty: &TypeRef) {
+        let param = match ty {
+            TypeRef::Named { name, args, .. }
+                if args.is_empty() && self.coloring.type_params.contains_key(name.as_str()) =>
+            {
+                name.to_string()
+            }
+            other => match self.narrow_tested_param(other) {
+                Some(p) => p,
+                None => return,
+            },
+        };
+        let target = self.annot(ty);
+        self.error(
+            DiagnosticCode::InvalidTypeArguments,
+            ty.span(),
+            format!(
+                "an `is {target}` arm cannot match the type parameter `{param}`: a pattern is \
+                 tested in place, so there is nowhere to resolve `{param}`'s instantiation into"
+            ),
+        )
+        .help(format!(
+            "use the expression form, which does resolve it: \
+             `match v.as<{param}>() {{ some(x) => …, none => … }}`"
+        ));
+    }
+
+    /// Check a name-keyed reflection surface's type operand (`field_specs_of`, `construct`).
+    ///
+    /// The **turbofish** arm carries a real `TypeRef`, so it is resolved like any other type
+    /// annotation — a name that resolves to nothing is an E0013, not a silent empty schema. That is
+    /// only possible because the type stays a `TypeRef` through the linker: the checker runs on the
+    /// already-qualified program, so `field_specs_of::<Todo>()` under `namespace app.storage` looks
+    /// up `app.storage.Todo` and a native extern spelled by its qualified path
+    /// (`field_specs_of::<std.test.Skip>()`) resolves without a `use`, exactly as
+    /// `attributes_of::<T>()` already did. Leniency about the *answer* is untouched: a type that
+    /// resolves but has no field schema (an enum, a `dyn` trait) still yields the empty list.
+    ///
+    /// The **dynamic** arm is an ordinary expression that must be a `string`. Nothing is resolved
+    /// there — its value is only known at runtime, which is the whole point of the surface.
+    fn check_type_operand(
+        &mut self,
+        operand: &TypeOperand,
+        env: &mut Env,
+        span: noeta_span::Span,
+        surface: &str,
+        help: &str,
+    ) {
+        let e = match operand {
+            TypeOperand::Static(ty) => {
+                if !self.reject_erased_type_param(ty, surface) {
+                    self.check_type_ref(ty);
+                }
+                return;
+            }
+            TypeOperand::Dynamic(e) => e,
+        };
+        let name_ty = self.synth(e, env);
+        if !matches!(name_ty, Type::String) && !name_ty.defers_to_runtime() {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("`{surface}` expects a `string` type name, found `{name_ty}`"),
+            )
+            .help(help.to_string());
+        }
     }
 
     pub(crate) fn synth_inner(&mut self, expr: &Expr, env: &mut Env) -> Type {
@@ -603,7 +1072,7 @@ impl Checker {
             // The one lookup site that needs an *owned* type (synthesis returns `Type` by value),
             // so it clones here rather than in `lookup` (audit-3 Finding 12).
             Expr::Ident { name, span }
-                if lookup(env, name).is_none()
+                if lookup(env, name.as_str()).is_none()
                     && self.symbols.forwarding.contains_key(name.as_str())
                     && self.symbols.functions.contains_key(name.as_str()) =>
             {
@@ -626,7 +1095,7 @@ impl Checker {
                 ));
                 Type::Unknown
             }
-            Expr::Ident { name, span } => match lookup(env, name)
+            Expr::Ident { name, span } => match lookup(env, name.as_str())
                 .cloned()
                 // A bare user-function reference is a first-class value of its **full** signature
                 // type — parameters included, so passing it where a `Fn(A) -> B` is declared
@@ -635,16 +1104,19 @@ impl Checker {
                 // position. (Was params-erased until higher-order-abi H2 made module signatures
                 // carry declared `Fn` params, which an erased handle could never satisfy.)
                 .or_else(|| {
-                    self.symbols.functions.get(name).map(|sig| Type::Fn {
-                        params: sig.params.clone(),
-                        ret: Box::new(sig.ret.clone()),
-                    })
+                    self.symbols
+                        .functions
+                        .get(name.as_str())
+                        .map(|sig| Type::Fn {
+                            params: sig.params.clone(),
+                            ret: Box::new(sig.ret.clone()),
+                        })
                 })
                 // A selectively-imported module function referenced as a value (`let f = sqrt`).
                 .or_else(|| {
                     self.imports
                         .imported_fns
-                        .contains_key(name)
+                        .contains_key(name.as_str())
                         .then(|| Type::Fn {
                             params: Vec::new(),
                             ret: Box::new(Type::Dyn),
@@ -671,13 +1143,13 @@ impl Checker {
                         .help(format!(
                             "member access is explicit — the field is `self.{name}`"
                         ));
-                    } else if !self.config.session_mode && !self.is_known_name(name, env) {
+                    } else if !self.config.session_mode && !self.is_known_name(name.as_str(), env) {
                         // A bare reference to a name that resolves to nothing — a genuinely
                         // undefined value (F1), the same static `E0005` as an unknown callee. A
                         // session defers (a later entry may define it). In a SEALED named-fn
                         // body a miss that names a real top-level binding gets the capture hint.
                         let sealed_global_miss = self.coloring.in_sealed_body
-                            && self.symbols.global_binding_names.contains(name);
+                            && self.symbols.global_binding_names.contains(name.as_str());
                         let diag = self.error(
                             DiagnosticCode::UnknownName,
                             *span,
@@ -791,28 +1263,23 @@ impl Checker {
                     self.check_reserved_name(&p.name, p.name_span);
                     // Same rule as the check-mode arm: any env hit is a shadow (E0059).
                     self.check_shadow(&p.name, p.name_span, env, crate::ShadowScopes::All);
-                    bind(env, &p.name, param_type(p, &self.imports.extern_types));
+                    bind(env, &p.name, self.annot_param(p));
                 }
                 // With an explicit return annotation, check the body against it (and adopt it as the
                 // closure's return type); otherwise infer it from the body (the arrow expression's
                 // type, or a block's joined `return`s).
-                let declared = ann
-                    .as_ref()
-                    .map(|t| from_ref_q(t, &self.imports.extern_types));
+                let declared = ann.as_ref().map(|t| self.annot(t));
                 let ret = self.closure_body_type(body, declared.as_ref(), env);
                 env.pop();
                 Type::Fn {
-                    params: params
-                        .iter()
-                        .map(|p| param_type(p, &self.imports.extern_types))
-                        .collect(),
+                    params: params.iter().map(|p| self.annot_param(p)).collect(),
                     ret: Box::new(ret),
                 }
             }
             Expr::Pipeline { left, right, .. } => {
                 // `left |> right` threads `left` as the first argument of `right`.
                 let piped = self.synth(left, env);
-                self.synth_piped(right, piped, env)
+                self.synth_piped(left, right, piped, env)
             }
             Expr::List { items, span } => {
                 // Synthesize a single element type by unifying the items. Concretely incompatible
@@ -1012,7 +1479,7 @@ impl Checker {
                     }
                     return Type::Unknown;
                 };
-                self.synth_object_named(lit, &type_name, env)
+                self.synth_object_named(lit, type_name.as_str(), env)
             }
             Expr::Try { expr, span } => {
                 let inner = self.synth(expr, env);
@@ -1101,7 +1568,9 @@ impl Checker {
                 result
             }
             Expr::Coalesce {
-                value, fallback, ..
+                value,
+                fallback,
+                span,
             } => {
                 // A generic-call value seeds its instantiation from the FALLBACK's type
                 // (poly-deferrals D1): `o = load(text) ?? default` — with no annotation, the only
@@ -1119,17 +1588,45 @@ impl Checker {
                     };
                 }
                 let v = self.synth(value, env);
-                self.synth(fallback, env);
+                let fb = self.synth(fallback, env);
                 match v {
                     Type::Result(ok, _) => *ok,
                     Type::Option(some) => *some,
-                    _ => Type::Unknown,
+                    // `??` unwraps a fallible value, so a left side that is already a single
+                    // concrete type has nothing to fall back FROM — the fallback is dead and both
+                    // backends abort on it at run time. Reject it here rather than leaking
+                    // `Unknown` (which unified with anything and let the program check clean).
+                    // A `dyn`/hole left side still defers, exactly as before.
+                    _ => {
+                        if !v.defers_to_runtime() {
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "`??` expects a `Result` or `Option` on the left, but this \
+                                         value is `{v}`"
+                                ),
+                            )
+                            .help(
+                                "`??` supplies a value for a `none`/`Err`; a value that is \
+                                     always present does not need it — drop the `?? …`, or use \
+                                     `map.get_or(key, default)` for a lookup that may miss",
+                            );
+                        }
+                        // Recover as the fallback's type: the program meant "a value of that
+                        // shape", so downstream typing stays useful instead of cascading.
+                        fb
+                    }
                 }
             }
             Expr::As { expr, ty, span } => {
                 let src = self.synth(expr, env);
                 self.check_type_ref(ty);
-                let target = from_ref_q(ty, &self.imports.extern_types);
+                // A **type parameter** target is answerable: the narrow keys on the instantiation's
+                // runtime name, and the same two channels `type_name::<T>()` rides deliver it.
+                // Unresolvable shapes are E0058 here rather than a silent `none` at run time.
+                self.check_narrow_target(ty, *span, ".as<…>()");
+                let target = self.annot(ty);
                 // Narrowing is the explicit way *out* of an open type: the dynamic top `dyn`, an
                 // un-inferred hole (which defers), a **union** (a *closed* `dyn`), or an abstract
                 // **kind-type** (`Enum`/`Struct`/`Class` — narrow to a concrete member). A value
@@ -1151,35 +1648,125 @@ impl Checker {
                 }
                 Type::Option(Box::new(target))
             }
-            Expr::TypeTest { expr, ty, .. } => {
+            Expr::TypeTest { expr, ty, span } => {
                 // A type *test* is always well-formed on any source — even a concrete one (it is
                 // simply a constant `true`/`false`), unlike `.as<T>()` whose narrowing of a known
                 // concrete value is an `E0028`. We only validate the target type names something.
-                self.synth(expr, env);
+                //
+                // A `dyn Trait` target is a PRECISE membership test at runtime (the shared
+                // reflection `trait_impls` table). Future work: when the scrutinee's static type is
+                // a single concrete nominal with a known impl (`user_trait_impls` hit), the test is
+                // provably constant-true and could fold or warn — today the runtime test simply
+                // runs (and agrees), so no warning machinery is spent on it.
+                let scrut = self.synth(expr, env);
+                let before = self.diags.len();
                 self.check_type_ref(ty);
-                // A bare-scalar test against an *erased* fixed width (`iN`/`f64`) is statically
-                // always false: a scalar carries no width tag, so `x is i32` can never hold (E0063,
-                // warning). `f32` is exempt (reified — a real narrowing head, Part A) and a
-                // container target (`List<i32>`) is exempt (packed element widths are distinct) —
-                // both filtered by matching only a *bare* (`args.is_empty()`) erased-width name.
-                if let TypeRef::Named { name, args, span } = ty
-                    && args.is_empty()
-                    && let Some(base) = erased_scalar_width_base(name)
+                // Same channels, same refusals as `.as<T>()` — the two surfaces share the runtime
+                // matcher, so they must share what a parameter target means.
+                self.check_narrow_target(ty, *span, "is");
+                // A test against a *reified container's* payload (`x is P` where `x: ?P`) is
+                // statically always false — the value's tag is `some`/`none`, never `P` (E0065,
+                // warning). Reported here; the narrowing sites (`if`, and a `match`'s `is T` arm)
+                // consult the same predicate and decline to narrow, so the dead branch stops
+                // type-checking as the payload.
+                //
+                // Skipped when the target itself did not resolve (`x is none` — E0013, already
+                // reported just above with the constructor-vs-type help): a second diagnostic on
+                // the same span about a type that does not exist is noise, not information.
+                if self.diags.len() == before
+                    && let Some(idiom) = self.impossible_type_test(&scrut, ty)
                 {
+                    let target = self.annot(ty);
                     self.warn(
-                        DiagnosticCode::ErasedWidthNarrow,
-                        *span,
+                        DiagnosticCode::ImpossibleTypeTest,
+                        ty.span(),
                         format!(
-                            "`{name}` erases to `{base}` at runtime; `x is {name}` is always false"
+                            "`{scrut}` is its own runtime type, not its payload's; \
+                             `x is {target}` is always false"
                         ),
                     )
-                    .help(format!("did you mean `x is {base}`?"));
+                    .help(idiom);
+                }
+                // A bare-scalar test against an *erased* fixed width (`iN`/`f64`) is the one family
+                // the **runtime** cannot answer: no scalar value carries a width tag (every integer
+                // width is the same NaN-boxed word, and an `f64` *is* a `float` bit for bit), so the
+                // shared matcher reaches no head for it and the test comes back `false` whatever the
+                // value. The *checker* frequently can answer it, and where it can, `false` is simply
+                // the wrong answer — so the answer is decided here and folded at lowering
+                // (`Sites::folded_type_tests`), and only a scrutinee that leaves the width genuinely
+                // unrecoverable warns (E0063).
+                //
+                // `f32` is exempt (reified — a real narrowing head, Part A) and a container target
+                // (`List<i32>`) is exempt (packed element widths live in the buffer's schema) —
+                // both filtered by matching only a *bare* (`args.is_empty()`) erased-width name.
+                if let TypeRef::Named {
+                    name,
+                    args,
+                    span: target_span,
+                } = ty
+                    && args.is_empty()
+                    && let Some(base) = erased_scalar_width_base(name.as_str())
+                {
+                    match settled_width_answer(&scrut, &self.annot(ty)) {
+                        Some(answer) => {
+                            self.sites.folded_type_tests.insert(*span, answer);
+                        }
+                        None => {
+                            self.warn(
+                                DiagnosticCode::ErasedWidthNarrow,
+                                *target_span,
+                                format!(
+                                    "`{name}` shares one runtime representation with `{base}`, and \
+                                     this value's static type does not fix the width — so \
+                                     `x is {name}` cannot be answered"
+                                ),
+                            )
+                            .help(format!(
+                                "test the base type instead (`x is {base}`); a scrutinee whose \
+                                 static type names the width is answered statically"
+                            ));
+                        }
+                    }
                 }
                 Type::Bool
             }
+            // `type_name::<T>()` — a type's qualified runtime identity as a `string`. The type is
+            // resolved like any annotation (an unresolvable `T` is E0013). A type *parameter* is
+            // answerable exactly when the instantiation reaches the body through one of the two
+            // channels the language already has, and E0058 when neither does:
+            //
+            //   * a parameter of the enclosing generic TYPE, in an instance method — it rides the
+            //     receiver's reflected type tag (`self_type_arg_sites`, below);
+            //   * a parameter of the enclosing top-level generic FN — it rides the hidden
+            //     type-argument slot that already carries `json.try_parse::<T>`'s decode recipe,
+            //     and this surface needs only the slot's NAME, no recipe at all.
+            Expr::TypeName { ty, span } => {
+                // A bare parameter of an enclosing generic is not erased after all: one of the two
+                // per-instantiation channels carries its name (the receiver's reflected type tag
+                // inside a generic type's instance method — generic constructor reflection, Gap B —
+                // or the enclosing fn's hidden type-argument slot, poly-values F2b). Recorded as a
+                // site rather than folded to a constant: one compiled body serves every
+                // instantiation, so there is no constant to fold to.
+                //
+                // Checked only for a *bare* parameter — the head is what this surface answers with,
+                // and `type_name::<List<T>>()` heads at `List` whatever `T` is, so it stays the
+                // folded constant. The narrow surfaces (`.as<T>()`, `x is T`) read the same two
+                // channels through the same helper, which is what makes them agree about `T`.
+                if let TypeRef::Named { args, .. } = ty
+                    && args.is_empty()
+                    && let Type::Param(p) = self.annot(ty)
+                    && self.record_type_param(&p, *span)
+                {
+                    return Type::String;
+                }
+                if !self.reject_erased_type_param(ty, "type_name") {
+                    self.check_type_ref(ty);
+                }
+                Type::String
+            }
             Expr::AttributesOf { ty, span } => {
                 self.check_type_ref(ty);
-                let target = from_ref_q(ty, &self.imports.extern_types);
+                let target = self.annot(ty);
                 // The type argument must itself be an attribute — a struct marked `@attribute` (the
                 // same capability gate as a `#[T(...)]` use). Otherwise the manifest holds no `T` to
                 // materialize.
@@ -1188,10 +1775,7 @@ impl Checker {
                 // resolves the concrete NAME at runtime. Whether that instantiation is an
                 // attribute is a per-name manifest fact (an entry-less name yields the empty
                 // list, exactly like the runtime path).
-                if let Type::Named(p, targs) = &target
-                    && targs.is_empty()
-                    && self.coloring.type_params.contains_key(p)
-                {
+                if let Type::Param(_) = &target {
                     match self
                         .coloring
                         .current_forwarding
@@ -1199,16 +1783,23 @@ impl Checker {
                         .position(|t| t == &target)
                     {
                         Some(idx) => {
-                            self.sites.dynamic_attr_sites.insert(*span, idx as u32);
+                            self.sites.forwarded_slot_sites.insert(*span, idx as u32);
                         }
                         None => {
                             self.error(
                                 DiagnosticCode::InvalidTypeArguments,
                                 *span,
                                 format!(
-                                    "cannot forward `{p}` here: call-site-typed forwarding is \
-                                     supported in top-level generic functions only"
+                                    "cannot forward `{target}` here: call-site-typed forwarding \
+                                     carries a generic `fn`'s or method's OWN type parameters, \
+                                     and `{target}` is not one of this body's"
                                 ),
+                            )
+                            .help(
+                                "an enclosing generic TYPE's parameter reaches a method through \
+                                 the receiver, which records the instantiation's name but no \
+                                 build recipe — take the type as the method's own parameter \
+                                 instead",
                             );
                         }
                     }
@@ -1255,13 +1846,21 @@ impl Checker {
                     Vec::new(),
                 )))
             }
+            Expr::TraitsOf { value, .. } => {
+                // The trait-membership query: the qualified trait names the value's nominal type
+                // has a registered `impl` for, as a sorted `List<string>` (the same shared table
+                // the precise `is dyn Trait` narrowing tests). A non-nominal value is the empty
+                // list, mirroring `fields_of`.
+                self.synth(value, env);
+                Type::List(Box::new(Type::String))
+            }
             Expr::RolesOf { ty, span } => {
                 // The compiler-built role index, surfaced as `List<RoleBinding>`. The optional
                 // turbofish scopes the query to one role enum, which — like `attributes_of`'s
                 // `@attribute` gate — must be a `@semantic` enum (only those contribute roles).
                 if let Some(ty) = ty {
                     self.check_type_ref(ty);
-                    let target = from_ref_q(ty, &self.imports.extern_types);
+                    let target = self.annot(ty);
                     let is_semantic = matches!(&target, Type::Named(n, _)
                         if self.symbols.semantic_enums.contains(n));
                     if !is_semantic {
@@ -1297,22 +1896,64 @@ impl Checker {
                     Vec::new(),
                 )))
             }
-            Expr::FieldSpecsOf { name, span } => {
-                // The type-level field schema, surfaced as `List<FieldSpec>`. The `name` operand is a
-                // runtime `string` naming a declared struct/class type (a turbofish `::<T>()` was
-                // already lowered to that name by the parser). Lenient like `params_of`: an unknown
-                // type is a runtime empty list, not a static error.
-                let name_ty = self.synth(name, env);
-                if !matches!(name_ty, Type::String) && !name_ty.defers_to_runtime() {
+            Expr::ReturnsOf { target, span } => {
+                // The other half of the compiler-built signature index, surfaced as `?Type`. Same
+                // runtime `string` target as `params_of` (a bare fn name or `Type.method`), and the
+                // same leniency about *what* it names — an unknown callable is a runtime `none`, not
+                // a static error, because the target is generally computed (a framework walks
+                // `roles_of()` and asks about each controller method it finds).
+                //
+                // The result is an OPTION where `params_of` answers an empty list, and the asymmetry
+                // is deliberate: an empty parameter list is a legitimate answer, so `params_of` can
+                // fold "unknown target" into it, but every callable has a return type — `void`
+                // included — so there is no return value that could stand for "no such callable".
+                // Folding them would make a typo indistinguishable from a `void` method.
+                let target_ty = self.synth(target, env);
+                if !matches!(target_ty, Type::String) && !target_ty.defers_to_runtime() {
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         *span,
-                        format!("`field_specs_of` expects a `string` type name, found `{name_ty}`"),
+                        format!("`returns_of` expects a `string` target, found `{target_ty}`"),
                     )
-                    .help("pass a struct or class type name, or use the turbofish `field_specs_of::<T>()`");
+                    .help("pass a fn name or `Type.method` string");
                 }
+                Type::Option(Box::new(Type::Named(
+                    noeta_ast::reflect::TYPE_ENUM.to_string(),
+                    Vec::new(),
+                )))
+            }
+            Expr::FieldSpecsOf { name, span } => {
+                // The type-level field schema, surfaced as `List<FieldSpec>`. The turbofish surface
+                // names the type statically (so an unresolvable `T` is an E0013); the dynamic surface
+                // takes a runtime `string` naming a declared struct/class type, and stays lenient
+                // like `params_of` — an unknown name there is a runtime empty list, not an error.
+                self.check_type_operand(
+                    name,
+                    env,
+                    *span,
+                    "field_specs_of",
+                    "pass a struct or class type name, or use the turbofish `field_specs_of::<T>()`",
+                );
                 Type::List(Box::new(Type::Named(
                     noeta_ast::reflect::FIELD_SPEC.to_string(),
+                    Vec::new(),
+                )))
+            }
+            Expr::VariantsOf { name, span } => {
+                // The type-level variant schema, surfaced as `List<VariantSpec>`. The enum twin of
+                // `field_specs_of`, checked through the SAME `check_type_operand` so the turbofish
+                // resolves a name (and reports an erased type parameter as E0058) identically, and
+                // the dynamic surface stays lenient — a name that is not an enum is a runtime empty
+                // list, not a static error.
+                self.check_type_operand(
+                    name,
+                    env,
+                    *span,
+                    "variants_of",
+                    "pass an enum type name, or use the turbofish `variants_of::<T>()`",
+                );
+                Type::List(Box::new(Type::Named(
+                    noeta_ast::reflect::VARIANT_SPEC.to_string(),
                     Vec::new(),
                 )))
             }
@@ -1321,15 +1962,13 @@ impl Checker {
                 // runtime `List<dyn>` of field values in declaration order. Fallible by construction
                 // (unknown type / arity / type-mismatch / missing required field are runtime `Err`),
                 // so both operands are synthesized leniently and the result is `Result<dyn, string>`.
-                let name_ty = self.synth(name, env);
-                if !matches!(name_ty, Type::String) && !name_ty.defers_to_runtime() {
-                    self.error(
-                        DiagnosticCode::TypeMismatch,
-                        *span,
-                        format!("`construct` expects a `string` type name, found `{name_ty}`"),
-                    )
-                    .help("pass a struct or class type name, or use the turbofish `construct::<T>(fields)`");
-                }
+                self.check_type_operand(
+                    name,
+                    env,
+                    *span,
+                    "construct",
+                    "pass a struct or class type name, or use the turbofish `construct::<T>(fields)`",
+                );
                 self.synth(fields, env);
                 Type::Result(Box::new(Type::Dyn), Box::new(Type::String))
             }
@@ -1344,7 +1983,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(ty);
-                let elem = from_ref_q(ty, &self.imports.extern_types);
+                let elem = self.annot(ty);
                 // The element type must be a packable `@packed` struct — the blob is a flat packed
                 // buffer. Recording the layout in `packed_list_sites` (the channel list literals use)
                 // hands the backend the schema to rebuild the list. Generic over any declared packable
@@ -1387,7 +2026,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(elem);
-                let t = from_ref_q(elem, &self.imports.extern_types);
+                let t = self.annot(elem);
                 // The split-endpoint pair: a `Sender<T>` and a `Receiver<T>` over the message type.
                 Type::Tuple(vec![
                     Type::Named(stdlib::SENDER.to_string(), vec![t.clone()]),
@@ -1406,7 +2045,7 @@ impl Checker {
                 // qualified identity through the imports; falling back to the raw binding lets an
                 // unimported/typo'd receiver resolve to nothing and report cleanly below.
                 let binding = match recv.as_ref() {
-                    Expr::Ident { name, .. } => name.clone(),
+                    Expr::Ident { name, .. } => name.to_string(),
                     _ => String::new(),
                 };
                 // `recv.func::<T>(args)` where the receiver is NOT an imported native module is a
@@ -1420,8 +2059,9 @@ impl Checker {
                 // module, a local binding, nor a user type (a typo'd module) falls through to the
                 // native-call path below and reports there, unchanged.
                 if let Expr::Ident { name, .. } = recv.as_ref()
-                    && !self.imports.modules.contains_key(name)
-                    && (lookup(env, name).is_some() || self.symbols.types.contains(name))
+                    && !self.imports.modules.contains_key(name.as_str())
+                    && (lookup(env, name.as_str()).is_some()
+                        || self.symbols.types.contains(name.as_str()))
                 {
                     self.check_type_ref(ty);
                     let mut arg_types: Vec<Type> = args
@@ -1465,7 +2105,7 @@ impl Checker {
                 let arg_types: Vec<Type> =
                     CallArg::values(args).map(|a| self.synth(a, env)).collect();
                 self.check_type_ref(ty);
-                let t = from_ref_q(ty, &self.imports.extern_types);
+                let t = self.annot(ty);
                 // A turbofish MENTIONING an in-scope type parameter (poly-values F2b; composites
                 // D2a): the recipe is per-instantiation, delivered through the enclosing
                 // forwarding fn's hidden slot for this exact template — the bare `T` or the whole
@@ -1481,16 +2121,23 @@ impl Checker {
                         .position(|s| s == &t)
                     {
                         Some(idx) => {
-                            self.sites.dynamic_recipe_sites.insert(*span, idx as u32);
+                            self.sites.forwarded_slot_sites.insert(*span, idx as u32);
                         }
                         None => {
                             self.error(
                                 DiagnosticCode::InvalidTypeArguments,
                                 *span,
                                 format!(
-                                    "cannot forward `{t}` here: call-site-typed forwarding is \
-                                     supported in top-level generic functions only"
+                                    "cannot forward `{t}` here: call-site-typed forwarding \
+                                     carries a generic `fn`'s or method's OWN type parameters, \
+                                     and `{t}` is not one of this body's"
                                 ),
+                            )
+                            .help(
+                                "an enclosing generic TYPE's parameter reaches a method through \
+                                 the receiver, which records the instantiation's name but no \
+                                 build recipe — take the type as the method's own parameter \
+                                 instead",
                             );
                         }
                     }
@@ -1560,7 +2207,7 @@ impl Checker {
                     })
                     .collect();
                 let ret = self.synth_typed_call(
-                    name,
+                    name.as_str(),
                     *name_span,
                     type_args,
                     &mut arg_types,
@@ -1619,6 +2266,37 @@ impl Checker {
                 }
                 ret
             }
+            // `Repo::<Todo>` reaching SYNTHESIS means it did not land where it is meaningful. The
+            // one place that reads it is the `Type.assoc(args)` static-call arm, which peels it off
+            // the receiver before ever synthesizing it (see [`Expr::peel_instantiation`]); anything
+            // else — `Repo::<Todo>.new` as a bare handle, `Repo::<Todo>.tbl`, an instance method on
+            // a value — has no instantiation to consume and would otherwise type as whatever the
+            // underlying reference types as, silently discarding the type arguments.
+            Expr::InstantiatedType {
+                recv,
+                type_args,
+                span,
+            } => {
+                for t in type_args {
+                    self.check_type_ref(t);
+                }
+                let head = match recv.as_ref() {
+                    Expr::Ident { name, .. } => name.to_string(),
+                    other => format!("{:?}", other.span()),
+                };
+                self.error(
+                    DiagnosticCode::InvalidTypeArguments,
+                    *span,
+                    "a call-site type argument list must be followed by an associated call"
+                        .to_string(),
+                )
+                .help(format!(
+                    "write `{head}::<...>.method(args)`. The instantiation is consumed by the \
+                     call; a bare `{head}::<...>` is not a value, and neither an instance method \
+                     nor a field reads it (a value carries its own instantiation)"
+                ));
+                self.synth(recv, env)
+            }
             Expr::Invoke {
                 recv, name, args, ..
             } => {
@@ -1639,7 +2317,7 @@ impl Checker {
                 if let Some(recv) = recv {
                     let recv_is_type = matches!(
                         recv.as_ref(),
-                        Expr::Ident { name, .. } if self.symbols.types.contains(name)
+                        Expr::Ident { name, .. } if self.symbols.types.contains(name.as_str())
                     );
                     if !recv_is_type {
                         self.synth(recv, env);
@@ -1733,8 +2411,8 @@ impl Checker {
             .get(type_name)
             .cloned()
             .unwrap_or_default();
-        let pset: HashSet<String> = params.iter().cloned().collect();
-        let mut subst: HashMap<String, Type> = HashMap::new();
+        let pset: ParamSet = params.iter().map(|p| p.id).collect();
+        let mut subst: Subst = Subst::new();
         for f in &lit.fields {
             // A polymorphic named function assigned to a **concretely `Fn`-typed field**
             // instantiates against the field's declared type (F1, poly-values) — the field
@@ -1744,7 +2422,7 @@ impl Checker {
             let field_fn_expectation = declared_field
                 .and_then(|(_, declared)| {
                     (matches!(declared, Type::Fn { .. })
-                        && !mentions_param(declared, &params)
+                        && !mentions_param(declared, &pset)
                         && self.is_deferred_arg(&f.value, env)
                         && matches!(f.value, Expr::Ident { .. }))
                     .then(|| declared.clone())
@@ -1759,7 +2437,43 @@ impl Checker {
                     }
                     _ => None,
                 });
-            let vty = match &field_fn_expectation {
+            // A generic type's **fresh-constructor call** in a field initializer absorbs the
+            // field's declared type, so `Outer { inner: Inner.new("todos") }` against `inner:
+            // Inner<Todo>` pins `T = Todo` exactly as the annotated binding `i: Inner<Todo> =
+            // Inner.new("todos")` and the argument position do. A field initializer is a *checked*
+            // position — the declared type is right there — and synthesizing it bottom-up left the
+            // construction site with no instantiation to record. The type's own parameters are
+            // erased first (they are inferred *from* this value), and only a fully-concrete
+            // expectation is pushed: an open one makes no claim.
+            //
+            // One exception to the erasure, and it is what lets a generic type construct another
+            // generic type out of its own parameter: a parameter the ENCLOSING member forwards on a
+            // hidden slot is not inferred from this value — it is *delivered* to it — so erasing it
+            // would throw away the only fact the position has. `repo: Repository<T>` inside
+            // `LiveRepository<T>.new` keeps its `T`, and `dynamic_ctor_slot` (consulted by
+            // `absorbs_constructor_expectation` below) is what decides whether that `T` really
+            // arrives; a `T` with no slot still erases and records nothing.
+            let inferred_params: ParamSet = pset
+                .iter()
+                .filter(|id| {
+                    !self
+                        .coloring
+                        .forwardable_params
+                        .iter()
+                        .any(|p| p.id == **id)
+                })
+                .copied()
+                .collect();
+            let absorbed_declared = if field_fn_expectation.is_none()
+                && let Some((_, declared)) = declared_field
+                && let e = erase_type_params(declared.clone(), &inferred_params)
+                && self.absorbs_constructor_expectation(&f.value, &e, env)
+            {
+                Some(e)
+            } else {
+                None
+            };
+            let vty = match field_fn_expectation.as_ref().or(absorbed_declared.as_ref()) {
                 Some(expected) => self.check(&f.value, expected, env),
                 None => self.synth(&f.value, env),
             };
@@ -1778,7 +2492,12 @@ impl Checker {
                 // `dyn` (they are inferred from this very value above), so a generic field
                 // accepts any value while a concrete field type is enforced.
                 let expected = erase_type_params(declared.clone(), &pset);
-                if !self.arg_assignable(&vty, &expected) {
+                // …unless the value was just CHECKED against that very type above, whose `subsume`
+                // has already reported any mismatch at this same span. Re-testing it here would
+                // print the identical error twice.
+                if absorbed_declared.as_ref() != Some(&expected)
+                    && !self.arg_assignable(&vty, &expected)
+                {
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         f.value.span(),
@@ -1790,12 +2509,32 @@ impl Checker {
                 }
             }
         }
+        // Fill any parameter the field values left unconstrained from the CHECKED position's
+        // expectation. Purely additive — an argument the fields DID pin stays as inferred, so the
+        // established "fields determine the instantiation" rule is untouched; this only decides
+        // what an otherwise-unconstrained parameter is, where the alternative is nothing at all.
+        // Only a fully concrete expectation contributes: a `dyn`/open argument makes no claim.
+        if !params.is_empty()
+            && let Some((expected_span, Type::Named(n, expected_args))) =
+                self.coloring.expected_object.clone()
+            && expected_span == lit.span
+            && n == type_name
+        {
+            for (i, p) in params.iter().enumerate() {
+                if !subst.contains_key(&p.id)
+                    && let Some(t) = expected_args.get(i)
+                    && self.fully_concrete(t)
+                {
+                    subst.insert(p.id, t.clone());
+                }
+            }
+        }
         let args = if subst.is_empty() {
             Vec::new()
         } else {
             params
                 .iter()
-                .map(|p| subst.get(p).cloned().unwrap_or(Type::Dyn))
+                .map(|p| subst.get(&p.id).cloned().unwrap_or(Type::Dyn))
                 .collect()
         };
         let ty = Type::Named(type_name.to_string(), args);
@@ -1814,5 +2553,77 @@ fn erased_scalar_width_base(name: &str) -> Option<&'static str> {
         noeta_ast::BuiltinTy::IntN { .. } => Some("int"),
         noeta_ast::BuiltinTy::F64 => Some("float"),
         _ => None,
+    }
+}
+
+/// The answer to `<scrut> is <target>` when the scrutinee's **static type settles it**, for an
+/// erased-width `target` (`iN`/`f64` — the caller has already established that). `None` means the
+/// scrutinee does not settle it, which for these targets is the same as "nobody can": the width is
+/// not on the value, so if it is not in the static type it is gone.
+///
+/// A width has *identity-only* subtyping — `i32` is not an `i64`, and `f64` deliberately does not
+/// widen to or from `float` — so for a scrutinee that is a single concrete type, equality is the
+/// whole answer. The unsettled cases are exactly the open ones:
+///
+/// - `dyn` and an inference hole: the launder that erased the width in the first place;
+/// - a `dyn Trait`: open in the same way, over a smaller set;
+/// - a bare type parameter: erased, and its instantiation is not in this body;
+/// - a union (which is what `number` is): the checker knows a *set* of types, not which one — and
+///   the value cannot be asked, so no member of the set can be ruled in or out;
+/// - a kind-type (`Enum`/`Struct`/`Class`): abstract over declarations, not a single type.
+///
+/// [`Type::Never`] is *not* on that list: it is uninhabited, so the test is in unreachable code and
+/// the constant `false` is as true as anything else there.
+fn settled_width_answer(scrut: &Type, target: &Type) -> Option<bool> {
+    match scrut {
+        Type::Unknown
+        | Type::Dyn
+        | Type::DynTrait(_)
+        | Type::Param(_)
+        | Type::Union(_)
+        | Type::Kind(_) => None,
+        _ => Some(scrut == target),
+    }
+}
+
+impl Checker {
+    /// Whether `<scrut> is <ty>` is **statically impossible**, and if so the idiom that does what
+    /// the author meant (E0065's help line).
+    ///
+    /// `Option` and `Result` are *reified* containers: each carries its own runtime head
+    /// constructor (`some`/`none`, `Ok`/`Err`), never the payload's. So `x is P` on an
+    /// `Option<P>` is always false — yet it reads exactly like "is it a `P`", which is why it gets
+    /// written. The damage was never the constant test; it was that the checker went on to
+    /// *narrow* `x` to `P` in the branch, so the dead code type-checked and only the runtime
+    /// disagreed.
+    ///
+    /// `None` (i.e. "leave it alone") for every case where the tag genuinely could match:
+    /// - an open target (`dyn`, `dyn Trait`, an inference hole) — the runtime decides;
+    /// - a kind-type target — **both containers are enums at runtime**, so `x is Enum` is `true`
+    ///   and flagging it would be simply wrong;
+    /// - a bare type parameter — erased, and it may instantiate to the container itself;
+    /// - the same container (`x is Option<…>` on an `Option`), which is the true test.
+    pub(crate) fn impossible_type_test(&self, scrut: &Type, ty: &TypeRef) -> Option<String> {
+        let target = self.annot(ty);
+        if matches!(
+            target,
+            Type::Dyn | Type::Unknown | Type::DynTrait(_) | Type::Kind(_)
+        ) {
+            return None;
+        }
+        if matches!(target, Type::Param(_)) {
+            return None;
+        }
+        match scrut {
+            Type::Option(inner) if !matches!(target, Type::Option(_)) => Some(format!(
+                "test presence with `x != none`, or reach the `{inner}` with \
+                 `match x {{ some(v) => …, none => … }}`"
+            )),
+            Type::Result(..) if !matches!(target, Type::Result(..)) => Some(
+                "match on it instead: `match x { Ok(v) => …, Err(e) => … }`, or unwrap it with `?`"
+                    .to_string(),
+            ),
+            _ => None,
+        }
     }
 }

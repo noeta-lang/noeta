@@ -71,12 +71,20 @@ fn is_temp(atom: &noeta_ir::Atom) -> bool {
     matches!(atom, noeta_ir::Atom::Temp(_))
 }
 
-/// Stamp a generic enum-variant construction's reflected type onto the freshly-built value (runtime
-/// type-argument reflection, R2b.2), so `type_of` recovers the enum's type arguments after a `dyn`
-/// launder. `reflect` is `Some` only for a generic enum construction; a non-enum result or an
-/// ordinary call is returned unchanged. The value was just built and is uniquely owned, so its parts
-/// move into a re-tagged `EnumValue` with no clone; an unexpectedly-shared value is left untagged.
-fn tag_enum_reflect(value: Value, reflect: &Option<noeta_ast::reflect::TypeRepr>) -> Value {
+/// Stamp a construction's reflected type onto the freshly-built value at a **method-call** site, so
+/// `type_of` recovers its type arguments after a `dyn` launder. Two producers, one field:
+///
+/// * a generic **enum-variant construction** (`Tree.Leaf(5)`, R2b.2) — the value was just built and
+///   is uniquely owned, so its parts move into a re-tagged `EnumValue` with no clone; an
+///   unexpectedly-shared value is left untagged;
+/// * a generic **constructor call** (`Repo.new("todos")` at `Repo<Todo>`, generic constructor
+///   reflection) — the instantiation is known at the CALL, not inside `fn new` where the literal is
+///   written, so the caller stamps it. The checker only records the site when it proved every
+///   `return` of the callee hands back a fresh literal of the type, so nothing else can hold this
+///   object; the tag is written in place because a `class`'s `Rc` is its identity.
+///
+/// `reflect` is `None` for an ordinary method call, which is returned unchanged.
+fn tag_call_reflect(value: Value, reflect: &Option<noeta_ast::reflect::TypeRepr>) -> Value {
     match (reflect, value) {
         (Some(repr), Value::Enum(rc)) => match Rc::try_unwrap(rc) {
             Ok(ev) => Value::Enum(Rc::new(crate::EnumValue {
@@ -85,6 +93,10 @@ fn tag_enum_reflect(value: Value, reflect: &Option<noeta_ast::reflect::TypeRepr>
             })),
             Err(rc) => Value::Enum(rc),
         },
+        (Some(repr), Value::Object(rc)) => {
+            rc.set_reflect(Rc::new(repr.clone()));
+            Value::Object(rc)
+        }
         (_, value) => value,
     }
 }
@@ -243,7 +255,10 @@ impl Interpreter {
         // Arm the safepoint-GC trigger for this run (the eval mirror of the VM's arm).
         crate::leak::safepoint_arm(crate::leak::safepoint_step());
         let native_roles = self.reg().native_roles();
-        self.reflection = noeta_ast::reflect::build(ast, &native_roles);
+        // Native trait data joins the membership table (precise `is dyn Trait` / `traits_of`)
+        // through the same registry projection seam as the roles — the VM's compile does the same.
+        let native_traits = noeta_ir::native_trait_impls(self.reg());
+        self.reflection = noeta_ast::reflect::build(ast, &native_roles, &native_traits);
         // Extension attribute shapes ride the artifact (tier-extensions port) — same embed the
         // bytecode path does, so the differential stays green by construction.
         noeta_check::extend_reflection(&mut self.reflection);
@@ -257,6 +272,7 @@ impl Interpreter {
         // The forwarding type-argument table (poly-values F2b) rides the IR itself, so both
         // backends read the same entries by construction.
         self.type_args = ir.type_args.clone();
+        self.type_arg_reprs = ir.type_arg_reprs.clone();
         let mut frame = Frame::new(ir.temp_count);
         // The top-level statements run directly in the global scope (no child).
         match self.exec_ir_stmts(&ir.top.stmts, &mut frame) {
@@ -282,9 +298,11 @@ impl Interpreter {
         self.reap_object_cycles();
         // A deliberate `os.exit(code)` wins over the diagnostic-derived code (there are no
         // diagnostics on that path — the halt is clean).
+        // Derived from whether the run **aborted**, not from whether it said anything — and
+        // identically to the VM's `lifecycle`, since the differential compares the two verbatim.
         let exit_code = self
             .requested_exit
-            .unwrap_or(if self.diagnostics.is_empty() { 0 } else { 1 });
+            .unwrap_or(u8::from(noeta_diagnostics::has_errors(&self.diagnostics)).into());
         (
             RunResult {
                 stdout: self.stdout,
@@ -499,6 +517,12 @@ impl Interpreter {
     /// Evaluate an IR `match`: try each arm's pattern in order, bind on the first match, run
     /// that arm's body block in a child scope, and write its value to `dst`. Mirrors
     /// `eval_match`, including the no-arm-matched runtime error.
+    ///
+    /// A guarded arm (`pattern if cond`) evaluates its guard **after** the pattern matches, in
+    /// the arm's child scope (the pattern bindings are visible); a `false` guard abandons the arm
+    /// and falls through to the next one exactly as a failed pattern would. A non-bool guard is
+    /// the same runtime error as a non-bool `if` condition — the VM compiles the guard to the
+    /// identical fused conditional branch (`CondBranch`), so the two backends agree byte for byte.
     fn exec_ir_match(
         &mut self,
         value: Value,
@@ -508,7 +532,12 @@ impl Interpreter {
         frame: &mut Frame,
     ) -> Eval<Flow> {
         for arm in arms {
-            if let Some(bindings) = crate::match_pattern(&arm.pattern, &value) {
+            if let Some(bindings) = crate::match_pattern(
+                &arm.pattern,
+                &value,
+                &self.reflection,
+                &self.native_type_names,
+            ) {
                 let child = crate::Scope::child(&self.scope);
                 for (name, bound) in bindings {
                     child.declare(name, bound, false);
@@ -518,22 +547,42 @@ impl Interpreter {
                 // the enclosing function, a `break`/`continue` the enclosing loop — so the arm
                 // body's flow propagates instead of being a value-position invariant (the VM's
                 // inline codegen gets the same behavior from its jump targets).
-                let result = (|| -> Eval<(Flow, Option<Value>)> {
+                let result = (|| -> Eval<Option<(Flow, Option<Value>)>> {
+                    if let Some(guard) = &arm.guard {
+                        let cond = self.eval_ir_block_value(&guard.block, frame, guard.span)?;
+                        match cond {
+                            Value::Bool(true) => {}
+                            // A false guard: this arm is not taken — fall through.
+                            Value::Bool(false) => return Ok(None),
+                            other => {
+                                return Err(self.runtime_error(
+                                    DiagnosticCode::TypeMismatch,
+                                    guard.span,
+                                    format!(
+                                        "`if` condition must be a bool, found {}",
+                                        other.type_name()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                     match self.exec_ir_stmts(&arm.body.stmts, frame)? {
                         Flow::Normal => {}
-                        flow => return Ok((flow, None)),
+                        flow => return Ok(Some((flow, None))),
                     }
                     let v = match &arm.body.tail {
                         Some(atom) => Some(self.eval_ir_atom(atom, frame)?),
                         None => None,
                     };
-                    Ok((Flow::Normal, v))
+                    Ok(Some((Flow::Normal, v)))
                 })();
                 if matches!(result, Err(Unwind::Abort)) {
                     self.fire_aborted_scope();
                 }
                 self.scope = saved;
-                let (flow, v) = result?;
+                let Some((flow, v)) = result? else {
+                    continue; // guard was false — try the next arm
+                };
                 if !matches!(flow, Flow::Normal) {
                     return Ok(flow);
                 }
@@ -602,10 +651,10 @@ impl Interpreter {
         // right after this declaration lands, below).
         let packed = noeta_ast::packed_named_fields(decl);
         if let Some(named) = packed.clone() {
-            self.packed_fields.insert(decl.name.clone(), named);
+            self.packed_fields.insert(decl.name.to_string(), named);
         }
         let def = TypeDef {
-            name: decl.name.clone(),
+            name: decl.name.to_string(),
             fields,
             methods,
             destructor: None,
@@ -623,7 +672,7 @@ impl Interpreter {
             field_defaults: strukt.field_defaults.clone(),
         };
         self.scope
-            .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
+            .declare(decl.name.to_string(), Value::Type(Rc::new(def)), false);
         // P-PKEY: settle the fixpoint with this declaration included and stamp every settled
         // type's (`Rc`-shared) def — a later declaration completing a forward-referenced nested
         // chain retro-marks the earlier defs, and every live instance sees it through the shared
@@ -655,6 +704,12 @@ impl Interpreter {
             .map(|v| VariantInfo {
                 name: v.name.clone(),
                 field_names: v.fields.iter().map(|f| f.name.clone()).collect(),
+                // The backing a wire→case conversion matches on, through the one `fold_const_expr`
+                // the reflection manifest and the checker's decode recipes also fold with.
+                backing: v
+                    .backed_value
+                    .as_ref()
+                    .and_then(noeta_ast::reflect::fold_const_expr),
             })
             .collect();
         let methods = en
@@ -663,7 +718,7 @@ impl Interpreter {
             .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
             .collect();
         let def = EnumDef {
-            name: decl.name.clone(),
+            name: decl.name.to_string(),
             variants,
             // A hand-written `compare`/`to_json` takes precedence over derivation — the same
             // rule `declare_ir_struct` applies.
@@ -674,7 +729,7 @@ impl Interpreter {
             methods,
         };
         self.scope
-            .declare(decl.name.clone(), Value::EnumType(Rc::new(def)), false);
+            .declare(decl.name.to_string(), Value::EnumType(Rc::new(def)), false);
     }
 
     /// Register a class whose methods are IR-bodied closures. Mirrors `declare_class`: fields,
@@ -695,7 +750,7 @@ impl Interpreter {
             .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
             .collect();
         let def = TypeDef {
-            name: decl.name.clone(),
+            name: decl.name.to_string(),
             fields,
             methods,
             // The lowered `destruct` block (a parameterless IR `Func`), run via `exec_ir_fn_body`
@@ -719,7 +774,7 @@ impl Interpreter {
             field_defaults: class.field_defaults.clone(),
         };
         self.scope
-            .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
+            .declare(decl.name.to_string(), Value::Type(Rc::new(def)), false);
     }
 
     /// Run a lowered function body as a call: allocate its temporary frame, run its
@@ -892,6 +947,45 @@ impl Interpreter {
             }
         }
         Ok(Flow::Normal)
+    }
+
+    /// The narrowing target a [`noeta_ir::Rvalue::As`]/[`noeta_ir::Rvalue::TypeTest`] with a
+    /// **dynamic** head-name atom resolves to, or `None` when it carries none (the ordinary
+    /// statically-written target, which stays authoritative).
+    ///
+    /// The atom is the `TypeArgName`/`TypeSlotName` that also answers `type_name::<T>()`, so it
+    /// evaluates to the instantiation's qualified name; wrapping it back into a bare
+    /// [`noeta_ir::TypeRef::Named`] re-enters `runtime_matches` on that name and reuses the whole
+    /// matcher unchanged — the built-in head funnel, `Option`/`Result`, a user shape name, and an
+    /// extern's qualified identity all decided exactly as for a written target. The VM's
+    /// `NarrowTarget::from_runtime_name` is the mirror of that re-entry.
+    ///
+    /// Head-only is not a simplification here: the checker records the site only for a *bare*
+    /// parameter target, so there is exactly one name and no arguments to carry.
+    fn runtime_narrow_target(
+        &mut self,
+        ty: &noeta_ir::TypeRef,
+        dynamic: &Option<noeta_ir::Atom>,
+        frame: &mut Frame,
+        span: noeta_span::Span,
+    ) -> Eval<Option<noeta_ir::TypeRef>> {
+        let Some(atom) = dynamic else {
+            return Ok(None);
+        };
+        let name = self.eval_ir_atom(atom, frame)?;
+        Ok(match name {
+            Value::Str(name) => Some(noeta_ir::TypeRef::Named {
+                name: noeta_ast::Name::canonical(name.to_string()),
+                args: Vec::new(),
+                span,
+            }),
+            // Both producers write a string, so this is unreachable in a checked program; a narrow
+            // has no failure channel, so it degrades to the baked target rather than aborting.
+            _ => {
+                let _ = ty;
+                None
+            }
+        })
     }
 
     /// Resolve an atom to a value: a constant, a frame temporary (moved out — see
@@ -1218,14 +1312,19 @@ impl Interpreter {
             noeta_ir::Rvalue::Call {
                 callee,
                 args,
+                // A forwarding generic's type arguments (poly-values F2b), in slot order — empty
+                // for every call that forwards nothing. Their own channel, which is why `supplied`
+                // below still indexes the VALUE parameters alone.
+                type_args,
                 // `None` for a pure reordering — lowering already permuted `args`, so there is
                 // nothing left to say. `Some` only when the call skips a defaulted parameter.
                 supplied,
                 span,
             } => {
                 let callee = self.eval_ir_atom(callee, frame)?;
+                let tys = self.eval_ir_atoms(type_args, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
-                self.call_masked(callee, values, *span, *supplied)
+                self.call_masked(callee, values, *span, &tys, *supplied)
             }
             noeta_ir::Rvalue::Method {
                 receiver,
@@ -1233,9 +1332,14 @@ impl Interpreter {
                 args,
                 reuse,
                 reflect,
+                reflect_slot,
+                // A forwarding generic METHOD's type arguments (Axis A), in slot order — empty for
+                // the overwhelming majority of method calls. The reuse fast paths below are all
+                // built-in collection updates, which declare no slots, so they never carry any.
+                type_args,
                 span,
                 supplied,
-                ..
+                name_span: _,
             } => {
                 // In-place collection self-update (Phase 5.1c): a marked `m = m.set(k,v)` moves the
                 // receiver out of its (reassigned) binding so a uniquely-owned map can be mutated in
@@ -1249,6 +1353,7 @@ impl Interpreter {
                         name: recv_name, ..
                     } = receiver
                 {
+                    let tys = self.eval_ir_atoms(type_args, frame)?;
                     let values = self.eval_ir_atoms(args, frame)?;
                     let recv = match self.scope.take_mut(recv_name) {
                         Some(v) => v,
@@ -1273,9 +1378,15 @@ impl Interpreter {
                             return self.set_remove_in_place(recv, values, *span);
                         }
                     }
-                    return self.call_method(recv, name, values, *span);
+                    // The non-collection fall-through — a user method that happens to be named
+                    // `set`/`add`/`remove` — is an ordinary consuming call, so it must carry both
+                    // channels: the VM's reuse arm gates on the runtime receiver KIND and reaches
+                    // its ordinary dispatch with them intact, and reuse is supposed to be
+                    // observationally invisible.
+                    return self.call_method_masked(recv, name, values, *span, &tys, *supplied);
                 }
                 let recv = self.eval_ir_atom(receiver, frame)?;
+                let tys = self.eval_ir_atoms(type_args, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
                 let result = if is_temp(receiver) {
                     // An owned temp receiver (`Resource.new().use()`): fire its destructor after the
@@ -1283,15 +1394,22 @@ impl Interpreter {
                     // and destroy the held copy — last-reference-gated, so a method that returns
                     // `self` (the result aliases it) correctly defers destruction.
                     let result =
-                        self.call_method_masked(recv.clone(), name, values, *span, *supplied);
+                        self.call_method_masked(recv.clone(), name, values, *span, &tys, *supplied);
                     self.destroy_value(recv);
                     result
                 } else {
-                    self.call_method_masked(recv, name, values, *span, *supplied)
+                    self.call_method_masked(recv, name, values, *span, &tys, *supplied)
                 };
                 // When this "method call" was a generic enum-variant construction, stamp the reflected
                 // type onto the freshly-built value (R2b.2) — the tree-walker twin of the VM's node tag.
-                result.map(|v| tag_enum_reflect(v, reflect))
+                // …or a generic-in-generic construction, whose tag the hidden slot names: resolve the
+                // slot's table index through the same `type_arg_reprs` table the VM's
+                // `Op::RetagDynamic` reads, so both backends stamp the identical interned repr.
+                let dynamic = match reflect_slot {
+                    Some(slot) => self.dynamic_construction_tag(slot, frame)?,
+                    None => None,
+                };
+                result.map(|v| tag_call_reflect(tag_call_reflect(v, reflect), &dynamic))
             }
             // A trait method call (native default body, slice 2; or a kernel-trait method since the
             // ExtBundle→ExtTrait fold-in, slice 4): the route was baked at the call site — straight to
@@ -1410,17 +1528,38 @@ impl Interpreter {
                 let value = self.eval_ir_atom(operand, frame)?;
                 self.eval_try_ir(value, on_error, *span)
             }
-            noeta_ir::Rvalue::As { operand, ty, .. } => {
+            // A narrow whose target is an enclosing generic's type parameter reads the head name out
+            // of the `dynamic` atom — the very `TypeArgName`/`TypeSlotName` that answers
+            // `type_name::<T>()` — and re-enters the matcher on that name, so the two surfaces
+            // resolve one `T` and built-in instantiations (`T = int`) go through the same
+            // `BuiltinTy` funnel a written `int` does. The VM's `from_runtime_name` mirrors it.
+            noeta_ir::Rvalue::As {
+                operand,
+                ty,
+                dynamic,
+                span,
+            } => {
                 let value = self.eval_ir_atom(operand, frame)?;
-                if crate::runtime_matches(&value, ty) {
+                let target = self.runtime_narrow_target(ty, dynamic, frame, *span)?;
+                if crate::runtime_matches(&value, target.as_ref().unwrap_or(ty), &self.reflection) {
                     Ok(crate::builtin_enum("Option", "some", vec![value]))
                 } else {
                     Ok(crate::builtin_enum("Option", "none", vec![]))
                 }
             }
-            noeta_ir::Rvalue::TypeTest { operand, ty, .. } => {
+            noeta_ir::Rvalue::TypeTest {
+                operand,
+                ty,
+                dynamic,
+                span,
+            } => {
                 let value = self.eval_ir_atom(operand, frame)?;
-                Ok(Value::Bool(crate::runtime_matches(&value, ty)))
+                let target = self.runtime_narrow_target(ty, dynamic, frame, *span)?;
+                Ok(Value::Bool(crate::runtime_matches(
+                    &value,
+                    target.as_ref().unwrap_or(ty),
+                    &self.reflection,
+                )))
             }
             noeta_ir::Rvalue::TypeOf { operand, span } => {
                 let v = self.eval_ir_atom(operand, frame)?;
@@ -1429,9 +1568,55 @@ impl Interpreter {
                     None => Ok(crate::build_type_value(&crate::eval_type_repr(&v))),
                 }
             }
+            // `type_name::<T>()` where `T` is a parameter of the enclosing generic type: read
+            // argument `index` off the receiver's reflected type tag. A receiver with no such
+            // argument aborts — a plausible-looking wrong name would travel silently.
+            noeta_ir::Rvalue::TypeArgName {
+                operand,
+                index,
+                type_name,
+                param,
+                span,
+            } => {
+                let v = self.eval_ir_atom(operand, frame)?;
+                match crate::eval_type_repr(&v).type_arg_name(*index as usize) {
+                    Some(name) => Ok(Value::Str(name)),
+                    None => Err(self.runtime_error(
+                        DiagnosticCode::InvalidTypeArguments,
+                        *span,
+                        noeta_ast::reflect::missing_type_arg_message(type_name, param),
+                    )),
+                }
+            }
+            // `type_name::<T>()` where `T` is a FORWARDED parameter of the enclosing generic fn:
+            // the instantiation's qualified name, read off the hidden slot's table entry. The same
+            // slot, entry and field the dynamic `attributes_of` arm above reads, so a forwarded
+            // name and a forwarded manifest can never disagree about what `T` is.
+            // The other slot reader is not an `Rvalue` of its own but a field on the associated-call
+            // one — see `Self::dynamic_construction_tag`.
+            noeta_ir::Rvalue::TypeSlotName { slot, span } => {
+                let idx = self.eval_ir_atom(slot, frame)?;
+                let Value::Int(i) = idx else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        "corrupt hidden type-argument slot".to_string(),
+                    ));
+                };
+                Ok(Value::Str(
+                    self.type_args
+                        .get(i as usize)
+                        .map(|e| e.name.clone())
+                        .unwrap_or_default(),
+                ))
+            }
             noeta_ir::Rvalue::FieldsOf { operand, .. } => {
                 let v = self.eval_ir_atom(operand, frame)?;
                 Ok(self.materialize_fields(&v))
+            }
+            noeta_ir::Rvalue::TraitsOf { operand, .. } => {
+                let v = self.eval_ir_atom(operand, frame)?;
+                Ok(self.materialize_traits(&v))
             }
             noeta_ir::Rvalue::FromBytes {
                 blob,
@@ -1775,6 +1960,14 @@ impl Interpreter {
                 };
                 Ok(self.materialize_params(&target))
             }
+            noeta_ir::Rvalue::ReturnsOf { target, .. } => {
+                // The runtime target string names a fn or method; materialize its declared return.
+                let target = match self.eval_ir_atom(target, frame)? {
+                    Value::Str(s) => s,
+                    _ => String::new(),
+                };
+                Ok(self.materialize_returns(&target))
+            }
             noeta_ir::Rvalue::FieldSpecsOf { name, .. } => {
                 // The runtime name string names a declared type; materialize its field schema.
                 let name = match self.eval_ir_atom(name, frame)? {
@@ -1782,6 +1975,14 @@ impl Interpreter {
                     _ => String::new(),
                 };
                 Ok(self.materialize_field_specs(&name))
+            }
+            noeta_ir::Rvalue::VariantsOf { name, .. } => {
+                // The runtime name string names a declared type; materialize its variant schema.
+                let name = match self.eval_ir_atom(name, frame)? {
+                    Value::Str(s) => s,
+                    _ => String::new(),
+                };
+                Ok(self.materialize_variant_specs(&name))
             }
             noeta_ir::Rvalue::Construct {
                 name, fields, span, ..
@@ -2043,9 +2244,22 @@ impl Interpreter {
             // `Result.Err(JsonError)`) carries a path-rich extern; a recipe decode of `T` itself
             // never yields one, only a wrapper's `Err` does.
             NativeOut::Extern(e) => MatOut::Value(Value::Extern(Rc::new(RefCell::new(e)))),
-            // A native enum value (native-extensibility S1) — a call-site-typed door does not
-            // decode one from a JSON recipe, but a native `Result`/`Option` wrapper may carry one,
-            // so materialize it through the ordinary (non-recipe) path.
+            // An enum value: decoded from a `TypeRecipe::Enum` (enum-construction arc), or carried by
+            // a native `Result`/`Option` wrapper (native-extensibility S1). Both build through the
+            // ordinary `materialize_native` path, so a decoded case is indistinguishable from a
+            // source-written one. Only a recipe door sets `has_validator`, and it re-enters exactly
+            // as a struct's does — the case is built first, then `validate()` runs, so a rejection
+            // short-circuits before this node becomes a `Value`.
+            out @ NativeOut::Variant {
+                has_validator: true,
+                ..
+            } => {
+                let value = crate::materialize_native(out);
+                if let Some(rejection) = self.run_validator(value.clone(), path, span)? {
+                    return Ok(MatOut::Rejected(rejection));
+                }
+                MatOut::Value(value)
+            }
             out @ NativeOut::Variant { .. } => MatOut::Value(crate::materialize_native(out)),
             // A native class instance (native-extensibility S2) — like a `Variant`, never decoded
             // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one.
@@ -2158,8 +2372,9 @@ impl Interpreter {
     /// mid-materialize. Returns `Some(message)` (the validator's own error message) when the
     /// validator's `Result` is an `Err`, `None` when it is `Ok`. The message is a `string`-typed
     /// error's bare string, or an `Error`-typed error's `message()`. Shared by the JSON recipe doors
-    /// (which wrap it in a path-carrying `JsonError`) and `from_bytes` (its own error channel).
-    fn validate_message(&mut self, value: Value, span: Span) -> Eval<Option<String>> {
+    /// (which wrap it in a path-carrying `JsonError`), `from_bytes` (its own error channel), and the
+    /// reflective `construct` door (whose channel is its own `Result<dyn, string>`).
+    pub(crate) fn validate_message(&mut self, value: Value, span: Span) -> Eval<Option<String>> {
         let result = self.call_method(value, "validate", vec![], span)?;
         match crate::result_err_payload(&result) {
             Some(payload) => Ok(Some(self.validation_message(payload, span)?)),
@@ -2186,6 +2401,29 @@ impl Interpreter {
     fn validation_message(&mut self, payload: Value, span: Span) -> Eval<String> {
         if let Value::Str(s) = &payload {
             return Ok(s.clone());
+        }
+        let rendered = self.call_method(payload, "message", vec![], span)?;
+        Ok(match rendered {
+            Value::Str(s) => s,
+            other => other.display(),
+        })
+    }
+
+    /// How an **unhandled** `Err` payload describes itself for the E0069 abort: a `string` payload as
+    /// itself, an `Error`-implementing payload through its `message()`, anything else through its
+    /// ordinary display — so the abort always names what went wrong, whatever was put in the `Err`.
+    ///
+    /// The `Error` test is the shared trait-membership table (the same one `is dyn Error` consults,
+    /// carrying declared `impl`s, `@derive`s, and native ABI declarations), so it agrees with "would
+    /// a `message()` call resolve" by construction and the VM's twin decides identically.
+    pub(crate) fn unhandled_error_message(&mut self, payload: Value, span: Span) -> Eval<String> {
+        if let Value::Str(s) = &payload {
+            return Ok(s.clone());
+        }
+        let implements_error = crate::value_nominal_name(&payload)
+            .is_some_and(|name| self.reflection.type_implements(&name, "Error"));
+        if !implements_error {
+            return Ok(payload.display());
         }
         let rendered = self.call_method(payload, "message", vec![], span)?;
         Ok(match rendered {
@@ -2511,6 +2749,29 @@ impl Interpreter {
                 format!("cannot assign field `{field}` on {}", other.type_name()),
             )),
         }
+    }
+
+    /// The reflected type a **dynamic construction site** stamps (generic-in-generic construction):
+    /// read the hidden type-argument slot `slot` and project its table entry through
+    /// [`Self::type_arg_reprs`].
+    ///
+    /// The tree-walker twin of the VM's `Op::RetagDynamic`, resolving the same index in the same
+    /// table — so the tag both backends write is the identical interned repr, not two independent
+    /// reconstructions. A non-integer or out-of-range slot, or an entry with no reflection
+    /// projection, answers `None`: the value stays untagged and `type_of` falls back to the head-only
+    /// classification, exactly as an unrecorded construction site does.
+    fn dynamic_construction_tag(
+        &mut self,
+        slot: &noeta_ir::Atom,
+        frame: &mut Frame,
+    ) -> Eval<Option<noeta_ast::reflect::TypeRepr>> {
+        let Value::Int(i) = self.eval_ir_atom(slot, frame)? else {
+            return Ok(None);
+        };
+        if i < 0 {
+            return Ok(None);
+        }
+        Ok(self.type_arg_reprs.get(i as usize).cloned().flatten())
     }
 
     /// Resolve a list of atoms to values, left-to-right.

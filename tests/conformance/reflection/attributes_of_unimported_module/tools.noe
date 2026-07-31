@@ -1,0 +1,22 @@
+// A library module whose three functions all carry `#[Marked]`. Only `imported` is named by the
+// entry's `use`; `unimported` is exported but referenced by nobody, and `hidden` is not even
+// exported. All three are part of the program because they are annotated.
+
+@attribute(Function)
+@role(Semantic.TrustBoundary)
+pub struct Marked { name: string }
+
+#[Marked("imported")]
+pub fn imported(): string {
+    return "app.tools.imported";
+}
+
+#[Marked("unimported")]
+pub fn unimported(): string {
+    return "app.tools.unimported";
+}
+
+#[Marked("private")]
+fn hidden(): string {
+    return "app.tools.hidden";
+}

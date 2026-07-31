@@ -100,6 +100,7 @@ pub fn insert_drops(program: &Program, relevance: Option<&Relevance>) -> Program
         top,
         temp_count: program.temp_count,
         type_args: program.type_args.clone(),
+        type_arg_reprs: program.type_arg_reprs.clone(),
         span: program.span,
     }
 }
@@ -116,6 +117,11 @@ struct ScopeFrame {
     /// *after* that drop does not redundantly re-drop them. (An early exit reached *before* a local's
     /// last use still drops it — that name is not yet in this set when the exit is emitted.)
     dropped: std::collections::HashSet<String>,
+    /// The block's `live_out` — the names that are still live where this scope ends, so the block
+    /// does **not** abandon them: they flow out to an enclosing scope, or back around a loop's
+    /// back-edge into a later iteration. The fall-through scope-exit drops have always consulted
+    /// this; an early exit must too (see [`collect_exit_drops`]).
+    live_out: VarSet,
     is_loop_body: bool,
 }
 
@@ -161,7 +167,18 @@ fn collect_exit_drops(
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for frame in scopes.iter().rev() {
         for (name, relevant) in frame.constructed.iter().rev() {
-            if moved_out.contains(name) || frame.dropped.contains(name) || !seen.insert(name) {
+            // A value still **live at this scope's exit** is not abandoned here — it flows out to an
+            // enclosing scope, or back around a loop's back-edge into a later iteration. Dropping it
+            // nulls a slot still in use, which is exactly what a `mut` accumulator reassigned before
+            // a `break`/`continue` suffered: `mut n = 0; for … { if p { n = n + 1; continue } }`
+            // recorded `n` in the `if`'s frame, and the exit reclaimed it, so the next iteration read
+            // a cleared slot. The fall-through path has always applied this test; this is the same
+            // one, on the early-exit path.
+            if moved_out.contains(name)
+                || frame.dropped.contains(name)
+                || frame.live_out.contains(name)
+                || !seen.insert(name)
+            {
                 continue;
             }
             drops.push((name.clone(), *relevant));
@@ -209,6 +226,7 @@ fn rewrite_func(func: &Func, cx: &Cx) -> Func {
         name: func.name.clone(),
         captures: func.captures.clone(),
         params: func.params.clone(),
+        hidden: func.hidden,
         // Default thunks run in the definition scope; this slice leaves them undropped (conservative).
         defaults: func.defaults.clone(),
         body,
@@ -223,6 +241,7 @@ fn liveness_of_body(func: &Func) -> BlockLiveness {
         top: func.body.clone(),
         temp_count: func.temp_count,
         type_args: Vec::new(),
+        type_arg_reprs: Vec::new(),
         span: func.span,
     })
     .top
@@ -247,6 +266,7 @@ fn rewrite_block(
     scopes.push(ScopeFrame {
         constructed: Vec::new(),
         dropped: std::collections::HashSet::new(),
+        live_out: live.live_out.clone(),
         is_loop_body,
     });
     let mut out: Vec<Stmt> = Vec::with_capacity(block.stmts.len());
@@ -410,10 +430,34 @@ fn rewrite_stmt(
             span,
         } => {
             let mut new_arms = Vec::with_capacity(arms.len());
-            for (arm, arm_live) in arms.iter().zip(&sl.sub) {
+            // `sl.sub` holds, per arm in order: the guard block's liveness (only when the arm is
+            // guarded), then the body's — consume it with a cursor rather than a 1:1 zip.
+            let mut subs = sl.sub.iter();
+            for arm in arms {
+                let guard = arm.guard.as_ref().map(|g| noeta_ir::Guard {
+                    block: rewrite_block(
+                        &g.block,
+                        subs.next().expect("a liveness entry per guard block"),
+                        droppable,
+                        owned,
+                        cx,
+                        scopes,
+                        false,
+                    ),
+                    span: g.span,
+                });
                 new_arms.push(Arm {
                     pattern: arm.pattern.clone(),
-                    body: rewrite_block(&arm.body, arm_live, droppable, owned, cx, scopes, false),
+                    guard,
+                    body: rewrite_block(
+                        &arm.body,
+                        subs.next().expect("a liveness entry per arm body"),
+                        droppable,
+                        owned,
+                        cx,
+                        scopes,
+                        false,
+                    ),
                     span: arm.span,
                 });
             }

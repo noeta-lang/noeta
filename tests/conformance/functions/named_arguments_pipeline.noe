@@ -1,0 +1,58 @@
+// Named arguments bind THROUGH a pipeline, and the piped value fills the parameter no label claimed.
+//
+// `|>` used to hand the checker its argument TYPES and no argument expressions at all, so the
+// labels on the right-hand side never reached argument binding: `5 |> div(a: 100)` bound
+// positionally and computed `div(5, 100)`, and `1 |> g(zzz: 1)` — a label naming no parameter —
+// checked clean. Silently wrong answers, which is the failure mode named arguments exist to remove.
+//
+// The rule: the piped value is the one argument with no written position, so it takes the first
+// parameter the labels left free, and the right-hand side's own positionals follow it into what is
+// still free. With no labels that is exactly "piped value first, written arguments after" — the
+// behaviour `|>` always had — so only calls that actually use a label change meaning.
+//
+// Arguments still evaluate in the order WRITTEN, the piped one first, however the binding permutes
+// them: `trace` proves the left operand runs before the right-hand side's arguments even when it
+// binds to a LATER parameter.
+// expect: stdout "9"
+// expect: stdout "9"
+// expect: stdout "9"
+// expect: stdout "piped"
+// expect: stdout "label"
+// expect: stdout "9"
+// expect: stdout "129"
+// expect: stdout "569"
+// expect: stdout "22"
+// expect: exit 0
+fn sub(a: int, b: int): int { return a - b }
+
+echo 10 |> sub(1)      // no label: the piped value leads, as it always did
+echo 10 |> sub(b: 1)   // `b` is claimed, so the piped value fills `a`
+echo 1 |> sub(a: 10)   // `a` is claimed, so the piped value fills `b`
+
+fn trace(tag: string, v: int): int {
+    echo tag
+    return v
+}
+echo trace("piped", 1) |> sub(a: trace("label", 10))
+
+// A label may skip a defaulted parameter through a pipe too — the call carries the same supplied
+// mask a direct `f(1, c: 9)` does, and the callee fills `b` from its own scope.
+base = 2
+
+fn f(a: int, b: int = base, c: int = 3) use (base): int {
+    return a * 100 + b * 10 + c
+}
+echo 1 |> f(c: 9)
+
+// Piped value, then a written positional, then a label: `c` is claimed, so the free parameters are
+// `a` and `b` — the piped value takes `a` and the written `6` takes `b`.
+fn g(a: int, b: int, c: int): int { return a * 100 + b * 10 + c }
+echo 5 |> g(6, c: 9)
+
+// A method binds identically; the receiver stays the receiver.
+class Box {
+    pub v: int
+    fn scale(k: int, off: int): int { return self.v * k + off }
+}
+box = Box { v: 3 }
+echo 10 |> box.scale(k: 4)

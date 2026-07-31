@@ -98,6 +98,38 @@ impl NativeCtx for EvalCtx<'_> {
         self.interp.stderr.push_str(text);
     }
 
+    fn flush_output(&mut self) {
+        // Take-then-restore: a host that does not stream (the sandbox) writes nothing and reports
+        // false, and the text goes back into the batch buffer untouched.
+        for stream in [noeta_stdlib::Stream::Stdout, noeta_stdlib::Stream::Stderr] {
+            let buffer = match stream {
+                noeta_stdlib::Stream::Stdout => &mut self.interp.stdout,
+                _ => &mut self.interp.stderr,
+            };
+            if buffer.is_empty() {
+                continue;
+            }
+            let text = std::mem::take(buffer);
+            if !self.interp.host.stream_output(stream, &text) {
+                match stream {
+                    noeta_stdlib::Stream::Stdout => self.interp.stdout = text,
+                    _ => self.interp.stderr = text,
+                }
+            }
+        }
+    }
+
+    fn drain_runtime_diagnostics(&mut self) -> Vec<String> {
+        // Clearing the abort trace as well: the next abort in this long-lived loop is a *new*
+        // failure and must record its own traceback (`record_abort_trace` keeps the first one).
+        self.interp.abort_trace.clear();
+        self.interp
+            .diagnostics
+            .drain(..)
+            .map(|d| format!("[{}] {}", d.code.code(), d.message))
+            .collect()
+    }
+
     fn render(&mut self, slot: Slot) -> CtxResult<String> {
         // Delegate to the interpreter's `display_value` — the one place `to_string` is consulted for
         // `echo` / interpolation — so `io.outln(x)` renders byte-identically to `echo x`, with no
@@ -108,6 +140,35 @@ impl NativeCtx for EvalCtx<'_> {
             Ok(text) => Ok(text),
             Err(_) => Err(CtxError::Abort),
         }
+    }
+
+    fn call_method(&mut self, recv: Slot, method: &str, args: &[Slot]) -> CtxResult<Option<Slot>> {
+        // Only a user object has methods to reach; anything else reports "no such method" so the
+        // caller can fall back rather than abort.
+        let Value::Object(object) = self.get(recv)?.clone() else {
+            return Ok(None);
+        };
+        let Some(closure) = object.def.methods.get(method).cloned() else {
+            return Ok(None);
+        };
+        let mut argv = Vec::with_capacity(args.len());
+        for &a in args {
+            argv.push(self.get(a)?.clone());
+        }
+        match self
+            .interp
+            .call_method_on(&object, &closure, argv, self.span)
+        {
+            Ok(value) => Ok(Some(self.insert(value))),
+            Err(_) => Err(CtxError::Abort),
+        }
+    }
+
+    fn bytes_of(&mut self, slot: Slot) -> CtxResult<Option<Vec<u8>>> {
+        Ok(match self.get(slot)? {
+            Value::Bytes(b) => Some(b.as_ref().clone()),
+            _ => None,
+        })
     }
 
     fn view(&mut self, slot: Slot) -> CtxResult<NativeValue> {

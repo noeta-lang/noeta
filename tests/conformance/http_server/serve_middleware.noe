@@ -9,7 +9,9 @@
 // expect: stdout "BLOCKED /echo"
 // expect: stdout "log /users/42"
 // expect: stdout "log /users/42"
+// expect: stdout "log /form"
 // expect: stdout "log /ws"
+// expect: stdout "log /events"
 // expect: exit 0
 use std.http.server
 use std.http.{Request, Response}

@@ -1192,11 +1192,16 @@ impl<'m> Vm<'m> {
                                 proto,
                                 Some(v),
                                 &[],
+                                // A protocol method is reached by its fixed name, so there is no
+                                // instantiation to carry; the guard aborts rather than misbind if
+                                // one is ever declared generic.
+                                &[],
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
                                 // A fixed-arity protocol call — no labels reach it.
                                 None,
+                                *span,
                             )?;
                             continue 'reload;
                         }
@@ -1319,11 +1324,13 @@ impl<'m> Vm<'m> {
                                     proto,
                                     Some(recv),
                                     &[],
+                                    &[],
                                     *dst,
                                     RetTransform::None,
                                     pc + 1,
                                     // A fixed-arity protocol call — no labels reach it.
                                     None,
+                                    *span,
                                 )?;
                                 continue 'reload;
                             }
@@ -1341,6 +1348,11 @@ impl<'m> Vm<'m> {
                         recv,
                         method,
                         args,
+                        // A forwarding generic METHOD's type arguments (Axis A) — empty for every
+                        // method call that forwards nothing, which is all but a handful. They are
+                        // read only on the user-method arms below: no built-in, native or protocol
+                        // receiver declares hidden slots.
+                        type_args,
                         span,
                         cache,
                         reuse,
@@ -1577,6 +1589,11 @@ impl<'m> Vm<'m> {
                                                 *dst,
                                                 callee_val,
                                                 args,
+                                                // A field holding a callable is a first-class
+                                                // value, so there is no type-argument channel to
+                                                // carry; a forwarding callee reached this way
+                                                // aborts in the setup rather than misbinding.
+                                                &[],
                                                 *span,
                                                 pc + 1,
                                                 // A member call carries no mask yet — named
@@ -1605,8 +1622,11 @@ impl<'m> Vm<'m> {
                             // The prototype takes the receiver in register 0 and the user arguments
                             // after it, so its declared arity is one more than the supplied args. A
                             // method may have trailing defaulted parameters, so the supplied count is a
-                            // range `[total - defaults, total]` (all less the receiver).
-                            let total = callee_chunk.num_params as usize - 1;
+                            // range `[total - defaults, total]` (all less the receiver). A forwarding
+                            // generic's hidden slots are not value parameters either — they are filled
+                            // from `type_args`, so they come off the count too.
+                            let total =
+                                callee_chunk.num_params as usize - 1 - callee_chunk.hidden as usize;
                             let required = total - callee_chunk.defaults.len();
                             if args.len() < required || args.len() > total {
                                 return Err(self.error(
@@ -1616,6 +1636,7 @@ impl<'m> Vm<'m> {
                                 ));
                             }
                             let arg_values = ArgBuf::collect(args, regs, fbase);
+                            let ty_values = ArgBuf::collect(type_args.regs(), regs, fbase);
                             self.push_callee_frame(
                                 frames,
                                 regs,
@@ -1623,10 +1644,12 @@ impl<'m> Vm<'m> {
                                 proto,
                                 Some(v),
                                 arg_values.as_slice(),
+                                ty_values.as_slice(),
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
-                                *supplied,
+                                noeta_bytecode::supplied_of(*supplied),
+                                *span,
                             )?;
                             continue 'reload;
                         }
@@ -1688,7 +1711,9 @@ impl<'m> Vm<'m> {
                             };
                             if let Some(proto) = proto {
                                 let callee_chunk = &module.protos[proto as usize];
-                                let total = callee_chunk.num_params as usize - 1;
+                                let total = callee_chunk.num_params as usize
+                                    - 1
+                                    - callee_chunk.hidden as usize;
                                 let required = total - callee_chunk.defaults.len();
                                 if args.len() < required || args.len() > total {
                                     return Err(self.error(
@@ -1698,6 +1723,7 @@ impl<'m> Vm<'m> {
                                     ));
                                 }
                                 let arg_values = ArgBuf::collect(args, regs, fbase);
+                                let ty_values = ArgBuf::collect(type_args.regs(), regs, fbase);
                                 self.push_callee_frame(
                                     frames,
                                     regs,
@@ -1705,10 +1731,12 @@ impl<'m> Vm<'m> {
                                     proto,
                                     Some(v),
                                     arg_values.as_slice(),
+                                    ty_values.as_slice(),
                                     *dst,
                                     RetTransform::None,
                                     pc + 1,
-                                    *supplied,
+                                    noeta_bytecode::supplied_of(*supplied),
+                                    *span,
                                 )?;
                                 continue 'reload;
                             }
@@ -1786,11 +1814,13 @@ impl<'m> Vm<'m> {
                                 proto,
                                 Some(v),
                                 &[idx],
+                                &[],
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
                                 // A fixed-arity protocol call — no labels reach it.
                                 None,
+                                *span,
                             )?;
                             continue 'reload;
                         }
@@ -1919,6 +1949,37 @@ impl<'m> Vm<'m> {
                             }
                             let ch = s.chars().nth(i as usize).unwrap().to_string();
                             set_reg(regs, fbase, *dst, Value::string(&ch));
+                            pc += 1;
+                            continue;
+                        }
+                        // A `bytes` buffer reads one byte as an `int` (0..=255). Borrowed in place
+                        // through `with_bytes` — never `bytes_data`, which clones the whole buffer
+                        // and would make a decode loop quadratic — and the read itself is the shared
+                        // `noeta_stdlib::bytes_index`, so the bounds error matches the tree-walker.
+                        if v.is_bytes() {
+                            let Some(i) = idx.as_int() else {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "bytes index must be an int, found {}",
+                                        idx.type_name()
+                                    ),
+                                ));
+                            };
+                            let read = v
+                                .with_bytes(|data| noeta_stdlib::bytes_index(data, i))
+                                .expect("checked `is_bytes` above");
+                            match read {
+                                Ok(byte) => set_reg(regs, fbase, *dst, Value::int(byte)),
+                                Err(error) => {
+                                    return Err(self.error(
+                                        stdlib_error_code(error.kind),
+                                        *span,
+                                        error.message,
+                                    ));
+                                }
+                            }
                             pc += 1;
                             continue;
                         }
@@ -2284,23 +2345,34 @@ impl<'m> Vm<'m> {
                         span,
                     } => {
                         let enum_name = module.name(*enum_name);
-                        let key = match regs[fbase + *arg as usize].as_string() {
-                            Some(s) => s,
-                            None => {
-                                let kind = if *panic { "from" } else { "try_from" };
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!(
-                                        "`{enum_name}.{kind}` expects a string, found {}",
-                                        regs[fbase + *arg as usize].type_name()
-                                    ),
-                                ));
-                            }
+                        let value = regs[fbase + *arg as usize];
+                        let Some(probe) = crate::values::wire_probe(value) else {
+                            let kind = if *panic { "from" } else { "try_from" };
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "`{enum_name}.{kind}` expects a string or a backing value, \
+                                     found {}",
+                                    value.type_name()
+                                ),
+                            ));
                         };
-                        let matched = cases.iter().find(|(name, _)| module.name(*name) == key);
+                        // Backing first, then case name — the shared rule the tree-walker also runs,
+                        // over the case names and backings baked in at compile time.
+                        let names: Vec<&str> = cases
+                            .iter()
+                            .map(|(name, _, _)| module.name(*name))
+                            .collect();
+                        let probe_cases: Vec<(&str, Option<&noeta_ast::AttrValue>)> = names
+                            .iter()
+                            .zip(cases.iter())
+                            .map(|(name, (_, backing, _))| (*name, backing.as_ref()))
+                            .collect();
+                        let matched = noeta_ast::reflect::variant_for_wire(&probe_cases, &probe)
+                            .map(|i| &cases[i]);
                         let result = match matched {
-                            Some((_, shape_idx)) => {
+                            Some((_, _, shape_idx)) => {
                                 // Build the payload-free case; its single reference transfers onward.
                                 let shape = self.persist.shapes[*shape_idx as usize];
                                 let case = Value::enum_value(shape, Vec::new());
@@ -2312,10 +2384,11 @@ impl<'m> Vm<'m> {
                                 }
                             }
                             None if *panic => {
+                                let shown = value.display();
                                 return Err(self.error(
                                     DiagnosticCode::Panic,
                                     *span,
-                                    format!("panic: `{enum_name}` has no case `{key}`"),
+                                    format!("panic: `{enum_name}` has no case `{shown}`"),
                                 ));
                             }
                             None => {
@@ -2435,6 +2508,27 @@ impl<'m> Vm<'m> {
                             // `Err(_)`/`none`: early-return the whole value from this frame, exactly
                             // as `Op::Return` does (the M0 `Unwind::Return`).
                             Some(TryOutcome::Empty) => {
+                                // An `Err` propagating out of the outermost run's BOTTOM frame is
+                                // top-level code: there is no caller to hand it to, and no declared
+                                // return type the checker could have rejected the `?` against (E0012
+                                // covers every declared return). Unwinding here used to end the
+                                // program *quietly at exit 0* — a `client.get(url)?` transport
+                                // failure was completely invisible and CI went green on a broken
+                                // program. Abort with the error's own message instead (E0069); the
+                                // teardown in `Vm::run` reclaims this frame, exactly as `Op::Panic`'s
+                                // does. The tree-walker's `eval_try_ir` mirrors this on an empty
+                                // `call_sites`, so the differential holds. `none` is untouched: an
+                                // absence reaching the top is not a failure.
+                                if self.run_depth == 1
+                                    && frames.len() == 1
+                                    && let Some(payload) = crate::values::result_err_payload(v)
+                                {
+                                    let message = self.unhandled_error_message(payload, *span)?;
+                                    self.out
+                                        .diagnostics
+                                        .push(Diagnostic::unhandled_error(*span, &message));
+                                    return Err(Abort);
+                                }
                                 retain(v);
                                 // Drop the frame locals this `?` abandons before unwinding (Phase 4.2c) —
                                 // destructor-relevant ones fire `destruct`, in the drop pass's order. Each
@@ -2522,11 +2616,14 @@ impl<'m> Vm<'m> {
                         dst,
                         src,
                         target,
+                        dynamic,
                         some_shape,
                         none_shape,
                     } => {
                         let v = regs[fbase + *src as usize];
-                        let result = if narrow_matches(v, target) {
+                        let dyn_target = runtime_narrow_target(regs, fbase, *dynamic);
+                        let target = dyn_target.as_ref().unwrap_or(target);
+                        let result = if narrow_matches(v, target, &self.module.reflection) {
                             retain(v);
                             let shape = self.persist.shapes[*some_shape as usize];
                             Value::enum_value(shape, vec![v])
@@ -2537,9 +2634,17 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
-                    Op::IsType { dst, src, target } => {
+                    Op::IsType {
+                        dst,
+                        src,
+                        target,
+                        dynamic,
+                    } => {
                         let v = regs[fbase + *src as usize];
-                        let result = Value::bool(narrow_matches(v, target));
+                        let dyn_target = runtime_narrow_target(regs, fbase, *dynamic);
+                        let target = dyn_target.as_ref().unwrap_or(target);
+                        let result =
+                            Value::bool(narrow_matches(v, target, &self.module.reflection));
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
@@ -2814,10 +2919,25 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
+                    Op::ReturnsOf { dst, src } => {
+                        // The runtime target string names a fn or method; materialize its return.
+                        let target = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                        let result = self.materialize_returns(&target);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
                     Op::FieldSpecsOf { dst, src } => {
                         // The runtime name string names a declared type; materialize its field schema.
                         let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
                         let result = self.materialize_field_specs(&name);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::VariantsOf { dst, src } => {
+                        // The runtime name string names a declared type; materialize its variant
+                        // schema (empty unless it is an enum).
+                        let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                        let result = self.materialize_variant_specs(&name);
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
@@ -2843,9 +2963,78 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
+                    // `type_name::<T>()` over the enclosing generic type's parameter: read
+                    // argument `index` off the receiver's reflected type tag.
+                    Op::TypeArgName {
+                        dst,
+                        src,
+                        index,
+                        names,
+                        span,
+                    } => {
+                        let repr = vm_type_repr(&regs[fbase + *src as usize]);
+                        let Some(name) = repr.type_arg_name(*index as usize) else {
+                            return Err(self.error(
+                                DiagnosticCode::InvalidTypeArguments,
+                                *span,
+                                noeta_ast::reflect::missing_type_arg_message(&names.0, &names.1),
+                            ));
+                        };
+                        let result = Value::string(&name);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    // The fn-side twin: a FORWARDED `type_name::<T>()` reads the qualified name
+                    // off the hidden slot's type-argument entry. Mirrors the tree-walker, and
+                    // mirrors the dynamic `AttributesOf` arm — same slot, entry and field.
+                    Op::TypeSlotName { dst, src, span } => {
+                        let idx = regs[fbase + *src as usize].as_int().unwrap_or(-1);
+                        let Some(entry) = module.type_args.get(idx.max(0) as usize) else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "corrupt hidden type-argument slot".to_string(),
+                            ));
+                        };
+                        let result = Value::string(&entry.name);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
                     Op::FieldsOf { dst, src } => {
                         let result = self.materialize_fields(regs[fbase + *src as usize]);
                         set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::TraitsOf { dst, src } => {
+                        let result = self.materialize_traits(regs[fbase + *src as usize]);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    // Stamp a fresh constructor's instantiation onto its result (generic
+                    // constructor reflection). The value was just returned by a call the checker
+                    // proved builds it fresh, so writing the tag in place is unobservable to any
+                    // other reference — there is none.
+                    Op::Retag { reg, repr } => {
+                        regs[fbase + *reg as usize]
+                            .set_reflect(Some(Rc::clone(&self.persist.type_reprs[*repr as usize])));
+                        pc += 1;
+                    }
+                    // The same stamp with the tag named at run time (generic-in-generic
+                    // construction): the hidden type-argument slot in `slot` indexes the module's
+                    // `type_args`, whose parallel `type_arg_reprs` entry is the interned tag. The
+                    // reference backend resolves the identical index in the identical table, which is
+                    // what makes the two agree; a corrupt slot or an entry with no reflection
+                    // projection leaves the value untagged (the head-only fallback), never guesses.
+                    Op::RetagDynamic { reg, slot } => {
+                        let idx = regs[fbase + *slot as usize].as_int().unwrap_or(-1);
+                        if idx >= 0
+                            && let Some(Some(repr)) =
+                                module.type_arg_reprs.get(idx as usize).copied()
+                        {
+                            regs[fbase + *reg as usize].set_reflect(Some(Rc::clone(
+                                &self.persist.type_reprs[repr as usize],
+                            )));
+                        }
                         pc += 1;
                     }
                     Op::TypeOfStatic { dst, repr } => {
@@ -2883,26 +3072,52 @@ impl<'m> Vm<'m> {
                         // the duration of the dispatch, then released after the call frame is built (its
                         // elements retained into it). `arg_items` below borrows from this temporary.
                         let mut args_to_release: Option<Value> = None;
+                        // A **named** `Map<string, dyn>` args operand (the same shape `Op::Construct`
+                        // takes) is projected to its `(name, value)` pairs here and bound to
+                        // parameters once the callee is known. The values share the map's references
+                        // exactly as `construct_dynamic`'s do, so there is no temporary to release;
+                        // a non-string key is dropped, as it is there.
+                        let named: Option<Vec<(String, Value)>> = args_val.is_map().then(|| {
+                            let keys = args_val.map_keys().expect("checked is_map");
+                            let vals = args_val.map_values().expect("checked is_map");
+                            keys.iter()
+                                .zip(vals)
+                                .filter_map(|(k, v)| match k {
+                                    noeta_stdlib::MapKey::Str(s) => {
+                                        Some((s.as_str().to_owned(), v))
+                                    }
+                                    _ => None,
+                                })
+                                .collect()
+                        });
                         // Resolve the dispatch by name: either a prototype to call (`Ok`) or a reason it
                         // failed (`Err(msg)` → `Result.Err`). Every resolution failure — non-string name,
-                        // non-list args, non-invokable receiver, unknown name, arity mismatch — is a
-                        // runtime `Err`, never an abort (only a panic *inside* the called body aborts).
-                        let outcome: Result<(InvokeTarget, Vec<Value>), String> = 'resolve: {
+                        // args that are neither a list nor a map, a non-invokable receiver, an unknown
+                        // name, an arity mismatch, an unknown or missing parameter in the named form —
+                        // is a runtime `Err`, never an abort (only a panic *inside* the called body
+                        // aborts).
+                        let outcome: Result<(InvokeTarget, Vec<Value>, Option<u64>), String> = 'resolve: {
                             let Some(method) = name_val.as_string() else {
                                 break 'resolve Err(format!(
                                     "invoke name must be a string, found {}",
                                     name_val.type_name()
                                 ));
                             };
-                            if !args_val.is_list() {
+                            if named.is_none() && !args_val.is_list() {
                                 break 'resolve Err(format!(
-                                    "invoke args must be a list, found {}",
+                                    "invoke args must be a list or a map, found {}",
                                     args_val.type_name()
                                 ));
                             }
-                            let args_list = args_val.realize_list();
-                            args_to_release = Some(args_list);
-                            let arg_items = args_list.list_items().expect("checked is_list");
+                            // A packed positional list is materialized to a temporary boxed list for
+                            // the duration of the dispatch; the named form reads the map directly.
+                            let arg_items: Vec<Value> = if named.is_some() {
+                                Vec::new()
+                            } else {
+                                let args_list = args_val.realize_list();
+                                args_to_release = Some(args_list);
+                                args_list.list_items().expect("checked is_list")
+                            };
                             // No receiver: the free-function form. The name resolves against the
                             // module's global slot table and nothing else — the same binding
                             // `Op::CallGlobal` reads for a statically-known top-level `fn`, which is
@@ -2919,20 +3134,29 @@ impl<'m> Vm<'m> {
                                     break 'resolve Err(free_fn_miss_message(&method));
                                 };
                                 // A free fn reserves no `self` register, so its declared arity is
-                                // the parameter count itself — unlike the method path below.
+                                // the parameter count itself — unlike the method path below — less
+                                // a forwarding generic's hidden type-argument slots, which are not
+                                // part of the surface signature the reflection artifact describes.
+                                // Counting them would report an arity the source never wrote;
+                                // `invoke` supplies no instantiation, so the CALL is what refuses
+                                // (see `Vm::no_instantiation`), and it must be reached to do so.
                                 let chunk =
                                     &module.protos[callee.as_closure().expect("filtered") as usize];
-                                let total = chunk.num_params as usize;
-                                let required = total - chunk.defaults.len();
-                                if arg_items.len() < required || arg_items.len() > total {
-                                    break 'resolve Err(arity_message(
-                                        "function",
-                                        required,
-                                        total,
-                                        arg_items.len(),
-                                    ));
-                                }
-                                break 'resolve Ok((InvokeTarget::Free(callee), arg_items));
+                                let total = chunk.num_params as usize - chunk.hidden as usize;
+                                break 'resolve match bind_invoke_args(
+                                    &module.reflection,
+                                    &method,
+                                    "function",
+                                    total,
+                                    chunk.defaults.len(),
+                                    arg_items,
+                                    named.as_deref(),
+                                ) {
+                                    Ok((args, supplied)) => {
+                                        Ok((InvokeTarget::Free(callee), args, supplied))
+                                    }
+                                    Err(message) => Err(message),
+                                };
                             };
                             // A type handle dispatches an associated function (no receiver); an object
                             // dispatches an instance method (receiver in register 0). A reflection `Type`
@@ -2961,17 +3185,26 @@ impl<'m> Vm<'m> {
                             // call), so its declared arity is one more than the supplied args; trailing
                             // defaults widen the accepted range, exactly as `Op::CallMethod`.
                             let callee_chunk = &module.protos[proto as usize];
-                            let total = callee_chunk.num_params as usize - 1;
-                            let required = total - callee_chunk.defaults.len();
-                            if arg_items.len() < required || arg_items.len() > total {
-                                break 'resolve Err(arity_message(
-                                    kind,
-                                    required,
-                                    total,
-                                    arg_items.len(),
-                                ));
-                            }
-                            Ok((InvokeTarget::Proto { proto, is_assoc }, arg_items))
+                            // `invoke` reckons arity over the VALUE parameters — a forwarding
+                            // generic's hidden slots are not part of the surface signature the
+                            // reflection artifact describes. It supplies none, so the push itself
+                            // aborts; reporting an arity the source never wrote first would only
+                            // mislead.
+                            let total =
+                                callee_chunk.num_params as usize - 1 - callee_chunk.hidden as usize;
+                            let (args, supplied) = match bind_invoke_args(
+                                &module.reflection,
+                                &format!("{type_name}.{method}"),
+                                kind,
+                                total,
+                                callee_chunk.defaults.len(),
+                                arg_items,
+                                named.as_deref(),
+                            ) {
+                                Ok(bound) => bound,
+                                Err(message) => break 'resolve Err(message),
+                            };
+                            Ok((InvokeTarget::Proto { proto, is_assoc }, args, supplied))
                         };
                         match outcome {
                             Err(message) => {
@@ -2986,8 +3219,9 @@ impl<'m> Vm<'m> {
                             // re-entry `map`/`filter` use — which carries the closure's upvalues and
                             // fills its defaults. Arity was pre-checked above, so `call_value`'s own
                             // (aborting) arity guard is unreachable and a soft `Err` is preserved.
-                            Ok((InvokeTarget::Free(callee), arg_items)) => {
-                                // `call_value` consumes owned arguments; the list still owns these.
+                            Ok((InvokeTarget::Free(callee), arg_items, supplied)) => {
+                                // `call_value_masked` consumes owned arguments; the list (or, in the
+                                // named form, the map) still owns these.
                                 let owned: Vec<Value> = arg_items
                                     .iter()
                                     .map(|&a| {
@@ -2998,12 +3232,13 @@ impl<'m> Vm<'m> {
                                 if let Some(list) = args_to_release.take() {
                                     list.release();
                                 }
-                                let result = self.call_value(callee, owned, *span)?;
+                                let result =
+                                    self.call_value_masked(callee, owned, *span, supplied)?;
                                 let ok = self.persist.shapes[*ok_shape as usize];
                                 set_reg(regs, fbase, *dst, Value::enum_value(ok, vec![result]));
                                 pc += 1;
                             }
-                            Ok((InvokeTarget::Proto { proto, is_assoc }, arg_items)) => {
+                            Ok((InvokeTarget::Proto { proto, is_assoc }, arg_items, supplied)) => {
                                 // An associated call leaves register 0 as unit (no receiver); an instance
                                 // call places the retained receiver there. The result is wrapped in
                                 // `Result.Ok` as it lands in the caller, so the invocation yields a
@@ -3020,11 +3255,18 @@ impl<'m> Vm<'m> {
                                     proto,
                                     recv,
                                     &arg_items,
+                                    // `invoke` is name-keyed with no static callee type, so it
+                                    // carries no instantiation: a forwarding generic reached this
+                                    // way aborts rather than bind a value argument into a type slot.
+                                    &[],
                                     *dst,
                                     RetTransform::WrapOk(ok),
                                     pc + 1,
-                                    // Reflective invocation builds its argument list positionally.
-                                    None,
+                                    // The prototype reserves register 0 for `self`, so every
+                                    // declared parameter's bit moves up by one — the same shift the
+                                    // compiler applies to a statically-named method call.
+                                    supplied.map(|m| (m << 1) | 1),
+                                    *span,
                                 )?;
                                 // Release the temporary boxed args list before transferring (its
                                 // elements were already retained into the call frame above); `take`
@@ -3072,13 +3314,22 @@ impl<'m> Vm<'m> {
                         fail,
                     } => {
                         let v = regs[fbase + *src as usize];
+                        let builtin_carrier =
+                            v.shape().is_some_and(|s| s.name.as_str() == "Result");
                         let matches = v.is_enum()
                             && v.shape().is_some_and(|shape| {
                                 shape.variant.as_deref() == Some(module.name(*variant))
                                     && type_name
                                         .is_none_or(|t| module.name(t) == shape.name.as_str())
                             })
-                            && v.enum_data().is_some_and(|d| d.len() == *arity as usize);
+                            && v.enum_data().is_some_and(|d| {
+                                d.len() == *arity as usize
+                                    || crate::lifecycle::unit_payload_match(
+                                        builtin_carrier,
+                                        d.len(),
+                                        *arity as usize,
+                                    )
+                            });
                         if matches {
                             pc += 1;
                         } else {
@@ -3099,8 +3350,13 @@ impl<'m> Vm<'m> {
                         }
                     }
                     Op::ExtractField { dst, src, index } => {
-                        let element =
-                            regs[fbase + *src as usize].enum_data().unwrap()[*index as usize];
+                        // Past the end only on the `unit_payload_match` path — a payload-less `Ok()`
+                        // reached through an `Ok(v)` pattern — where the payload is `void` and `unit`
+                        // is the whole of it.
+                        let element = regs[fbase + *src as usize]
+                            .enum_data()
+                            .and_then(|d| d.into_iter().nth(*index as usize))
+                            .unwrap_or_else(Value::unit);
                         retain(element);
                         set_reg(regs, fbase, *dst, element);
                         pc += 1;
@@ -3201,11 +3457,13 @@ impl<'m> Vm<'m> {
                                 proto,
                                 Some(left),
                                 &[right],
+                                &[],
                                 *dst,
                                 transform,
                                 pc + 1,
                                 // An operator/protocol dispatch of fixed arity — no labels reach it.
                                 None,
+                                *span,
                             )?;
                             continue 'reload;
                         }
@@ -3383,8 +3641,7 @@ impl<'m> Vm<'m> {
                     }
                     Op::Echo { reg } => {
                         let text = regs[fbase + *reg as usize].display();
-                        self.out.stdout.push_str(&text);
-                        self.out.stdout.push('\n');
+                        self.emit_stdout_line(&text);
                         pc += 1;
                     }
                     Op::Stringify { dst, src, span } => {
@@ -3415,11 +3672,13 @@ impl<'m> Vm<'m> {
                                 proto,
                                 Some(v),
                                 &[],
+                                &[],
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
                                 // An operator/protocol dispatch of fixed arity — no labels reach it.
                                 None,
+                                *span,
                             )?;
                             continue 'reload;
                         }
@@ -3475,6 +3734,7 @@ impl<'m> Vm<'m> {
                         dst,
                         callee,
                         args,
+                        type_args,
                         span,
                         supplied,
                     } => {
@@ -3490,9 +3750,10 @@ impl<'m> Vm<'m> {
                             *dst,
                             callee_val,
                             args,
+                            type_args.regs(),
                             *span,
                             pc + 1,
-                            *supplied,
+                            noeta_bytecode::supplied_of(*supplied),
                         )? {
                             continue 'reload;
                         }
@@ -3502,6 +3763,7 @@ impl<'m> Vm<'m> {
                         dst,
                         global,
                         args,
+                        type_args,
                         span,
                         supplied,
                     } => {
@@ -3528,9 +3790,10 @@ impl<'m> Vm<'m> {
                             *dst,
                             callee_val,
                             args,
+                            type_args.regs(),
                             *span,
                             pc + 1,
-                            *supplied,
+                            noeta_bytecode::supplied_of(*supplied),
                         )? {
                             continue 'reload;
                         }
@@ -3603,30 +3866,51 @@ impl<'m> Vm<'m> {
         proto: u32,
         recv: Option<Value>,
         args: &[Value],
+        ty_args: &[Value],
         ret_dst: u16,
         ret_transform: RetTransform,
         resume_pc: usize,
         supplied: Option<u64>,
+        span: Span,
     ) -> Result<(), Abort> {
         let module = self.module;
         let callee_chunk = &module.protos[proto as usize];
+        // A forwarding generic METHOD (Axis A) declares hidden type-argument slots; only a call
+        // with a static receiver type can fill them. The name-keyed entry points that route
+        // through here without one — `invoke`, a method handle, a `dyn` receiver — pass none, and
+        // binding positionally anyway would lay a value argument into a type slot.
+        let hidden = callee_chunk.hidden as usize;
+        if ty_args.len() != hidden {
+            let name = callee_chunk.name.clone();
+            return Err(self.no_instantiation(name.as_deref(), hidden, ty_args.len(), span));
+        }
+        let hidden_base = callee_chunk.hidden_base as usize;
         let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
         if let Some(r) = recv {
             retain(r);
             regs[new_base] = r;
         }
-        // Register 0 holds the receiver, so an argument lands one past the parameter it fills.
+        // The hidden block sits immediately after the receiver.
+        for (j, &t) in ty_args.iter().enumerate() {
+            retain(t);
+            regs[new_base + hidden_base + j] = t;
+        }
+        // Register 0 holds the receiver, so an argument lands one past the parameter it fills —
+        // and one hidden block further on, at a forwarding callee.
         for (i, &a) in args.iter().enumerate() {
             retain(a);
-            regs[new_base + noeta_bytecode::param_of_arg(i + 1, supplied)] = a;
+            let p = noeta_bytecode::param_of_arg(i + 1, supplied);
+            regs[new_base + noeta_bytecode::reg_of_param(p, hidden, hidden_base)] = a;
         }
         // Fill every parameter the call left out from its default thunk — the trailing ones under
-        // the ordinary prefix rule, plus any the mask says was skipped.
+        // the ordinary prefix rule, plus any the mask says was skipped. A default's register is
+        // absolute, so shift it back out of the hidden block to index the mask (a hidden slot
+        // never carries a default, so the subtraction is always in range).
         if !callee_chunk.defaults.is_empty() {
             let defaults = callee_chunk.defaults.clone();
             let n_args = args.len() + 1;
             for (reg, dproto) in &defaults {
-                if !noeta_bytecode::is_param_filled(*reg as usize, n_args, supplied) {
+                if !noeta_bytecode::is_param_filled(*reg as usize - hidden, n_args, supplied) {
                     let value = self.run_thunk(*dproto, &[])?;
                     regs[new_base + *reg as usize] = value;
                 }
@@ -3694,6 +3978,27 @@ pub(crate) fn elem_bin_op(op: noeta_ast::BinaryOp) -> Option<noeta_stdlib::ElemB
         noeta_ast::BinaryOp::Mul => noeta_stdlib::ElemBinOp::Mul,
         _ => return None,
     })
+}
+
+/// The narrowing target a [`Op::Narrow`]/[`Op::IsType`] with a **dynamic** head-name register
+/// resolves to, or `None` when the op carries no such register (the ordinary statically-written
+/// target, which stays authoritative).
+///
+/// The register holds the instantiation's qualified name as a string — put there by the same
+/// `TypeArgName`/`TypeSlotName` that serves `type_name::<T>()` — and it resolves through
+/// [`NarrowTarget::from_runtime_name`], the funnel the compiler reduces a written type name through.
+/// That shared funnel is what makes `v.as<T>()` at `T = int` answer what `v.as<int>()` does, and it
+/// mirrors the tree-walker, which re-enters its own `runtime_matches` on the name for the same reason.
+///
+/// A non-string register cannot arise from a checked program (both producers write a string), and a
+/// narrow has no failure channel, so it degrades to the baked target rather than aborting.
+pub(crate) fn runtime_narrow_target(
+    regs: &[Value],
+    fbase: usize,
+    dynamic: Option<u16>,
+) -> Option<NarrowTarget> {
+    let reg = dynamic?;
+    regs[fbase + reg as usize].with_str(NarrowTarget::from_runtime_name)
 }
 
 pub(crate) fn set_reg(regs: &mut [Value], base: usize, dst: u16, value: Value) {

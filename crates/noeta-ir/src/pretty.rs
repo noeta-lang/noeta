@@ -116,7 +116,16 @@ impl Printer<'_> {
                 };
                 self.line(indent, &head);
                 for arm in arms {
-                    self.line(indent + 1, &format!("{} =>", pattern_str(&arm.pattern)));
+                    match &arm.guard {
+                        Some(guard) => {
+                            self.line(indent + 1, &format!("{} if {{", pattern_str(&arm.pattern)));
+                            self.block_body(&guard.block, indent + 2);
+                            self.line(indent + 1, "} =>");
+                        }
+                        None => {
+                            self.line(indent + 1, &format!("{} =>", pattern_str(&arm.pattern)));
+                        }
+                    }
                     self.block_body(&arm.body, indent + 2);
                 }
                 self.line(indent, "}");
@@ -256,18 +265,38 @@ impl Printer<'_> {
                 bits,
                 ..
             } => format!("{}.{method:?}({}) w{bits}", atom(receiver), atoms(args)),
-            Rvalue::Call { callee, args, .. } => format!("call {}({})", atom(callee), atoms(args)),
+            // A forwarding call's type arguments render as a turbofish, and are absent — so the
+            // dump and its golden are unchanged — for every call that forwards nothing.
+            Rvalue::Call {
+                callee,
+                args,
+                type_args,
+                ..
+            } => format!(
+                "call {}{}({})",
+                atom(callee),
+                turbofish(type_args),
+                atoms(args)
+            ),
             Rvalue::Method {
                 receiver,
                 name,
                 args,
+                type_args,
                 reuse,
                 ..
             } => {
                 // The reuse token renders only when set (the rare collection method self-update), so
                 // every other method dump — and its golden — is unchanged.
                 let marker = if *reuse { " reuse" } else { "" };
-                format!("{}.{}({}){}", atom(receiver), name, atoms(args), marker)
+                format!(
+                    "{}.{}{}({}){}",
+                    atom(receiver),
+                    name,
+                    turbofish(type_args),
+                    atoms(args),
+                    marker
+                )
             }
             Rvalue::TraitMethod {
                 receiver,
@@ -374,12 +403,36 @@ impl Printer<'_> {
             }
             Rvalue::Closure { func, .. } => format!("closure fn({})", func.params.join(", ")),
             Rvalue::Try { operand, .. } => format!("{}?", atom(operand)),
-            Rvalue::As { operand, ty, .. } => format!("{}.as<{}>()", atom(operand), type_ref(ty)),
-            Rvalue::TypeTest { operand, ty, .. } => {
-                format!("{} is {}", atom(operand), type_ref(ty))
-            }
+            // A dynamic head name is rendered as the atom it arrives in, not as the erased `T` the
+            // baked `ty` still spells — a snapshot must show which target the narrow will use.
+            Rvalue::As {
+                operand,
+                ty,
+                dynamic,
+                ..
+            } => match dynamic {
+                Some(name) => format!("{}.as<name {}>()", atom(operand), atom(name)),
+                None => format!("{}.as<{}>()", atom(operand), type_ref(ty)),
+            },
+            Rvalue::TypeTest {
+                operand,
+                ty,
+                dynamic,
+                ..
+            } => match dynamic {
+                Some(name) => format!("{} is name {}", atom(operand), atom(name)),
+                None => format!("{} is {}", atom(operand), type_ref(ty)),
+            },
+            Rvalue::TypeArgName {
+                operand,
+                index,
+                param,
+                ..
+            } => format!("type_name::<{param}>({}[{index}])", atom(operand)),
+            Rvalue::TypeSlotName { slot, .. } => format!("type_name(${})", atom(slot)),
             Rvalue::TypeOf { operand, .. } => format!("type_of({})", atom(operand)),
             Rvalue::FieldsOf { operand, .. } => format!("fields_of({})", atom(operand)),
+            Rvalue::TraitsOf { operand, .. } => format!("traits_of({})", atom(operand)),
             Rvalue::MakeGen { step, .. } => format!("make_gen({})", atom(step)),
             Rvalue::MakeFuture { thunk, .. } => format!("make_future({})", atom(thunk)),
             Rvalue::RunFuture { future, .. } => format!("run_future({})", atom(future)),
@@ -404,7 +457,9 @@ impl Printer<'_> {
                 None => "roles_of()".to_string(),
             },
             Rvalue::ParamsOf { target, .. } => format!("params_of({})", atom(target)),
+            Rvalue::ReturnsOf { target, .. } => format!("returns_of({})", atom(target)),
             Rvalue::FieldSpecsOf { name, .. } => format!("field_specs_of({})", atom(name)),
+            Rvalue::VariantsOf { name, .. } => format!("variants_of({})", atom(name)),
             Rvalue::Construct { name, fields, .. } => {
                 format!("construct({}, {})", atom(name), atom(fields))
             }
@@ -450,6 +505,15 @@ fn dst_prefix(dst: &Option<crate::Temp>) -> String {
 
 fn atoms(atoms: &[Atom]) -> String {
     atoms.iter().map(atom).collect::<Vec<_>>().join(", ")
+}
+
+/// A call's TYPE arguments, rendered as a turbofish — and rendered as nothing at all for the
+/// overwhelming majority of calls, which forward none, so existing dumps are byte-identical.
+fn turbofish(type_args: &[Atom]) -> String {
+    if type_args.is_empty() {
+        return String::new();
+    }
+    format!("::<{}>", atoms(type_args))
 }
 
 fn atom(atom: &Atom) -> String {
@@ -512,34 +576,10 @@ fn pattern_str(pattern: &crate::Pattern) -> String {
     }
 }
 
+/// A [`TypeRef`]'s surface spelling for the IR dump, names **verbatim** — an IR dump is about
+/// identity, so a linker-qualified `app.models.User` must not shorten to `User`. The same
+/// `shape::type_source` the AST snapshot printer uses, for the same reason; this was a third
+/// hand-written copy of that walk.
 fn type_ref(ty: &TypeRef) -> String {
-    match ty {
-        TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),
-        TypeRef::AssocProjection { name, .. } => format!("Self::{name}"),
-        TypeRef::Named { name, args, .. } => {
-            if args.is_empty() {
-                name.clone()
-            } else {
-                let args: Vec<String> = args.iter().map(type_ref).collect();
-                format!("{name}<{}>", args.join(", "))
-            }
-        }
-        TypeRef::Optional { inner, .. } => format!("?{}", type_ref(inner)),
-        TypeRef::Union { members, .. } => {
-            members.iter().map(type_ref).collect::<Vec<_>>().join(" | ")
-        }
-        TypeRef::Tuple { elements, .. } => {
-            format!(
-                "({})",
-                elements.iter().map(type_ref).collect::<Vec<_>>().join(", ")
-            )
-        }
-        TypeRef::Fn { params, ret, .. } => {
-            format!(
-                "({}) -> {}",
-                params.iter().map(type_ref).collect::<Vec<_>>().join(", "),
-                type_ref(ret)
-            )
-        }
-    }
+    noeta_ast::shape::type_source(ty)
 }

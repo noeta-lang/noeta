@@ -67,6 +67,66 @@ fn doc_attaches_to_the_following_declaration() {
 }
 
 #[test]
+fn doc_tier_stamps_members_and_traits_not_only_top_level_declarations() {
+    // The `#[Doc]` stamp reaches **every** declaration a `@doc` block may legally attach to — the
+    // `doc` tier's four declared sites — keyed by the reflection manifest's own target convention,
+    // so a member's prose joins with `params_of`/`returns_of` on one `Type.method` key.
+    //
+    // A method was the gap this pins: its `@doc` resolved (`noeta doc` extracted it) but only
+    // top-level statements were stamped, so a framework deriving an operation's description from
+    // its handler's prose — a handler is always a method — got nothing, and the only alternative
+    // was an attribute repeating documentation the author had already written. A trait was the
+    // same gap: prose above one resolves to the trait, and the stamping walk had no arm for it.
+    let file = temp_program(
+        "doc_members",
+        "use std.doc.Doc\n\
+         @doc { A function. }\n\
+         fn top(): int { return 1 }\n\
+         @doc { A trait. }\n\
+         trait Area { fn area(): int }\n\
+         @doc { A class. }\n\
+         class K {\n\
+             pub n: int\n\
+             @doc { A class method. }\n\
+             fn double(): int { return self.n * 2 }\n\
+             impl Area {\n\
+                 @doc { An in-body impl method. }\n\
+                 fn area(): int { return self.n }\n\
+             }\n\
+         }\n\
+         struct P { y: int }\n\
+         impl Area for P {\n\
+             @doc { A standalone impl method. }\n\
+             fn area(): int { return self.y }\n\
+         }\n\
+         for d in attributes_of::<Doc>() { echo \"${d.target}=${d.value.text.trim()}\" }\n",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .arg("--tier")
+        .arg("doc")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("top=A function.")
+                .and(predicate::str::contains("Area=A trait."))
+                .and(predicate::str::contains("K=A class."))
+                .and(predicate::str::contains("K.double=A class method."))
+                .and(predicate::str::contains("K.area=An in-body impl method."))
+                .and(predicate::str::contains("P.area=A standalone impl method.")),
+        );
+    // Without the tier nothing is stamped anywhere — production carries no doc text for a member
+    // any more than for a top-level fn.
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
 fn doc_out_generates_the_registry_artifact() {
     // `noeta doc --out DIR` generates the package documentation artifact: a schema-versioned
     // `docs.json` keyed by the `[package]` identity (the canonical, registry-indexable form)
@@ -248,8 +308,7 @@ fn pure_source_package_publishes_and_resolves_from_the_registry() {
     .unwrap();
     std::fs::write(
         repo.join("page.noe"),
-        "namespace view.page;\n\
-         pub struct Page { title: string }\n\
+        "         pub struct Page { title: string }\n\
          pub fn render(p: Page): string { return \"<h1>\" ~ p.title ~ \"</h1>\" }\n",
     )
     .unwrap();
@@ -350,4 +409,109 @@ fn doc_unterminated_block_is_reported() {
     // swallow.
     let file = temp_program("doc_unterminated", "@doc {\n  # never closed\n");
     lang().arg("doc").arg(&file).assert().failure().code(1);
+}
+
+// --- `noeta doc` over a project (dev-story sweep) ------------------------------------
+
+#[test]
+fn doc_covers_the_entrys_modules_not_just_the_entry() {
+    // A `@doc` block is adjacency-resolved against the file it sits in, and linking merges a
+    // module's *declarations* without the doc blocks beside them — so extraction from the linked
+    // program silently dropped the documentation of every imported symbol. A two-module project
+    // printed the entry's docs and nothing else, even for the module function it calls.
+    let dir = temp_dir(
+        "doc_project",
+        &[
+            (
+                "src/util.noe",
+                "namespace Proj.Util;\n\
+                 @doc {\n    Doubles `n`.\n}\n\
+                 pub fn double(n: int): int { return n * 2; }\n",
+            ),
+            (
+                "src/main.noe",
+                "use Proj.Util.double\n\
+                 @doc {\n    The entry helper.\n}\n\
+                 fn helper(): int { return double(21); }\n\
+                 echo helper();\n",
+            ),
+        ],
+    );
+    lang()
+        .arg("doc")
+        .arg(dir.join("src/main.noe"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("The entry helper.")
+                .and(predicate::str::contains("Doubles `n`."))
+                .and(predicate::str::contains("· double")),
+        );
+}
+
+#[test]
+fn doc_on_a_directory_extracts_every_file() {
+    let dir = temp_dir(
+        "doc_dir",
+        &[
+            (
+                "src/a.noe",
+                "@doc {\n    Alpha.\n}\nfn a(): int { return 1; }\n",
+            ),
+            (
+                "nested/b.noe",
+                "@doc {\n    Beta.\n}\nfn b(): int { return 2; }\n",
+            ),
+        ],
+    );
+    lang()
+        .arg("doc")
+        .arg(&dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Alpha.").and(predicate::str::contains("Beta.")));
+}
+
+#[test]
+fn doc_on_a_directory_skips_a_file_that_does_not_parse() {
+    // Extraction works on a parse alone — that is what makes it useful on work-in-progress code —
+    // so a broken sibling contributes nothing rather than taking the whole run down.
+    let dir = temp_dir(
+        "doc_dir_broken",
+        &[
+            (
+                "src/ok.noe",
+                "@doc {\n    Good.\n}\nfn a(): int { return 1; }\n",
+            ),
+            ("src/broken.noe", "fn ( unbalanced\n"),
+        ],
+    );
+    lang()
+        .arg("doc")
+        .arg(&dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Good."));
+}
+
+#[test]
+fn doc_out_on_a_directory_names_the_entry_it_needs() {
+    // `--out` builds a *package's* artifact, keyed by the `[package]` identity beside its entry, so
+    // it needs that entry named. Extracting to stdout instead would silently drop the flag.
+    let dir = temp_dir(
+        "doc_out_dir",
+        &[(
+            "src/main.noe",
+            "@doc {\n    A.\n}\nfn a(): int { return 1; }\n",
+        )],
+    );
+    lang()
+        .arg("doc")
+        .arg(&dir)
+        .arg("--out")
+        .arg(dir.join("built"))
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("name its entry `.noe` file"));
 }

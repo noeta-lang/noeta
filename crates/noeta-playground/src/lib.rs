@@ -93,7 +93,10 @@ fn run_with_executor(
     executor: Box<dyn noeta_stdlib::Executor>,
 ) -> String {
     let (db, src, diagnostics) = front_end(text);
-    if !diagnostics.is_empty() {
+    // Errors only: a warning describes a well-formed program, so it is reported *with* the run's
+    // own diagnostics below rather than standing in for one — the playground must not refuse to run
+    // what `check` calls fine.
+    if blocking(&diagnostics) {
         return json!({ "compiled": false, "diagnostics": diagnostics }).to_string();
     }
 
@@ -103,21 +106,29 @@ fn run_with_executor(
         Err(unsupported) => {
             // By construction every checked program compiles (the differential holds the VM at
             // 100% coverage); surface the invariant breach rather than mislabel it a user error.
+            let located: Vec<_> = unsupported
+                .diagnostic()
+                .iter()
+                .map(|d| noeta_diagnostics::to_json(&sources, d))
+                .collect();
             return json!({
                 "compiled": false,
-                "diagnostics": [],
-                "error": format!("internal error: the VM cannot compile this program: {}", unsupported.reason),
+                "diagnostics": located,
+                "error": unsupported.to_string(),
             })
             .to_string();
         }
     };
 
     let (result, trace) = noeta_vm::VmBackend::new().run_module_debug(module, host, executor, None);
-    let runtime_diagnostics: Vec<_> = result
-        .diagnostics
-        .iter()
-        .map(|d| noeta_diagnostics::to_json(&sources, d))
-        .collect();
+    // Compile-time warnings first, then whatever the run reported.
+    let mut runtime_diagnostics = diagnostics;
+    runtime_diagnostics.extend(
+        result
+            .diagnostics
+            .iter()
+            .map(|d| noeta_diagnostics::to_json(&sources, d)),
+    );
     let rendered_trace = (trace.len() >= 2).then(|| noeta_vm::render_trace(&trace, &sources));
     json!({
         "compiled": true,
@@ -145,6 +156,13 @@ pub fn fmt_source(text: &str) -> String {
         })
         .to_string(),
     }
+}
+
+/// Whether any of `diagnostics` blocks. The wasm surface carries diagnostics in their resolved
+/// JSON form, so the severity is a word here rather than the enum — but the question, and the
+/// answer, are `noeta_diagnostics::has_errors`'.
+fn blocking(diagnostics: &[noeta_diagnostics::JsonDiagnostic]) -> bool {
+    diagnostics.iter().any(|d| d.severity == "error")
 }
 
 /// The shared front end: lex + parse + type-check `text` through the salsa graph, with every

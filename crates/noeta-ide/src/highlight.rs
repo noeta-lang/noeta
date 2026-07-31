@@ -48,12 +48,37 @@ pub struct HlSpan {
     pub class: HlClass,
 }
 
-/// The built-in value-type names the checker knows lexically — colored as types even though the
-/// lexer sees plain identifiers.
-const PRIMITIVES: &[&str] = &[
-    "int", "float", "bool", "string", "void", "dyn", "bytes", "u8", "u16", "u32", "u64", "i8",
-    "i16", "i32", "i64", "f32", "f64",
-];
+/// Whether an identifier is a built-in **scalar** type name — colored as a type even though the
+/// lexer sees a plain identifier. Decodes through the [`noeta_ast::BuiltinTy`] funnel and matches
+/// exhaustively, replacing a hand list that had drifted (`unit` was missing). The containers and
+/// abstract kind-types deliberately answer `false`: their canonical spellings are colored by the
+/// uppercase-initial heuristic, while the bare `list`/`map`/`set` spellings collide with the
+/// like-named methods (`x.map(…)`) and would steal the function color, so they stay uncolored.
+fn is_primitive_type_name(word: &str) -> bool {
+    use noeta_ast::BuiltinTy::*;
+    match noeta_ast::BuiltinTy::from_name_any(word) {
+        // `never` colors as a type name like the other scalars. It is not a keyword — an ordinary
+        // `fn never()` is still a function — but in the one position it appears (a return
+        // annotation) it reads as the type it is.
+        Some(
+            Int
+            | Float
+            | F32
+            | F64
+            | IntN { .. }
+            | Bool
+            | Str
+            | Bytes
+            | Unit
+            | Dyn
+            | Never
+            | Number,
+        ) => true,
+        Some(List | Set | Map | Option | Result | KindEnum | KindStruct | KindClass) | None => {
+            false
+        }
+    }
+}
 
 fn is_keyword(kind: TokenKind) -> bool {
     use TokenKind::*;
@@ -94,10 +119,16 @@ fn is_keyword(kind: TokenKind) -> bool {
             | IsKw
             | AttributesOfKw
             | TypeOfKw
+            | TypeNameKw
             | FieldsOfKw
+            | TraitsOfKw
             | FromBytesKw
             | RolesOfKw
             | ParamsOfKw
+            | ReturnsOfKw
+            | FieldSpecsOfKw
+            | VariantsOfKw
+            | ConstructKw
             | InvokeKw
     )
 }
@@ -133,7 +164,7 @@ pub fn highlight_code(text: &str) -> Vec<HlSpan> {
                         Some(HlClass::Decorator)
                     } else if word == "self" {
                         Some(HlClass::Keyword)
-                    } else if PRIMITIVES.contains(&word)
+                    } else if is_primitive_type_name(word)
                         || word.chars().next().is_some_and(|c| c.is_uppercase())
                     {
                         Some(HlClass::Type)

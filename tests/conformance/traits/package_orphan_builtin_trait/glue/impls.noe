@@ -1,0 +1,8 @@
+// A **built-in** trait is not a local trait for anybody: it belongs to no package, so it can never
+// be the side that makes an impl legal. Package `glue` therefore has to own the TYPE to implement
+// `Clone` for it — and it does not.
+// (This file sits at `glue/impls.noe`, so its module path derives as `glue.impls`.)
+
+use b.thing.{Thing};
+
+impl Clone for Thing {}

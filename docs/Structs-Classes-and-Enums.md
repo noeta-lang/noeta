@@ -86,23 +86,35 @@ p = Point { x: 1, y: 2 }
 
 **Field-init shorthand** puns an in-scope variable of the same name:
 
-```noeta check
+```noeta
+struct User { name: string  email: string }
+
 name = "Ada"; email = "ada@x.io"
 u = User { name, email }    // ≡ User { name: name, email: email }
+echo u                      // User {name: "Ada", email: "ada@x.io"}
 ```
 
 The **empty literal** `T {}` is valid iff every field has a default:
 
-```noeta check
-c = Cfg { name: "x" }   // ok
-d = Defaults {}         // ok only if every field of Defaults has a default
+```noeta
+struct Defaults {
+    retries: int = 3
+    verbose: bool = false
+}
+d = Defaults {}         // ok — every field of Defaults has a default
+echo d.retries          // 3
 ```
 
-**Spread** `T { ...base, f: override }` copies every field from `base`, then applies overrides. The original is unchanged (structural update):
+**Spread** `T { ...base, f: override }` fills every field you don't list explicitly from `base`. It is **position-independent**: an explicitly listed field wins whether it is written before or after the `...base`. The original is unchanged (structural update):
 
-```noeta check
+```noeta
+struct Money { amount: int  currency: string }
+
 a = Money { amount: 100, currency: "USD" }
 b = Money { amount: 300, ...a }    // amount: 300, currency: "USD"
+c = Money { ...a, amount: 300 }    // the same — the explicit field wins either way
+echo b == c        // true
+echo a             // Money {amount: 100, currency: "USD"} — the original is unchanged
 ```
 
 ## Methods and `self`
@@ -162,6 +174,25 @@ enum Direction: string {                                 // string-backed
 }
 ```
 
+A payload field may be **named** (`NegativePrice(index: int)`) or **positional** (`NegativePrice(int)`) — the name is documentation, since construction and `match` both bind by position. Either way the payload is a *type*, so it may be anything a type annotation may: an imported or fully-qualified name, generic arguments, `?T`, a tuple, a function type.
+
+```noeta
+use std.id.Uuid
+
+enum Event {
+    Started(Uuid)                                        // an imported type
+    Tagged(List<string>)                                 // generic arguments
+    Scored(name: string, points: int)                    // named, several fields
+    Missing
+}
+echo match Event.Tagged(["a", "b"]) {
+    Event.Started(u)   => "start",
+    Event.Tagged(tags) => "${tags.len()} tags",
+    Event.Scored(n, p) => "${n}=${p}",
+    Event.Missing      => "-",
+}
+```
+
 Construct with `Enum.Variant` (or `Enum.Variant(payload)`), compare with `==`, and destructure in a `match`:
 
 ```noeta
@@ -186,7 +217,28 @@ enum Level {
 echo Level.High.rank()   // 2
 ```
 
-A **string-backed** enum gets `Enum.try_from(s): ?Enum` (name-matched, `none` on miss) and `Enum.from(s): Enum` (panics on miss). Payload variants are not name-constructible.
+### Converting a wire value to a case
+
+Every enum gets a pair: `Enum.try_from(v): ?Enum` (`none` on a miss) and `Enum.from(v): Enum` (panics on a miss) — the recoverable/aborting shape the [rest of the language uses](Error-Handling#aborting-and-recoverable-doors). Reach for `try_from` whenever the value came from outside the program; `from` when a bad value means the program itself is wrong.
+
+The value is matched against each case's **backing first, then its name**. A backed enum's backing is what its JSON Schema advertises and what a real document carries, so that is what a wire-facing conversion reads:
+
+```noeta
+enum Plan: string { Free = "free"; Paid = "paid" }
+enum Code: int { Ok = 200; Missing = 404 }
+
+echo Plan.try_from("free")     // some(Plan.Free)   — the backing
+echo Plan.try_from("Free")     // some(Plan.Free)   — the case name still works
+echo Plan.try_from("gold")     // none
+echo Code.try_from(404)        // some(Code.Missing) — backings are typed, so this takes an int
+echo Plan.from("paid")         // Plan.Paid
+```
+
+A **plain** enum has no backings, so its case names are what select — which is also exactly what its schema advertises. The argument type follows the backing: a `string`-backed or plain enum takes a `string`, an `int`-backed one takes `int | string`.
+
+Payload-carrying variants are never selected: there is no payload to supply. Build those with [`construct("Enum.Variant", payload)`](Attributes-and-Reflection#constructing-an-enum-case).
+
+To decode an enum sitting inside a larger document, derive [`Deserialize<Json>`](Derives#enum-typed-fields) on the enclosing type instead — the same backing-versus-name rule applies there, with path-carrying errors.
 
 ## Tuples
 

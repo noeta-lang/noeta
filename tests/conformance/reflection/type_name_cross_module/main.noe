@@ -1,0 +1,21 @@
+// `type_name::<T>()` written with a **local alias** yields the DECLARING module's identity, not the
+// alias. This is the case a name-keyed repository actually depends on: `para/db`'s `Repository` takes
+// its model's qualified identity, and had to be handed a hand-written `"app.storage.Todo"` because
+// generics are erased and the runtime registries are name-keyed. Written as `type_name::<Task>()` it
+// is compile-checked, rename-safe, and — as here — independent of what the importer calls the type.
+//
+// The entry is a different module (`app.main`), so nothing but the linker's import map can supply
+// the qualification; the type reaching lowering as a `TypeRef` rather than a string is what lets it.
+// expect: stdout "aliased: app.storage.Todo"
+// expect: stdout "direct: app.storage.Todo"
+// expect: stdout "agrees with type_of: true"
+// expect: stdout "schema: 2"
+// expect: exit 0
+use app.storage.Todo as Task;
+
+echo "aliased: ${type_name::<Task>()}";
+
+t = Task { id: 1, title: "a" };
+echo "direct: ${type_name::<app.storage.Todo>()}";
+echo "agrees with type_of: ${"${type_of(t)}" == "Type.Struct(${type_name::<Task>()}, [])"}";
+echo "schema: ${field_specs_of(type_name::<Task>()).len()}";

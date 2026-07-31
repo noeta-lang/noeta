@@ -11,12 +11,16 @@ A round-up of the performance story, including the numeric-layout work and one i
 | Inline caches on property/method sites | `noeta-vm` | [The Virtual Machine](The-Virtual-Machine) |
 | Register allocation via graph coloring | `noeta-compiler` | [The Virtual Machine](The-Virtual-Machine) |
 | Tier-1 Cranelift JIT (hot-counter + OSR) | `noeta-jit` | [The Virtual Machine](The-Virtual-Machine#tier-1--the-jit) |
-| SSA register promotion + typed/unboxed values (P-JSSA) | `noeta-jit` | [The Virtual Machine](The-Virtual-Machine#registers-live-in-ssa-mem2reg) |
+| SSA register promotion + typed/unboxed values | `noeta-jit` | [The Virtual Machine](The-Virtual-Machine#registers-live-in-ssa-mem2reg) |
 | Fast call convention + call-site inline caches | `noeta-jit` | [The Virtual Machine](The-Virtual-Machine#calls-stay-native--the-fast-call-convention) |
 | Compiled precise reference counting | `noeta-ir-passes` | [Memory Management](Memory-Management) |
 | In-place reuse (O(n²) → O(n) appends) | `noeta-ir-passes` | [Memory Management](Memory-Management) |
 | Incremental recompilation (salsa) | `noeta-db` | [Architecture & Pipeline](Architecture-and-Pipeline) |
 | Numeric layout + autovectorization | `noeta-stdlib` | this page |
+
+## Finding the hot spots
+
+Before optimizing, measure: [`noeta profile`](Profiling) reports where a program spends its time — an exact per-function call-count/self-time table (`--instrument`) or a wall-time **flamegraph** (SVG / speedscope). It profiles the production VM tier-0, so it shows the language-level shape of a run (which function/line is hot); see [Profiling](Profiling) for what tier-0 does and does not reflect.
 
 ## Memory management is a performance feature
 
@@ -28,7 +32,7 @@ The VM's speed comes from *cheap, predictable* operations: values are one word (
 
 ## A second tier: the JIT
 
-The interpreter above is Tier 0. Hot prototypes are compiled to native code by a **Tier-1 [Cranelift](https://cranelift.dev/) JIT** (`noeta-jit`, behind the `jit` cargo feature — on in the shipped binary, absent in a `--no-default-features` build). It is a *method* JIT with the values genuinely in machine registers: VM registers are held in **SSA** across the whole compiled region (heap values included), a kind dataflow lets typed arithmetic run **unboxed** with the NaN-box checks gone from loop bodies, and calls use a **fast convention** (per-call-site inline caches, arguments in machine arguments, native frame push and teardown) so recursion never leaves native code. Anything the JIT doesn't specialize calls back into the interpreter's own code, so the two tiers can never disagree; promotion is a hot-counter plus **on-stack replacement (OSR)**, and compiled code runs on the interpreter's own register stack so deopt is a bare pc-return. A dedicated `--jit-differential` oracle asserts the JIT is byte-identical to the interpreter, leak-free, *and* refcount-anomaly-free on every program. Measured on the cross-language suite: a fn-local counting loop runs ~2.3× faster and recursive `fib` ~4.3× faster than the pre-SSA JIT — putting Noeta in the method-JIT class on scalar loops (within ~1.7× of PHP 8.4's JIT) while keeping its existing wins (SoA columns, string building, startup). Full mechanism (deopt contract, verified claims, the fast call convention, refcounts across the tier boundary, and the instructive negative results) in [The Virtual Machine → Tier 1](The-Virtual-Machine#tier-1--the-jit); the milestone record with all measurements is the JIT-SSA arc ledger in `plans/` git history.
+The interpreter above is Tier 0. Hot prototypes (hot-counter plus on-stack replacement) are compiled to native code by a **Tier-1 [Cranelift](https://cranelift.dev/) JIT** (`noeta-jit`, behind the `jit` cargo feature — on in the shipped binary, absent in a `--no-default-features` build). It is a *method* JIT with the values genuinely in machine registers — SSA across the compiled region, typed arithmetic unboxed, a fast native call convention — while anything it doesn't specialize calls back into the interpreter's own code, so the two tiers can never disagree; a dedicated `--jit-differential` oracle asserts the JIT is byte-identical to the interpreter, leak-free, and refcount-anomaly-free on every program. Measured on the cross-language suite, this puts Noeta in the method-JIT class on scalar loops (a counting loop ~2.3× and recursive `fib` ~4.3× over the pre-SSA JIT, within ~1.7× of PHP 8.4's JIT). The full mechanism — deopt contract, verified claims, the fast call convention, refcounts across the tier boundary, and the instructive negative results — is in [The Virtual Machine → Tier 1](The-Virtual-Machine#tier-1--the-jit).
 
 ## Numeric layout and SIMD — a case study
 
@@ -58,16 +62,7 @@ For editor-speed feedback, the compiler is a salsa query graph: editing one modu
 
 Honestly noted, so the picture is complete:
 
-- **Explicit SIMD intrinsics** (`Simd<T, N>` + const generics) as a later track — the shipped approach deliberately relies on layout (the SoA columns above) + autovectorization instead, which benched *faster* than hand-written intrinsics.
-
-Two items formerly listed here have since resolved: zero-copy cross-thread **borrow-share** for isolates shipped (interned `&'static` shapes + the `SharedRegion` spawn path — see [Concurrency Internals](Concurrency-Internals)), and the `gc-arena` tracing idea was superseded — cycle collection ships as the refcount GC's backup trace + trial-deletion collectors (see [Memory Management](Memory-Management)).
-
-## Finding the hot spots
-
-Before optimizing, measure: [`noeta profile`](Profiling) reports where a program spends its time — an
-exact per-function call-count/self-time table (`--instrument`) or a wall-time **flamegraph** (SVG /
-speedscope). It profiles the production VM tier-0, so it shows the language-level shape of a run
-(which function/line is hot); see [Profiling](Profiling) for what tier-0 does and does not reflect.
+- **Explicit SIMD intrinsics** (`Simd<T, N>` + const generics) are designed but not built. The shipped approach deliberately relies on layout (the SoA columns above) + autovectorization instead, which benched *faster* than hand-written intrinsics.
 
 ## See also
 

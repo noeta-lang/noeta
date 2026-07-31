@@ -2,6 +2,7 @@
 //! bundle-method dispatch (kernel-methods K2), namespace-group resolution, and the full
 //! `synth_member` receiver dispatch. All `Checker` methods moved verbatim out of the crate root.
 
+use crate::expr::calls::closed_to_new_methods;
 use crate::*;
 
 impl Checker {
@@ -47,7 +48,7 @@ impl Checker {
             name: recv_name,
             span: recv_span,
         } = receiver
-            && !lookup_mutable(env, recv_name)
+            && !lookup_mutable(env, recv_name.as_str())
         {
             self.error(
                 DiagnosticCode::ImmutableAssignment,
@@ -109,12 +110,12 @@ impl Checker {
                 .get(&name)
                 .cloned()
                 .unwrap_or_default();
-            let subst: HashMap<String, Type> = params
+            let subst: Subst = params
                 .iter()
-                .cloned()
+                .map(|p| p.id)
                 .zip(recv_args.iter().cloned())
                 .collect();
-            let pset: HashSet<String> = params.into_iter().collect();
+            let pset: ParamSet = params.iter().map(|p| p.id).collect();
             let expected = erase_type_params(apply_subst(&fty, &subst), &pset);
             if !self.assignable(&vty, &expected) {
                 self.error(
@@ -139,7 +140,8 @@ impl Checker {
         &mut self,
         recv: &Type,
         name: &str,
-        args: &[Type],
+        args: &mut [Type],
+        arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         call_span: Span,
     ) -> Option<Type> {
@@ -164,21 +166,48 @@ impl Checker {
                 .find(|m| m.sig.name == name && m.receiver == receiver_kind)
                 .map(|m| (b.bundle.qualified(), m, b.bundle.assoc_types))
         })?;
-        let params = stdlib::bundle_method_params(self.reg(), &method.sig, args);
+        // `Self` is the IMPLEMENTOR — the bound `@packed` struct — not the receiver: an `Element`
+        // method's receiver is `Self` while a `Bulk` method's is `List<Self>`, and both spell their
+        // operand relative to the same type. The uniform element backs `Self::Name` projections
+        // (`dot` → `int` for an i16 vector, `f32` for an f32 one). Both are resolved BEFORE the
+        // parameter types, which now depend on them.
+        let self_ty = Type::Named(type_name.clone(), vec![]);
+        let elem = self
+            .packed_layout(&self_ty)
+            .and_then(|layout| stdlib::packed_elem_type(&layout));
+        let params = stdlib::bundle_method_params(
+            self.reg(),
+            &method.sig,
+            args,
+            &self_ty,
+            assoc_types,
+            elem.as_ref(),
+        );
         let required = noeta_ext_abi::SigType::required_count(method.sig.params);
-        self.check_args(&params, required, args, &[], span, name);
+        // A kernel method's declared parameter names bind a label here, through the same
+        // `order_arguments` a declared call uses — `v.scale(factor: 2.0)`. Passing the argument
+        // EXPRESSIONS (this used to pass `&[]`) is also what lets `check_args` see a label it
+        // cannot bind and refuse it, instead of the list arriving label-free and the label being
+        // silently dropped on the floor.
+        let bound = self.bind_sig_args(
+            &method.sig,
+            arg_exprs,
+            &params,
+            required,
+            args,
+            span,
+            call_span,
+        );
+        let arg_exprs = bound.as_deref().unwrap_or(arg_exprs);
+        self.check_args(&params, required, args, arg_exprs, span, name);
         // Record the `(trait, method)` route: the fold-in unified the bundle runtime route onto the
         // trait route, so every kernel method dispatches through `Registry::dispatch_trait_method`.
         self.sites
             .trait_call_sites
             .insert(call_span, (trait_q, name.to_string()));
-        // Resolve the bound shape's uniform element type, so a `Self::Wide` / `Self::Float` return
-        // types against the concrete field kind of the struct this trait was `impl`-bound to — `dot`
-        // → `int` for an i16 vector, `f32` for an f32 vector. The bound struct is the receiver's own
-        // `@packed` type; `SameAsArg(0)` returns are `Self` (element) / `List<Self>` (bulk).
-        let elem = self
-            .packed_layout(&Type::Named(type_name.clone(), vec![]))
-            .and_then(|layout| stdlib::packed_elem_type(&layout));
+        // The same `elem` resolved above types the `Self::Wide` / `Self::Float` returns against the
+        // concrete field kind of the struct this trait was `impl`-bound to; `SameAsArg(0)` returns
+        // are `Self` (element) / `List<Self>` (bulk).
         Some(stdlib::bundle_method_return(
             self.reg(),
             &method.sig,
@@ -224,19 +253,19 @@ impl Checker {
         // carry no type parameters, so no substitution is needed.
         let decl = self.symbols.user_traits.get(&local)?;
         let m = decl.methods.iter().find(|m| m.sig.name == name)?;
-        let params: Vec<Type> = m
-            .sig
-            .params
-            .iter()
-            .map(|p| param_type(p, &self.imports.extern_types))
-            .collect();
+        let params: Vec<Type> = m.sig.params.iter().map(|p| self.annot_param(p)).collect();
         let required = required_params(&m.sig.params);
-        let ret = m
-            .sig
-            .ret
-            .as_ref()
-            .map(|t| from_ref_q(t, &self.imports.extern_types))
-            .unwrap_or(Type::Unknown);
+        // `async` is part of the return type on every path that reads a signature (`async fn m(): T`
+        // is called for a `Future<T>`), so this one wraps too — a native trait's synthesized decl is
+        // never `async` today, but the rule belongs with the read, not with today's registry.
+        let ret = async_return(
+            m.sig
+                .ret
+                .as_ref()
+                .map(|t| self.annot(t))
+                .unwrap_or(Type::Unknown),
+            m.sig.is_async,
+        );
         self.sites
             .trait_call_sites
             .insert(call_span, (qualified, name.to_string()));
@@ -253,35 +282,43 @@ impl Checker {
     /// the caller stays lenient exactly as before (bounds license, they don't close the world).
     pub(crate) fn type_param_trait_method(
         &self,
-        param: &str,
+        param: &ParamRef,
         name: &str,
     ) -> Option<(Vec<Type>, usize, Type)> {
-        let bounds = self.coloring.type_params.get(param)?;
-        for b in bounds {
+        let bounds = self.param_bounds(param)?.to_vec();
+        for b in &bounds {
             let Some(decl) = self.symbols.user_traits.get(&b.name) else {
                 continue;
             };
             let Some(m) = decl.methods.iter().find(|m| m.sig.name == name) else {
                 continue;
             };
-            let subst: HashMap<String, Type> = decl
+            // The trait's method signature is written in the TRAIT's scope, not the caller's, so
+            // it is resolved against the trait's own `<…>` — otherwise a `K` in the signature would
+            // resolve to whatever the caller happens to spell `K` (or to nothing at all), and the
+            // substitution below would miss. That the two used to agree was an accident of both
+            // being name-keyed.
+            let trait_scope = param_scope(&decl.type_params, &self.imports.extern_types);
+            let subst: Subst = decl
                 .type_params
                 .iter()
                 .enumerate()
-                .map(|(i, tp)| (tp.name.clone(), b.args.get(i).cloned().unwrap_or(Type::Dyn)))
+                .map(|(i, tp)| {
+                    (
+                        ParamId::at(tp.span),
+                        b.args.get(i).cloned().unwrap_or(Type::Dyn),
+                    )
+                })
                 .collect();
+            let sig_ty = |t: &TypeRef| from_ref_q(t, &self.imports.extern_types, &trait_scope);
             let params: Vec<Type> = m
                 .sig
                 .params
                 .iter()
-                .map(|p| apply_subst(&param_type(p, &self.imports.extern_types), &subst))
+                .map(|p| apply_subst(&p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown), &subst))
                 .collect();
             let ret = async_return(
-                m.sig
-                    .ret
-                    .as_ref()
-                    .map(|t| from_ref_q(t, &self.imports.extern_types))
-                    .unwrap_or(Type::Unknown),
+                m.sig.ret.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
                 m.sig.is_async,
             );
             return Some((
@@ -291,6 +328,69 @@ impl Checker {
             ));
         }
         None
+    }
+
+    /// Resolve a method call on a **trait object** (`dyn Trait`, UT4) against the trait's declared
+    /// contract — the `dyn` twin of [`Self::type_param_trait_method`], and deliberately its mirror
+    /// image so the two receivers can never disagree about the same method. Returns `(parameter
+    /// types, required count, return type)`; `None` when `tr` names no known trait or the trait
+    /// declares no `name`.
+    ///
+    /// Two things the raw signature read this replaced got wrong, both of which the bound path had
+    /// always got right:
+    ///
+    /// * **`async` is part of the return type.** A call to an `async fn m(): T` produces
+    ///   `Future<T>` ([`async_return`]) — the runtime returns a future through `dyn` dispatch
+    ///   exactly as it does through a bound, so typing the call `T` was a soundness hole: the
+    ///   program declared `string` and held a `<future>`.
+    /// * **A generic trait's parameters must be substituted.** `dyn Trait` carries no type
+    ///   arguments (the surface has no `dyn Trait<...>` form), so — exactly as for a bare bound on a
+    ///   generic trait — its parameters instantiate permissively to `dyn`. Leaving them raw leaked
+    ///   the trait's own parameter name into the call's type (`s.get(k)` typed as `V`), which then
+    ///   mismatched every real type it met.
+    pub(crate) fn dyn_trait_method(
+        &self,
+        tr: &str,
+        name: &str,
+    ) -> Option<(Vec<Type>, usize, Type)> {
+        let decl = self.symbols.user_traits.get(tr)?;
+        let m = decl.methods.iter().find(|m| m.sig.name == name)?;
+        // Resolved in the TRAIT's scope, like the bound path above — see the note there.
+        let trait_scope = param_scope(&decl.type_params, &self.imports.extern_types);
+        let subst: Subst = decl
+            .type_params
+            .iter()
+            .map(|tp| (ParamId::at(tp.span), Type::Dyn))
+            .collect();
+        let sig_ty = |t: &TypeRef| from_ref_q(t, &self.imports.extern_types, &trait_scope);
+        let params: Vec<Type> = m
+            .sig
+            .params
+            .iter()
+            .map(|p| apply_subst(&p.ty.as_ref().map(&sig_ty).unwrap_or(Type::Unknown), &subst))
+            .collect();
+        let ret = async_return(
+            m.sig.ret.as_ref().map(&sig_ty).unwrap_or(Type::Unknown),
+            m.sig.is_async,
+        );
+        Some((
+            params,
+            required_params(&m.sig.params),
+            apply_subst(&ret, &subst),
+        ))
+    }
+
+    /// How `type_name.name` may be reached ([`Receiver`]) — the one place the table is consulted,
+    /// so every call form (`T.m(…)`, `x.m(…)`, either of those with a turbofish, and both handle
+    /// spellings) asks the same question and gets the same answer. An unrecorded method is
+    /// `Either`: the checker knows nothing that forbids a spelling, and refusing one would be
+    /// inventing a rule out of missing data.
+    pub(crate) fn receiver_of(&self, type_name: &str, name: &str) -> Receiver {
+        self.symbols
+            .method_receiver
+            .get(&(type_name.to_string(), name.to_string()))
+            .copied()
+            .unwrap_or(Receiver::Either)
     }
 
     pub(crate) fn method_call_return(&self, recv: &Type, name: &str) -> Type {
@@ -313,10 +413,25 @@ impl Checker {
         // A method call on a trait object (L1 user traits, UT4) resolves against the trait's declared
         // signatures — dispatched dynamically at runtime, but statically typed by the contract.
         if let Type::DynTrait(tr) = recv
-            && let Some(decl) = self.symbols.user_traits.get(tr)
-            && let Some(m) = decl.methods.iter().find(|m| m.sig.name == name)
+            && let Some((_, _, ret)) = self.dyn_trait_method(tr, name)
         {
-            return field_type(&m.sig.ret, &self.imports.extern_types);
+            return ret;
+        }
+        // `@derive(Serialize<Json>)` synthesizes a structural `to_json(): string`, and it is the one
+        // derive-provided member with no entry anywhere else here: `BuiltinTrait::Serialize` has no
+        // `required_method` (its whole body is synthesized rather than written), so the trait table
+        // says the type serializes without saying what that gives it. Typed here rather than left
+        // `Unknown` for two reasons — `x.to_json().len()` should check like the `string` it is, and
+        // the closed-user-type guard reads a `Unknown` return as proof the member does not exist.
+        if let Type::Named(n, _) = recv
+            && name == "to_json"
+            && self
+                .symbols
+                .trait_impls
+                .get(n.as_str())
+                .is_some_and(|ts| ts.contains(&noeta_types::BuiltinTrait::Serialize))
+        {
+            return Type::String;
         }
         if recv.defers_to_runtime() {
             return recv.clone();
@@ -405,8 +520,8 @@ impl Checker {
     pub(crate) fn resolve_namespace_prefix(&self, expr: &Expr, env: &Env) -> Option<String> {
         use noeta_ext_abi::registry::NsChild;
         match expr {
-            Expr::Ident { name, .. } if lookup(env, name).is_none() => {
-                self.imports.namespaces.get(name).cloned()
+            Expr::Ident { name, .. } if lookup(env, name.as_str()).is_none() => {
+                self.imports.namespaces.get(name.as_str()).cloned()
             }
             Expr::Member { receiver, name, .. } => {
                 let prefix = self.resolve_namespace_prefix(receiver, env)?;
@@ -490,14 +605,19 @@ impl Checker {
             .get(n)
             .cloned()
             .unwrap_or_default();
-        let subst: HashMap<String, Type> = params
+        let subst: Subst = params
             .iter()
-            .cloned()
+            .map(|p| p.id)
             .zip(recv_args.iter().cloned())
             .collect();
-        let pset: HashSet<String> = params
-            .into_iter()
-            .filter(|p| !self.coloring.type_params.contains_key(p))
+        // A parameter of the receiver's type that is ALSO in scope here — i.e. we are inside that
+        // very declaration — is not erased: it is the caller's own parameter and must survive.
+        // Asked by identity, this now means exactly that; asked by name it also caught an
+        // unrelated declaration's `T`, which is the same conflation this arc removes.
+        let pset: ParamSet = params
+            .iter()
+            .filter(|p| !self.param_in_scope(p))
+            .map(|p| p.id)
             .collect();
         Some(erase_type_params(apply_subst(&ty, &subst), &pset))
     }
@@ -513,11 +633,38 @@ impl Checker {
         // `Type.Variant` (a nullary enum constructor like `Status.Paid`) reads as the enum type. For a
         // generic enum a payload-free variant pins no parameter, so its arguments infer to `dyn`
         // (R2b) — keeping the arity consistent with a payload variant of the same enum.
+        //
+        // A **payload-carrying** variant in value position is not that, and used to fall through
+        // here as if it were: `Shape.Circle` where `Circle(int)` typed as `Shape` and then died in
+        // the backend with `internal error: the VM cannot compile this program`. That is the
+        // checks-clean-then-fails shape — a value the type system believes in that neither runtime
+        // has heard of — reached through the enum-member spelling. Naming the variant as a
+        // *constructor value* (`Fn(int) -> Shape`, the way `some`/`Ok` are first-class) is a real
+        // feature and a real slice; until it exists the honest answer is a static error, because
+        // the expression has no value at run time.
         if let Expr::Ident { name: tn, .. } = receiver
-            && let Some(key) = self.enum_type_key(tn)
-            && self.is_enum_variant(&key, name)
+            && let Some(key) = self.enum_type_key(tn.as_str())
+            && let Some(fields) = self.enum_variant_fields(&key, name)
         {
-            return self.enum_construction_type(&key, name, &[], member_span);
+            if fields == 0 {
+                return self.enum_construction_type(&key, name, &[], member_span);
+            }
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                member_span,
+                format!(
+                    "`{tn}.{name}` carries {fields} value{}, so it is a constructor and not a value",
+                    match fields {
+                        1 => "",
+                        _ => "s",
+                    }
+                ),
+            )
+            .help(format!(
+                "construct it with its arguments — `{tn}.{name}(…)`; a payload-carrying variant \
+                 cannot yet be passed around as a function"
+            ));
+            return Type::Unknown;
         }
         // `Type.method` in value position (not the callee of a call) is an unbound **method handle**:
         // a callable taking the receiver as its first argument (prelude-redesign MH). Guarded to a
@@ -525,28 +672,27 @@ impl Checker {
         // `Fn(ReceiverType, ...method_params) -> ret`; the resolution is recorded so lowering emits an
         // `Rvalue::MethodHandle`. (Built-in-type receivers — `list.len` — land in a later slice.)
         if let Expr::Ident { name: tn, .. } = receiver
-            && lookup(env, tn).is_none()
-            && let Some(sig) = self.symbols.methods.get(&(tn.clone(), name.to_string()))
+            && lookup(env, tn.as_str()).is_none()
+            && let Some(sig) = self
+                .symbols
+                .methods
+                .get(&(tn.to_string(), name.to_string()))
         {
             // The handle's shape follows the derived classification (EX.2): an INSTANCE method's
             // handle takes the receiver as its first argument (`Fn(T, ...params) -> ret`); an
             // ASSOCIATED function's handle is the function itself (`Fn(params) -> ret`) — e.g.
-            // `ctor = Stack.new`.
-            let instance = self
-                .symbols
-                .method_instance
-                .get(&(tn.clone(), name.to_string()))
-                .copied()
-                .unwrap_or(true);
+            // `ctor = Stack.new`. A trait's self-less method ([`Receiver::Either`]) takes the
+            // instance shape, which is what the unclassified entry already meant here.
+            let instance = self.receiver_of(tn.as_str(), name).handle_takes_receiver();
             let mut params = Vec::with_capacity(sig.params.len() + 1);
             if instance {
-                params.push(Type::Named(tn.clone(), Vec::new()));
+                params.push(Type::Named(tn.to_string(), Vec::new()));
             }
             params.extend(sig.params.iter().cloned());
             let ret = sig.ret.clone();
             self.sites
                 .handle_sites
-                .insert(member_span, (tn.clone(), name.to_string(), !instance));
+                .insert(member_span, (tn.to_string(), name.to_string(), !instance));
             return Type::Fn {
                 params,
                 ret: Box::new(ret),
@@ -557,15 +703,15 @@ impl Checker {
         // `Fn(ReceiverType, ...method_params) -> ret` (prelude-redesign MH.2). Built-in types have no
         // associated fns, so a built-in handle is always instance.
         if let Expr::Ident { name: tn, .. } = receiver
-            && lookup(env, tn).is_none()
-            && let Some(recv_ty) = builtin_receiver_type(tn)
+            && lookup(env, tn.as_str()).is_none()
+            && let Some(recv_ty) = builtin_receiver_type(tn.as_str())
             && let Some(ret) = stdlib::method_return(self.reg(), &recv_ty, name)
         {
             let mut params = vec![recv_ty.clone()];
             params.extend(stdlib::method_params(self.reg(), &recv_ty, name).unwrap_or_default());
             self.sites
                 .handle_sites
-                .insert(member_span, (tn.clone(), name.to_string(), false));
+                .insert(member_span, (tn.to_string(), name.to_string(), false));
             return Type::Fn {
                 params,
                 ret: Box::new(ret),
@@ -623,15 +769,9 @@ impl Checker {
         {
             let params = sig.params.clone();
             let ret = sig.ret.clone();
-            let instance = self
-                .symbols
-                .method_instance
-                .get(&(n.clone(), name.to_string()))
-                .copied()
-                .unwrap_or(true);
             // Binding an ASSOCIATED function through a value is the wrong-way shape (E0047) —
             // there is no receiver to capture; bind it off the type instead.
-            if !instance {
+            if !self.receiver_of(n, name).allows_instance_call() {
                 self.error(
                     DiagnosticCode::InvalidReceiver,
                     member_span,
@@ -659,6 +799,31 @@ impl Checker {
         // A field/member access on a `dyn` (or hole) receiver stays deferred.
         if recv.defers_to_runtime() {
             return recv;
+        }
+        // Nothing resolved. On a CLOSED builtin receiver that is proof the member does not exist —
+        // the same reasoning (and the same predicate) the *call* path already applies to
+        // `s.nope()`. Without it the member path stayed silently `Unknown`, so `p.x` on an
+        // `Option<P>`, `"s".nope`, and `[1].nope` all passed `noeta check` and only failed at run
+        // time with E0005 — precisely the check-vs-run divergence the call-path guard was added to
+        // close, reached through the one spelling it did not cover. `Named`/`dyn`/holes stay
+        // lenient for the reasons documented on `closed_to_new_methods`.
+        if closed_to_new_methods(&recv) || crate::expr::calls::user_type_is_closed(self, &recv) {
+            let diag = self.error(
+                DiagnosticCode::TypeMismatch,
+                name_span,
+                format!("type `{recv}` has no field or method `{name}`"),
+            );
+            // The overwhelmingly common way to reach here is reading a field *through* an optional
+            // (`entry.size` where `entry: ?Entry`), so name the unwrap rather than leave the user
+            // to rediscover it.
+            if let Type::Option(inner) = &recv
+                && matches!(inner.as_ref(), Type::Named(..))
+            {
+                diag.help(format!(
+                    "`{recv}` may be `none`; reach the `{inner}` first — \
+                     `match x {{ some(v) => v.{name}, none => … }}`, or `(x ?? fallback).{name}`"
+                ));
+            }
         }
         Type::Unknown
     }

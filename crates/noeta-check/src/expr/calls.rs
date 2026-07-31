@@ -29,30 +29,57 @@ impl Checker {
             if !matches!(slot, Type::Unknown) {
                 continue;
             }
-            // Absorb the expected parameter type where it can guide the literal — a `Fn` for a
-            // closure (or a deferred polymorphic-function reference, F1), a `List`/`Map` for a
-            // container literal; anything else (a mismatched param, or an unknown one) synthesizes
-            // standalone, preserving the pre-deferral behavior (the mismatch is then caught by
-            // `check_args`' assignability check).
-            *slot = match (expr, params.get(i)) {
-                (Expr::Closure { .. } | Expr::Ident { .. }, Some(expected @ Type::Fn { .. })) => {
-                    self.check(expr, expected, env)
-                }
-                (
-                    Expr::List { .. } | Expr::Map { .. },
-                    Some(expected @ (Type::List(_) | Type::Map(..))),
-                ) => self.check(expr, expected, env),
-                // A target-typed `.{ … }` absorbs **whatever** the parameter type is — unlike the
-                // arms above it does not pre-filter on the expected type's shape, because the
-                // literal has no standalone meaning to fall back to. `check` owns the decision:
-                // a concrete named record type is adopted, anything else is E0023 reported there.
-                // Falling through to `synth` instead would report "no expected type", which would
-                // be a lie at a call site that has one.
-                (Expr::Object(lit), Some(expected)) if lit.type_name.is_none() => {
-                    self.check(expr, expected, env)
-                }
-                _ => self.synth(expr, env),
-            };
+            let expected = params.get(i).cloned();
+            *slot = self.absorb_deferred_arg(expr, expected.as_ref(), env);
+        }
+    }
+
+    /// Type one **deferred** argument against the callee's now-known parameter type — the single
+    /// definition of "absorb the expectation at an argument position", shared by the non-generic
+    /// path ([`Self::finalize_closure_args`]) and the generic one
+    /// ([`Self::check_generic_call_seeded`], whose `expected` is the parameter with everything bound
+    /// so far substituted in). Keeping it in one place is what makes the two paths agree by
+    /// construction: an argument form that absorbs an expectation must absorb it identically whether
+    /// or not the callee happens to be generic.
+    ///
+    /// A form the expectation cannot guide — or an absent/unguiding parameter — synthesizes
+    /// standalone, preserving the pre-deferral behavior (the mismatch is then caught by the
+    /// assignability check that follows).
+    pub(crate) fn absorb_deferred_arg(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Type>,
+        env: &mut Env,
+    ) -> Type {
+        match (expr, expected) {
+            (Expr::Closure { .. } | Expr::Ident { .. }, Some(expected @ Type::Fn { .. })) => {
+                self.check(expr, expected, env)
+            }
+            (
+                Expr::List { .. } | Expr::Map { .. },
+                Some(expected @ (Type::List(_) | Type::Map(..))),
+            ) => self.check(expr, expected, env),
+            // A target-typed `.{ … }` absorbs **whatever** the parameter type is — unlike the
+            // arms above it does not pre-filter on the expected type's shape, because the
+            // literal has no standalone meaning to fall back to. `check` owns the decision:
+            // a concrete named record type is adopted, anything else is E0023 reported there.
+            // Falling through to `synth` instead would report "no expected type", which would
+            // be a lie at a call site that has one.
+            (Expr::Object(lit), Some(expected)) if lit.type_name.is_none() => {
+                self.check(expr, expected, env)
+            }
+            // A generic type's **fresh-constructor call** (`Inner.new("todos")`) absorbs a
+            // fully-concrete instantiation of that very type, so `f(Inner.new("todos"))` against
+            // `fn f(i: Inner<Todo>)` pins `T = Todo` exactly as the annotated binding `i:
+            // Inner<Todo> = Inner.new("todos")` does. The parameter type IS the expectation the
+            // position already has; without pushing it in, the call synthesized bottom-up as an
+            // uninstantiated `Inner` and the construction site recorded nothing to reflect.
+            (Expr::Call { .. }, Some(expected))
+                if self.absorbs_constructor_expectation(expr, expected, env) =>
+            {
+                self.check(expr, expected, env)
+            }
+            _ => self.synth(expr, env),
         }
     }
 
@@ -60,19 +87,180 @@ impl Checker {
     /// known: the literal forms ([`is_deferred_literal_arg`] — closures and container literals),
     /// plus (F1, poly-values) a bare identifier naming an unshadowed **polymorphic named function**
     /// — a generic user fn, or a prelude constructor (`Ok`/`Err`/`some`) — whose precise type only
-    /// an expected `Fn` type can instantiate. Everything else synthesizes eagerly as before.
+    /// an expected `Fn` type can instantiate, plus a generic type's **fresh-constructor call**
+    /// ([`Self::fresh_constructor_type`]), whose instantiation only the parameter type pins.
+    /// Everything else synthesizes eagerly as before.
     pub(crate) fn is_deferred_arg(&self, expr: &Expr, env: &Env) -> bool {
         if is_deferred_literal_arg(expr) {
             return true;
         }
+        if self.fresh_constructor_type(expr, env).is_some() {
+            return true;
+        }
         matches!(expr, Expr::Ident { name, .. }
-            if lookup(env, name).is_none()
+            if lookup(env, name.as_str()).is_none()
                 && (matches!(name.as_str(), "Ok" | "Err" | "some")
                     || self
                         .symbols
                         .functions
-                        .get(name)
+                        .get(name.as_str())
                         .is_some_and(|sig| sig.generic.is_some())))
+    }
+
+    /// The **generic user type whose provable fresh constructor** `expr` statically calls —
+    /// `Some("Inner")` for `Inner.new("todos")`, the one call form whose *reflected instantiation*
+    /// comes from the expected type rather than from its own arguments (see [`crate::constructors`]:
+    /// inside the body the literal's type is `Inner<T>`, with `T` still a parameter).
+    ///
+    /// This is the syntactic trigger for treating such a call as a **checked** position wherever the
+    /// position's declared type is known — an argument, an object-literal field initializer — so
+    /// that all four such positions (those two plus the annotated binding and the declared return)
+    /// route through the one expectation channel instead of each recording specially.
+    ///
+    /// Narrow on purpose: [`crate::SymbolTable::fresh_constructors`] already holds only *generic*
+    /// types' provably-fresh associated functions, so an ordinary factory, a non-generic type's
+    /// `new`, and an instance-method call (whose instantiation rides the receiver's own tag) are all
+    /// excluded and keep synthesizing eagerly.
+    pub(crate) fn fresh_constructor_type<'e>(&self, expr: &'e Expr, env: &Env) -> Option<&'e str> {
+        let Expr::Call { callee, .. } = expr else {
+            return None;
+        };
+        let Expr::Member { receiver, name, .. } = callee.as_ref() else {
+            return None;
+        };
+        // A call-site instantiation is peeled: `Repo::<Todo>.new(…)` is the same fresh-constructor
+        // call as `Repo.new(…)`. Missing this would drop the call out of the deferred-argument and
+        // absorbing paths, and the argument/field positions would stop pinning it.
+        let Expr::Ident { name: tn, .. } = receiver.peel_instantiation() else {
+            return None;
+        };
+        (lookup(env, tn.as_str()).is_none()
+            && self
+                .symbols
+                .fresh_constructors
+                .contains(&(tn.to_string(), name.to_string())))
+        .then_some(tn.as_str())
+    }
+
+    /// The **class type arguments a call site spells explicitly** — `[Todo]` for
+    /// `Repo::<Todo>.new("todos")` — or empty where the receiver is a bare type name and the
+    /// instantiation is left to inference.
+    ///
+    /// This is the whole of the new form's semantics. The result is handed to
+    /// [`Checker::call_user_method`] as `recv_args`, the channel a *value* receiver's type arguments
+    /// already travel on, so everything downstream is unchanged: the seed wins over argument
+    /// inference and over an expected type by `bind_type_params`' first-wins `or_insert`, and
+    /// [`Checker::note_constructor_call`] records the resulting instantiation through the one
+    /// recording path. There is no second channel.
+    ///
+    /// Arity is checked against the type's **declared** parameters (E0058) — not the method's, which
+    /// is what `Repo.new::<Todo>(…)` means and why the two spellings stay distinct. A non-generic
+    /// type is refused for the same reason: it has nothing to instantiate, so the turbofish would be
+    /// decoration.
+    fn call_site_class_args(&mut self, receiver: &Expr, type_name: &str) -> Vec<Type> {
+        let type_args = receiver.call_site_type_args();
+        if type_args.is_empty() {
+            return Vec::new();
+        }
+        for t in type_args {
+            self.check_type_ref(t);
+        }
+        let params = self
+            .symbols
+            .generic_types
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default();
+        let span = receiver.span();
+        if params.is_empty() {
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                span,
+                format!("`{type_name}` is not generic, so it takes no type arguments"),
+            )
+            .help(format!(
+                "drop the `::<...>` and call `{type_name}.method(args)`. A method with type \
+                 parameters OF ITS OWN is instantiated on the method \
+                 (`{type_name}.method::<T>(args)`)"
+            ));
+            return Vec::new();
+        }
+        if type_args.len() != params.len() {
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                span,
+                format!(
+                    "`{type_name}` expects {} type argument(s), found {}",
+                    params.len(),
+                    type_args.len()
+                ),
+            )
+            .help(format!(
+                "`{type_name}` declares `<{}>`",
+                params
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            return Vec::new();
+        }
+        type_args.iter().map(|t| self.annot(t)).collect()
+    }
+
+    /// Whether a fresh-constructor call **absorbs** `expected` — the pre-filter that keeps this arm
+    /// from turning a genuine mismatch into a double report.
+    ///
+    /// Like every other absorbing arm ([`Checker::check_inner`]), this one fires only where the
+    /// expectation can actually guide the expression: `expected` must be a **fully-concrete
+    /// instantiation of the constructor's own type**. That is exactly the shape
+    /// [`Checker::note_constructor_call`] can record from, so a non-matching expectation had nothing
+    /// to offer anyway — and letting it through would run [`Checker::subsume`] over a mismatch the
+    /// caller's own assignability check is about to report at the same span (`need_int(Box.new(1))`
+    /// printing one `E0007`, not two).
+    ///
+    /// The `fully_concrete` half is the load-bearing one: an open parameter (`fn keep<T>(x: T)`)
+    /// makes no claim about the instantiation, so the call keeps synthesizing bottom-up and binds
+    /// the callee's `T` itself. Recording `Inner<dyn>` there would invent a fact the site does not
+    /// have.
+    pub(crate) fn absorbs_constructor_expectation(
+        &self,
+        expr: &Expr,
+        expected: &Type,
+        env: &Env,
+    ) -> bool {
+        let Type::Named(n, args) = expected else {
+            return false;
+        };
+        !args.is_empty()
+            && self.fresh_constructor_type(expr, env) == Some(n.as_str())
+            && (self.fully_concrete(expected) || self.dynamic_ctor_slot(expected).is_some())
+    }
+
+    /// The **hidden type-argument slot** that can deliver `instantiation` at run time, or `None`
+    /// (generic-in-generic construction).
+    ///
+    /// The one definition of "this body can still record a construction at this instantiation", and it
+    /// is deliberately consulted from both ends of the same fact: [`Self::absorbs_constructor_expectation`]
+    /// asks it before pushing an open expectation into a fresh-constructor call, and
+    /// [`Self::note_constructor_call`] asks it again to record the site. Two answers here would mean a
+    /// call typed against an expectation nothing then recorded — silence exactly where the arc exists
+    /// to remove it.
+    ///
+    /// Both halves are load-bearing. `open_only_by_params` keeps a `dyn` or an inference hole out (a
+    /// tag is a claim, and neither is one). The template match is what proves a *caller* is obliged to
+    /// resolve it: a slot exists for this instantiation only because the syntactic pre-pass saw a
+    /// declared position demanding it, and every call of this member then substitutes its own
+    /// instantiation into that template and interns the finished type.
+    pub(crate) fn dynamic_ctor_slot(&self, instantiation: &Type) -> Option<u32> {
+        if !self.open_only_by_params(instantiation, &self.coloring.forwardable_params) {
+            return None;
+        }
+        self.coloring
+            .current_forwarding
+            .iter()
+            .position(|t| t == instantiation)
+            .map(|i| i as u32)
     }
 
     /// The precise monomorphic [`Type::Fn`] of a **polymorphic named function used in value
@@ -109,16 +297,19 @@ impl Checker {
         }
         // The prelude constructors, typed as the generic constructors they are:
         // `Ok<T, E>(v: T): Result<T, E>` (also the nullary `Ok(): Result<void, E>`),
-        // `Err<T, E>(e: E): Result<T, E>`, `some<T>(v: T): Option<T>`. The synthetic `$T`/`$E`
-        // parameter names cannot collide with a user type (no source name contains `$`), and any
-        // residue erases to `dyn` below. `panic` has no parameters to instantiate: its value type
+        // `Err<T, E>(e: E): Result<T, E>`, `some<T>(v: T): Option<T>`. They have no source
+        // declaration to take an identity from, so they take reserved SYNTHETIC ids — which cannot
+        // alias any real parameter, where the old synthetic `$T`/`$E` *names* relied on no user
+        // ever spelling a `$`. Any residue erases to `dyn` below. `panic` has no parameters to instantiate: its value type
         // is `fn(dyn) -> ?` — the language has no bottom/`never` type, so the return stays an
         // inference hole (divergent in practice, compatible with any expected return).
-        let t = || Type::Named("$T".to_string(), Vec::new());
-        let e = || Type::Named("$E".to_string(), Vec::new());
+        let t_param = synthetic::ctor_ok();
+        let e_param = synthetic::ctor_err();
+        let t = || Type::Param(t_param.clone());
+        let e = || Type::Param(e_param.clone());
         /// The instantiable shape of a polymorphic value: its (bounded) type parameters and
         /// un-erased params/return — the same trio [`GenericInfo`] carries.
-        type CtorShape = (Vec<(String, Vec<BoundReq>)>, Vec<Type>, Type);
+        type CtorShape = (Vec<(ParamRef, Vec<BoundReq>)>, Vec<Type>, Type);
         let (params, raw_params, raw_ret): CtorShape = match name {
             "panic" => {
                 return Some(Type::Fn {
@@ -163,14 +354,14 @@ impl Checker {
             }
         };
         let is_prelude_ctor = params.is_empty();
-        let tps: HashSet<String> = if is_prelude_ctor {
-            ["$T".to_string(), "$E".to_string()].into_iter().collect()
+        let tps: ParamSet = if is_prelude_ctor {
+            [t_param.id, e_param.id].into_iter().collect()
         } else {
-            params.iter().map(|(n, _)| n.clone()).collect()
+            params.iter().map(|(p, _)| p.id).collect()
         };
         // Bind parameters first (positionally, contravariance is irrelevant for binding), then let
         // the expected return pin anything the parameters left open (`f: () -> Order = make`).
-        let mut subst: HashMap<String, Type> = HashMap::new();
+        let mut subst: Subst = Subst::new();
         for (raw, exp) in raw_params.iter().zip(exp_params) {
             bind_type_params(raw, exp, &tps, &mut subst);
         }
@@ -181,8 +372,8 @@ impl Checker {
         // `List<Result<int, Low>>` boundary exactly as the per-element calls would. A user generic
         // fn's residue erases to `dyn` (below), matching its call sites.
         if is_prelude_ctor {
-            for p in ["$T", "$E"] {
-                subst.entry(p.to_string()).or_insert(Type::Unknown);
+            for p in [t_param.id, e_param.id] {
+                subst.entry(p).or_insert(Type::Unknown);
             }
         }
         // A FORWARDING generic fn as a value (poly-deferrals D2c): the expectation pinned the
@@ -215,8 +406,8 @@ impl Checker {
     fn resolve_value_hidden_slots(
         &mut self,
         name: &str,
-        subst: &HashMap<String, Type>,
-        tps: &HashSet<String>,
+        subst: &Subst,
+        tps: &ParamSet,
         span: Span,
     ) -> Option<Vec<noeta_ext_abi::HiddenArg>> {
         if self.symbols.forwarding_poisoned.contains(name) {
@@ -227,7 +418,7 @@ impl Checker {
         for slot in &fwd {
             if params_mentioned(&slot.template, tps).iter().any(|p| {
                 subst
-                    .get(p)
+                    .get(&p.id)
                     .is_none_or(|t| t.defers_to_runtime() || t.contains_unknown())
             }) {
                 return None;
@@ -242,33 +433,11 @@ impl Checker {
                 hidden.push(noeta_ext_abi::HiddenArg::Forward(j as u32));
                 continue;
             }
-            let recipe = self.type_to_recipe(&sigma);
-            if slot.needs_recipe && recipe.is_none() {
-                // Report the precise unbuildable-type error (mirroring the call site) and keep
-                // resolving: the program is already rejected, and falling back to synthesis here
-                // would only stack the generic value-boundary E0058 on top.
-                self.error(
-                    DiagnosticCode::TypeMismatch,
-                    span,
-                    format!(
-                        "`{sigma}` cannot be built by the call-site-typed `::<{}>` position of \
-                         `{name}`",
-                        slot.template
-                    ),
-                );
-            }
-            let info = noeta_ext_abi::TypeArgInfo {
-                name: sigma.to_string(),
-                recipe,
-            };
-            let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
-                Some(i) => i,
-                None => {
-                    self.sites.type_arg_table.push(info);
-                    self.sites.type_arg_table.len() - 1
-                }
-            };
-            hidden.push(noeta_ext_abi::HiddenArg::Table(idx as u32));
+            // The shared interning site derives every projection of the instantiation and reports
+            // an unbuildable one. Reporting there (rather than bailing here) is deliberate: the
+            // program is already rejected, and falling back to synthesis would only stack the
+            // generic value-boundary E0058 on top of the precise message.
+            hidden.push(self.intern_type_arg(&sigma, slot, name, span));
         }
         Some(hidden)
     }
@@ -289,11 +458,11 @@ impl Checker {
         let Expr::Ident { name, span } = callee.as_ref() else {
             return None;
         };
-        if lookup(env, name).is_some() {
+        if lookup(env, name.as_str()).is_some() {
             return None;
         }
-        let generic = self.symbols.functions.get(name)?.generic.clone()?;
-        Some((name.clone(), *span, generic))
+        let generic = self.symbols.functions.get(name.as_str())?.generic.clone()?;
+        Some((name.to_string(), *span, generic))
     }
 
     /// The seeded-call worker behind the check-mode seeding arms: defer the deferrable arguments,
@@ -309,7 +478,7 @@ impl Checker {
         args: &[CallArg],
         callee_span: Span,
         call_span: Span,
-        seed: HashMap<String, Type>,
+        seed: Subst,
         env: &mut Env,
     ) -> Type {
         let mut arg_types: Vec<Type> = args
@@ -330,7 +499,12 @@ impl Checker {
             args,
             callee_span,
             seed,
-            Some(call_span),
+            // A seeded position hands the arguments through as written; the caller has not
+            // compacted them, so argument `i` is parameter `i`.
+            &[],
+            // Spelled without a turbofish — the instantiation came from the checked position's
+            // expectation, which the syntactic pre-pass cannot see.
+            Some((call_span, name.to_string(), ForwardSpelling::Inferred)),
             env,
         );
         // The deferred-argument safety net, mirroring `synth_call`.
@@ -364,8 +538,8 @@ impl Checker {
             unreachable!("seedable_generic_call matches plain calls only")
         };
         let required = self.symbols.functions[&name].required;
-        let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
-        let mut seed: HashMap<String, Type> = HashMap::new();
+        let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
+        let mut seed: Subst = Subst::new();
         match &generic.raw_ret {
             Type::Result(ok, _) => bind_type_params(ok, success_expected, &tps, &mut seed),
             Type::Option(some) => bind_type_params(some, success_expected, &tps, &mut seed),
@@ -386,7 +560,8 @@ impl Checker {
     /// Unwrap the operand type of a `?` (`Expr::Try`) — the one shared judgment for synthesis and
     /// the check-mode seeding arm (poly-deferrals D1): a `Result` yields its `Ok` payload and runs
     /// the error-position `From`-conversion rule (E0057 / `try_conversion_sites`); an `Option`
-    /// yields its payload; a `dyn`/hole defers; anything else is E0012.
+    /// yields its payload and runs the absence-position rule; a `dyn`/hole defers; anything else is
+    /// E0012.
     pub(crate) fn try_unwrap(&mut self, inner: &Type, span: Span) -> Type {
         match inner {
             Type::Result(ok, err) => {
@@ -397,7 +572,10 @@ impl Checker {
                 self.check_try_error(&err, span);
                 (**ok).clone()
             }
-            Type::Option(some) => (**some).clone(),
+            Type::Option(some) => {
+                self.check_try_option(span);
+                (**some).clone()
+            }
             // A hole carries no info; `dyn` defers to runtime — both accept `?` without a
             // diagnostic, yielding the same deferred type.
             t if t.defers_to_runtime() => t.clone(),
@@ -439,10 +617,7 @@ impl Checker {
         for t in type_args {
             self.check_type_ref(t);
         }
-        let resolved: Vec<Type> = type_args
-            .iter()
-            .map(|t| from_ref_q(t, &self.imports.extern_types))
-            .collect();
+        let resolved: Vec<Type> = type_args.iter().map(|t| self.annot(t)).collect();
         // A local binding cannot be instantiated, and shadows the free function in call position —
         // reject rather than silently routing past the shadow.
         if lookup(env, name).is_some() {
@@ -494,15 +669,43 @@ impl Checker {
                     resolved.len()
                 ),
             );
-            let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+            let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
-        let seed: HashMap<String, Type> = generic
+        let seed: Subst = generic
             .params
             .iter()
-            .map(|(n, _)| n.clone())
+            .map(|(p, _)| p.id)
             .zip(resolved)
             .collect();
+        // Named arguments, normalized into parameter order exactly as the non-turbofish call does
+        // (`synth_call`) — spelling the instantiation must not change what a label means. Without
+        // this, `f::<T>(1, c: 9)` checked its arguments in written order against the declared
+        // parameters and reported a type error naming the parameter it skipped.
+        let permuted;
+        let mut supplied_at: Vec<usize> = Vec::new();
+        let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
+            let (names, types) = (sig.param_names.clone(), sig.params.clone());
+            match self.order_arguments(
+                arg_exprs,
+                &names,
+                &types,
+                sig.required,
+                name,
+                args,
+                span,
+                span,
+            ) {
+                Some((a, _, at)) => {
+                    permuted = a;
+                    supplied_at = at;
+                    &permuted[..]
+                }
+                None => return sig.ret.clone(),
+            }
+        } else {
+            arg_exprs
+        };
         self.check_generic_call_seeded(
             name,
             &generic,
@@ -511,7 +714,10 @@ impl Checker {
             arg_exprs,
             span,
             seed,
-            Some(span),
+            &supplied_at,
+            // `f::<T, ...>(args)`: an explicit turbofish on a bare name — the spelling the
+            // pre-pass propagates transitive slots through.
+            Some((span, name.to_string(), ForwardSpelling::Turbofish)),
             env,
         )
     }
@@ -584,6 +790,10 @@ impl Checker {
                 if let Some(params) = stdlib::module_params(self.reg(), module, func, args) {
                     let required =
                         stdlib::module_required(self.reg(), module, func).unwrap_or(params.len());
+                    let bound = self.bind_native_args(
+                        module, func, arg_exprs, &params, required, args, span, call_span,
+                    );
+                    let arg_exprs = bound.as_deref().unwrap_or(arg_exprs);
                     self.finalize_closure_args(&params, args, arg_exprs, env);
                     self.check_args(&params, required, args, arg_exprs, span, func);
                 }
@@ -600,7 +810,7 @@ impl Checker {
                 // than silently deferred or misrouted to the free function's signature. A
                 // `dyn`/`Unknown` local (an untyped closure value) stays deferred, its arguments
                 // unchecked as before.
-                if let Some(Type::Fn { params, ret }) = lookup(env, name) {
+                if let Some(Type::Fn { params, ret }) = lookup(env, name.as_str()) {
                     let params = params.clone();
                     let ret = (**ret).clone();
                     self.finalize_closure_args(&params, args, arg_exprs, env);
@@ -613,57 +823,71 @@ impl Checker {
                     // record which of its parameters carry defaults, so `required` is `0`.
                     let erased_import = params.is_empty() && matches!(ret, Type::Dyn);
                     if !erased_import {
-                        self.check_args(&params, 0, args, arg_exprs, span, name);
+                        self.check_args(&params, 0, args, arg_exprs, span, name.as_str());
                     }
                     return ret;
                 }
                 // A local binding of a user OBJECT type invoked as a value (`obj(args)`) — the
                 // `Callable` protocol: typed as `obj.call(args)` when the type provides a `call`
                 // method; a known user type without one is statically not callable (E0007).
-                if let Some(recv @ Type::Named(..)) = lookup(env, name) {
+                if let Some(recv @ Type::Named(..)) = lookup(env, name.as_str()) {
                     let recv = recv.clone();
                     if let Some(ret) = self.synth_callable_object(&recv, args, arg_exprs, span, env)
                     {
                         return ret;
                     }
                 }
-                if let Some(sig) = self.symbols.functions.get(name) {
+                if let Some(sig) = self.symbols.functions.get(name.as_str()) {
                     let required = sig.required;
                     // Named arguments bind to the parameters they name, so normalize the written
                     // list into parameter order ONCE, here — everything downstream (generic
                     // instantiation, closure finalization, arity and assignability) then sees a
                     // plain positional call and needs no notion of labels at all.
                     let (permuted, supplied_params);
+                    // Which raw parameter each argument landed on, for the generic path below —
+                    // empty for the dense-prefix call, where argument `i` is parameter `i`.
+                    let mut supplied_at: Vec<usize> = Vec::new();
                     let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
                         let (names, types) = (sig.param_names.clone(), sig.params.clone());
                         match self.order_arguments(
-                            arg_exprs, &names, &types, required, name, args, span, call_span,
+                            arg_exprs,
+                            &names,
+                            &types,
+                            required,
+                            name.as_str(),
+                            args,
+                            span,
+                            call_span,
                         ) {
-                            Some((a, p)) => {
+                            Some((a, p, at)) => {
                                 permuted = a;
                                 supplied_params = Some(p);
+                                supplied_at = at;
                                 &permuted[..]
                             }
-                            None => return self.symbols.functions[name].ret.clone(),
+                            None => return self.symbols.functions[name.as_str()].ret.clone(),
                         }
                     } else {
                         supplied_params = None;
                         arg_exprs
                     };
-                    let sig = &self.symbols.functions[name];
+                    let sig = &self.symbols.functions[name.as_str()];
                     // A generic function is instantiated per call: bind its type parameters from the
                     // argument types, check arguments against the substituted parameters, enforce
                     // the bounds (E0025), and return the substituted result type.
                     if let Some(generic) = sig.generic.clone() {
                         return self.check_generic_call(
-                            name,
+                            name.as_str(),
                             &generic,
                             required,
                             args,
                             arg_exprs,
                             span,
                             &[],
-                            Some(call_span),
+                            &supplied_at,
+                            // `f(args)` — no turbofish, so the instantiation is inferred and the
+                            // pre-pass registered nothing for it.
+                            Some((call_span, name.to_string(), ForwardSpelling::Inferred)),
                             env,
                         );
                     }
@@ -679,18 +903,22 @@ impl Checker {
                         None => (sig.params.clone(), required),
                     };
                     self.finalize_closure_args(&params, args, arg_exprs, env);
-                    self.check_args(&params, required, args, arg_exprs, span, name);
+                    self.check_args(&params, required, args, arg_exprs, span, name.as_str());
                     return ret;
                 }
                 // A selectively-imported module function (`use std.math.sqrt`) called bare — typed
                 // exactly like the qualified `math.sqrt(args)` (same params/return tables). A local
                 // binding of the same name shadows it (checked first, in the arms above via `env`).
-                if let Some((module, func)) = self.imports.imported_fns.get(name).cloned()
-                    && lookup(env, name).is_none()
+                if let Some((module, func)) = self.imports.imported_fns.get(name.as_str()).cloned()
+                    && lookup(env, name.as_str()).is_none()
                 {
                     if let Some(params) = stdlib::module_params(self.reg(), &module, &func, args) {
                         let required = stdlib::module_required(self.reg(), &module, &func)
                             .unwrap_or(params.len());
+                        let bound = self.bind_native_args(
+                            &module, &func, arg_exprs, &params, required, args, span, call_span,
+                        );
+                        let arg_exprs = bound.as_deref().unwrap_or(arg_exprs);
                         self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, &func);
                     }
@@ -704,7 +932,7 @@ impl Checker {
                 // the free form left the prelude, P1.2.) Closure arguments synthesize standalone
                 // first, so a payload-typed result (`some(fn…)`) sees the real closure type.
                 self.finalize_closure_args(&[], args, arg_exprs, env);
-                if let Some(t) = stdlib::prelude_return(name, args) {
+                if let Some(t) = stdlib::prelude_return(name.as_str(), args) {
                     return t;
                 }
                 // Not a user fn, import, or prelude free function. A local (a closure value) or a
@@ -713,11 +941,11 @@ impl Checker {
                 // is a genuinely undefined callee — a static `E0005` (F1), so a typo is caught at
                 // check time instead of failing at runtime. A session defers (a later entry may
                 // define it).
-                if !self.config.session_mode && !self.is_known_name(name, env) {
+                if !self.config.session_mode && !self.is_known_name(name.as_str(), env) {
                     // In a SEALED named-fn body, a callee that names a real top-level binding
                     // (e.g. a closure bound at top level) gets the capture hint.
                     let sealed_global_miss = self.coloring.in_sealed_body
-                        && self.symbols.global_binding_names.contains(name);
+                        && self.symbols.global_binding_names.contains(name.as_str());
                     let diag = self.error(
                         DiagnosticCode::UnknownName,
                         span,
@@ -734,16 +962,30 @@ impl Checker {
                 Type::Unknown
             }
             Expr::Member { receiver, name, .. } => {
-                // `Enum.try_from(s)` → `?Enum` / `Enum.from(s)` → `Enum` — the built-in string→case
+                // `Enum.try_from(v)` → `?Enum` / `Enum.from(v)` → `Enum` — the built-in wire→case
                 // conversions (PHP `tryFrom`/`from`), reserved on every enum type. Checked before the
                 // variant constructor so the names cannot be captured by a same-named variant.
+                //
+                // The argument is the enum's **backing type** where it has one, plus `string` for the
+                // case-name spelling — so a `enum Code: int { Ok = 200 }` accepts `Code.try_from(200)`,
+                // the value its schema advertises and the value that comes off a wire.
+                //
+                // A **declared** method of that name wins. An `impl From<Source>` in an enum's body
+                // hoists a `from`, and the `?` conversion already resolves it there, so reserving the
+                // name unconditionally would reject the matching explicit call (`AppError.from(e)`)
+                // as "not assignable to `string`" while `?` accepted the same conversion.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
                     && (name == "try_from" || name == "from")
-                    && lookup(env, tn).is_none()
-                    && self.symbols.enums.contains_key(tn)
+                    && lookup(env, tn.as_str()).is_none()
+                    && self.symbols.enums.contains_key(tn.as_str())
+                    && !self
+                        .symbols
+                        .methods
+                        .contains_key(&(tn.to_string(), name.to_string()))
                 {
-                    self.check_args(&[Type::String], 1, args, arg_exprs, span, name);
-                    let ty = Type::Named(tn.clone(), Vec::new());
+                    let probe = self.enum_probe_type(tn.as_str());
+                    self.check_args(&[probe], 1, args, arg_exprs, span, name);
+                    let ty = Type::Named(tn.to_string(), Vec::new());
                     return if name == "from" {
                         ty
                     } else {
@@ -753,7 +995,7 @@ impl Checker {
                 // `Type.Variant(args)` — an algebraic enum constructor applied to its data. Infer the
                 // enum's type arguments from the payload (R2b), so `Tree.Leaf(5)` is `Tree<int>`.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
-                    && let Some(key) = self.enum_type_key(tn)
+                    && let Some(key) = self.enum_type_key(tn.as_str())
                     && self.is_enum_variant(&key, name)
                 {
                     // Payload types bind the enum's generics, so a closure payload must be real.
@@ -766,7 +1008,7 @@ impl Checker {
                 // key the same stdlib return-type tables, and the chain form records its span so
                 // lowering materializes the leaf module value (`std.http.client`).
                 let module_id = match receiver.as_ref() {
-                    Expr::Ident { name: m, .. } => self.imports.modules.get(m).cloned(),
+                    Expr::Ident { name: m, .. } => self.imports.modules.get(m.as_str()).cloned(),
                     _ => None,
                 }
                 .or_else(|| self.resolve_namespace_module(receiver, env));
@@ -804,6 +1046,10 @@ impl Checker {
                     if let Some(params) = stdlib::module_params(self.reg(), &qm, name, args) {
                         let required =
                             stdlib::module_required(self.reg(), &qm, name).unwrap_or(params.len());
+                        let bound = self.bind_native_args(
+                            &qm, name, arg_exprs, &params, required, args, span, call_span,
+                        );
+                        let arg_exprs = bound.as_deref().unwrap_or(arg_exprs);
                         self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, name);
                     }
@@ -833,25 +1079,20 @@ impl Checker {
                 // typed (a constructor result is `Box`, not a hole) and a generic class enforces its
                 // bounds at construction. Guard on the receiver naming a type that is not shadowed
                 // by a local variable.
-                if let Expr::Ident { name: tn, .. } = receiver.as_ref()
-                    && lookup(env, tn).is_none()
-                    && self.symbols.types.contains(tn)
+                if let Expr::Ident { name: tn, .. } = receiver.peel_instantiation()
+                    && lookup(env, tn.as_str()).is_none()
+                    && self.symbols.types.contains(tn.as_str())
                     && let Some(sig) = self
                         .symbols
                         .methods
-                        .get(&(tn.clone(), name.to_string()))
+                        .get(&(tn.to_string(), name.to_string()))
                         .cloned()
                 {
                     // An INSTANCE method (its body references `self`) cannot be called
                     // associated-style — there is no receiver to become `self` (E0047,
-                    // prelude-redesign EX.2). The classification is derived from the body.
-                    if self
-                        .symbols
-                        .method_instance
-                        .get(&(tn.clone(), name.to_string()))
-                        .copied()
-                        .unwrap_or(false)
-                    {
+                    // prelude-redesign EX.2). A self-less method of a trait's interface
+                    // ([`Receiver::Either`]) is reachable this way as well as on a value.
+                    if !self.receiver_of(tn.as_str(), name).allows_associated_call() {
                         self.error(
                             DiagnosticCode::InvalidReceiver,
                             span,
@@ -864,17 +1105,61 @@ impl Checker {
                         return sig.ret.clone();
                     }
                     // A static call: the type arguments are not known from a bare type name, so the
-                    // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`).
-                    return self.call_user_method(
+                    // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`)
+                    // — and, in a checked position, the expected type does (`r: Repo<Todo> =
+                    // Repo.new("todos")` binds `T = Todo` through the return-position seed).
+                    //
+                    // A **call-site instantiation** (`Repo::<Todo>.new("todos")`) supplies them
+                    // here instead, on the very channel a value receiver uses: the class's type
+                    // arguments. Nothing downstream is special-cased — `call_user_method` seeds the
+                    // class's parameters from `recv_args` exactly as it does for `r.method(…)`, so
+                    // the same `note_constructor_call` records the same construction site.
+                    let class_args = self.call_site_class_args(receiver, tn.as_str());
+                    let ret = self.call_user_method(
                         name,
+                        Some(tn.as_str()),
                         &sig,
                         args,
                         arg_exprs,
                         span,
-                        &[],
+                        &class_args,
                         Some(call_span),
                         env,
                     );
+                    // A **fresh constructor** of a generic type: the instantiation resolved here is
+                    // the one the constructor body could not see, so record the call as the
+                    // construction site and let the backends stamp the returned object with it.
+                    self.note_constructor_call(tn.as_str(), name, &ret, call_span);
+                    return ret;
+                }
+                // `Type.assoc(args)` where the type declares no such associated function. The
+                // instance path below reports this for a value receiver; without it here, a typo'd
+                // constructor (`Ollama.new()` where the type spells it `local`) type-checked clean
+                // and the *first* report was a run-time `cannot find <Type> in this scope` — which
+                // blames the type rather than the member, so it reads as a missing import.
+                //
+                // Structs and classes only. An enum's `Type.Case(payload)` is a *construction* that
+                // arrives here as a call on a type name and resolves through the variant table, not
+                // through `symbols.methods`; flagging it would refuse every payload-carrying enum
+                // literal in the language.
+                if let Expr::Ident { name: tn, .. } = receiver.as_ref()
+                    && lookup(env, tn.as_str()).is_none()
+                    && self.symbols.records.contains_key(tn.as_str())
+                    && !self
+                        .symbols
+                        .methods
+                        .contains_key(&(tn.to_string(), name.to_string()))
+                    && user_type_is_closed(self, &Type::Named(tn.to_string(), Vec::new()))
+                {
+                    // Rendered through `Type` so the name reads exactly as the instance-path
+                    // message does — short, not the linker's qualified key.
+                    let shown = Type::Named(tn.to_string(), Vec::new());
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("type `{shown}` has no associated function `{name}`"),
+                    );
+                    return Type::Unknown;
                 }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
@@ -903,14 +1188,11 @@ impl Checker {
                         .cloned()
                 {
                     // An ASSOCIATED function (never touches `self`) is not callable on a value —
-                    // the receiver would be silently discarded (E0047, prelude-redesign EX.2).
-                    if !self
-                        .symbols
-                        .method_instance
-                        .get(&(n.clone(), name.to_string()))
-                        .copied()
-                        .unwrap_or(true)
-                    {
+                    // the receiver would be silently discarded (E0047, prelude-redesign EX.2). A
+                    // self-less method of a trait's interface ([`Receiver::Either`]) IS callable
+                    // here: the trait's contract puts it in the instance interface, and that is how
+                    // `dyn Trait` reaches it.
+                    if !self.receiver_of(n, name).allows_instance_call() {
                         self.error(
                             DiagnosticCode::InvalidReceiver,
                             span,
@@ -921,6 +1203,7 @@ impl Checker {
                     }
                     return self.call_user_method(
                         name,
+                        Some(n.as_str()),
                         &sig,
                         args,
                         arg_exprs,
@@ -978,8 +1261,8 @@ impl Checker {
                 // bounds, typed at the bound's instantiation (`<T: Keyed<int>>` → `x.key(): int`,
                 // `x.same(other: int)`); a method no bound declares falls through and stays
                 // lenient as before (dispatch may still resolve at runtime).
-                if let Type::Named(n, _) = &recv
-                    && let Some((params, required, ret)) = self.type_param_trait_method(n, name)
+                if let Type::Param(p) = &recv
+                    && let Some((params, required, ret)) = self.type_param_trait_method(p, name)
                 {
                     self.finalize_closure_args(&params, args, arg_exprs, env);
                     self.check_args(&params, required, args, arg_exprs, span, name);
@@ -1054,20 +1337,22 @@ impl Checker {
                 // route is recorded at the call span for lowering to bake in — so dispatch is
                 // call-site-resolved (an empty list receiver works) and a `dyn` receiver simply
                 // never reaches here (the documented escape-hatch behavior).
-                if let Some(ret) = self.bundle_method_call(&recv, name, args, span, call_span) {
+                if let Some(ret) =
+                    self.bundle_method_call(&recv, name, args, arg_exprs, span, call_span)
+                {
                     return ret;
                 }
                 let ret = self.method_call_return(&recv, name);
-                // A method call on a concrete primitive with no such built-in method is an error,
+                // A method call on a CLOSED builtin type with no such built-in method is an error,
                 // mirroring the non-indexable check (`42[0]`). `dyn`/holes defer (their result is
                 // the deferred type, not `Unknown`), and a user `Named` type may resolve the call
-                // through a trait at runtime — so both are left lenient; only the closed primitives
-                // are flagged.
+                // through a trait at runtime — so both are left lenient; only the closed types are
+                // flagged. Without this the runtime is left to raise E0005 ("no method `x` on
+                // string") on a program the checker called clean — the editor shows nothing and
+                // Run fails, which is exactly how the playground's `client.get(url)` (a `Result`,
+                // missing its `?`) reached production looking correct.
                 if matches!(ret, Type::Unknown)
-                    && matches!(
-                        recv,
-                        Type::Int | Type::IntN { .. } | Type::Float | Type::Bool | Type::Unit
-                    )
+                    && (closed_to_new_methods(&recv) || user_type_is_closed(self, &recv))
                 {
                     self.error(
                         DiagnosticCode::TypeMismatch,
@@ -1142,9 +1427,17 @@ impl Checker {
             .get(&(n.clone(), "call".to_string()))
             .cloned()
         {
-            return Some(
-                self.call_user_method("call", &sig, args, arg_exprs, span, recv_args, None, env),
-            );
+            return Some(self.call_user_method(
+                "call",
+                Some(n.as_str()),
+                &sig,
+                args,
+                arg_exprs,
+                span,
+                recv_args,
+                None,
+                env,
+            ));
         }
         // An **extern** type participates in the protocol exactly as a user type does (http arc
         // H10): a registered `call` method makes its values invocable. Extern types already join
@@ -1205,8 +1498,8 @@ impl Checker {
         let type_args = if params.is_empty() {
             Vec::new()
         } else {
-            let pset: HashSet<String> = params.iter().cloned().collect();
-            let mut subst: HashMap<String, Type> = HashMap::new();
+            let pset: ParamSet = params.iter().map(|p| p.id).collect();
+            let mut subst: Subst = Subst::new();
             if let Some(fields) = self
                 .symbols
                 .enums
@@ -1220,7 +1513,7 @@ impl Checker {
             }
             params
                 .iter()
-                .map(|p| subst.get(p).cloned().unwrap_or(Type::Dyn))
+                .map(|p| subst.get(&p.id).cloned().unwrap_or(Type::Dyn))
                 .collect()
         };
         let ty = Type::Named(enum_name.to_string(), type_args);
@@ -1228,10 +1521,14 @@ impl Checker {
         ty
     }
 
+    /// `type_name` is the method's owning type — `None` only where the receiver is not a resolvable
+    /// user type. It is what qualifies the forwarding key (`Type.method`), so two classes declaring
+    /// a `load` cannot share a slot layout.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn call_user_method(
         &mut self,
         name: &str,
+        type_name: Option<&str>,
         sig: &FnSig,
         args: &mut [Type],
         arg_exprs: &[CallArg],
@@ -1246,6 +1543,7 @@ impl Checker {
         // the call span, so a call with no span to key (a synthesized or forwarded one) keeps its
         // written order and its labels are refused rather than silently ignored.
         let permuted;
+        let mut supplied_at: Vec<usize> = Vec::new();
         let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
             let Some(call_span) = call_span else {
                 self.error(
@@ -1266,8 +1564,9 @@ impl Checker {
                 span,
                 call_span,
             ) {
-                Some((a, _)) => {
+                Some((a, _, at)) => {
                     permuted = a;
+                    supplied_at = at;
                     &permuted[..]
                 }
                 None => return sig.ret.clone(),
@@ -1281,19 +1580,33 @@ impl Checker {
             // declared return against it, first-wins AFTER the receiver's own arguments (the
             // receiver stays authoritative for the class's parameters; the expectation fills what
             // it leaves open — typically the method's own).
-            let mut seed: HashMap<String, Type> = generic
+            let mut seed: Subst = generic
                 .params
                 .iter()
-                .map(|(n, _)| n.clone())
+                .map(|(p, _)| p.id)
                 .zip(recv_args.iter().cloned())
                 .filter(|(_, t)| !t.defers_to_runtime())
                 .collect();
             if let Some((pending_span, expected)) = self.pending_member_ret.clone()
                 && call_span == Some(pending_span)
             {
-                let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+                let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
                 bind_type_params(&generic.raw_ret, &expected, &tps, &mut seed);
             }
+            // A generic METHOD forwards its OWN type parameters through the call node's
+            // type-argument channel (Axis A), exactly as a top-level generic fn does — keyed
+            // `Type.method`, so the body's slots and this call site agree on the layout. It takes
+            // both a resolvable owning type and a call span to key on; a synthesized call (no
+            // span) or an unresolvable receiver supplies nothing, and the callee's body aborts at
+            // its forwarded site rather than reading a value argument as a type-table index.
+            // Spelled without a turbofish (`recv.m(args)`) — this path is `call_user_method`, the
+            // inferred one; the explicit spelling lands in `synth_typed_method_call`.
+            let hidden_site = match (call_span, type_name) {
+                (Some(cs), Some(ty)) => {
+                    Some((cs, format!("{ty}.{name}"), ForwardSpelling::Inferred))
+                }
+                _ => None,
+            };
             return self.check_generic_call_seeded(
                 name,
                 generic,
@@ -1302,8 +1615,8 @@ impl Checker {
                 arg_exprs,
                 span,
                 seed,
-                // Methods never forward (the pinned D3 boundary), so no hidden site.
-                None,
+                &supplied_at,
+                hidden_site,
                 env,
             );
         }
@@ -1321,6 +1634,13 @@ impl Checker {
     /// bindings first, the turbofish's next, arguments filling only what those leave open).
     /// Misapplied turbofish — an unknown method, a non-generic one, or a type-argument arity
     /// mismatch against the method's own parameters — is E0058.
+    ///
+    /// The receiver may itself carry a **call-site class instantiation**, `Repo::<Todo>.m::<U>(…)`.
+    /// That is the only spelling for a self-less member of a generic class whose own parameter no
+    /// argument or expectation can infer, and it needs nothing new here: the class's arguments are
+    /// read off the receiver by the same [`Checker::call_site_class_args`] the non-turbofish static
+    /// path uses, and land in `recv_args` — the very channel a *value* receiver's arguments travel.
+    /// Both halves keep their own arity check against their own parameter list.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn synth_typed_method_call(
         &mut self,
@@ -1336,17 +1656,22 @@ impl Checker {
         for t in type_args {
             self.check_type_ref(t);
         }
-        let resolved: Vec<Type> = type_args
-            .iter()
-            .map(|t| from_ref_q(t, &self.imports.extern_types))
-            .collect();
-        // Resolve the receiver: a bare unshadowed TYPE name is the associated form (no receiver
-        // instantiation); anything else synthesizes and must be a user type with methods.
-        let (type_name, recv_args, associated) = match recv {
+        let resolved: Vec<Type> = type_args.iter().map(|t| self.annot(t)).collect();
+        // Resolve the receiver: a bare unshadowed TYPE name is the associated form — with the
+        // class's instantiation taken from a call-site turbofish if one is spelled
+        // (`Repo::<Todo>.m::<U>(…)`) and left to inference if not; anything else synthesizes and
+        // must be a user type with methods. Peeling first is mandatory, not cosmetic: an
+        // unpeeled `Expr::InstantiatedType` falls to the `_` arm, synthesizes as "a call-site type
+        // argument list must be followed by an associated call", and the static call it plainly is
+        // stops being recognized as one.
+        let (type_name, recv_args, associated) = match recv.peel_instantiation() {
             Expr::Ident { name: tn, .. }
-                if lookup(env, tn).is_none() && self.symbols.types.contains(tn) =>
+                if lookup(env, tn.as_str()).is_none()
+                    && self.symbols.types.contains(tn.as_str()) =>
             {
-                (tn.clone(), Vec::new(), true)
+                let tn = tn.to_string();
+                let class_args = self.call_site_class_args(recv, &tn);
+                (tn, class_args, true)
             }
             _ => match self.synth(recv, env) {
                 Type::Named(n, targs) => (n, targs, false),
@@ -1410,14 +1735,12 @@ impl Checker {
             return Type::Unknown;
         };
         // The associated/instance discipline (E0047) holds for the turbofish form exactly as for
-        // plain calls.
-        let is_instance = self
-            .symbols
-            .method_instance
-            .get(&(type_name.clone(), name.to_string()))
-            .copied()
-            .unwrap_or(true);
-        if associated && is_instance {
+        // plain calls — which it did not, quite: this read the table with ONE default (`true`) for
+        // both directions, while the plain paths used opposite ones, so an unclassified method
+        // (every standalone-impl method) was accepted as `T.m(…)` and refused as `T.m::<X>(…)`.
+        // Asking [`Checker::receiver_of`] the same question all three sites ask settles it.
+        let receiver = self.receiver_of(&type_name, name);
+        if associated && !receiver.allows_associated_call() {
             self.error(
                 DiagnosticCode::InvalidReceiver,
                 name_span,
@@ -1429,7 +1752,7 @@ impl Checker {
             ));
             return sig.ret.clone();
         }
-        if !associated && !is_instance {
+        if !associated && !receiver.allows_instance_call() {
             self.error(
                 DiagnosticCode::InvalidReceiver,
                 name_span,
@@ -1461,22 +1784,53 @@ impl Checker {
                     resolved.len()
                 ),
             );
-            let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+            let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
         // The composed seed: the receiver's type arguments bind the class's parameters
         // (positionally, exactly as a plain instance call's), the turbofish binds the method's
         // own — both first-wins, so arguments can only fill what they leave open.
-        let mut seed: HashMap<String, Type> = generic
+        let mut seed: Subst = generic
             .params
             .iter()
-            .map(|(n, _)| n.clone())
+            .map(|(p, _)| p.id)
             .zip(recv_args.iter().cloned())
             .filter(|(_, t)| !t.defers_to_runtime())
             .collect();
-        for ((n, _), t) in own.iter().zip(resolved) {
-            seed.entry(n.clone()).or_insert(t);
+        // The method's OWN parameters are separate keys from the class's — even when both are
+        // spelled `T`. Keyed on the name, the class's argument occupied `"T"` first and this
+        // `or_insert` silently discarded the turbofish the user wrote, so `Repo::<Todo>
+        // .label::<User>()` answered `Todo`. Keyed on identity there is nothing to collide with,
+        // and `or_insert` now means only what it says: an explicit binding wins over inference.
+        for ((p, _), t) in own.iter().zip(resolved) {
+            seed.entry(p.id).or_insert(t);
         }
+        // Named arguments, normalized into parameter order exactly as the non-turbofish method
+        // call does (`call_user_method`) — see the free-function twin above.
+        let permuted;
+        let mut supplied_at: Vec<usize> = Vec::new();
+        let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
+            let (names, types) = (sig.param_names.clone(), sig.params.clone());
+            match self.order_arguments(
+                arg_exprs,
+                &names,
+                &types,
+                sig.required,
+                name,
+                args,
+                span,
+                span,
+            ) {
+                Some((a, _, at)) => {
+                    permuted = a;
+                    supplied_at = at;
+                    &permuted[..]
+                }
+                None => return sig.ret.clone(),
+            }
+        } else {
+            arg_exprs
+        };
         self.check_generic_call_seeded(
             name,
             &generic,
@@ -1485,7 +1839,25 @@ impl Checker {
             arg_exprs,
             span,
             seed,
-            None,
+            &supplied_at,
+            // An EXPLICIT method turbofish forwards on the same channel as an inferred one — the
+            // turbofish only pins the instantiation the seed carries into the slot templates.
+            // Its SPELLING, though, is what decides whether the syntactic pre-pass could have
+            // registered a slot for it: a bare-name receiver (`s.load::<T>`, `self.load::<T>`,
+            // `Store.load::<T>`) parses as the module-call atom the pre-pass marks; anything
+            // compound (`self.inner.load::<T>`, `f().load::<T>`) names its callee only here. A
+            // call-site class instantiation (`Store::<T>.load::<U>`) is a bare name with types
+            // written on it, not a compound receiver — hence the peel, so the help it produces
+            // matches the one `Store.load::<U>` produces.
+            Some((
+                span,
+                format!("{type_name}.{name}"),
+                if matches!(recv.peel_instantiation(), Expr::Ident { .. }) {
+                    ForwardSpelling::Turbofish
+                } else {
+                    ForwardSpelling::CompoundReceiver
+                },
+            )),
             env,
         )
     }
@@ -1551,8 +1923,8 @@ impl Checker {
     }
 
     /// Arity- and type-check a method call's arguments against the resolved parameter signature
-    /// (a built-in method or a user method); a deferred receiver or an unknown method is not
-    /// checked.
+    /// (a built-in method, a user method, or a trait object's declared contract); a deferred
+    /// receiver or an unknown method is not checked.
     pub(crate) fn check_method_args(
         &mut self,
         recv: &Type,
@@ -1570,12 +1942,28 @@ impl Checker {
             let params = sig.params.clone();
             let required = sig.required;
             self.check_args(&params, required, args, arg_exprs, span, name);
+        } else if let Type::DynTrait(tr) = recv
+            && let Some((params, required, _)) = self.dyn_trait_method(tr, name)
+        {
+            // A `dyn Trait` call is typed by the trait's contract on the way out (`method_call_return`)
+            // — so its arguments are checked against the same contract on the way in, exactly as the
+            // bound receiver's are. Without this a trait object was the one receiver whose arguments
+            // nothing checked: `g.greet(42)` against `fn greet(who: string)` passed `noeta check`.
+            self.check_args(&params, required, args, arg_exprs, span, name);
         }
     }
 
     /// Check a call's argument count and types against the callable's parameter types, reporting
     /// at `span`. Lenient where either side defers to runtime (`dyn`/hole) and on numeric widening
     /// (`int` where `float` is expected), so polymorphic and numeric calls are not false positives.
+    ///
+    /// **A label that reaches here never bound.** Every callee that *can* honour one resolves its
+    /// binding first, in [`Checker::order_arguments`], which permutes the list into parameter order
+    /// and clears the labels on the way through. So a surviving `name:` means the callee had no
+    /// parameter names to bind it against — a native or built-in function, whose parameters are
+    /// positional — and the only honest answers are to bind it or to refuse it. It used to be
+    /// neither: `math.pow(base: 2.0, exp: 3.0)` ran with both labels discarded, and
+    /// `"abc".replace(zzz: "a", "b")` ran with a label naming nothing at all.
     pub(crate) fn check_args(
         &mut self,
         params: &[Type],
@@ -1585,6 +1973,7 @@ impl Checker {
         span: Span,
         callee: &str,
     ) {
+        self.reject_unbound_labels(arg_exprs, callee);
         if args.len() < required || args.len() > params.len() {
             let expected = if required == params.len() {
                 format!("{}", params.len())
@@ -1615,14 +2004,92 @@ impl Checker {
                 continue;
             }
             if !self.arg_assignable(arg, param) {
-                self.error(
+                let d = self.error(
                     DiagnosticCode::TypeMismatch,
                     span,
                     format!("argument of type `{arg}` is not assignable to `{param}`"),
                 );
+                // `number` is the one parameter type whose name does not list its members, so say
+                // what it admits — once, here, rather than in the message every call site prints.
+                if param.is_arith_numeric_union() {
+                    d.help(
+                        "`number` is any numeric scalar: `int`, `float`, `f32`, `f64`, and the \
+                         fixed widths `i8`…`u64`",
+                    );
+                }
             }
         }
     }
+}
+
+/// Whether `ty` is a **closed** builtin type — one whose method table is complete at check time, so
+/// "the lookup found nothing" is proof the method does not exist rather than merely that this pass
+/// could not see it.
+///
+/// Closedness is the language's, not a convenience: `impl Trait for string` (and for every other
+/// type here) is rejected with E0013 — "not a record, class, or enum declared in this module" — so
+/// no user code can add a method to one of these after the fact. Native extensions *can*, but they
+/// register into the same instance registry [`Checker::method_call_return`] already consulted, so
+/// theirs are found too.
+///
+/// Deliberately excluded, and why:
+/// - [`Type::Named`] — a type parameter, a native type, or a declared one. The declared half is
+///   closed too, but by a different question: see [`user_type_is_closed`], which this predicate's
+///   two call sites ask alongside it.
+/// - [`Type::Dyn`], [`Type::Unknown`] and the other gradual holes — they never reach here, because
+///   `method_call_return` answers them with the deferred type rather than `Unknown`.
+/// - [`Type::DynTrait`] — resolved against the trait's declared methods, but a trait object's
+///   dispatch is the runtime's call to make.
+pub(crate) fn closed_to_new_methods(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Int
+            | Type::IntN { .. }
+            | Type::Float
+            | Type::F32
+            | Type::F64
+            | Type::Bool
+            | Type::Unit
+            | Type::String
+            | Type::Bytes
+            | Type::List(_)
+            | Type::Map(_, _)
+            | Type::Set(_)
+            | Type::Option(_)
+            | Type::Result(_, _)
+    )
+}
+
+/// Whether the receiver's member set is known **in full** here: the builtins that
+/// [`closed_to_new_methods`] covers, plus a nominal type this program itself declares.
+///
+/// The second half is what makes `Ollama.local()` a typo the checker catches. Reflection is
+/// whole-program and so is checking: a `struct`/`class`/`enum` written in the program (or in one of
+/// its packages) has exactly the members its declaration and its `impl` blocks give it, so a call to
+/// one that is not there cannot resolve at run time either — it aborts with E0005, which used to be
+/// the *first* report of a name nothing in the program ever spelled.
+///
+/// Three kinds of `Type::Named` are excluded, and each would be a false positive rather than a
+/// missed one:
+///
+///   * a **type parameter** — a bound *licenses* methods rather than closing the world, and a
+///     method no bound declares is documented to defer to runtime dispatch. It needs no test of its
+///     own now that it is its own lattice variant: it simply is not a `Named`, so the destructure
+///     below declines it. (It used to be a `Named` like any other, told apart by membership in the
+///     in-scope name table.)
+///   * a **native/extern** type, whose members live in the extension registry under an identity the
+///     checker resolves through `stdlib::method_return`; a miss there is not proof of absence.
+///   * anything the program does not declare at all — an opaque imported stub, a name the linker
+///     left unresolved. Nothing is known about those, and "nothing known" is not "does not exist".
+pub(crate) fn user_type_is_closed(checker: &crate::Checker, ty: &Type) -> bool {
+    let Type::Named(n, _) = ty else {
+        return false;
+    };
+    if checker.reg().resolve_type(n.as_str()).is_some() {
+        return false;
+    }
+    checker.symbols.records.contains_key(n.as_str())
+        || checker.symbols.enums.contains_key(n.as_str())
 }
 
 /// A compact human label for a **computed callee** — the expression standing in for a name in an
@@ -1633,7 +2100,7 @@ impl Checker {
 /// invented name.
 fn callee_label(callee: &Expr) -> String {
     match callee {
-        Expr::Ident { name, .. } => name.clone(),
+        Expr::Ident { name, .. } => name.to_string(),
         Expr::Index { receiver, .. } => format!("{}[…]", callee_label(receiver)),
         Expr::Call { callee, .. } => format!("{}(…)", callee_label(callee)),
         Expr::Member { receiver, name, .. } => format!("{}.{name}", callee_label(receiver)),

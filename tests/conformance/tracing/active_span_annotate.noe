@@ -1,0 +1,64 @@
+// std.tracing — the ACTIVE-SPAN annotators. `tracing.set_attribute`/`add_event`/`record_error`
+// apply the `Span` mutations to the span the program is already *inside*, which no handle names.
+// Before them, a program inside a `with_span` body could only create a *child* span to record
+// something that merely happened — an annotation forced into a span's shape.
+//
+// They are free functions, not a `current_span() -> ?Span`, because the active span is an ambient
+// value (`std.log` already reads the same task-local stack with no handle) and a handle would carry
+// `.end()` — letting a body end the span `with_span` is about to end, or a request handler end the
+// auto-instrumented SERVER span.
+//
+// Each returns `bool`: whether a LIVE active span received the annotation. That return is ordinary
+// program output, so the differential oracle pins the active-span state on both backends — the
+// annotated spans themselves are a write-only side effect, asserted against the sandbox recorder in
+// `crates/noeta-conformance/tests/tracing_serve.rs`.
+//
+// Top level has NO active span, so all three answer `false`. The no-span case is visible rather
+// than a silent no-op, which is the whole reason the surface returns a value: `record_error` is
+// exactly the call whose failure must not be swallowed.
+// expect: stdout "top_attr=false"
+// expect: stdout "top_event=false"
+// expect: stdout "top_event_with=false"
+// expect: stdout "top_error=false"
+// expect: stdout "in_attr=true"
+// expect: stdout "in_event=true"
+// expect: stdout "in_event_with=true"
+// expect: stdout "in_error=true"
+// expect: stdout "held_still_works=true"
+// expect: stdout "done"
+// expect: exit 0
+use std.{tracing}
+
+// No span is active at top level — nothing to annotate, and each call says so.
+top_attr = tracing.set_attribute("verdict", "allow")
+top_event = tracing.add_event("guardrail.checked")
+top_event_with = tracing.add_event_with("guardrail.denied", {"guard": "pii"})
+top_error = tracing.record_error("nothing to attach to")
+echo "top_attr=${top_attr}"
+echo "top_event=${top_event}"
+echo "top_event_with=${top_event_with}"
+echo "top_error=${top_error}"
+
+// Inside a `with_span` body the annotations land on that span — the case the surface exists for.
+body = fn(): void {
+    a = tracing.set_attribute("verdict", "deny")
+    e = tracing.add_event("guardrail.checked")
+    // An event carrying its own attributes: the structured form, so two verdicts recorded on one
+    // span each keep their own reason instead of overwriting a span-level key.
+    ew = tracing.add_event_with("guardrail.denied", {"guard": "pii", "reason": "email in prompt"})
+    r = tracing.record_error("policy violation")
+    echo "in_attr=${a}"
+    echo "in_event=${e}"
+    echo "in_event_with=${ew}"
+    echo "in_error=${r}"
+}
+tracing.with_span("run", body)
+
+// The handle form is untouched, and gained the same structured event: a span you opened yourself is
+// still annotated through the handle, and the two surfaces are the same operations under two names
+// for two receivers.
+held = tracing.span("db.lookup").set_attribute("db.system", "postgres").add_event("cache.miss")
+held.add_event_with("retry", {"attempt": 2}).end()
+echo "held_still_works=true"
+
+echo "done"

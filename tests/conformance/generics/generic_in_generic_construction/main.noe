@@ -1,0 +1,96 @@
+// **Generic-in-generic construction**: a generic type builds ANOTHER generic type out of its own
+// type parameter, and the inner instantiation is recorded.
+//
+// This is what `LiveRepository<T>` wants and could not have. Its constructor is self-less, so it has
+// no receiver to read `T` off; and the `Repository.new(tbl, pk)` it writes resolves to
+// `Repository<T>` with `T` still a *parameter* — one compiled `LiveRepository.new` serves every
+// instantiation, so there is no concrete `TypeRepr` in the body to stamp. It checked clean and then
+// ABORTED at run time on the first `type_name::<T>()` inside `Repository`.
+//
+// The instantiation now travels the channel that already exists: the **hidden type-argument slot**.
+// The slot's template is the whole declared instantiation (`Repository<T>`, read off the field's
+// declaration), so the OUTER call — which knows `T = Todo` — substitutes and interns the finished
+// `Repository<Todo>` *statically*, exactly as every other forwarding slot does. The body then stamps
+// the interned entry the slot names onto the object the inner call freshly built. Nothing is composed
+// at run time; only WHICH interned entry applies is dynamic, which is why both backends answer
+// identically (one table index each).
+//
+// A `main.noe` with a `noeta.toml` on purpose: the harness runs a *single-file* case straight from
+// source text, with no loader and therefore no namespace qualification, so a bare `.noe` here could
+// not observe that the tag carries the **linked** identity. Delete the manifest and the expectations
+// below silently lose their qualification.
+// expect: stdout "todos:live.main.Todo@c1"
+// expect: stdout "orders:live.main.Order@c2"
+// expect: stdout "true"
+// expect: stdout "deep:todos:live.main.Todo"
+// expect: exit 0
+
+struct Todo {
+    id: int
+}
+struct Order {
+    id: int
+}
+
+class Repository<T> {
+    pub tbl: string
+    pub pk: string
+
+    fn new(tbl: string, pk: string): Repository<T> {
+        return Repository { tbl: tbl, pk: pk };
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+
+// One line at the call site is the whole point: the caller names the model once and never builds or
+// passes a `Repository<Todo>` by hand.
+class LiveRepository<T> {
+    repo: Repository<T>
+    conn: string
+
+    fn new(tbl: string, pk: string, conn: string): LiveRepository<T> {
+        return LiveRepository { repo: Repository.new(tbl, pk), conn: conn };
+    }
+
+    fn describe(): string {
+        return self.repo.model() ~ "@" ~ self.conn;
+    }
+
+    // The inner repository's own answer, reached through an INSTANCE method (it reads `self`), so
+    // `Outer` below observes the nested tag without `repo` leaving the class.
+    fn inner_model(): string {
+        return self.repo.model();
+    }
+}
+
+live: LiveRepository<Todo> = LiveRepository.new("todos", "id", "c1");
+other: LiveRepository<Order> = LiveRepository.new("orders", "id", "c2");
+echo live.describe();
+echo other.describe();
+// Two differently-instantiated OUTER types in one program: the tags must not bleed. They would be
+// equal — for the wrong reason — if the two inner repositories shared one type-argument entry, which
+// is exactly what deduplicating the interned table on `TypeArgInfo` alone would have done (its `name`
+// is head-keyed and a class carries no decode recipe, so `Repository<Todo>` and `Repository<Order>`
+// are indistinguishable there).
+echo live.describe() != other.describe();
+
+// Nested two deep: `Outer<T>` builds `LiveRepository<T>`, which builds `Repository<T>`. The
+// intermediate slot is a PASS-THROUGH — `LiveRepository.new`'s own `Repository<T>` template
+// substitutes to `Repository<T>` in `Outer`'s scope, so `Outer.new` carries that slot too and hands
+// it down. Nothing about the mechanism is per-level.
+class Outer<T> {
+    live: LiveRepository<T>
+
+    fn new(tbl: string, conn: string): Outer<T> {
+        return Outer { live: LiveRepository.new(tbl, "id", conn) };
+    }
+
+    fn describe(): string {
+        return "deep:" ~ self.live.inner_model();
+    }
+}
+o: Outer<Todo> = Outer.new("todos", "c3");
+echo o.describe();

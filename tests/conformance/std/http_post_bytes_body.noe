@@ -1,0 +1,16 @@
+// A `bytes` body must reach the native `http` dispatch as REAL BYTES. `http.client` is a
+// `deep_marshal` module (its optional `headers` map has to arrive whole), so a `bytes` argument
+// travels through the *deep* value projection — which used to render a buffer as the human summary
+// `"<N bytes>"`, silently POSTing that ASCII text instead of the buffer (`want_data` saw a
+// `NativeValue::Str` and took its UTF-8). The sandbox `/echo` responder reflects the request body
+// back, so what is asserted is the value that ARRIVED, not merely that the call succeeded.
+// expect: stdout "{"body":"hi","method":"POST","path":"/echo"}"
+// expect: stdout "{"body":"hé","method":"POST","path":"/echo"}"
+// expect: exit 0
+use std.http.client
+
+echo client.post("https://svc.test/echo", "hi".to_bytes())?.body()
+
+// Multi-byte UTF-8: the summary form would have said `<3 bytes>` — a different length as well as
+// different content, so this pins the buffer rather than any coincidence of size.
+echo client.post("https://svc.test/echo", "hé".to_bytes())?.body()

@@ -181,6 +181,12 @@ body {
   text-decoration: underline;
 }
 
+/* In-panel links (another guide page, or a heading on this one) carry no href — they navigate by
+   posting to the extension — so they need the pointer an href would have given them. */
+.doc-body a.doc-link {
+  cursor: pointer;
+}
+
 .doc-body hr {
   border: none;
   border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));

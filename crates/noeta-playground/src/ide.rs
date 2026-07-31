@@ -31,7 +31,16 @@ thread_local! {
 }
 
 /// Push `text` into the persistent store (the keystroke path) and answer `f` against it.
+///
+/// Seeds the process-default extension registry first, for the same reason
+/// [`crate::front_end`] does: nothing seeds it in this wasm module, and the store resolves `std`
+/// names against it. Without this an IDE request that arrived **before** the first `check`/`run`
+/// — a hover racing the page's first diagnostics pass — hit an unseeded registry and aborted the
+/// whole instance on a wasm `unreachable`. `check`/`run`/`debug` all seed it via `front_end`, so
+/// the fault only ever showed on a cold engine, which is exactly when a visitor's first hover
+/// lands. Idempotent, so the repeat cost on every keystroke is a resolved-once check.
 fn with_document<T>(text: &str, f: impl FnOnce(&DocumentStore) -> T) -> T {
+    noeta_stdlib::registry::default_seeded();
     STORE.with(|store| {
         let mut store = store.borrow_mut();
         store.change(URI, text.to_string());

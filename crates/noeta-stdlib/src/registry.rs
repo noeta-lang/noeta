@@ -169,7 +169,85 @@ impl Extension for HttpExtension {
         // `noeta serve` (higher-order-abi H6) — contributed here, not a core CLI verb.
         &[crate::serve::SERVE_COMMAND]
     }
+    fn enums(&self) -> &'static [ExtEnum] {
+        HTTP_ENUMS
+    }
+    fn structs(&self) -> &'static [ExtStruct] {
+        HTTP_STRUCTS
+    }
 }
+
+/// The `http` unit's native enum: `Framing` (http-streaming arc) — how `client.stream` cuts a
+/// response body. A real language enum rather than a string, so a `match` over it is exhaustive
+/// (E0011) and a typo is a compile error instead of a runtime surprise.
+///
+/// Fieldless and unbacked: the variants are a choice, not a value with a wire representation, so
+/// there is nothing for `.value()` to return.
+const HTTP_ENUMS: &[ExtEnum] = &[ExtEnum {
+    name: noeta_ext_abi::stream::FRAMING_TYPE_NAME,
+    namespace: "std.http",
+    variants: &[
+        ExtVariant {
+            name: "Sse",
+            fields: &[],
+            value: VariantValue::None,
+        },
+        ExtVariant {
+            name: "Ndjson",
+            fields: &[],
+            value: VariantValue::None,
+        },
+        ExtVariant {
+            name: "Lines",
+            fields: &[],
+            value: VariantValue::None,
+        },
+    ],
+    ..ExtEnum::DEFAULTS
+}];
+
+/// The `http` unit's native value struct: `Frame` (http-streaming arc) — one frame cut out of a
+/// streaming body.
+///
+/// A **struct**, not a class and not an extern handle, and that is the load-bearing decision: a
+/// struct-kind type is `Send` when all its fields are (they are all `string`/`?int` here), so a
+/// frame crosses a channel or an isolate. A consuming pipeline — the motivating case is an LLM
+/// client re-emitting provider tokens to a browser — is channel-based, and a `class`/`dyn` is
+/// `!Send` and could not participate.
+///
+/// Every field is `pub` and none is `mut`: a frame is a decoded observation, so reading it is the
+/// whole point and mutating it in place is meaningless (build a new one).
+const HTTP_STRUCTS: &[ExtStruct] = &[ExtStruct {
+    name: noeta_ext_abi::stream::FRAME_TYPE_NAME,
+    namespace: "std.http",
+    fields: &[
+        ExtField {
+            name: "event",
+            ty: Str,
+            is_public: true,
+            is_mut: false,
+        },
+        ExtField {
+            name: "data",
+            ty: Str,
+            is_public: true,
+            is_mut: false,
+        },
+        ExtField {
+            name: "id",
+            ty: Str,
+            is_public: true,
+            is_mut: false,
+        },
+        ExtField {
+            name: "retry",
+            ty: SigType::Option(&SigType::Int),
+            is_public: true,
+            is_mut: false,
+        },
+    ],
+    ..ExtStruct::STRUCT_DEFAULTS
+}];
 
 /// The `id` unit's extern type: `Uuid` (X2 — pure, byte-ordered, key-capable).
 const ID_TYPES: &[ExtType] = &[ExtType {
@@ -288,6 +366,99 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: SOCKET_DOCS,
         ..ExtType::DEFAULTS
     },
+    // The incremental body reader (http-streaming arc) — the `Socket` shape on the OUTBOUND side:
+    // a host-resource handle whose `recv` rides the executor, so its body methods live in the ctx
+    // table. Its **head** methods (`status`/`ok`/`header`/`error_for_status`) are plain reads off
+    // the handle and live in the ordinary table, so answering "did this request fail?" costs no
+    // executor round and no `recv()`.
+    ExtType {
+        name: noeta_ext_abi::stream::FRAME_STREAM_TYPE_NAME,
+        namespace: "std.http",
+        methods: crate::http_stream::FRAME_STREAM_METHODS,
+        dispatch: crate::http_stream::frame_stream_method_dispatch,
+        ctx_methods: crate::http_stream::FRAME_STREAM_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::http_stream::frame_stream_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        key_capable: false, // identifies a host resource
+        docs: FRAME_STREAM_DOCS,
+        ..ExtType::DEFAULTS
+    },
+    // The event-stream sink (http-streaming arc) — `Socket`'s write-only inbound twin. Its `send`
+    // takes a `Frame` value struct, which must arrive marshalled rather than as an opaque handle.
+    ExtType {
+        name: noeta_ext_abi::stream::SSE_SINK_TYPE_NAME,
+        namespace: "std.http",
+        ctx_methods: crate::http_stream::SSE_SINK_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::http_stream::sse_sink_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        key_capable: false, // identifies a host resource
+        deep_marshal: true,
+        docs: SSE_SINK_DOCS,
+        ..ExtType::DEFAULTS
+    },
+];
+
+/// `FrameStream`'s method prose (`noeta doc --api` renders `docs/std-http.md` from this).
+const FRAME_STREAM_DOCS: &[(&str, &str)] = &[
+    (
+        "status",
+        "The response status the opening handshake received — readable immediately, **before** the first \
+         `recv()`. Check it: a rate-limited provider answers a streaming request with a `429` whose body is \
+         a JSON error document, and since that is not an event stream, `Framing.Sse` decodes it to zero \
+         frames. Without the status, that failure is indistinguishable from a model that had nothing to \
+         say.",
+    ),
+    (
+        "ok",
+        "Whether `status()` is a 2xx. `if !stream.ok() { … }` is the guard to write before draining a \
+         stream you did not open with `error_for_status()`.",
+    ),
+    (
+        "header",
+        "A response header from the opening handshake, matched case-insensitively; `none` when absent. \
+         This is where a streamed failure keeps its actionable part: `stream.header(\"retry-after\")` on a \
+         `429` tells a backoff loop how long to wait, and the provider's `x-ratelimit-*` headers report the \
+         remaining budget.",
+    ),
+    (
+        "error_for_status",
+        "Turn a non-2xx status into the `Err` arm, so `client.stream(req, Framing.Sse)?.error_for_status()?` \
+         short-circuits a rate limit the same way a transport failure does. Opt-in and explicit, exactly \
+         like `Response.error_for_status`: a status is an answer, not a broken network, so plain `?` on a \
+         `stream(...)` keeps its one meaning.",
+    ),
+    (
+        "recv",
+        "The next frame of the body, or `none` once the body ends. Await it: `frame = stream.recv().await`. \
+         A stream yields `none` forever after the body ends, so a `while` loop over it terminates.",
+    ),
+    (
+        "close",
+        "Release the stream and its connection without reading the rest of the body — what a caller does \
+         after seeing a terminal frame (`[DONE]`) rather than draining to the end. Idempotent, and \
+         unnecessary once `recv` has returned `none`.",
+    ),
+];
+
+/// `SseSink`'s method prose.
+const SSE_SINK_DOCS: &[(&str, &str)] = &[
+    (
+        "send",
+        "Push one `Frame` to the client. A multi-line `data` is encoded as several `data:` lines, which is \
+         the only legal way to carry a newline through an event stream.",
+    ),
+    (
+        "comment",
+        "Write an SSE comment (`: text`) — the keepalive heartbeat. It puts bytes on the wire without \
+         dispatching an event, so an idle stream is not reaped by an intermediary.",
+    ),
+    (
+        "close",
+        "End the event stream and release the connection. The stream also closes when the handler returns, \
+         so this is for ending early.",
+    ),
 ];
 
 /// The always-on core extern types: `FileHandle` (X3 — mutable + effectful, `fs`), `Cell<T>` (H4),
@@ -295,12 +466,16 @@ const HTTP_TYPES: &[ExtType] = &[
 const CORE_TYPES: &[ExtType] = &[
     // `Span` (native OTEL T1) — a mutable, effectful, host-coupled handle (like `FileHandle`): its
     // methods reach the `Tracing` capability by id. NOT key-capable (identifies a host resource).
+    // `deep_marshal` so `add_event_with`'s `Map<string, …>` argument arrives as a full
+    // `NativeValue::Map` (the shallow projection collapses containers to opaque) — the same reason
+    // the metrics handles set it for their `*_with(_, attrs)` forms.
     ExtType {
         name: crate::tracing::SPAN_TYPE_NAME,
         namespace: "std.tracing",
         methods: crate::tracing::SPAN_METHODS,
         dispatch: crate::tracing::span_method_dispatch,
         key_capable: false,
+        deep_marshal: true,
         docs: SPAN_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
@@ -362,6 +537,19 @@ const CORE_TYPES: &[ExtType] = &[
         docs: JSON_ERROR_DOCS,
         ..ExtType::DEFAULTS
     },
+    // `Base64Error` — the `JsonError` shape for a flat input: pure, content-equal data carrying the
+    // failure kind and the offset it was detected at. Declares `Error` + `Display` so `<E: Error>`
+    // bounds accept it, `?` converts through `From`, and `${e}` renders the composed message.
+    ExtType {
+        name: crate::base64::BASE64_ERROR_TYPE_NAME,
+        namespace: "std.base64",
+        methods: BASE64_ERROR_METHODS,
+        dispatch: base64_error_method_dispatch,
+        key_capable: false, // a decode failure is not a map key
+        traits: &["Error", "Display"],
+        docs: BASE64_ERROR_DOCS,
+        ..ExtType::DEFAULTS
+    },
     // `ExecResult` (stdlib-gaps) — pure, content-equal subprocess outcome (the `Response` model).
     ExtType {
         name: crate::os::EXEC_RESULT_TYPE_NAME,
@@ -381,6 +569,19 @@ const CORE_TYPES: &[ExtType] = &[
         dispatch: process_method_dispatch,
         key_capable: false,
         docs: PROCESS_DOCS,
+        ..ExtType::DEFAULTS
+    },
+    // `OsError` (subprocess-doors arc) — the recoverable failure the `try_spawn`/`try_write` doors
+    // carry. Pure, content-equal data like `HttpError`; declares `Error` + `Display` so `<E: Error>`
+    // bounds accept it and `?` converts it through `From`.
+    ExtType {
+        name: crate::os::OS_ERROR_TYPE_NAME,
+        namespace: "std.os",
+        methods: OS_ERROR_METHODS,
+        dispatch: os_error_method_dispatch,
+        key_capable: false, // a subprocess failure is not a map key
+        traits: &["Error", "Display"],
+        docs: OS_ERROR_DOCS,
         ..ExtType::DEFAULTS
     },
     // `Cell<T>` (higher-order-abi H4) — the generic, Class-3 corner of the matrix: all methods
@@ -451,21 +652,25 @@ const CORE_TYPES: &[ExtType] = &[
 /// `file_handle_method`/`file_handle_params` tables used to hardcode.
 const FILE_HANDLE_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "read_line",
         params: &[],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["count"],
         name: "read",
         params: &[Int],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["contents"],
         name: "write",
         params: &[Str],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &[],
         name: "close",
         params: &[],
         ret: Concrete(SigType::Unit),
@@ -643,43 +848,64 @@ pub fn assemble_with_extras(
 
 /// Assemble (std ∪ `extra`) as an **interned** `&'static` registry — the per-session entry
 /// (instance-registry IR5) for hosts that create sessions repeatedly. The whole pipeline hands out
-/// `&'static Registry`, so a per-session assembly must leak; interning by the unit **pointer set**
-/// bounds that leak by *distinct configurations* instead of by session count (a game engine
-/// reloading levels re-uses one assembly forever). Fallible: a mis-assembled unit set (duplicate
-/// identities, a type namespaced outside its unit's root) is an `Err` for the host to surface,
-/// never a panic out of a library entry point.
+/// `&'static Registry`, so a per-session assembly must leak; interning by the unit set bounds that
+/// leak by *distinct configurations* instead of by session count (a game engine reloading levels
+/// re-uses one assembly forever). Fallible: a mis-assembled unit set (duplicate identities, a type
+/// namespaced outside its unit's root) is an `Err` for the host to surface, never a panic out of a
+/// library entry point.
+///
+/// # Why the key is the units themselves
+///
+/// The table is keyed by **unit identity** — the `&'static dyn Extension` references the caller
+/// passed, compared whole (see [`same_units`]). Two earlier keys were both wrong, in opposite
+/// directions, and each produced the same silent failure: a session handed *another* session's
+/// registry, so its own extension resolved as an unknown name.
+///
+/// * **Data pointers** collide, because an extension type is typically a unit struct and distinct
+///   **zero-sized** statics share one address — any two ZST extensions hashed to the same key.
+/// * **Names** collide too, one level up: two *different* extension objects may legitimately share
+///   a `name()` (a host that links a plugin's v1 and v2 surface, or builds a unit set per feature
+///   flag). `Registry::new`'s uniqueness sweep only rejects a duplicate name *within* one set, so it
+///   never sees this — the second session simply got the first's assembly.
+///
+/// Comparing the references whole distinguishes both: a ZST's vtable carries its type even when its
+/// address does not. A false *negative* (two vtable copies for one type across codegen units) costs
+/// one extra assembly — a bounded leak, never a wrong registry — which is the direction to err in.
 pub fn interned_with_extras(
     extra: &[&'static (dyn Extension + Sync)],
 ) -> Result<&'static noeta_ext_abi::registry::Registry, String> {
-    use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static INTERNED: OnceLock<
-        Mutex<HashMap<Vec<&'static str>, &'static noeta_ext_abi::registry::Registry>>,
-    > = OnceLock::new();
-    // Key on the extras' **names**, order-normalized. Extension names are unique by construction —
-    // `Registry::new`'s uniqueness sweep rejects a duplicate — so a name set *is* a configuration.
-    //
-    // This used to key on the units' data pointers, which is unsound: an extension type is
-    // typically a unit struct, and distinct **zero-sized** statics share one address, so any two
-    // ZST extensions collided onto the same key. Two sessions with disjoint extension sets then
-    // silently shared whichever registry was interned first — the second session's own extension
-    // resolved as an unknown name. Silent and configuration-dependent, which is the worst shape for
-    // an embedding host to debug.
-    let mut key: Vec<&'static str> = extra.iter().map(|e| e.name()).collect();
-    key.sort_unstable();
+    type Units = Vec<&'static (dyn Extension + Sync)>;
+    static INTERNED: OnceLock<Mutex<Vec<(Units, &'static noeta_ext_abi::registry::Registry)>>> =
+        OnceLock::new();
+    // Order-normalized by name so `[&A, &B]` and `[&B, &A]` are one configuration. Names are unique
+    // within any set that assembles (`Registry::try_new` rejects a duplicate), so this is a total
+    // order on every input that gets interned; a set that does *not* assemble returns `Err` below
+    // and is never stored.
+    let mut key: Units = extra.to_vec();
+    key.sort_unstable_by_key(|unit| unit.name());
     let mut interned = INTERNED
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
         .expect("registry intern table poisoned");
-    if let Some(registry) = interned.get(&key) {
+    if let Some((_, registry)) = interned.iter().find(|(units, _)| same_units(units, &key)) {
         return Ok(registry);
     }
     let mut units = std_units();
     units.extend_from_slice(extra);
     let registry: &'static _ =
         Box::leak(Box::new(noeta_ext_abi::registry::Registry::try_new(units)?));
-    interned.insert(key, registry);
+    interned.push((key, registry));
     Ok(registry)
+}
+
+/// Whether two name-sorted unit lists are the **same units** — pairwise reference identity, vtable
+/// included (see [`interned_with_extras`] for why the vtable is the load-bearing half).
+fn same_units(
+    a: &[&'static (dyn Extension + Sync)],
+    b: &[&'static (dyn Extension + Sync)],
+) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| std::ptr::eq(*x, *y))
 }
 
 /// All registered extensions.
@@ -1145,77 +1371,282 @@ fn want_tag<'a>(func: &str, args: &'a [NativeValue], index: usize) -> Result<&'a
     }
 }
 
+// --- `base64`: RFC 4648 encode/decode over `bytes` -----------------------------------------------
+//
+// Four functions rather than two plus alphabet/padding flags: the name states the wire format, so a
+// call site documents which envelope it speaks and a mistake is visible in review instead of
+// surfacing as a token the remote party silently rejects. `encode`/`decode` are the standard
+// `+/`-alphabet, `=`-padded form (RFC 4648 §4, and what §10's vectors show); `encode_url`/
+// `decode_url` are the `-_` URL-safe form with no padding (§5, as RFC 7515 requires for JWTs).
+// Decoding is recoverable — base64 off a wire is untrusted input exactly like JSON — so both decode
+// doors return `Result<bytes, Base64Error>` and never abort. See `crate::base64` for the alphabet-
+// strict / padding-indifferent rule and the reasoning behind offering url-safe at all.
+
+/// `Base64Error`'s signature spelling — the error arm of both decode doors.
+const BASE64_ERROR_SIG: SigType = SigType::Named(crate::base64::BASE64_ERROR_TYPE_NAME);
+
+/// What both decode doors return: `Result<bytes, Base64Error>`.
+const BASE64_RESULT_SIG: SigType = SigType::Result(&SigType::Bytes, &BASE64_ERROR_SIG);
+
+const BASE64_FNS: &[ExtFn] = &[
+    // Encoding accepts `string|bytes` like the `crypto` digests: a string encodes as its UTF-8
+    // bytes, which is what a caller inlining text into a data URI or an auth header wants, and
+    // spares the `.to_bytes()` ceremony in the overwhelmingly common case.
+    ExtFn {
+        param_names: &["data"],
+        name: "encode",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &["data"],
+        name: "encode_url",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &["text"],
+        name: "decode",
+        params: &[Str],
+        ret: Concrete(BASE64_RESULT_SIG),
+    },
+    ExtFn {
+        param_names: &["text"],
+        name: "decode_url",
+        params: &[Str],
+        ret: Concrete(BASE64_RESULT_SIG),
+    },
+];
+
+fn base64_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    // Both decode doors are recoverable: the whole `Result` rides inside the `NativeOut` and the
+    // `Err` channel (a runtime abort) is never used — the same contract `json.try_parse` honors.
+    let decoded = |result: Result<Vec<u8>, crate::base64::Base64Error>| match result {
+        Ok(bytes) => NativeOut::Ok(Box::new(NativeOut::Bytes(bytes))),
+        Err(error) => NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error)))),
+    };
+    match func {
+        "encode" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Str(crate::base64::encode(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "encode_url" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Str(crate::base64::encode_url(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "decode" => {
+            want_arity(func, args, 1)?;
+            Ok(decoded(crate::base64::decode(want_str(func, args, 0)?)))
+        }
+        "decode_url" => {
+            want_arity(func, args, 1)?;
+            Ok(decoded(crate::base64::decode_url(want_str(func, args, 0)?)))
+        }
+        _ => Err(no_function_error("base64", func)),
+    }
+}
+
+const BASE64_DOCS: &[(&str, &str)] = &[
+    (
+        "encode",
+        "Encode bytes (or a string, as its UTF-8 bytes) with the **standard** RFC 4648 alphabet, \
+         `=`-padded — the canonical form, and what an LLM provider's inline image/file field and an \
+         MCP resource's `blob` expect.",
+    ),
+    (
+        "encode_url",
+        "Encode with the **URL-safe** alphabet (`-`/`_`) and no padding — RFC 4648 §5 as RFC 7515 \
+         requires it, so the result is safe in a URL path, a query parameter, or a filename. This \
+         is the JWT-segment spelling.",
+    ),
+    (
+        "decode",
+        "Decode **standard**-alphabet base64 into `bytes`: `Ok(bytes)`, or `Err(Base64Error)` \
+         naming the failure and its `offset()`. Never aborts — base64 from a remote party is \
+         untrusted input exactly like JSON.\n\n\
+         Padded or unpadded input both decode; the *alphabet* is strict, so `-`/`_` is rejected \
+         here (reach for `decode_url`). Non-canonical trailing bits are rejected too, so a \
+         successful decode always re-encodes to the same text.",
+    ),
+    (
+        "decode_url",
+        "Decode **URL-safe**-alphabet base64 into `bytes` — the `encode_url` inverse, and the door \
+         for a JWT segment. Same recoverable `Result<bytes, Base64Error>` contract as `decode`, and \
+         it rejects `+`/`/`: that strictness is why this is a real function rather than a character \
+         substitution you apply afterwards, which would accept a mixed-alphabet token.",
+    ),
+];
+
+/// The `Base64Error` instance methods: pure reads over the decode failure — the `JsonError`
+/// accessor model. `message` is `impl Error`'s required method and `to_string` is `impl Display`'s
+/// (both declared on the type's registration), and both return the same composed message the value
+/// also displays as.
+const BASE64_ERROR_METHODS: &[ExtFn] = &[
+    ExtFn {
+        param_names: &[],
+        name: "message",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "kind",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "offset",
+        params: &[],
+        ret: Concrete(SigType::Option(&Int)),
+    },
+];
+
+const BASE64_ERROR_DOCS: &[(&str, &str)] = &[
+    (
+        "message",
+        "The composed human message (`invalid url-safe base64 character '+' at offset 3`). The \
+         `Error` trait's required method.",
+    ),
+    (
+        "to_string",
+        "Same as `message()` — the `Display` rendering, so `${e}` interpolates the message.",
+    ),
+    (
+        "kind",
+        "What went wrong: `\"invalid_character\"` (a character outside this door's alphabet), \
+         `\"invalid_length\"` (a truncated group), `\"invalid_last_symbol\"` (non-canonical \
+         trailing bits), or `\"invalid_padding\"`.",
+    ),
+    (
+        "offset",
+        "The 0-based byte offset into the encoded text where the failure was detected, or `none` \
+         when the failure is not positional (malformed padding).",
+    ),
+];
+
+fn base64_error_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    use crate::base64::{BASE64_ERROR_TYPE_NAME, Base64Error};
+    let Some(error) = recv.as_any().downcast_ref::<Base64Error>() else {
+        return Err(type_error(method, BASE64_ERROR_TYPE_NAME));
+    };
+    want_arity(method, args, 0)?;
+    match method {
+        // `message` (Error) and `to_string` (Display) are the same composed message by design.
+        "message" | "to_string" => Ok(NativeOut::Str(error.message())),
+        "kind" => Ok(NativeOut::Str(error.kind.label().to_string())),
+        "offset" => Ok(match error.offset {
+            Some(at) => NativeOut::Some(Box::new(NativeOut::Scalar(Scalar::Int(i64::from(at))))),
+            None => NativeOut::None,
+        }),
+        _ => Err(crate::no_method_error(BASE64_ERROR_TYPE_NAME, method)),
+    }
+}
+
 const CRYPTO_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["data"],
         name: "sha256",
         params: &[STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     ExtFn {
+        param_names: &["data"],
         name: "sha512",
         params: &[STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     // Interop-only digests (UUID v5, legacy checksums) — documented as not collision-resistant.
     ExtFn {
+        param_names: &["data"],
         name: "sha1",
         params: &[STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     ExtFn {
+        param_names: &["data"],
         name: "md5",
         params: &[STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     ExtFn {
+        param_names: &["key", "message"],
         name: "hmac_sha256",
         params: &[STR_OR_BYTES, STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     ExtFn {
+        param_names: &["key", "message"],
         name: "hmac_sha512",
         params: &[STR_OR_BYTES, STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
     // Constant-time verification (C7): tag comparison must not short-circuit like `bytes ==`.
     ExtFn {
+        param_names: &["key", "message", "tag"],
         name: "hmac_sha256_verify",
         params: &[STR_OR_BYTES, STR_OR_BYTES, SigType::Bytes],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["key", "message", "tag"],
         name: "hmac_sha512_verify",
         params: &[STR_OR_BYTES, STR_OR_BYTES, SigType::Bytes],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "constant_time_eq",
         params: &[STR_OR_BYTES, STR_OR_BYTES],
         ret: Concrete(SigType::Bool),
     },
     // Incremental hashing (C3): per-algorithm constructors, one `Hasher` type.
     ExtFn {
+        param_names: &[],
         name: "sha256_hasher",
         params: &[],
         ret: Concrete(HASHER_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "sha512_hasher",
         params: &[],
         ret: Concrete(HASHER_SIG),
     },
     // Password hashing + crypto-grade randomness (C4) — the module's Host-entropy corner.
     ExtFn {
+        param_names: &["password", "cost"],
         name: "bcrypt_hash",
         params: &[Str, Int],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &["password", "hash"],
         name: "bcrypt_verify",
         params: &[Str, Str],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["count"],
         name: "random_bytes",
         params: &[Int],
         ret: Concrete(SigType::Bytes),
@@ -1230,11 +1661,13 @@ const HASHER_SIG: SigType = SigType::Named(crate::crypto::HASHER_TYPE_NAME);
 /// non-destructive read (interim digests keep flowing).
 const HASHER_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["data"],
         name: "update",
         params: &[STR_OR_BYTES],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &[],
         name: "digest",
         params: &[],
         ret: Concrete(SigType::Bytes),
@@ -1414,6 +1847,19 @@ const HTTP_ERROR_SIG: SigType = SigType::Named(crate::net::HTTP_ERROR_TYPE_NAME)
 /// `resp.error_for_status()?`.
 const RESPONSE_RESULT_SIG: SigType = SigType::Result(&RESPONSE_SIG, &HTTP_ERROR_SIG);
 
+/// The `Framing` choice a `stream` call cuts with (http-streaming arc).
+const FRAMING_SIG: SigType = SigType::Named(noeta_ext_abi::stream::FRAMING_TYPE_NAME);
+/// The open incremental reader.
+const FRAME_STREAM_SIG: SigType = SigType::Named(noeta_ext_abi::stream::FRAME_STREAM_TYPE_NAME);
+/// The event-stream sink a `server.sse` handler writes to.
+pub(crate) const SSE_SINK_SIG: SigType = SigType::Named(noeta_ext_abi::stream::SSE_SINK_TYPE_NAME);
+
+/// What `stream` returns: the same `Err` door the one-shot verbs use, so `?` on opening a stream
+/// means exactly "the request never got off the ground" — an HTTP error *status* is still a
+/// successfully opened stream whose body the caller reads (an error page streams like anything
+/// else), matching `Ok(Response)` for a 404.
+const FRAME_STREAM_RESULT_SIG: SigType = SigType::Result(&FRAME_STREAM_SIG, &HTTP_ERROR_SIG);
+
 /// A request-headers argument type — `Map<string, string>`, named once.
 const HEADERS: SigType = SigType::Map(&SigType::String, &SigType::String);
 /// The optional trailing `headers` parameter every verb accepts (http arc H5).
@@ -1435,79 +1881,110 @@ const HTTP_CLIENT_FNS: &[ExtFn] = &[
     // The configured door (http arc H7): `client.new(base?)` mints a `Client` carrying base URL,
     // headers, auth, and a deadline. The free verbs below stay the one-shot door.
     ExtFn {
+        param_names: &["base"],
         name: "new",
         params: &[SigType::Optional(&Str)],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "get",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "head",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "delete",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "post",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "put",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "query",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["method", "url", "headers"],
         name: "request",
         params: &[Str, Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "get_async",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "head_async",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["url", "headers"],
         name: "delete_async",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "post_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "put_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["url", "body", "headers"],
         name: "query_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &["method", "url", "headers"],
         name: "request_async",
         params: &[Str, Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
+    },
+    // `stream(req, framing)` (http-streaming arc) — read a response body INCREMENTALLY instead of
+    // buffering it whole.
+    //
+    // It takes a prepared `Request` rather than a url, because a streaming call is always a
+    // configured one in practice (a base URL, an auth header, a JSON body naming the model) and
+    // `prepare`/`send` is already the seam where std hands off to user code.
+    //
+    // Synchronous, returning `Result<FrameStream, HttpError>`: the call sends the request and reads
+    // the response HEAD, which is the last moment a failure is still a transport error the caller
+    // can handle. Everything after that is body, and a body failure surfaces as the stream ending.
+    ExtFn {
+        param_names: &["req", "framing"],
+        name: "stream",
+        params: &[REQUEST_SIG, FRAMING_SIG],
+        ret: Concrete(FRAME_STREAM_RESULT_SIG),
     },
 ];
 
@@ -1518,16 +1995,19 @@ const HTTP_CLIENT_FNS: &[ExtFn] = &[
 /// are the HTTP convenience over it, so a handler never touches a token or a cookie by hand.
 const SESSION_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["secrets"],
         name: "keyring",
         params: &[SigType::List(&Str)],
         ret: Concrete(KEYRING_SIG),
     },
     ExtFn {
+        param_names: &["data", "keys", "max_age"],
         name: "encode",
         params: &[SESSION_DATA_SIG, KEYRING_SIG, Int],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &["token", "keys"],
         name: "decode",
         params: &[Str, KEYRING_SIG],
         ret: Concrete(SigType::Option(&SESSION_DATA_SIG)),
@@ -1536,6 +2016,7 @@ const SESSION_FNS: &[ExtFn] = &[
     // it to rebuild the `Session` currency from a row it read, so a handler consumes a stored
     // session exactly as it does a cookie one. Clean so a pure read never provokes a row write.
     ExtFn {
+        param_names: &["data"],
         name: "of",
         params: &[SESSION_DATA_SIG],
         ret: Concrete(SESSION_SIG),
@@ -1543,6 +2024,7 @@ const SESSION_FNS: &[ExtFn] = &[
     // Read the session off a request. Never fails: an absent, forged, or expired cookie all yield
     // an empty session, because a caller has one correct response to all three.
     ExtFn {
+        param_names: &["request", "keys"],
         name: "open",
         params: &[REQUEST_SIG, KEYRING_SIG],
         ret: Concrete(SESSION_SIG),
@@ -1555,6 +2037,7 @@ const SESSION_FNS: &[ExtFn] = &[
     // credentials over cleartext. Both failures are quiet, so the choice is the caller's to make
     // out loud: `true` in production, `false` only for local development.
     ExtFn {
+        param_names: &["response", "session", "keys", "max_age", "secure"],
         name: "attach",
         params: &[RESPONSE_SIG, SESSION_SIG, KEYRING_SIG, Int, SigType::Bool],
         ret: Concrete(RESPONSE_SIG),
@@ -1757,6 +2240,7 @@ fn want_response<'a>(
 /// ctx function. None of these pull reqwest — a `use std.http.server` program links no client ring.
 const HTTP_SERVER_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["status", "body", "headers"],
         name: "response",
         params: &[Int, OPT_BODY, OPT_HEADERS],
         ret: Concrete(RESPONSE_SIG),
@@ -1764,9 +2248,32 @@ const HTTP_SERVER_FNS: &[ExtFn] = &[
     // The `Set-Cookie` builder (cookie arc C1). Server-side: a client sends cookies back through
     // the `Cookie:` header, which `Request.cookies()` reads, so only the reply side builds one.
     ExtFn {
+        param_names: &["name", "value"],
         name: "cookie",
         params: &[Str, Str],
         ret: Concrete(COOKIE_SIG),
+    },
+    // The form/percent codec as free functions, for a caller holding a body string rather than a
+    // `Request` — a websocket session delivering a client event, a queue consumer, a test. Same
+    // parser as `Request.form_all()`; exposing it here is what keeps every consumer from
+    // hand-rolling percent-decoding.
+    // Build an INBOUND `Request` without a server (named `incoming` because the client module's
+    // `request` verb is an outbound call, and the two share one dispatch). The serve loop is
+    // otherwise the only source of one, so a
+    // handler taking a `Request` — or any framework routing on one — could not be exercised from a
+    // test or a script. Carries no connection, so replying to it is a no-op rather than traffic to
+    // a live socket.
+    ExtFn {
+        param_names: &["method", "url", "body", "headers"],
+        name: "incoming",
+        params: &[Str, Str, OPT_BODY, OPT_HEADERS],
+        ret: Concrete(REQUEST_SIG),
+    },
+    ExtFn {
+        param_names: &["body"],
+        name: "parse_form",
+        params: &[Str],
+        ret: Concrete(SigType::Map(&Str, &Str)),
     },
 ];
 
@@ -1809,6 +2316,40 @@ fn http_request(
     }
 }
 
+/// `std.http.url` — the percent-encoder/decoder (RFC 3986). Pure and host-free: no request is
+/// performed, so this module links nothing and is safe in any ring.
+const HTTP_URL_FNS: &[ExtFn] = &[
+    ExtFn {
+        param_names: &["value"],
+        name: "encode",
+        params: &[Str],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &["value"],
+        name: "decode",
+        params: &[Str],
+        ret: Concrete(Str),
+    },
+];
+
+/// `std.http.url`'s dispatch. Its own rather than an arm of [`http_dispatch`], because neither
+/// function touches the [`Host`]: they are string transformations, and routing them through the
+/// request builder would imply otherwise.
+fn http_url_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    want_arity(func, args, 1)?;
+    let value = want_str(func, args, 0)?;
+    match func {
+        "encode" => Ok(NativeOut::Str(crate::url::encode(value))),
+        "decode" => Ok(NativeOut::Str(crate::url::decode(value))),
+        _ => Err(no_function_error("http.url", func)),
+    }
+}
+
 fn http_dispatch(
     func: &str,
     host: &mut dyn Host,
@@ -1845,6 +2386,38 @@ fn http_dispatch(
             crate::cookie::Cookie::new(name, value)?,
         )));
     }
+    // The form/percent codec — pure string transforms over the same parser `Request.form_all()`
+    // uses, for callers that hold a body rather than a request.
+    if func == "incoming" {
+        want_arity_range(func, args, 2, 4)?;
+        let method = want_str(func, args, 0)?.to_ascii_uppercase();
+        let url = want_str(func, args, 1)?.to_string();
+        let body = match args.get(2) {
+            None => Vec::new(),
+            Some(_) => want_data(func, args, 2)?.to_vec(),
+        };
+        return Ok(NativeOut::Extern(crate::ExternBox::new(
+            crate::net::Request {
+                conn: None,
+                inner: crate::NetRequest {
+                    method,
+                    url,
+                    headers: want_headers(func, args, 3)?,
+                    body,
+                    timeout_ms: None,
+                },
+            },
+        )));
+    }
+    if func == "parse_form" {
+        want_arity(func, args, 1)?;
+        return Ok(NativeOut::Map(
+            crate::net::form_pairs(want_str(func, args, 0)?)
+                .into_iter()
+                .map(|(name, value)| (name, NativeOut::Str(value)))
+                .collect(),
+        ));
+    }
     // The configured-client constructor (http arc H7) — pure, no request performed.
     if func == "new" {
         want_arity_range(func, args, 0, 1)?;
@@ -1855,6 +2428,14 @@ fn http_dispatch(
         return Ok(NativeOut::Extern(crate::ExternBox::new(
             crate::http_client::HttpClient::new(base),
         )));
+    }
+    // `stream(req, framing)` (http-streaming arc) — open the body incrementally. Unlike the verbs
+    // below it takes a prepared request, so there is nothing to build.
+    if func == "stream" {
+        want_arity(func, args, 2)?;
+        let request = want_request(func, args, 0)?.inner.clone();
+        let framing = want_framing(func, args, 1)?;
+        return Ok(stream_outcome(host.net_stream_open(request, framing)));
     }
     // Build the request from the call, per verb shape. Bodyless verbs put headers at index 1;
     // body-carrying verbs and `request` put them at index 2. The method is uppercased so
@@ -1900,6 +2481,49 @@ fn http_dispatch(
     }
 }
 
+/// Read a `Framing` argument.
+///
+/// `Framing` is a real native enum, so a caller writes `Framing.Sse` and the **checker** rejects a
+/// typo or a missing `match` arm — that guarantee is static and holds regardless of how the value
+/// is projected across the seam.
+///
+/// One shape reaches this function, and it is the enum: [`NativeValue::Variant`]. This used to
+/// accept a bare [`NativeValue::Str`] as well, because the *deep* (JSON-shaped) projection — which
+/// `http.client` takes, since its optional `headers` argument is a `Map` — flattened every
+/// non-`Option` enum to its variant **name**, so the two projections of the same value disagreed and
+/// a reader had to know both. The deep projection now carries the real variant (see
+/// `Value::to_native_deep`), so the second shape no longer exists and the string arm is retired with
+/// it: the workaround's whole cost was the disagreement it papered over.
+fn want_framing(
+    func: &str,
+    args: &[NativeValue],
+    index: usize,
+) -> Result<noeta_ext_abi::stream::Framing, StdError> {
+    let Some(NativeValue::Variant { variant, .. }) = args.get(index) else {
+        return Err(type_error(func, noeta_ext_abi::stream::FRAMING_TYPE_NAME));
+    };
+    variant
+        .parse::<noeta_ext_abi::stream::Framing>()
+        .map_err(|()| type_error(func, noeta_ext_abi::stream::FRAMING_TYPE_NAME))
+}
+
+/// Marshal a stream-open outcome as `Result<FrameStream, HttpError>` — the
+/// [`crate::net::fetch_outcome`] twin, shared by the free function and the `Client` method so both
+/// doors return the identical shape.
+///
+/// The head rides onto the handle here, which is what makes `stream.status()` answerable without a
+/// `recv()` — see [`noeta_ext_abi::stream::FrameStream`].
+fn stream_outcome(
+    result: Result<noeta_ext_abi::stream::StreamHead, noeta_ext_abi::NetError>,
+) -> NativeOut {
+    match result {
+        Ok(head) => NativeOut::Ok(Box::new(NativeOut::Extern(crate::ExternBox::new(
+            noeta_ext_abi::stream::FrameStream::new(head),
+        )))),
+        Err(error) => NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error)))),
+    }
+}
+
 const CLIENT_SIG: SigType = SigType::Named(crate::http_client::CLIENT_TYPE_NAME);
 
 /// The `Client` instance methods (http arc H7): the immutable configuration chain, then the verbs
@@ -1915,26 +2539,31 @@ const CLIENT_SIG: SigType = SigType::Named(crate::http_client::CLIENT_TYPE_NAME)
 /// paginator can hand back an absolute `next` link through a based client.
 const CLIENT_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["name", "value"],
         name: "header",
         params: &[Str, Str],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &["token"],
         name: "bearer",
         params: &[Str],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &["user", "password"],
         name: "basic",
         params: &[Str, Str],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &["ms"],
         name: "timeout",
         params: &[Int],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &["max", "base_ms", "on"],
         name: "retry",
         params: &[
             Int,
@@ -1944,11 +2573,13 @@ const CLIENT_METHODS: &[ExtFn] = &[
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "retry_non_idempotent",
         params: &[],
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "base_url",
         params: &[],
         ret: Concrete(Str),
@@ -1957,6 +2588,7 @@ const CLIENT_METHODS: &[ExtFn] = &[
     // Resolves the path against the base URL and applies the client's headers, so what the outermost
     // middleware sees is the request as configured, not a half-formed one.
     ExtFn {
+        param_names: &["method", "path", "body", "headers"],
         name: "prepare",
         params: &[Str, Str, SigType::Optional(&STR_OR_BYTES), OPT_HEADERS],
         ret: Concrete(REQUEST_SIG),
@@ -1967,41 +2599,63 @@ const CLIENT_METHODS: &[ExtFn] = &[
     // deliberately does not compose chains itself, because doing so would mean holding user
     // closures inside a native value.
     ExtFn {
+        param_names: &["request"],
         name: "send",
         params: &[REQUEST_SIG],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
+    // The streaming terminal (http-streaming arc) — `send`'s incremental twin, and the door a
+    // configured client needs: a streaming call in practice carries a base URL and an auth header,
+    // so without this the whole `Client` configuration chain would be unreachable from `stream`.
+    //
+    // The client's **retry policy is deliberately not applied**. Retrying means re-sending the
+    // request and discarding the first attempt's response — coherent for a buffered body, and not
+    // for a stream the caller may already have begun reading. The base URL, headers, and deadline
+    // all still apply.
     ExtFn {
+        param_names: &["request", "framing"],
+        name: "stream",
+        params: &[REQUEST_SIG, FRAMING_SIG],
+        ret: Concrete(FRAME_STREAM_RESULT_SIG),
+    },
+    ExtFn {
+        param_names: &["path", "headers"],
         name: "get",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["path", "headers"],
         name: "head",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["path", "headers"],
         name: "delete",
         params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["path", "body", "headers"],
         name: "post",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["path", "body", "headers"],
         name: "put",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["path", "body", "headers"],
         name: "query",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["method", "path", "headers"],
         name: "request",
         params: &[Str, Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_RESULT_SIG),
@@ -2056,6 +2710,19 @@ const CLIENT_DOCS: &[(&str, &str)] = &[
         "Perform an already-built `Request` through this client's configuration (base URL, \
          headers, deadline, retry). The terminal a composed middleware chain bottoms out in — \
          see the `para/api` package, which owns middleware, mocking, and pagination.",
+    ),
+    (
+        "stream",
+        "`send`'s incremental twin: perform the request through this client's configuration and read \
+         the response body as a `FrameStream` cut by `framing` — see `client.stream`.\n\n\
+         Applies the base URL, the client headers, and the deadline, but **not** the retry policy: \
+         retrying re-sends the request and discards the first attempt's response, which is coherent \
+         for a buffered body and not for a stream the caller may already be reading.\n\n\
+         This is a **separate terminal from `send`**, not a variant of it, and a middleware chain \
+         written over `send` does not cover it. That is deliberate — a layer that buffers, caches, \
+         replays, or retries a response cannot operate on a single-shot body, so the two terminals \
+         are kept distinct rather than letting a stream flow silently through layers that would \
+         mishandle it.",
     ),
     (
         "get",
@@ -2195,6 +2862,17 @@ fn client_method_dispatch(
             );
             return Ok(crate::net::fetch_outcome(client.perform(outgoing, host)));
         }
+        // The streaming terminal (http-streaming arc) — `send`'s twin, layering the same client
+        // configuration onto a prepared request, minus the retry policy (see the signature's note:
+        // re-sending discards a response the caller may already be reading).
+        "stream" => {
+            want_arity(method, args, 2)?;
+            let request = want_request(method, args, 0)?.inner.clone();
+            let framing = want_framing(method, args, 1)?;
+            let outgoing =
+                client.build(&request.method, &request.url, request.body, request.headers);
+            return Ok(stream_outcome(host.net_stream_open(outgoing, framing)));
+        }
         _ => {}
     }
     // The verb half: expand the client into a plain request, then take the shared fetch door, so a
@@ -2238,26 +2916,31 @@ fn client_method_dispatch(
 /// registration, so `?` converts it through `From` and `${e}` interpolates the sentence.
 const HTTP_ERROR_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "message",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "to_string",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "kind",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "url",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "retryable",
         params: &[],
         ret: Concrete(SigType::Bool),
@@ -2315,31 +2998,37 @@ fn http_error_method_dispatch(
 /// The `Response` instance methods (http arc H2): all pure reads over the wrapped response.
 const RESPONSE_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "status",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "ok",
         params: &[],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &[],
         name: "body",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "body_bytes",
         params: &[],
         ret: Concrete(SigType::Bytes),
     },
     ExtFn {
+        param_names: &["name"],
         name: "header",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["name", "value"],
         name: "with_header",
         params: &[Str, Str],
         ret: Concrete(RESPONSE_SIG),
@@ -2351,6 +3040,7 @@ const RESPONSE_METHODS: &[ExtFn] = &[
     // generic multi-value write. `header` answers with the first match only, which is a lossy
     // question to ask of a repeated header. Empty when absent.
     ExtFn {
+        param_names: &["name"],
         name: "headers_all",
         params: &[Str],
         ret: Concrete(SigType::List(&Str)),
@@ -2364,6 +3054,7 @@ const RESPONSE_METHODS: &[ExtFn] = &[
     // detail no caller reasons about. A generic append was the rejected alternative: it would have
     // been a second, subtly-different header operation existing to serve exactly one header.
     ExtFn {
+        param_names: &["cookie"],
         name: "with_cookie",
         params: &[COOKIE_SIG],
         ret: Concrete(RESPONSE_SIG),
@@ -2372,16 +3063,19 @@ const RESPONSE_METHODS: &[ExtFn] = &[
     // into the `Err` arm, for callers who want a 404 to short-circuit like a transport failure.
     // Kept explicit rather than folded into the verbs, so `?` on a request keeps one meaning.
     ExtFn {
+        param_names: &[],
         name: "error_for_status",
         params: &[],
         ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "url",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "links",
         params: &[],
         ret: Concrete(SigType::Map(&Str, &Str)),
@@ -2395,6 +3089,7 @@ const RESPONSE_METHODS: &[ExtFn] = &[
 /// value you can handle, never an abort. The aborting spelling stays available as
 /// `json.parse::<T>(resp.body())` for callers who genuinely want a malformed body to be fatal.
 const RESPONSE_TYPED_METHODS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "json",
     params: &[],
     ret: TypeArg(TypeArgWrap::Result(SigType::Named("JsonError"))),
@@ -2554,31 +3249,37 @@ fn response_method_dispatch(
 /// aliased handle mutated underneath.
 const SESSION_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["name"],
         name: "get",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["name", "value"],
         name: "set",
         params: &[Str, Str],
         ret: Concrete(SESSION_SIG),
     },
     ExtFn {
+        param_names: &["name"],
         name: "remove",
         params: &[Str],
         ret: Concrete(SESSION_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "clear",
         params: &[],
         ret: Concrete(SESSION_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "dirty",
         params: &[],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &[],
         name: "data",
         params: &[],
         ret: Concrete(SESSION_DATA_SIG),
@@ -2587,6 +3288,7 @@ const SESSION_METHODS: &[ExtFn] = &[
     // change, so it does NOT mark the session dirty; and it rides alongside the data rather than in
     // it, so it never shows through `data()`.
     ExtFn {
+        param_names: &["id"],
         name: "with_id",
         params: &[Str],
         ret: Concrete(SESSION_SIG),
@@ -2594,6 +3296,7 @@ const SESSION_METHODS: &[ExtFn] = &[
     // The opaque server-side id a stored backend tagged this session with, or none. Survives
     // `clear()`, so a logout can still name the row to delete after the data is gone.
     ExtFn {
+        param_names: &[],
         name: "id",
         params: &[],
         ret: Concrete(SigType::Option(&Str)),
@@ -2666,56 +3369,67 @@ fn session_method_dispatch(
 /// new `Cookie` only after validating it, so an unserializable cookie is unrepresentable.
 const COOKIE_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "name",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "value",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &["value"],
         name: "with_value",
         params: &[Str],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["path"],
         name: "with_path",
         params: &[Str],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["domain"],
         name: "with_domain",
         params: &[Str],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["seconds"],
         name: "with_max_age",
         params: &[Int],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["enabled"],
         name: "with_http_only",
         params: &[SigType::Bool],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["enabled"],
         name: "with_secure",
         params: &[SigType::Bool],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &["policy"],
         name: "with_same_site",
         params: &[Str],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "expired",
         params: &[],
         ret: Concrete(COOKIE_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "to_header",
         params: &[],
         ret: Concrete(Str),
@@ -2813,39 +3527,62 @@ fn cookie_method_dispatch(
     }
 }
 
-/// The `Request` instance methods (http-server S2): all pure reads over the wrapped inbound request.
+/// The `Request` instance methods (http-server S2): pure reads over the wrapped inbound request,
+/// plus the `with_*` copy-modify builders a middleware layer rewrites a request through.
 const REQUEST_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "method",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "path",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &["name"],
         name: "query",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["name"],
         name: "header",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &[],
         name: "body",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "body_bytes",
         params: &[],
         ret: Concrete(SigType::Bytes),
     },
+    // The `application/x-www-form-urlencoded` body, decoded — the same wire format `query` parses,
+    // read from the body instead of the URL. `form(name)`/`form_all()` mirror `cookie`/`cookies`:
+    // the single lookup is the common case, the map is there when you want to iterate.
     ExtFn {
+        param_names: &["name"],
+        name: "form",
+        params: &[Str],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "form_all",
+        params: &[],
+        ret: Concrete(SigType::Map(&Str, &Str)),
+    },
+    ExtFn {
+        param_names: &[],
         name: "url",
         params: &[],
         ret: Concrete(Str),
@@ -2853,11 +3590,13 @@ const REQUEST_METHODS: &[ExtFn] = &[
     // Copy-modify (the `Response.with_header` shape). A middleware layer above std — para/api —
     // rewrites a request before passing it on, so `Request` needs builders, not just accessors.
     ExtFn {
+        param_names: &["name", "value"],
         name: "with_header",
         params: &[Str, Str],
         ret: Concrete(REQUEST_SIG),
     },
     ExtFn {
+        param_names: &["url"],
         name: "with_url",
         params: &[Str],
         ret: Concrete(REQUEST_SIG),
@@ -2868,6 +3607,7 @@ const REQUEST_METHODS: &[ExtFn] = &[
     // attributes are write-only, never echoed back — so a `Cookie` here would carry six fields the
     // client never sent, each a plausible-looking lie. Empty when the header is absent.
     ExtFn {
+        param_names: &[],
         name: "cookies",
         params: &[],
         ret: Concrete(SigType::Map(&Str, &Str)),
@@ -2875,6 +3615,7 @@ const REQUEST_METHODS: &[ExtFn] = &[
     // One cookie by name — `cookies()[name]` without materializing the map, and the spelling that
     // matches `header`/`query` for the overwhelmingly common single lookup.
     ExtFn {
+        param_names: &["name"],
         name: "cookie",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
@@ -2927,6 +3668,25 @@ fn request_method_dispatch(
         "body_bytes" => {
             want_arity(method, args, 0)?;
             Ok(NativeOut::Bytes(req.body.clone()))
+        }
+        "form" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            let body = String::from_utf8_lossy(&req.body);
+            Ok(match crate::net::form_value(&body, name) {
+                Some(value) => NativeOut::Some(Box::new(NativeOut::Str(value))),
+                None => NativeOut::None,
+            })
+        }
+        "form_all" => {
+            want_arity(method, args, 0)?;
+            let body = String::from_utf8_lossy(&req.body);
+            Ok(NativeOut::Map(
+                crate::net::form_pairs(&body)
+                    .into_iter()
+                    .map(|(name, value)| (name, NativeOut::Str(value)))
+                    .collect(),
+            ))
         }
         "url" => {
             want_arity(method, args, 0)?;
@@ -3115,7 +3875,8 @@ fn os_dispatch(
             )))
         }
         // `spawn(command, args?)` — start a child WITHOUT waiting and hand back a controllable
-        // `Process` handle (process-handle arc), unlike `exec`'s run-to-completion.
+        // `Process` handle (process-handle arc), unlike `exec`'s run-to-completion. The **aborting**
+        // door of the pair; `try_spawn` below is its recoverable twin.
         "spawn" => {
             want_arity_range(func, args, 1, 2)?;
             let command = want_str(func, args, 0)?;
@@ -3124,6 +3885,23 @@ fn os_dispatch(
             Ok(NativeOut::Extern(crate::ExternBox::new(
                 crate::os::Process { id },
             )))
+        }
+        // `try_spawn(command, args?)` — the **recoverable** door (subprocess-doors arc), the shape
+        // `json.parse`/`json.try_parse` sets. A tool server that is not installed is an ordinary
+        // condition for a client, not a reason to take the program down, so this hands back
+        // `Result<Process, OsError>` and never a `StdError` abort.
+        "try_spawn" => {
+            want_arity_range(func, args, 1, 2)?;
+            let command = want_str(func, args, 0)?;
+            let argv = want_argv(func, args, 1)?;
+            Ok(match host.os_try_spawn(command, &argv) {
+                Ok(id) => NativeOut::Ok(Box::new(NativeOut::Extern(crate::ExternBox::new(
+                    crate::os::Process { id },
+                )))),
+                Err(error) => {
+                    NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error))))
+                }
+            })
         }
         // `exit(code?)` — deliberate termination. Not a host effect and not a diagnostic: the
         // distinguished `ErrorKind::Exit` unwinds the backend, which halts cleanly and surfaces
@@ -3181,21 +3959,25 @@ fn shell_quote(s: &str) -> String {
 /// `Response` accessor model.
 const EXEC_RESULT_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "status",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "ok",
         params: &[],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &[],
         name: "stdout",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "stderr",
         params: &[],
         ret: Concrete(Str),
@@ -3228,27 +4010,32 @@ fn exec_result_dispatch(
 /// each routing to the `Os` seam by the handle's id.
 const PROCESS_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "pid",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "wait",
         params: &[],
         ret: Concrete(EXEC_RESULT_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "try_wait",
         params: &[],
         ret: Concrete(SigType::Option(&EXEC_RESULT_SIG)),
     },
     ExtFn {
+        param_names: &[],
         name: "kill",
         params: &[],
         ret: Concrete(SigType::Unit),
     },
     // Signalling (process-signals arc): the general form of `kill` — send a named OS signal.
     ExtFn {
+        param_names: &["name"],
         name: "signal",
         params: &[Str],
         ret: Concrete(SigType::Unit),
@@ -3256,6 +4043,7 @@ const PROCESS_METHODS: &[ExtFn] = &[
     // `wait_async` (process-signals arc): the awaitable twin of `wait` — yields a
     // `Future<ExecResult>`. Deterministic in the sandbox; genuinely overlapping on the real host.
     ExtFn {
+        param_names: &[],
         name: "wait_async",
         params: &[],
         ret: Concrete(SigType::Future(&EXEC_RESULT_SIG)),
@@ -3264,31 +4052,137 @@ const PROCESS_METHODS: &[ExtFn] = &[
     // the child runs, read stderr, and feed / close its stdin. `wait` still returns the whole
     // captured output.
     ExtFn {
+        param_names: &[],
         name: "read_line",
         params: &[],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &["count"],
         name: "read",
         params: &[Int],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &[],
         name: "read_err_line",
         params: &[],
         ret: Concrete(SigType::Option(&Str)),
     },
+    // The awaitable twins of the three reads (subprocess-async arc): each yields a `Future<?string>`
+    // an `.await` unwraps, so `race([p.read_line_async(), task.tick(500)])` is how a program bounds
+    // a child read. All three, not a chosen subset — a blocking read without a twin parks the
+    // isolate's whole scheduler, and the stderr side parks it exactly as the stdout side does.
     ExtFn {
+        param_names: &[],
+        name: "read_line_async",
+        params: &[],
+        ret: Concrete(SigType::Future(&OPT_STR_SIG)),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "read_err_line_async",
+        params: &[],
+        ret: Concrete(SigType::Future(&OPT_STR_SIG)),
+    },
+    ExtFn {
+        param_names: &["count"],
+        name: "read_async",
+        params: &[Int],
+        ret: Concrete(SigType::Future(&OPT_STR_SIG)),
+    },
+    ExtFn {
+        param_names: &["contents"],
         name: "write",
         params: &[Str],
         ret: Concrete(SigType::Unit),
     },
+    // The recoverable write door (subprocess-doors arc) — `write`'s `json.try_parse` twin.
     ExtFn {
+        param_names: &["contents"],
+        name: "try_write",
+        params: &[Str],
+        ret: Concrete(SigType::Result(&SigType::Unit, &OS_ERROR_SIG)),
+    },
+    ExtFn {
+        param_names: &[],
         name: "close_stdin",
         params: &[],
         ret: Concrete(SigType::Unit),
     },
 ];
+
+/// `?string` — the return of every streaming read, and (wrapped in a `Future`) of its async twin.
+const OPT_STR_SIG: SigType = SigType::Option(&Str);
+
+/// The `OsError` signature — the payload of both recoverable subprocess doors.
+const OS_ERROR_SIG: SigType = SigType::Named(crate::os::OS_ERROR_TYPE_NAME);
+
+/// The `OsError` instance methods (subprocess-doors arc): pure reads over the recoverable
+/// subprocess failure. The `HttpError`/`JsonError` shape — `message`/`to_string` satisfy the
+/// `Error` + `Display` declarations on its registration, so `?` converts it through `From` and
+/// `${e}` interpolates the sentence.
+const OS_ERROR_METHODS: &[ExtFn] = &[
+    ExtFn {
+        param_names: &[],
+        name: "message",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "kind",
+        params: &[],
+        ret: Concrete(Str),
+    },
+];
+
+const OS_ERROR_DOCS: &[(&str, &str)] = &[
+    (
+        "message",
+        "The composed human message (``spawn: cannot start `mcp-server`: No such file or \
+         directory``) — identical to what the aborting twin reports. The `Error` trait's required \
+         method.",
+    ),
+    (
+        "to_string",
+        "Same as `message()` — the `Display` rendering, so `${e}` interpolates the message.",
+    ),
+    (
+        "kind",
+        "What went wrong: `\"not_found\"` (the command is not on `PATH`), \
+         `\"permission_denied\"`, `\"broken_pipe\"` (the child is gone and took its stdin with \
+         it), `\"stdin_closed\"` (you closed it with `close_stdin`), or `\"other\"`. Branch on \
+         this rather than on the message — `not_found` usually means \"tell the user to install \
+         it\" while `broken_pipe` usually means \"restart the server and retry\".",
+    ),
+];
+
+fn os_error_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(error) = recv.as_any().downcast_ref::<crate::os::OsError>() else {
+        return Err(type_error(method, crate::os::OS_ERROR_TYPE_NAME));
+    };
+    want_arity(method, args, 0)?;
+    match method {
+        "message" | "to_string" => Ok(NativeOut::Str(error.message())),
+        "kind" => Ok(NativeOut::Str(error.kind.label().to_string())),
+        _ => Err(crate::no_method_error(
+            crate::os::OS_ERROR_TYPE_NAME,
+            method,
+        )),
+    }
+}
 
 /// Wrap an optional string read (a streaming `read_line`/`read`/`read_err_line`) into a native
 /// `some(...)`/`none`.
@@ -3359,11 +4253,48 @@ fn process_method_dispatch(
             want_arity(method, args, 0)?;
             Ok(opt_str_out(host.os_proc_read_stderr_line(id)?))
         }
+        // The awaitable twins of the three reads above (subprocess-async arc). Every blocking read
+        // has one, because whichever lacked it could still park the isolate's whole scheduler —
+        // which is the condition that makes a bounded child read inexpressible.
+        "read_line_async" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(
+                host.os_proc_read_spawn(id, crate::os::ProcRead::StdoutLine),
+            )))
+        }
+        "read_err_line_async" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(
+                host.os_proc_read_spawn(id, crate::os::ProcRead::StderrLine),
+            )))
+        }
+        "read_async" => {
+            want_arity(method, args, 1)?;
+            let count = want_int(method, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(host.os_proc_read_spawn(
+                id,
+                crate::os::ProcRead::Stdout(count),
+            ))))
+        }
         "write" => {
             want_arity(method, args, 1)?;
             let data = want_str(method, args, 0)?;
             host.os_proc_write_stdin(id, data)?;
             Ok(NativeOut::Unit)
+        }
+        // The **recoverable** write door (subprocess-doors arc). A child that exited between the
+        // program's last liveness check and this write is an ordinary condition — and the race
+        // cannot be closed from the language, because the child can die in the gap — so the failure
+        // is a value the caller decides about.
+        "try_write" => {
+            want_arity(method, args, 1)?;
+            let data = want_str(method, args, 0)?;
+            Ok(match host.os_proc_try_write_stdin(id, data) {
+                Ok(()) => NativeOut::Ok(Box::new(NativeOut::Unit)),
+                Err(error) => {
+                    NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error))))
+                }
+            })
         }
         "close_stdin" => {
             want_arity(method, args, 0)?;
@@ -3759,66 +4690,79 @@ use SigType::{Dyn, Float, Int, String as Str};
 
 const MATH_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "pi",
         params: &[],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &[],
         name: "e",
         params: &[],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "sqrt",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["base", "exp"],
         name: "pow",
         params: &[Float, Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "sin",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "cos",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "tan",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "floor",
         params: &[Float],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &["x"],
         name: "ceil",
         params: &[Float],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &["x"],
         name: "round",
         params: &[Float],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &["x"],
         name: "abs",
         params: &[Dyn],
         ret: NumericPreserving,
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "min",
         params: &[Dyn, Dyn],
         ret: NumericPreserving,
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "max",
         params: &[Dyn, Dyn],
         ret: NumericPreserving,
@@ -3826,66 +4770,79 @@ const MATH_FNS: &[ExtFn] = &[
     // The transcendental family — real-valued like `sqrt`, so params pin to `Float` and the
     // return is always a float.
     ExtFn {
+        param_names: &["x"],
         name: "asin",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "acos",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "atan",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["y", "x"],
         name: "atan2",
         params: &[Float, Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "ln",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x", "base"],
         name: "log",
         params: &[Float, Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "log2",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "log10",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "exp",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x", "y"],
         name: "hypot",
         params: &[Float, Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "sinh",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "cosh",
         params: &[Float],
         ret: Concrete(Float),
     },
     ExtFn {
+        param_names: &["x"],
         name: "tanh",
         params: &[Float],
         ret: Concrete(Float),
@@ -4111,7 +5068,15 @@ const OS_DOCS: &[(&str, &str)] = &[
     (
         "spawn",
         "Start `program` with `args` as a child `Process` and return immediately — for streaming \
-         its I/O or awaiting it later.",
+         its I/O or awaiting it later. **Aborts** (E0021) if the child cannot be started at all; \
+         use `try_spawn` when a missing program is a case to handle rather than a bug.",
+    ),
+    (
+        "try_spawn",
+        "Recoverable `spawn`: `Result<Process, OsError>` instead of an abort. This is the door for \
+         starting a program you do not control — a language server, an MCP server, a formatter — \
+         where \"not installed\" is an ordinary answer to give the user. Branch on \
+         `e.kind()` (`\"not_found\"`, `\"permission_denied\"`).",
     ),
 ];
 
@@ -4173,7 +5138,42 @@ const FS_DOCS: &[(&str, &str)] = &[
 const JSON_DOCS: &[(&str, &str)] = &[
     (
         "parse",
-        "Parse a JSON string into a dynamic value — a `dyn` map/list/scalar tree.",
+        "Parse a JSON string, **aborting** on a malformed document (E0007).\n\n\
+         Two doors share the name. `json.parse(text)` decodes into a dynamic value — a `dyn` \
+         map/list/scalar tree, addressed with `v[\"key\"]`. `json.parse::<T>(text)` decodes into \
+         the type you name at the call site, filling declared field defaults and reporting a shape \
+         mismatch by path. Reach for either when a malformed document means the program is wrong; \
+         use `try_parse` when it means the *input* is wrong — including for the enum rules, which \
+         are the same for both doors and written up under `try_parse`.",
+    ),
+    (
+        "try_parse",
+        "Parse a JSON string **recoverably**: `Ok(value)`, or `Err(JsonError)` naming the exact \
+         failure — its `path()`, `kind()`, and, for a malformed document, `line()`/`column()`. \
+         Never aborts.\n\n\
+         Two doors share the name. `json.try_parse(text): Result<dyn, JsonError>` needs no target \
+         type — the door for a body read off a wire, where the shape is the remote party's. \
+         `json.try_parse::<T>(text): Result<T, JsonError>` additionally checks the document \
+         against `T` and hands back a real `T`.\n\n\
+         Either door composes with `?` and with `match … { Ok(v) => …, Err(e) => … }`; `JsonError` \
+         implements `Error` and `Display`, so `${e}` interpolates its composed message.\n\n\
+         **Enums decode from the wire values their JSON Schema advertises** (this holds for \
+         `parse::<T>` and `decode_typed` too — one recipe walk serves all three). A *backed* enum \
+         is selected by its backing: `enum Plan: string { Free = \"free\" }` decodes `\"free\"`, \
+         not `\"Free\"`. A *plain* enum is selected by its case name. Those are exactly what each \
+         derives as its `{\"enum\": […]}` schema, so a document a schema describes is a document \
+         the decode accepts. Backings of any scalar type work, so an `int`-backed enum decodes \
+         from JSON numbers. The result is a real enum value — it `match`es exhaustively and \
+         compares equal to a case written in source, rather than a string standing in for one.\n\n\
+         A value naming no case is an `\"unknown_variant\"` error whose detail lists every accepted \
+         wire value, reported at the failing value's path — never a panic, never a silently-wrong \
+         value. A value of the wrong JSON *kind* (an object where a string-backed enum was \
+         expected) is an ordinary `\"mismatch\"`.\n\n\
+         An enum with a **payload-carrying** variant has no JSON decoding at all, and a type with \
+         such a field is refused at check time: a data-carrying sum has no canonical JSON \
+         spelling, and decoding only its payload-free half would accept documents against a schema \
+         that cannot describe the type. Build such a case with `construct(\"Enum.Variant\", \
+         payload)` instead.",
     ),
     ("stringify", "Serialize a value to a JSON string."),
 ];
@@ -4334,6 +5334,30 @@ const HTTP_CLIENT_DOCS: &[(&str, &str)] = &[
         "Perform an HTTP request with an arbitrary `method` to `url` — the general form the verb \
          helpers build on.",
     ),
+    (
+        "stream",
+        "Read a response body **incrementally**, cut into frames: `stream(req, framing)` sends the \
+         prepared request and returns a `FrameStream` whose `recv()` yields the next `Frame` (or \
+         `none` at the end of the body). Use it for anything that arrives over time rather than all \
+         at once — an LLM token stream, a progress feed, a log tail.\n\n\
+         `framing` picks the cut. `Framing.Sse` parses `text/event-stream` (what OpenAI-compatible \
+         endpoints speak) to the WHATWG rules: multi-line `data:` fields join with newlines, `event:`/\
+         `id:`/`retry:` populate the frame, comments and blocks without data dispatch nothing. \
+         `Framing.Ndjson` yields one JSON document per line, unparsed, in `data` (Ollama's native \
+         shape). `Framing.Lines` yields one raw line per frame, blank lines included.\n\n\
+         The `Err` arm means the request never produced a response — an HTTP error *status* opens a \
+         stream normally, because an error page streams like any other body. **Check the status \
+         before you drain it**: `stream.status()`/`ok()` answer from the response head, without a \
+         `recv()`. A rate-limited provider replies `429` with a bare JSON error document, and since \
+         that is not an event stream, `Framing.Sse` cuts it into zero frames — so an unchecked reader \
+         sees an empty stream and cannot tell a rate limit from a model with nothing to say. \
+         `stream.header(\"retry-after\")` carries the backoff, and \
+         `client.stream(req, framing)?.error_for_status()?` short-circuits the whole case in one \
+         line.\n\n\
+         A body that is cut off mid-frame simply ends: with `Framing.Sse` the incomplete trailing \
+         block is discarded, since a frame only exists once its terminating blank line arrives.\n\n\
+         Call `close()` when abandoning a stream early; a drained one needs no close.",
+    ),
     ("get_async", "Async `get` — yields a `Future<Response>`."),
     ("head_async", "Async `head`."),
     ("delete_async", "Async `delete`."),
@@ -4341,6 +5365,23 @@ const HTTP_CLIENT_DOCS: &[(&str, &str)] = &[
     ("put_async", "Async `put`."),
     ("query_async", "Async `query`."),
     ("request_async", "Async `request`."),
+];
+
+const HTTP_URL_DOCS: &[(&str, &str)] = &[
+    (
+        "encode",
+        "Percent-encode one URL component (RFC 3986), leaving `A-Za-z0-9-_.~` alone. Encoding is \
+         over UTF-8 bytes, so one character may become several `%XX` escapes. Encode the pieces of \
+         a query or path, then join them — encoding the whole thing would escape its separators.",
+    ),
+    (
+        "decode",
+        "Percent-decode one URL component: every `%XX` back to its byte — the exact inverse of \
+         `encode`. A `+` stays a `+` (that it means a space is a *form*-encoding rule, and a plus \
+         in a path is literal); a query parser substitutes it before decoding. Total — a stray `%` \
+         stays a literal `%` and invalid UTF-8 is replaced, so a malformed URL is read rather than \
+         refused.",
+    ),
 ];
 
 const HTTP_SERVER_DOCS: &[(&str, &str)] = &[
@@ -4363,6 +5404,19 @@ const HTTP_SERVER_DOCS: &[(&str, &str)] = &[
     (
         "websocket",
         "Upgrade the current request to a WebSocket, driving the connection with `handler(socket)`.",
+    ),
+    (
+        "sse",
+        "Answer the current request with a **server-sent events** stream, driving it with \
+         `handler(sink)`. Return it from a `fetch` handler exactly like `server.websocket`: the \
+         response head goes out as `text/event-stream`, the connection is held open, and the handler \
+         pushes frames with `sink.send(frame)` until it returns (which closes the stream).\n\n\
+         The one-way twin of `websocket`, and the write side of `client.stream`. Use it when the \
+         client only needs to *listen* — a progress endpoint, a log tail, a build-status feed, an \
+         LLM token stream re-emitted to a browser. It needs no handshake and no client opt-in, so any \
+         request can be answered with one, and a browser consumes it with a plain `EventSource`.\n\n\
+         Send `sink.comment(\"keepalive\")` periodically on an otherwise idle stream: it puts bytes on \
+         the wire without dispatching an event, which stops an intermediary reaping the connection.",
     ),
     (
         "liveview_js",
@@ -4455,6 +5509,34 @@ const TRACING_DOCS: &[(&str, &str)] = &[
         "with_span",
         "Run `f` inside a new span named `name`, closing the span when it returns; returns `f`'s \
          result.",
+    ),
+    (
+        "set_attribute",
+        "Set an attribute on the **active** span — the span you are already inside (a `with_span` \
+         body, or a request handler under the auto-instrumented SERVER span), which no handle \
+         names. Returns whether a live active span received it: `false` at top level, so the \
+         no-span case is visible rather than silent. Use `Span.set_attribute` for a span you hold.",
+    ),
+    (
+        "add_event",
+        "Add a timestamped event to the **active** span. This is the annotation to reach for \
+         instead of opening a short child span for something that merely *happened* during the \
+         current unit of work — a child span per event inflates trace volume and buries the \
+         signal. Returns whether a live active span received it (`false` at top level).",
+    ),
+    (
+        "add_event_with",
+        "Add a timestamped event carrying its own attributes to the **active** span. Prefer this \
+         over `set_attribute` for a *structured fact*: several facts recorded on one span each keep \
+         their own attribute set, where span-level attributes would overwrite each other by key. \
+         Returns whether a live active span received it.",
+    ),
+    (
+        "record_error",
+        "Set the **active** span's status to error with `message` — mark the span you are inside \
+         as failed without holding its handle. Returns whether a live active span received it; \
+         check it on a path that must not lose an error (`if !tracing.record_error(msg) { \
+         log.error(msg) }`), since at top level there is no span to carry it.",
     ),
 ];
 
@@ -4556,13 +5638,29 @@ const FILE_HANDLE_DOCS: &[(&str, &str)] = &[
 const REQUEST_DOCS: &[(&str, &str)] = &[
     ("method", "The HTTP method (`\"GET\"`, `\"POST\"`, …)."),
     ("path", "The request path."),
-    ("query", "The raw query string."),
+    (
+        "query",
+        "The value of query parameter `name`, or none. Percent-decoded: `?q=caf%C3%A9` reads as \
+         `café` and `?title=buy+milk` as `buy milk`, since a query string is percent-encoded by \
+         definition and every caller would otherwise hand-roll the same decoder.",
+    ),
+    ("url", "The full request URL, as received."),
     (
         "header",
-        "The value of request header `name`, or empty if absent.",
+        "The value of request header `name`, or none if absent.",
     ),
     ("body", "The request body as a string."),
     ("body_bytes", "The request body as raw `bytes`."),
+    (
+        "form",
+        "The value of `application/x-www-form-urlencoded` body field `name`, or none — the same \
+         wire format `query` parses, read from the body instead of the URL.",
+    ),
+    (
+        "form_all",
+        "Every decoded form field, by name. `form(name)`/`form_all()` mirror `cookie`/`cookies`: \
+         the single lookup is the common case, the map is there when you want to iterate.",
+    ),
     (
         "cookies",
         "Every cookie the client sent, by name. Empty when the request carries no `Cookie` \
@@ -4573,6 +5671,16 @@ const REQUEST_DOCS: &[(&str, &str)] = &[
         "cookie",
         "The value of the cookie named `name`, or none. Cookie names are case-sensitive, unlike \
          header names.",
+    ),
+    (
+        "with_header",
+        "A copy of the request with header `name` set to `value`. The `Response.with_header` \
+         shape: a middleware layer above std rewrites a request before passing it on, so \
+         `Request` carries builders and not only accessors.",
+    ),
+    (
+        "with_url",
+        "A copy of the request pointed at `url` — the rewrite half of the same builder pair.",
     ),
 ];
 const KEYRING_DOCS: &[(&str, &str)] = &[];
@@ -4758,6 +5866,20 @@ const SOCKET_DOCS: &[(&str, &str)] = &[
         "recv",
         "Await the next message; `none` when the socket closes.",
     ),
+    (
+        "recv_timeout",
+        "Await the next message for at most `ms` milliseconds; `none` if none arrived in time. \
+         This is the door to a session that acts on its own schedule — push a periodic update, \
+         poll a server-side source — instead of only when the client speaks. The deadline lives \
+         *inside* the read rather than racing `recv` against a timer, because a race cancels the \
+         losing `recv` and loses any message it had already consumed. Pair it with `closed()` to \
+         tell the two `none`s apart.",
+    ),
+    (
+        "closed",
+        "Whether the peer has closed the connection — so a `none` from `recv_timeout` reads as \
+         \"nothing yet\" rather than \"we are done\".",
+    ),
     ("close", "Close the WebSocket connection."),
 ];
 
@@ -4830,7 +5952,34 @@ const PROCESS_DOCS: &[(&str, &str)] = &[
         "read_err_line",
         "Read the next line from the process's stderr.",
     ),
-    ("write", "Write to the process's stdin."),
+    (
+        "read_line_async",
+        "Await the next line of the process's stdout, yielding a `Future<?string>` — the async twin \
+         of `read_line`. This is how a child read is **bounded**: `race([p.read_line_async(), \
+         task.tick(500)])`. The blocking `read_line` parks the whole isolate, so a sibling \
+         watchdog task cannot fire while it waits.",
+    ),
+    (
+        "read_err_line_async",
+        "Await the next line of the process's stderr, yielding a `Future<?string>` — the async twin \
+         of `read_err_line`, on its own cursor.",
+    ),
+    (
+        "read_async",
+        "Await up to `count` characters of the process's stdout, yielding a `Future<?string>` — \
+         the async twin of `read`.",
+    ),
+    (
+        "write",
+        "Write to the process's stdin. **Aborts** (E0021) if the pipe is gone — a child that \
+         exited is a broken pipe; use `try_write` when that is a case to handle.",
+    ),
+    (
+        "try_write",
+        "Recoverable `write`: `Result<void, OsError>` instead of an abort. Prefer it whenever the \
+         child is a program you do not control, because no check can make the aborting door safe \
+         — the child can exit between a `try_wait()` poll and the write that follows it.",
+    ),
     (
         "close_stdin",
         "Close the process's stdin, signalling end of input.",
@@ -4871,10 +6020,35 @@ const VIEW_METHOD_DOCS: &[(&str, &str)] = &[
 ];
 
 const SPAN_METHOD_DOCS: &[(&str, &str)] = &[
-    ("set_attribute", "Attach a key→value attribute to the span."),
-    ("add_event", "Record a timestamped event on the span."),
-    ("record_error", "Record an error on the span."),
-    ("end", "End the span, fixing its duration."),
+    (
+        "set_attribute",
+        "Attach a key→value attribute to the span. This is for a span you hold; to annotate the \
+         span you are merely *inside* (a `with_span` body, a handler under the SERVER span), call \
+         `tracing.set_attribute` — no handle needed.",
+    ),
+    (
+        "add_event",
+        "Record a timestamped event on the span. `tracing.add_event` does the same to the *active* \
+         span, which is what you want instead of opening a short child span for something that \
+         merely happened.",
+    ),
+    (
+        "add_event_with",
+        "Record a timestamped event carrying its own attributes. Prefer it over `set_attribute` for \
+         a structured fact you may record more than once on one span — events accumulate, span \
+         attributes overwrite by key.",
+    ),
+    (
+        "record_error",
+        "Record an error on the span (sets its status). `tracing.record_error` does the same to \
+         the *active* span.",
+    ),
+    (
+        "end",
+        "End the span, fixing its duration. Deliberately absent from the active-span surface: \
+         ending a span you did not open would close a `with_span`'s span early, or the \
+         auto-instrumented SERVER span out from under `http.serve`.",
+    ),
     (
         "context",
         "The span's trace context, serialized for propagation across a boundary.",
@@ -4883,16 +6057,19 @@ const SPAN_METHOD_DOCS: &[(&str, &str)] = &[
 
 const RANDOM_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["seed"],
         name: "seed",
         params: &[Int],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["low", "high"],
         name: "int",
         params: &[Int, Int],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "float",
         params: &[],
         ret: Concrete(Float),
@@ -4901,11 +6078,13 @@ const RANDOM_FNS: &[ExtFn] = &[
 
 const TIME_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "monotonic",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &["ms"],
         name: "sleep",
         params: &[Int],
         ret: Concrete(SigType::Unit),
@@ -4914,6 +6093,7 @@ const TIME_FNS: &[ExtFn] = &[
 
 const ID_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "next_id",
         params: &[],
         ret: Concrete(Int),
@@ -4922,43 +6102,51 @@ const ID_FNS: &[ExtFn] = &[
     // explicit opt-in. Both return the first-class `Uuid` (extern-types X2), which displays in
     // canonical hyphenated lowercase.
     ExtFn {
+        param_names: &[],
         name: "uuid",
         params: &[],
         ret: Concrete(UUID_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "uuid_v7",
         params: &[],
         ret: Concrete(UUID_SIG),
     },
     ExtFn {
+        param_names: &["text"],
         name: "parse",
         params: &[Str],
         ret: Concrete(SigType::Option(&UUID_SIG)),
     },
     // Name-based UUIDs (crypto arc C5): pure — same namespace + name = same UUID, everywhere.
     ExtFn {
+        param_names: &["namespace", "name"],
         name: "uuid_v5",
         params: &[UUID_SIG, Str],
         ret: Concrete(UUID_SIG),
     },
     // The RFC 9562 well-known namespaces, as zero-arg constructors (a module has no constants).
     ExtFn {
+        param_names: &[],
         name: "namespace_dns",
         params: &[],
         ret: Concrete(UUID_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "namespace_url",
         params: &[],
         ret: Concrete(UUID_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "namespace_oid",
         params: &[],
         ret: Concrete(UUID_SIG),
     },
     ExtFn {
+        param_names: &[],
         name: "namespace_x500",
         params: &[],
         ret: Concrete(UUID_SIG),
@@ -4973,16 +6161,19 @@ const UUID_SIG: SigType = SigType::Named(crate::id::TYPE_NAME);
 /// carries a timestamp (v7) — the Option IS the version distinction.
 const UUID_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "to_string",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "version",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "timestamp_ms",
         params: &[],
         ret: Concrete(SigType::Option(&SigType::Int)),
@@ -5025,11 +6216,13 @@ const STR_MAP: SigType = SigType::Map(&Str, &Str);
 
 const ENV_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["name"],
         name: "get",
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
+        param_names: &[],
         name: "keys",
         params: &[],
         ret: Concrete(SigType::List(&Str)),
@@ -5037,11 +6230,13 @@ const ENV_FNS: &[ExtFn] = &[
     // `.env` support folded into the same namespace (F5): a pure parser and a file loader that
     // applies a `.env`'s defaults under real-env-wins precedence.
     ExtFn {
+        param_names: &["text"],
         name: "parse",
         params: &[Str],
         ret: Concrete(STR_MAP),
     },
     ExtFn {
+        param_names: &["path"],
         name: "load",
         params: &[SigType::Optional(&Str)],
         ret: Concrete(STR_MAP),
@@ -5049,6 +6244,7 @@ const ENV_FNS: &[ExtFn] = &[
     // `set(key, value)` writes the program's view of the environment (stdlib-gaps): sandbox
     // fixture map, or `RealHost`'s thread-safe overlay (children via `os.exec` observe it).
     ExtFn {
+        param_names: &["name", "value"],
         name: "set",
         params: &[Str, Str],
         ret: Concrete(SigType::Unit),
@@ -5056,6 +6252,7 @@ const ENV_FNS: &[ExtFn] = &[
 ];
 
 const ARGS_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "all",
     params: &[],
     ret: Concrete(SigType::List(&Str)),
@@ -5070,59 +6267,80 @@ const PROCESS_SIG: SigType = SigType::Named(crate::os::PROCESS_TYPE_NAME);
 /// The `os` module (stdlib-gaps): system introspection leaves + subprocess execution + exit.
 const OS_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "platform",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "arch",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "hostname",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "cpus",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &[],
         name: "cwd",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "pid",
         params: &[],
         ret: Concrete(Int),
     },
     ExtFn {
+        param_names: &["command", "args"],
         name: "exec",
         params: &[Str, SigType::Optional(&SigType::List(&Str))],
         ret: Concrete(EXEC_RESULT_SIG),
     },
     ExtFn {
+        param_names: &["command", "args"],
         name: "exec_async",
         params: &[Str, SigType::Optional(&SigType::List(&Str))],
         ret: Concrete(SigType::Future(&EXEC_RESULT_SIG)),
     },
     // `spawn(command, args?)` — start a child and return a controllable `Process` handle.
     ExtFn {
+        param_names: &["command", "args"],
         name: "spawn",
         params: &[Str, SigType::Optional(&SigType::List(&Str))],
         ret: Concrete(PROCESS_SIG),
     },
-    // `exit(code?)` types as unit; it never actually returns.
+    // `try_spawn(command, args?)` — the recoverable twin (subprocess-doors arc).
     ExtFn {
+        param_names: &["command", "args"],
+        name: "try_spawn",
+        params: &[Str, SigType::Optional(&SigType::List(&Str))],
+        ret: Concrete(SigType::Result(&PROCESS_SIG, &OS_ERROR_SIG)),
+    },
+    // `exit(code?)` — the archetypal diverging call: it unwinds the backend with
+    // `ErrorKind::Exit` and the process is gone. Declared `never`, not `void`: "returns nothing"
+    // and "does not return" are different facts, and only the second one tells a tier runner
+    // that `os.exit(run())` at the top of a CLI entry must not join the shared test setup.
+    ExtFn {
+        param_names: &["code"],
         name: "exit",
         params: &[SigType::Optional(&Int)],
-        ret: Concrete(SigType::Unit),
+        ret: Concrete(SigType::Never),
     },
     // `shell_quote(s)` — POSIX-shell-safe quoting for the explicit `sh -c` escape hatch.
     ExtFn {
+        param_names: &["text"],
         name: "shell_quote",
         params: &[Str],
         ret: Concrete(Str),
@@ -5131,32 +6349,38 @@ const OS_FNS: &[ExtFn] = &[
 
 const FS_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["path", "contents"],
         name: "write",
         params: &[Str, Str],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["path", "contents"],
         name: "append",
         params: &[Str, Str],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["path", "contents"],
         name: "write_bytes",
         params: &[Str, SigType::Bytes],
         ret: Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["path"],
         name: "read_bytes",
         params: &[Str],
         ret: Concrete(SigType::Bytes),
     },
     // A.10 residue: the async twin of `read_bytes` — a `Future<bytes>`.
     ExtFn {
+        param_names: &["path"],
         name: "read_bytes_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Bytes)),
     },
     ExtFn {
+        param_names: &["path"],
         name: "read",
         params: &[Str],
         ret: Concrete(Str),
@@ -5165,16 +6389,19 @@ const FS_FNS: &[ExtFn] = &[
     // async context `.await`s. On the sandbox they resolve deterministically (in-oracle); on the real
     // executor they suspend and the IO runs concurrently on tokio (CLI-only, out-of-oracle).
     ExtFn {
+        param_names: &["path"],
         name: "read_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&Str)),
     },
     ExtFn {
+        param_names: &["path", "contents"],
         name: "write_async",
         params: &[Str, Str],
         ret: Concrete(SigType::Future(&SigType::Unit)),
     },
     ExtFn {
+        param_names: &["path", "contents"],
         name: "append_async",
         params: &[Str, Str],
         ret: Concrete(SigType::Future(&SigType::Unit)),
@@ -5182,42 +6409,50 @@ const FS_FNS: &[ExtFn] = &[
     // The async metadata twins (extern-types X6) — pure `FsIo` additions: no backend code
     // changed to add these, which is the point of the open seam.
     ExtFn {
+        param_names: &["path"],
         name: "exists_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Bool)),
     },
     ExtFn {
+        param_names: &["path"],
         name: "remove_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Bool)),
     },
     // Trailing-optional dir, like the sync `list` (package-manager N3.4).
     ExtFn {
+        param_names: &["path"],
         name: "list_async",
         params: &[SigType::Optional(&Str)],
         ret: Concrete(SigType::Future(&SigType::List(&Str))),
     },
     ExtFn {
+        param_names: &["path"],
         name: "read_lines",
         params: &[Str],
         ret: Concrete(SigType::List(&Str)),
     },
     ExtFn {
+        param_names: &["path"],
         name: "exists",
         params: &[Str],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["path"],
         name: "remove",
         params: &[Str],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["path"],
         name: "is_dir",
         params: &[Str],
         ret: Concrete(SigType::Bool),
     },
     ExtFn {
+        param_names: &["path"],
         name: "mkdir",
         params: &[Str],
         ret: Concrete(SigType::Unit),
@@ -5225,11 +6460,13 @@ const FS_FNS: &[ExtFn] = &[
     // A.10 residue: the async directory twins — `is_dir_async` → `Future<bool>`, `mkdir_async`
     // → `Future<void>`. `list_async` already covers directory listing.
     ExtFn {
+        param_names: &["path"],
         name: "is_dir_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Bool)),
     },
     ExtFn {
+        param_names: &["path"],
         name: "mkdir_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Unit)),
@@ -5237,11 +6474,13 @@ const FS_FNS: &[ExtFn] = &[
     // `list([dir])` — the directory argument is trailing-optional (the http-arc H4 machinery,
     // which post-dates this function's old "checker special-cases the arity" note).
     ExtFn {
+        param_names: &["path"],
         name: "list",
         params: &[SigType::Optional(&Str)],
         ret: Concrete(SigType::List(&Str)),
     },
     ExtFn {
+        param_names: &["path", "mode"],
         name: "open",
         params: &[Str, Str],
         ret: Concrete(SigType::Named("FileHandle")),
@@ -5253,71 +6492,85 @@ const FS_FNS: &[ExtFn] = &[
 // dispatch); object results are `SameAsArg` (same shape as the indicated argument).
 const VEC_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["a", "b"],
         name: "add",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "sub",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "cross",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["v", "normal"],
         name: "reflect",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "min",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "max",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["v"],
         name: "abs",
         params: &[Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["v"],
         name: "normalize",
         params: &[Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["v", "factor"],
         name: "scale",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b", "t"],
         name: "lerp",
         params: &[Dyn, Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["v", "lo", "hi"],
         name: "clamp",
         params: &[Dyn, Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "dot",
         params: &[Dyn, Dyn],
         ret: Concrete(SigType::F32),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "distance",
         params: &[Dyn, Dyn],
         ret: Concrete(SigType::F32),
     },
     ExtFn {
+        param_names: &["v"],
         name: "length",
         params: &[Dyn],
         ret: Concrete(SigType::F32),
@@ -5326,37 +6579,44 @@ const VEC_FNS: &[ExtFn] = &[
 
 const QUAT_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["a", "b"],
         name: "mul",
         params: &[Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["q"],
         name: "conjugate",
         params: &[Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["q"],
         name: "normalize",
         params: &[Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b", "t"],
         name: "slerp",
         params: &[Dyn, Dyn, Dyn],
         ret: SameAsArg(0),
     },
     ExtFn {
+        param_names: &["a", "b"],
         name: "dot",
         params: &[Dyn, Dyn],
         ret: Concrete(SigType::F32),
     },
     ExtFn {
+        param_names: &["q"],
         name: "length",
         params: &[Dyn],
         ret: Concrete(SigType::F32),
     },
     // `rotate_vec3(q, v)` returns the *vector* (its second argument's shape).
     ExtFn {
+        param_names: &["q", "v"],
         name: "rotate_vec3",
         params: &[Dyn, Dyn],
         ret: SameAsArg(1),
@@ -5370,13 +6630,35 @@ const QUAT_FNS: &[ExtFn] = &[
 // `TypeRecipe`), not this dynamic dispatch. `json.stringify(value)` serializes a **deeply**
 // marshalled argument (the module sets `deep_marshal`) through the shared `json::stringify`.
 
+/// `JsonError`'s signature spelling — the error arm of every recoverable `json` door.
+const JSON_ERROR_SIG: SigType = SigType::Named(crate::json::JSON_ERROR_TYPE_NAME);
+
+/// What the recoverable **dynamic** door returns: `Result<dyn, JsonError>`.
+///
+/// The non-turbofish twin of `try_parse::<T>`'s `Result<T, JsonError>`, and the only recoverable
+/// decode that needs no declared recipe — which is what makes it the right door for a body read off
+/// a wire, where the shape is the remote party's and a malformed document must be a value the
+/// program handles rather than an abort.
+const DYN_JSON_RESULT_SIG: SigType = SigType::Result(&Dyn, &JSON_ERROR_SIG);
+
 const JSON_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["text"],
         name: "parse",
         params: &[Str],
         ret: Concrete(Dyn),
     },
+    // The recoverable dynamic door. It shares the name `try_parse` with the call-site-typed
+    // `try_parse::<T>` below, exactly as `parse` shares its name with `parse::<T>`: the plain and
+    // turbofish call surfaces are separate tables, so a name in both is two doors, not a collision.
     ExtFn {
+        param_names: &["text"],
+        name: "try_parse",
+        params: &[Str],
+        ret: Concrete(DYN_JSON_RESULT_SIG),
+    },
+    ExtFn {
+        param_names: &["value"],
         name: "stringify",
         params: &[Dyn],
         ret: Concrete(Str),
@@ -5386,19 +6668,23 @@ const JSON_FNS: &[ExtFn] = &[
 // The **call-site-typed** doors — the turbofish forms `json.parse::<T>` (aborting) and
 // `json.try_parse::<T>` (recoverable → `Result<T, JsonError>`). A separate table from `JSON_FNS`:
 // the dynamic `parse(text): dyn` and the typed `parse::<T>: T` legitimately share the name
-// `parse`, so they live in disjoint call surfaces. Each declares `RetTy::TypeArg` with the
-// wrapper the checker types the call by; `json_typed_dispatch` produces the matching `NativeOut`
-// tree threaded with the checker-resolved recipe.
+// `parse` — and, since the recoverable dynamic door landed, `try_parse` is the second such pair
+// (`try_parse(text): Result<dyn, JsonError>` here, `try_parse::<T>(): Result<T, JsonError>` there).
+// The two call surfaces are disjoint tables, so sharing a name is two doors, not a collision.
+// Each declares `RetTy::TypeArg` with the wrapper the checker types the call by;
+// `json_typed_dispatch` produces the matching `NativeOut` tree threaded with the resolved recipe.
 const JSON_TYPED_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["text"],
         name: "parse",
         params: &[Str],
         ret: TypeArg(TypeArgWrap::Plain),
     },
     ExtFn {
+        param_names: &["text"],
         name: "try_parse",
         params: &[Str],
-        ret: TypeArg(TypeArgWrap::Result(SigType::Named("JsonError"))),
+        ret: TypeArg(TypeArgWrap::Result(JSON_ERROR_SIG)),
     },
 ];
 
@@ -5411,6 +6697,20 @@ fn json_dispatch(
         "parse" => {
             want_arity(func, args, 1)?;
             crate::json::parse_dynamic(want_str(func, args, 0)?)
+        }
+        // The recoverable dynamic door: it never uses the `Err` channel (that would be an abort),
+        // returning the whole `Result` inside the `NativeOut` — the same contract `try_parse::<T>`
+        // honors below, so both backends materialize one tree and stay identical by construction.
+        "try_parse" => {
+            want_arity(func, args, 1)?;
+            Ok(
+                match crate::json::try_parse_dynamic(want_str(func, args, 0)?) {
+                    Ok(out) => NativeOut::Ok(Box::new(out)),
+                    Err(error) => {
+                        NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error))))
+                    }
+                },
+            )
         }
         "stringify" => {
             want_arity(func, args, 1)?;
@@ -5458,31 +6758,37 @@ fn json_typed_dispatch(
 /// composed message the value also displays as.
 const JSON_ERROR_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "message",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "to_string",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "kind",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "path",
         params: &[],
         ret: Concrete(Str),
     },
     ExtFn {
+        param_names: &[],
         name: "line",
         params: &[],
         ret: Concrete(SigType::Option(&Int)),
     },
     ExtFn {
+        param_names: &[],
         name: "column",
         params: &[],
         ret: Concrete(SigType::Option(&Int)),
@@ -5502,7 +6808,14 @@ const JSON_ERROR_DOCS: &[(&str, &str)] = &[
     (
         "kind",
         "What went wrong: `\"syntax\"` (malformed document), `\"mismatch\"` (wrong value kind), \
-         `\"missing_field\"`, or `\"unknown_type\"` (a `decode_typed` name with no recipe).",
+         `\"missing_field\"`, `\"unknown_variant\"` (a right-kind value naming no case of a target \
+         enum — the detail lists every accepted one), `\"validation\"` (a shape-correct value its \
+         type's `Validate::validate` rejected), or `\"unknown_type\"` (a `decode_typed` name with \
+         no recipe).\n\n\
+         `\"unknown_variant\"` is deliberately distinct from `\"mismatch\"`: a mismatch means the \
+         document has the wrong *shape*, while this means it has the right shape and an \
+         out-of-vocabulary *value* — something a caller can act on, since the accepted set is in \
+         the message.",
     ),
     (
         "path",
@@ -5656,6 +6969,17 @@ const CORE_MODULES: &[ExtModule] = &[
         docs: FS_DOCS,
         ..ExtModule::DEFAULTS
     },
+    // `base64` (RFC 4648) — the binary-over-text envelope every LLM provider, MCP resource, JWT,
+    // and data URI speaks. Pure and dep-light (the `base64` crate is already linked for HTTP Basic
+    // auth), so it is always-on core with no ring of its own.
+    ExtModule {
+        name: "base64",
+        functions: BASE64_FNS,
+        dispatch: base64_dispatch,
+        deep_marshal: false,
+        docs: BASE64_DOCS,
+        ..ExtModule::DEFAULTS
+    },
     ExtModule {
         name: "json",
         functions: JSON_FNS,
@@ -5781,6 +7105,22 @@ const HTTP_MODULES: &[ExtModule] = &[
         // no ring. A `use std.http.server` program links no reqwest, precisely (P0.3b split).
         ring: None,
         docs: HTTP_SERVER_DOCS,
+        ..ExtModule::DEFAULTS
+    },
+    ExtModule {
+        // Percent-encoding (RFC 3986). Native because the transformation is over UTF-8 BYTES, which
+        // Noeta's scalar-based string surface does not reach — a `.noe` implementation gets ASCII
+        // right and mangles everything else. It sits under `http` because every consumer is HTTP:
+        // assembling a query string, taking one apart, escaping a path segment.
+        //
+        // No ring and no host: both functions are pure string transformations, so a program that
+        // uses them links no transport at all.
+        name: "http.url",
+        functions: HTTP_URL_FNS,
+        dispatch: http_url_dispatch,
+        deep_marshal: false,
+        ring: None,
+        docs: HTTP_URL_DOCS,
         ..ExtModule::DEFAULTS
     },
 ];

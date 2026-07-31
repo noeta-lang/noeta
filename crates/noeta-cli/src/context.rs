@@ -11,12 +11,23 @@
 //! per-test case, a bench loop, a tier-dispatch call) through [`check_under`] — the crate's one
 //! remaining hand-paired `check_all_with_editions` call.
 
-use std::process::ExitCode;
+use std::io::Write;
 
 use noeta_runner::compile::Loaded;
 
 use crate::output::emit_diagnostics_mapped;
 use crate::{compose, run_declared_tier};
+
+/// Print a [`noeta_runner::CompileFailure`] to stderr and yield its **`u8`** exit code — the tier
+/// subsystem speaks the native-runner seam's `u8` exit codes (0 ok, 1 program error, 2 setup
+/// failure) end to end, so `CompileFailure::report` (which returns a `std::process::ExitCode` the
+/// seam cannot read) is unwrapped to the code here. `ExitCode` reappears only at the CLI's outer
+/// clap boundary, where a verb wraps this crate's `u8` back into one.
+fn report_u8(f: &noeta_runner::CompileFailure) -> u8 {
+    let (text, code) = f.to_text();
+    let _ = std::io::stderr().write_all(text.as_bytes());
+    code
+}
 
 /// For a tier runner: whether its `tier` is live under `--target`. `Ok(true)` when no target was
 /// given (the runner always runs); `Ok(false)` when a target was given but does not make `tier`
@@ -46,7 +57,7 @@ pub(crate) fn target_gate(
     entry: &std::path::Path,
     target: &Option<String>,
     tier: &str,
-) -> Option<ExitCode> {
+) -> Option<u8> {
     match tier_active_in_target(entry, target, tier) {
         Ok(true) => None,
         Ok(false) => {
@@ -54,11 +65,11 @@ pub(crate) fn target_gate(
                 "tier `{tier}` is not active in target `{}`",
                 target.as_deref().unwrap_or_default()
             );
-            Some(ExitCode::SUCCESS)
+            Some(0)
         }
         Err(err) => {
             eprintln!("noeta: {err}");
-            Some(ExitCode::from(1))
+            Some(1)
         }
     }
 }
@@ -72,36 +83,57 @@ pub(crate) fn target_gate(
 pub(crate) fn load_linked(
     file: &std::path::Path,
     resolved: Option<noeta_pm::graph::ResolvedGraph>,
-) -> Result<noeta_loader::Linked, ExitCode> {
+) -> Result<noeta_loader::Linked, u8> {
     // The shared front half (drift firewall): deps + edition resolve exactly as `noeta run`'s
     // pipeline resolves them; the verbs stage tier activation themselves.
-    let facts =
-        noeta_runner::compile::resolve_front_with(file, &[], &None, resolved.map(|g| g.packages))
-            .map_err(|f| f.report())?;
-    noeta_runner::compile::load_linked(file, &facts).map_err(|f| f.report())
+    let facts = noeta_runner::compile::resolve_front_with(
+        file,
+        &[],
+        &None,
+        resolved.map(|g| noeta_runner::compile::ResolvedFront {
+            packages: g.packages,
+            package_uses: g.package_uses,
+        }),
+    )
+    .map_err(|f| report_u8(&f))?;
+    // The loader has no manifest data, so it leaves `package_uses` empty; fill it from the resolved
+    // facts (which hold the per-package `@`-name tables) so `loaded(..)`’s check resolves directives.
+    let mut linked = noeta_runner::compile::load_linked(file, &facts).map_err(|f| report_u8(&f))?;
+    linked.package_uses = facts.package_uses;
+    Ok(linked)
 }
 
 /// Rewrap a linker result as the runner's [`Loaded`], so type-checking goes through
-/// [`Loaded::check`] — the editions-threading choke point — instead of a hand-paired
+/// [`Loaded::check`] — the editions/provenance threading choke point — instead of a hand-paired
 /// `check_all_with_editions(&linked.program, linked.editions.clone())`.
 pub(crate) fn loaded(linked: noeta_loader::Linked) -> Loaded {
     Loaded {
         program: linked.program,
         sources: linked.sources,
         editions: linked.editions,
+        packages: linked.packages,
+        package_uses: linked.package_uses,
+        // A raw link performs no tier activation, so there is nothing advisory to carry yet — the
+        // caller's own check supplies whatever warnings there are.
+        warnings: Vec::new(),
     }
 }
 
 /// Type-check a program **synthesized from** an already-linked one (a per-test case, a bench
 /// measurement loop, a tier-dispatch program, a hot-swap candidate) under the parent workspace's
-/// editions. SourceIds survive the synthesis (the new nodes carry existing or synthetic spans),
-/// so the parent's edition map stays valid. The crate's single hand-written
-/// `check_all_with_editions` call site — whole linked programs go through [`Loaded::check`].
+/// [`noeta_check::CheckOptions`] — its per-source editions *and* its package provenance. SourceIds
+/// survive the synthesis (the new nodes carry existing or synthetic spans), so both maps stay valid.
+/// The crate's single hand-written whole-`CheckOptions` call site — whole linked programs go through
+/// [`Loaded::check`].
+///
+/// It takes the options **as one value** rather than a map per concern: the two used to be paired by
+/// hand at every one of these call sites, which is precisely how a second per-source map would end
+/// up threaded through half of them.
 pub(crate) fn check_under(
     program: &noeta_ast::Program,
-    editions: &noeta_lexer::EditionMap,
+    opts: &noeta_check::CheckOptions,
 ) -> noeta_check::Checked {
-    noeta_check::check_all_with_editions(program, editions.clone())
+    noeta_check::check_all_with(program, opts.clone())
 }
 
 /// Resolve which provider owns `tier` under the target's map and, when a dependency package's
@@ -113,7 +145,7 @@ pub(crate) fn provider_escape(
     linked: &noeta_loader::Linked,
     activated: noeta_check::Activated,
     providers: &std::collections::BTreeMap<String, String>,
-) -> Result<noeta_check::Activated, ExitCode> {
+) -> Result<noeta_check::Activated, u8> {
     match activated.registry.resolve_provider(tier, providers) {
         Ok(noeta_check::ResolvedProvider::Extension) => Ok(activated),
         Ok(noeta_check::ResolvedProvider::Declared(d)) => {
@@ -122,7 +154,7 @@ pub(crate) fn provider_escape(
         }
         Err(err) => {
             eprintln!("noeta: {err}");
-            Err(ExitCode::from(2))
+            Err(2)
         }
     }
 }
@@ -132,7 +164,18 @@ pub(crate) fn provider_escape(
 /// activation and whole-program type-check diagnostics (rendered against the workspace sources).
 pub(crate) struct TierRun {
     pub(crate) activated: noeta_check::Activated,
-    pub(crate) editions: noeta_lexer::EditionMap,
+    /// The top-level statements that **do not return** (`noeta_check::Checked::diverging_stmts`),
+    /// harvested from the whole-program check above. The shared-setup filter reads it to keep
+    /// `conn.migrate(…)` while dropping `server.serve(…)` — the behavioural question that replaced
+    /// a filter written in terms of statement syntax. It must come from the check of *this* program:
+    /// an empty set would silently assert that nothing diverges.
+    pub(crate) diverging: std::collections::HashSet<noeta_span::Span>,
+    /// The workspace's sources, kept so a runner can render a span against the file it came from —
+    /// the dropped-setup warning (`E0071`) points at a real line in a real file.
+    pub(crate) sources: noeta_span::SourceMap,
+    /// The workspace's check configuration — per-source editions and package provenance — so a
+    /// per-case re-check ([`check_under`]) judges the same program the whole-program check did.
+    pub(crate) opts: noeta_check::CheckOptions,
 }
 
 /// The outcome of [`tier_prologue`]: either the invocation was fully handled (delegated to a
@@ -140,7 +183,9 @@ pub(crate) struct TierRun {
 /// return the exit code), or the program is loaded, activated, and checked clean under the
 /// native runner.
 pub(crate) enum Prologue {
-    Ran(ExitCode),
+    /// The invocation was fully handled; carries the native-runner-seam `u8` exit code (a verb
+    /// wraps it back into a `std::process::ExitCode` at the clap boundary).
+    Ran(u8),
     /// Boxed: `TierRun` carries a whole activated program, and the enum crosses a return
     /// boundary per verb invocation (clippy::large_enum_variant).
     Ready(Box<TierRun>),
@@ -157,7 +202,9 @@ pub(crate) fn tier_prologue(
     // The compose probe hands back the graph it resolved (default selection) for the load below
     // — the tier verbs always load under the default selection (audit-5 F2).
     let resolved = match compose::maybe_delegate(file) {
-        Err(code) => return Prologue::Ran(code),
+        // Composition needed but failed (`maybe_delegate` yields a fixed exit-1 `ExitCode`); the
+        // tier subsystem speaks `u8`, so surface it as code 1.
+        Err(_) => return Prologue::Ran(1),
         Ok(resolved) => resolved,
     };
     if let Some(code) = target_gate(file, target, tier) {
@@ -174,43 +221,75 @@ pub(crate) fn tier_prologue(
         Ok(map) => map,
         Err(err) => {
             eprintln!("noeta: {err}");
-            return Prologue::Ran(ExitCode::from(2));
+            return Prologue::Ran(2);
         }
     };
     // Activate the tier: inline its `@<tier>` blocks as ordinary top-level declarations and
     // collect the tier fns. An unknown-tier block is an E0036 (a typo must not silently vanish).
-    let activated = noeta_check::activate_tiers_with(&linked.program, &[tier], &providers);
+    // Each `@name` resolves per the package that wrote it (per-package naming arc).
+    let ctx = noeta_check::TierContext {
+        uses: &linked.package_uses,
+        packages: &linked.packages,
+    };
+    let activated = noeta_check::activate_tiers_with(&linked.program, &[tier], &ctx);
     let mut activated = match provider_escape(tier, &linked, activated, &providers) {
         Ok(activated) => activated,
         Err(code) => return Prologue::Ran(code),
     };
-    if !activated.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
-        return Prologue::Ran(ExitCode::from(1));
+    // Report what activation found, then gate on **errors** only: a warning is advisory, and a
+    // `noeta test` that refuses to run because one line lints is a broken test runner.
+    emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+    if noeta_diagnostics::has_errors(&activated.diagnostics) {
+        return Prologue::Ran(1);
     }
 
     // Type-check the activated program once — through the runner's `Loaded`, so the per-source
     // editions ride structurally — so a broken tier fn is a compile error reported a single time
     // here rather than redundantly inside every per-case run.
     let noeta_loader::Linked {
-        sources, editions, ..
+        sources,
+        editions,
+        packages,
+        package_uses,
+        ..
     } = linked;
     let checking = Loaded {
         program: activated.program,
         sources,
         editions,
+        packages,
+        package_uses,
+        // Activation's own diagnostics were reported above; nothing left to carry.
+        warnings: Vec::new(),
     };
     let checked = checking.check();
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&checking.sources, checked.diagnostics.iter());
-        return Prologue::Ran(ExitCode::from(1));
+    // Reported once, here — the per-case programs the verb synthesizes below re-check the *same*
+    // source, so they deliberately stay silent rather than repeating every warning per test case.
+    emit_diagnostics_mapped(&checking.sources, checked.diagnostics.iter());
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
+        return Prologue::Ran(1);
     }
+    let diverging = checked.diverging_stmts;
     let Loaded {
-        program, editions, ..
+        program,
+        editions,
+        packages,
+        package_uses,
+        sources,
+        // Empty by construction here (this `Loaded` was built above with none), and activation's own
+        // diagnostics were already reported.
+        warnings: _,
     } = checking;
     activated.program = program;
     Prologue::Ready(Box::new(TierRun {
         activated,
-        editions,
+        diverging,
+        sources,
+        opts: noeta_check::CheckOptions {
+            editions,
+            packages,
+            package_uses,
+            ..noeta_check::CheckOptions::default()
+        },
     }))
 }

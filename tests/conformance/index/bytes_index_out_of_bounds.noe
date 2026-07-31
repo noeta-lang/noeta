@@ -1,0 +1,6 @@
+// Indexing a `bytes` buffer outside its bounds is a runtime error (E0016) — the string/list index
+// rule verbatim, from the one shared `bytes_index` body, so both backends report it identically.
+// expect: error E0016 at 6:6
+// expect: exit 1
+b = "hi".to_bytes();
+echo b[5];

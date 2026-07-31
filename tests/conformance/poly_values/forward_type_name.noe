@@ -1,0 +1,66 @@
+// `type_name::<T>()` over a **forwarded** type parameter (poly-values F2b). A top-level generic fn
+// that can already forward `T` into `json.try_parse::<T>` can now also ask what `T` is called: the
+// hidden type-argument slot that carries the decode recipe carries the instantiation's name in the
+// same entry, and this surface reads nothing but that name — so it forwards even for an
+// instantiation that has no recipe at all (the CLASS below: a class is reference/identity, so it
+// never decodes, and its table entry carries a name and a `None` recipe).
+//
+// It also closes the loop the surface's own diagnostic pointed at. `field_specs_of::<T>()` stays
+// E0058 — the turbofish arm is a *compile-time* key, resolved like an annotation — but its
+// runtime-string arm now reaches the instantiation: `field_specs_of(type_name::<T>())` inside a
+// generic body answers the real per-instantiation schema, where before the name had to be
+// reflected at the call site and handed in.
+//
+// Nested `fn`s and closures read the enclosing fn's slot exactly as the recipe forwards do (D2b).
+// The qualified-name agreement with the concrete turbofish needs the loader, so it is pinned
+// separately in `forward_type_name_namespaced/`.
+// expect: stdout "Todo"
+// expect: stdout "Todo"
+// expect: stdout "2"
+// expect: stdout "Todo|Todo"
+// expect: stdout "Session"
+// expect: stdout "decoded Todo Ok(Todo {id: 1, label: \"write\"})"
+// expect: exit 0
+use std.{json}
+use std.json.JsonError
+
+struct Todo {
+    id: int
+    label: string
+}
+
+class Session {
+    pub id: int
+}
+
+// The name alone, forwarded.
+fn named<T>(): string {
+    return type_name::<T>()
+}
+
+// The name feeding the query whose turbofish arm stays static.
+fn field_count<T>(): int {
+    return field_specs_of(type_name::<T>()).len()
+}
+
+// A nested `fn` and a closure both read the enclosing fn's slot (D2b).
+fn inner_and_lambda<T>(): string {
+    fn inner(): string {
+        return type_name::<T>()
+    }
+    lam = fn() => type_name::<T>()
+    return inner() ~ "|" ~ lam()
+}
+
+// Name and recipe from the same instantiation, in one body — the shape a typed-extraction door
+// wants, and the reason its caller no longer has to name the type twice.
+fn decode<T>(body: string): string {
+    return "decoded " ~ type_name::<T>() ~ " " ~ "${json.try_parse::<T>(body)}"
+}
+
+echo type_name::<Todo>()
+echo named::<Todo>()
+echo field_count::<Todo>()
+echo inner_and_lambda::<Todo>()
+echo named::<Session>()
+echo decode::<Todo>("{\"id\": 1, \"label\": \"write\"}")

@@ -1,0 +1,9 @@
+// A guard is a bool position: it is checked bidirectionally against `bool`, so an `int` guard is
+// the standard expected/found mismatch (E0007) at the guard expression.
+// expect: error E0007 at 7:16
+// expect: exit 1
+fn f(): ?int { return some(3); }
+echo match f() {
+    some(n) if n => "yes",
+    _ => "no",
+};

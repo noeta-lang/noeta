@@ -222,9 +222,25 @@ fn from_native(value: NativeValue) -> Value {
                 .collect(),
         ),
         NativeValue::Opaque(name) => Value::Str(format!("<{name}>")),
-        // A native enum value (native-extensibility S1): surface its case name (a fieldless/backed
-        // variant is fully described by it), consistent with the display-string convention above.
-        NativeValue::Variant { variant, .. } => Value::Str(variant),
+        // An enum value: a fieldless/backed variant is fully described by its case name, so it
+        // surfaces as that string (consistent with the display-string convention above). A
+        // payload-carrying one surfaces as the single-entry map `{case: [payload…]}` — the same
+        // shape `json.stringify` writes it as, for the same reason `Bytes` above surfaces as a list
+        // of byte values: this door and the JSON door describe one value, so they describe it
+        // identically. `Value` has no variant kind, so *some* spelling had to be chosen; dropping
+        // the payload and keeping only the tag is the one choice that loses data.
+        NativeValue::Variant {
+            variant, fields, ..
+        } => {
+            if fields.is_empty() {
+                Value::Str(variant)
+            } else {
+                Value::Map(vec![(
+                    variant,
+                    Value::List(fields.into_iter().map(from_native).collect()),
+                )])
+            }
+        }
         // A native class instance (native-extensibility S2): surface its fields as a keyed map,
         // like an object/record aggregate.
         NativeValue::Instance { fields, .. } => Value::Map(
@@ -375,9 +391,13 @@ impl Builder {
             Some(reg) => noeta_check::check_all_with_registry(&program, reg),
             None => noeta_check::check_all(&program),
         };
-        if !checked.diagnostics.is_empty() {
+        // Errors only. A warning describes a program that loads and runs perfectly well; failing
+        // the host's `load` over one would make every advisory lint a breaking change for every
+        // embedder. The messages are kept on the session instead (`Session::warnings`).
+        if noeta_diagnostics::has_errors(&checked.diagnostics) {
             return Err(Error::Check(render_all(source, &checked.diagnostics)));
         }
+        let warnings = render_all(source, &checked.diagnostics);
         let (module, compiler) = match registry {
             Some(reg) => noeta_compiler::compile_with_sites_session_with_registry(
                 &program,
@@ -414,6 +434,7 @@ impl Builder {
             source: source.to_string(),
             stdout: out.stdout,
             registry,
+            warnings,
         })
     }
 }
@@ -432,6 +453,10 @@ pub struct Session {
     /// registry the session type-checked and runs under, not the process-global default.
     /// `None` ⇒ the default registry.
     registry: Option<&'static noeta_stdlib::registry::Registry>,
+    /// The advisory diagnostics the loaded source produced (refreshed by each accepted
+    /// [`hot_swap`](Session::hot_swap)). Held rather than dropped: a warning must not fail a load,
+    /// but the host still has to be able to see it — see [`Session::warnings`].
+    warnings: Vec<String>,
 }
 
 impl Session {
@@ -443,6 +468,13 @@ impl Session {
     /// Configure a session (host world) before loading.
     pub fn builder() -> Builder {
         Builder::default()
+    }
+
+    /// The advisory diagnostics the currently-loaded source produced — warnings, which never fail a
+    /// load or a swap. A host that wants to surface them (a log line, an editor gutter) reads them
+    /// here; ignoring them is also a valid choice, which is exactly why they are not an `Err`.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Call the top-level function `name` with `args`, returning its result. The session's state
@@ -500,9 +532,10 @@ impl Session {
             Some(reg) => noeta_check::check_all_with_registry(&new_program, reg),
             None => noeta_check::check_all(&new_program),
         };
-        if !checked.diagnostics.is_empty() {
+        if noeta_diagnostics::has_errors(&checked.diagnostics) {
             return Err(Error::Check(render_all(new_source, &checked.diagnostics)));
         }
+        self.warnings = render_all(new_source, &checked.diagnostics);
         match diff_programs(&old_program, &self.source, &new_program, new_source) {
             SwapDiff::Unchanged => {
                 self.source = new_source.to_string();

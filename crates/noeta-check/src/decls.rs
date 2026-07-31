@@ -6,6 +6,52 @@
 use super::*;
 
 impl Checker {
+    /// Turn a **written annotation** into a lattice type, in the scope the checker is currently in:
+    /// extern-imported names take their qualified identity, and a spelling the enclosing `<…>`
+    /// binds becomes the [`Type::Param`] it names.
+    ///
+    /// The single entry point for every annotation the *checking* pass reads, so no site has to
+    /// remember to resolve parameters — which is exactly the kind of "remember to consult the side
+    /// table" obligation this arc removes. (The *collecting* pass has no `coloring` yet and builds
+    /// its scope explicitly; it calls the free [`from_ref_q`] with that scope.)
+    pub(crate) fn annot(&self, ty: &TypeRef) -> Type {
+        from_ref_q(ty, &self.imports.extern_types, &self.coloring.type_params)
+    }
+
+    /// [`Self::annot`] for a parameter's declared type; `Unknown` when unannotated.
+    pub(crate) fn annot_param(&self, p: &Param) -> Type {
+        param_type(p, &self.imports.extern_types, &self.coloring.type_params)
+    }
+
+    /// [`Self::annot`] for an optional annotation (a field's type, a return); `Unknown` when absent.
+    pub(crate) fn annot_field(&self, ty: &Option<TypeRef>) -> Type {
+        field_type(ty, &self.imports.extern_types, &self.coloring.type_params)
+    }
+
+    /// The identities of every type parameter currently in scope — what erasure quantifies over
+    /// while checking this declaration.
+    pub(crate) fn scope_param_ids(&self) -> ParamSet {
+        scope_ids(&self.coloring.type_params)
+    }
+
+    /// The declared trait bounds of `p`, if it is one of the parameters currently in scope.
+    ///
+    /// Looked up **by identity**: a same-spelled parameter of some other declaration is not this
+    /// one, and reading its bounds would license an operation the type in hand never promised.
+    pub(crate) fn param_bounds(&self, p: &ParamRef) -> Option<&[BoundReq]> {
+        self.coloring
+            .type_params
+            .values()
+            .find(|s| s.param.id == p.id)
+            .map(|s| s.bounds.as_slice())
+    }
+
+    /// Whether `p` is one of the type parameters currently in scope (as opposed to one belonging
+    /// to some other declaration, which reaches here only inside an un-substituted template).
+    pub(crate) fn param_in_scope(&self, p: &ParamRef) -> bool {
+        self.param_bounds(p).is_some()
+    }
+
     /// Validate a callable's parameter defaults. Two rules: defaults must be **trailing-only** — a
     /// required parameter after a defaulted one is `E0026` — and each default's type must be
     /// assignable to its parameter (`E0007`). The default expression is synthesized in `env` *before
@@ -31,7 +77,7 @@ impl Checker {
                 .help("give this parameter a default too, or move it before the optional ones");
             }
         }
-        let tps: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
+        let tps = self.scope_param_ids();
         for p in params {
             let Some(default) = &p.default else { continue };
             // The parameter's declared type is the default's expected type, so a target-typed
@@ -40,7 +86,7 @@ impl Checker {
             // no existing inference changes.
             let declared =
                 p.ty.is_some()
-                    .then(|| erase_type_params(param_type(p, &self.imports.extern_types), &tps));
+                    .then(|| erase_type_params(self.annot_param(p), &tps));
             let actual = match (&declared, default) {
                 (Some(expected), Expr::Object(l)) if l.type_name.is_none() => {
                     self.check(default, expected, env)
@@ -71,15 +117,14 @@ impl Checker {
     /// trailing-only rule**: literal fields are named, so a default makes its field optional
     /// regardless of position. Call before binding fields into `env`.
     pub(crate) fn validate_field_defaults(&mut self, fields: &[FieldDecl], env: &mut Env) {
-        let tps: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
+        let tps = self.scope_param_ids();
         for f in fields {
             let Some(default) = &f.default else { continue };
             // The field's declared type is the default's expected type — the field analogue of the
             // parameter rule above, so `r: Retry = .{ attempts: 3 }` names its type.
-            let declared = f
-                .ty
-                .is_some()
-                .then(|| erase_type_params(field_type(&f.ty, &self.imports.extern_types), &tps));
+            let declared =
+                f.ty.is_some()
+                    .then(|| erase_type_params(self.annot_field(&f.ty), &tps));
             let actual = match (&declared, default) {
                 (Some(expected), Expr::Object(l)) if l.type_name.is_none() => {
                     self.check(default, expected, env)
@@ -134,22 +179,29 @@ impl Checker {
         // Only `self` is bound in a method body (prelude-redesign EX.1 — member access is
         // explicit): `self.field` types through `synth_member`; a bare field name is an unknown
         // name with a targeted hint (see the `Expr::Ident` fallback in `synth`).
-        let fields: Vec<(String, Type)> =
-            vec![("self".to_string(), self_type(&r.name, &r.type_params))];
+        let fields: Vec<(String, Type)> = vec![(
+            "self".to_string(),
+            self_type(r.name.as_str(), &r.type_params),
+        )];
         for f in &r.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.validate_field_defaults(&r.fields, env);
-        self.check_derives(&r.name, &r.decorators.derives, &r.fields, &r.methods);
-        let standalone = self.standalone_for(&r.name);
+        self.check_derives(
+            r.name.as_str(),
+            &r.decorators.derives,
+            &r.fields,
+            &r.methods,
+        );
+        let standalone = self.standalone_for(r.name.as_str());
         // A struct carries in-body `impl Trait { }` blocks and inherent methods (the unified body),
         // checked exactly as a class's — coherence over its impls, then each method body.
         self.check_coherence(&r.decorators.derives, &r.impls, &standalone);
         self.check_attrs(&r.decorators.attrs, TargetKind::Struct);
         // Inside the type's own body, its (always-public) fields are accessible; the marker is
         // uniform with classes (a struct simply has no private fields to gate).
-        let saved_type = self.coloring.current_type.replace(r.name.clone());
+        let saved_type = self.coloring.current_type.replace(r.name.to_string());
         for block in &r.impls {
             self.check_impl(block);
         }
@@ -175,20 +227,27 @@ impl Checker {
         // Only `self` is bound in a method body (prelude-redesign EX.1 — member access is
         // explicit): `self.field` types through `synth_member`; a bare field name is an unknown
         // name with a targeted hint (see the `Expr::Ident` fallback in `synth`).
-        let fields: Vec<(String, Type)> =
-            vec![("self".to_string(), self_type(&c.name, &c.type_params))];
+        let fields: Vec<(String, Type)> = vec![(
+            "self".to_string(),
+            self_type(c.name.as_str(), &c.type_params),
+        )];
         for f in &c.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.validate_field_defaults(&c.fields, env);
-        self.check_derives(&c.name, &c.decorators.derives, &c.fields, &c.methods);
-        let standalone = self.standalone_for(&c.name);
+        self.check_derives(
+            c.name.as_str(),
+            &c.decorators.derives,
+            &c.fields,
+            &c.methods,
+        );
+        let standalone = self.standalone_for(c.name.as_str());
         self.check_coherence(&c.decorators.derives, &c.impls, &standalone);
         self.check_attrs(&c.decorators.attrs, TargetKind::Class);
         // Inside the class's own methods/destructor its private fields are accessible — on `self`
         // and on any same-type value (the type-scoped privacy rule, object-model slice 2d).
-        let saved_type = self.coloring.current_type.replace(c.name.clone());
+        let saved_type = self.coloring.current_type.replace(c.name.to_string());
         for block in &c.impls {
             self.check_impl(block);
         }
@@ -216,6 +275,9 @@ impl Checker {
         let saved = self.enter_type_params(&e.type_params);
         self.check_type_opt(&e.backing);
         for variant in &e.variants {
+            // Both payload spellings annotate their type — `Leaf(Item)` no less than
+            // `Leaf(item: Item)` — so one rule reaches both. This used to reconstruct a `TypeRef`
+            // by hand for the positional form, whose type the parser stored in the field's *name*.
             for field in &variant.fields {
                 self.check_type_opt(&field.ty);
             }
@@ -226,8 +288,8 @@ impl Checker {
             // looks at.
             self.check_param_attrs(&variant.fields);
         }
-        self.check_derives(&e.name, &e.decorators.derives, &[], &e.methods);
-        let standalone = self.standalone_for(&e.name);
+        self.check_derives(e.name.as_str(), &e.decorators.derives, &[], &e.methods);
+        let standalone = self.standalone_for(e.name.as_str());
         // An enum carries in-body `impl Trait { }` blocks and inherent methods (the unified body,
         // object-model slice 3), checked exactly as a class's — coherence over its impls, then each
         // method body.
@@ -237,8 +299,8 @@ impl Checker {
         // unlike a struct/class — there is no implicit per-field scope; a method `match`es on
         // `self`). Bind `self` to the enum type so that `match self` is exhaustiveness-checked, and
         // set `current_type` for the same type-scoped resolution a class uses.
-        let self_ty = Type::Named(e.name.clone(), Vec::new());
-        let saved_type = self.coloring.current_type.replace(e.name.clone());
+        let self_ty = Type::Named(e.name.to_string(), Vec::new());
+        let saved_type = self.coloring.current_type.replace(e.name.to_string());
         for block in &e.impls {
             self.check_impl(block);
         }
@@ -260,22 +322,9 @@ impl Checker {
     /// restore once the declaration is checked). Generic parameters are erased at runtime but are
     /// legal referents for annotations within their declaration. Each parameter's trait bounds are
     /// validated here (an unknown trait in a bound is `E0014`).
-    pub(crate) fn enter_type_params(
-        &mut self,
-        params: &[TypeParam],
-    ) -> HashMap<String, Vec<BoundReq>> {
-        let saved = std::mem::replace(
-            &mut self.coloring.type_params,
-            params
-                .iter()
-                .map(|p| {
-                    (
-                        p.name.clone(),
-                        bound_reqs(&p.bounds, &self.imports.extern_types),
-                    )
-                })
-                .collect(),
-        );
+    pub(crate) fn enter_type_params(&mut self, params: &[TypeParam]) -> ParamScope {
+        let scope = param_scope(params, &self.imports.extern_types);
+        let saved = std::mem::replace(&mut self.coloring.type_params, scope);
         // Validated AFTER the parameters enter scope: a bound argument may name a sibling
         // parameter (`<K, T: Keyed<K>>`), which is a legal annotation referent here.
         self.check_type_param_bounds(params);
@@ -292,7 +341,7 @@ impl Checker {
         for p in params {
             for bound in &p.bounds {
                 // A bound may name a built-in trait or a user-defined one (L1, UT3).
-                if let Some(decl) = self.symbols.user_traits.get(&bound.name) {
+                if let Some(decl) = self.symbols.user_traits.get(bound.name.as_str()) {
                     let arity = decl.type_params.len();
                     if !bound.args.is_empty() && bound.args.len() != arity {
                         let msg = if arity == 0 {
@@ -318,7 +367,7 @@ impl Checker {
                     }
                     continue;
                 }
-                if BuiltinTrait::from_name(&bound.name).is_some() {
+                if BuiltinTrait::from_name(bound.name.as_str()).is_some() {
                     if !bound.args.is_empty() {
                         self.error(
                             DiagnosticCode::UnknownTrait,
@@ -379,8 +428,8 @@ impl Checker {
             TypeRef::AssocProjection { .. } => {}
             // `dyn Trait` — the trait must resolve to a built-in or user-defined trait (L1, UT4).
             TypeRef::DynTrait { trait_name, span } => {
-                if BuiltinTrait::from_name(trait_name).is_none()
-                    && !self.symbols.user_traits.contains_key(trait_name)
+                if BuiltinTrait::from_name(trait_name.as_str()).is_none()
+                    && !self.symbols.user_traits.contains_key(trait_name.as_str())
                 {
                     self.error(
                         DiagnosticCode::UnknownTrait,
@@ -391,44 +440,60 @@ impl Checker {
                 }
             }
             TypeRef::Named { name, args, span } => {
-                if !Type::is_builtin_name(name)
+                if !Type::is_builtin_name(name.as_str())
                     && !PRELUDE_TYPES.contains(&name.as_str())
-                    && !self.coloring.type_params.contains_key(name)
-                    && !self.symbols.types.contains(name)
+                    && !self.coloring.type_params.contains_key(name.as_str())
+                    && !self.symbols.types.contains(name.as_str())
                     // A native extern type is a valid annotation only when `use`-imported into this
                     // file (`use std.id.Uuid` → `extern_types["Uuid"]`), like a user type — it is no
                     // longer globally in scope by bare name.
-                    && !self.imports.extern_types.contains_key(name)
+                    && !self.imports.extern_types.contains_key(name.as_str())
                     // A module-qualified type rooted at a retained user import (`use geometry.vec`
                     // then `vec.Vec2` in an *isolated* check — REPL/session, a docs fragment): the
                     // linker resolves the dotted head in a full link, and an unlinked fragment
                     // tolerates it exactly like other unresolved external names (F1). Root-only —
                     // std namespace members keep their exact-key resolution and stay strict.
                     && !name
+                        .as_str()
                         .split_once('.')
                         .is_some_and(|(root, _)| self.symbols.types.contains(root))
                 {
-                    self.error(
+                    let diag = self.error(
                         DiagnosticCode::UnknownType,
                         *span,
                         format!("unknown type `{name}`"),
-                    )
-                    .help(
-                        "name a declared type, one imported with `use` (native types too, e.g. \
-                             `use std.id.Uuid`), a generic parameter, or a built-in",
                     );
+                    // `some`/`none`/`Ok`/`Err` are the *constructors* of `Option`/`Result`, not
+                    // types — but they are the obvious thing to reach for in `x is …`, since they
+                    // are exactly what a `match` arm names. Point at the spelling that works
+                    // rather than at the type catalog, which has nothing for the user to find.
+                    match name.as_str() {
+                        "some" | "none" => diag.help(
+                            "`some`/`none` are an optional's values, not types — test one with \
+                             `x != none` / `x == none`, or take it apart with \
+                             `match x { some(v) => …, none => … }`",
+                        ),
+                        "Ok" | "Err" => diag.help(
+                            "`Ok`/`Err` are a `Result`'s values, not types — take it apart with \
+                             `match x { Ok(v) => …, Err(e) => … }`, or propagate it with `?`",
+                        ),
+                        _ => diag.help(
+                            "name a declared type, one imported with `use` (native types too, \
+                             e.g. `use std.id.Uuid`), a generic parameter, or a built-in",
+                        ),
+                    };
                 }
                 // Key-capability gate (extern-types X4): a `Map<K, _>` key / `Set<T>` element
                 // formed from an extern type requires it key-capable — a mutable handle's hash
                 // or order could go stale under a key, so `Map<FileHandle, _>` is a type error.
-                let key_role = keyed_container_role(name);
+                let key_role = keyed_container_role(name.as_str());
                 if let Some((role, is_set)) = key_role
                     && let Some(TypeRef::Named {
                         name: key_name,
                         span: key_span,
                         ..
                     }) = args.first()
-                    && self.named_key_capable(key_name, is_set) == Some(false)
+                    && self.named_key_capable(key_name.as_str(), is_set) == Some(false)
                 {
                     self.error(
                         DiagnosticCode::TypeMismatch,
@@ -441,7 +506,7 @@ impl Checker {
                          value kind (struct/enum) ordering structurally",
                     );
                 }
-                self.check_type_args(name, args, *span);
+                self.check_type_args(name.as_str(), args, *span);
             }
         }
     }
@@ -502,21 +567,38 @@ impl Checker {
                 PackedKind::Struct(inner) => layout_key_capable(inner),
             })
         }
-        if matches!(
-            key_name,
-            "string" | "int" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
-        ) {
-            return Some(true);
-        }
-        if matches!(key_name, "float" | "f32") {
-            return Some(false);
-        }
-        // `bool` splits by role (post derive-soundness: bool is orderable, `false < true`):
-        // a `Set<bool>` is fine — the runtime canonicalizes it like any orderable element — but
-        // a map key needs a `MapKey` kind, which bool deliberately lacks (two possible keys is a
-        // smell; use fields). The gates pass their role via `for_set`.
-        if key_name == "bool" {
-            return Some(for_set);
+        // A built-in scalar decides here, exhaustively over `BuiltinTy` — the string list this
+        // replaces knew `float`/`f32` but not `f64`, so a `Map<f64, _>` annotation slipped
+        // through the gate a `Map<float, _>` failed (the silent-fallthrough drift the funnel
+        // exists to prevent).
+        if let Some(builtin) = noeta_types::BuiltinTy::from_name_any(key_name) {
+            use noeta_types::BuiltinTy::*;
+            return match builtin {
+                Str | Int | IntN { .. } => Some(true),
+                // The float family is uniformly barred: NaN ≠ NaN and `-0.0 == 0.0` make float
+                // keys a footgun, and `f64` is `float` under another name.
+                Float | F32 | F64 => Some(false),
+                // `number` is a UNION of scalars, so there is no single key form to hash or order
+                // by — `Map<number, _>` would need one key representation spanning twelve types.
+                // Barred like the float family, by a different route.
+                Number => Some(false),
+                // `bool` splits by role (post derive-soundness: bool is orderable, `false <
+                // true`): a `Set<bool>` is fine — the runtime canonicalizes it like any orderable
+                // element — but a map key needs a `MapKey` kind, which bool deliberately lacks
+                // (two possible keys is a smell; use fields). The gates pass their role via
+                // `for_set`.
+                Bool => Some(for_set),
+                // The remaining built-ins keep the lenient answer the old fallthrough gave them
+                // — now stated rather than inherited. `bytes` keys are undecided (content
+                // comparison exists; a `MapKey` form does not — an explicit deferral), and a
+                // container/abstract-kind head in key position is a malformed type the arity
+                // check (E0058) already reports on its own span.
+                // `never` is uninhabited, so `Map<never, _>` has no key to be capable of. Left
+                // undecided with the other malformed heads rather than answered false: the
+                // arity/type check reports the real problem on its own span.
+                Bytes | Unit | Dyn | Never | List | Set | Map | Option | Result | KindEnum
+                | KindStruct | KindClass => None,
+            };
         }
         if let Some(ext) = self.imported_extern(key_name) {
             return Some(ext.key_capable);
@@ -574,8 +656,10 @@ fn keyed_container_role(name: &str) -> Option<(&'static str, bool)> {
         | BuiltinTy::Bytes
         | BuiltinTy::Unit
         | BuiltinTy::Dyn
+        | BuiltinTy::Never
         | BuiltinTy::KindEnum
         | BuiltinTy::KindStruct
-        | BuiltinTy::KindClass => None,
+        | BuiltinTy::KindClass
+        | BuiltinTy::Number => None,
     }
 }

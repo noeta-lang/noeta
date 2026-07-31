@@ -1191,7 +1191,7 @@ impl<'m> Vm<'m> {
 
     /// Accept `min..=max` arguments — a collection method with a trailing-optional parameter
     /// (`slice(start, end?)`, `join(sep?)`). The range twin of [`Self::stdlib_arity`].
-    fn stdlib_arity_range(
+    pub(crate) fn stdlib_arity_range(
         &mut self,
         name: &str,
         args: &[Value],
@@ -1221,7 +1221,12 @@ impl<'m> Vm<'m> {
     /// Read an int argument for a collection method, raising the shared `noeta-stdlib` type error.
     /// `as_int` is `None` for a float, so `slice(1.0, 2)` is a type error — matching the
     /// tree-walker, which accepts only `Value::Int`.
-    fn stdlib_int(&mut self, name: &str, value: Value, span: Span) -> Result<i64, Abort> {
+    pub(crate) fn stdlib_int(
+        &mut self,
+        name: &str,
+        value: Value,
+        span: Span,
+    ) -> Result<i64, Abort> {
         match value.as_int() {
             Some(i) => Ok(i),
             None => {
@@ -1233,7 +1238,7 @@ impl<'m> Vm<'m> {
 
     /// Read an **optional** int argument at `index`, falling back to `default` when it is absent —
     /// the trailing-optional-parameter reader (`slice`'s `end?`). A present non-int is a type error.
-    fn stdlib_opt_int(
+    pub(crate) fn stdlib_opt_int(
         &mut self,
         name: &str,
         args: &[Value],

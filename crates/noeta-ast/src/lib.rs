@@ -14,11 +14,14 @@ pub mod bodies;
 pub mod builtin_ty;
 pub mod derive;
 pub mod desugar;
+mod name;
 mod pretty;
 pub mod reflect;
+pub mod shape;
 mod syntax_kind;
 
 pub use builtin_ty::{BuiltinTy, Spelling, parse_int_width};
+pub use name::Name;
 pub use pretty::Pretty;
 pub use syntax_kind::SyntaxKind;
 
@@ -213,7 +216,7 @@ impl Stmt {
 /// blocks (the unified body grammar), but never a `destruct` (pure data — that is class-only).
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDecl {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
     /// default.
@@ -324,25 +327,25 @@ impl Stmt {
             Stmt::Struct(d) => Some(Decorated {
                 decorators: &d.decorators,
                 site: Sites::STRUCT,
-                name: &d.name,
+                name: d.name.as_str(),
                 name_span: d.name_span,
             }),
             Stmt::Class(d) => Some(Decorated {
                 decorators: &d.decorators,
                 site: Sites::CLASS,
-                name: &d.name,
+                name: d.name.as_str(),
                 name_span: d.name_span,
             }),
             Stmt::Enum(d) => Some(Decorated {
                 decorators: &d.decorators,
                 site: Sites::ENUM,
-                name: &d.name,
+                name: d.name.as_str(),
                 name_span: d.name_span,
             }),
             Stmt::Trait(d) => Some(Decorated {
                 decorators: &d.decorators,
                 site: Sites::TRAIT,
-                name: &d.name,
+                name: d.name.as_str(),
                 name_span: d.name_span,
             }),
             // A `fn`'s directives are tier annotations on `FnDecl::tier`/`::directives`, not a
@@ -772,7 +775,7 @@ pub struct PackedDirective {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoleTag {
     /// The `@semantic` enum the role belongs to (e.g. `Semantic`, `WebRole`); empty if unqualified.
-    pub enum_name: String,
+    pub enum_name: Name,
     /// The variant naming the role (e.g. `EntryPoint`, `Controller`).
     pub variant: String,
     /// The whole `Enum.Variant` span, for diagnostics.
@@ -786,7 +789,7 @@ pub struct RoleTag {
 /// separate `@derive(...)` directive (a type declaration's `derives` list).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// The arguments inside the parentheses. Empty for a bare `#[Marker]`. Each argument is a
     /// literal (positional `#[Route("/x")]` or named `#[Cache(ttl: 60)]`) — attribute arguments
@@ -888,13 +891,13 @@ pub enum AttrValue {
     /// An enum value: a qualified `Enum.Variant` / `Enum.Variant(args)`, or a built-in `Option`/
     /// `Result` constructor (`Ok(5)`, `none`). Fieldless or literal-payload.
     Enum {
-        enum_name: String,
+        enum_name: Name,
         variant: String,
         args: Vec<AttrValue>,
     },
     /// A struct literal `Point { x: 1 }` (the named type prefix disambiguates it from a map).
     Struct {
-        type_name: String,
+        type_name: Name,
         fields: Vec<(String, AttrValue)>,
     },
     /// A type name used as a value (`JsonConverter`) — a type reference, materialized as the
@@ -905,7 +908,7 @@ pub enum AttrValue {
     /// argument form: the `@`-directives previously had a separate identifiers-only grammar whose
     /// sole capability beyond `#[...]`'s was generic type arguments.
     TypeRef {
-        name: String,
+        name: Name,
         args: Vec<TypeRef>,
     },
 }
@@ -933,7 +936,7 @@ impl AttrValue {
 /// the impl from the type's fields (parameterized by the args, e.g. the serialization format).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeriveSpec {
-    pub name: String,
+    pub name: Name,
     /// Generic type arguments (`<Json>`); empty for a nullary derive.
     pub args: Vec<TypeRef>,
     /// Explicit required-member bindings (`@derive(Ordered, value: amount)`, derive layer 1): the
@@ -973,7 +976,9 @@ pub fn packed_named_fields(decl: &StructDecl) -> Option<Vec<Option<String>>> {
         decl.fields
             .iter()
             .map(|f| match &f.ty {
-                Some(TypeRef::Named { name, args, .. }) if args.is_empty() => Some(name.clone()),
+                Some(TypeRef::Named { name, args, .. }) if args.is_empty() => {
+                    Some(name.to_string())
+                }
                 _ => None,
             })
             .collect(),
@@ -983,11 +988,24 @@ pub fn packed_named_fields(decl: &StructDecl) -> Option<Vec<Option<String>>> {
 /// The field types a key-capable packed struct may use directly (P-PKEY): the integer family and
 /// `bool`. **Floats are deliberately excluded** — NaN ≠ NaN and `-0.0 == 0.0` make float keys a
 /// footgun; a bit-pattern opt-in can come later.
+///
+/// Decodes through [`BuiltinTy`] and matches exhaustively, so a new built-in scalar must declare
+/// its key capability here rather than silently inheriting "not key-capable".
 fn key_capable_primitive(name: &str) -> bool {
-    matches!(
-        name,
-        "int" | "bool" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
-    )
+    use BuiltinTy::*;
+    match BuiltinTy::from_name_any(name) {
+        Some(Int | IntN { .. } | Bool) => true,
+        // The float family: excluded per above. Everything else can never be a `@packed` field
+        // in the first place (`packed_named_fields` records only bare named field types, and the
+        // layout gate admits only the numeric/bool primitives), so it is not key-capable either.
+        // `number` is a union, not a storage class — a `@packed` field must have ONE width to lay
+        // out, so it can never be a packed field at all, let alone a key.
+        Some(
+            Float | F32 | F64 | Str | Bytes | Unit | Dyn | Never | List | Set | Map | Option
+            | Result | KindEnum | KindStruct | KindClass | Number,
+        )
+        | None => false,
+    }
 }
 
 /// The **key-capable** packed structs of a program (P-PKEY): a `@packed` struct every one of
@@ -1039,7 +1057,7 @@ pub struct TypeParam {
 /// generic trait accepts any instantiation. Built-in traits take no bound arguments.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitBound {
-    pub name: String,
+    pub name: Name,
     /// The demanded instantiation's type arguments; empty for a bare bound.
     pub args: Vec<TypeRef>,
     pub span: Span,
@@ -1051,7 +1069,7 @@ pub struct TraitBound {
 /// validate the trait name and its required method signatures.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplBlock {
-    pub trait_name: String,
+    pub trait_name: Name,
     pub trait_span: Span,
     /// The trait's generic type arguments (`impl Cache<string> { … }`) — required (matching the
     /// trait's parameter count) when the trait is generic, so its default methods substitute
@@ -1069,7 +1087,7 @@ pub struct ImplBlock {
 /// The named contract a type implements via `impl Name for Type { ... }` (or an in-body `impl Name`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitDecl {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// Whether the trait is `pub` (exported for `use`).
     pub is_public: bool,
@@ -1120,12 +1138,12 @@ pub struct AssocTypeDecl {
 /// the satisfaction for bound/gate checks, and folds it into the target's trait coherence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplDecl {
-    pub trait_name: String,
+    pub trait_name: Name,
     pub trait_span: Span,
     /// The trait's generic type arguments (`impl Cache<string> for T { … }`); see
     /// [`ImplBlock::trait_args`].
     pub trait_args: Vec<TypeRef>,
-    pub target: String,
+    pub target: Name,
     pub target_span: Span,
     /// Methods written in the impl body. Empty for a marker/capability trait (e.g. `Attribute`);
     /// a non-empty body is parsed but only validated for arity in pass 1 (runtime dispatch of
@@ -1141,7 +1159,7 @@ pub struct ImplDecl {
 /// is just a conventional associated function returning the enclosing type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
     /// default.
@@ -1198,7 +1216,7 @@ pub struct FieldDecl {
 /// (`enum OrderError { Empty; NegativePrice(index: int); }`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDecl {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
     /// default.
@@ -1280,7 +1298,7 @@ impl UseName {
 /// `fn` declaration just introduces a callable binding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
-    pub name: String,
+    pub name: Name,
     pub name_span: Span,
     /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
     /// default; meaningless for a method (only top-level declarations are importable).
@@ -1340,7 +1358,7 @@ pub struct TierDecl {
     pub name: String,
     pub name_span: Span,
     /// The knob attribute type (`config: Fuzz`), if the tier has knobs.
-    pub config: Option<(String, Span)>,
+    pub config: Option<(Name, Span)>,
     /// The body language ID (`text: "markdown"`) when the tier is a **text tier** (text-tiers
     /// arc): its `@<name> { … }` bodies are verbatim text the lexer captures un-parsed, tagged
     /// with this language for tooling (editor injection, extraction). `None` for a code tier.
@@ -1352,7 +1370,7 @@ pub struct TierDecl {
     /// `fn(statics: List<string>, holes: List<() -> U>): T`). The named type must match the
     /// handler's return type (E0051). Composes with `text:` (the lang id drives tooling) and is
     /// mutually exclusive with `config:`.
-    pub expr: Option<(String, Span)>,
+    pub expr: Option<(Name, Span)>,
     /// The whole `@tier(…)` directive span, for diagnostics.
     pub span: Span,
 }
@@ -1376,6 +1394,22 @@ pub struct Param {
     pub ty: Option<TypeRef>,
     pub default: Option<Expr>,
     pub span: Span,
+    /// Whether the declaration wrote **no name** — an enum variant's *positional* payload,
+    /// `Leaf(User)` as opposed to `Leaf(u: User)`. `name` is then the synthesized slot name `_0`,
+    /// `_1`, … (the spelling both backends already use for a native enum's payload slots) and says
+    /// nothing the source said; `ty` holds the type, like every other parameter's.
+    ///
+    /// Always `false` for a function or method parameter, which must be named.
+    ///
+    /// The flag exists so that a positional payload's *type* lives in the type slot. It used to
+    /// live in `name`, with `ty: None` — parsed by the identifier rule and stored where a name
+    /// goes. Every consumer that wanted the type had to know the trick, and each one that did not
+    /// silently did something wrong: module qualification skipped it (so a cross-module
+    /// `Leaf(User)` was E0013 "unknown type" while `Leaf(u: User)` worked), the E0013 declaration
+    /// check reconstructed a `TypeRef` by hand, IDE completion collected no type span for it, and —
+    /// because an identifier is not a type — `Leaf(App.Models.User)`, `Leaf(List<User>)`, and
+    /// `Leaf(?User)` were all syntax errors. One representation, one rule.
+    pub positional: bool,
 }
 
 impl Param {
@@ -1406,14 +1440,14 @@ impl Param {
 pub enum TypeRef {
     /// A named type with optional generic arguments.
     Named {
-        name: String,
+        name: Name,
         args: Vec<TypeRef>,
         span: Span,
     },
     /// A **trait object** `dyn Trait` (L1 user traits, UT4): a value of any type that `impl`s
     /// `trait_name`, dispatched dynamically on its runtime type. The typed counterpart of the bare
     /// `dyn` top type — method calls resolve against the trait's declared signatures.
-    DynTrait { trait_name: String, span: Span },
+    DynTrait { trait_name: Name, span: Span },
     /// `?T`, sugar for `Option<T>`. Kept as its own node (not desugared) so M1 can
     /// produce precise diagnostics on the nullability surface.
     Optional { inner: Box<TypeRef>, span: Span },
@@ -1452,6 +1486,84 @@ impl TypeRef {
             | TypeRef::Fn { span, .. } => *span,
         }
     }
+
+    /// The **head name** of this type reference, as the reflection registry keys it.
+    ///
+    /// A nominal type (the only meaningful argument to the type-level reflection queries) yields its
+    /// name — after the linker has run, that is the *qualified* identity (`app.storage.Todo`), which
+    /// is exactly the key `field_specs_of`/`construct` look up. A non-nominal reference (a container,
+    /// `?T`, a union, a tuple, a fn type) has no single type name and yields the empty string, so the
+    /// query answers with the honest empty result rather than a spurious match.
+    pub fn head_name(&self) -> String {
+        match self {
+            TypeRef::Named { name, .. } => name.to_string(),
+            TypeRef::DynTrait { trait_name, .. } => trait_name.to_string(),
+            _ => String::new(),
+        }
+    }
+}
+
+/// **How a name-keyed reflection surface names its type** — the two disjoint arms of
+/// `field_specs_of` and `construct`, which each spell one query under one keyword in two ways.
+///
+/// Both arms end at the same runtime node (a type *name*, because the reflection registries are
+/// name-keyed), but they must stay distinguishable all the way through the compiler, and the static
+/// arm must stay a **type**:
+///
+/// * Namespace qualification runs in the *linker*, long after parsing, and it rewrites [`TypeRef`]s.
+///   A turbofish `T` flattened to a string literal in the parser is invisible to it, so
+///   `field_specs_of::<Todo>()` under `namespace app.storage` would query the unqualified key `Todo`
+///   and silently answer with the empty schema. Keeping `T` a [`TypeRef`] until lowering puts it on
+///   the one path that qualifies every other type reference — the same convention
+///   [`Expr::FromBytes`], [`Expr::Channel`] and [`Expr::AttributesOf`] already follow.
+/// * The dynamic arm is a genuine runtime `string` (a framework holding a `Type.Struct(name, _)` it
+///   just reflected). It must NOT be qualified — a literal `field_specs_of("Todo")` that happens to
+///   spell a local type name means the string `Todo`, and nothing else. Modelling the two as one
+///   overloaded operand would make that distinction a guess; here it is a discriminant.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeOperand {
+    /// The turbofish surface: `field_specs_of::<T>()` / `construct::<T>(fields)`. Lowering (which
+    /// runs post-qualification) takes [`TypeRef::head_name`] — the *qualified* identity, exactly the
+    /// key the reflection registry stores the type under.
+    Static(TypeRef),
+    /// The runtime-string surface: `field_specs_of(name)` / `construct(name, fields)`. Any
+    /// expression; the checker requires it to be a `string`.
+    Dynamic(Box<Expr>),
+}
+
+impl TypeOperand {
+    /// The turbofish type, or `None` for the dynamic surface.
+    pub fn static_type(&self) -> Option<&TypeRef> {
+        match self {
+            TypeOperand::Static(ty) => Some(ty),
+            TypeOperand::Dynamic(_) => None,
+        }
+    }
+
+    /// The runtime-string operand, or `None` for the turbofish surface. The walks that recurse into
+    /// sub-*expressions* (free variables, awaits, nested fns, qualification) use this: the static
+    /// arm holds no expression at all.
+    pub fn dynamic(&self) -> Option<&Expr> {
+        match self {
+            TypeOperand::Static(_) => None,
+            TypeOperand::Dynamic(e) => Some(e),
+        }
+    }
+
+    /// [`TypeOperand::dynamic`], mutably — for the rewriting walks.
+    pub fn dynamic_mut(&mut self) -> Option<&mut Expr> {
+        match self {
+            TypeOperand::Static(_) => None,
+            TypeOperand::Dynamic(e) => Some(e),
+        }
+    }
+
+    pub fn span(&self) -> Span {
+        match self {
+            TypeOperand::Static(ty) => ty.span(),
+            TypeOperand::Dynamic(e) => e.span(),
+        }
+    }
 }
 
 /// An expression.
@@ -1482,7 +1594,7 @@ pub enum Expr {
     /// A boolean literal.
     Bool { value: bool, span: Span },
     /// A reference to a binding.
-    Ident { name: String, span: Span },
+    Ident { name: Name, span: Span },
     /// A prefix unary operation.
     Unary {
         op: UnaryOp,
@@ -1615,6 +1727,22 @@ pub enum Expr {
     /// manifest that returns the materialized `#[T(...)]` attributes (each as a real `T` struct
     /// paired with its annotated target). `ty` is the attribute type between the angle brackets.
     AttributesOf { ty: TypeRef, span: Span },
+    /// The reflection query `type_name::<T>()` — a type's **qualified runtime identity** as a
+    /// `string` (`"app.storage.Todo"`). The same name [`Expr::TypeOf`] reports for a value of that
+    /// type, and the same key the name-keyed registries ([`Expr::FieldSpecsOf`], [`Expr::Construct`],
+    /// [`Expr::Invoke`]) are stored under — so it is the compile-checked way to *write* that key.
+    ///
+    /// `ty` stays a real [`TypeRef`] all the way to lowering, which resolves it with
+    /// [`TypeRef::head_name`]. That is the whole point: namespace qualification runs in the linker
+    /// and rewrites type references, so the name this yields follows a `namespace`, a `use … as`
+    /// alias, and a rename — none of which a hand-written string literal does. Flattening it to a
+    /// string in the parser would put it beyond that rewrite, which is exactly the bug
+    /// `field_specs_of::<T>()` had.
+    ///
+    /// Turbofish only, with no dynamic string surface: `type_name(s)` would be the identity function
+    /// on `s`. An unresolvable `T` is an `E0013`; an erased type *parameter* is an `E0058`, since a
+    /// parameter has no name at run time.
+    TypeName { ty: TypeRef, span: Span },
     /// The reflection query `type_of(value)` — the runtime [`Type`] descriptor of a value. At this
     /// fidelity (B) it is the **head constructor** (`type_of([1])` is `List(Dyn)`, generics erased);
     /// the compile-time full-fidelity path rides the same `Expr` (P2.3). `value` is the operand.
@@ -1625,6 +1753,13 @@ pub enum Expr {
     /// structural behavior over `self` without a macro system. A non-object value yields the
     /// empty list.
     FieldsOf { value: Box<Expr>, span: Span },
+    /// The reflection query `traits_of(value)` — the qualified trait names the value's nominal
+    /// type has a registered `impl` for (user `impl`/`@derive` and native ABI-advertised impls
+    /// alike), as a sorted, deduped `List<string>`. Reads the same shared membership table
+    /// (`ReflectionInfo::trait_impls`) the precise `x is dyn Trait` narrowing tests, so the two
+    /// surfaces cannot disagree. A non-nominal value (scalar/collection/function) yields the
+    /// empty list, mirroring `fields_of`'s non-object answer.
+    TraitsOf { value: Box<Expr>, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>` (P-PACK 4.4). `ty` is
     /// the element type (turbofish; must be a `@packed` struct), `blob` the `bytes` operand. The byte
     /// buffer is opaque, so the element type must be named at the call site.
@@ -1665,7 +1800,7 @@ pub enum Expr {
     /// E0007 against the substituted parameter. Erased at runtime like every generic call — this
     /// lowers exactly as the plain `f(args)` does.
     TypedCall {
-        name: String,
+        name: Name,
         name_span: Span,
         type_args: Vec<TypeRef>,
         args: Vec<CallArg>,
@@ -1685,6 +1820,27 @@ pub enum Expr {
         args: Vec<CallArg>,
         span: Span,
     },
+    /// A **type reference carrying an explicit instantiation** — the head of
+    /// `Repo::<Todo>.new("todos")` (call-site type arguments). `recv` is the type reference itself
+    /// (a bare `Expr::Ident`, or the member chain a qualified reference parses to before the linker
+    /// collapses it); `type_args` are the class's OWN type parameters, in declaration order.
+    ///
+    /// It exists **only as the receiver of a member access**, which is what the grammar accepts: the
+    /// turbofish must be followed by `.`, so `Repo::<Todo>` alone stays a parse error and the node
+    /// can never reach a value position. The checker reads it in exactly one place — the
+    /// `Type.assoc(args)` static-call arm — where the resolved arguments become the receiver
+    /// instantiation the arm otherwise gets from an expected type, and the ordinary
+    /// [`Checker::note_constructor_call`](../noeta_check/struct.Checker.html) recording follows
+    /// unchanged. Anywhere else it is `E0058`.
+    ///
+    /// Purely a check-time carrier: generics are erased at runtime, so this lowers as its `recv`
+    /// does and the instantiation reaches the value through the construction-site tag the checker
+    /// records at the call span — the same channel an annotated binding uses.
+    InstantiatedType {
+        recv: Box<Expr>,
+        type_args: Vec<TypeRef>,
+        span: Span,
+    },
     /// The reflection query `roles_of()` / `roles_of::<RoleEnum>()` — the compiler-built
     /// `(declaration, Role)` index (P2.7), returned as a `List<RoleBinding>` (each
     /// `{ target: string, role: Role }`). Compile-time resolved from the attribute manifest's
@@ -1698,6 +1854,22 @@ pub enum Expr {
     /// keying the attribute manifest. Built from the same compiler-built parameter index both
     /// backends read; surfaces a controller method's declared parameter types for dependency injection.
     ParamsOf { target: Box<Expr>, span: Span },
+    /// The reflection query `returns_of(target)` — a callable's declared **return type**, returned as
+    /// a `?Type`. `target` is a runtime `string` naming a function or method, keyed exactly as
+    /// [`Expr::ParamsOf`]'s is (a bare fn name, or a qualified `Type.method`), and read from the same
+    /// compiler-built signature index, so reflecting a callable's parameters and its return type is
+    /// two projections of one record.
+    ///
+    /// The result is an **option**, unlike `params_of`'s "empty list for an unknown target": an empty
+    /// parameter list is a legitimate answer, but there is no return type that means "no such
+    /// callable" — `void` is a real return type — so the missing case needs its own `none`. That is
+    /// what lets a framework deriving response schemas notice a mistyped target instead of silently
+    /// deriving a `void` response.
+    ///
+    /// An `async fn f(): T` reports `T`, the type written in the declaration, not the `Future<T>` a
+    /// call to it evaluates to — reflection reports declared types throughout (a parameter's type is
+    /// its annotation, too).
+    ReturnsOf { target: Box<Expr>, span: Span },
     /// The reflection invocation `invoke(recv, name, args)` / `invoke(name, args)` — fallible
     /// by-name dispatch. `name` is a runtime `string`; `args` is a runtime `List`. Evaluates to
     /// `Result<dyn, dyn>` — `Ok(retval)` on a hit, `Err(msg)` when the name is unknown or the arity
@@ -1728,8 +1900,22 @@ pub enum Expr {
     /// whether it declared a default. `name` is a runtime `string` naming the type — the same
     /// string-keyed shape [`Expr::ParamsOf`] takes — so a framework holding a type name only as a
     /// runtime string (`Type.Struct(name, _)`) can query it. The turbofish surface
-    /// `field_specs_of::<T>()` is sugar the parser lowers to this node with `T`'s name as the string.
-    FieldSpecsOf { name: Box<Expr>, span: Span },
+    /// `field_specs_of::<T>()` names the type statically; the two surfaces are the two arms of
+    /// [`TypeOperand`], and both converge on one name-keyed runtime node.
+    FieldSpecsOf { name: TypeOperand, span: Span },
+    /// The reflection query `variants_of::<T>()` / `variants_of(name)` — a declared enum TYPE's
+    /// variant schema, returned as a `List<VariantSpec>` (each `{ name: string, payload:
+    /// List<FieldSpec>, backing: ?dyn }`, declaration order). The **enum twin** of
+    /// [`Expr::FieldSpecsOf`], with the same two surfaces (the two arms of [`TypeOperand`]), the same
+    /// name-keyed convergence, and the same lenient contract: a name that is not a declared enum
+    /// yields the empty list.
+    ///
+    /// It exists because `field_specs_of` alone left an enum **indistinguishable from a field-less
+    /// struct** — both answered with the empty list — so anything walking a type to build a schema
+    /// recursed into an enum-typed field, found nothing, and emitted an empty object. Asking both
+    /// queries makes that case loud: variants present ⇒ an enum, and empty/empty ⇒ genuinely nothing
+    /// known about the name.
+    VariantsOf { name: TypeOperand, span: Span },
     /// The reflection constructor `construct::<T>(fields)` / `construct(name, fields)` — build a
     /// struct value from field values at runtime, reusing the SAME construction path as a `T { … }`
     /// literal (field defaults and full-initialization honored). `name` is a runtime `string` naming
@@ -1737,10 +1923,10 @@ pub enum Expr {
     /// (a list shorter than the field count fills the remaining fields from their defaults). Evaluates
     /// to a `Result<dyn, string>` — `Ok(value)` on success, `Err(msg)` for an unknown type, an
     /// arity/type-mismatch, or a missing non-defaulted field — recoverable like [`Expr::Invoke`]. The
-    /// turbofish surface `construct::<T>(fields)` is sugar the parser lowers to this node with `T`'s
-    /// name as the string.
+    /// turbofish surface `construct::<T>(fields)` names the type statically — the two surfaces are
+    /// the two arms of [`TypeOperand`].
     Construct {
-        name: Box<Expr>,
+        name: TypeOperand,
         fields: Box<Expr>,
         span: Span,
     },
@@ -1805,7 +1991,7 @@ pub struct ObjectLit {
     /// [`Self::span`]) for lowering to read — the name is never written back here, because checking
     /// sees the AST by shared reference. `Option` rather than an empty-string sentinel so every
     /// reader is forced to say what it does with an un-named literal.
-    pub type_name: Option<String>,
+    pub type_name: Option<Name>,
     /// The span of the type name, or of the `.{` token itself for the target-typed form.
     pub type_name_span: Span,
     pub fields: Vec<FieldInit>,
@@ -1826,6 +2012,12 @@ pub struct FieldInit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: Pattern,
+    /// The arm's **guard**: `pattern if cond => body`. Evaluated only after the pattern
+    /// structurally matches, with the pattern's bindings in scope; a `false` guard falls through
+    /// to the next arm exactly as a failed pattern would. Must type-check as `bool`. A guarded
+    /// arm contributes **nothing** to exhaustiveness (E0011) — the checker cannot prove a guard
+    /// ever true.
+    pub guard: Option<Expr>,
     /// The arm's body: a value expression (`pattern => expr`, the common form) or a statement
     /// block (`pattern => { stmts }`, aether F1) whose value is `unit` — side-effectful arms
     /// without an artificial expression. `{ … }` parses as an EXPRESSION first (map/set literals
@@ -1893,7 +2085,7 @@ pub enum Pattern {
     /// `Type.Variant`, `Variant(sub, ...)`, or `Type.Variant(sub, ...)`. `type_name`
     /// is `None` for unqualified constructors like `Ok(x)` / `some(x)`.
     Variant {
-        type_name: Option<String>,
+        type_name: Option<Name>,
         variant: String,
         bindings: Vec<Pattern>,
         span: Span,
@@ -2030,6 +2222,29 @@ impl Stmt {
 }
 
 impl Expr {
+    /// The type reference under a call-site instantiation — `Repo` for `Repo::<Todo>` — or `self`
+    /// where there is none.
+    ///
+    /// Every consumer that recognizes a static call by pattern-matching its receiver
+    /// (`Expr::Member { receiver: Expr::Ident, .. }`) must peel first, or `Repo::<Todo>.new(…)`
+    /// silently stops being recognized as one — falling back to the deferred `dyn` method path with
+    /// no diagnostic, which is the failure the explicit spelling exists to remove.
+    pub fn peel_instantiation(&self) -> &Expr {
+        match self {
+            Expr::InstantiatedType { recv, .. } => recv.peel_instantiation(),
+            other => other,
+        }
+    }
+
+    /// The explicit call-site type arguments this receiver carries (`[Todo]` for `Repo::<Todo>`),
+    /// empty where the instantiation is left to inference.
+    pub fn call_site_type_args(&self) -> &[TypeRef] {
+        match self {
+            Expr::InstantiatedType { type_args, .. } => type_args,
+            _ => &[],
+        }
+    }
+
     pub fn span(&self) -> Span {
         match self {
             Expr::Str { span, .. }
@@ -2060,17 +2275,22 @@ impl Expr {
             | Expr::Coalesce { span, .. }
             | Expr::As { span, .. }
             | Expr::AttributesOf { span, .. }
+            | Expr::TypeName { span, .. }
             | Expr::TypeOf { span, .. }
             | Expr::FieldsOf { span, .. }
+            | Expr::TraitsOf { span, .. }
             | Expr::FromBytes { span, .. }
             | Expr::Channel { span, .. }
             | Expr::TypedModuleCall { span, .. }
             | Expr::TypedCall { span, .. }
             | Expr::TypedMethodCall { span, .. }
+            | Expr::InstantiatedType { span, .. }
             | Expr::RolesOf { span, .. }
             | Expr::ParamsOf { span, .. }
+            | Expr::ReturnsOf { span, .. }
             | Expr::Invoke { span, .. }
             | Expr::FieldSpecsOf { span, .. }
+            | Expr::VariantsOf { span, .. }
             | Expr::Construct { span, .. }
             | Expr::TypeTest { span, .. }
             | Expr::FieldSet { span, .. }
@@ -2101,6 +2321,7 @@ impl Expr {
             | Expr::F64 { .. }
             | Expr::Bool { .. }
             | Expr::AttributesOf { .. }
+            | Expr::TypeName { .. }
             | Expr::RolesOf { .. } => false,
             Expr::Ident { name: n, .. } => n == name,
             Expr::Unary { operand, .. } => operand.mentions(name),
@@ -2150,7 +2371,13 @@ impl Expr {
             }),
             Expr::Match {
                 scrutinee, arms, ..
-            } => scrutinee.mentions(name) || arms.iter().any(|arm| arm.body.mentions(name)),
+            } => {
+                scrutinee.mentions(name)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(|g| g.mentions(name))
+                            || arm.body.mentions(name)
+                    })
+            }
             Expr::Object(lit) => {
                 lit.fields.iter().any(|f| f.value.mentions(name))
                     || lit.spread.as_ref().is_some_and(|s| s.mentions(name))
@@ -2162,13 +2389,18 @@ impl Expr {
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
             | Expr::FieldsOf { value: expr, .. }
+            | Expr::TraitsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
-            | Expr::FieldSpecsOf { name: expr, .. }
+            | Expr::ReturnsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
             Expr::Channel { capacity, .. } => capacity.mentions(name),
+            // A turbofish operand is a type, never a value binding; only a dynamic one can mention.
+            Expr::FieldSpecsOf { name: n, .. } | Expr::VariantsOf { name: n, .. } => {
+                n.dynamic().is_some_and(|e| e.mentions(name))
+            }
             Expr::Construct {
                 name: n, fields, ..
-            } => n.mentions(name) || fields.mentions(name),
+            } => n.dynamic().is_some_and(|e| e.mentions(name)) || fields.mentions(name),
             Expr::Invoke {
                 recv,
                 name: n,
@@ -2183,6 +2415,9 @@ impl Expr {
             // The callee is a top-level fn name, never a local binding, so only the arguments count.
             Expr::TypedCall { args, .. } => any_args(args),
             Expr::TypedMethodCall { recv, args, .. } => recv.mentions(name) || any_args(args),
+            // The turbofish carries only types; a binding can be mentioned solely by the type
+            // reference the instantiation is applied to.
+            Expr::InstantiatedType { recv, .. } => recv.mentions(name),
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.mentions(name) || value.mentions(name),
@@ -2211,6 +2446,7 @@ impl Expr {
             | Expr::Bool { .. }
             | Expr::Ident { .. }
             | Expr::AttributesOf { .. }
+            | Expr::TypeName { .. }
             | Expr::RolesOf { .. }
             // A closure is a separate callable: its own `.await`s are not this level's (they are
             // E0040 unless the closure is itself async, which builtins' callbacks are not).
@@ -2255,7 +2491,16 @@ impl Expr {
             }),
             Expr::Match {
                 scrutinee, arms, ..
-            } => scrutinee.has_await() || arms.iter().any(|arm| arm.body.has_await()),
+            } => {
+                scrutinee.has_await()
+                    || arms.iter().any(|arm| {
+                        // A guard is evaluated at this callable level; an `.await` inside one is
+                        // rejected by the checker (the state-machine lowering cannot suspend
+                        // between a pattern test and its guard), but it still counts here so the
+                        // coloring analysis can never miss it.
+                        arm.guard.as_ref().is_some_and(Expr::has_await) || arm.body.has_await()
+                    })
+            }
             Expr::Object(lit) => {
                 lit.fields.iter().any(|f| f.value.has_await())
                     || lit.spread.as_ref().is_some_and(|s| s.has_await())
@@ -2266,11 +2511,17 @@ impl Expr {
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
             | Expr::FieldsOf { value: expr, .. }
+            | Expr::TraitsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
-            | Expr::FieldSpecsOf { name: expr, .. }
+            | Expr::ReturnsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
             Expr::Channel { capacity, .. } => capacity.has_await(),
-            Expr::Construct { name, fields, .. } => name.has_await() || fields.has_await(),
+            Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
+                name.dynamic().is_some_and(Expr::has_await)
+            }
+            Expr::Construct { name, fields, .. } => {
+                name.dynamic().is_some_and(Expr::has_await) || fields.has_await()
+            }
             Expr::Invoke {
                 recv, name, args, ..
             } => {
@@ -2281,6 +2532,7 @@ impl Expr {
             Expr::TypedModuleCall { recv, args, .. } => recv.has_await() || any_args(args),
             Expr::TypedCall { args, .. } => any_args(args),
             Expr::TypedMethodCall { recv, args, .. } => recv.has_await() || any_args(args),
+            Expr::InstantiatedType { recv, .. } => recv.has_await(),
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.has_await() || value.has_await(),

@@ -1,0 +1,78 @@
+// **A type parameter is its declaration, not its spelling.** The regression guard for the whole
+// identity representation: every line here answers correctly only because two same-spelled
+// parameters from different declarations are different parameters, and two references that resolved
+// to the same declaration are the same parameter whatever they are called.
+//
+// Written as one file rather than five so a change that re-keys parameters on the name (a
+// `HashMap<String, Type>` substitution, a `HashSet<String>` of in-scope names, a `p.name ==`
+// comparison) fails here loudly, wherever it is reintroduced.
+// The two methods that re-spell the class's `T` are E0075 warnings — the identity rule makes the
+// shadowing sound, and the warning says it is still unreadable. Warnings do not stop the program.
+// expect: error E0075 at 49:14
+// expect: error E0075 at 55:23
+// expect: stdout "7Todo"
+// expect: stdout "7User"
+// expect: stdout "int"
+// expect: stdout "string"
+// expect: stdout "Todo"
+// expect: stdout "7"
+// expect: exit 0
+
+struct Todo {
+    id: int
+}
+struct User {
+    name: string
+}
+
+// A nominal type spelled exactly like a parameter. The parameter must win inside its declaration,
+// and the nominal type must survive outside it — the case that was ALREADY sound and must stay so.
+struct T {
+    z: int
+}
+
+class Repo<T> {
+    pub tag: int
+
+    fn new(tag: int): Repo<T> {
+        return Repo { tag: tag };
+    }
+
+    // The class's `T` — reached off the receiver's reflected tag, which is why the body reads
+    // `self`: a self-less member has no receiver to read the instantiation from.
+    fn outer(): string {
+        return "${self.tag}" ~ type_name::<T>();
+    }
+
+    // The method's OWN `T` — a different parameter under the same spelling, reached through the
+    // call node's type arguments. Nothing here can tell them apart by name.
+    fn inner<T>(): string {
+        return type_name::<T>();
+    }
+
+    // The same method reached on a VALUE, so the class's tag is live at the same time as the
+    // method's own turbofish — the composed case where a shared key collided.
+    fn inner_on_value<T>(): string {
+        return "${self.tag}" ~ type_name::<T>();
+    }
+
+    // Two parameters, different spellings, same declaration site each — the control.
+    fn both<U>(): string {
+        return type_name::<U>();
+    }
+}
+
+// A top-level generic whose parameter is spelled the same as the class's, to make sure a caller's
+// `T` and a callee's `T` are separate keys across a call boundary too.
+fn passthrough<T>(x: T): T {
+    return x;
+}
+
+r: Repo<Todo> = Repo.new(7);
+echo r.outer();
+echo r.inner_on_value::<User>();
+echo Repo::<Todo>.both::<int>();
+echo Repo::<Todo>.inner::<string>();
+// The nominal `T` is still a type outside any generic declaration.
+echo type_name::<Todo>();
+echo passthrough(7);

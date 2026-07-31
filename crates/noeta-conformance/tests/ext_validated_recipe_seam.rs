@@ -50,6 +50,7 @@ const PERCENT: ExtStruct = ExtStruct {
         is_mut: false,
     }],
     methods: &[ExtFn {
+        param_names: &[],
         name: "validate",
         params: &[],
         // The `Validate` contract's shape: `Result<void, string>` (Ok on a valid value, Err(message)
@@ -240,5 +241,57 @@ echo match p.validate() {
     assert_eq!(
         out, "75\nvalid\n",
         "the plain door yields a real native struct whose native method dispatches"
+    );
+}
+
+/// The **reflective** door on the same native type: `construct("pct.Percent", …)` re-enters the native
+/// `validate` exactly as the recipe door does, so a `@validated` native struct cannot be minted
+/// out-of-range through reflection either.
+///
+/// This is the differential case worth naming, because the two doors build a native fielded value under
+/// *different names*: the recipe carries the qualified identity (`pct.Percent`) and both backends shape
+/// the object under it, while `construct` builds the shape under the registry's own **short** name and
+/// stamps the qualified identity as the reflected tag. The validator re-entry keys off the value's shape
+/// name, so the two doors reach `validate` by two different routes and each backend resolves them
+/// independently — precisely the shape of the divergence the previous native-reflection change produced.
+/// It agrees here, and this asserts it keeps agreeing.
+///
+/// The corpus cannot reach this: no shipped extension declares a native `@validated` type.
+#[test]
+fn the_reflective_construct_door_runs_a_native_validator_on_both_backends() {
+    const PROGRAM: &str = r#"
+use pct.Percent
+
+fn say(r: Result<dyn, string>): string {
+    return match r {
+        Ok(v) => "ok: ${v.value}",
+        Err(e) => "bad: ${e}",
+    }
+}
+
+// Out of range: the native `validate` runs on the freshly constructed instance and the door surfaces
+// its own message as the construct `Err` — no `Percent` violating its invariant is ever reachable.
+mut bad: List<dyn> = []
+bad = bad ~ [200]
+echo say(construct("pct.Percent", bad))
+
+// In range: a real native struct, indistinguishable from the recipe door's — its field reads, its
+// native method dispatches, and its identity is the qualified one.
+mut good: List<dyn> = []
+good = good ~ [50]
+echo say(construct("pct.Percent", good))
+made = match construct("pct.Percent", good) { Ok(v) => v.as<Percent>(), Err(e) => none };
+match made {
+    some(p) => { echo "dispatch: ${match p.validate() { Ok(u) => "valid", Err(m) => m }} ${type_of(p)}" },
+    none => { echo "made nothing" },
+}
+"#;
+    let out = run_both_agree(PROGRAM);
+    assert_eq!(
+        out,
+        "bad: percent out of range: 200\n\
+         ok: 50\n\
+         dispatch: valid Type.Struct(pct.Percent, [])\n",
+        "the reflective door runs the native validator and yields the same dispatchable instance"
     );
 }

@@ -8,13 +8,17 @@
 // expect: stdout "handling POST /echo"
 // expect: stdout "handling GET /users/42"
 // expect: stdout "handling DELETE /users/42"
+// expect: stdout "handling POST /form"
 // expect: stdout "handling GET /ws"
+// expect: stdout "handling GET /events"
 // expect: stdout "done GET /"
 // expect: stdout "done GET /health"
 // expect: stdout "done POST /echo"
 // expect: stdout "done GET /users/42"
 // expect: stdout "done DELETE /users/42"
+// expect: stdout "done POST /form"
 // expect: stdout "done GET /ws"
+// expect: stdout "done GET /events"
 // expect: stdout "served"
 // expect: exit 0
 use std.http.server

@@ -142,8 +142,8 @@ pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
             // A multi-file fixture flows through the salsa module graph (M1.9.3): its sources
             // become a `Workspace`, the `linked` query merges them, and both backends consume the
             // workspace queries — the multi-file analogue of the single-file path below.
-            match noeta_loader::read_workspace(&case.entry) {
-                Ok(raw) => compare_backends_workspace(&name, &raw, &mut report),
+            match crate::read_case_workspace(&case.entry) {
+                Ok(raw) => compare_backends_workspace(&name, &raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
         } else {
@@ -181,7 +181,13 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     // the normal conformance harness's job (the lexer/parser stages). Exclude it here.
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
-    if !tokens.0.diagnostics.is_empty() || !parsed.0.diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(
+        tokens
+            .0
+            .diagnostics
+            .iter()
+            .chain(parsed.0.diagnostics.iter()),
+    ) {
         report.not_run.parse_failed += 1;
         return;
     }
@@ -190,7 +196,7 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     // backend, and its diagnostics are the program's whole observable result — identical no
     // matter which backend would have run. So a type error is a guaranteed agreement, counted as
     // matched. (The corpus harness separately asserts the diagnostic's code+span.)
-    if !noeta_db::checked(&db, src).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::checked(&db, src).diagnostics) {
         report.not_run.checker_rejected += 1;
         note_rejection(name, text, report);
         return;
@@ -226,10 +232,37 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
 fn compare_backends_workspace(
     name: &str,
     raw: &noeta_loader::RawWorkspace,
+    entry: &std::path::Path,
     report: &mut DiffReport,
 ) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
+    // A case with package subdirectories is a *dependency graph*, so it becomes a workspace WITH
+    // deps — otherwise its `use <pkg>.…` resolves to nothing, the link fails, and the case would
+    // sit silently in the "not run" tally rather than being compared. Package-less cases (every
+    // pre-existing one) take the same deps-free workspace they always did.
+    let deps = crate::dep_sources(entry, (raw.modules.len() + 1) as u32);
+    let ws = if deps.is_empty() {
+        noeta_db::workspace(
+            &db,
+            &raw.entry,
+            &raw.modules,
+            noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
+        )
+    } else {
+        // No `@name` tables: the corpus's dependency graph is synthesized from the case's
+        // subdirectories (`crate::dep_sources`), not from a `noeta.toml`, so no package binds a
+        // `[tiers]`/`[directives]` local name — an empty `PackageUses` is behavior-identical.
+        noeta_db::workspace_with_deps(
+            &db,
+            &raw.entry,
+            &raw.modules,
+            &deps,
+            &noeta_span::PackageUses::new(),
+            noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
+        )
+    };
 
     let program = match &noeta_db::linked(&db, ws).program {
         Ok(program) => program,
@@ -238,7 +271,7 @@ fn compare_backends_workspace(
             return;
         }
     };
-    if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::linked_checked(&db, ws).diagnostics) {
         report.not_run.checker_rejected += 1;
         note_rejection(name, raw.entry.text(), report);
         return;

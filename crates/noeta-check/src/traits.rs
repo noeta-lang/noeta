@@ -17,7 +17,7 @@ impl Checker {
         let target = self.coloring.current_type.clone().unwrap_or_default();
         self.check_trait_impl(
             &target,
-            &block.trait_name,
+            block.trait_name.as_str(),
             &block.trait_args,
             block.trait_span,
             &block.methods,
@@ -106,17 +106,24 @@ impl Checker {
             .help("only built-in traits can be implemented (e.g. `Add`, `Equatable`, `Display`)");
             return;
         };
-        if t.intrinsic() {
+        // No built-in trait declares an `async` method — the runtime invokes these protocols
+        // (`to_string`, `compare`, `add`, `call`, …) for a value, not for a future. An `async`
+        // implementation would hand the protocol a `Future<T>` where it reads a `T`, the same
+        // contract break a user trait's `async` mismatch is (E0015, below), so it is refused for the
+        // same reason: the caller's typing comes from the trait, never from the body.
+        for m in methods.iter().filter(|m| m.is_async) {
             self.error(
                 DiagnosticCode::InvalidImpl,
-                trait_span,
-                format!("`{trait_name}` cannot be implemented"),
+                m.name_span,
+                format!(
+                    "`{}` cannot be `async`: `{trait_name}` is a built-in trait",
+                    m.name
+                ),
             )
-            .help(format!(
-                "`{trait_name}` is a built-in capability satisfied only by the runtime types that \
-                 provide it (e.g. the CRDT types for `Mergeable`), not by a user `impl`"
-            ));
-            return;
+            .help(
+                "the runtime invokes a built-in protocol for a value, not a future; drop `async` \
+                 and await inside the caller instead",
+            );
         }
         let Some((req_name, req_arity)) = t.required_method() else {
             return; // a marker trait (e.g. `Clone`, `Attribute`) imposes no hand-written method
@@ -163,8 +170,8 @@ impl Checker {
                 .help("construct and return the new value from the `from` parameter alone");
             }
             if let (Some(arg), Some(param)) = (trait_args.first(), m.params.first()) {
-                let want = from_ref_q(arg, &self.imports.extern_types);
-                let got = field_type(&param.ty, &self.imports.extern_types);
+                let want = self.annot(arg);
+                let got = self.annot_field(&param.ty);
                 if !Self::sig_types_compatible(&want, &got) {
                     self.error(
                         DiagnosticCode::InvalidImpl,
@@ -184,7 +191,7 @@ impl Checker {
         if t == BuiltinTrait::Validate
             && let Some(m) = methods.iter().find(|m| m.name == "validate")
         {
-            let ret = field_type(&m.ret, &self.imports.extern_types);
+            let ret = self.annot_field(&m.ret);
             let ok_shape = match &ret {
                 Type::Result(ok, err) if matches!(**ok, Type::Unit) => Some((**err).clone()),
                 _ => None,
@@ -209,20 +216,32 @@ impl Checker {
         }
     }
 
-    /// Validate a standalone `impl Trait for T {}` declaration. Two checks beyond the shared
-    /// trait-side validation ([`Self::check_trait_impl`], also run): the **orphan rule** — `T` must
-    /// be a struct/class/enum declared in this module, not a built-in or a `use`-imported name
-    /// (E0013) — and the **built-in body restriction** — a *user* trait's standalone impl may
-    /// carry method bodies (hoisted onto the target), but a built-in trait's must stay an
-    /// empty-body marker (E0015). Coherence is enforced together with the target's
-    /// `@derive`s/in-body impls in [`Self::check_coherence`].
+    /// Validate a standalone `impl Trait for T {}` declaration. Three checks beyond the shared
+    /// trait-side validation ([`Self::check_trait_impl`], also run): `T` must be a struct, class, or
+    /// enum **the program declares**, not a built-in or an unresolved name (E0013); the **package
+    /// orphan rule** ([`Self::check_package_orphan`], E0070); and the **built-in body restriction** —
+    /// a *user* trait's standalone impl may carry method bodies (hoisted onto the target), but a
+    /// built-in trait's must stay an empty-body marker (E0015).
+    ///
+    /// "The program declares" is the whole linked program, not the one file: the checker runs
+    /// downstream of the linker, so an imported type is a declared type like any other and a module
+    /// may implement a trait for a **sibling's** type. That stays true and is deliberately
+    /// unrestricted — the orphan rule's boundary is the *package*, not the file, so cross-module
+    /// impls within one package are as legal as they ever were. What the rule adds is that the
+    /// package writing the impl must be the one that declares the trait or the type. Uniqueness —
+    /// the other half of coherence — is enforced separately, together with the target's `@derive`s
+    /// and in-body impls, in [`Self::check_coherence`] (E0027).
     pub(crate) fn check_standalone_impl(&mut self, decl: &ImplDecl, env: &mut Env) {
         // A dotted trait path is a method-bundle binding (kernel-methods K1) with its own
         // validation — bundle resolution, packed-target + constraint checks, conflict rules. But a
         // cross-package **user trait** is *also* dotted once qualified (`para.aether.Store`), so a
         // known user trait is never a bundle — check that first, or a dependency's standalone
         // `impl Trait for T` would be misread as a bundle impl.
-        if decl.trait_name.contains('.') && !self.symbols.user_traits.contains_key(&decl.trait_name)
+        if decl.trait_name.as_str().contains('.')
+            && !self
+                .symbols
+                .user_traits
+                .contains_key(decl.trait_name.as_str())
         {
             self.check_bundle_impl(decl);
             // Override bodies are now permitted (ExtBundle→ExtTrait fold-in, slice 4): a kernel binding
@@ -231,8 +250,8 @@ impl Checker {
             self.check_standalone_impl_bodies(decl, env);
             return;
         }
-        if !self.symbols.records.contains_key(&decl.target)
-            && !self.symbols.enums.contains_key(&decl.target)
+        if !self.symbols.records.contains_key(decl.target.as_str())
+            && !self.symbols.enums.contains_key(decl.target.as_str())
         {
             self.error(
                 DiagnosticCode::UnknownType,
@@ -248,10 +267,16 @@ impl Checker {
                      where the type is defined",
             );
         }
+        self.check_package_orphan(decl);
         // A standalone `impl` with a method body is supported for **user traits** (L1, UT2 — its
         // methods are hoisted onto the target type by the loader). A built-in trait's standalone
         // impl is still marker-only: its operator/protocol methods live in the type's own body.
-        if !decl.methods.is_empty() && !self.symbols.user_traits.contains_key(&decl.trait_name) {
+        if !decl.methods.is_empty()
+            && !self
+                .symbols
+                .user_traits
+                .contains_key(decl.trait_name.as_str())
+        {
             self.error(
                 DiagnosticCode::InvalidImpl,
                 decl.span,
@@ -263,14 +288,131 @@ impl Checker {
             );
         }
         self.check_trait_impl(
-            &decl.target,
-            &decl.trait_name,
+            decl.target.as_str(),
+            decl.trait_name.as_str(),
             &decl.trait_args,
             decl.trait_span,
             &decl.methods,
             &decl.assoc_bindings,
         );
         self.check_standalone_impl_bodies(decl, env);
+    }
+
+    /// The **package orphan rule** (E0070): a standalone `impl Trait for Type` must live in the same
+    /// package as the trait **or** as the type.
+    ///
+    /// Noeta links one whole program at a time, so coherence's *uniqueness* half is always
+    /// answerable and needs no orphan rule to be decidable. This rule exists for a different reason:
+    /// without it a **transitive dependency** can implement one package's trait for another
+    /// package's type, and that behavior shows up in an application that imports both and mentions
+    /// the implementing package nowhere — `t is dyn Speaks` silently becomes true and `t.speak()`
+    /// runs code the author never wrote down. Two such packages in one graph then collide as an
+    /// E0027 the end user cannot fix: they own neither impl, so they can remove neither. The cost of
+    /// the feature is global and invisible; its value — attaching behavior to a foreign type — is
+    /// already served ergonomically by the newtype (`@derive(Trait, via: field)`), which is what the
+    /// help points at.
+    ///
+    /// **Provenance, not a heuristic.** The judgement reads the loader's per-source
+    /// [`noeta_span::PackageMap`] ([`Checker::package_at`]). A `namespace` would be the tempting
+    /// proxy and is the wrong one — it is declared per file with no required relationship to the
+    /// package that shipped it, so it would both admit real orphans and reject legitimate
+    /// same-package impls. Where provenance is *unknown* the rule stands down entirely: a
+    /// single-file check, a REPL fragment, a synthesized program, and compile-time generated code
+    /// are never judged.
+    ///
+    /// **What counts as "local".** The type is local when it is declared in a source belonging to
+    /// the impl's package. The trait is local on the same terms — but a **built-in** trait
+    /// (`Display`, `Comparable`, …) and a **native** trait seeded from the extension registry belong
+    /// to no package at all, so neither can make an impl local; such an impl must live with its
+    /// type. That is the same judgement Rust makes about `impl std::fmt::Display for ForeignType`.
+    /// Method-bundle bindings (`impl vec.Kernels for T {}`) return before this point: they are a
+    /// native kernel-binding mechanism with their own conflict rules, not trait impls.
+    pub(crate) fn check_package_orphan(&mut self, decl: &ImplDecl) {
+        // Unknown provenance ⇒ no judgement. Cloned so the `&mut self` diagnostic below does not
+        // conflict with the borrow of `self.config.packages`.
+        let Some(impl_pkg) = self.package_at(decl.span).cloned() else {
+            return;
+        };
+        let type_span = self
+            .symbols
+            .type_decl_spans
+            .get(decl.target.as_str())
+            .copied();
+        let Some(type_pkg) = type_span.and_then(|s| self.package_at(s)).cloned() else {
+            return;
+        };
+        // Same package as the type: legal, whichever module either sits in.
+        if impl_pkg == type_pkg {
+            return;
+        }
+        // A trait that resolves to nothing at all is already E0014 at this same impl; reporting an
+        // orphan on top would cascade *and* describe a trait that does not exist as "built into the
+        // language". Only a real trait — a built-in or a declared one — is judged.
+        if BuiltinTrait::from_name(decl.trait_name.as_str()).is_none()
+            && !self
+                .symbols
+                .user_traits
+                .contains_key(decl.trait_name.as_str())
+        {
+            return;
+        }
+        let trait_span = self.trait_decl_span(decl.trait_name.as_str());
+        let trait_pkg = trait_span.and_then(|s| self.package_at(s)).cloned();
+        // Same package as the trait: equally legal — that is the "or" in the rule.
+        if trait_pkg.as_ref() == Some(&impl_pkg) {
+            return;
+        }
+        let trait_name = decl.trait_name.as_str();
+        let target = decl.target.as_str();
+        // A trait belonging to no package is not "unknown" — it is a built-in or a native trait,
+        // which no package can claim, so it can never make an impl local.
+        let trait_where = match &trait_pkg {
+            Some(pkg) => pkg.to_string(),
+            None => "no package (it is built into the language, or provided by a native extension)"
+                .to_string(),
+        };
+        // The impl HEADER (`Trait for Type`), not the whole block: a tight one-line caret, and the
+        // same shape E0027 points at.
+        let header = decl.trait_span.merge(decl.target_span);
+        let d = self.error(
+            DiagnosticCode::OrphanImpl,
+            header,
+            format!(
+                "`impl {trait_name} for {target}` is an orphan: the trait comes from {trait_where}, \
+                 the type from {type_pkg}, but this implementation is in {impl_pkg}"
+            ),
+        );
+        d.label(header, format!("written in {impl_pkg}"));
+        if let Some(span) = trait_span {
+            d.label(span, format!("`{trait_name}` is declared in {trait_where}"));
+        }
+        if let Some(span) = type_span {
+            d.label(span, format!("`{target}` is declared in {type_pkg}"));
+        }
+        // The concrete escape hatch, written out with this impl's own names — `@derive(T, via: f)`
+        // is documented as "the newtype pattern without boilerplate", and it is the fix the author
+        // actually needs, not a restatement of the rule.
+        let short_trait = short_name(trait_name);
+        let short_target = short_name(target);
+        d.help(format!(
+            "an `impl` must live in the same package as the trait or as the type. To give \
+             `{short_target}` this behavior from here, wrap it in a type you own — the newtype \
+             pattern, which `via:` writes for you:\n    \
+             @derive({short_trait}, via: inner)\n    \
+             class My{short_target} {{ pub inner: {short_target} }}"
+        ));
+    }
+
+    /// Where the trait named `name` was **declared**, when that is a `.noe` `trait` declaration with
+    /// a real span. `None` for a built-in trait (never in `user_traits`) and for a trait seeded from
+    /// the extension registry (recorded in `native_traits`, and carrying a placeholder span that
+    /// points at the entry source) — both belong to no package, which is exactly what the orphan
+    /// rule needs to know.
+    fn trait_decl_span(&self, name: &str) -> Option<Span> {
+        if self.symbols.native_traits.contains(name) {
+            return None;
+        }
+        self.symbols.user_traits.get(name).map(|d| d.name_span)
     }
 
     /// Type-check a standalone `impl Trait for T { … }`'s method **bodies**.
@@ -292,23 +434,39 @@ impl Checker {
         if decl.methods.is_empty() {
             return;
         }
-        // Only for a type this module declares. A target that is not a known record/enum already
-        // produced E0013 above; checking bodies against a type we know nothing about would pile
-        // cascading noise on top of that one real error.
-        if !self.symbols.records.contains_key(&decl.target)
-            && !self.symbols.enums.contains_key(&decl.target)
-        {
-            return;
-        }
+        // An **orphan** target — not a record/enum this program declares — already produced E0013
+        // above. Its bodies are checked all the same. This used to `return` early, to keep cascading
+        // noise off the one real error, and that made the body-coverage gate
+        // ([`Checker::verify_body_coverage`]) fire: the checker enumerated these bodies and then
+        // never entered them. A debug build panicked outright ("the checker never visited these
+        // bodies") on `impl T for Undeclared { fn m() { … } }` — a program a user writes by
+        // misspelling a type name — and a release build silently left the body unchecked. The gate
+        // exists precisely because "never looked at a body" is the failure that hides indefinitely,
+        // so the answer is to look, not to exempt.
+        //
+        // What kept the noise down is kept: `self` binds to the gradual top rather than to a type we
+        // know nothing about, so member access through it defers instead of erroring, and
+        // `current_type` stays unset rather than naming a type that has no fields to be private.
+        let known = self.symbols.records.contains_key(decl.target.as_str())
+            || self.symbols.enums.contains_key(decl.target.as_str());
         let type_params = self
             .symbols
             .type_params
-            .get(&decl.target)
+            .get(decl.target.as_str())
             .cloned()
             .unwrap_or_default();
         let saved_params = self.enter_type_params(&type_params);
-        let bindings = vec![("self".to_string(), self_type(&decl.target, &type_params))];
-        let saved_type = self.coloring.current_type.replace(decl.target.clone());
+        let self_ty = if known {
+            self_type(decl.target.as_str(), &type_params)
+        } else {
+            Type::Unknown
+        };
+        let bindings = vec![("self".to_string(), self_ty)];
+        let saved_type = if known {
+            self.coloring.current_type.replace(decl.target.to_string())
+        } else {
+            self.coloring.current_type.take()
+        };
         for method in &decl.methods {
             self.check_fn(method, env, &bindings, TargetKind::Method);
         }
@@ -317,10 +475,11 @@ impl Checker {
     }
 
     /// Validate that an `impl` of a user trait provides its contract (L1, UT2): every **required**
-    /// (non-default) trait method must be present with matching arity and — when both sides annotate
-    /// them — matching parameter and return types. Default methods may be omitted (their fallback
-    /// body lands in UT5). Extra methods beyond the trait are allowed (inherent methods). Shares the
-    /// E0015 `InvalidImpl` code with the built-in path.
+    /// (non-default) trait method must be present, and every method the impl provides — required or
+    /// an override of a defaulted one — must match the trait's arity, its `async`-ness, and (when
+    /// both sides annotate them) its parameter and return types. Default methods may be *omitted*
+    /// (their fallback body lands in UT5). Extra methods beyond the trait are allowed (inherent
+    /// methods). Shares the E0015 `InvalidImpl` code with the built-in path.
     fn check_user_trait_impl(
         &mut self,
         target: &str,
@@ -339,7 +498,7 @@ impl Checker {
         let derived: Vec<(String, noeta_ext_abi::AssocDerivation)> = self
             .symbols
             .native_derived_assoc
-            .get(&decl.name)
+            .get(decl.name.as_str())
             .cloned()
             .unwrap_or_default();
         if !derived.is_empty()
@@ -353,7 +512,7 @@ impl Checker {
                 .collect();
             self.symbols
                 .trait_assoc
-                .insert((target.to_string(), decl.name.clone()), map);
+                .insert((target.to_string(), decl.name.to_string()), map);
         }
         // Associated-type coherence (slice 1a): every associated type WITHOUT a default must be bound
         // by this impl. A defaulted associated type — or a native-derived one (auto-supplied above) —
@@ -379,22 +538,54 @@ impl Checker {
             }
         }
         for tm in &decl.methods {
-            if tm.has_default {
-                continue; // a default method is optional for an implementor
-            }
             let req_name = &tm.sig.name;
             let Some(m) = methods.iter().find(|m| &m.name == req_name) else {
-                self.error(
-                    DiagnosticCode::InvalidImpl,
-                    trait_span,
-                    format!("`impl {}` must define `fn {}`", decl.name, req_name),
-                )
-                .help(format!(
-                    "the `{}` trait requires `fn {}`",
-                    decl.name, req_name
-                ));
+                // A default method is optional for an implementor; a required one is not.
+                if !tm.has_default {
+                    self.error(
+                        DiagnosticCode::InvalidImpl,
+                        trait_span,
+                        format!("`impl {}` must define `fn {}`", decl.name, req_name),
+                    )
+                    .help(format!(
+                        "the `{}` trait requires `fn {}`",
+                        decl.name, req_name
+                    ));
+                }
                 continue;
             };
+            // A method the impl DOES provide is checked against the trait's signature whether or not
+            // the trait defaults it. The `has_default` skip used to sit above this whole block, so an
+            // *override* of a defaulted method was exempt from every conformance rule — it could take
+            // different parameters, return a different type, or (see below) differ in `async`-ness,
+            // while `dyn Trait` and every bound kept typing it by the trait's declaration.
+            //
+            // `async` is part of the contract, not a private implementation detail: the return type a
+            // caller sees is `Future<T>` for an `async fn` and `T` otherwise, and every receiver form
+            // — bound, trait object, concrete — types the call from *some* signature. If the two sides
+            // may disagree, then typing a `dyn Trait` call by the trait's declaration is unsound (an
+            // `async` declaration reached a synchronous body, or the reverse). Pinning it here is what
+            // makes the trait-object typing above a promise the runtime keeps.
+            if tm.sig.is_async != m.is_async {
+                let (want, got) = if tm.sig.is_async {
+                    ("async fn", "fn")
+                } else {
+                    ("fn", "async fn")
+                };
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    m.name_span,
+                    format!(
+                        "`{req_name}` is declared `{got}`, but trait `{}` declares it `{want}`",
+                        decl.name
+                    ),
+                )
+                .help(format!(
+                    "an implementation must match the trait's `async`-ness — a call through \
+                     `dyn {}` or a `<T: {}>` bound is typed from the trait's declaration",
+                    decl.name, decl.name
+                ));
+            }
             if m.params.len() != tm.sig.params.len() {
                 self.error(
                     DiagnosticCode::InvalidImpl,
@@ -412,8 +603,8 @@ impl Checker {
             for (i, (tp, ip)) in tm.sig.params.iter().zip(&m.params).enumerate() {
                 // Resolve a `Self::Name` on either side against this impl's binding (slice 1a) so the
                 // contract compares concrete types (`int` vs `int`), not two opaque projections.
-                let want = self.assoc_resolved_type(&tp.ty, target, &decl.name);
-                let got = self.assoc_resolved_type(&ip.ty, target, &decl.name);
+                let want = self.assoc_resolved_type(&tp.ty, target, decl.name.as_str());
+                let got = self.assoc_resolved_type(&ip.ty, target, decl.name.as_str());
                 if !Self::sig_types_compatible(&want, &got) {
                     self.error(
                         DiagnosticCode::InvalidImpl,
@@ -427,8 +618,8 @@ impl Checker {
                     );
                 }
             }
-            let want_ret = self.assoc_resolved_type(&tm.sig.ret, target, &decl.name);
-            let got_ret = self.assoc_resolved_type(&m.ret, target, &decl.name);
+            let want_ret = self.assoc_resolved_type(&tm.sig.ret, target, decl.name.as_str());
+            let got_ret = self.assoc_resolved_type(&m.ret, target, decl.name.as_str());
             if !Self::sig_types_compatible(&want_ret, &got_ret) {
                 self.error(
                     DiagnosticCode::InvalidImpl,
@@ -450,10 +641,10 @@ impl Checker {
         if let Some(constraint) = self
             .symbols
             .native_trait_self_constraints
-            .get(&decl.name)
+            .get(decl.name.as_str())
             .copied()
         {
-            self.check_packed_self_constraint(target, trait_span, &decl.name, &constraint);
+            self.check_packed_self_constraint(target, trait_span, decl.name.as_str(), &constraint);
         }
     }
 
@@ -498,7 +689,19 @@ impl Checker {
                 .resolve_assoc(target, trait_name, name)
                 .unwrap_or(Type::Unknown);
         }
-        field_type(ty, &self.imports.extern_types)
+        // A bare `Self` in the contract means "the implementing type", so resolve it exactly as an
+        // associated projection is resolved. Without this the impl is forced to spell the literal
+        // word `Self` — and a signature written that way is *uncallable*, because the concrete
+        // argument at the call site has nothing to unify a nominal `Self` against. A native trait
+        // declaring `SigType::SelfTy` synthesizes into precisely this shape
+        // (`stdlib::sig_type_ref`), so one fix serves both trait kinds.
+        if let Some(noeta_ast::TypeRef::Named { name, args, .. }) = ty
+            && name == "Self"
+            && args.is_empty()
+        {
+            return Type::Named(target.to_string(), Vec::new());
+        }
+        self.annot_field(ty)
     }
 
     /// Validate a user-defined `trait` declaration (L1, UT1). The declaration was registered in
@@ -508,7 +711,7 @@ impl Checker {
     pub(crate) fn check_trait_decl(&mut self, decl: &noeta_ast::TraitDecl, env: &mut Env) {
         // A user trait may not shadow a built-in trait name — an `impl`/bound naming it would be
         // ambiguous against the closed built-in set.
-        if BuiltinTrait::from_name(&decl.name).is_some() {
+        if BuiltinTrait::from_name(decl.name.as_str()).is_some() {
             self.error(
                 DiagnosticCode::InvalidTraitDeclaration,
                 decl.name_span,
@@ -517,9 +720,9 @@ impl Checker {
                     decl.name
                 ),
             );
-        } else if self.symbols.types.contains(&decl.name)
-            || self.symbols.records.contains_key(&decl.name)
-            || self.symbols.enums.contains_key(&decl.name)
+        } else if self.symbols.types.contains(decl.name.as_str())
+            || self.symbols.records.contains_key(decl.name.as_str())
+            || self.symbols.enums.contains_key(decl.name.as_str())
         {
             // A trait and a type sharing a name would make `dyn {name}` / `{name}` ambiguous.
             self.error(
@@ -533,7 +736,7 @@ impl Checker {
         } else if self
             .symbols
             .user_traits
-            .get(&decl.name)
+            .get(decl.name.as_str())
             .is_some_and(|first| first.span != decl.span)
         {
             // A second `trait` of the same name; pass 1 kept the first.
@@ -615,7 +818,7 @@ impl Checker {
             return;
         }
         let saved_params = self.enter_type_params(&decl.type_params);
-        let bindings = vec![("self".to_string(), Type::DynTrait(decl.name.clone()))];
+        let bindings = vec![("self".to_string(), Type::DynTrait(decl.name.to_string()))];
         for m in defaults {
             self.check_fn(&m.sig, env, &bindings, TargetKind::Method);
         }
@@ -630,7 +833,11 @@ impl Checker {
     /// runtime, moved to compile time), and method-name conflicts with the target's own methods
     /// or an earlier binding's.
     pub(crate) fn check_bundle_impl(&mut self, decl: &ImplDecl) {
-        let (module_ref, bundle_name) = decl.trait_name.rsplit_once('.').expect("dotted path");
+        let (module_ref, bundle_name) = decl
+            .trait_name
+            .as_str()
+            .rsplit_once('.')
+            .expect("dotted path");
         if !self.imports.modules.contains_key(module_ref) {
             self.error(
                 DiagnosticCode::UnknownTrait,
@@ -643,7 +850,7 @@ impl Checker {
             .help("bind the module first — e.g. `use std.{vec}` brings `vec` into scope");
             return;
         }
-        let Some((_, bundle)) = self.resolve_bundle_ref(&decl.trait_name) else {
+        let Some((_, bundle)) = self.resolve_bundle_ref(decl.trait_name.as_str()) else {
             self.error(
                 DiagnosticCode::UnknownTrait,
                 decl.trait_span,
@@ -655,10 +862,10 @@ impl Checker {
         // carry an override body (checked by `check_standalone_impl_bodies` at the caller). The methods
         // are still native defaults — an empty `impl vec.Kernels for T {}` adopts every one.
         self.check_bundle_binding(
-            &decl.target,
+            decl.target.as_str(),
             decl.target_span,
             decl.trait_span,
-            &decl.trait_name,
+            decl.trait_name.as_str(),
             bundle,
         );
     }
@@ -827,16 +1034,26 @@ impl Checker {
     /// implemented at most once, counting both a `@derive(T)` directive and an `impl T { }` block
     /// as implementations. A second implementation of an already-implemented trait — whether
     /// `@derive(T)` twice, two `impl T` blocks, or a `@derive(T)` alongside an `impl T` — is
-    /// reported as `E0027 ConflictingTraitImpl`, pointing at the later occurrence and naming where
-    /// the first one is. This keeps each `(type, trait)` pair single-implementation, so
-    /// [`Self::satisfies`] and runtime dispatch are unambiguous.
+    /// reported as `E0027 ConflictingTraitImpl`, **labelling both sites**: the primary span on the
+    /// later occurrence, a secondary label on the one it collides with. This keeps each
+    /// `(type, trait)` pair single-implementation, so [`Self::satisfies`] and runtime dispatch are
+    /// unambiguous.
+    ///
+    /// **Both sites, because the two can be in different files.** Coherence runs over the *linked*
+    /// program, so the competing implementations may be two sibling modules — or two dependency
+    /// packages — that never mention each other. Naming only the later one, and describing the
+    /// other as "above", sent the reader looking up a file that does not contain it; the second
+    /// label (rendered by `ariadne` against its own file, see `noeta_diagnostics::render_mapped`)
+    /// is the only thing that makes the conflict locatable. [`ImplForm`] supplies each side's
+    /// spelling, so the wording fits whichever pair actually collided rather than assuming the
+    /// same-file `@derive`-vs-`impl` case.
     ///
     /// The orphan half of coherence is enforced separately: an in-body `impl` block can only name
-    /// the type that owns it, and a standalone `impl Trait for T {}` is required (in
-    /// [`Self::check_standalone_impl`]) to target a type declared in the same module — so a trait
-    /// is still only ever implemented for a local type, and every trait is a built-in. Records and
-    /// enums carry no in-body `impl` blocks (pass an empty slice); `standalone` carries the
-    /// `(trait, span)` of every standalone impl targeting this type.
+    /// the type that owns it, and a standalone `impl Trait for T {}` must target a type the program
+    /// declares and live in the same package as that type or as the trait
+    /// ([`Self::check_standalone_impl`]). Records and enums carry no in-body `impl` blocks (pass an
+    /// empty slice); `standalone` carries the `(trait, span)` of every standalone impl targeting
+    /// this type.
     pub(crate) fn check_coherence(
         &mut self,
         derives: &[DeriveSpec],
@@ -844,51 +1061,76 @@ impl Checker {
         standalone: &[(String, Span)],
     ) {
         // Source order is derives, then in-body impls, then standalone impls: this scan reports the
-        // textually-later duplicate and names where the first one is. `From` is deliberately
+        // textually-later duplicate and labels the one it collides with. `From` is deliberately
         // covered by the same name-keyed rule: an impl block's methods flatten into the type's
         // method table by NAME (there is no overloading), so a type can carry exactly one `from` —
         // one declared conversion. A second `From` impl (same source or another) is exactly the
         // ambiguity the `?` conversion must never see — two declared paths into the target — and
         // collides here (E0027).
-        let mut seen: HashMap<String, Span> = HashMap::new();
-        let occurrences: Vec<(String, Span)> = derives
+        let mut seen: HashMap<String, (Span, ImplForm)> = HashMap::new();
+        let occurrences: Vec<(String, Span, ImplForm)> = derives
             .iter()
-            .map(|d| (d.name.clone(), d.span))
-            .chain(impls.iter().map(|b| (b.trait_name.clone(), b.trait_span)))
-            .chain(standalone.iter().map(|(name, span)| (name.clone(), *span)))
+            .map(|d| (d.name.to_string(), d.span, ImplForm::Derive))
+            .chain(
+                impls
+                    .iter()
+                    .map(|b| (b.trait_name.to_string(), b.trait_span, ImplForm::InBody)),
+            )
+            .chain(
+                standalone
+                    .iter()
+                    .map(|(name, span)| (name.clone(), *span, ImplForm::Standalone)),
+            )
             .collect();
-        for (name, span) in occurrences {
+        for (name, span, form) in occurrences {
             match seen.get(&name) {
-                Some(_first) => {
+                Some((first_span, first_form)) => {
+                    let (first_span, first_form) = (*first_span, *first_form);
                     self.error(
                         DiagnosticCode::ConflictingTraitImpl,
                         span,
                         format!("trait `{name}` is implemented more than once for this type"),
                     )
+                    // The offending (later) site first, so `ariadne` groups it first and the
+                    // rendered header carries the same file/line the primary span — and every
+                    // non-rendered consumer of the diagnostic — reports.
+                    .label(span, format!("implemented again here, {form}"))
+                    .label(first_span, format!("first implemented here, {first_form}"))
                     .help(format!(
-                        "`{name}` is already implemented above; a type may implement each trait \
-                         only once (via one `@derive` or one `impl` block, not both)"
+                        "a type may implement each trait only once — remove one of the two \
+                         implementations of `{name}`, or merge them into a single one"
                     ));
                 }
                 None => {
-                    seen.insert(name, span);
+                    seen.insert(name, (span, form));
                 }
             }
         }
     }
 
-    /// The `?` **error-position rule** (error-ergonomics): a `?` on a `Result` whose `Err` payload
-    /// type differs from the enclosing function's declared error type either **converts** through
-    /// the target's declared `impl From<Source>` (the site is recorded for lowering — the one
-    /// implicit conversion position in the language) or is `E0057`. Runs only when both sides are
-    /// resolved: a `dyn`/hole on either side, an undeclared return, or a type parameter in scope
-    /// defers to runtime exactly as before, and an assignable error (a union member, for instance)
-    /// propagates unconverted as it always did. Exactly-one-path is by construction: sources are
-    /// matched by type equality, and coherence admits at most one `From` impl per target type, so
-    /// no `?` site ever sees two candidate conversions.
+    /// The `?` **failure-position rule** — the `Result` twin of [`Self::check_try_option`], plus the
+    /// error-conversion rule layered on top of it.
+    ///
+    /// *Position* first: `?` on a `Result` early-returns the `Err`, so the enclosing function has to
+    /// be able to return one. A declared return that is neither a `Result` nor deferring is
+    /// **E0012**, exactly as the `Option` half is — the same rule, the same span, the same code.
+    /// Without it, `fn work(): void { client.get(url)? }` checked clean, discarded the transport
+    /// failure, and exited 0: the failure was unobservable and CI went green on a broken program. A
+    /// declared return that defers (`dyn`, an inference hole, top-level code, an unannotated closure)
+    /// still defers — an `Err` that reaches the top aborts there (E0069) rather than vanishing.
+    ///
+    /// *Conversion* second (error-ergonomics): a `?` whose `Err` payload type differs from the
+    /// declared error type either **converts** through the target's declared `impl From<Source>` (the
+    /// site is recorded for lowering — the one implicit conversion position in the language) or is
+    /// `E0057`. That judgement runs only when both sides are resolved: a `dyn`/hole on either side or
+    /// a type parameter in scope defers to runtime, and an assignable error (a union member, for
+    /// instance) propagates unconverted. Exactly-one-path is by construction: sources are matched by
+    /// type equality, and coherence admits at most one `From` impl per target type, so no `?` site
+    /// ever sees two candidate conversions.
     pub(crate) fn check_try_error(&mut self, err: &Type, span: Span) {
         let Type::Result(_, declared) = self.coloring.current_ret.clone() else {
-            return; // no declared `Result` context — `?` behaves exactly as before
+            self.reject_try_position(err, span);
+            return;
         };
         let declared = *declared;
         if err.defers_to_runtime() || declared.defers_to_runtime() {
@@ -930,13 +1172,75 @@ impl Checker {
         }
     }
 
-    /// Whether an error-position type is resolved enough for the `?` rule to judge: anything but a
-    /// `Named` head that is an in-scope generic type parameter (those defer to the instantiation).
-    fn concrete_error_type(&self, ty: &Type) -> bool {
-        match ty {
-            Type::Named(n, _) => !self.coloring.type_params.contains_key(n),
-            _ => true,
+    /// The position half of [`Self::check_try_error`]: the enclosing function's declared return is
+    /// not a `Result`, so the `Err` this `?` early-returns has nowhere to go. A return that defers
+    /// (`dyn`, an inference hole, top-level code, an unannotated closure) still defers to runtime;
+    /// anything else is E0012, naming the declaration that would make the propagation legal.
+    fn reject_try_position(&mut self, err: &Type, span: Span) {
+        let declared = self.coloring.current_ret.clone();
+        if declared.defers_to_runtime() {
+            return;
         }
+        let d = self.error(
+            DiagnosticCode::InvalidTry,
+            span,
+            format!(
+                "`?` on a `Result` early-returns its `Err`, but this function returns `{declared}`"
+            ),
+        );
+        // Name the concrete declaration that admits this very `Err`; an unresolved error payload
+        // (`dyn`, a hole) can only be described generically.
+        if err.defers_to_runtime() {
+            d.help(
+                "declare the return as `Result<T, E>` to propagate the failure (converting through \
+                 `impl From<Source>` on `E` if the error types differ), or handle it here with \
+                 `match` / `??`",
+            );
+        } else {
+            d.help(format!(
+                "declare the return as `Result<T, {err}>` to propagate the failure (or \
+                 `Result<T, E>` with an `impl From<{err}>` on `E` to convert it), or handle it here \
+                 with `match` / `??`"
+            ));
+        }
+    }
+
+    /// The `?` **absence-position rule**: `?` on an `Option` early-returns `none`, so the enclosing
+    /// function has to be able to return one.
+    ///
+    /// Without this, `fn head(xs: List<string>): string { return xs.first()? }` type-checked clean
+    /// and then handed the caller a `none` sitting in a slot the checker had promised was a
+    /// `string` — the same shape of hole as a declared value holding a future. A declared return
+    /// that defers (`dyn`, an inference hole, top-level code, an unannotated closure) still defers,
+    /// and a `?T` return is exactly what the operator is for.
+    pub(crate) fn check_try_option(&mut self, span: Span) {
+        let declared = self.coloring.current_ret.clone();
+        if declared.defers_to_runtime() || matches!(declared, Type::Option(_)) {
+            return;
+        }
+        self.error(
+            DiagnosticCode::InvalidTry,
+            span,
+            format!(
+                "`?` on an `Option` early-returns `none`, but this function returns `{declared}`"
+            ),
+        )
+        .help(
+            "declare the return as `?T` to propagate the absence, or supply a value with \
+             `?? <fallback>` — a `Result`-returning function has to match the `Option` and return \
+             its own `Err`",
+        );
+    }
+
+    /// Whether an error-position type is resolved enough for the `?` rule to judge: anything but a
+    /// generic type parameter (those defer to the instantiation).
+    ///
+    /// This asked the in-scope NAME table and matched `Type::Named`, which is exactly the
+    /// conflation this arc removes — and it was load-bearing: `fn f<E>(): Result<int, E>`
+    /// propagating a concrete `Err` deferred only because `"E"` was in that table. As a lattice
+    /// question the arm is direct, and the catch-all no longer silently swallows a parameter.
+    fn concrete_error_type(&self, ty: &Type) -> bool {
+        !matches!(ty, Type::Param(_))
     }
 
     /// Validate the `@derive(...)` directives on a declaration: every named trait must be a known
@@ -952,11 +1256,11 @@ impl Checker {
         type_methods: &[FnDecl],
     ) {
         for spec in derives {
-            let Some(t) = BuiltinTrait::from_name(&spec.name) else {
+            let Some(t) = BuiltinTrait::from_name(spec.name.as_str()) else {
                 // A USER trait derives through the shared planner (UT5 + bridging + `via:`
                 // delegation): defaults adopted wholesale, required members bridged onto the
                 // type's own fields/methods, or the whole trait forwarded through a field.
-                if let Some(decl) = self.symbols.user_traits.get(&spec.name).cloned() {
+                if let Some(decl) = self.symbols.user_traits.get(spec.name.as_str()).cloned() {
                     self.check_user_trait_derive(type_name, spec, &decl, fields, type_methods);
                     continue;
                 }
@@ -968,8 +1272,8 @@ impl Checker {
                 // an empty `impl` would (`check_bundle_binding`); the binding itself was recorded in
                 // `collect` beside the `impl` form. A bundle takes no member bindings, no `via:`, and
                 // no type arguments — those belong to trait derives.
-                if spec.name.contains('.')
-                    && let Some((_, bundle)) = self.resolve_bundle_ref(&spec.name)
+                if spec.name.as_str().contains('.')
+                    && let Some((_, bundle)) = self.resolve_bundle_ref(spec.name.as_str())
                 {
                     if let Some(b) = spec.bindings.first() {
                         self.error(
@@ -997,14 +1301,18 @@ impl Checker {
                         // Same target as the impl form: the decorated type, at the derive argument's
                         // span (which is both where the shape error points and the binding site).
                         self.check_bundle_binding(
-                            type_name, spec.span, spec.span, &spec.name, bundle,
+                            type_name,
+                            spec.span,
+                            spec.span,
+                            spec.name.as_str(),
+                            bundle,
                         );
                     }
                     continue;
                 }
                 // A NATIVE derive recipe (layer 4, `ExtDerive`): synthesizes handler forwards —
                 // no bindings/via surface, plus the recipe's own optional shape validation.
-                if let Some(ext) = self.reg().find_ext_derive(&spec.name) {
+                if let Some(ext) = self.reg().find_ext_derive(spec.name.as_str()) {
                     if let Some(b) = spec.bindings.first() {
                         self.error(
                             DiagnosticCode::UnderivableTrait,
@@ -1022,13 +1330,13 @@ impl Checker {
                             format!("`{}` is a native derive; `via:` does not apply", spec.name),
                         );
                     } else if let Some(validate) = ext.validate {
-                        let shape: Vec<(String, String)> = fields
-                            .iter()
-                            .map(|f| {
-                                let ty = field_type(&f.ty, &self.imports.extern_types);
-                                (f.name.clone(), ty.to_string())
-                            })
-                            .collect();
+                        // The shared derivation (`noeta_ast::shape`), which also builds
+                        // `DirectiveCtx::fields` for an `ExtDirective::expand` hook. One walk, so a
+                        // derive recipe and an expansion hook in the same extension can never see
+                        // the same declaration differently — and the spelling a recipe judges is the
+                        // *declared* one (`List<int>`, `?User`) rather than a lattice rendering of
+                        // it, which is what a recipe generating code from a field actually needs.
+                        let shape = noeta_ast::shape::field_shape(fields);
                         if let Some(message) = validate(type_name, &shape) {
                             self.error(DiagnosticCode::UnderivableTrait, spec.span, message);
                         }
@@ -1047,7 +1355,7 @@ impl Checker {
             // E0050 field constraint) does not apply — the synthesized method carries the behavior.
             if let Some((via_name, via_span)) = &spec.via {
                 if let Err(e) =
-                    noeta_ast::derive::plan_builtin_via(&spec.name, type_name, fields, spec)
+                    noeta_ast::derive::plan_builtin_via(spec.name.as_str(), type_name, fields, spec)
                 {
                     let d = self.error(DiagnosticCode::UnderivableTrait, spec.span, e.message);
                     if let Some(h) = e.help {
@@ -1060,11 +1368,11 @@ impl Checker {
                     // field mentioning one of the type's own generic parameters is deferred to
                     // the instantiation site instead (`satisfies` judges the substituted via
                     // field — S4's `via:` twin), exactly like the field-wise recipe's deferral.
-                    let params: Vec<String> = self
+                    let params: ParamSet = self
                         .symbols
                         .generic_types
                         .get(type_name)
-                        .cloned()
+                        .map(|ps| ps.iter().map(|p| p.id).collect())
                         .unwrap_or_default();
                     let field_ty = self
                         .symbols
@@ -1088,11 +1396,11 @@ impl Checker {
                     // implement `Error`, or the delegation dispatches into nothing (the same
                     // judgement as a user-trait `via:`). A field typed as one of the deriving
                     // type's own generic parameters defers to the instantiation site.
-                    let params: Vec<String> = self
+                    let params: ParamSet = self
                         .symbols
                         .generic_types
                         .get(type_name)
-                        .cloned()
+                        .map(|ps| ps.iter().map(|p| p.id).collect())
                         .unwrap_or_default();
                     let field_ty = self
                         .symbols
@@ -1251,21 +1559,26 @@ impl Checker {
         if let Some((via, via_span)) = &spec.via
             && let Some(f) = fields.iter().find(|f| f.name == *via)
         {
-            let params: Vec<String> = self
+            // A syntactic check on the WRITTEN annotation (no lattice conversion happens here), so
+            // this one legitimately compares spellings: it is asking whether the source wrote the
+            // declaration's own parameter, and the declaration is the one that named it.
+            let params = self
                 .symbols
                 .generic_types
                 .get(type_name)
                 .cloned()
                 .unwrap_or_default();
             let satisfied = match &f.ty {
-                Some(noeta_ast::TypeRef::Named { name, .. }) if params.contains(name) => {
+                Some(noeta_ast::TypeRef::Named { name, .. })
+                    if params.iter().any(|p| p.name == name.as_str()) =>
+                {
                     true // parameter-typed — deferred to the instantiation site
                 }
                 Some(noeta_ast::TypeRef::Named { name, .. }) => self
                     .symbols
                     .user_trait_impls
-                    .get(name)
-                    .is_some_and(|traits| traits.contains_key(&decl.name)),
+                    .get(name.as_str())
+                    .is_some_and(|traits| traits.contains_key(decl.name.as_str())),
                 Some(noeta_ast::TypeRef::DynTrait { trait_name, .. }) => trait_name == &decl.name,
                 _ => false,
             };
@@ -1306,11 +1619,11 @@ impl Checker {
             _ => true,
         };
         if matches!(t, BuiltinTrait::Comparable | BuiltinTrait::Serialize) {
-            let params: Vec<String> = self
+            let params: ParamSet = self
                 .symbols
                 .generic_types
                 .get(type_name)
-                .cloned()
+                .map(|ps| ps.iter().map(|p| p.id).collect())
                 .unwrap_or_default();
             let offender = if let Some(fields) = self.symbols.records.get(type_name) {
                 fields
@@ -1362,7 +1675,15 @@ impl Checker {
             | Type::F64
             | Type::IntN { .. }
             | Type::Bool
-            | Type::String => true,
+            | Type::String
+            // A type parameter orders value-dependently, exactly like `dyn`: whether it does is a
+            // property of the instantiation, judged at the instantiation site. (Callers that care
+            // about the declaration itself — the derive checks — screen parameter-typed fields out
+            // with `mentions_param` before asking.)
+            | Type::Param(_)
+            // Vacuous: no two values of the bottom type exist to compare, so nothing can
+            // observe a missing ordering. Permissive, like `dyn`.
+            | Type::Never => true,
             // A union's members order value-dependently (two ints do, an int and a string don't);
             // like `dyn`, that is the runtime's call, not a statically-impossible ordering.
             Type::Union(_) => true,
@@ -1496,15 +1817,16 @@ impl Checker {
         arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         recv_args: &[Type],
-        hidden_site: Option<Span>,
+        supplied_at: &[usize],
+        hidden_site: Option<(Span, String, ForwardSpelling)>,
         env: &mut Env,
     ) -> Type {
         // Seed with the receiver's type arguments (instance call); the call's own arguments then
         // refine any still-unbound parameters without overwriting the receiver's binding.
-        let seed: HashMap<String, Type> = generic
+        let seed: Subst = generic
             .params
             .iter()
-            .map(|(n, _)| n.clone())
+            .map(|(p, _)| p.id)
             .zip(recv_args.iter().cloned())
             .filter(|(_, t)| !t.defers_to_runtime())
             .collect();
@@ -1516,6 +1838,7 @@ impl Checker {
             arg_exprs,
             span,
             seed,
+            supplied_at,
             hidden_site,
             env,
         )
@@ -1536,11 +1859,12 @@ impl Checker {
         args: &mut [Type],
         arg_exprs: &[noeta_ast::CallArg],
         span: Span,
-        seed: HashMap<String, Type>,
-        hidden_site: Option<Span>,
+        seed: Subst,
+        supplied_at: &[usize],
+        hidden_site: Option<(Span, String, ForwardSpelling)>,
         env: &mut Env,
     ) -> Type {
-        let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+        let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
         if args.len() < required || args.len() > generic.raw_params.len() {
             let expected = if required == generic.raw_params.len() {
                 format!("{}", generic.raw_params.len())
@@ -1557,12 +1881,26 @@ impl Checker {
             );
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
-        let mut subst: HashMap<String, Type> = seed;
-        for (i, raw) in generic.raw_params.iter().enumerate() {
+        let mut subst: Subst = seed;
+        // Which parameter each argument fills. A named-argument call that SKIPS a defaulted
+        // parameter (`f(1, c: 9)`) has already been compacted into parameter order, so argument
+        // `i` is the `i`-th SUPPLIED parameter — not `raw_params[i]`. Checking it against
+        // `raw_params[i]` bound the wrong type parameter and reported the skipped parameter's type
+        // in the mismatch, which is what made a named argument over a defaulted one unusable on
+        // any generic callable. Empty means the ordinary dense prefix, where the two coincide.
+        let positions: Vec<usize> = if supplied_at.is_empty() {
+            (0..generic.raw_params.len()).collect()
+        } else {
+            supplied_at.to_vec()
+        };
+        for (i, &p) in positions.iter().enumerate() {
             if i >= args.len() {
                 // Omitted trailing defaults — already checked at the declaration.
                 break;
             }
+            let Some(raw) = generic.raw_params.get(p) else {
+                break;
+            };
             // A deferred closure argument finalizes against the raw parameter with everything
             // bound SO FAR substituted in — `fn each<T>(xs: List<T>, f: (T) -> unit)` has `T`
             // pinned by `xs` before `f` is looked at — and its now-known type (the inferred
@@ -1574,24 +1912,15 @@ impl Checker {
                 && matches!(args[i], Type::Unknown)
             {
                 let expected = subst_or_dyn(raw, &subst, &tps);
-                // Absorb the (substituted) parameter type into the deferred literal — a `Fn` into a
-                // closure (or a deferred polymorphic-function reference, F1), a `List`/`Map` into a
-                // container literal — so its resolved type then binds any still-unbound type
-                // parameter below; a mismatched or unguiding param synthesizes standalone (unchanged
-                // from the closure-only behavior).
-                args[i] = match (expr, &expected) {
-                    (Expr::Closure { .. } | Expr::Ident { .. }, Type::Fn { .. }) => {
-                        self.check(expr, &expected, env)
-                    }
-                    (Expr::List { .. } | Expr::Map { .. }, Type::List(_) | Type::Map(..)) => {
-                        self.check(expr, &expected, env)
-                    }
-                    _ => self.synth(expr, env),
-                };
+                // Absorb the (substituted) parameter type into the deferred argument — one shared
+                // definition with the non-generic path, so the two agree by construction — and its
+                // resolved type then binds any still-unbound type parameter below; a mismatched or
+                // unguiding param synthesizes standalone (unchanged from the closure-only behavior).
+                args[i] = self.absorb_deferred_arg(expr, Some(&expected), env);
             }
             let arg = args[i].clone();
             bind_type_params(raw, &arg, &tps, &mut subst);
-            let expected = apply_subst(raw, &subst);
+            let expected = subst_or_dyn(raw, &subst, &tps);
             let arg = &arg;
             // A bare literal adapts into a fixed-width parameter here too (P-NUM-SYM) — whether the
             // parameter is a concrete `u8`/`f32`/`f64` or a type variable already bound to one
@@ -1616,13 +1945,17 @@ impl Checker {
         // TEMPLATE and resolve the result into a table entry (concrete — the whole composite is
         // interned statically, so the runtime never constructs a recipe) or a pass-through of the
         // enclosing fn's own matching slot (a template still mentioning the caller's parameters).
-        // `hidden_site` is the whole-call span lowering keys on; `None` for a method call
-        // (methods never forward).
-        if let Some(call_span) = hidden_site
-            && let Some(fwd) = self.symbols.forwarding.get(name).cloned()
+        // `hidden_site` is the whole-call span lowering keys on, paired with the KEY the callee's
+        // slot layout is recorded under — a bare `fn` name, or `Type.method` for a method (Axis A),
+        // which is why it is not simply `name`: two classes may declare `load`. `None` at a call
+        // that has no channel to supply them through. The third element is how this call was
+        // SPELLED, which is what the pre-pass's reach is a property of — see [`ForwardSpelling`],
+        // and the E0058 below that is the only consumer.
+        if let Some((call_span, key, spelling)) = hidden_site
+            && let Some(fwd) = self.symbols.forwarding.get(key.as_str()).cloned()
             // A poisoned callee (diverging slot set, D2a) already carries the one clear error at
             // its declaration; resolving its partial slots here would only cascade noise.
-            && !self.symbols.forwarding_poisoned.contains(name)
+            && !self.symbols.forwarding_poisoned.contains(key.as_str())
         {
             let mut hidden = Vec::with_capacity(fwd.len());
             for slot in &fwd {
@@ -1633,10 +1966,29 @@ impl Checker {
                     .into_iter()
                     .find(|p| {
                         subst
-                            .get(p)
+                            .get(&p.id)
                             .is_none_or(|t| t.defers_to_runtime() || t.contains_unknown())
                     })
                 {
+                    // A parameter of the enclosing **type** (the leading `class_params` of the
+                    // composed list) cannot be spelled with a turbofish here — a method's `::<…>`
+                    // names the METHOD's own parameters, never its class's, which come from the
+                    // receiver's type arguments. So "supply it explicitly" is a dead end for one and
+                    // the fix for the other, and each says which it is.
+                    let class_param = generic
+                        .params
+                        .iter()
+                        .take(generic.class_params)
+                        .any(|(p, _)| *p == open);
+                    let help = if class_param {
+                        format!(
+                            "a self-less member reads `{open}` from the CALL's instantiation, and \
+                             nothing here determines one — annotate the position this call flows \
+                             into so its result type pins `{open}` (`x: Type<Something> = …`)"
+                        )
+                    } else {
+                        format!("supply it explicitly: `{name}::<...>(...)`")
+                    };
                     self.error(
                         DiagnosticCode::CannotInfer,
                         span,
@@ -1645,7 +1997,7 @@ impl Checker {
                              a call-site-typed result"
                         ),
                     )
-                    .help(format!("supply it explicitly: `{name}::<...>(...)`"));
+                    .help(help);
                     continue;
                 }
                 if self.mentions_in_scope_param(&sigma) {
@@ -1659,48 +2011,69 @@ impl Checker {
                         .position(|t| t == &sigma)
                     {
                         Some(j) => hidden.push(noeta_ext_abi::HiddenArg::Forward(j as u32)),
+                        // No matching slot in this body. What to say depends entirely on how the
+                        // call was SPELLED ([`ForwardSpelling`]), because the pre-pass that builds
+                        // the slot table is syntactic — it is the spelling, not the resolved
+                        // callee, that decided whether a slot could be registered. Getting this
+                        // wrong is worse than silence: the previous single message claimed
+                        // forwarding lives in top-level generic functions only (it has worked from
+                        // generic methods since the generic-forwarding arc, and fires *inside* a
+                        // top-level fn in the inferred case) and advised a turbofish the failing
+                        // source had usually already spelled.
                         None => {
-                            self.error(
+                            let d = self.error(
                                 DiagnosticCode::InvalidTypeArguments,
                                 span,
-                                format!(
-                                    "cannot forward `{sigma}` into `{name}` here: \
-                                     call-site-typed forwarding is supported in top-level \
-                                     generic functions only"
-                                ),
-                            )
-                            .help(format!(
-                                "spell the instantiation with an explicit turbofish \
-                                 (`{name}::<...>`) so `{sigma}` is recognized as forwarded"
-                            ));
+                                match spelling {
+                                    ForwardSpelling::CompoundReceiver => format!(
+                                        "cannot forward `{sigma}` into `{name}` here: a compound \
+                                         receiver is typed by checking, while the slots a body \
+                                         forwards through are computed before it — forwarding \
+                                         reaches a call spelled on a BARE NAME \
+                                         (`json.try_parse::<{sigma}>`, `self.{name}::<...>`, \
+                                         `Type.{name}::<...>`), from a top-level generic `fn` and \
+                                         a generic method alike"
+                                    ),
+                                    ForwardSpelling::Inferred => format!(
+                                        "cannot forward `{sigma}` into `{name}` here: this body \
+                                         carries no forwarding slot for `{sigma}` — one is \
+                                         registered from an EXPLICIT turbofish, never from an \
+                                         instantiation the arguments or the expected type inferred"
+                                    ),
+                                    ForwardSpelling::Turbofish => format!(
+                                        "cannot forward `{sigma}` into `{name}` here: `{name}` \
+                                         forwards the slot `{sigma}`, and this body carries no \
+                                         matching one — a body carries exactly the slots its own \
+                                         forwarded sites spell"
+                                    ),
+                                },
+                            );
+                            match spelling {
+                                // Verified: `r = self.inner; r.load::<T>(text)` compiles and
+                                // decodes per instantiation — a bare-name receiver is the spelling
+                                // the pre-pass registers a slot from.
+                                ForwardSpelling::CompoundReceiver => {
+                                    d.help(format!(
+                                        "bind the receiver to a local and call on that name: \
+                                         `r = <receiver>;` then `r.{name}::<...>(...)`"
+                                    ));
+                                }
+                                ForwardSpelling::Inferred => {
+                                    d.help(format!(
+                                        "spell the instantiation with an explicit turbofish \
+                                         (`{name}::<...>`) so `{sigma}` is recognized as forwarded"
+                                    ));
+                                }
+                                // The turbofish is already spelled on a name the pre-pass sees, so
+                                // there is no route to point at — a help here would only repeat
+                                // what the source does. Say nothing rather than something false.
+                                ForwardSpelling::Turbofish => {}
+                            }
                         }
                     }
                     continue;
                 }
-                let recipe = self.type_to_recipe(&sigma);
-                if slot.needs_recipe && recipe.is_none() {
-                    self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`{sigma}` cannot be built by the call-site-typed `::<{}>` \
-                             position of `{name}`",
-                            slot.template
-                        ),
-                    );
-                }
-                let info = noeta_ext_abi::TypeArgInfo {
-                    name: sigma.to_string(),
-                    recipe,
-                };
-                let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
-                    Some(i) => i,
-                    None => {
-                        self.sites.type_arg_table.push(info);
-                        self.sites.type_arg_table.len() - 1
-                    }
-                };
-                hidden.push(noeta_ext_abi::HiddenArg::Table(idx as u32));
+                hidden.push(self.intern_type_arg(&sigma, slot, name, span));
             }
             self.sites.hidden_arg_sites.insert(call_span, hidden);
         }
@@ -1711,8 +2084,7 @@ impl Checker {
     /// composite instantiation (`List<T>`) out of a forwarded hidden slot (only the bare
     /// parameter passes through).
     pub(crate) fn mentions_in_scope_param(&self, t: &Type) -> bool {
-        let params: Vec<String> = self.coloring.type_params.keys().cloned().collect();
-        mentions_param(t, &params)
+        mentions_param(t, &self.scope_param_ids())
     }
 
     /// Enforce a polymorphic callable's declared **trait bounds** against a resolved substitution:
@@ -1723,16 +2095,25 @@ impl Checker {
     pub(crate) fn enforce_type_param_bounds(
         &mut self,
         name: &str,
-        params: &[(String, Vec<BoundReq>)],
-        subst: &HashMap<String, Type>,
-        tps: &HashSet<String>,
+        params: &[(ParamRef, Vec<BoundReq>)],
+        subst: &Subst,
+        tps: &ParamSet,
         span: Span,
     ) {
-        for (pname, bounds) in params {
-            let Some(concrete) = subst.get(pname) else {
+        for (param, bounds) in params {
+            let pname = &param.name;
+            let Some(concrete) = subst.get(&param.id) else {
                 continue; // unconstrained by the arguments — nothing concrete to check against
             };
             for bound in bounds {
+                // A type parameter that is itself in scope satisfies whatever its OWN declaration
+                // bounds it by — there is no `impl` to look up, the bound is the declaration. This
+                // is what licenses a generic type's methods to call each other: inside
+                // `struct Agent<P: Provider>`, `self.other()` substitutes the callee's `P` with the
+                // receiver's `P`, and the callee also demands `P: Provider`.
+                if self.in_scope_param_satisfies(concrete, bound, subst, tps) {
+                    continue;
+                }
                 // A user-defined trait bound (L1, UT3): satisfied iff `concrete` has a recorded
                 // `impl` of it — and, for an INSTANTIATED bound (`T: Keyed<int>`), an impl at that
                 // instantiation. A bound argument may mention a sibling parameter (`<K, T:
@@ -1760,19 +2141,17 @@ impl Checker {
                 }
                 // Bounds on a collected signature are validated trait names (E0014 otherwise); a
                 // non-built-in, non-user name is unreachable here, so skip rather than falsely report.
-                let Some(t) = BuiltinTrait::from_name(&bound.name) else {
-                    continue;
-                };
                 let bound = &bound.name;
-                if !self.satisfies(concrete, t) {
-                    let help = if t.intrinsic() {
-                        format!(
-                            "`{bound}` is a built-in capability — only the runtime types that \
-                             provide it (the CRDT types for `Mergeable`) satisfy this bound"
-                        )
-                    } else {
-                        format!("`{concrete}` must `@derive` or `impl {bound}` to be used here")
-                    };
+                let satisfied = match BuiltinTrait::from_name(bound) {
+                    Some(t) => self.satisfies(concrete, t),
+                    None => {
+                        self.satisfies_user_trait(concrete, bound, &[])
+                            || self.native_type_advertises(concrete, bound)
+                    }
+                };
+                if !satisfied {
+                    let help =
+                        format!("`{concrete}` must `@derive` or `impl {bound}` to be used here");
                     self.error(
                         DiagnosticCode::TraitBoundNotSatisfied,
                         span,
@@ -1785,6 +2164,48 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// Whether `concrete` is a **type parameter currently in scope** whose own declaration already
+    /// carries `bound`.
+    ///
+    /// A parameter is not a nominal type, so it can never have a recorded `impl` — its bounds *are*
+    /// its declaration. Without this, a generic type's methods could not call one another: in
+    /// `struct Agent<P: Provider>`, `self.drive(…)` substitutes the callee's `P` with the caller's
+    /// `P` and then failed the callee's `P: Provider` bound, reporting "type `P` does not satisfy
+    /// the bound `Provider`" against the very declaration that states it does. The same applies to
+    /// built-in bounds (`<T: Comparable>` calling another `<T: Comparable>` helper).
+    ///
+    /// An instantiated bound must match argument-wise (`T: Keyed<int>` does not license a call
+    /// demanding `Keyed<string>`), with the call's own substitution applied to the callee's bound
+    /// arguments first, exactly as the nominal path does.
+    fn in_scope_param_satisfies(
+        &self,
+        concrete: &Type,
+        bound: &BoundReq,
+        subst: &Subst,
+        tps: &ParamSet,
+    ) -> bool {
+        let Type::Param(p) = concrete else {
+            return false;
+        };
+        let Some(declared) = self.param_bounds(p) else {
+            return false;
+        };
+        let want: Vec<Type> = bound
+            .args
+            .iter()
+            .map(|a| subst_or_dyn(a, subst, tps))
+            .collect();
+        declared.iter().any(|d| {
+            d.name == bound.name
+                && (want.is_empty()
+                    || (d.args.len() == want.len()
+                        && d.args
+                            .iter()
+                            .zip(&want)
+                            .all(|(a, b)| bound_arg_matches(a, b))))
+        })
     }
 
     /// Whether `ty` satisfies the built-in trait `trait_name`. A `dyn`/inference-hole satisfies
@@ -1870,6 +2291,30 @@ impl Checker {
     /// can — via a recorded in-body or standalone `impl` (`user_trait_impls`). A
     /// `dyn`/inference-hole defers to runtime (never a false negative); a built-in/primitive type
     /// never implements a user trait.
+    /// Whether a **native** type advertises `bound` in its own `ExtType.traits` declaration.
+    ///
+    /// The import-gated `user_trait_impls` table cannot answer this: `seed_ext_traits` seeds a
+    /// native trait only when the program `use`s it, which is right for *naming* one (`impl Widget`
+    /// needs the import like any other name) and wrong for a **bound on a native signature**. A
+    /// program calling `synced_signal(crdt.gcounter(), …)` never names `Mergeable` — the bound is
+    /// the extension's own business — so requiring an import to satisfy it would make every such
+    /// call site import traits it does not mention. The registry knows the advertisement outright,
+    /// so ask it there.
+    fn native_type_advertises(&self, ty: &Type, bound: &str) -> bool {
+        let Type::Named(name, _) = ty else {
+            return false;
+        };
+        let qualified = self
+            .imports
+            .extern_types
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.clone());
+        self.reg()
+            .find_type_qualified(&qualified)
+            .is_some_and(|t| t.traits.contains(&bound))
+    }
+
     fn satisfies_user_trait(&self, ty: &Type, bound: &str, want: &[Type]) -> bool {
         self.satisfies_user_trait_inner(ty, bound, want, &mut Vec::new())
     }
@@ -1891,12 +2336,18 @@ impl Checker {
             // (dispatch is by name at runtime; there is nothing static to hold the args against).
             Type::DynTrait(t) => t == bound,
             Type::Named(n, args) => {
-                let Some(impl_args) = self
-                    .symbols
-                    .user_trait_impls
-                    .get(n)
-                    .and_then(|impls| impls.get(bound))
-                else {
+                // A **native** type's impls are recorded under its qualified identity
+                // (`user_trait_impls["para.crdt.GSet"]["Mergeable"]`), while a signature names it
+                // by the short spelling its `ExtType` declares (`GSet`). Resolve through the
+                // import map on a miss, so a native type advertising a native trait satisfies the
+                // bound the same way a user type does.
+                let impls = self.symbols.user_trait_impls.get(n).or_else(|| {
+                    self.imports
+                        .extern_types
+                        .get(n)
+                        .and_then(|qualified| self.symbols.user_trait_impls.get(qualified))
+                });
+                let Some(impl_args) = impls.and_then(|impls| impls.get(bound)) else {
                     return false;
                 };
                 // An instantiated bound demands an impl at that instantiation (argument-wise,
@@ -1942,20 +2393,21 @@ impl Checker {
         span: Span,
     ) {
         for (concrete, bound) in stdlib::module_var_bounds(self.reg(), module, func, args) {
-            let Some(t) = BuiltinTrait::from_name(bound) else {
-                continue;
+            // A bound on a native signature names EITHER a built-in trait or a trait the extension
+            // itself declares (`para.crdt.Mergeable`). Resolving only the built-in set and skipping
+            // the rest silently drops the bound — which is how `synced_signal(42, "t")` briefly
+            // type-checked when `Mergeable` stopped being built-in. Both kinds are checked here.
+            let satisfied = match BuiltinTrait::from_name(bound) {
+                Some(t) => self.satisfies(&concrete, t),
+                None => {
+                    self.satisfies_user_trait(&concrete, bound, &[])
+                        || self.native_type_advertises(&concrete, bound)
+                }
             };
-            if self.satisfies(&concrete, t) {
+            if satisfied {
                 continue;
             }
-            let help = if t.intrinsic() {
-                format!(
-                    "`{bound}` is a built-in capability — only the runtime types that provide it \
-                     (the CRDT types `GCounter`/`PnCounter`/`GSet`) satisfy this bound"
-                )
-            } else {
-                format!("`{concrete}` must `@derive` or `impl {bound}`")
-            };
+            let help = format!("`{concrete}` must `@derive` or `impl {bound}`");
             self.error(
                 DiagnosticCode::TraitBoundNotSatisfied,
                 span,
@@ -1964,6 +2416,13 @@ impl Checker {
             .help(help);
         }
     }
+}
+
+/// The **short** form of a link-qualified name (`b.thing.Thing` → `Thing`) — what the author wrote
+/// and what a code sketch in a diagnostic must use, since the qualified form is the linker's
+/// spelling and is not valid in a declaration.
+fn short_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
 }
 
 /// Whether a recorded impl argument satisfies a demanded bound argument: exact type equality,
@@ -1979,5 +2438,30 @@ fn bound_display(name: &str, args: &[Type]) -> String {
     } else {
         let args: Vec<String> = args.iter().map(Type::to_string).collect();
         format!("{name}<{}>", args.join(", "))
+    }
+}
+
+/// How one implementation of a trait was **written** — the three spellings [`Checker::check_coherence`]
+/// counts as implementations, so a collision report can name what actually collided instead of
+/// guessing at the `@derive`-vs-`impl` pair. Two standalone impls in two modules are the common
+/// cross-file conflict, and neither is a `@derive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImplForm {
+    /// A `@derive(Trait)` directive on the type's declaration.
+    Derive,
+    /// An `impl Trait { … }` block inside the type's own body.
+    InBody,
+    /// A standalone `impl Trait for Type { … }` declaration, which may live in another module
+    /// (or, before the package orphan rule, another package) entirely.
+    Standalone,
+}
+
+impl std::fmt::Display for ImplForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ImplForm::Derive => "by a `@derive`",
+            ImplForm::InBody => "by an `impl` block in the type's body",
+            ImplForm::Standalone => "by a standalone `impl … for …`",
+        })
     }
 }

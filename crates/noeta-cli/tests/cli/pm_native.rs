@@ -22,7 +22,9 @@ fn composed_project(name: &str) -> PathBuf {
         app.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
          [dependencies]\nimgfx = { path = \"../imgfx\" }\n\
-         [trust]\nnative = [\"acme/imgfx\"]\ncommands = [\"acme/imgfx\"]\n",
+         [directives]\nfx_spec = \"imgfx\"\nfx_shape = \"imgfx\"\n\
+         [trust]\nnative = [\"acme/imgfx\"]\n\
+         [trust.commands]\nfx-info = \"acme/imgfx\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -60,6 +62,17 @@ fn composed_project(name: &str) -> PathBuf {
         app.join("spec.noe"),
         "use imgfx.{fx}\n\n@fx_spec(\"pets.yaml\")\nstruct PetStore { base_url: string }\n\
          echo PetStore.list_pets();\n",
+    )
+    .unwrap();
+
+    // The SHAPE-driven generator (see `expand_fx_shape`): it takes no arguments and reads no file,
+    // so everything it emits is derived from the decorated declaration's own fields. Its own entry
+    // for the same reason `spec.noe` is one. `tags` is generic on purpose — an erased `List` would
+    // generate an accessor with the wrong return type, and only a full-fidelity spelling catches it.
+    std::fs::write(
+        app.join("shape.noe"),
+        "@fx_shape\nstruct Order { id: int; tags: List<string> }\n\
+         echo Order.tags_type();\n",
     )
     .unwrap();
 
@@ -115,11 +128,13 @@ use noeta_ext_abi::{
 
 const FX_FNS: &[ExtFn] = &[
     ExtFn {
+param_names: &[],
         name: "double",
         params: &[SigType::Int],
         ret: RetTy::Concrete(SigType::Int),
     },
     ExtFn {
+param_names: &[],
         name: "acc",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Acc")),
@@ -151,11 +166,13 @@ fn fx_dispatch(
 // transform producing a new list.
 const FX_CTX_FNS: &[ExtFn] = &[
     ExtFn {
+param_names: &[],
         name: "sum_r",
         params: &[SigType::Dyn],
         ret: RetTy::Concrete(SigType::F32),
     },
     ExtFn {
+param_names: &[],
         name: "brighten_all",
         params: &[SigType::Dyn, SigType::F32],
         ret: RetTy::SameAsArg(0),
@@ -262,11 +279,13 @@ impl ExternValue for Acc {
 
 const ACC_METHODS: &[ExtFn] = &[
     ExtFn {
+param_names: &[],
         name: "add",
         params: &[SigType::Int],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+param_names: &[],
         name: "total",
         params: &[],
         ret: RetTy::Concrete(SigType::Int),
@@ -302,6 +321,7 @@ fn acc_method_dispatch(
 }
 
 const ACC_CTX_METHODS: &[ExtFn] = &[ExtFn {
+param_names: &[],
     name: "apply",
     params: &[SigType::Fn(&[SigType::Int], &SigType::Int)],
     ret: RetTy::Concrete(SigType::Unit),
@@ -368,6 +388,7 @@ const PIXELS_BUNDLE: ExtTrait = ExtTrait {
     namespace: "imgfx.fx",
     methods: &[ExtTraitMethod {
         sig: ExtFn {
+param_names: &[],
             name: "brighten",
             params: &[SigType::F32],
             ret: RetTy::SameAsArg(0),
@@ -426,6 +447,23 @@ fn expand_fx_spec(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     })
 }
 
+/// A SHAPE-driven directive (`DirectiveCtx::fields`): one accessor per field of the decorated
+/// declaration, reporting that field's declared type spelling. It takes no arguments and reads no
+/// file, so everything it emits is derived from the declaration's own shape — which makes `noeta
+/// expand`'s printout a direct assertion on what the compiler handed the hook.
+fn expand_fx_shape(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
+    let mut source = String::new();
+    for (name, spelling) in &ctx.fields {
+        source.push_str(&format!(
+            "fn {name}_type(): string {{ return \"{spelling}\"; }}\n"
+        ));
+    }
+    Ok(Expansion {
+        source,
+        reads: Vec::new(),
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ImgfxExtension;
 
@@ -461,16 +499,28 @@ impl Extension for ImgfxExtension {
         &[FX_INFO]
     }
     fn directives(&self) -> &'static [ExtDirective] {
-        &[ExtDirective {
-            name: "fx_spec",
-            sites: &[TierSite::Type],
-            max_args: Some(1),
-            named_keys: &[],
-            detail: "@fx_spec(\"<file>\")",
-            doc: "Generate one accessor per name in the given spec file.",
-            params: &["spec"],
-            expand: Some(expand_fx_spec),
-        }]
+        &[
+            ExtDirective {
+                name: "fx_spec",
+                sites: &[TierSite::Type],
+                max_args: Some(1),
+                named_keys: &[],
+                detail: "@fx_spec(\"<file>\")",
+                doc: "Generate one accessor per name in the given spec file.",
+                params: &["spec"],
+                expand: Some(expand_fx_spec),
+            },
+            ExtDirective {
+                name: "fx_shape",
+                sites: &[TierSite::Type],
+                max_args: Some(0),
+                named_keys: &[],
+                detail: "@fx_shape",
+                doc: "Generate one accessor per field of the decorated declaration.",
+                params: &[],
+                expand: Some(expand_fx_shape),
+            },
+        ]
     }
     // dev-deps D5: a DEV-only capability — a tier-body formatter — gated behind the `fmt` feature.
     // The runtime capabilities above (module/type/command) always compile; this one, and the marker
@@ -854,6 +904,34 @@ fn composed_toolchain_end_to_end() {
         .assert()
         .success()
         .stdout(predicate::str::contains("42"));
+
+    // 7. `DirectiveCtx::fields`: a hook that takes no arguments and reads no file still generates
+    //    members derived from the decorated declaration's **shape**. The spelling must be the
+    //    declared one at full fidelity — `List<string>`, never `List` — because the generator writes
+    //    it back out as source.
+    composed_env(&mut lang())
+        .arg("expand")
+        .arg(app.join("shape.noe"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("// Order ⟨@fx_shape⟩")
+                .and(predicate::str::contains(
+                    r#"fn id_type(): string { return "int"; }"#,
+                ))
+                .and(predicate::str::contains(
+                    r#"fn tags_type(): string { return "List<string>"; }"#,
+                )),
+        )
+        .stderr(predicate::str::contains("expanded 1 declaration"));
+
+    // And it runs: the shape-derived accessor really is callable code, not just printed text.
+    composed_env(&mut lang())
+        .arg("run")
+        .arg(app.join("shape.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("List<string>"));
 }
 
 #[test]
@@ -983,6 +1061,7 @@ use noeta_ext_abi::registry::{ExtFn, ExtModule, Extension, NativeOut, RetTy, Sig
 use noeta_ext_abi::{no_function_error, CommandCtx, ExtCommand, Host, NativeValue, ParsedArgs, StdError};
 
 const GFX_FNS: &[ExtFn] = &[ExtFn {
+param_names: &[],
     name: "triple",
     params: &[SigType::Int],
     ret: RetTy::Concrete(SigType::Int),
@@ -1076,7 +1155,8 @@ pub fn triple(args: &[NativeValue]) -> Result<NativeOut, StdError> {
         format!(
             "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
              [dependencies]\ngitfx = {{ git = \"file://{}\" }}\n\
-             [trust]\nnative = [\"acme/gitfx\"]\ncommands = [\"acme/gitfx\"]\n",
+             [trust]\nnative = [\"acme/gitfx\"]\n\
+             [trust.commands]\ngfx-info = \"acme/gitfx\"\n",
             pkg.display()
         ),
     )
@@ -1182,6 +1262,7 @@ use noeta_ext_abi::registry::{ExtFn, ExtModule, Extension, NativeOut, RetTy, Sig
 use noeta_ext_abi::{no_function_error, CommandCtx, ExtCommand, Host, NativeValue, ParsedArgs, StdError};
 
 const FX_FNS: &[ExtFn] = &[ExtFn {
+param_names: &[],
     name: "triple",
     params: &[SigType::Int],
     ret: RetTy::Concrete(SigType::Int),
@@ -1378,10 +1459,13 @@ pub fn triple(args: &[NativeValue]) -> Result<NativeOut, StdError> {
         .stderr(predicate::str::contains("imgfx-info"))
         .stdout(predicate::str::contains("registry-index native extension ok").not());
 
-    // 5. WITH `[trust].commands` the command-trust change recomposes and the command dispatches.
+    // 5. WITH a `[trust.commands]` binding the command-trust change recomposes and the command
+    //    dispatches under its bound local name (here the same as its exported name).
     std::fs::write(
         app.join("noeta.toml"),
-        manifest("\n[trust]\nnative = [\"acme/imgfx\"]\ncommands = [\"acme/imgfx\"]\n"),
+        manifest(
+            "\n[trust]\nnative = [\"acme/imgfx\"]\n[trust.commands]\nimgfx-info = \"acme/imgfx\"\n",
+        ),
     )
     .unwrap();
     composed_env(&mut lang())

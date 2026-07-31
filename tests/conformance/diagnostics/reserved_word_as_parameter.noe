@@ -1,0 +1,9 @@
+// A reserved word where a parameter's name belongs is reported as a reserved NAME (E0046), not as
+// a syntax surprise. `type_name` is the reflection primitive `type_name::<T>()`, so the parser
+// refuses it as a binder — and says so, instead of the older `expected an identifier`, which named
+// the one thing that was not the problem and sent the reader off to check their punctuation.
+// expect: error E0046 at 7:9
+// expect: exit 1
+fn look(type_name: string): string {
+    return "x"
+}

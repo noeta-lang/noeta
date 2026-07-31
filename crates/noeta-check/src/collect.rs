@@ -13,12 +13,26 @@ impl Checker {
     /// and **user-type** imports (everything else → [`Self::types`]). The extern-type case is tried
     /// before the selective-function case: `use std.id.Uuid` names a *type* in the `id` unit, not a
     /// function, so it must not fall into the "module has no function" error.
+    /// Record `local` as a name bindings in `span`'s own source may not shadow (E0059), described by
+    /// `what` — see [`Symbols::source_statics`] for why the index is per-source.
+    fn note_static(&mut self, span: Span, local: &str, what: &'static str) {
+        self.symbols
+            .source_statics
+            .entry(span.source)
+            .or_default()
+            .insert(local.to_string(), what);
+    }
+
     pub(crate) fn collect_imports(&mut self, program: &Program) {
         use noeta_ext_abi::registry::UseKind;
         for stmt in &program.stmts {
-            let Stmt::Use { path, names, .. } = stmt else {
+            let Stmt::Use {
+                path, names, span, ..
+            } = stmt
+            else {
                 continue;
             };
+            let use_span = *span;
             for name in names {
                 let local = name.local().to_string();
                 // One shared classifier decides what every `use` target binds — so the checker, the
@@ -26,7 +40,21 @@ impl Checker {
                 // namespace group, a member function, a type, or an error (the check/run divergence
                 // this closes). `UnknownUnderRoot` stays lenient in this slice (except the existing
                 // member-function-miss diagnostic); slice 2 tightens it to a hard E0019.
-                match self.reg().classify_use(path, &name.name) {
+                let kind = self.reg().classify_use(path, &name.name);
+                // Every `use` binds its local name **in this file**, so a later binding of the same
+                // name there is E0059 — and a binding of that name in some *other* module of the
+                // merged program is not this import's business. See `Symbols::source_statics`.
+                match &kind {
+                    UseKind::UnknownUnderRoot => {}
+                    UseKind::Module(_) | UseKind::Namespace(_) => {
+                        self.note_static(use_span, &local, "an imported module")
+                    }
+                    UseKind::MemberFn { .. } => {
+                        self.note_static(use_span, &local, "a top-level function")
+                    }
+                    _ => self.note_static(use_span, &local, "an imported type"),
+                }
+                match kind {
                     UseKind::Module(qualified) => {
                         // Expose the module's own extern types under the bound name, exactly as the
                         // namespace arm below does for a group. Without this, `use para.db` +
@@ -140,38 +168,68 @@ impl Checker {
     /// OWN (generic methods, poly-deferrals D3); the `GenericInfo` composes them — the class's
     /// parameters first (`class_params` many, seeded positionally by the receiver's type
     /// arguments), then the method's own (filled by turbofish/arguments/expectation).
-    fn collect_method_sig(
+    fn collect_method_sig(&mut self, type_name: &str, m: &FnDecl, type_params: &[TypeParam]) {
+        self.collect_method_sig_classified(type_name, m, type_params, false);
+    }
+
+    /// [`Self::collect_method_sig`] with control over the receiver classification.
+    ///
+    /// `trait_provided` says whether a **trait's interface** supplies this method — an `impl Trait`
+    /// block's own method, in-body or standalone. It changes what a *self-less* body means: an
+    /// inherent one is an associated function ([`Receiver::Associated`], `T.m(…)` only), a trait's
+    /// is reachable either way ([`Receiver::Either`]), because the trait's contract puts it in the
+    /// instance interface — `dyn Trait` dispatches it on a value — while its body needs no receiver.
+    /// A body that *does* read `self` is [`Receiver::Instance`] either way; the trait cannot conjure
+    /// a receiver for it, and calling such a method as `T.m(…)` aborts at run time.
+    ///
+    /// This flag used to be `classify_instance`, and `false` meant "record nothing" — leaving the
+    /// third state to the accident of two call sites disagreeing about the default. Recording it
+    /// makes the standalone spelling say what it means, and incidentally closes the case that
+    /// accident got wrong: a standalone impl whose body reads `self`, called as `T.m(…)`, checked
+    /// clean and then died with "no field `x` on unit".
+    fn collect_method_sig_classified(
         &mut self,
         type_name: &str,
         m: &FnDecl,
-        type_tps: &HashSet<String>,
-        type_generics: &[(String, Vec<BoundReq>)],
+        type_params: &[TypeParam],
+        trait_provided: bool,
     ) {
-        self.symbols.method_instance.insert(
-            (type_name.to_string(), m.name.clone()),
-            m.body.iter().any(|s| s.mentions("self")),
-        );
-        let own_generics: Vec<(String, Vec<BoundReq>)> = m
+        let uses_self = m.body.iter().any(|s| s.mentions("self"));
+        let receiver = if trait_provided {
+            Receiver::trait_method(uses_self)
+        } else {
+            Receiver::inherent(uses_self)
+        };
+        self.symbols
+            .method_receiver
+            .insert((type_name.to_string(), m.name.to_string()), receiver);
+        let xt = &self.imports.extern_types;
+        // The type's parameters, then the method's own LAYERED OVER them: a method `<T>` inside a
+        // class `<T>` shadows, so an annotation in this signature resolves to the METHOD's `T`.
+        // Both remain in `generic.params` below — they are different parameters with different
+        // identities, and each is seeded from its own channel (the receiver's type arguments for
+        // the class's, the turbofish/arguments for the method's).
+        let type_scope = param_scope(type_params, xt);
+        let scope = extend_param_scope(&type_scope, &m.type_params, xt);
+        let type_generics: Vec<(ParamRef, Vec<BoundReq>)> = type_params
+            .iter()
+            .map(|p| (param_ref(p), bound_reqs(&p.bounds, xt, &type_scope)))
+            .collect();
+        let own_generics: Vec<(ParamRef, Vec<BoundReq>)> = m
             .type_params
             .iter()
-            .map(|p| {
-                (
-                    p.name.clone(),
-                    bound_reqs(&p.bounds, &self.imports.extern_types),
-                )
-            })
+            .map(|p| (param_ref(p), bound_reqs(&p.bounds, xt, &scope)))
             .collect();
-        let mut tps = type_tps.clone();
-        tps.extend(m.type_params.iter().map(|p| p.name.clone()));
-        let raw_params: Vec<Type> = m
-            .params
-            .iter()
-            .map(|p| param_type(p, &self.imports.extern_types))
-            .collect();
+        // Erasure quantifies over BOTH lists — including a class parameter the method shadowed,
+        // which the signature cannot name but which costs nothing to include and would be a silent
+        // gap if the shadowing rule ever changed.
+        let mut tps = param_ids(type_params);
+        tps.extend(param_ids(&m.type_params));
+        let raw_params: Vec<Type> = m.params.iter().map(|p| param_type(p, xt, &scope)).collect();
         let raw_ret = async_return(
             m.ret
                 .as_ref()
-                .map(|t| from_ref_q(t, &self.imports.extern_types))
+                .map(|t| from_ref_q(t, xt, &scope))
                 .unwrap_or(Type::Unknown),
             m.is_async,
         );
@@ -183,13 +241,13 @@ impl Checker {
         let ret = erase_type_params(raw_ret.clone(), &tps);
         let generic =
             (!type_generics.is_empty() || !own_generics.is_empty()).then(|| GenericInfo {
-                params: type_generics.iter().cloned().chain(own_generics).collect(),
                 class_params: type_generics.len(),
+                params: type_generics.into_iter().chain(own_generics).collect(),
                 raw_params,
                 raw_ret,
             });
         self.symbols.methods.insert(
-            (type_name.to_string(), m.name.clone()),
+            (type_name.to_string(), m.name.to_string()),
             FnSig {
                 params,
                 param_names: m.params.iter().map(|p| p.name.clone()).collect(),
@@ -224,28 +282,52 @@ impl Checker {
         for stmt in &program.stmts {
             collect_nested_fn_names(stmt, true, &mut self.symbols.nested_fn_names);
         }
+        // Every top-level declaration, as a name bindings **in its own file** may not shadow
+        // (E0059). Under its *local* spelling: the loader qualifies a package module's declarations
+        // (`desk.tools.find_order`), and what a binding could collide with is the last segment, which
+        // is how the source spells it. Recorded after the imports pass so a declaration's own word
+        // wins over an import's for the same name.
+        for stmt in &program.stmts {
+            let (name, span, what) = match stmt {
+                Stmt::Fn(d) => (d.name.as_str(), d.span, "a top-level function"),
+                Stmt::Struct(d) => (d.name.as_str(), d.span, "a type"),
+                Stmt::Class(d) => (d.name.as_str(), d.span, "a type"),
+                Stmt::Enum(d) => (d.name.as_str(), d.span, "a type"),
+                _ => continue,
+            };
+            let local = name.rsplit('.').next().unwrap_or(name).to_string();
+            self.note_static(span, &local, what);
+        }
         for stmt in &program.stmts {
             match stmt {
                 Stmt::Struct(r) => {
+                    // Field types resolve against the type's OWN parameters, so a `T`-typed field
+                    // is a `Type::Param` a later instantiation substitutes by identity.
+                    let scope = param_scope(&r.type_params, &self.imports.extern_types);
                     let fields = r
                         .fields
                         .iter()
                         .map(|f| {
                             (
                                 f.name.clone(),
-                                field_type(&f.ty, &self.imports.extern_types),
+                                field_type(&f.ty, &self.imports.extern_types, &scope),
                             )
                         })
                         .collect();
-                    self.symbols.records.insert(r.name.clone(), fields);
+                    self.symbols.records.insert(r.name.to_string(), fields);
+                    // Where this type was declared — the span whose `SourceId` the package orphan
+                    // rule resolves the type's package from.
+                    self.symbols
+                        .type_decl_spans
+                        .insert(r.name.to_string(), r.name_span);
                     if let Some(directive) = &r.decorators.packed {
-                        self.symbols.packed_structs.insert(r.name.clone());
+                        self.symbols.packed_structs.insert(r.name.to_string());
                         if directive.layout == noeta_ast::PackedLayout::Column {
-                            self.symbols.column_structs.insert(r.name.clone());
+                            self.symbols.column_structs.insert(r.name.to_string());
                         }
                     }
                     if r.decorators.validated.is_some() {
-                        self.symbols.validated_types.insert(r.name.clone());
+                        self.symbols.validated_types.insert(r.name.to_string());
                     }
                     // A struct's `mut` fields are assignable via `x.f = v` (value-semantic, so the
                     // write is a copy-on-write rebind). Register them exactly as for a class; the
@@ -257,75 +339,76 @@ impl Checker {
                         .map(|f| f.name.clone())
                         .collect();
                     if !muts.is_empty() {
-                        self.symbols.mut_fields.insert(r.name.clone(), muts);
+                        self.symbols.mut_fields.insert(r.name.to_string(), muts);
                     }
-                    self.symbols.types.insert(r.name.clone());
+                    self.symbols.types.insert(r.name.to_string());
                     self.symbols
                         .type_kinds
-                        .insert(r.name.clone(), noeta_types::TypeKind::Struct);
-                    self.record_optional_fields(&r.name, &r.fields);
+                        .insert(r.name.to_string(), noeta_types::TypeKind::Struct);
+                    self.record_optional_fields(r.name.as_str(), &r.fields);
                     // A struct satisfies a trait it `@derive`s or in-body `impl`s — the same
                     // chain a class/enum records. (The impls half was missing here: a struct's
                     // `impl Comparable` never registered, so bounds falsely rejected it.)
                     self.record_trait_impls(
-                        &r.name,
+                        r.name.as_str(),
                         r.decorators
                             .derives
                             .iter()
                             .map(|d| d.name.as_str())
                             .chain(r.impls.iter().map(|b| b.trait_name.as_str())),
                     );
-                    self.record_derived(&r.name, &r.decorators.derives);
-                    self.record_from_impls(&r.name, &r.impls);
-                    self.record_attribute(&r.name, r.decorators.attribute.as_deref());
+                    self.record_derived(r.name.as_str(), &r.decorators.derives);
+                    self.record_from_impls(r.name.as_str(), &r.impls);
+                    self.record_attribute(r.name.as_str(), r.decorators.attribute.as_deref());
                     self.symbols.generic_types.insert(
-                        r.name.clone(),
-                        r.type_params.iter().map(|p| p.name.clone()).collect(),
+                        r.name.to_string(),
+                        r.type_params.iter().map(param_ref).collect(),
                     );
                     // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
                     self.symbols
                         .type_params
-                        .insert(r.name.clone(), r.type_params.clone());
+                        .insert(r.name.to_string(), r.type_params.clone());
                     // Record each struct method's signature + instance classification, exactly as
                     // for a class (this closed a long-standing gap: struct associated calls —
                     // `B.new(1)` — previously typed as a hole because struct methods were never
                     // registered; prelude-redesign EX.2 needs the classification for all kinds).
-                    let tps: HashSet<String> =
-                        r.type_params.iter().map(|p| p.name.clone()).collect();
-                    let struct_generics: Vec<(String, Vec<BoundReq>)> = r
-                        .type_params
-                        .iter()
-                        .map(|p| {
-                            (
-                                p.name.clone(),
-                                bound_reqs(&p.bounds, &self.imports.extern_types),
-                            )
-                        })
-                        .collect();
-                    let methods: Vec<&FnDecl> = r
-                        .methods
-                        .iter()
-                        .chain(r.impls.iter().flat_map(|b| b.methods.iter()))
-                        .collect();
-                    for m in methods {
-                        self.collect_method_sig(&r.name, m, &tps, &struct_generics);
+                    // Inherent methods classify from their bodies; an `impl Trait { … }` block's do
+                    // not (see `collect_method_sig_classified`). Registration order matches the
+                    // flattened walk this replaces — inherent first, so a same-named impl method
+                    // still wins.
+                    for m in &r.methods {
+                        self.collect_method_sig(r.name.as_str(), m, &r.type_params);
                     }
-                    self.bake_impl_assoc(&r.name, &r.impls, &tps, &struct_generics);
+                    for (m, provided) in impl_block_methods(&r.impls) {
+                        self.collect_method_sig_classified(
+                            r.name.as_str(),
+                            m,
+                            &r.type_params,
+                            provided,
+                        );
+                    }
+                    self.bake_impl_assoc(r.name.as_str(), &r.impls, &r.type_params);
                 }
                 Stmt::Class(c) => {
+                    // Field types resolve against the type's OWN parameters, so a `T`-typed field
+                    // is a `Type::Param` a later instantiation substitutes by identity.
+                    let scope = param_scope(&c.type_params, &self.imports.extern_types);
                     let fields = c
                         .fields
                         .iter()
                         .map(|f| {
                             (
                                 f.name.clone(),
-                                field_type(&f.ty, &self.imports.extern_types),
+                                field_type(&f.ty, &self.imports.extern_types, &scope),
                             )
                         })
                         .collect();
-                    self.symbols.records.insert(c.name.clone(), fields);
+                    self.symbols.records.insert(c.name.to_string(), fields);
+                    self.symbols
+                        .type_decl_spans
+                        .insert(c.name.to_string(), c.name_span);
                     if c.decorators.validated.is_some() {
-                        self.symbols.validated_types.insert(c.name.clone());
+                        self.symbols.validated_types.insert(c.name.to_string());
                     }
                     let muts: HashSet<String> = c
                         .fields
@@ -334,7 +417,7 @@ impl Checker {
                         .map(|f| f.name.clone())
                         .collect();
                     if !muts.is_empty() {
-                        self.symbols.mut_fields.insert(c.name.clone(), muts);
+                        self.symbols.mut_fields.insert(c.name.to_string(), muts);
                     }
                     // Class fields default **private**; only those declared `pub` are public
                     // (object-model slice 2d). Struct fields are always public, so structs never
@@ -346,155 +429,151 @@ impl Checker {
                         .map(|f| f.name.clone())
                         .collect();
                     if !private.is_empty() {
-                        self.symbols.private_fields.insert(c.name.clone(), private);
+                        self.symbols
+                            .private_fields
+                            .insert(c.name.to_string(), private);
                     }
-                    self.symbols.types.insert(c.name.clone());
+                    self.symbols.types.insert(c.name.to_string());
                     self.symbols
                         .type_kinds
-                        .insert(c.name.clone(), noeta_types::TypeKind::Class);
+                        .insert(c.name.to_string(), noeta_types::TypeKind::Class);
                     // A class with a `destruct { ... }` block seeds destruct-reachability (Phase 3.2b).
                     if c.destructor.is_some() {
-                        self.symbols.destructor_classes.insert(c.name.clone());
+                        self.symbols.destructor_classes.insert(c.name.to_string());
                     }
                     // A class satisfies a trait it `@derive`s or `impl`s; record both for bound
                     // enforcement (the `impl`/`derive` *names* are validated elsewhere).
                     self.record_trait_impls(
-                        &c.name,
+                        c.name.as_str(),
                         c.decorators
                             .derives
                             .iter()
                             .map(|d| d.name.as_str())
                             .chain(c.impls.iter().map(|b| b.trait_name.as_str())),
                     );
-                    self.record_derived(&c.name, &c.decorators.derives);
-                    self.record_from_impls(&c.name, &c.impls);
+                    self.record_derived(c.name.as_str(), &c.decorators.derives);
+                    self.record_from_impls(c.name.as_str(), &c.impls);
                     // Record each method's signature (class methods and impl-block methods alike),
                     // so `obj.method(...)` resolves to a concrete type and its arguments are
                     // checked. The class's generic parameters are erased to `dyn` (erased at
                     // runtime, they accept any argument).
-                    let tps: HashSet<String> =
-                        c.type_params.iter().map(|p| p.name.clone()).collect();
-                    // A generic class's type parameters + bounds, shared by every method's
-                    // `GenericInfo` so a call instantiates the class's `T` from the arguments and
-                    // enforces its bounds (S4.3b) — the class-level mirror of a generic function.
-                    let class_generics: Vec<(String, Vec<BoundReq>)> = c
-                        .type_params
-                        .iter()
-                        .map(|p| {
-                            (
-                                p.name.clone(),
-                                bound_reqs(&p.bounds, &self.imports.extern_types),
-                            )
-                        })
-                        .collect();
                     self.symbols.generic_types.insert(
-                        c.name.clone(),
-                        c.type_params.iter().map(|p| p.name.clone()).collect(),
+                        c.name.to_string(),
+                        c.type_params.iter().map(param_ref).collect(),
                     );
                     // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
                     self.symbols
                         .type_params
-                        .insert(c.name.clone(), c.type_params.clone());
-                    let methods: Vec<&FnDecl> = c
-                        .methods
-                        .iter()
-                        .chain(c.impls.iter().flat_map(|b| b.methods.iter()))
-                        .collect();
-                    for m in methods {
-                        self.collect_method_sig(&c.name, m, &tps, &class_generics);
+                        .insert(c.name.to_string(), c.type_params.clone());
+                    for m in &c.methods {
+                        self.collect_method_sig(c.name.as_str(), m, &c.type_params);
                     }
-                    self.bake_impl_assoc(&c.name, &c.impls, &tps, &class_generics);
+                    for (m, provided) in impl_block_methods(&c.impls) {
+                        self.collect_method_sig_classified(
+                            c.name.as_str(),
+                            m,
+                            &c.type_params,
+                            provided,
+                        );
+                    }
+                    self.bake_impl_assoc(c.name.as_str(), &c.impls, &c.type_params);
                 }
                 Stmt::Enum(e) => {
+                    // As for a struct's fields: a payload naming the enum's `T` is a parameter.
+                    let scope = param_scope(&e.type_params, &self.imports.extern_types);
                     let variants = e
                         .variants
                         .iter()
                         .map(|v| VariantInfo {
                             name: v.name.clone(),
-                            // A variant's **accurate** payload types (via `variant_field_type`, R2b),
-                            // exactly as a struct's field types live in `self.symbols.records`: one source of
-                            // truth for enum-construction type-argument inference **and** the `Send`
-                            // classifier **and** destructor-relevance. (Previously `field_type(&p.ty)`,
-                            // which is `Unknown` for a positional payload whose type parses into the
-                            // `Param`'s *name* — an `Unknown` that silently classified an enum wrapping
-                            // a `class` as `Send`, unlike the equivalent struct.)
+                            // A variant's payload types, read from the annotation exactly as a
+                            // struct's field types are (R2b): one source of truth for
+                            // enum-construction type-argument inference, the `Send` classifier, and
+                            // destructor-relevance. This needed a `variant_field_type` helper that
+                            // rebuilt a positional payload's type out of the `Param`'s *name*; the
+                            // parser puts it in `ty` now, so the plain field rule reaches both forms.
                             fields: v
                                 .fields
                                 .iter()
-                                .map(|v| variant_field_type(v, &self.imports.extern_types))
+                                .map(|v| field_type(&v.ty, &self.imports.extern_types, &scope))
                                 .collect(),
+                            // A backed variant's literal, through the one `fold_const_expr` the
+                            // reflection manifest also folds with — so the backing a decode recipe
+                            // matches on and the backing `variants_of` reports are the same value,
+                            // not two independent readings of the same declaration.
+                            backing: v
+                                .backed_value
+                                .as_ref()
+                                .and_then(noeta_ast::reflect::fold_const_expr),
                         })
                         .collect();
-                    self.symbols.enums.insert(e.name.clone(), variants);
-                    self.symbols.types.insert(e.name.clone());
+                    self.symbols.enums.insert(e.name.to_string(), variants);
+                    self.symbols.types.insert(e.name.to_string());
+                    self.symbols
+                        .type_decl_spans
+                        .insert(e.name.to_string(), e.name_span);
                     self.symbols
                         .type_kinds
-                        .insert(e.name.clone(), noeta_types::TypeKind::Enum);
+                        .insert(e.name.to_string(), noeta_types::TypeKind::Enum);
                     // `@semantic` makes the enum role-eligible (its fieldless variants may be named
                     // by `@role(Enum.Variant)`); recorded for the post-collect role-validation pass.
                     if e.decorators.semantic.is_some() {
-                        self.symbols.semantic_enums.insert(e.name.clone());
+                        self.symbols.semantic_enums.insert(e.name.to_string());
                     }
                     // An enum satisfies a trait it `@derive`s or `impl`s (its in-body blocks are
                     // uniform with a class's — object-model slice 3); record both so an operator
                     // trait (`impl Add`, `impl Comparable`, …) is accepted on an enum operand.
                     self.record_trait_impls(
-                        &e.name,
+                        e.name.as_str(),
                         e.decorators
                             .derives
                             .iter()
                             .map(|d| d.name.as_str())
                             .chain(e.impls.iter().map(|b| b.trait_name.as_str())),
                     );
-                    self.record_derived(&e.name, &e.decorators.derives);
-                    self.record_from_impls(&e.name, &e.impls);
+                    self.record_derived(e.name.as_str(), &e.decorators.derives);
+                    self.record_from_impls(e.name.as_str(), &e.impls);
                     self.symbols.generic_types.insert(
-                        e.name.clone(),
-                        e.type_params.iter().map(|p| p.name.clone()).collect(),
+                        e.name.to_string(),
+                        e.type_params.iter().map(param_ref).collect(),
                     );
                     // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
                     self.symbols
                         .type_params
-                        .insert(e.name.clone(), e.type_params.clone());
+                        .insert(e.name.to_string(), e.type_params.clone());
                     // Record each enum method's signature (inherent + impl-block, the unified body —
                     // object-model slice 3) under `(Enum, method)`, exactly like a class's, so an
                     // instance call `status.label()` and an associated call `Status.parse(s)` resolve
                     // to a concrete type. The enum's generic parameters are erased to `dyn`.
-                    let tps: HashSet<String> =
-                        e.type_params.iter().map(|p| p.name.clone()).collect();
-                    let enum_generics: Vec<(String, Vec<BoundReq>)> = e
-                        .type_params
-                        .iter()
-                        .map(|p| {
-                            (
-                                p.name.clone(),
-                                bound_reqs(&p.bounds, &self.imports.extern_types),
-                            )
-                        })
-                        .collect();
                     for m in &e.methods {
-                        self.collect_method_sig(&e.name, m, &tps, &enum_generics);
+                        self.collect_method_sig(e.name.as_str(), m, &e.type_params);
                     }
-                    self.bake_impl_assoc(&e.name, &e.impls, &tps, &enum_generics);
+                    for (m, provided) in impl_block_methods(&e.impls) {
+                        self.collect_method_sig_classified(
+                            e.name.as_str(),
+                            m,
+                            &e.type_params,
+                            provided,
+                        );
+                    }
+                    self.bake_impl_assoc(e.name.as_str(), &e.impls, &e.type_params);
                 }
                 Stmt::Fn(f) => {
                     // The registered signature is **erased** (generic parameters → `dyn`): the
                     // arity check and the non-generic fast path use it. A generic function also
                     // carries un-erased `GenericInfo` so a call site can instantiate it precisely
                     // and enforce its bounds (S4.2); a non-generic function carries `None`.
-                    let tps: HashSet<String> =
-                        f.type_params.iter().map(|p| p.name.clone()).collect();
-                    let raw_params: Vec<Type> = f
-                        .params
-                        .iter()
-                        .map(|p| param_type(p, &self.imports.extern_types))
-                        .collect();
+                    let xt = &self.imports.extern_types;
+                    let scope = param_scope(&f.type_params, xt);
+                    let tps = param_ids(&f.type_params);
+                    let raw_params: Vec<Type> =
+                        f.params.iter().map(|p| param_type(p, xt, &scope)).collect();
                     // An `async fn f(): T` call produces `Future<T>` (Track A); wrap before erasure so
                     // the erased signature and the generic instantiation both carry the future.
                     let raw_ret = async_return(
                         f.ret
                             .as_ref()
-                            .map(|t| from_ref_q(t, &self.imports.extern_types))
+                            .map(|t| from_ref_q(t, xt, &scope))
                             .unwrap_or(Type::Unknown),
                         f.is_async,
                     );
@@ -508,19 +587,14 @@ impl Checker {
                         params: f
                             .type_params
                             .iter()
-                            .map(|p| {
-                                (
-                                    p.name.clone(),
-                                    bound_reqs(&p.bounds, &self.imports.extern_types),
-                                )
-                            })
+                            .map(|p| (param_ref(p), bound_reqs(&p.bounds, xt, &scope)))
                             .collect(),
                         class_params: 0,
                         raw_params,
                         raw_ret,
                     });
                     self.symbols.functions.insert(
-                        f.name.clone(),
+                        f.name.to_string(),
                         FnSig {
                             params,
                             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
@@ -541,14 +615,14 @@ impl Checker {
                 // counts it. Validity (orphan rule, trait, body) is checked in pass 2.
                 Stmt::Impl(decl) => {
                     self.record_trait_impls(
-                        &decl.target,
+                        decl.target.as_str(),
                         std::iter::once(decl.trait_name.as_str()),
                     );
                     self.symbols
                         .standalone_impls
-                        .entry(decl.target.clone())
+                        .entry(decl.target.to_string())
                         .or_default()
-                        .push((decl.trait_name.clone(), decl.trait_span));
+                        .push((decl.trait_name.to_string(), decl.trait_span));
                 }
                 // A user-defined trait (L1) is registered up front so forward references (an `impl`
                 // or `<T: Trait>` bound textually above the `trait`) resolve. A duplicate declaration
@@ -556,7 +630,7 @@ impl Checker {
                 Stmt::Trait(t) => {
                     self.symbols
                         .user_traits
-                        .entry(t.name.clone())
+                        .entry(t.name.to_string())
                         .or_insert_with(|| t.clone());
                 }
                 _ => {}
@@ -576,23 +650,28 @@ impl Checker {
         for stmt in &program.stmts {
             let (type_name, impls, derives): (&str, &[noeta_ast::ImplBlock], &[DeriveSpec]) =
                 match stmt {
-                    Stmt::Impl(decl) if self.symbols.user_traits.contains_key(&decl.trait_name) => {
+                    Stmt::Impl(decl)
+                        if self
+                            .symbols
+                            .user_traits
+                            .contains_key(decl.trait_name.as_str()) =>
+                    {
                         let args: Vec<Type> = decl
                             .trait_args
                             .iter()
-                            .map(|t| from_ref_q(t, &self.imports.extern_types))
+                            .map(|t| from_ref_q(t, &self.imports.extern_types, &ParamScope::new()))
                             .collect();
                         self.symbols
                             .user_trait_impls
-                            .entry(decl.target.clone())
+                            .entry(decl.target.to_string())
                             .or_default()
-                            .entry(decl.trait_name.clone())
+                            .entry(decl.trait_name.to_string())
                             .or_insert(args);
                         continue;
                     }
-                    Stmt::Struct(d) => (&d.name, &d.impls, &d.decorators.derives),
-                    Stmt::Class(d) => (&d.name, &d.impls, &d.decorators.derives),
-                    Stmt::Enum(d) => (&d.name, &d.impls, &d.decorators.derives),
+                    Stmt::Struct(d) => (d.name.as_str(), &d.impls, &d.decorators.derives),
+                    Stmt::Class(d) => (d.name.as_str(), &d.impls, &d.decorators.derives),
+                    Stmt::Enum(d) => (d.name.as_str(), &d.impls, &d.decorators.derives),
                     _ => continue,
                 };
             for (trait_name, trait_args) in impls
@@ -600,16 +679,16 @@ impl Checker {
                 .map(|b| (&b.trait_name, b.trait_args.as_slice()))
                 .chain(derives.iter().map(|d| (&d.name, d.args.as_slice())))
             {
-                if self.symbols.user_traits.contains_key(trait_name) {
+                if self.symbols.user_traits.contains_key(trait_name.as_str()) {
                     let args: Vec<Type> = trait_args
                         .iter()
-                        .map(|t| from_ref_q(t, &self.imports.extern_types))
+                        .map(|t| from_ref_q(t, &self.imports.extern_types, &ParamScope::new()))
                         .collect();
                     self.symbols
                         .user_trait_impls
                         .entry(type_name.to_string())
                         .or_default()
-                        .entry(trait_name.clone())
+                        .entry(trait_name.to_string())
                         .or_insert(args);
                 }
             }
@@ -620,22 +699,36 @@ impl Checker {
         // projecting `Self::Name` in a method signature to the implementor's concrete type.
         for stmt in &program.stmts {
             match stmt {
-                Stmt::Impl(d) => {
-                    self.record_assoc_bindings(&d.target, &d.trait_name, &d.assoc_bindings)
-                }
+                Stmt::Impl(d) => self.record_assoc_bindings(
+                    d.target.as_str(),
+                    d.trait_name.as_str(),
+                    &d.assoc_bindings,
+                ),
                 Stmt::Struct(d) => {
                     for b in &d.impls {
-                        self.record_assoc_bindings(&d.name, &b.trait_name, &b.assoc_bindings);
+                        self.record_assoc_bindings(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.assoc_bindings,
+                        );
                     }
                 }
                 Stmt::Class(d) => {
                     for b in &d.impls {
-                        self.record_assoc_bindings(&d.name, &b.trait_name, &b.assoc_bindings);
+                        self.record_assoc_bindings(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.assoc_bindings,
+                        );
                     }
                 }
                 Stmt::Enum(d) => {
                     for b in &d.impls {
-                        self.record_assoc_bindings(&d.name, &b.trait_name, &b.assoc_bindings);
+                        self.record_assoc_bindings(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.assoc_bindings,
+                        );
                     }
                 }
                 _ => {}
@@ -655,9 +748,19 @@ impl Checker {
                 &[noeta_ast::FnDecl],
                 &[DeriveSpec],
             ) = match stmt {
-                Stmt::Struct(d) => (&d.name, &d.fields, &d.methods, &d.decorators.derives),
-                Stmt::Class(d) => (&d.name, &d.fields, &d.methods, &d.decorators.derives),
-                Stmt::Enum(d) => (&d.name, &[], &d.methods, &d.decorators.derives),
+                Stmt::Struct(d) => (
+                    d.name.as_str(),
+                    &d.fields,
+                    &d.methods,
+                    &d.decorators.derives,
+                ),
+                Stmt::Class(d) => (
+                    d.name.as_str(),
+                    &d.fields,
+                    &d.methods,
+                    &d.decorators.derives,
+                ),
+                Stmt::Enum(d) => (d.name.as_str(), &[], &d.methods, &d.decorators.derives),
                 _ => continue,
             };
             // The ONE cascade (`noeta_ast::derive::plan_derive`), which the backends' hoist also
@@ -679,6 +782,56 @@ impl Checker {
             let type_name = type_name.to_string();
             for m in plans.iter().flatten() {
                 self.register_synth_method(&type_name, m);
+            }
+        }
+        // A STANDALONE `impl Trait for T { … }`'s method signatures. The in-body `impl` half was
+        // already folded into each type's own method walk above (`.impls` chained into `methods`);
+        // this closes the other half, which the surface has carried unfinished since standalone
+        // impls first parsed ("runtime dispatch … is a later slice" — dispatch landed, this did not).
+        //
+        // Without it the methods dispatch correctly at runtime (the loader hoists them onto the
+        // target) while the checker never learns their signatures, so the call typed as a hole and
+        // NOTHING was checked: `d.same("nope")` against `fn same(other: int): bool` checked clean,
+        // ran, and printed `false` — a wrong answer rather than a diagnostic.
+        //
+        // Placement is load-bearing. AFTER the type walk, so `symbols.type_params` already carries
+        // the target's parameters (stored there for exactly this purpose). BEFORE the UT5
+        // default-fallback below, whose `register_synth_method` skips an already-registered key —
+        // so a method the impl really provides wins over the trait's default.
+        for stmt in &program.stmts {
+            let Stmt::Impl(d) = stmt else { continue };
+            let type_params = self
+                .symbols
+                .type_params
+                .get(d.target.as_str())
+                .cloned()
+                .unwrap_or_default();
+            // Mirror the in-body path's `Self::Name` projection (slice 1a, `bake_impl_assoc`): a
+            // signature written against an associated type resolves to this impl's binding for it,
+            // so a concrete receiver types against the implementor's type rather than a hole.
+            let assoc: HashMap<&str, &TypeRef> = d
+                .assoc_bindings
+                .iter()
+                .map(|(n, t)| (n.as_str(), t))
+                .collect();
+            let provided = trait_supplies_instance_interface(d.trait_name.as_str());
+            for m in &d.methods {
+                if assoc.is_empty() {
+                    self.collect_method_sig_classified(
+                        d.target.as_str(),
+                        m,
+                        &type_params,
+                        provided,
+                    );
+                } else {
+                    let resolved = subst_self_assoc_in_fn(m, &assoc);
+                    self.collect_method_sig_classified(
+                        d.target.as_str(),
+                        &resolved,
+                        &type_params,
+                        provided,
+                    );
+                }
             }
         }
         // GENERIC-trait impls (in-body and standalone) register their INSTANTIATED omitted
@@ -709,21 +862,41 @@ impl Checker {
             match stmt {
                 Stmt::Struct(d) => {
                     for b in &d.impls {
-                        register(&d.name, &b.trait_name, &b.trait_args, &b.methods);
+                        register(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.trait_args,
+                            &b.methods,
+                        );
                     }
                 }
                 Stmt::Class(d) => {
                     for b in &d.impls {
-                        register(&d.name, &b.trait_name, &b.trait_args, &b.methods);
+                        register(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.trait_args,
+                            &b.methods,
+                        );
                     }
                 }
                 Stmt::Enum(d) => {
                     for b in &d.impls {
-                        register(&d.name, &b.trait_name, &b.trait_args, &b.methods);
+                        register(
+                            d.name.as_str(),
+                            b.trait_name.as_str(),
+                            &b.trait_args,
+                            &b.methods,
+                        );
                     }
                 }
                 Stmt::Impl(d) => {
-                    register(&d.target, &d.trait_name, &d.trait_args, &d.methods);
+                    register(
+                        d.target.as_str(),
+                        d.trait_name.as_str(),
+                        &d.trait_args,
+                        &d.methods,
+                    );
                 }
                 _ => {}
             }
@@ -787,9 +960,9 @@ impl Checker {
                         decl.trait_span,
                     )]
                 }
-                Stmt::Struct(d) => bundle_derive_candidates(&d.name, &d.decorators.derives),
-                Stmt::Class(d) => bundle_derive_candidates(&d.name, &d.decorators.derives),
-                Stmt::Enum(d) => bundle_derive_candidates(&d.name, &d.decorators.derives),
+                Stmt::Struct(d) => bundle_derive_candidates(d.name.as_str(), &d.decorators.derives),
+                Stmt::Class(d) => bundle_derive_candidates(d.name.as_str(), &d.decorators.derives),
+                Stmt::Enum(d) => bundle_derive_candidates(d.name.as_str(), &d.decorators.derives),
                 _ => continue,
             };
             for (target, trait_name, span) in candidates {
@@ -846,6 +1019,13 @@ impl Checker {
     /// Record which of a type's `fields` carry a default (`name: T = …`) — and so are **optional** in
     /// an attribute construction (object-model slice 6i). Used by the construction gate to omit a
     /// defaulted field without an E0009.
+    ///
+    /// The same walk records each default's **decode** classification (json-defaults) into
+    /// `symbols.field_defaults`, so the one "this field declared a default" reading feeds both the
+    /// construction gate and the JSON decode recipe. The two tables differ only where they must: a
+    /// construction runs the default's thunk, so *any* default makes the field optional; a decode can
+    /// only bake a literal, so a non-literal default is recorded as
+    /// [`noeta_ext_abi::FieldDefault::Dynamic`] (see [`Checker::field_default_recipe`]).
     pub(crate) fn record_optional_fields(&mut self, type_name: &str, fields: &[FieldDecl]) {
         let optional: HashSet<String> = fields
             .iter()
@@ -856,6 +1036,16 @@ impl Checker {
             self.symbols
                 .attribute_optional_fields
                 .insert(type_name.to_string(), optional);
+        }
+        let decode_defaults: HashMap<String, noeta_ext_abi::FieldDefault> = fields
+            .iter()
+            .map(|f| (f.name.clone(), Checker::field_default_recipe(f)))
+            .filter(|(_, d)| *d != noeta_ext_abi::FieldDefault::Required)
+            .collect();
+        if !decode_defaults.is_empty() {
+            self.symbols
+                .field_defaults
+                .insert(type_name.to_string(), decode_defaults);
         }
     }
 
@@ -873,25 +1063,33 @@ impl Checker {
     /// fallback and derive bridging share (the body itself is materialized by the backends'
     /// hoist; the checker needs the signature so member calls resolve and type).
     fn register_synth_method(&mut self, type_name: &str, m: &noeta_ast::FnDecl) {
-        let key = (type_name.to_string(), m.name.clone());
+        let key = (type_name.to_string(), m.name.to_string());
         if self.symbols.methods.contains_key(&key) {
             return;
         }
+        // Hoisted from a trait, whose methods declare no type parameters of their own (E0058) —
+        // so there is nothing here for a scope to resolve.
+        let scope = param_scope(&m.type_params, &self.imports.extern_types);
         let params: Vec<Type> = m
             .params
             .iter()
-            .map(|p| param_type(p, &self.imports.extern_types))
+            .map(|p| param_type(p, &self.imports.extern_types, &scope))
             .collect();
         let ret = async_return(
             m.ret
                 .as_ref()
-                .map(|t| from_ref_q(t, &self.imports.extern_types))
+                .map(|t| from_ref_q(t, &self.imports.extern_types, &scope))
                 .unwrap_or(Type::Unknown),
             m.is_async,
         );
-        self.symbols
-            .method_instance
-            .insert(key.clone(), m.body.iter().any(|s| s.mentions("self")));
+        // Every method reaching here comes from a trait: a hoisted UT5 default, or a `@derive`
+        // plan's bridge/forward. So a self-less one is `Either` like any other trait method — an
+        // omitted default is reachable as `T.m()` (the documented UT5 spelling) *and* on a value,
+        // exactly as the same body written out in the `impl` block would be.
+        self.symbols.method_receiver.insert(
+            key.clone(),
+            Receiver::trait_method(m.body.iter().any(|s| s.mentions("self"))),
+        );
         self.symbols.methods.insert(
             key,
             FnSig {
@@ -925,12 +1123,15 @@ impl Checker {
             if let Some(default) = &a.default {
                 map.insert(
                     a.name.clone(),
-                    from_ref_q(default, &self.imports.extern_types),
+                    from_ref_q(default, &self.imports.extern_types, &ParamScope::new()),
                 );
             }
         }
         for (name, ty) in bindings {
-            map.insert(name.clone(), from_ref_q(ty, &self.imports.extern_types));
+            map.insert(
+                name.clone(),
+                from_ref_q(ty, &self.imports.extern_types, &ParamScope::new()),
+            );
         }
         self.symbols
             .trait_assoc
@@ -942,13 +1143,7 @@ impl Checker {
     /// concrete receiver types against the implementor's associated type. Overwrites the flattened
     /// (unresolved) registration from the main method walk. A block with no bindings is skipped (there
     /// is nothing to resolve).
-    fn bake_impl_assoc(
-        &mut self,
-        type_name: &str,
-        impls: &[ImplBlock],
-        type_tps: &HashSet<String>,
-        type_generics: &[(String, Vec<BoundReq>)],
-    ) {
+    fn bake_impl_assoc(&mut self, type_name: &str, impls: &[ImplBlock], type_params: &[TypeParam]) {
         for b in impls {
             if b.assoc_bindings.is_empty() {
                 continue;
@@ -958,9 +1153,10 @@ impl Checker {
                 .iter()
                 .map(|(n, t)| (n.as_str(), t))
                 .collect();
+            let provided = trait_supplies_instance_interface(b.trait_name.as_str());
             for m in &b.methods {
                 let resolved = subst_self_assoc_in_fn(m, &map);
-                self.collect_method_sig(type_name, &resolved, type_tps, type_generics);
+                self.collect_method_sig_classified(type_name, &resolved, type_params, provided);
             }
         }
     }
@@ -979,7 +1175,7 @@ impl Checker {
             .or_default();
         for t in derives
             .iter()
-            .filter_map(|d| BuiltinTrait::from_name(&d.name))
+            .filter_map(|d| BuiltinTrait::from_name(d.name.as_str()))
         {
             entry.insert(t);
         }
@@ -991,7 +1187,7 @@ impl Checker {
                     .via_derives
                     .entry(name.to_string())
                     .or_default()
-                    .push((d.name.clone(), via.clone()));
+                    .push((d.name.to_string(), via.clone()));
             }
         }
     }
@@ -1010,30 +1206,30 @@ impl Checker {
         let mut ast_provided: HashSet<(String, String)> = HashSet::new();
         let mut note = |ty: &str, methods: &[FnDecl]| {
             for m in methods {
-                ast_provided.insert((ty.to_string(), m.name.clone()));
+                ast_provided.insert((ty.to_string(), m.name.to_string()));
             }
         };
         for stmt in &program.stmts {
             match stmt {
                 Stmt::Struct(d) => {
-                    note(&d.name, &d.methods);
+                    note(d.name.as_str(), &d.methods);
                     for b in &d.impls {
-                        note(&d.name, &b.methods);
+                        note(d.name.as_str(), &b.methods);
                     }
                 }
                 Stmt::Class(d) => {
-                    note(&d.name, &d.methods);
+                    note(d.name.as_str(), &d.methods);
                     for b in &d.impls {
-                        note(&d.name, &b.methods);
+                        note(d.name.as_str(), &b.methods);
                     }
                 }
                 Stmt::Enum(d) => {
-                    note(&d.name, &d.methods);
+                    note(d.name.as_str(), &d.methods);
                     for b in &d.impls {
-                        note(&d.name, &b.methods);
+                        note(d.name.as_str(), &b.methods);
                     }
                 }
-                Stmt::Impl(d) => note(&d.target, &d.methods),
+                Stmt::Impl(d) => note(d.target.as_str(), &d.methods),
                 _ => {}
             }
         }
@@ -1083,7 +1279,11 @@ impl Checker {
     pub(crate) fn record_from_impls(&mut self, target: &str, impls: &[noeta_ast::ImplBlock]) {
         for block in impls {
             if block.trait_name == BuiltinTrait::From.name() && block.trait_args.len() == 1 {
-                let source = from_ref_q(&block.trait_args[0], &self.imports.extern_types);
+                let source = from_ref_q(
+                    &block.trait_args[0],
+                    &self.imports.extern_types,
+                    &ParamScope::new(),
+                );
                 self.symbols
                     .from_impls
                     .entry(target.to_string())
@@ -1156,7 +1356,7 @@ fn collect_nested_fn_names(stmt: &Stmt, top_level: bool, out: &mut HashSet<Strin
     };
     let fn_decl = |decl: &FnDecl, is_nested: bool, out: &mut HashSet<String>| {
         if is_nested {
-            out.insert(decl.name.clone());
+            out.insert(decl.name.to_string());
         }
         for s in &decl.body {
             collect_nested_fn_names(s, false, out);
@@ -1267,6 +1467,7 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
             }
         }
         Expr::Unary { operand: inner, .. }
+        | Expr::InstantiatedType { recv: inner, .. }
         | Expr::Member {
             receiver: inner, ..
         }
@@ -1278,16 +1479,25 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         | Expr::Spawn { future: inner, .. }
         | Expr::TypeOf { value: inner, .. }
         | Expr::FieldsOf { value: inner, .. }
+        | Expr::TraitsOf { value: inner, .. }
         | Expr::ParamsOf { target: inner, .. }
-        | Expr::FieldSpecsOf { name: inner, .. }
+        | Expr::ReturnsOf { target: inner, .. }
         | Expr::As { expr: inner, .. }
         | Expr::TypeTest { expr: inner, .. }
         | Expr::FromBytes { blob: inner, .. }
         | Expr::Channel {
             capacity: inner, ..
         } => collect_nested_fns_in_expr(inner, out),
+        // A turbofish operand is a type — no expression, so no nested fn; a dynamic one is ordinary.
+        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
+            if let Some(e) = name.dynamic() {
+                collect_nested_fns_in_expr(e, out);
+            }
+        }
         Expr::Construct { name, fields, .. } => {
-            collect_nested_fns_in_expr(name, out);
+            if let Some(e) = name.dynamic() {
+                collect_nested_fns_in_expr(e, out);
+            }
             collect_nested_fns_in_expr(fields, out);
         }
         Expr::Binary { lhs: a, rhs: b, .. }
@@ -1358,6 +1568,7 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         Expr::Ident { .. }
         | Expr::NativeFnRef { .. }
         | Expr::AttributesOf { .. }
+        | Expr::TypeName { .. }
         | Expr::RolesOf { .. }
         | Expr::Str { .. }
         | Expr::Int { .. }
@@ -1464,4 +1675,28 @@ fn subst_self_assoc_in_fn(m: &FnDecl, bindings: &HashMap<&str, &TypeRef>) -> FnD
         out.ret = Some(subst_self_assoc(ret, bindings));
     }
     out
+}
+
+/// Whether an `impl <trait_name>` block's methods belong to the trait's **instance interface** —
+/// the question that decides whether a self-less one is [`Receiver::Either`] (reachable both ways)
+/// or [`Receiver::Associated`] (on the type only).
+///
+/// True for every user, native, and built-in trait *except* one whose method is associated by
+/// contract ([`BuiltinTrait::associated_method`] — `From::from` builds a value rather than acting
+/// on one, and the checker already refuses a `from` body that mentions `self`). Deciding it from
+/// the closed built-in set rather than from `symbols.user_traits` keeps it independent of source
+/// order: an `impl` written above its `trait` must classify like one written below it, and during
+/// this walk the trait table is only half-populated.
+fn trait_supplies_instance_interface(trait_name: &str) -> bool {
+    BuiltinTrait::from_name(trait_name).is_none_or(|t| !t.associated_method())
+}
+
+/// Every method of every in-body `impl Trait { … }` block, paired with whether its trait supplies an
+/// instance interface ([`trait_supplies_instance_interface`]) — the one place the struct, class, and
+/// enum walks agree on how to classify a block's methods.
+fn impl_block_methods(impls: &[ImplBlock]) -> impl Iterator<Item = (&FnDecl, bool)> {
+    impls.iter().flat_map(|b| {
+        let provided = trait_supplies_instance_interface(b.trait_name.as_str());
+        b.methods.iter().map(move |m| (m, provided))
+    })
 }

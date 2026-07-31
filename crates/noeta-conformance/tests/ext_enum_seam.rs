@@ -47,6 +47,7 @@ const HUE: ExtEnum = ExtEnum {
     // A **fieldless-variant** instance method (Slice B): reads the case off the marshalled
     // `Variant` and lower-cases it (`Hue.Red.name()` → "red").
     methods: &[ExtFn {
+        param_names: &[],
         name: "name",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -121,6 +122,7 @@ const TAG: ExtEnum = ExtEnum {
     // A **payload-carrying-variant** instance method (Slice B): reads the payload off the
     // marshalled `Variant` — `Tag.Labeled("hi").describe()` → "labeled:hi", `Tag.Plain` → "plain".
     methods: &[ExtFn {
+        param_names: &[],
         name: "describe",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
@@ -134,34 +136,40 @@ const FX_ENUMS: &[ExtEnum] = &[HUE, TONE, LEVEL, TAG];
 
 const PALETTE_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &[],
         name: "pick",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Hue")),
     },
     // Takes a variant as an argument (arg-IN), returns its case name.
     ExtFn {
+        param_names: &[],
         name: "name_of",
         params: &[SigType::Named("Hue")],
         ret: RetTy::Concrete(SigType::String),
     },
     ExtFn {
+        param_names: &[],
         name: "default_tone",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Tone")),
     },
     ExtFn {
+        param_names: &[],
         name: "default_level",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Level")),
     },
     // Returns a payload-carrying variant (return-OUT with a payload).
     ExtFn {
+        param_names: &[],
         name: "make_tag",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Tag")),
     },
     // Takes a payload-carrying variant back (arg-IN with a payload).
     ExtFn {
+        param_names: &[],
         name: "tag_label",
         params: &[SigType::Named("Tag")],
         ret: RetTy::Concrete(SigType::String),
@@ -179,6 +187,9 @@ fn variant(
         variant: variant.to_string(),
         variant_index,
         fields,
+        // A dispatch's own return value is not untrusted input crossing a decode door, so nothing
+        // re-enters to validate it (only `TypeRecipe::Enum` sets this).
+        has_validator: false,
     }
 }
 

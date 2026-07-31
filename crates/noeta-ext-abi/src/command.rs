@@ -159,12 +159,23 @@ pub enum EntryArg {
     Ident(&'static str),
 }
 
-/// A trailing entry call the driver appends to the loaded program —
-/// `<module>.<func>(<args>)`. This is the whole trick behind `noeta serve`: the command supplies
-/// only the entry convention (`http.serve(<port>, fetch)`); the mechanism is the exact same
-/// registered function a program can call directly.
+/// A trailing entry call the driver appends to the program — `<module>.<func>(<args>)`. This is the
+/// whole trick behind `noeta serve`: the command supplies only the entry convention
+/// (`http.serve(<port>, fetch)`); the mechanism is the exact same registered function a program can
+/// call directly.
+///
+/// The driver appends it (with its `use`) to the entry **before the program links**, so it resolves
+/// exactly as the same line written into the file would. Appending to the *linked* program instead
+/// left it outside every decision linking makes — its import resolved nothing, and its names went
+/// unqualified.
 #[derive(Debug, Clone)]
 pub struct EntryCall {
+    /// The module the call names. Spell it **qualified** (`std.http.server`, `para.db`,
+    /// `para.db.migrations`): the driver calls its last segment (`server.serve(…)`) and binds that
+    /// segment with a synthetic `use` of the rest, so the entry call resolves whatever the program
+    /// itself imports. A bare, single segment binds nothing and resolves through the program's own
+    /// imports — which means a program that does not import the module gets "cannot find `server` in
+    /// this scope" pointing at a line it never wrote, since a qualified reference requires a `use`.
     pub module: &'static str,
     pub func: &'static str,
     pub args: Vec<EntryArg>,
@@ -199,7 +210,7 @@ pub trait CommandCtx {
         self.run_file(
             file,
             Some(&EntryCall {
-                module: "server",
+                module: "std.http.server",
                 func: "serve",
                 args: vec![
                     EntryArg::Int(port),

@@ -8,7 +8,7 @@ The VM (`noeta-vm`) is a Tier-0 **register machine** (Lua/Dalvik style), not a s
 
 The compiled artifact (pure data in `noeta-bytecode`):
 
-- **`Op`** — the opcode set: arithmetic and branching, `Call`/`Return`, `MakeList`/`MakeMap` and iteration ops, `CallBuiltin`/`LoadNativeFn` for native calls, the object-model ops (`MakeStruct`/`MakeEnum`/`LoadField`/`CallMethod`), and ops added by later tracks (`MakeStructInPlace` for reuse, drop ops for RC, `MakeChannel`/`SpawnIsolate`).
+- **`Op`** — the opcode set: arithmetic and branching, `Call`/`Return`, `MakeList`/`MakeMap` and iteration ops, `CallBuiltin`/`LoadNativeFn` for native calls, the object-model ops (`MakeStruct`/`MakeEnum`/`LoadField`/`CallMethod`), the memory-management ops (`MakeStructInPlace` for in-place reuse, the drop ops for RC), and the concurrency ops (`MakeChannel`/`SpawnIsolate`).
 - **`Chunk`** — one function prototype: its `code`, constant pool, `num_params`, `num_registers`, and `frame_locals` (destructor-teardown pins). `Chunk::disassemble` gives stable text for snapshot tests.
 - **`Module`** — the prototype table (proto 0 is the top-level program; the rest are functions/closures/methods), the flat `shapes` layout table, the `methods` dispatch table, and `cache_slots` (the inline-cache count).
 
@@ -75,19 +75,56 @@ Everything above is **Tier 0**: the interpreter dispatch loop. On top of it sits
 
 ### The shared stack makes deopt free
 
-A compiled prototype runs on the **same contiguous register stack** the interpreter uses (the payoff of the earlier register-stack rework), with the ABI `fn(vm, regs, base, globals, frames, regs_vec, entry_pc) -> i64`. Because native code reads and writes the interpreter's real registers, **deoptimization costs nothing to set up**: when native code reaches an op it doesn't compile — a `Return`, or a guard that fails (an operand isn't a small int, an add overflows the 48-bit immediate range, an `if` condition isn't a bool) — it simply *returns the bytecode pc of that op*, and the interpreter resumes there over the already-correct register window. Guards always **bail before mutating any state**, so the interpreter re-runs the op cleanly. This guard-and-bail contract is what lets an untyped bytecode be compiled speculatively without a separate deopt-state map.
+A compiled prototype runs on the **same contiguous register stack** the interpreter uses, with the ABI `fn(vm, regs, base, globals, frames, regs_vec, entry_pc) -> i64`. Because native code reads and writes the interpreter's real registers, **deoptimization costs nothing to set up**: when native code reaches an op it doesn't compile — a `Return`, or a guard that fails (an operand isn't a small int, an add overflows the 48-bit immediate range, an `if` condition isn't a bool) — it simply *returns the bytecode pc of that op*, and the interpreter resumes there over the already-correct register window. Guards always **bail before mutating any state**, so the interpreter re-runs the op cleanly. This guard-and-bail contract is what lets an untyped bytecode be compiled speculatively without a separate deopt-state map.
 
 ### Registers live in SSA (mem2reg)
 
-Within a compiled prototype, VM registers are **Cranelift SSA variables**, not memory: an analyzed prototype's registers — heap values included — live in machine registers for the whole native region, and the in-memory register stack is touched only at region boundaries (entry loads, bail-edge spills, helper syncs). On top of that sits **typed promotion**: a forward kind dataflow proves registers `Int`/`Bool`/`Float` along native paths, and a second *raw* (unboxed) variable per register lets typed arithmetic skip the NaN-box tag checks and box/unbox chains entirely — a counting loop's governing compare compiles to literally one `cmp; jl`. The analyses' claims are **verified, not trusted**: every mid-frame entry (a resume after a call, an OSR loop header) checks the claimed registers against what Tier 0 actually left in the slots and bails on a violation — Tier 0 can heap-box an overflow exactly where the native path would have bailed first, and a wrongly-trusted claim would corrupt refcounts. This "claims verified at entries, maintained by native defs" contract is what lets an untyped bytecode carry unboxed values safely. (The JIT-SSA arc ledger in `plans/` git history is the milestone record, including the measured dead ends.)
+Within a compiled prototype, VM registers are **Cranelift SSA variables**, not memory:
+
+- **Registers live in machine registers for the whole native region** — heap values included. The in-memory register stack is touched only at region boundaries: entry loads, bail-edge spills, helper syncs.
+- **Typed values run unboxed.** A forward kind dataflow proves registers `Int`/`Bool`/`Float` along native paths, and a second *raw* (unboxed) variable per register lets typed arithmetic skip the NaN-box tag checks and box/unbox chains entirely — a counting loop's governing compare compiles to literally one `cmp; jl`.
+- **Claims are verified at entries, never trusted.** Every mid-frame entry (a resume after a call, an OSR loop header) checks the claimed registers against what Tier 0 actually left in the slots and bails on a violation — Tier 0 can heap-box an overflow exactly where the native path would have bailed first, and a wrongly-trusted claim would corrupt refcounts.
+
+This "claims verified at entries, maintained by native defs" contract is what lets an untyped bytecode carry unboxed values safely.
 
 ### Getting hot, and getting in mid-loop (OSR)
 
 Promotion is a per-prototype counter: a prototype crossing `JIT_HOT_THRESHOLD` frame entries **or loop back-edges** is compiled. The back-edge trigger is **on-stack replacement (OSR)** — a long-running loop enters Tier 1 *at its loop header*, mid-frame, rather than only at the next call. Without it a top-level program that is one big loop (its `main` frame entered exactly once) would never get hot; with it, loop headers become native re-entry points, reusing the same mid-frame-entry machinery that re-enters a compiled caller after a call returns.
 
+The whole tier-transition loop, in one picture:
+
+```text
+              ┌──────────────────────────┐
+              │   Tier 0 — interpreter   │◄──────────────────────────┐
+              └────────────┬─────────────┘                           │
+       frame entries / loop back-edges                               │
+        cross JIT_HOT_THRESHOLD                                      │
+                           ▼                                         │
+                 compile the prototype                               │
+                           │                                         │
+            ┌──────────────┴──────────────┐                          │
+            ▼                             ▼                          │
+   native entry (next call)   OSR entry (hot loop header,            │
+            │                        mid-frame)                      │
+            └──────────────┬──────────────┘                          │
+                           ▼                                         │
+          native code runs on the interpreter's                      │
+                  own register stack                                 │
+                           │                                         │
+      a guard fails / an uncompiled op is reached                    │
+                           │                                         │
+                           ▼                                         │
+     normalize the register window, return the bytecode pc ──────────┘
+             (Tier 0 resumes at exactly that op)
+```
+
 ### Calls stay native — the fast call convention
 
-A native `Call` first consults a **per-call-site inline cache**: on a hit (same callee closure as last time — the cached closure is pinned so bits-equality proves identity), the entire call setup is native — capacity-check the stacks, extend the register stack over an **uninitialized** callee window, write the frame record from a baked template, and call the callee's **fast-convention body**: arguments travel as machine arguments, the result comes back as a return value, and the return protocol (masked slot releases, frame pop, stack truncation) is emitted inline from the baked frame layout. Zero helper calls on the hot path; recursive `fib` runs frame-to-frame in native code. The soundness contract is that the interpreter must never see the uninitialized window: every native exit *normalizes* it (spill the live and heap-desynced registers, unit-fill the rest) before the interpreter — or an abort's unwind — can look. A cache miss or an un-direct-able callee falls back to a helper that pushes the callee frame for the interpreter; the frame stack itself stays fully honest (every call pushes a real frame), which is what keeps deopt and unwinding trivial.
+A native `Call` first consults a **per-call-site inline cache**. On a hit (same callee closure as last time — the cached closure is pinned so bits-equality proves identity), the entire call setup is native:
+
+- **Zero helper calls on the hot path.** Native code capacity-checks the stacks, extends the register stack over an **uninitialized** callee window, writes the frame record from a baked template, and calls the callee's **fast-convention body**: arguments travel as machine arguments, the result comes back as a return value, and the return protocol (masked slot releases, frame pop, stack truncation) is emitted inline from the baked frame layout. Recursive `fib` runs frame-to-frame in native code.
+- **Every native exit normalizes the window.** The soundness contract is that the interpreter must never see the uninitialized window: before the interpreter — or an abort's unwind — can look, native code spills the live and heap-desynced registers and unit-fills the rest.
+- **The frame stack stays fully honest.** A cache miss or an un-direct-able callee falls back to a helper that pushes the callee frame for the interpreter; either way every call pushes a real frame, which is what keeps deopt and unwinding trivial.
 
 ### Refcounts across the tier boundary
 
@@ -95,7 +132,13 @@ A prototype that keeps a heap value in a register is compiled **heap-aware**: ov
 
 ### The oracle
 
-Tier 1 has its own gate, separate from the eval↔VM differential: **`--jit-differential`** runs every corpus program through the interpreter and through the forced-Tier-1 JIT and asserts a **byte-identical `RunResult`**, **zero heap residency**, *and* **zero refcount anomalies**. The anomaly check closes a blind spot the residency check alone has: the cycle collector verifies that every unreachable object's refcount equals its in-edges from the garbage set (unreachable garbage can only reference itself), so a *skipped* retain or release is caught even when teardown's backup sweep would have absorbed the orphan — exactly the failure mode of a wrong immediacy claim, and the check that made a latent mid-frame-entry bug reproducible (it also caught three unrelated interpreter refcount bugs on arrival). Because refcount exactness is the thing most likely to drift when native code manages the heap — and JIT-generated code cannot run under miri — these checks are as load-bearing as the output check. At the P-JSSA milestone's measured coverage: 433 programs, 0 divergence, 0 leaks, 0 anomalies, 893 of 894 prototypes compiled to real native code — the conformance corpus has grown substantially since, so treat these as a historical snapshot, not a live count.
+Tier 1 has its own gate, separate from the eval↔VM differential: **`--jit-differential`** runs every corpus program through the interpreter and through the forced-Tier-1 JIT and asserts three things at once:
+
+- **A byte-identical `RunResult`** — the JIT may never change observable behavior.
+- **Zero heap residency** — no program leaks under native code.
+- **Zero refcount anomalies** — during cycle collection, every unreachable object's refcount must equal its in-edges from the garbage set (unreachable garbage can only reference itself). This closes a blind spot the residency check alone has: a *skipped* retain or release is caught even when teardown's backup sweep would have absorbed the orphan — exactly the failure mode of a wrong immediacy claim, and the check that made a latent mid-frame-entry bug reproducible (it also caught three unrelated interpreter refcount bugs on arrival).
+
+Because refcount exactness is the thing most likely to drift when native code manages the heap — and JIT-generated code cannot run under miri — these checks are as load-bearing as the output check. A historical snapshot from when this coverage was measured: 433 programs, 0 divergences, 0 leaks, 0 anomalies, and 893 of 894 prototypes compiled to real native code; the conformance corpus has grown substantially since, so treat those numbers as a snapshot, not a live count.
 
 > [!NOTE]
 > **One negative result is worth recording.** A call-free *native inline cache* for field reads was built (guard the receiver's shape pointer, load at a cached slot offset) and **reverted** — measured no faster than the leaf-op helper. Field-bearing loops are bottlenecked by the dependent-load latency of the read and the heap-aware store discipline, both tier-independent, not by the field lookup. The JIT's wins are in native arithmetic, control flow, calls, and OSR'd loops; heap-dominated loops are best left to the interpreter's own inline cache.

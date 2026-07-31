@@ -189,6 +189,13 @@ pub enum NarrowTarget {
     Fn,
     Dyn,
     Named(String),
+    /// A **trait-object** target (`x is dyn Trait` / `x.as<dyn Trait>()`): matches iff the value's
+    /// nominal type (shape name / extern qualified identity) has a REGISTERED impl of the trait in
+    /// the module's reflection membership table (`ReflectionInfo::trait_impls`) — the same
+    /// declarations trait-method dispatch resolves through. The carried name is the trait's
+    /// canonical identity (loader-qualified `.noe` name, or a native trait's qualified
+    /// `namespace.name`), resolved at lowering. A non-nominal value never matches.
+    DynTrait(String),
     /// A union target (`x.as<int | string>()`): matches if the value matches **any** member.
     AnyOf(Vec<NarrowTarget>),
     /// An abstract kind-type target (`x.as<Enum>()` / `x is Struct`): matches any value of that
@@ -208,6 +215,83 @@ pub enum NarrowTarget {
     },
 }
 
+impl NarrowTarget {
+    /// The runtime head constructor a **built-in type name** narrows to, or `None` when the name has
+    /// no dedicated head and falls back to a nominal ([`NarrowTarget::Named`]) match by shape name.
+    ///
+    /// Exhaustive over [`noeta_ast::BuiltinTy`] so this and the tree-walker's `runtime_matches` —
+    /// the two halves of the differential — cannot drift: a new built-in fails to compile in both
+    /// until handled.
+    ///
+    /// This funnel dropped a bare `tuple` head the VM alone recognized. `tuple` is not a built-in
+    /// type name (`Type::is_builtin_name` rejects it, so the checker reports an unknown type before
+    /// any narrowing runs) and the tree-walker always treated it nominally — so the two backends now
+    /// agree on an unreachable case they used to answer differently. A tuple target is written
+    /// `(A, B)`, which reaches [`NarrowTarget::Tuple`] through the compiler's `TypeRef::Tuple` arm.
+    ///
+    /// It lives here rather than in the compiler because the VM needs it too: a narrow whose target
+    /// is a generic's type parameter learns the name only at run time
+    /// ([`NarrowTarget::from_runtime_name`]), and resolving it through any other mapping would let
+    /// `v.as<T>()` with `T = int` disagree with `v.as<int>()`.
+    pub fn builtin_head(name: &str) -> Option<NarrowTarget> {
+        use noeta_ast::BuiltinTy;
+        Some(match BuiltinTy::from_name_any(name)? {
+            BuiltinTy::Int => NarrowTarget::Int,
+            // `f32` is reified at runtime (distinct NaN-box tag), so it gets a head; the matcher's
+            // `F32 <: float` edge makes `(f32) is float` true while `(float) is f32` stays false.
+            BuiltinTy::F32 => NarrowTarget::F32,
+            BuiltinTy::Float => NarrowTarget::Float,
+            BuiltinTy::Bool => NarrowTarget::Bool,
+            BuiltinTy::Str => NarrowTarget::String,
+            BuiltinTy::Bytes => NarrowTarget::Bytes,
+            BuiltinTy::Unit => NarrowTarget::Unit,
+            BuiltinTy::Dyn => NarrowTarget::Dyn,
+            // The bottom type is uninhabited, so `x is never` is false for every value. Spelled as
+            // the EMPTY `AnyOf` rather than a head of its own: "matches none of these" is exactly
+            // what an empty disjunction means, and it needs no new runtime case in either backend.
+            BuiltinTy::Never => NarrowTarget::AnyOf(Vec::new()),
+            BuiltinTy::List => NarrowTarget::List,
+            BuiltinTy::Map => NarrowTarget::Map,
+            BuiltinTy::Set => NarrowTarget::Set,
+            // Abstract kind-types match any value of that declaration kind.
+            BuiltinTy::KindEnum => NarrowTarget::AnyEnum,
+            BuiltinTy::KindStruct => NarrowTarget::AnyStruct,
+            BuiltinTy::KindClass => NarrowTarget::AnyClass,
+            // `number` is a union, so it narrows through the union machinery (`AnyOf`) rather than
+            // earning a head of its own. Only three heads are listed because the runtime erases the
+            // rest: every fixed-width integer is a `Value::Int` and `f64` is a `Value::Float` (there
+            // is no boxing site to stamp a width on), while `f32` alone is reified — the same
+            // erasure the `Int`/`Float`/`F32` arms above already encode.
+            BuiltinTy::Number => NarrowTarget::AnyOf(vec![
+                NarrowTarget::Int,
+                NarrowTarget::Float,
+                NarrowTarget::F32,
+            ]),
+            // `Option`/`Result` are enums whose shape name *is* the type name, so they narrow
+            // through the nominal path like a user enum rather than needing a head of their own.
+            BuiltinTy::Option | BuiltinTy::Result => return None,
+            // The erased widths (`f64`, `i8..u64`) carry no runtime tag on a scalar, so they fall to
+            // the nominal path and never match a scalar. The checker warns on a bare-scalar `is
+            // i32`/`is f64` (statically always-false); giving them heads would need scalar
+            // reification, which the arc deliberately declines. `f32` alone is reified and handled
+            // above. Both backends agree.
+            BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
+        })
+    }
+
+    /// The head-only target for a type name known only at **run time** — the instantiation of an
+    /// enclosing generic's type parameter, delivered by [`Op::Narrow`]'s / [`Op::IsType`]'s
+    /// `dynamic` register (the receiver's reflected type tag, or the hidden type-argument slot).
+    ///
+    /// Head-only by construction: the name is a single string, so there are no arguments to test —
+    /// which is exactly why the checker refuses a *composite* parameter target (`v is List<T>`)
+    /// rather than lowering one here. Built-ins resolve through [`Self::builtin_head`], so
+    /// `v.as<T>()` at `T = int` answers what the written `v.as<int>()` does.
+    pub fn from_runtime_name(name: &str) -> NarrowTarget {
+        Self::builtin_head(name).unwrap_or_else(|| NarrowTarget::Named(name.to_string()))
+    }
+}
+
 /// How a [`Op::MakeStructInPlace`] is allowed to reuse its consumed `base` object's allocation.
 ///
 /// This is the compile-time half of reuse analysis: the compiler always knows the construct is a
@@ -224,6 +308,88 @@ pub enum ReuseCheck {
     /// unconditional — no runtime refcount/shape branch. This is the Perceus/Roc "hoist the
     /// uniqueness decision to compile time" path.
     Static,
+}
+
+/// A call's **supplied-parameter mask** as an op stores it.
+///
+/// `Some` only at a call that skips a defaulted parameter (`f(1, c: 9)`) — and such a call supplies
+/// at least one parameter, so an all-zero mask is not a reachable state. That lets `NonZeroU64`'s
+/// niche give the `Option` discriminant a home instead of a second word: `Option<u64>` is 16 bytes,
+/// this is 8. `Op` is pinned to a single 64-byte cache line (P-VMT-OPSZ, `tests/op_size.rs`), and
+/// with three call ops each carrying a mask *and* a type-argument channel, that word is the
+/// difference between one cache line and two.
+///
+/// Convert with [`pack_supplied`] / [`supplied_of`]; everything downstream of the ops keeps the
+/// plain `Option<u64>`, whose meaning is unchanged.
+pub type SuppliedMask = Option<std::num::NonZeroU64>;
+
+/// Store a mask on an op. `Some(0)` cannot arise from a checked program; it is read as `None` —
+/// the conservative reading, the ordinary prefix rule — rather than misencoded, and asserted in
+/// debug builds so a producer that ever manages it is caught by the test suite.
+#[inline]
+pub fn pack_supplied(mask: Option<u64>) -> SuppliedMask {
+    debug_assert!(
+        mask != Some(0),
+        "a supplied mask names at least one parameter"
+    );
+    mask.and_then(std::num::NonZeroU64::new)
+}
+
+/// Read a stored mask back into the plain form every binder speaks.
+#[inline]
+pub fn supplied_of(mask: SuppliedMask) -> Option<u64> {
+    mask.map(std::num::NonZeroU64::get)
+}
+
+/// A call's **type-argument** registers — what fills a forwarding generic's leading
+/// [`Chunk::hidden`] slots (poly-values F2b), in slot order. See [`Op::Call::type_args`].
+///
+/// Held out of line behind a **thin** pointer, and empty (one null word) for the overwhelming
+/// majority of calls, which forward nothing. `Op` is streamed through the dispatch loop and pinned
+/// to a single 64-byte cache line (P-VMT-OPSZ, `tests/op_size.rs`); an inline `Box<[Reg]>` is a
+/// *fat* pointer, and spending two words on a channel almost every call leaves empty is exactly
+/// what pushed `Op` over that line. The rare forwarding call pays one extra indirection, on a path
+/// that is already doing a frame push.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct TypeArgs(Option<Box<TypeArgSlots>>);
+
+/// The out-of-line payload of a non-empty [`TypeArgs`]. A named struct rather than a boxed slice
+/// so the outer `Option<Box<_>>` is a *thin* pointer — a `Box<[Reg]>` would put the length back
+/// inline and cost the second word this indirection exists to save.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct TypeArgSlots(Box<[Reg]>);
+
+impl TypeArgs {
+    /// The empty channel — every call that forwards nothing.
+    pub const NONE: TypeArgs = TypeArgs(None);
+
+    /// The channel holding `regs`, in slot order. An empty list is [`TypeArgs::NONE`], so "no type
+    /// arguments" has one representation and costs no allocation.
+    pub fn new(regs: Vec<Reg>) -> TypeArgs {
+        if regs.is_empty() {
+            TypeArgs::NONE
+        } else {
+            TypeArgs(Some(Box::new(TypeArgSlots(regs.into_boxed_slice()))))
+        }
+    }
+
+    /// The registers, in slot order — empty for a non-forwarding call.
+    pub fn regs(&self) -> &[Reg] {
+        self.0.as_deref().map_or(&[], |s| &s.0)
+    }
+
+    /// The registers for in-place rewriting (register allocation renumbers them like any operand).
+    pub fn regs_mut(&mut self) -> &mut [Reg] {
+        self.0.as_deref_mut().map_or(&mut [], |s| &mut s.0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    pub fn len(&self) -> usize {
+        self.regs().len()
+    }
 }
 
 /// One register-machine instruction.
@@ -465,6 +631,11 @@ pub enum Op {
         recv: Reg,
         method: NameId,
         args: Box<[Reg]>,
+        /// The [`Op::Call::type_args`] twin for a method (Axis A): the registers filling a
+        /// forwarding generic method's hidden slots, which sit immediately after the receiver
+        /// ([`Chunk::hidden_base`]). Empty for every method call that forwards nothing, which is
+        /// nearly all of them.
+        type_args: TypeArgs,
         span: Span,
         /// Inline-cache slot (index into the VM's per-run cache array). Memoizes the last receiver
         /// shape → resolved method prototype, so a monomorphic site skips the `(type, method)`
@@ -487,8 +658,9 @@ pub enum Op {
         /// The [`Op::Call::supplied`] twin for a method, in the callee's REGISTER space: the
         /// receiver occupies register 0, so bit 0 is always set and bit `p + 1` names the method's
         /// `p`-th declared parameter. (The IR's `Rvalue::Method::supplied` counts the declared
-        /// parameters only; the shift happens where the receiver becomes a register.)
-        supplied: Option<u64>,
+        /// parameters only; the shift happens where the receiver becomes a register.) Bit 0 being
+        /// always set is also why a method mask is never zero — see [`SuppliedMask`].
+        supplied: SuppliedMask,
     },
     /// `dst = recv[index]` — index access (the `Index` trait / list element access), mirroring
     /// the tree-walker's `eval_index`. On an object it dispatches to the `get` method (pushing a
@@ -573,17 +745,24 @@ pub enum Op {
         /// onto the built value so `type_of` recovers the enum's type arguments after a `dyn` launder.
         reflect: Option<u32>,
     },
-    /// `dst = Enum.try_from(s)` / `Enum.from(s)` — construct a **payload-free** enum case from the
-    /// string in `arg`, matched by case name (the PHP `tryFrom`/`from` pair). `cases` lists every
-    /// payload-free `(name, shape)` of the enum. On a hit: `from` (`panic = true`) yields the case
-    /// itself; `try_from` (`panic = false`) wraps it as `Option.some` (`some_shape`). On a miss:
-    /// `from` raises an `E0010` panic at `span`; `try_from` yields `Option.none` (`none_shape`). A
-    /// non-string `arg` raises `E0007`.
+    /// `dst = Enum.try_from(v)` / `Enum.from(v)` — construct a **payload-free** enum case from the
+    /// wire value in `arg`, matched by **backing first, then case name**
+    /// ([`noeta_ast::reflect::variant_for_wire`] owns that rule, shared with the tree-walker).
+    /// `cases` lists every payload-free case of the enum as `(name, backing, shape)`, in declaration
+    /// order. The names and backings are now *also* recoverable at run time — a prelude and a native
+    /// enum each have a reflection entry since the artifact is seeded from the same tables this
+    /// lowering reads — so what keeps them baked is the third element, an **interned shape id**,
+    /// which only the compiler can mint. Reading the cases dynamically instead would additionally
+    /// need runtime shape interning, so this stays redundant as data and load-bearing as shapes.
+    /// On a hit: `from` (`panic = true`) yields the case itself; `try_from`
+    /// (`panic = false`) wraps it as `Option.some` (`some_shape`). On a miss: `from` raises an `E0010`
+    /// panic at `span`; `try_from` yields `Option.none` (`none_shape`). A non-scalar `arg` raises
+    /// `E0007`.
     EnumFromStr {
         dst: Reg,
         arg: Reg,
         enum_name: NameId,
-        cases: Box<[(NameId, u32)]>,
+        cases: Box<[(NameId, Option<noeta_ast::AttrValue>, u32)]>,
         some_shape: u32,
         none_shape: u32,
         panic: bool,
@@ -652,6 +831,16 @@ pub enum Op {
         /// Boxed (P-VMT-OPSZ): `NarrowTarget` is 32 bytes and narrowing is a cold op, so it lives
         /// behind a pointer to keep it off the hot instruction stream.
         target: Box<NarrowTarget>,
+        /// A register holding the target's head name as a **string**, when `T` is a type parameter
+        /// of an enclosing generic: generics are erased, so `target` would be the literal letter
+        /// `T` — a name nothing is registered under, which answered `none` for every value. The
+        /// register is filled by the same [`Op::TypeArgName`]/[`Op::TypeSlotName`] that serves
+        /// `type_name::<T>()`, and the VM resolves it through
+        /// [`NarrowTarget::from_runtime_name`], so a narrow can never disagree with that surface
+        /// about what `T` is.
+        ///
+        /// `None` — the common case — leaves `target` authoritative.
+        dynamic: Option<Reg>,
         some_shape: u32,
         none_shape: u32,
     },
@@ -663,6 +852,9 @@ pub enum Op {
         src: Reg,
         /// Boxed (P-VMT-OPSZ), as in [`Op::Narrow`].
         target: Box<NarrowTarget>,
+        /// The run-time head name, exactly as [`Op::Narrow`] carries it — the two share the matcher,
+        /// so they share this channel.
+        dynamic: Option<Reg>,
     },
     /// `dst = make_gen(src)` (Track G.1b): wrap the step closure in `src` into a generator iterator
     /// (`IterState::Gen`). The generator desugar emits this as the tail of a generator function — the
@@ -787,11 +979,29 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// `returns_of(target)`: `dst = ?Type` — the declared return type of the fn/method named by the
+    /// runtime `string` in `src`, read from the module's reflection info and materialized through the
+    /// same `build_type_value` decoder `ParamsOf` uses for `ParamInfo.type`, so the two can never
+    /// disagree about how a declared type renders. `Option::some(t)` for a known callable;
+    /// `Option::none` when the name matches no callable — an empty answer would be indistinguishable
+    /// from a `void` return. Reads `Module::reflection`.
+    ReturnsOf {
+        dst: Reg,
+        src: Reg,
+    },
     /// `field_specs_of::<T>()` / `field_specs_of(name)`: `dst = List<FieldSpec>` — the declared field
     /// schema (`{ name, type, optional }`, declaration order) of the struct/class named by the runtime
     /// string in `src`; the empty list for an unknown or non-fielded type. The type-level twin of
     /// `FieldsOf`.
     FieldSpecsOf {
+        dst: Reg,
+        src: Reg,
+    },
+    /// `variants_of::<T>()` / `variants_of(name)`: `dst = List<VariantSpec>` — the declared variant
+    /// schema (`{ name, payload, backing }`, declaration order) of the enum named by the runtime
+    /// string in `src`; the empty list for an unknown type or one that is not an enum. The enum twin
+    /// of `FieldSpecsOf`, declared beside it so the two type-level schema queries read as one surface.
+    VariantsOf {
         dst: Reg,
         src: Reg,
     },
@@ -809,6 +1019,38 @@ pub enum Op {
         err_shape: u32,
         span: Span,
     },
+    /// Stamp a **reflected type tag** onto the value already in `reg` (generic constructor
+    /// reflection): `repr` is an index into [`Module::type_reprs`]. Emitted directly after a call to
+    /// a generic type's *fresh constructor* (`Repo.new("todos")` at `Repo<Todo>`), because the
+    /// instantiation is known at the call site and not inside `fn new`, where the object literal is
+    /// written. The checker only records such a site when every `return` of the callee hands back a
+    /// freshly-built literal of the type, so no other reference to this object can exist — which is
+    /// what makes writing the tag in place (rather than rebuilding the value, impossible for a
+    /// reference-`class`) sound. Invisible to value semantics, exactly like the construction-time tag.
+    Retag {
+        reg: Reg,
+        repr: u32,
+    },
+    /// [`Op::Retag`] with the tag chosen at run time (generic-in-generic construction): `slot` is the
+    /// register holding a hidden type-argument slot's value — an index into [`Module::type_args`] —
+    /// and the tag stamped is that entry's [`Module::type_arg_reprs`] projection.
+    ///
+    /// Emitted after a fresh constructor of a generic type whose instantiation is a type *parameter*
+    /// of the enclosing self-less member (`Repository.new(tbl, pk)` initializing a `repo:
+    /// Repository<T>` inside `LiveRepository<T>.new`). One compiled body serves every `LiveRepository
+    /// <…>`, so the concrete `Repository<Todo>` is not in it — the outer call resolved and interned it
+    /// and handed over its index. The tag is therefore still a statically-interned `TypeRepr`; only
+    /// *which* one is dynamic, which is what keeps the two backends' answers identical (one table
+    /// index each).
+    ///
+    /// An entry with no reflection projection (`None` — a `dyn`/hole top) leaves the value untagged,
+    /// the same head-only fallback an unrecorded construction site takes. Sound for the same reason
+    /// [`Op::Retag`] is: the checker records the site only for a *provably fresh* constructor, so no
+    /// other reference to this object exists.
+    RetagDynamic {
+        reg: Reg,
+        slot: Reg,
+    },
     /// `type_of(value)`: `dst = Type` — the runtime [`noeta_ast::reflect`] head-constructor descriptor
     /// of the value in `src` (`List(Dyn)`, `Named("Route")`, `Int`, …). Generics are erased at
     /// runtime, so element/argument types collapse to `Dyn` at this fidelity.
@@ -816,10 +1058,48 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// `type_name::<T>()` where `T` is a **type parameter of the enclosing generic type**, inside
+    /// one of its instance methods: `dst` = the head name of type argument `index` of `src`'s
+    /// reflected type tag, as a `string`. One compiled body serves every instantiation, so the
+    /// instantiation rides on the receiver rather than being folded into a constant.
+    ///
+    /// A receiver whose tag carries no such argument **aborts** (`noeta_ast::reflect::
+    /// missing_type_arg_message`, shared with the reference backend) instead of answering a
+    /// placeholder name — the surface exists to hand a name to something that keys on it.
+    TypeArgName {
+        dst: Reg,
+        src: Reg,
+        index: u32,
+        /// `(enclosing type, parameter)` for the abort message. Boxed: cold, and an `Op` must stay
+        /// inside one cache line.
+        names: Box<(String, String)>,
+        span: Span,
+    },
+    /// `type_name::<T>()` where `T` is a **forwarded type parameter of the enclosing top-level
+    /// generic fn** (poly-values F2b): `dst = ` the qualified name of the [`Module::type_args`]
+    /// entry whose index the hidden slot register `src` holds.
+    ///
+    /// The fn-side twin of [`Op::TypeArgName`] — same answer, different channel: a generic type
+    /// carries its instantiation on the receiver, a generic fn in the hidden argument that already
+    /// delivers a forwarded decode recipe. Reads only the entry's name, so it serves an
+    /// instantiation with no recipe at all.
+    TypeSlotName {
+        dst: Reg,
+        src: Reg,
+        span: Span,
+    },
     /// `fields_of(value)`: `dst = List<FieldEntry>` — the struct/class instance in `src` read as
     /// `{ name, value }` pairs in declaration order (derive layer 3); the empty list for any other
     /// value.
     FieldsOf {
+        dst: Reg,
+        src: Reg,
+    },
+    /// `traits_of(value)`: `dst = List<string>` — the qualified trait names the nominal type of
+    /// the value in `src` has a registered `impl` for, sorted and deduped, off the module
+    /// reflection's `trait_impls` membership table (the same table `NarrowTarget::DynTrait`
+    /// tests); the empty list for a non-nominal value.
+    TraitsOf {
         dst: Reg,
         src: Reg,
     },
@@ -1001,14 +1281,24 @@ pub enum Op {
         dst: Reg,
         callee: Reg,
         args: Box<[Reg]>,
+        /// The registers holding this call's **type arguments** — what fills a forwarding
+        /// generic's leading [`Chunk::hidden`] slots (poly-values F2b), in slot order. Empty for
+        /// the overwhelming majority of calls, which forward nothing.
+        ///
+        /// A channel of its own, beside `args` rather than prepended onto it: that is what keeps
+        /// `supplied` below indexed over the callee's **value** parameters, so a forwarding call's
+        /// parameter positions are exactly those of the same call without forwarding. A callee
+        /// declaring a different `hidden` count than this supplies cannot arise from a checked
+        /// program; the VM aborts rather than binding a value argument into a type slot.
+        type_args: TypeArgs,
         span: Span,
-        /// Which parameters `args` fills, when the call cannot be described by the ordinary
+        /// Which VALUE parameters `args` fills, when the call cannot be described by the ordinary
         /// "args fill parameters 0..n in order" prefix rule — i.e. a named-argument call that
-        /// *skips* a defaulted parameter (`f(1, c: 9)`). Bit `p` set means parameter `p` is
+        /// *skips* a defaulted parameter (`f(1, c: 9)`). Bit `p` set means value parameter `p` is
         /// supplied, and the supplied bits, read low to high, correspond to `args` in order.
         /// `None` means the prefix rule applies, which is every call that omits only trailing
         /// parameters — so the common path carries no extra work.
-        supplied: Option<u64>,
+        supplied: SuppliedMask,
     },
     /// `dst = f(args)` where `f` is a statically-known top-level `fn` bound to global slot
     /// `global` (immutable, zero upvalues). Reads the callee closure straight from its slot —
@@ -1019,9 +1309,13 @@ pub enum Op {
         dst: Reg,
         global: GlobalId,
         args: Box<[Reg]>,
+        /// The [`Op::Call::type_args`] twin — same meaning, same empty common case. This is the
+        /// op a forwarding generic is actually reached through, since a forwarding call is by
+        /// definition a call of a statically-known top-level `fn`.
+        type_args: TypeArgs,
         span: Span,
         /// The [`Op::Call::supplied`] twin — same meaning, same `None` fast path.
-        supplied: Option<u64>,
+        supplied: SuppliedMask,
     },
     /// Return `src` from the current frame to the caller's destination register (or end the
     /// program if returning from the top-level frame).
@@ -1159,6 +1453,28 @@ pub struct Chunk {
     pub diagnostics: Vec<Diagnostic>,
     /// Parameters occupy registers `0..num_params` on entry.
     pub num_params: u16,
+    /// How many of those leading registers are **type-argument slots** rather than value
+    /// parameters (poly-values F2b): a forwarding generic's `$ty0`, `$ty1`, … . They are ordinary
+    /// registers — the body reads them, register allocation places them — but they are filled from
+    /// the call's own [`Op::Call::type_args`] channel, never from its value arguments.
+    ///
+    /// So a call binds type argument `j` into register `j` and value argument `i` into register
+    /// `hidden + param_of_arg(i, supplied)`, and arity, defaults and the supplied mask are all
+    /// reckoned over the `num_params - hidden` value parameters alone. Zero for every prototype
+    /// that forwards nothing, which is every prototype but a forwarding generic's.
+    ///
+    /// The eval twin is `Func::hidden`, read straight off the same lowered `Func`, so the two
+    /// backends cannot disagree about the layout.
+    pub hidden: u16,
+    /// The **first register of the hidden block**: `0` for a function, `1` for a method, whose
+    /// register 0 is the receiver and therefore sits *before* the block.
+    ///
+    /// It exists because a method's receiver reaches the binder as an ordinary argument on one of
+    /// the two call paths — an associated call passes unit in argument position 0 with a
+    /// receiver-shifted mask — so "shift every argument past the hidden slots" is wrong for
+    /// exactly that one argument. [`reg_of_param`] is the single statement of the rule; with
+    /// `hidden == 0` (every prototype but a forwarding generic's) it is the identity either way.
+    pub hidden_base: u16,
     pub num_registers: u16,
     /// The frame's source locals (params + body bindings) in **construction order**, by register —
     /// the order they come to life as the function runs. On a panic the VM walks this reversed and
@@ -1226,6 +1542,8 @@ impl Chunk {
             consts: Vec::new(),
             diagnostics: Vec::new(),
             num_params: 0,
+            hidden: 0,
+            hidden_base: 0,
             num_registers: 0,
             defaults: Vec::new(),
             frame_locals: Vec::new(),
@@ -1414,6 +1732,16 @@ pub struct Module {
     /// [`Op::TypedModuleCall::dynamic`] / [`Op::AttributesOf::dynamic`]). Copied from the IR
     /// `Program`, so both backends resolve identical entries. Empty without forwarding.
     pub type_args: Vec<noeta_ext_abi::TypeArgInfo>,
+    /// The **reflection projection** of [`Module::type_args`], indexed identically: each interned
+    /// instantiation's reflected type, as an index into [`Module::type_reprs`], or `None` where the
+    /// instantiation has none (a `dyn`/hole top). Read by [`Op::RetagDynamic`], which stamps the
+    /// entry a hidden slot names onto a freshly-constructed object.
+    ///
+    /// A parallel table rather than a field on [`noeta_ext_abi::TypeArgInfo`]: `noeta-ext-abi` is the
+    /// lean ABI crate and deliberately has no `noeta-ast` dependency, which a `TypeRepr` would force
+    /// on it. Interned through the same pool as every other reflected type, so a repr shared with a
+    /// list/object construction tag is stored once.
+    pub type_arg_reprs: Vec<Option<u32>>,
     /// The interned instruction name table (P-VMT-OPSZ): every [`NameId`] in an op indexes here.
     /// Deduped module-wide by the compiler, so a name used at N sites is stored once. Holds field /
     /// method / global / type names, ext-call module+func, and `match`-literal strings; the VM
@@ -1603,6 +1931,29 @@ pub fn param_of_arg(i: usize, supplied: Option<u64>) -> usize {
     remaining.trailing_zeros() as usize
 }
 
+/// The callee register an argument binds to, given the callee's hidden block.
+///
+/// `p` is the parameter position the argument fills ([`param_of_arg`]), in the callee's register
+/// space. A method's receiver sits at register 0, *before* the block ([`Chunk::hidden_base`]), so
+/// it alone is not shifted; every value parameter sits after the block and shifts by its width.
+///
+/// The one statement of the rule, shared by both VM binders so a method call and an associated
+/// call cannot lay their arguments down differently.
+#[inline]
+pub fn reg_of_param(p: usize, hidden: usize, hidden_base: usize) -> usize {
+    if p < hidden_base { p } else { p + hidden }
+}
+
+/// Render a call's **type**-argument registers as a turbofish (`::<r3>`), so a forwarding call
+/// reads as one in the disassembly. Empty — and therefore invisible — for every other call.
+fn type_arg_regs(type_args: &TypeArgs) -> String {
+    if type_args.is_empty() {
+        return String::new();
+    }
+    let regs: Vec<String> = type_args.regs().iter().map(|r| format!("r{r}")).collect();
+    format!("::<{}>", regs.join(", "))
+}
+
 /// Render a call's argument registers, showing a skipped parameter as `_` so a masked call reads
 /// as what it is — `f(r1, _, r2)` fills parameters 0 and 2 and leaves 1 to its default thunk.
 fn call_args(args: &[Reg], supplied: Option<u64>) -> String {
@@ -1737,6 +2088,7 @@ fn op_repr(
             recv,
             method,
             args,
+            type_args,
             reuse,
             consume_key,
             ..
@@ -1749,8 +2101,9 @@ fn op_repr(
                 (false, false) => "",
             };
             format!(
-                "CallMethod  r{dst} <- r{recv}.{}({}){marker}",
+                "CallMethod  r{dst} <- r{recv}.{}{}({}){marker}",
                 n(method),
+                type_arg_regs(type_args),
                 args.join(", ")
             )
         }
@@ -1881,9 +2234,19 @@ fn op_repr(
         Op::Coalesce {
             dst, src, fallback, ..
         } => format!("Coalesce    r{dst} <- r{src} ?? -> {fallback}"),
+        // A dynamic head name is rendered as the register it arrives in — the disassembly must show
+        // that the target is not the baked one, or a narrow over a type parameter would read as a
+        // match on the letter `T`.
         Op::Narrow {
-            dst, src, target, ..
-        } => format!("Narrow      r{dst} <- r{src}.as<{target:?}>()"),
+            dst,
+            src,
+            target,
+            dynamic,
+            ..
+        } => match dynamic {
+            Some(r) => format!("Narrow      r{dst} <- r{src}.as<name r{r}>()"),
+            None => format!("Narrow      r{dst} <- r{src}.as<{target:?}>()"),
+        },
         Op::AttributesOf {
             dst,
             type_name,
@@ -1897,14 +2260,29 @@ fn op_repr(
             None => format!("RolesOf     r{dst} <- roles_of()"),
         },
         Op::ParamsOf { dst, src } => format!("ParamsOf    r{dst} <- params_of(r{src})"),
+        Op::ReturnsOf { dst, src } => format!("ReturnsOf   r{dst} <- returns_of(r{src})"),
+        Op::VariantsOf { dst, src } => {
+            format!("VariantsOf r{dst} <- variants_of(r{src})")
+        }
         Op::FieldSpecsOf { dst, src } => {
             format!("FieldSpecsOf r{dst} <- field_specs_of(r{src})")
         }
         Op::Construct {
             dst, name, fields, ..
         } => format!("Construct   r{dst} <- construct(r{name}, r{fields})"),
+        Op::Retag { reg, repr } => format!("Retag       r{reg} <- tag #{repr}"),
+        Op::RetagDynamic { reg, slot } => {
+            format!("RetagDyn    r{reg} <- tag of type_args[r{slot}]")
+        }
+        Op::TypeArgName {
+            dst, src, index, ..
+        } => format!("TypeArgName r{dst} <- r{src}.typearg[{index}]"),
+        Op::TypeSlotName { dst, src, .. } => {
+            format!("TypeSlotName r{dst} <- type_args[r{src}].name")
+        }
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::FieldsOf { dst, src } => format!("FieldsOf    r{dst} <- fields_of(r{src})"),
+        Op::TraitsOf { dst, src } => format!("TraitsOf    r{dst} <- traits_of(r{src})"),
         Op::FromBytes {
             dst, src, schema, ..
         } => {
@@ -1970,9 +2348,15 @@ fn op_repr(
                 n(trait_name)
             )
         }
-        Op::IsType { dst, src, target } => {
-            format!("IsType      r{dst} <- r{src} is {target:?}")
-        }
+        Op::IsType {
+            dst,
+            src,
+            target,
+            dynamic,
+        } => match dynamic {
+            Some(r) => format!("IsType      r{dst} <- r{src} is name r{r}"),
+            None => format!("IsType      r{dst} <- r{src} is {target:?}"),
+        },
         Op::MakeFuture { dst, src } => {
             format!("MakeFuture  r{dst} <- future r{src}")
         }
@@ -2043,25 +2427,29 @@ fn op_repr(
             dst,
             callee,
             args,
+            type_args,
             supplied,
             ..
         } => {
             format!(
-                "Call        r{dst} <- r{callee}({})",
-                call_args(args, *supplied)
+                "Call        r{dst} <- r{callee}{}({})",
+                type_arg_regs(type_args),
+                call_args(args, supplied_of(*supplied))
             )
         }
         Op::CallGlobal {
             dst,
             global,
             args,
+            type_args,
             supplied,
             ..
         } => {
             format!(
-                "CallGlobal  r{dst} <- {:?}({})",
+                "CallGlobal  r{dst} <- {:?}{}({})",
                 g(global),
-                call_args(args, *supplied)
+                type_arg_regs(type_args),
+                call_args(args, supplied_of(*supplied))
             )
         }
         Op::Return { src } => format!("Return      r{src}"),

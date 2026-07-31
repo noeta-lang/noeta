@@ -512,17 +512,17 @@ fn compile_debug(entry: &Entry, real_isolates: bool) -> Result<Compiled, String>
     };
 
     let (checked, checker) = noeta_check::check_all_session_with(&program, editions);
-    if !checked.diagnostics.is_empty() {
+    // Errors only — a warning leaves a runnable program, and refusing to attach to it is the one
+    // thing a debugger must never do.
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return Err(render_mapped(&sources, checked.diagnostics.iter()));
     }
 
     let (module, session) =
         noeta_compiler::compile_with_sites_session(&program, checked.sites, real_isolates, true)
-            .map_err(|u| {
-                format!(
-                    "internal error: the VM cannot compile this program: {}\n",
-                    u.reason
-                )
+            .map_err(|u| match u.diagnostic() {
+                Some(diagnostic) => render_mapped(&sources, std::iter::once(&diagnostic)),
+                None => format!("{u}\n"),
             })?;
     Ok(Compiled {
         module,

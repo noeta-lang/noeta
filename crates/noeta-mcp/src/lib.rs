@@ -28,9 +28,9 @@ use noeta_diagnostics::{DiagnosticCode, JsonDiagnostic, to_json};
 use noeta_span::{Source, SourceId, SourceMap};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
-    Implementation, ListResourcesResult, PaginatedRequestParams, ProtocolVersion,
-    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
-    ServerInfo,
+    CallToolRequestParams, CallToolResult, Implementation, ListResourcesResult,
+    PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResult,
+    Resource, ResourceContents, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
@@ -429,6 +429,11 @@ pub struct ExplainArgs {
 }
 
 /// The `explain_diagnostic` result: what the code means plus the real programs that trigger it.
+///
+/// `summary`/`detail`/`severity`/`group` come from the toolchain's own explanation catalog
+/// ([`noeta_diagnostics::DiagnosticCode::explain`]) — the same store `noeta explain` prints and
+/// the docs site renders its reference page from, so an agent and a human never get different
+/// answers about a code.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ExplainOut {
     /// The canonical code, e.g. `E0007`.
@@ -437,6 +442,14 @@ pub struct ExplainOut {
     pub title: String,
     /// Whether `code` is a known diagnostic.
     pub known: bool,
+    /// One sentence: what happened. Empty when `known` is false.
+    pub summary: String,
+    /// How to fix it. Empty where the summary already says it, or when `known` is false.
+    pub detail: String,
+    /// `error` or `warning` — a warning prints but does not fail a build.
+    pub severity: String,
+    /// The catalog section this code belongs to, e.g. `Control flow and matching`.
+    pub group: String,
     /// Real, CI-tested example programs that raise this diagnostic (with their descriptions).
     pub examples: Vec<ExampleOut>,
     /// Documentation pages that mention this code, as `[slug, title]`.
@@ -469,14 +482,10 @@ modules are resolved so imports check). Run this before claiming Noeta code comp
         &self,
         Parameters(args): Parameters<CheckArgs>,
     ) -> Result<Json<CheckOutput>, ErrorData> {
-        let sources = resolve_sources(&args.source, &args.file)?;
-        // Check under the entry's package edition (from its `noeta.toml`), default for inline source.
-        let root_edition = args
-            .file
-            .as_deref()
-            .map(|f| noeta_pm::manifest::root_edition(std::path::Path::new(f)))
-            .unwrap_or_default();
-        Ok(Json(run_check(&sources, root_edition)))
+        // The whole program — siblings *and* dependency packages — under the entry's package
+        // edition (from its `noeta.toml`), the default for inline source.
+        let resolved = resolve_workspace(&args.source, &args.file)?;
+        Ok(Json(run_check(&resolved)))
     }
 
     /// Search the Noeta documentation — the first stop before writing unfamiliar Noeta.
@@ -970,9 +979,10 @@ the source untouched) if it does not parse — format never guesses at broken so
 
     /// Explain a diagnostic code with real programs that trigger it.
     #[tool(
-        description = "Explain a Noeta diagnostic code (e.g. `E0007`): its name, the real CI-tested \
-example programs that raise it (so you can see the cause and the fix), and the docs that cover it. \
-Call this whenever `check` returns a code you want to resolve."
+        description = "Explain a Noeta diagnostic code (e.g. `E0007`): what it means and how to \
+fix it (the toolchain's own explanation catalog, the same text `noeta explain` prints), plus the \
+real CI-tested example programs that raise it and the docs that cover it. Call this whenever \
+`check` returns a code you want to resolve."
     )]
     async fn explain_diagnostic(
         &self,
@@ -983,9 +993,29 @@ Call this whenever `check` returns a code you want to resolve."
             Some(t) => (t, true),
             None => (String::new(), false),
         };
+        // The catalog entry, when the code is real. Same store `noeta explain` reads.
+        let entry = DiagnosticCode::from_code(&code).map(|c| c.explain());
+        let (summary, detail, severity, group) = match entry {
+            Some(e) => (
+                e.summary.to_string(),
+                e.detail.to_string(),
+                match e.severity {
+                    noeta_diagnostics::Severity::Warning => "warning",
+                    noeta_diagnostics::Severity::Note => "note",
+                    noeta_diagnostics::Severity::Error => "error",
+                }
+                .to_string(),
+                e.group.to_string(),
+            ),
+            None => (String::new(), String::new(), String::new(), String::new()),
+        };
         Json(ExplainOut {
             title,
             known,
+            summary,
+            detail,
+            severity,
+            group,
             // Cap the examples so `explain_diagnostic` stays token-frugal — a common code can appear
             // in dozens of cases; the `diagnostics/`-dir canonical repros sort first.
             examples: corpus::examples_for_code(&code)
@@ -1004,6 +1034,29 @@ Call this whenever `check` returns a code you want to resolve."
 
 #[tool_handler]
 impl ServerHandler for NoetaMcp {
+    /// Dispatch one `tools/call`, **containing a panic in the tool** rather than letting it end the
+    /// request. `#[tool_handler]` would generate exactly this body minus the `catch_unwind`; it
+    /// skips generating one when the impl defines its own.
+    ///
+    /// A tool panic is not a hypothetical: every tool runs the compiler front end over whatever
+    /// source the agent points at. rmcp spawns each request as its own task, so a panic there does
+    /// not kill the server — but it kills the task *before* it can reply, and the client is left
+    /// waiting on a response that will never come, with nothing on the wire to say why. Turning it
+    /// into an `INTERNAL_ERROR` gives the agent something it can read, retry, or report, and leaves
+    /// the session usable. (A stack **overflow** is not an unwind and cannot be caught here — that
+    /// one is prevented up front, by sizing the runtime's threads — see
+    /// [`noeta_parser::SERVER_STACK_SIZE`] and [`run_stdio`].)
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let tool = request.name.to_string();
+        let context = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let router = Self::tool_router();
+        catching_panics(&tool, router.call(context)).await
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.protocol_version = ProtocolVersion::LATEST;
@@ -1065,26 +1118,140 @@ impl ServerHandler for NoetaMcp {
     }
 }
 
-/// Turn a `check`-style `source`/`file` pair into the ordered source list (entry first, then
-/// sibling modules) that the salsa `Workspace` is built from. Inline `source` is a lone entry; a
-/// `file` pulls in siblings. Shared by `check` and every M3 analysis tool (see [`analyze::prepare`]).
-pub(crate) fn resolve_sources(
+/// Everything one `check`-style `source`/`file` request analyzes over: the ordered sources, the
+/// dependency packages, and the root package's edition — i.e. **the whole program**, not just the
+/// files that happen to sit beside the entry.
+#[derive(Debug)]
+pub(crate) struct ResolvedWorkspace {
+    /// Entry at index 0, then sibling modules, then each dependency package's modules — the
+    /// loader's canonical [`SourceId`] assignment ([`noeta_loader::workspace_sources`]), so a span
+    /// from any of them resolves back to its file by index.
+    pub sources: Vec<Source>,
+    /// The dependency packages as salsa inputs. Empty for inline `source`, for a bare script with
+    /// no manifest, and whenever resolution fails (see [`resolve_workspace`]).
+    pub deps: Vec<noeta_db::DepSources>,
+    /// The whole program's per-package `@name` resolution tables (`[directives]`/`[tiers]`), from the
+    /// same query-path graph resolve that produced [`Self::deps`]. Threaded onto the salsa
+    /// [`Workspace`](noeta_db::Workspace) so a renamed text tier (`[tiers] docs = "std:doc"`) lexes
+    /// verbatim under the MCP surface exactly as it does under `noeta run`/`noeta check` and the
+    /// editor (per-package tier-naming arc, 3g). Empty for inline `source` and manifest-less scripts.
+    pub package_uses: noeta_span::PackageUses,
+    /// The root package's language edition — what the entry and its siblings are analyzed under
+    /// (each dependency carries its own).
+    pub edition: noeta_lexer::Edition,
+    /// The module path each **member** source's location derives, index-aligned with the members.
+    /// Empty for an inline source, which sits in no package and so derives nothing.
+    pub paths: Vec<noeta_loader::ModulePath>,
+}
+
+impl ResolvedWorkspace {
+    /// The **member** sources — the entry and its sibling modules, i.e. everything ahead of the
+    /// dependency packages' modules in the canonical ordering.
+    pub fn members(&self) -> &[Source] {
+        let dep_len: usize = self.deps.iter().map(|d| d.modules.len()).sum();
+        &self.sources[..self.sources.len() - dep_len]
+    }
+
+    /// Build the salsa [`Workspace`](noeta_db::Workspace) for this program: the members under the
+    /// root package's edition, each dependency package's modules under its own. The one place the
+    /// MCP surface turns a request into a program, so no tool can accidentally analyze a
+    /// dependency-less slice of one.
+    pub fn workspace(&self, db: &noeta_db::LangDatabase) -> noeta_db::Workspace {
+        let (entry, modules) = self
+            .members()
+            .split_first()
+            .expect("resolve_workspace always yields at least the entry");
+        noeta_db::workspace_with_deps(
+            db,
+            entry,
+            modules,
+            &self.deps,
+            &self.package_uses,
+            self.edition,
+            &self.paths,
+        )
+    }
+}
+
+/// Turn a `check`-style `source`/`file` pair into the workspace the salsa `Workspace` is built
+/// from. Inline `source` is a lone entry with no dependencies; a `file` pulls in its sibling
+/// modules **and resolves its `noeta.toml` dependency graph**, exactly as the LSP does
+/// (`noeta_ide::workspace`) and for the same reason: without the dependency packages, a program
+/// that imports one is analyzed as a program whose imports do not exist. That made `check` report
+/// an E0019/E0029 on code `noeta run` compiles cleanly, and made `reflect` miss every role a
+/// dependency's `@role`-bearing attribute confers — the attribute *application* sits in the entry,
+/// so it was listed, while the `@role` tag that gives it meaning sat in the unlinked package.
+///
+/// Resolution is the **query** walk (no lockfile refresh): answering an agent's question must not
+/// rewrite `noeta.lock` as a side effect — the same rule the editor path follows. A resolution
+/// failure degrades to no dependencies rather than failing the request; the entry's own analysis is
+/// still worth returning, and the unresolved import then surfaces as an ordinary diagnostic.
+pub(crate) fn resolve_workspace(
     source: &Option<String>,
     file: &Option<String>,
-) -> Result<Vec<Source>, ErrorData> {
+) -> Result<ResolvedWorkspace, ErrorData> {
     match (source, file) {
-        (Some(text), None) => Ok(vec![Source::new(
-            SourceId::FIRST,
-            "<inline>".to_string(),
-            text.clone(),
-        )]),
+        (Some(text), None) => Ok(ResolvedWorkspace {
+            sources: vec![Source::new(
+                SourceId::FIRST,
+                "<inline>".to_string(),
+                text.clone(),
+            )],
+            deps: Vec::new(),
+            package_uses: noeta_span::PackageUses::new(),
+            edition: noeta_lexer::Edition::default(),
+            paths: Vec::new(),
+        }),
         (None, Some(path)) => {
-            let raw = noeta_loader::read_workspace(Path::new(path))
-                .map_err(|e| ErrorData::invalid_params(format!("cannot read {path}: {e}"), None))?;
-            let mut sources = Vec::with_capacity(raw.modules.len() + 1);
-            sources.push(raw.entry);
-            sources.extend(raw.modules);
-            Ok(sources)
+            let path = Path::new(path);
+            let raw =
+                noeta_loader::read_workspace(path, noeta_pm::sources::package_root(path).as_ref())
+                    .map_err(|e| {
+                        ErrorData::invalid_params(
+                            format!("cannot read {}: {e}", path.display()),
+                            None,
+                        )
+                    })?;
+            // The query-path graph resolve (no lockfile refresh — answering a question must not
+            // rewrite `noeta.lock`) yields both the dependency packages AND the per-package `@name`
+            // tables, so a renamed text tier lexes verbatim exactly as under the CLI and editor. A
+            // resolution failure degrades to no dependencies and no bindings (empty tables), the same
+            // quiet degrade the old `dependency_packages_query(...).unwrap_or_default()` gave.
+            let (packages, package_uses) = match noeta_pm::graph::resolve_graph_query(path) {
+                Ok(graph) => (graph.packages, graph.package_uses),
+                Err(_) => (Vec::new(), noeta_span::PackageUses::new()),
+            };
+            // THE one ordering authority — the same `SourceId` assignment the CLI's
+            // `link_with_deps` and the startup cache use, so a dependency module's span located
+            // here names the same file the compiler would.
+            let sources = noeta_loader::workspace_sources(&raw, &packages);
+            let mut next = 1 + raw.modules.len();
+            let deps = packages
+                .iter()
+                .map(|package| {
+                    let modules = sources[next..next + package.modules.len()].to_vec();
+                    next += package.modules.len();
+                    noeta_db::DepSources {
+                        root: package.root.clone(),
+                        prefix: package.prefix.clone(),
+                        renames: package
+                            .dep_renames
+                            .iter()
+                            .map(|(local, global)| (local.clone(), global.clone()))
+                            .collect(),
+                        modules,
+                        paths: package.modules.iter().map(|m| m.path.clone()).collect(),
+                        edition: package.edition,
+                    }
+                })
+                .collect();
+            Ok(ResolvedWorkspace {
+                sources,
+                deps,
+                package_uses,
+                edition: noeta_pm::manifest::root_edition(path),
+                paths: raw.paths,
+            })
         }
         (Some(_), Some(_)) => Err(ErrorData::invalid_params(
             "provide either `source` or `file`, not both",
@@ -1097,18 +1264,15 @@ pub(crate) fn resolve_sources(
     }
 }
 
-/// Run the whole-workspace check over `sources` (entry at index 0) and resolve the diagnostics into
-/// the canonical `JsonDiagnostic` form (the same one `noeta check --format json` emits). Uses a
-/// fresh `LangDatabase` — the memoization is per call in M0.
-fn run_check(sources: &[Source], root_edition: noeta_lexer::Edition) -> CheckOutput {
+/// Run the whole-program check over `resolved` — the entry, its siblings, **and** its dependency
+/// packages — and resolve the diagnostics into the canonical `JsonDiagnostic` form (the same one
+/// `noeta check --format json` emits). Uses a fresh `LangDatabase` — the memoization is per call.
+fn run_check(resolved: &ResolvedWorkspace) -> CheckOutput {
     let db = noeta_db::LangDatabase::default();
-    let (entry, modules) = sources
-        .split_first()
-        .expect("resolve_sources always yields at least the entry");
-    let ws = noeta_db::workspace(&db, entry, modules, root_edition);
+    let ws = resolved.workspace(&db);
     let checked = noeta_db::linked_checked(&db, ws);
     // The `SourceMap` resolves each diagnostic's span → file + line/column (entry is SourceId 0).
-    let source_map = SourceMap::new(sources.to_vec());
+    let source_map = SourceMap::new(resolved.sources.clone());
     let diagnostics: Vec<JsonDiagnostic> = checked
         .diagnostics
         .iter()
@@ -1183,10 +1347,46 @@ fn split_camel_case(name: &str) -> String {
 /// synchronous), mirroring `noeta_lsp::run_stdio` / `noeta_dap::run_stdio`.
 pub fn run_stdio() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        // Every tool runs the compiler front end on a runtime thread, and tokio's **2 MiB** default
+        // is a quarter of the stack a `main` gets — so a tool that the equivalent CLI verb runs
+        // happily aborted the *whole server* with "thread 'tokio-rt-worker' has overflowed its
+        // stack", taking the client's session down mid-request. tokio hands the same size to the
+        // blocking pool, so this covers `spawn_blocking` work too.
+        .thread_stack_size(noeta_parser::SERVER_STACK_SIZE)
         .enable_all()
         .build()
         .expect("failed to build the MCP-server tokio runtime");
     runtime.block_on(serve());
+}
+
+/// Await a tool's future, turning a **panic** into a JSON-RPC `INTERNAL_ERROR` naming the tool.
+/// Extracted from [`NoetaMcp::call_tool`] so the containment is testable on its own — the tool
+/// router is not a place a panic can be injected.
+async fn catching_panics(
+    tool: &str,
+    call: impl Future<Output = Result<CallToolResult, ErrorData>>,
+) -> Result<CallToolResult, ErrorData> {
+    match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(call)).await {
+        Ok(result) => result,
+        // `&*payload`, not `&payload`: the latter unsizes the *`Box`* to `dyn Any`, so every
+        // downcast misses and every panic renders as "non-string payload".
+        Err(payload) => Err(ErrorData::internal_error(
+            format!("the `{tool}` tool panicked: {}", panic_message(&*payload)),
+            None,
+        )),
+    }
+}
+
+/// The human-readable half of a caught panic payload (`panic!("…")` / a failed `unwrap`), or a
+/// placeholder when the payload is neither of the two standard string shapes.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
 }
 
 async fn serve() {
@@ -1206,14 +1406,7 @@ mod tests {
     use super::*;
 
     fn check_source(text: &str) -> CheckOutput {
-        run_check(
-            &[Source::new(
-                SourceId::FIRST,
-                "<inline>".to_string(),
-                text.to_string(),
-            )],
-            noeta_lexer::Edition::DEFAULT,
-        )
+        run_check(&resolve_workspace(&Some(text.to_string()), &None).expect("inline source"))
     }
 
     #[test]
@@ -1242,7 +1435,7 @@ mod tests {
 
     #[test]
     fn missing_arguments_is_an_invalid_params_error() {
-        let err = resolve_sources(&None, &None).unwrap_err();
+        let err = resolve_workspace(&None, &None).unwrap_err();
         assert!(err.message.contains("source"));
     }
 
@@ -1256,6 +1449,43 @@ mod tests {
                 .contains("check")
         );
         assert!(info.capabilities.tools.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_panicking_tool_becomes_a_json_rpc_error() {
+        // A panic inside a tool must reach the client as an error it can read. rmcp spawns each
+        // request as its own task, so an escaping panic does not kill the server — it kills the
+        // task before it replies, leaving the client waiting forever on a response that will never
+        // come. `catching_panics` is what `call_tool` wraps every dispatch in.
+        let err = catching_panics("probe", async { panic!("boom") })
+            .await
+            .expect_err("a panicking tool must produce an error, not a hang");
+        assert!(
+            err.message.contains("`probe`") && err.message.contains("boom"),
+            "the error should name the tool and carry the panic message: {}",
+            err.message
+        );
+        // The happy path is untouched.
+        let ok = catching_panics("probe", async { Ok(CallToolResult::success(vec![])) })
+            .await
+            .expect("a well-behaved tool passes through");
+        assert!(ok.content.is_empty());
+    }
+
+    #[test]
+    fn a_panic_payload_renders_both_standard_shapes() {
+        assert_eq!(
+            panic_message(&"literal" as &(dyn std::any::Any + Send)),
+            "literal"
+        );
+        assert_eq!(
+            panic_message(&String::from("formatted") as &(dyn std::any::Any + Send)),
+            "formatted"
+        );
+        assert_eq!(
+            panic_message(&7u8 as &(dyn std::any::Any + Send)),
+            "<non-string panic payload>"
+        );
     }
 
     /// The gate fixture: drive a real MCP session (client ⇄ server over an in-memory duplex) and

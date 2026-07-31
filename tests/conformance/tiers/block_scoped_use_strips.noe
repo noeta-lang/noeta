@@ -1,0 +1,24 @@
+// A tier block may open with its own `use`s, and both the import and everything it feeds are
+// **block-scoped**: with no tier active (a normal run / the conformance harness) the whole block is
+// stripped before lowering, so the `use std.test.{Skip}`, the `#[Skip(…)]` it resolves, and the
+// annotated fn all vanish together. Nothing is left behind — no dangling import binding `Skip` in
+// the merged program, no attribute for the checker to validate — so the program's own output is
+// unchanged and both backends lower the identical stripped program. (When the tier *is* active the
+// same import is what makes `#[Skip]` resolve to `std.test.Skip` and take effect; that half is
+// gated by the `noeta test` CLI tests, since the conformance harness never activates a tier.)
+// expect: stdout "5"
+// expect: stdout "done"
+// expect: exit 0
+fn add(a: int, b: int): int { return a + b; }
+
+@test {
+    use std.test.{Skip}
+
+    #[Skip("needs an argument")]
+    fn f(text: string): string { return text }
+
+    fn adds(): void { assert(add(2, 3) == 5); }
+}
+
+echo add(2, 3);
+echo "done";

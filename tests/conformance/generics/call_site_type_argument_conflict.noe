@@ -1,0 +1,31 @@
+// **The conflict rule.** When an annotation and a call-site turbofish disagree, the TURBOFISH wins
+// the instantiation and the disagreement is reported as an ordinary assignability error at the
+// binding (E0007), pointing at the initializer.
+//
+// Chosen over a dedicated "these two type arguments disagree" diagnostic because it is the truthful
+// account of what happened rather than a special case bolted on: `Repo::<Todo>.new("todos")` is a
+// self-sufficient expression of type `Repo<Todo>`, exactly like `5` is an `int`, and `r: Repo<User>
+// = <a Repo<Todo>>` is the same mistake as `n: int = "s"` — reported by the same rule, at the same
+// span, with the same wording the rest of the language uses. A bespoke error would have to explain
+// a precedence the reader now does not need to know.
+//
+// The precedence falls out of the machinery rather than being enforced: the class type arguments
+// seed the substitution first, and `bind_type_params` binds with a first-wins `or_insert`, so the
+// expected type can only fill what the turbofish left open. Nothing has to decide a winner.
+// expect: error E0007 at 30:17
+// expect: exit 1
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+}
+r: Repo<User> = Repo::<Todo>.new("todos");
+echo r.tbl;

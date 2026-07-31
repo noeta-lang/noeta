@@ -107,7 +107,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
     let mut exit_code;
 
     if stage == Stage::Lexer {
-        exit_code = if diagnostics.is_empty() { 0 } else { 1 };
+        exit_code = if has_error(&diagnostics) { 1 } else { 0 };
     } else {
         let parsed = noeta_parser::parse_in(
             &source,
@@ -124,7 +124,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // One `check_all` yields both the gate diagnostics and the site bundle the eval backend
         // needs, so the checker runs once per case instead of again inside the backend.
         let mut sites = noeta_check::Sites::default();
-        if stage == Stage::Eval && diagnostics.is_empty() {
+        if stage == Stage::Eval && !has_error(&diagnostics) {
             let checked = noeta_check::check_all(&parsed.program);
             diagnostics.extend(checked.diagnostics);
             sites = checked.sites;
@@ -133,19 +133,24 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // Only evaluate a program that checked cleanly and only when asked to. The reference is the
         // Core-IR interpreter (the migration's Phase-4 reference semantics), so conformance pins the
         // same last-use destruction the VM produces.
-        if stage == Stage::Eval && diagnostics.is_empty() {
+        //
+        // "Cleanly" means **no errors**, not "no diagnostics": a warning says the program is
+        // well-formed and compiles, so a case that trips one still runs and still exits 0. Gating on
+        // emptiness made every warning a silent hard stop with no output at all, which is the one
+        // thing a warning must not be.
+        if stage == Stage::Eval && !has_error(&diagnostics) {
             let result = reference::reference_run(&parsed.program, sites);
             stdout = result.stdout;
             stderr = result.stderr;
             diagnostics.extend(result.diagnostics);
             exit_code = result.exit_code;
         } else {
-            exit_code = if diagnostics.is_empty() { 0 } else { 1 };
+            exit_code = if has_error(&diagnostics) { 1 } else { 0 };
         }
     }
 
     // A compile error always means a failing exit, even if a stage stopped early.
-    if !diagnostics.is_empty() && exit_code == 0 {
+    if has_error(&diagnostics) && exit_code == 0 {
         exit_code = 1;
     }
 
@@ -155,6 +160,16 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         exit_code,
         errors: errors_of(&source, &diagnostics),
     }
+}
+
+/// Whether any diagnostic is an **error** — the gate on running a program and on a failing exit.
+///
+/// A [`Severity::Warning`](noeta_diagnostics::Severity::Warning) is by definition compatible with
+/// running: it says the program is well-formed and something in it is worth a second look. It is
+/// still reported (a case asserts it with the same `// expect: error <CODE> at …` header — the
+/// header names a diagnostic, whatever its severity), it simply does not stop the program.
+pub(crate) fn has_error(diagnostics: &[Diagnostic]) -> bool {
+    noeta_diagnostics::has_errors(diagnostics)
 }
 
 /// Map each diagnostic to its `(code, line, col)` expectation, resolved against `source`.
@@ -280,10 +295,160 @@ pub fn run_case_path(entry: &Path, display: &str, stage: Stage) -> CaseResult {
     compare(display, &expectations, &outcome, stage)
 }
 
+/// The **root package** a multi-file case declares, if it declares one: a case directory holding a
+/// [`noeta_loader::MANIFEST_NAME`] is a package, and its `.noe` files derive their module paths under
+/// the manifest's `[package] name` root segment (`local/App` → `App.…`).
+///
+/// This is what lets a case exercise **derivation** at all. Without a manifest there is no package,
+/// nothing derives, and each file's own `namespace` declaration stands — which is exactly the
+/// behavior a bare `noeta run` on a lone script keeps, and what every package-less case relies on.
+///
+/// Looked for in the case directory **only**, never up the tree: a corpus fixture must not change
+/// meaning because of a `noeta.toml` sitting somewhere above the checkout.
+pub(crate) fn case_root(entry: &Path) -> Option<noeta_loader::PackageRoot> {
+    let dir = entry.parent()?;
+    let text = std::fs::read_to_string(dir.join(noeta_loader::MANIFEST_NAME)).ok()?;
+    let name = noeta_pm::manifest::Manifest::parse(&text)
+        .ok()?
+        .package()?
+        .name
+        .root()
+        .to_string();
+    Some(noeta_loader::PackageRoot::new(dir, vec![name]))
+}
+
+/// Read a discovered case's sources as a workspace, under whatever package root the case declares
+/// ([`case_root`]) — so every runner that drives cases through the salsa module graph derives module
+/// paths the same way the batch loader does. One helper, because six runners disagreeing about which
+/// package a case belongs to would be silent.
+pub(crate) fn read_case_workspace(entry: &Path) -> std::io::Result<noeta_loader::RawWorkspace> {
+    noeta_loader::read_workspace(entry, case_root(entry).as_ref())
+}
+
+/// The **dependency packages** of a multi-file case: every *subdirectory* of the case directory is
+/// one package, keyed (and rooted) by its directory name, holding that directory's `.noe` files as
+/// its modules.
+///
+/// A conformance case is otherwise one package — entry plus siblings — which cannot express any rule
+/// whose boundary is the package, the orphan rule (E0070) first among them. A subdirectory is the
+/// smallest thing that can: the loader's `DepPackage` needs a root segment, a derived prefix, and
+/// modules, and a directory name supplies the first two. A plain name gives `prefix == [name]` and
+/// `root == name`, so nothing is re-rooted and a package's modules are addressed by exactly the path
+/// their file names derive; every package is visible to every other, which models a graph where the
+/// entry depends on all of them and they depend on each other (the checker sees one merged pool
+/// either way).
+///
+/// **A dotted directory name is a scope-array member** — `para.db/` is the package `para/db` reached
+/// through `para = [{ package = "para/db" }, … ]`, so its modules derive under the two-segment prefix
+/// `para.db` while the package's own root segment stays `db` (what it derives under standalone, and
+/// therefore what its intra-package `use`s lead with). That shape is the *only* one in which a
+/// package's derived prefix is deeper than its own root segment, and it is where an intra-package
+/// import has to be re-rooted to keep resolving — inexpressible while a directory name gave one
+/// segment for both.
+///
+/// **Empty for every existing case**, and callers must keep the deps-free path when it is: linking
+/// *with* a resolved dependency graph is deliberately stricter about foreign import roots than
+/// sibling-only linking, so routing a package-less case through it would change its meaning.
+fn dep_packages(dir: &Path) -> Vec<noeta_loader::DepPackage> {
+    // A case that is *itself* a package ([`case_root`]) owns its subdirectories — they are its own
+    // module tree, walked recursively under its prefix. Treating them as separate packages too would
+    // link every file twice and collide on every derived path.
+    if dir.join(noeta_loader::MANIFEST_NAME).is_file() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    dirs.into_iter()
+        .filter_map(|package_dir| {
+            let name = package_dir.file_name()?.to_string_lossy().into_owned();
+            // A case's package subdirectory IS a package root: walked recursively, every module
+            // deriving its path under the prefix the directory name spells.
+            let prefix: Vec<String> = name.split('.').map(str::to_string).collect();
+            // The package's own root segment is the LAST prefix segment — the package half of the
+            // identity, which is what a single-segment name gives too.
+            let root = prefix.last().cloned().unwrap_or_default();
+            let modules = noeta_loader::read_package_modules(&noeta_loader::PackageRoot::new(
+                &package_dir,
+                prefix.clone(),
+            ));
+            (!modules.is_empty()).then(|| noeta_loader::DepPackage {
+                prefix,
+                root,
+                modules,
+                dep_renames: std::collections::BTreeMap::new(),
+                native: false,
+                edition: noeta_lexer::Edition::DEFAULT,
+                directives: Default::default(),
+            })
+        })
+        .collect()
+}
+
+/// The same package layout as [`dep_packages`], expressed as the salsa module graph's
+/// [`noeta_db::DepSources`] — for the differential, which drives multi-file cases through the query
+/// graph rather than the batch loader. `next_id` continues the `SourceId` numbering past the entry
+/// and its siblings, matching the loader's own assignment (entry = 0, siblings `1..=S`, dependency
+/// modules after), so a span resolves to the same file on both paths.
+pub(crate) fn dep_sources(entry: &Path, next_id: u32) -> Vec<noeta_db::DepSources> {
+    let Some(dir) = entry.parent() else {
+        return Vec::new();
+    };
+    let mut id = next_id;
+    dep_packages(dir)
+        .into_iter()
+        .map(|pkg| {
+            let modules = pkg
+                .modules
+                .iter()
+                .map(|m| {
+                    let source = Source::new(SourceId(id), m.name.as_str(), m.text.as_str());
+                    id += 1;
+                    source
+                })
+                .collect();
+            let paths = pkg.modules.iter().map(|m| m.path.clone()).collect();
+            noeta_db::DepSources {
+                root: pkg.root,
+                prefix: pkg.prefix,
+                renames: Vec::new(),
+                modules,
+                paths,
+                edition: noeta_lexer::Edition::DEFAULT,
+            }
+        })
+        .collect()
+}
+
 /// Load + link `entry` and run the merged program to an [`Outcome`]. Lex/parse errors render
 /// against the source they came from; check/runtime diagnostics against the entry source.
 fn run_linked(entry: &Path, stage: Stage) -> Outcome {
-    let linked = match noeta_loader::load(entry, noeta_lexer::Edition::DEFAULT) {
+    // A case with package subdirectories links through the dependency-aware path so its sources
+    // carry real package provenance; one without keeps the deps-free path byte-for-byte.
+    let deps = entry.parent().map(dep_packages).unwrap_or_default();
+    // A case declaring a manifest is a package: its files derive their module paths ([`case_root`]).
+    // One without keeps `None` — nothing derives and each file's `namespace` declaration stands.
+    let root = case_root(entry);
+    let load = if deps.is_empty() {
+        noeta_loader::load(entry, noeta_lexer::Edition::DEFAULT, root.as_ref())
+    } else {
+        // Conformance cases carry no manifest `[tiers]`/`[directives]`, so an empty `PackageUses`
+        // suffices — a dependency's own `@tier(…, text)` still captures via the global scan.
+        noeta_loader::load_with_deps(
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &deps,
+            &noeta_span::PackageUses::new(),
+            root.as_ref(),
+        )
+    };
+    let linked = match load {
         Ok(Ok(linked)) => linked,
         Ok(Err(load_diagnostics)) => {
             let errors = load_diagnostics
@@ -320,8 +485,17 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     // Check/runtime diagnostics may land on a declaration merged in from a sibling module, so they
     // resolve through the source map (by each span's `SourceId`) rather than always against the
     // entry — that is what gives a cross-module error its real file/line/column.
-    let checked = noeta_check::check_all(&linked.program);
-    if !checked.diagnostics.is_empty() {
+    // Checked under the program's real per-source provenance, so a package-boundary rule (E0070)
+    // sees the same graph a `noeta run` of the same layout does.
+    let checked = noeta_check::check_all_with(
+        &linked.program,
+        noeta_check::CheckOptions {
+            editions: linked.editions.clone(),
+            packages: linked.packages.clone(),
+            ..noeta_check::CheckOptions::default()
+        },
+    );
+    if has_error(&checked.diagnostics) {
         return Outcome {
             stdout: String::new(),
             stderr: String::new(),
@@ -329,9 +503,13 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
             errors: errors_of_mapped(&linked.sources, &checked.diagnostics),
         };
     }
+    // A check that produced only warnings runs — and the warnings stay in the reported list, ahead
+    // of anything the run itself reports, so a case can assert one and its output in one header.
+    let mut diagnostics = checked.diagnostics;
     let result = reference::reference_run(&linked.program, checked.sites);
+    diagnostics.extend(result.diagnostics);
     Outcome {
-        errors: errors_of_mapped(&linked.sources, &result.diagnostics),
+        errors: errors_of_mapped(&linked.sources, &diagnostics),
         stdout: result.stdout,
         stderr: result.stderr,
         exit_code: result.exit_code,
@@ -355,7 +533,11 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
 /// test body, not the individual runner. A scoped thread lets `f` borrow its inputs directly; only
 /// the owned result crosses the join.
 pub fn on_deep_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
-    // Matches `noeta_parser::DEEP_PARSE_STACK` — comfortably above any single case's needs.
+    // This is the *interpreter's* budget, not the parser's: it used to be written as "matches
+    // `noeta_parser::DEEP_PARSE_STACK`", which stopped being true when that constant was sized
+    // against a measured per-nesting-level cost and grew to 256 MiB. Nothing here needs to track it
+    // — a corpus case's depth is its call depth, not its syntactic nesting — so the number stands on
+    // its own: comfortably above any single case's needs.
     const DEEP_STACK: usize = 64 * 1024 * 1024;
     std::thread::scope(|scope| {
         match std::thread::Builder::new()

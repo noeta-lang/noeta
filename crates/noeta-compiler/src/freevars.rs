@@ -205,6 +205,9 @@ fn collect_bindings_stmt(stmt: &Stmt, outer: &HashSet<String>, local: &mut HashS
         Stmt::Match { arms, .. } => {
             for arm in arms {
                 pattern_names(&arm.pattern, local);
+                if let Some(guard) = &arm.guard {
+                    collect_bindings_block(&guard.block, outer, local);
+                }
                 collect_bindings_block(&arm.body, outer, local);
             }
         }
@@ -323,11 +326,14 @@ fn collect_refs_stmt(
         } => {
             atom_ref(scrutinee, out);
             for arm in arms {
-                // Names the arm pattern binds are local to the arm — collect the body's refs,
-                // then remove them so they are not reported as free.
+                // Names the arm pattern binds are local to the arm — collect the guard's and
+                // body's refs, then remove them so they are not reported as free.
                 let mut bound = HashSet::new();
                 pattern_names(&arm.pattern, &mut bound);
                 let mut arm_refs = BTreeSet::new();
+                if let Some(guard) = &arm.guard {
+                    collect_refs_block(&guard.block, enclosing, globals, &mut arm_refs);
+                }
                 collect_refs_block(&arm.body, enclosing, globals, &mut arm_refs);
                 out.extend(arm_refs.into_iter().filter(|n| !bound.contains(n)));
             }
@@ -435,12 +441,19 @@ fn collect_nested_frees_stmt(
         }
         Stmt::For { body, .. } => collect_nested_frees_block(body, enclosing, globals, out),
         Stmt::Match { arms, .. } => {
+            // An arm's pattern bindings are locals of *this* function (`collect_bindings_stmt`
+            // records them), exactly like a `for` variable — so a closure in the arm that captures
+            // one must make it celled. They are therefore NOT subtracted here: this collector feeds
+            // the celling decision, and filtering them out left the binding uncelled while the
+            // closure still captured it (the compiler then had no cell to source the capture from).
+            // The mirror collector `collect_refs_stmt` *does* subtract them, because there the
+            // question is which names escape to an *enclosing* function — and an arm binding never
+            // does.
             for arm in arms {
-                let mut bound = HashSet::new();
-                pattern_names(&arm.pattern, &mut bound);
-                let mut arm_refs = BTreeSet::new();
-                collect_nested_frees_block(&arm.body, enclosing, globals, &mut arm_refs);
-                out.extend(arm_refs.into_iter().filter(|n| !bound.contains(n)));
+                if let Some(guard) = &arm.guard {
+                    collect_nested_frees_block(&guard.block, enclosing, globals, out);
+                }
+                collect_nested_frees_block(&arm.body, enclosing, globals, out);
             }
         }
         Stmt::Logical { right, .. } => collect_nested_frees_block(right, enclosing, globals, out),
@@ -500,11 +513,38 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(receiver);
             args.iter().for_each(&mut *f);
         }
-        Rvalue::Call { callee, args, .. } => {
+        // A forwarding call's `type_args` are operands like any other — a pass-through slot reads
+        // the enclosing fn's `$ty` local, and a NESTED fn (D2b) reaches it as a *capture*, so
+        // skipping them here would leave that capture unrecorded.
+        Rvalue::Call {
+            callee,
+            args,
+            type_args,
+            ..
+        } => {
             f(callee);
             args.iter().for_each(&mut *f);
+            type_args.iter().for_each(&mut *f);
         }
-        Rvalue::Method { receiver, args, .. } | Rvalue::TraitMethod { receiver, args, .. } => {
+        // A forwarding METHOD call carries its type arguments in the same separate channel, and
+        // for the same reason a `Call`'s must be visited here (a nested fn reaches a pass-through
+        // slot as a capture). A `TraitMethod` route is baked and never forwards.
+        Rvalue::Method {
+            receiver,
+            args,
+            type_args,
+            // The dynamic construction tag's hidden slot is an operand like any other: a nested `fn`
+            // or closure that constructs through it CAPTURES the enclosing `$ty<i>` local, and the
+            // slot must stay live across the call it re-tags after.
+            reflect_slot,
+            ..
+        } => {
+            f(receiver);
+            args.iter().for_each(&mut *f);
+            type_args.iter().for_each(&mut *f);
+            reflect_slot.iter().for_each(&mut *f);
+        }
+        Rvalue::TraitMethod { receiver, args, .. } => {
             f(receiver);
             args.iter().for_each(&mut *f);
         }
@@ -560,13 +600,28 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
                 }
             }
         }
+        // A narrow's `dynamic` head-name atom is an operand like any other: it is the temporary the
+        // preceding `TypeArgName`/`TypeSlotName` produced, so a walk that skipped it would lose that
+        // temporary's last use.
+        Rvalue::As {
+            operand, dynamic, ..
+        }
+        | Rvalue::TypeTest {
+            operand, dynamic, ..
+        } => {
+            f(operand);
+            if let Some(name) = dynamic {
+                f(name);
+            }
+        }
         Rvalue::Try { operand, .. }
-        | Rvalue::As { operand, .. }
-        | Rvalue::TypeTest { operand, .. }
         | Rvalue::TypeOf { operand, .. }
-        | Rvalue::FieldsOf { operand, .. } => f(operand),
-        Rvalue::ParamsOf { target, .. } => f(target),
-        Rvalue::FieldSpecsOf { name, .. } => f(name),
+        | Rvalue::TypeArgName { operand, .. }
+        | Rvalue::FieldsOf { operand, .. }
+        | Rvalue::TraitsOf { operand, .. } => f(operand),
+        Rvalue::TypeSlotName { slot, .. } => f(slot),
+        Rvalue::ParamsOf { target, .. } | Rvalue::ReturnsOf { target, .. } => f(target),
+        Rvalue::FieldSpecsOf { name, .. } | Rvalue::VariantsOf { name, .. } => f(name),
         Rvalue::Construct { name, fields, .. } => {
             f(name);
             f(fields);

@@ -14,6 +14,73 @@ use crate::scheduler::SchedState;
 /// form; `None` for the map form), and the shared planner's validation outcome.
 type ConstructResolve = (Vec<(String, Value)>, Option<Value>, Result<(), String>);
 
+/// Validate a `construct("Enum.Variant", fields)` payload against the variant's declared schema and
+/// order it into the positional slots an enum value carries, each **retained** for its new home.
+///
+/// The mirror of the tree-walker's function of the same name (`plans/backend-mirror.md`): only the
+/// value extraction and the refcount protocol are backend-local, and every accept/reject decision
+/// runs through the same shared planners a struct's fields go through — so a payload mismatch is
+/// worded exactly like a field mismatch, in both backends.
+fn plan_variant_payload(
+    case_name: &str,
+    payload: &[noeta_ast::reflect::FieldSpecData<'_>],
+    fields_val: &Value,
+) -> Result<Vec<Value>, String> {
+    if fields_val.is_list() {
+        // `realize_list` hands back values sharing the container's references (not retained), so each
+        // value kept for the built case is retained and the realized list released afterward — the
+        // `Op::Invoke` protocol the fielded path uses.
+        let realized = fields_val.realize_list();
+        let values = realized.list_items().expect("checked is_list");
+        let reprs: Vec<noeta_ast::reflect::TypeRepr> = values.iter().map(vm_type_repr).collect();
+        let plan = noeta_ast::reflect::plan_construct(case_name, payload, &reprs);
+        let out = match plan {
+            Err(msg) => {
+                realized.release();
+                return Err(msg);
+            }
+            Ok(_) => {
+                values.iter().for_each(|v| retain(*v));
+                values
+            }
+        };
+        realized.release();
+        Ok(out)
+    } else if fields_val.is_map() {
+        let keys = fields_val.map_keys().expect("checked is_map");
+        let vals = fields_val.map_values().expect("checked is_map");
+        let provided: Vec<(String, Value)> = keys
+            .iter()
+            .zip(vals)
+            .filter_map(|(k, v)| match k {
+                noeta_stdlib::MapKey::Str(s) => Some((s.as_str().to_owned(), v)),
+                _ => None,
+            })
+            .collect();
+        let reprs: Vec<(String, noeta_ast::reflect::TypeRepr)> = provided
+            .iter()
+            .map(|(n, v)| (n.clone(), vm_type_repr(v)))
+            .collect();
+        noeta_ast::reflect::plan_construct_named(case_name, payload, &reprs)?;
+        let names: Vec<String> = provided.iter().map(|(n, _)| n.clone()).collect();
+        Ok(
+            noeta_ast::reflect::plan_variant_payload_order(payload, &names)
+                .into_iter()
+                .map(|i| {
+                    let value = provided[i].1;
+                    retain(value);
+                    value
+                })
+                .collect(),
+        )
+    } else {
+        Err(format!(
+            "construct fields must be a list or a map, found {}",
+            fields_val.type_name()
+        ))
+    }
+}
+
 /// Builds a fresh host + async executor for a worker isolate (isolates I.4b). Injected by the CLI (its
 /// `RealHost` + `RealExecutor`), so `noeta-vm` stays free of `noeta-host-real`/tokio. `Send + Sync` so the
 /// worker closure can carry a clone across the thread boundary.
@@ -169,12 +236,45 @@ pub(crate) fn try_classify(v: Value) -> Option<TryOutcome> {
     }
 }
 
+/// Whether a variant pattern asking for one binding may match a **payload-less** built-in `Result`
+/// value by supplying `unit`.
+///
+/// `Ok()` on a `Result<void, E>` — which is what every `impl Validate` returns — builds an enum with
+/// no payload element, while the pattern `Ok(_)` (and `Ok(v)`) asks for one. Without this, the two
+/// spellings of the same value disagree: `x?` unwraps it happily ([`try_classify`] already
+/// substitutes `unit` on exactly this shape), and `match x { Ok(_) => …, Err(e) => … }` falls off
+/// the end of an exhaustive-looking match with E0007 at run time — a failure the checker cannot see
+/// and the reader cannot explain. Restricted to the two built-in carriers because for a *declared*
+/// enum the arity is the author's own distinction: `Part.Text` and `Part.Text(t)` are different
+/// cases, and a lenient match there would be a real bug.
+pub(crate) fn unit_payload_match(builtin_carrier: bool, data_len: usize, arity: usize) -> bool {
+    builtin_carrier && data_len == 0 && arity == 1
+}
+
+/// The **nominal runtime tag** a value carries, if any: a shape's name (user struct/class/enum)
+/// or an extern value's qualified identity — the key the trait-membership table
+/// (`ReflectionInfo::trait_impls`) and `traits_of` use. `None` for every non-nominal value
+/// (scalars, collections, functions), which therefore implements no declared trait. Mirrors the
+/// tree-walker's `value_nominal_name`.
+pub(crate) fn vm_nominal_name(v: &Value) -> Option<String> {
+    if v.is_extern() {
+        return Some(v.with_extern(|e| e.type_identity().to_string()));
+    }
+    v.shape().map(|s| s.name.clone())
+}
+
 /// Whether a value matches a narrowing target (`x.as<T>()`). Generics are erased, so only the
 /// runtime **head constructor** is tested. The primitive/collection kinds compare against
 /// [`Value::type_name`] — the same canonical strings the M0 tree-walker matches on, so both
 /// backends decide a narrowing identically; `Named` (a user struct/class/enum, or the built-in
-/// `Option`/`Result`) matches by shape name; `Dyn` always matches (no-op narrowing).
-pub(crate) fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
+/// `Option`/`Result`) matches by shape name; `Dyn` always matches (no-op narrowing); `DynTrait`
+/// tests the value's nominal type against `reflection`'s trait-membership table (the same shared
+/// table the tree-walker consults, so the two backends agree by construction).
+pub(crate) fn narrow_matches(
+    v: Value,
+    target: &NarrowTarget,
+    reflection: &noeta_ast::reflect::ReflectionInfo,
+) -> bool {
     let kind = match target {
         NarrowTarget::Int => "int",
         // Subtype edge `F32 <: float`: a plain `float` OR a reified `f32` value matches `float`.
@@ -204,8 +304,15 @@ pub(crate) fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
             }
             return v.shape().is_some_and(|s| &s.name == name);
         }
+        // A trait object matches iff the value's nominal type has a REGISTERED impl of the trait —
+        // the module reflection's membership table, built from the same `impl`/`@derive`/ABI
+        // declarations trait-method dispatch resolves through. A non-nominal value implements no
+        // declared trait and never matches. Mirrors the tree-walker's `TypeRef::DynTrait` arm.
+        NarrowTarget::DynTrait(trait_name) => {
+            return vm_nominal_name(&v).is_some_and(|n| reflection.type_implements(&n, trait_name));
+        }
         NarrowTarget::AnyOf(members) => {
-            return members.iter().any(|m| narrow_matches(v, m));
+            return members.iter().any(|m| narrow_matches(v, m, reflection));
         }
         // Abstract kind-types match any value of that declaration kind, by the value's shape kind.
         NarrowTarget::AnyEnum => {
@@ -222,14 +329,77 @@ pub(crate) fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         // match `args` (a `dyn` on either side is a wildcard). An untagged value classifies its args
         // to `dyn`, so `vm_type_repr` yields `dyn` arguments and the check passes head-only.
         NarrowTarget::Generic { head, args } => {
-            return narrow_matches(v, head)
+            return narrow_matches(v, head, reflection)
                 && noeta_ast::reflect::narrow_args_match(args, &vm_type_repr(&v));
         }
     };
     v.type_name() == kind
 }
 
+/// How much unterminated output may accumulate before a live run flushes it anyway.
+///
+/// Live output is **line**-oriented (one write syscall per line, not per `echo`), which is both the
+/// cheap shape and the one a terminal already expects. This bound is the escape hatch for a program
+/// that writes a great deal without ever emitting a newline: it still appears, in chunks, instead of
+/// growing a buffer nobody sees.
+const LIVE_OUTPUT_CHUNK: usize = 8 * 1024;
+
 impl<'m> Vm<'m> {
+    /// Append to the program's stdout buffer, then stream it if this run is live.
+    pub(crate) fn emit_stdout(&mut self, text: &str) {
+        self.out.stdout.push_str(text);
+        if self.out.live {
+            self.flush_live(noeta_stdlib::Stream::Stdout);
+        }
+    }
+
+    /// Append `text` and a newline — `Op::Echo`'s shape, kept as its own entry point so the hot path
+    /// still appends straight into the buffer rather than growing the rendered string first.
+    pub(crate) fn emit_stdout_line(&mut self, text: &str) {
+        self.out.stdout.push_str(text);
+        self.out.stdout.push('\n');
+        if self.out.live {
+            self.flush_live(noeta_stdlib::Stream::Stdout);
+        }
+    }
+
+    /// Append to the program's stderr buffer, then stream it if this run is live.
+    pub(crate) fn emit_stderr(&mut self, text: &str) {
+        self.out.stderr.push_str(text);
+        if self.out.live {
+            self.flush_live(noeta_stdlib::Stream::Stderr);
+        }
+    }
+
+    /// Hand every **completed line** in `stream`'s batch buffer to the host's live-output door,
+    /// removing exactly what was written.
+    ///
+    /// Only whole lines leave, so a `io.out("Total: ")` followed by `io.outln(n)` still reaches the
+    /// terminal as one line rather than two writes — with [`LIVE_OUTPUT_CHUNK`] as the bound for a
+    /// program that never terminates a line at all. A host that unexpectedly declines the write
+    /// (`stream_output` → `false`) gets its text put back and the run reverts to batch capture, so
+    /// no output can be lost between the two policies.
+    fn flush_live(&mut self, stream: noeta_stdlib::Stream) {
+        let buffer = match stream {
+            noeta_stdlib::Stream::Stderr => &mut self.out.stderr,
+            _ => &mut self.out.stdout,
+        };
+        let cut = match buffer.rfind('\n') {
+            Some(at) => at + 1,
+            None if buffer.len() >= LIVE_OUTPUT_CHUNK => buffer.len(),
+            None => return,
+        };
+        let text: String = buffer.drain(..cut).collect();
+        if !self.persist.host.stream_output(stream, &text) {
+            let buffer = match stream {
+                noeta_stdlib::Stream::Stderr => &mut self.out.stderr,
+                _ => &mut self.out.stdout,
+            };
+            buffer.insert_str(0, &text);
+            self.out.live = false;
+        }
+    }
+
     /// Build a VM ready to run `module` — resolving every derived table (shapes, packed schemas,
     /// methods, destructors, defaults, derives) but **without running `main`** (isolates I.4b). The
     /// normal entry points run `main` right after; a worker isolate instead seeds its globals from the
@@ -316,6 +486,9 @@ impl<'m> Vm<'m> {
     pub(crate) fn load_with(module: &'m Module, persist: SessionState) -> Vm<'m> {
         // Cached: fixed per host (see the `tel_on` field).
         let tel_on = persist.host.tel_enabled();
+        // Likewise fixed per host: whether program output streams to the terminal as it is produced
+        // (`noeta run`) or batches until teardown (the `@test` runner, the differential's sandbox).
+        let host_streams_output = persist.host.streams_output();
         let mut methods: HashMap<String, HashMap<String, u32>> = HashMap::new();
         for m in &module.methods {
             methods
@@ -413,6 +586,9 @@ impl<'m> Vm<'m> {
             out: RunOutput {
                 stdout: String::new(),
                 stderr: String::new(),
+                // Asked of the host once, here: whether it streams cannot change mid-run, and the
+                // write path must not pay a virtual call per `echo` to re-ask.
+                live: host_streams_output,
                 diagnostics: Vec::new(),
                 requested_exit: None,
                 abort_trace: Vec::new(),
@@ -650,15 +826,15 @@ impl<'m> Vm<'m> {
         }
 
         // A deliberate `os.exit(code)` wins over the diagnostic-derived code (there are no
-        // diagnostics on that path — the halt is clean).
+        // diagnostics on that path — the halt is clean). Otherwise the code is derived from whether
+        // the run **aborted** — an *error* — not from whether it said anything: a program's exit
+        // code is its own outcome, and an advisory diagnostic is not a failure. (Every runtime
+        // diagnostic is an abort today, so this is the same value; spelling it `is_empty()` is how
+        // the first advisory runtime diagnostic would silently start failing programs.)
         let exit_code = self
             .out
             .requested_exit
-            .unwrap_or(if self.out.diagnostics.is_empty() {
-                0
-            } else {
-                1
-            });
+            .unwrap_or(u8::from(noeta_diagnostics::has_errors(&self.out.diagnostics)).into());
         RunResult {
             stdout: std::mem::take(&mut self.out.stdout),
             stderr: std::mem::take(&mut self.out.stderr),
@@ -879,8 +1055,8 @@ impl<'m> Vm<'m> {
     pub(crate) fn materialize_attributes(&self, type_name: &str) -> Value {
         let attributed_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
-            "Attributed",
-            vec!["target".to_string(), "value".to_string()],
+            noeta_ast::reflect::ATTRIBUTED,
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::ATTRIBUTED),
         ));
         let shape = noeta_ast::reflect::attribute_shape(type_name, &self.module.reflection);
         let fields = shape.fields;
@@ -917,8 +1093,8 @@ impl<'m> Vm<'m> {
     pub(crate) fn materialize_roles(&self, role_enum: Option<&str>) -> Value {
         let binding_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
-            "RoleBinding",
-            vec!["target".to_string(), "role".to_string()],
+            noeta_ast::reflect::ROLE_BINDING,
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::ROLE_BINDING),
         ));
         let items: Vec<Value> = self
             .module
@@ -957,12 +1133,7 @@ impl<'m> Vm<'m> {
         let info_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             noeta_ast::reflect::PARAM_INFO,
-            vec![
-                "name".to_string(),
-                "type".to_string(),
-                "optional".to_string(),
-                "attrs".to_string(),
-            ],
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::PARAM_INFO),
         ));
         let items: Vec<Value> = self
             .module
@@ -984,15 +1155,40 @@ impl<'m> Vm<'m> {
         Value::list(items)
     }
 
+    /// Materialize a callable's declared **return type** from the module's reflection info into a
+    /// `?Type` — `some(t)` for a known callable, `none` when the target names none. `t` is built by
+    /// the very same `build_type_value` `materialize_params` uses for `ParamInfo.type`, so the two
+    /// reflection surfaces cannot render a declared type differently. The tree-walker materializes it
+    /// the same way, so the values agree across the differential by construction.
+    ///
+    /// `none` for an unknown target rather than a fabricated `Type.Unit`: `void` is a real return
+    /// type, so an unknown callable must be distinguishable from a `void` one.
+    pub(crate) fn materialize_returns(&self, target: &str) -> Value {
+        match self.module.reflection.returns_for(target) {
+            Some(repr) => crate::values::make_some(build_type_value(repr)),
+            None => crate::values::make_none(),
+        }
+    }
+
     /// One parameter's `#[...]` attributes, materialized into a `List<dyn>` of attribute-struct
     /// instances. Each instance is built exactly as `materialize_attributes` builds it — same
     /// `attribute_shape`, same `materialize_args` field resolution — so the value a consumer reads
     /// off `ParamInfo.attrs` is indistinguishable from the one it would read off an `Attributed`.
     pub(crate) fn materialize_param_attrs(&self, callable: &str, param: &str) -> Value {
-        let items: Vec<Value> = self
-            .module
-            .reflection
-            .param_attributes_for(callable, param)
+        self.materialize_attr_instances(
+            self.module.reflection.param_attributes_for(callable, param),
+        )
+    }
+
+    /// A member's manifest rows, materialized into a `List<dyn>` of attribute-struct instances —
+    /// the one builder both `ParamInfo.attrs` and `FieldSpec.attrs` go through, so "a field's
+    /// attributes are built exactly as a parameter's" is a shared call rather than a claim two
+    /// copies have to keep. An empty row set yields an empty list, never an absence.
+    pub(crate) fn materialize_attr_instances(
+        &self,
+        records: Vec<&noeta_ast::reflect::AttributeRecord>,
+    ) -> Value {
+        let items: Vec<Value> = records
             .into_iter()
             .map(|a| {
                 let shape = noeta_ast::reflect::attribute_shape(&a.name, &self.module.reflection);
@@ -1014,6 +1210,26 @@ impl<'m> Vm<'m> {
         Value::list(items)
     }
 
+    /// Materialize the qualified trait names a value's nominal type implements into a sorted,
+    /// deduped `List<string>` — the reflection `traits_of(value)`. Reads the SAME membership table
+    /// (`Module::reflection.trait_impls`) `NarrowTarget::DynTrait` tests, so the query and the
+    /// narrowing cannot disagree; a non-nominal value yields the empty list (mirroring
+    /// `fields_of`'s non-object answer). The tree-walker reads the identical shared table, so the
+    /// values agree across the differential by construction.
+    pub(crate) fn materialize_traits(&self, value: Value) -> Value {
+        let items: Vec<Value> = vm_nominal_name(&value)
+            .map(|n| {
+                self.module
+                    .reflection
+                    .traits_for(&n)
+                    .into_iter()
+                    .map(Value::string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Value::list(items)
+    }
+
     /// Materialize a struct/class instance's fields into a `List<FieldEntry>` (`{ name, value }`,
     /// declaration order) — the value-level reflection `fields_of` (derive layer 3). Any other
     /// value yields the empty list. The shape is built fresh (structural equality matches the
@@ -1023,7 +1239,7 @@ impl<'m> Vm<'m> {
         let entry_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             noeta_ast::reflect::FIELD_ENTRY,
-            vec!["name".to_string(), "value".to_string()],
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::FIELD_ENTRY),
         ));
         let items: Vec<Value> = value
             .object_fields_for_reflection()
@@ -1037,20 +1253,22 @@ impl<'m> Vm<'m> {
         Value::list(items)
     }
 
-    /// Materialize a declared type's field schema into a `List<FieldSpec>` (`{ name, type, optional }`,
-    /// declaration order) — the type-level reflection `field_specs_of`. An unknown or non-fielded type
-    /// yields the empty list. Each `type` is the field's declared type (precise, from the reflection
-    /// artifact). The shape is built fresh; structural shape equality matches the tree-walker's, so the
-    /// materialized values agree across the differential by construction.
+    /// Materialize a declared type's field schema into a `List<FieldSpec>` (`{ name, type, optional,
+    /// attrs }`, declaration order) — the type-level reflection `field_specs_of`. An unknown or
+    /// non-fielded type yields the empty list. Each `type` is the field's declared type (precise,
+    /// from the reflection artifact). The shape is built fresh; structural shape equality matches the
+    /// tree-walker's, so the materialized values agree across the differential by construction.
+    ///
+    /// `attrs` is **joined from the attribute manifest**, exactly as `materialize_params` joins a
+    /// parameter's: the rows are the ones `attributes_of::<T>()` returns for the same field, reached
+    /// through the shared `field_attributes_for` key. So the field door and the parameter door hand
+    /// a schema deriver the same shape, and a field attribute cannot be visible through one query
+    /// and missing from the other.
     pub(crate) fn materialize_field_specs(&self, type_name: &str) -> Value {
         let spec_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             noeta_ast::reflect::FIELD_SPEC,
-            vec![
-                "name".to_string(),
-                "type".to_string(),
-                "optional".to_string(),
-            ],
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::FIELD_SPEC),
         ));
         let items: Vec<Value> = self
             .module
@@ -1064,7 +1282,72 @@ impl<'m> Vm<'m> {
                         Value::string(spec.name),
                         build_type_value(spec.ty),
                         Value::bool(spec.optional),
+                        self.materialize_attr_instances(
+                            self.module
+                                .reflection
+                                .field_attributes_for(type_name, spec.name),
+                        ),
                     ],
+                )
+            })
+            .collect();
+        Value::list(items)
+    }
+
+    /// Materialize a declared enum's variant schema into a `List<VariantSpec>` (`{ name, payload,
+    /// backing }`, declaration order) — the type-level reflection `variants_of`. An unknown type, or
+    /// one that is not an enum, yields the empty list (the same contract `materialize_field_specs`
+    /// answers a non-fielded type with). Each payload entry is a `FieldSpec` built by the SAME
+    /// construction `materialize_field_specs` uses, so a variant payload and a struct field are the
+    /// same value shape; `backing` goes through the shared `attr_value_to_vm`, so a backed value
+    /// materializes exactly as the same literal does in an attribute argument. The tree-walker's
+    /// `materialize_variant_specs` builds each element the same way, so the values agree across the
+    /// differential by construction.
+    pub(crate) fn materialize_variant_specs(&self, type_name: &str) -> Value {
+        let spec_shape = noeta_object::intern_shape(Shape::object(
+            ShapeKind::Struct,
+            noeta_ast::reflect::FIELD_SPEC,
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::FIELD_SPEC),
+        ));
+        let variant_shape = noeta_object::intern_shape(Shape::object(
+            ShapeKind::Struct,
+            noeta_ast::reflect::VARIANT_SPEC,
+            noeta_ast::reflect::prelude_struct_fields(noeta_ast::reflect::VARIANT_SPEC),
+        ));
+        let items: Vec<Value> = self
+            .module
+            .reflection
+            .variant_specs(type_name)
+            .into_iter()
+            .map(|variant| {
+                let payload: Vec<Value> = variant
+                    .payload
+                    .into_iter()
+                    .map(|spec| {
+                        Value::object(
+                            spec_shape,
+                            vec![
+                                Value::string(spec.name),
+                                build_type_value(spec.ty),
+                                Value::bool(spec.optional),
+                                // Empty, and that is the true answer rather than a stub: a variant
+                                // payload slot has no syntax for an attribute (the `#[…]` a variant
+                                // bears is the *variant*'s, keyed `Enum.Variant`).
+                                Value::list(Vec::new()),
+                            ],
+                        )
+                    })
+                    .collect();
+                let backing = match variant.backing {
+                    Some(value) => crate::values::make_some(crate::values::attr_value_to_vm(
+                        value,
+                        &self.module.reflection,
+                    )),
+                    None => crate::values::make_none(),
+                };
+                Value::object(
+                    variant_shape,
+                    vec![Value::string(variant.name), Value::list(payload), backing],
                 )
             })
             .collect();
@@ -1078,13 +1361,18 @@ impl<'m> Vm<'m> {
     /// missing non-defaulted field is a recoverable `Err(message)` (via `err_shape`); success wraps the
     /// object in `Ok` (via `ok_shape`). Validation runs through the shared `plan_construct` — the same
     /// one the tree-walker uses — so both backends agree on every accept/reject and every message.
+    ///
+    /// A target that implements `Validate` has its `validate()` run on the freshly-built value before
+    /// the door hands it back — the same re-entry the `json`/`from_bytes` decode doors make (see
+    /// [`noeta_ast::reflect::construct_validates`]), through the same `validate_message`, so a
+    /// rejection is the door's own `Err(message)` carrying the validator's words.
     pub(crate) fn construct_dynamic(
         &mut self,
         name_val: Value,
         fields_val: Value,
         ok_shape: u32,
         err_shape: u32,
-        _span: Span,
+        span: Span,
     ) -> Result<Value, Abort> {
         let err_of = |vm: &Self, msg: String| {
             let shape = vm.persist.shapes[err_shape as usize];
@@ -1099,21 +1387,58 @@ impl<'m> Vm<'m> {
                 ),
             ));
         };
-        // Only a declared struct/class is constructible; check before field validation so an unknown
-        // type reports as such rather than "no field X".
-        match self
-            .module
-            .reflection
-            .type_named(&type_name)
-            .map(|t| t.kind)
-        {
-            Some(noeta_ast::reflect::TypeKind::Struct | noeta_ast::reflect::TypeKind::Class) => {}
-            _ => {
-                return Ok(err_of(
-                    self,
-                    format!("`{type_name}` is not a constructible struct or class"),
-                ));
+        // What the name refers to, decided by the shared resolver the tree-walker also runs — before
+        // any field validation, so an unconstructible name reports as such rather than "no field X".
+        // An `Enum.Variant` spelling builds the case directly (its payload IS the value: no defaults,
+        // no slot table), which is why it can be answered here without touching the shape tables.
+        let variant_plan =
+            match noeta_ast::reflect::resolve_construct_target(&self.module.reflection, &type_name)
+            {
+                noeta_ast::reflect::ConstructTarget::Rejected(msg) => Err(msg),
+                noeta_ast::reflect::ConstructTarget::Variant {
+                    enum_name,
+                    variant,
+                    index,
+                    payload,
+                } => Ok(Some((
+                    noeta_object::intern_shape(
+                        Shape::enum_variant(
+                            enum_name,
+                            variant,
+                            payload.iter().map(|s| s.name.to_string()).collect(),
+                            false,
+                        )
+                        .with_variant_index(index),
+                    ),
+                    plan_variant_payload(&type_name, &payload, &fields_val),
+                    // A validated ENUM validates on its own name, not the `"Enum.Variant"` spelling
+                    // the call site used: membership is keyed on the type. Decided here, under the
+                    // reflection borrow, because the re-entry below needs `&mut self`.
+                    noeta_ast::reflect::construct_validates(&self.module.reflection, enum_name),
+                ))),
+                noeta_ast::reflect::ConstructTarget::Fielded => Ok(None),
+            };
+        match variant_plan {
+            Err(msg) => return Ok(err_of(self, msg)),
+            Ok(Some((shape, payload, validates))) => {
+                let data = match payload {
+                    Err(msg) => return Ok(err_of(self, msg)),
+                    Ok(data) => data,
+                };
+                let value = Value::enum_value(shape, data);
+                if validates {
+                    // `validate_message` consumes its argument, so retain first: the case stays owned
+                    // here and is either handed on inside `Ok` or released on a rejection.
+                    retain(value);
+                    if let Some(msg) = self.validate_message(value, span)? {
+                        release(value);
+                        return Ok(err_of(self, msg));
+                    }
+                }
+                let ok = self.persist.shapes[ok_shape as usize];
+                return Ok(Value::enum_value(ok, vec![value]));
             }
+            Ok(None) => {}
         }
         // The `fields` argument is a `List<dyn>` (positional, declaration order) or a
         // `Map<string, dyn>` (named — the sparse, any-order form a framework binding `--field` flags
@@ -1180,24 +1505,34 @@ impl<'m> Vm<'m> {
         // compiled shape in `module.shapes`, so the shape is rebuilt from the reflection artifact —
         // same kind, name, and field order the compiler would have interned, and shape interning is
         // structural, so a dynamically built instance and a literal one share the one shape.
-        let shape =
-            match self.module.shapes.iter().find(|s| {
-                s.name == type_name && matches!(s.kind, ShapeKind::Struct | ShapeKind::Class)
-            }) {
-                Some(shape) => noeta_object::intern_shape(shape.clone()),
-                None => {
-                    let info = self
-                        .module
-                        .reflection
-                        .type_named(&type_name)
-                        .expect("validated type is in the reflection artifact");
-                    let kind = match info.kind {
-                        noeta_ast::reflect::TypeKind::Class => ShapeKind::Class,
-                        _ => ShapeKind::Struct,
-                    };
-                    noeta_object::intern_shape(Shape::object(kind, &type_name, info.fields.clone()))
-                }
-            };
+        //
+        // A **native** fielded target is the one case where the artifact's key and the runtime identity
+        // differ: reflection registers it as `std.http.Frame` while a value of it carries the canonical
+        // short shape name (`Frame`) plus a *stamped* qualified reflected type — the pair a source
+        // literal `Frame { … }` produces. So the shape is built under the registry's own name and the
+        // qualified identity is stamped below, which makes a constructed instance the same value as a
+        // literal one: the interned shape is shared, `==` holds, and it marshals into native code. The
+        // tree-walker applies the identical rule off the identical registry lookup (`native_fielded_repr`).
+        let native = noeta_stdlib::registry::default_registry()
+            .and_then(|reg| reg.resolve_fielded(&type_name));
+        let shape_name = native.map(|cl| cl.name).unwrap_or(type_name.as_str());
+        let shape = match self.module.shapes.iter().find(|s| {
+            s.name == shape_name && matches!(s.kind, ShapeKind::Struct | ShapeKind::Class)
+        }) {
+            Some(shape) => noeta_object::intern_shape(shape.clone()),
+            None => {
+                let info = self
+                    .module
+                    .reflection
+                    .type_named(&type_name)
+                    .expect("validated type is in the reflection artifact");
+                let kind = match info.kind {
+                    noeta_ast::reflect::TypeKind::Class => ShapeKind::Class,
+                    _ => ShapeKind::Struct,
+                };
+                noeta_object::intern_shape(Shape::object(kind, shape_name, info.fields.clone()))
+            }
+        };
         let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
         for (name, value) in &named {
             if let Some(idx) = shape.fields.iter().position(|f| f == name) {
@@ -1233,6 +1568,34 @@ impl<'m> Vm<'m> {
             .map(|s| s.unwrap_or_else(Value::unit))
             .collect();
         let object = Value::object(shape, slots);
+        // The stamped reflected identity for a native fielded type (see above) — the qualified name
+        // `type_of` must report, which the short shape name alone cannot supply. Written before the
+        // value escapes, so no other reference can observe the untagged state.
+        if let Some(cl) = native {
+            use noeta_stdlib::NominalType;
+            let repr = match cl.kind {
+                noeta_stdlib::FieldedKind::Class => {
+                    noeta_ast::reflect::TypeRepr::Class(cl.qualified(), Vec::new())
+                }
+                noeta_stdlib::FieldedKind::Struct => {
+                    noeta_ast::reflect::TypeRepr::Struct(cl.qualified(), Vec::new())
+                }
+            };
+            object.set_reflect(Some(Rc::new(repr)));
+        }
+        // Bottom-up, exactly as the recipe walk is: every field value handed in was built and (if its
+        // own type validates) checked at its own door before it reached this call, and the defaulted
+        // slots were filled above — so the type's own `validate` sees a complete, already-valid value,
+        // and a rejection short-circuits before the object escapes into `Ok`. The reflected tag is
+        // already stamped, so a native type's validator dispatches to its own `validate`.
+        if noeta_ast::reflect::construct_validates(&self.module.reflection, &type_name) {
+            // `validate_message` consumes its argument; retain so `object` stays owned here.
+            retain(object);
+            if let Some(msg) = self.validate_message(object, span)? {
+                release(object);
+                return Ok(err_of(self, msg));
+            }
+        }
         let ok = self.persist.shapes[ok_shape as usize];
         Ok(Value::enum_value(ok, vec![object]))
     }
@@ -1243,6 +1606,27 @@ impl<'m> Vm<'m> {
             .diagnostics
             .push(Diagnostic::error(code, span, message));
         Abort
+    }
+
+    /// The abort a call takes when it reaches a **forwarding generic** without supplying the type
+    /// arguments its prototype declares. The entry points with no static callee type behind them —
+    /// a `dyn` receiver, a handle, `invoke`, a first-class value — carry none, and binding
+    /// positionally anyway would lay a value argument into a type-argument slot and read it as an
+    /// index into the type table. Shares one message with the tree-walker, so the two backends
+    /// cannot word it differently.
+    pub(crate) fn no_instantiation(
+        &mut self,
+        callee: Option<&str>,
+        declared: usize,
+        supplied: usize,
+        span: Span,
+    ) -> Abort {
+        let message = noeta_ast::reflect::no_instantiation_message(
+            callee.unwrap_or("<anonymous>"),
+            declared,
+            supplied,
+        );
+        self.error(DiagnosticCode::InvalidTypeArguments, span, message)
     }
 
     /// Convert a native-dispatch [`noeta_stdlib::StdError`] into the unwind token. The

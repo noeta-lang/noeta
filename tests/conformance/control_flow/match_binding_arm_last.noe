@@ -1,0 +1,35 @@
+// The reachability rule (E0066) is about ORDER, not about bindings: a bare-identifier arm in LAST
+// position is the ordinary catch-all-that-names-its-value form and stays clean, exactly as a
+// trailing `_` does. Nothing follows it, so nothing is dead.
+//
+// Bare-identifier resolution is likewise narrow — a name becomes a case test only when it is a
+// payload-free variant of the SCRUTINEE's own enum. `rest` is not a `Signal` variant, and `label`'s
+// scrutinee is an `int` with no variants at all, so both bindings are just bindings.
+// expect: stdout "zero"
+// expect: stdout "many 7"
+// expect: stdout "go"
+// expect: stdout "other: Signal.Stop"
+// expect: exit 0
+enum Signal {
+    Go;
+    Stop;
+}
+
+fn label(n: int): string {
+    return match n {
+        0 => "zero",
+        rest => "many ${rest}",
+    }
+}
+
+fn act(s: Signal): string {
+    return match s {
+        Signal.Go => "go",
+        rest => "other: ${rest}",
+    }
+}
+
+echo label(0)
+echo label(7)
+echo act(Signal.Go)
+echo act(Signal.Stop)

@@ -1,0 +1,41 @@
+// `type_name::<T>()` yields a type's **qualified runtime identity** as a `string`, and it is the
+// same identity `type_of(value)` reports and the same key the name-keyed registries are stored
+// under. Those three agreeing is the whole contract: `type_name::<Todo>()` exists so a framework can
+// *write* that key as a compile-checked expression instead of a hand-written string literal that no
+// rename, alias or `namespace` follows.
+//
+// The type is kept as a real `TypeRef` all the way to lowering, so the linker's namespace rewrite
+// reaches it and the string comes out qualified. That is the whole reason it is not desugared to a
+// string in the parser — and why this is a `main.noe` directory case: the harness runs a single-file
+// case straight from source text with no loader, so a bare `.noe` here would never qualify anything
+// and could not observe the difference it pins.
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
+// expect: stdout "name: app.main.Todo"
+// expect: stdout "type_of: Type.Struct(app.main.Todo, [])"
+// expect: stdout "agrees with type_of: true"
+// expect: stdout "keys field_specs_of: 2"
+// expect: stdout "keys construct: Ok"
+// expect: exit 0
+
+pub struct Todo {
+    pub id: int
+    pub title: string
+}
+
+t = Todo { id: 1, title: "a" }
+
+echo "name: ${type_name::<Todo>()}"
+echo "type_of: ${type_of(t)}"
+
+// `type_of` renders as `Type.Struct(name, args)`; the identity inside it is what `type_name` yields.
+echo "agrees with type_of: ${"${type_of(t)}" == "Type.Struct(${type_name::<Todo>()}, [])"}"
+
+// The para/db use case: the string feeds the name-keyed registries directly, and resolves there.
+echo "keys field_specs_of: ${field_specs_of(type_name::<Todo>()).len()}"
+
+fields: Map<string, dyn> = {"id": 2, "title": "b"}
+echo "keys construct: ${match construct(type_name::<Todo>(), fields) {
+    Ok(_) => "Ok",
+    Err(_) => "Err",
+}}"

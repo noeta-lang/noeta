@@ -1,0 +1,7 @@
+// `returns_of(target)` takes a runtime `string` naming a fn or method — the same target keying
+// `params_of`. A non-`string` operand (here an `int`) is a type mismatch (E0007). What the string
+// *names* stays lenient, though: an unknown callable is a runtime `none`, not a static error, since
+// a reflection-driven framework generally computes the target rather than writing it out.
+// expect: error E0007 at 7:6
+// expect: exit 1
+echo returns_of(42);

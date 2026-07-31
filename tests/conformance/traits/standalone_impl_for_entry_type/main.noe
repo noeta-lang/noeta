@@ -1,0 +1,33 @@
+// The other half of "an impl travels with its target type": the type is declared **here**, in the
+// entry, and the sibling module supplies the `impl`. The entry's own declarations are the program's
+// tail rather than merged imports, so a linker that asked "is the target type merged?" of the merged
+// half alone answered no and dropped the impl — `want(Target.new())` was then E0007 "expected
+// `dyn Decoder`, found `Target`" for a program in which the impl is right there in the sibling.
+//
+// The entry also declares a standalone impl of its own (`Marked for Target`). A namespaced entry is
+// a pooled module like any other, so the impl scan meets that impl a second time; it must recognize
+// it as already present rather than merge a duplicate, which coherence would reject as E0027.
+// expect: stdout "HI"
+// expect: stdout "marked"
+// expect: stdout "[\"pkg.lib.Decoder\", \"pkg.main.Marked\"]"
+// expect: exit 0
+
+use pkg.lib.{Decoder};
+
+pub class Target {
+    fn new(): Target { return Target {} }
+}
+
+trait Marked {
+    fn mark(): string
+}
+
+impl Marked for Target {
+    fn mark(): string { return "marked" }
+}
+
+fn want(x: dyn Decoder): string { return x.step("hi") }
+
+echo want(Target.new())
+echo Target.new().mark()
+echo traits_of(Target.new())

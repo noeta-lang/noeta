@@ -1,0 +1,39 @@
+// The gradual escape survives the failure-position rule: a declared return that **defers** (`dyn`,
+// an inference hole, top-level code, an unannotated closure) still accepts a `?` on a `Result` without
+// a diagnostic. E0012 (`try_result_return_type`) is for a *declared, non-deferring* return — the point
+// of that rule is that a concrete `void`/`string` return is now checked, not that inference got
+// stricter.
+//
+// A `dyn` return means the checker cannot say what the `?` early-return has to fit, so it does not
+// pretend to: the `Err` simply becomes the function's return value, and the caller decides. Nothing
+// aborts, because nothing propagated the `Err` out of the *top level* — the E0069 abort
+// (`try_unhandled_at_top_level`) is about a failure with no frames left, not about `dyn`.
+// expect: stdout "ok: hello"
+// expect: stdout "Err(Failure.Blank)"
+// expect: stdout "handled: Failure.Blank"
+// expect: exit 0
+enum Failure { Blank }
+
+fn fetch(key: string): Result<string, Failure> {
+    if key == "" {
+        return Err(Failure.Blank)
+    }
+    return Ok("hello")
+}
+
+// `dyn` defers: no E0012 here, and the `?` keeps its ordinary meaning.
+fn deferred(key: string): dyn {
+    v = fetch(key)?
+    return "ok: ${v}"
+}
+
+echo deferred("k")
+
+// The failure arrives as the return value, so it is an ordinary value the caller can echo…
+echo deferred("")
+
+// …or match, which is what a deferred context leaves you free to do.
+echo match deferred("") {
+    Err(e) => "handled: ${e}",
+    other  => "value: ${other}",
+}

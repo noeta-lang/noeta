@@ -227,6 +227,24 @@ pub trait Network {
         Box::new(crate::net::WsRecvIo { conn })
     }
 
+    /// Build the **timed** recv descriptor — resolves to `?string`, `None` = nothing arrived
+    /// within `_ms` (or the peer closed; [`Self::net_ws_is_closed`] tells the two apart).
+    ///
+    /// This is the primitive a session needs to act on its own schedule. Racing a plain `recv`
+    /// against a timer is not a substitute: the race cancels the losing recv, and a message it had
+    /// *already consumed* dies with the cancelled task — measured at every client message dropped
+    /// against a 700ms tick. A deadline handled inside the read has nothing to cancel, so nothing
+    /// can be lost.
+    fn net_ws_recv_timeout(&self, conn: u64, _ms: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::net::WsRecvTimeoutIo { conn })
+    }
+
+    /// Whether `conn`'s peer has closed — what distinguishes a *timed-out*
+    /// [`Self::net_ws_recv_timeout`] (`None`, keep looping) from a *finished* one (`None`, stop).
+    fn net_ws_is_closed(&self, _conn: u64) -> bool {
+        true
+    }
+
     /// Build the send descriptor. Default via [`Self::net_ws_send_now`]; `RealHost` overrides
     /// with an async frame write.
     fn net_ws_send(&self, conn: u64, text: String) -> Box<dyn crate::ExternIo> {
@@ -239,6 +257,126 @@ pub trait Network {
     /// Build the close descriptor. Default via [`Self::net_ws_close_now`].
     fn net_ws_close(&self, conn: u64) -> Box<dyn crate::ExternIo> {
         Box::new(crate::net::WsCloseIo { conn })
+    }
+
+    // --- Streaming bodies (http-streaming arc). The outbound half reads a response body
+    // *incrementally* instead of buffering it whole; the inbound half serves an event stream
+    // instead of one reply-and-close. Determinism follows the same discipline as everything above:
+    // the sandbox decodes a **pure, finite scripted body** (a function of the request, like
+    // `sandbox_respond`) so a streaming program terminates in-oracle, and the real host overrides
+    // the descriptor builders with genuinely async reqwest/socket bodies. ---
+
+    /// Open `request`'s response body as an incremental stream cut with `framing`, returning the
+    /// [`crate::stream::StreamHead`] — the stream id passed to [`Self::net_stream_recv`] /
+    /// [`Self::net_stream_close`], **and the response head that came back with it**.
+    ///
+    /// Synchronous, and deliberately so: opening a stream is "send the request and read the
+    /// response **head**", which is exactly the point where a transport failure is still a
+    /// [`crate::NetError`] the caller can handle. Once the head is in, failures belong to the body
+    /// and surface as the stream ending. That split is what lets `stream(...)` return a
+    /// `Result<FrameStream, HttpError>` whose `Err` means "the request never got off the ground",
+    /// the same contract the one-shot verbs have.
+    ///
+    /// Because the handshake is where the status exists, it is also the only place a host can be
+    /// *made* to report it — see [`crate::stream::StreamHead`] for why that is returned rather
+    /// than queried afterwards.
+    ///
+    /// The default is an honest capability error, so a host with no streaming transport (WASI, the
+    /// browser) stays compiling and a program reaching the surface is told why.
+    fn net_stream_open(
+        &mut self,
+        request: crate::NetRequest,
+        _framing: crate::stream::Framing,
+    ) -> Result<crate::stream::StreamHead, crate::NetError> {
+        Err(crate::NetError::new(
+            crate::NetErrorKind::Other,
+            request.url,
+            "this host does not support streaming response bodies",
+        ))
+    }
+
+    /// The next decoded frame on `stream` for the default recv descriptor — `None` once the body
+    /// has ended and every buffered frame has been taken.
+    fn net_stream_recv_next(
+        &mut self,
+        _stream: u64,
+    ) -> Result<Option<crate::stream::Frame>, StdError> {
+        Err(StdError {
+            kind: ErrorKind::Io,
+            message: "this host does not support streaming response bodies".to_string(),
+        })
+    }
+
+    /// Build the async recv descriptor for `stream`. Default: a
+    /// [`StreamRecvIo`](crate::stream::StreamRecvIo) resolving through
+    /// [`Self::net_stream_recv_next`] at spawn (deterministic in the sandbox, where the whole
+    /// scripted body is decoded at open; serial-but-correct on any host). `RealHost` overrides it
+    /// with a genuine chunk read off the live connection.
+    fn net_stream_recv(&self, stream: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::stream::StreamRecvIo { stream })
+    }
+
+    /// Release `stream` and its underlying connection.
+    ///
+    /// Idempotent: closing an already-closed (or never-opened) stream is `Ok`, because a program
+    /// that closes a stream it has already drained is doing the right thing, not an error. A
+    /// stream the program **abandons** without closing is released when the host is torn down —
+    /// there is no host-coupled finalizer to do it sooner (see `docs/Native-Extensions.md`), which
+    /// is exactly why `close()` exists on the surface.
+    fn net_stream_close(&mut self, _stream: u64) -> Result<(), StdError> {
+        Ok(())
+    }
+
+    /// Begin an event-stream response on `conn`: write the `200 text/event-stream` head and hold
+    /// the connection open for [`Self::net_sse_send_now`] frames.
+    ///
+    /// The inbound mirror of [`Self::net_stream_open`], and the exact analogue of
+    /// [`Self::net_ws_upgrade_now`] — a connection leaving one-reply-and-close for a persistent
+    /// stream. Unlike a websocket this needs no handshake key: SSE is a plain HTTP response whose
+    /// body never ends, so any request can be answered with one.
+    fn net_sse_start_now(&mut self, _conn: u64) -> Result<(), StdError> {
+        Err(StdError {
+            kind: ErrorKind::Io,
+            message: "this host does not serve event streams".to_string(),
+        })
+    }
+
+    /// Write already-encoded event-stream bytes on `conn` for the default send descriptor.
+    ///
+    /// Takes **wire text**, not a [`crate::stream::Frame`], so the one encoder
+    /// ([`crate::stream::Frame::to_sse_wire`]) serves every host and a `comment` heartbeat — which
+    /// is not a frame at all — rides the same leaf instead of needing its own.
+    fn net_sse_send_now(&mut self, _conn: u64, _wire: &str) -> Result<(), StdError> {
+        Err(StdError {
+            kind: ErrorKind::Io,
+            message: "this host does not serve event streams".to_string(),
+        })
+    }
+
+    /// End the event stream on `conn` and release it. Idempotent, like
+    /// [`Self::net_stream_close`].
+    fn net_sse_close_now(&mut self, _conn: u64) -> Result<(), StdError> {
+        Ok(())
+    }
+
+    /// Build the SSE start descriptor. Default via [`Self::net_sse_start_now`]; `RealHost`
+    /// overrides it with an async write of the response head.
+    fn net_sse_start(&self, conn: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::stream::SseStartIo { conn })
+    }
+
+    /// Build the SSE send descriptor. Default via [`Self::net_sse_send_now`]; `RealHost` overrides
+    /// it with an async socket write.
+    fn net_sse_send(&self, conn: u64, wire: String) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::stream::SseSendIo {
+            conn,
+            wire: Some(wire),
+        })
+    }
+
+    /// Build the SSE close descriptor. Default via [`Self::net_sse_close_now`].
+    fn net_sse_close(&self, conn: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::stream::SseCloseIo { conn })
     }
 }
 
@@ -284,6 +422,33 @@ pub trait Console {
     /// `None` at EOF. In the sandbox this is deterministic: it returns the next scripted stdin line
     /// and does not write anywhere observable.
     fn prompt(&mut self, msg: &str) -> Option<String>;
+
+    /// Stream program output that has **already been produced** straight to the real terminal,
+    /// bypassing the batch output buffer, and report whether it was written.
+    ///
+    /// The seam that makes a long-running program's output *live*. Program output is normally
+    /// batch-captured and rendered when the run ends — right for a program that ends, and useless
+    /// for one that does not: a `noeta serve` app runs until Ctrl-C, so every `echo` a request
+    /// handler makes would be invisible for the entire life of the server.
+    ///
+    /// Returning `false` (the default, and what the sandbox does) means the host wrote nothing and
+    /// the caller must keep the text in the batch buffer — that is what holds the differential
+    /// oracle byte-identical, since only the real host streams.
+    fn stream_output(&mut self, _stream: Stream, _text: &str) -> bool {
+        false
+    }
+
+    /// Whether [`stream_output`](Self::stream_output) would actually write — the cheap predicate a
+    /// backend reads *before* deciding to drain its batch buffer, so a host that does not stream
+    /// costs one bool per write instead of a take-then-restore of the whole buffer.
+    ///
+    /// `false` (the default, and what the sandbox does) means every write stays in the compared
+    /// batch buffer. `RealHost` reports it only when the driver asked for live output — `noeta run`
+    /// does, and the `@test` runner deliberately does not, because a passing test's stdout is
+    /// captured and shown only when it fails.
+    fn streams_output(&self) -> bool {
+        false
+    }
 }
 
 /// **Operating system** capability (stdlib-gaps) — process execution and system introspection,
@@ -329,9 +494,22 @@ pub trait Os {
     // `std::process::Child` with drained pipes (CLI-only). ---
 
     /// Spawn `command` with `args` (verbatim — no shell) **without waiting**, returning an opaque
-    /// handle id. The child runs concurrently with the program. A command that cannot be started
-    /// at all (not found, not executable) is an `Io` error, exactly like [`Self::os_exec`].
-    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError>;
+    /// handle id. The child runs concurrently with the program. A command that cannot be started at
+    /// all (not found, not executable) is a classified [`crate::os::OsError`] — the value the
+    /// recoverable `os.try_spawn` door hands the program.
+    ///
+    /// **This is the primitive**, not [`Self::os_spawn`]: a host that can fail to start a child can
+    /// always say *why*, and a door that throws that away can never be recovered from. The aborting
+    /// door is derived from it below.
+    fn os_try_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, crate::os::OsError>;
+
+    /// The **aborting** spawn door (`os.spawn`) — an `Io` error (`E0021`), exactly like
+    /// [`Self::os_exec`]. Derived from [`Self::os_try_spawn`] so the two doors report the identical
+    /// message by construction; a host never implements both.
+    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError> {
+        self.os_try_spawn(command, args)
+            .map_err(crate::os::OsError::into_std_error)
+    }
 
     /// The OS process id of a spawned child, or `None` if `handle` is not a live handle.
     fn os_proc_pid(&self, handle: u64) -> Option<i64>;
@@ -386,8 +564,47 @@ pub trait Os {
     /// [`Self::os_proc_read_line`]. `wait` still returns the whole captured stderr.
     fn os_proc_read_stderr_line(&mut self, handle: u64) -> Result<Option<String>, StdError>;
 
-    /// Write `data` to the child's stdin. An error if the child has no stdin or it is closed.
-    fn os_proc_write_stdin(&mut self, handle: u64, data: &str) -> Result<(), StdError>;
+    /// Build the work descriptor for an **awaitable** streaming read — the twin of every blocking
+    /// read above, selected by [`crate::os::ProcRead`] (`read_line_async`, `read_err_line_async`,
+    /// `read_async(n)`).
+    ///
+    /// One method for all three because the only difference between them is which buffer and how
+    /// much: an asymmetric async surface would leave whichever read lacked a twin able to park the
+    /// isolate's whole scheduler, which is the exact condition this exists to remove.
+    ///
+    /// Default: a [`crate::os::ProcReadIo`] resolving through the blocking methods at spawn
+    /// (deterministic in the sandbox — the scripted child's output is already complete, so it is
+    /// instantly ready and in-oracle); `RealHost` overrides it with a blocking-pool body over the
+    /// child's shared stream buffer, so the read genuinely overlaps the isolate's other tasks. The
+    /// [`Self::os_proc_wait_spawn`] analogue for a streaming read.
+    fn os_proc_read_spawn(
+        &mut self,
+        handle: u64,
+        read: crate::os::ProcRead,
+    ) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::os::ProcReadIo { handle, read })
+    }
+
+    /// Write `data` to the child's stdin, reporting a classified [`crate::os::OsError`] — the value
+    /// the recoverable `Process.try_write` door hands the program.
+    ///
+    /// **This is the primitive**, for the same reason [`Self::os_try_spawn`] is: a write to a child
+    /// that has exited is an ordinary condition (the server crashed mid-call), and the
+    /// check-then-write race a program would otherwise use to avoid it cannot be closed from the
+    /// language — the child can die in the gap between the liveness poll and the write.
+    fn os_proc_try_write_stdin(
+        &mut self,
+        handle: u64,
+        data: &str,
+    ) -> Result<(), crate::os::OsError>;
+
+    /// The **aborting** write door (`Process.write`) — an `Io` error (`E0021`). Derived from
+    /// [`Self::os_proc_try_write_stdin`] so the two doors report the identical message by
+    /// construction; a host never implements both.
+    fn os_proc_write_stdin(&mut self, handle: u64, data: &str) -> Result<(), StdError> {
+        self.os_proc_try_write_stdin(handle, data)
+            .map_err(crate::os::OsError::into_std_error)
+    }
 
     /// Close the child's stdin, signalling end-of-input to it (a program reading until EOF then
     /// unblocks). Idempotent.

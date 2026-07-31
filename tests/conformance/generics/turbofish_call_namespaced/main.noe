@@ -1,0 +1,51 @@
+// An explicitly instantiated generic call resolves its **callee** under a `namespace`, exactly as
+// the plain call does.
+//
+// Regression: the linker's qualification walk recursed into `Expr::TypedCall`'s type arguments and
+// its arguments but never visited the callee NAME, which that node holds inline rather than as an
+// `Expr::Ident` sub-expression (the plain `f(args)` form reaches the rewrite through `Expr::Call`'s
+// callee). So `gen(1)` resolved and `gen::<Todo>(2)` was an E0005 in the very same module — every
+// generic function unusable with an explicit turbofish in any namespaced module.
+//
+// The three sibling turbofish surfaces are pinned alongside, because they must keep working and are
+// qualified by different routes: a method/associated call resolves its name against the receiver
+// (never namespaced) and reaches its receiver as a real sub-expression, and a typed module call
+// reaches its module handle the same way. Only the bare-callee form needed the explicit visit.
+//
+// A `main.noe` on purpose: the harness runs a *single-file* case straight from source text, with no
+// loader and therefore no namespace qualification at all, so a bare `.noe` here could not observe
+// the bug it pins.
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
+// expect: stdout "plain: 1"
+// expect: stdout "turbofish: 2"
+// expect: stdout "through a helper: 7"
+// expect: stdout "associated: 3"
+// expect: stdout "method: 4"
+// expect: stdout "module: 7"
+// expect: exit 0
+
+use std.json;
+
+pub struct Todo { pub id: int }
+
+fn gen<T>(x: int): int { return x }
+
+// The callee is also reached from *inside* another declaration, which is the shape the linker's
+// same-module reference graph walks: `helper` must drag `gen` into the merged program.
+fn helper(): int { return gen::<Todo>(7) }
+
+trait Marker { fn tag(): string }
+
+pub struct Box2 { pub id: int }
+impl Marker for Box2 {
+    fn tag(): string { return "t" }
+    fn pick<T>(x: int): int { return x }
+}
+
+echo "plain: ${gen(1)}"
+echo "turbofish: ${gen::<Todo>(2)}"
+echo "through a helper: ${helper()}"
+echo "associated: ${Box2.pick::<Todo>(3)}"
+echo "method: ${Box2 { id: 1 }.pick::<Todo>(4)}"
+echo "module: ${json.parse::<Todo>("{\"id\": 7}").id}"

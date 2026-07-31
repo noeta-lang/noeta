@@ -147,6 +147,15 @@ pub enum NativeOut {
         variant: String,
         variant_index: u32,
         fields: Vec<NativeOut>,
+        /// Propagated from [`TypeRecipe::Enum::has_validator`] — the exact twin of
+        /// [`NativeOut::Struct::has_validator`]: when set, the backend re-enters to run this enum's
+        /// `Validate::validate` on the built value, so a **decode door** enforces an enum's
+        /// invariants on the same terms it enforces a struct's (`docs/Validation.md`).
+        ///
+        /// A dispatch returning an enum it built itself passes `false`: a native function's return
+        /// value is not untrusted input crossing a door, so nothing re-enters and the flag costs it
+        /// nothing.
+        has_validator: bool,
     },
     /// A native-declared **fielded-type** instance (native-extensibility S2, unified) — a REAL
     /// language `Object` the backend materializes with named fields, distinct from an anonymous
@@ -241,6 +250,15 @@ pub enum SigType {
     Unit,
     /// Accepts any value (numeric-polymorphic positions, `json.stringify`, …).
     Dyn,
+    /// **`never`** — the bottom type: this function **does not return**. `os.exit` terminates the
+    /// process; `server.serve` runs an accept loop until the process is killed.
+    ///
+    /// Meaningful in a *return* position only (a parameter of type `never` could never be supplied).
+    /// Declaring it is not decoration: it is the fact the tier runners read to decide whether a
+    /// top-level `f(…)` is setup they may run, which they previously had to guess from statement
+    /// syntax. See [`crate::registry::SigType::Unit`]'s neighbours — `Unit` says "returns nothing",
+    /// this says "does not return".
+    Never,
     List(&'static SigType),
     Option(&'static SigType),
     Map(&'static SigType, &'static SigType),
@@ -283,10 +301,12 @@ pub enum SigType {
     Var(u8),
     /// A **trait-bounded** type variable (p2p P2) — like [`SigType::Var`] for binding and
     /// substitution, but the type bound to it must satisfy the named built-in trait or the call is
-    /// a static error (E0025). `synced_signal(initial: BoundedVar(0, "Mergeable"), …)` is the first
-    /// use: only a CRDT may be synced, enforced at compile time. The checker maps the trait name
-    /// through `BuiltinTrait::from_name` and reuses its ordinary bound-satisfaction check.
-    BoundedVar(u8, &'static str),
+    /// a static error (E0025). `synced_signal(initial: BoundedVar(0, &["Mergeable", "Syncable"]), …)`
+    /// is the motivating use: a synced value must both converge *and* know how to cross the wire,
+    /// and those are separate capabilities a type can hold independently. **Every** listed bound
+    /// must be satisfied, so the list is a conjunction (`T: Mergeable + Syncable`), matching what
+    /// the surface `<T: A + B>` means. A single-element slice is the ordinary one-bound case.
+    BoundedVar(u8, &'static [&'static str]),
     /// A **generic nominal instantiation** (higher-order-abi H4) — a generic extern type in a
     /// signature position: `cell.new(v: Var(0)) -> Generic("Cell", &[Var(0)])` types as
     /// `Cell<T>` with `T` bound from the argument. The plain [`SigType::Named`] stays the
@@ -303,6 +323,30 @@ pub enum SigType {
     /// the `ListElemWide` analog and nests through the concrete resolution. Under `dyn`/no binding it
     /// degrades to a gradual hole, never a wrong concrete type.
     Assoc(&'static str),
+    /// **`Self`** — the implementing type itself, in a native trait method's *parameter* position.
+    ///
+    /// [`RetTy::SameAsArg(0)`](RetTy::SameAsArg) has always said this on the **return** side, and
+    /// [`Assoc`](Self::Assoc) says "a type derived from `Self`'s element". Neither could say it about
+    /// an argument, so a method taking another value of the implementor's own type — `v.add(other)`
+    /// on a `@packed` vector — had to declare `Dyn` and accept anything: `v.add(5)` type-checked
+    /// clean and failed at runtime. This is the missing half of that vocabulary.
+    ///
+    /// Resolution is receiver-relative, so it is only meaningful where a receiver exists (a trait
+    /// method). `Self` is the **implementor**, not the receiver: an `Element` method's receiver *is*
+    /// `Self`, while a `Bulk` method's is `List<Self>`, and both spell their operand the same way —
+    /// `Self` and `List<Self>` respectively. Outside a trait method it degrades to a gradual hole
+    /// rather than a wrong concrete type, exactly as `Assoc` does.
+    SelfTy,
+    /// **Any numeric scalar** — every type `Type::is_arith_numeric` admits: `int`, `float`, `f32`,
+    /// `f64`, and each `i8`..`u64` width.
+    ///
+    /// The other numeric [`SigType`]s name ONE type each, and there are no fixed-width variants at
+    /// all, so a parameter that genuinely takes any number had no way to say so and was declared
+    /// `Dyn` — which also admits a string, a list, or a whole `@packed` vector. `vec.Kernels::scale`
+    /// is the case in point: its factor is width-agnostic on purpose (`read_factor` converts), so
+    /// `Color` (4×u8) scales by `2.0` as readily as by `2`, and typing it as the element would
+    /// wrongly reject the first. This says exactly what such a parameter accepts, and nothing more.
+    Numeric,
 }
 
 impl SigType {
@@ -335,6 +379,7 @@ impl SigType {
             SigType::Bytes => "bytes".to_string(),
             SigType::Unit => "void".to_string(),
             SigType::Dyn => "dyn".to_string(),
+            SigType::Never => "never".to_string(),
             SigType::List(t) => format!("List<{}>", t.render()),
             SigType::Option(t) => format!("Option<{}>", t.render()),
             SigType::Map(k, v) => format!("Map<{}, {}>", k.render(), v.render()),
@@ -357,7 +402,9 @@ impl SigType {
                 ret.render()
             ),
             SigType::Var(n) => type_var_name(*n),
-            SigType::BoundedVar(n, bound) => format!("{}: {}", type_var_name(*n), bound),
+            SigType::BoundedVar(n, bounds) => {
+                format!("{}: {}", type_var_name(*n), bounds.join(" + "))
+            }
             SigType::Generic(name, args) => format!(
                 "{}<{}>",
                 name,
@@ -367,6 +414,8 @@ impl SigType {
                     .join(", ")
             ),
             SigType::Assoc(name) => format!("Self::{name}"),
+            SigType::SelfTy => "Self".to_string(),
+            SigType::Numeric => "number".to_string(),
         }
     }
 }
@@ -475,10 +524,10 @@ pub enum TypeRecipe {
     List(Box<TypeRecipe>),
     /// A string-keyed map; the boxed recipe is the value type (JSON object keys are always strings).
     Map(Box<TypeRecipe>),
-    /// A struct/record type: its name and `(field, recipe)` pairs in the type's declared order.
+    /// A struct/record type: its name and its [`FieldRecipe`]s in the type's declared order.
     Struct {
         name: String,
-        fields: Vec<(String, TypeRecipe)>,
+        fields: Vec<FieldRecipe>,
         /// Whether this type implements the `Validate` built-in trait (validation arc). When set,
         /// a recipe door re-enters the backend to run `validate()` on the freshly-built value
         /// (bottom-up: after all fields are materialized and validated). Resolved by the checker's
@@ -486,6 +535,155 @@ pub enum TypeRecipe {
         /// (zero cost for a non-validated type).
         has_validator: bool,
     },
+    /// A declared **enum** type: its name and its variants in declaration order, each carrying the
+    /// wire value that selects it ([`VariantRecipe::tag`]).
+    ///
+    /// **A decode accepts exactly what the type's JSON Schema advertises**, which is the whole reason
+    /// this form exists. A *backed* enum's schema enumerates its backings (`enum Tier: string { Free
+    /// = "free" }` derives `{"enum": ["free"]}`), so `"free"` decodes; a *plain* enum's schema
+    /// enumerates its case names (`{"enum": ["Positive"]}`), so `"Positive"` does. Describing a
+    /// document with one vocabulary and decoding it with another is exactly the asymmetry that left
+    /// an enum reflectable but not buildable, so the tag is the one place the two are tied together.
+    ///
+    /// Every variant here is **payload-free**. A payload-carrying variant has no canonical JSON
+    /// spelling — a discriminated union has several, and no single one is accepted by every
+    /// consumer's strict mode — so the checker's `type_to_recipe` declines such an enum whole rather
+    /// than decoding its payload-free half, which would advertise a schema the decode could not
+    /// honor. That variant is built by `construct("Enum.Variant", payload)` instead, where the
+    /// payload is named data rather than a guessed encoding.
+    Enum {
+        name: String,
+        variants: Vec<VariantRecipe>,
+        /// Whether this enum implements the `Validate` built-in trait — the enum twin of
+        /// [`TypeRecipe::Struct::has_validator`], honoring the identical decode-door contract: a
+        /// freshly decoded variant runs `validate()` before it escapes the door.
+        has_validator: bool,
+    },
+}
+
+/// One payload-free variant of a [`TypeRecipe::Enum`]: its case name, its declaration index, and the
+/// wire value that selects it.
+///
+/// `index` is carried rather than derived from position because it is what both backends stamp on the
+/// built value ([`NativeOut::Variant::variant_index`] — what a derived `Comparable` orders by, and
+/// what keeps the tree-walker's `EnumValue` and the VM's interned shape identical).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct VariantRecipe {
+    /// The variant's declared case name (`Free`) — the identity the built value carries, whatever
+    /// wire value selected it.
+    pub name: String,
+    /// The variant's declaration index.
+    pub index: u32,
+    /// The wire value that selects this variant.
+    pub tag: VariantTag,
+}
+
+/// The wire value that selects one variant of a [`TypeRecipe::Enum`] — what a decode matches against,
+/// and what a rejection lists as accepted.
+///
+/// A plain enum's variant carries [`VariantTag::Name`] rather than a `Str` of its own case name so the
+/// two stay distinguishable after the fact: they decode identically, but nothing downstream has to
+/// guess whether a string tag came from a backing or from the declaration — a distinction that stops
+/// being cosmetic the moment a backed enum backs one case with another case's name.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum VariantTag {
+    /// A plain (unbacked) enum's variant: the **case name** is the wire value, matching the case-name
+    /// schema such an enum derives.
+    Name,
+    /// A `string`-backed variant's backing.
+    Str(String),
+    /// An `int`-backed variant's backing.
+    Int(i64),
+    /// A `float`-backed variant's backing.
+    Float(f64),
+    /// A `bool`-backed variant's backing.
+    Bool(bool),
+}
+
+impl VariantTag {
+    /// This tag's accepted wire value as **JSON text**, for the list a rejection names (`expected one
+    /// of "free", "paid"`). [`VariantTag::Name`] needs the case name, which lives on the
+    /// [`VariantRecipe`] rather than here, so it is passed in.
+    pub fn render(&self, case_name: &str) -> String {
+        match self {
+            VariantTag::Name => crate::json_text::json_string(case_name),
+            VariantTag::Str(s) => crate::json_text::json_string(s),
+            VariantTag::Int(n) => n.to_string(),
+            VariantTag::Float(f) => crate::format_float(*f),
+            VariantTag::Bool(b) => b.to_string(),
+        }
+    }
+}
+
+/// One field of a [`TypeRecipe::Struct`]: its name, the recipe its value decodes through, and what
+/// the decoder does when the input omits it ([`FieldDefault`]).
+///
+/// The default rides *on the field* rather than as a wrapper recipe node so that every consumer that
+/// walks a struct's fields (the decoder, the conformance harnesses, an extension's own recipe walk)
+/// sees the optionality where the field is named, and a nested recipe stays a pure type description.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct FieldRecipe {
+    /// The field's declared name — the key the decoder matches in the input object, and the name it
+    /// emits in the resulting [`NativeOut::Struct`].
+    pub name: String,
+    /// The recipe the field's value decodes through.
+    pub recipe: TypeRecipe,
+    /// What an *omitted* field means: required, or filled from a baked-in literal default.
+    pub default: FieldDefault,
+}
+
+impl FieldRecipe {
+    /// A field the input must supply (no declared default).
+    pub fn required(name: impl Into<String>, recipe: TypeRecipe) -> FieldRecipe {
+        FieldRecipe {
+            name: name.into(),
+            recipe,
+            default: FieldDefault::Required,
+        }
+    }
+
+    /// A field whose declared default is a literal, baked in as the JSON text `json`. An omitted
+    /// field decodes that text through [`Self::recipe`], so a filled default and a supplied value go
+    /// through the identical walk.
+    pub fn with_default(
+        name: impl Into<String>,
+        recipe: TypeRecipe,
+        json: impl Into<String>,
+    ) -> FieldRecipe {
+        FieldRecipe {
+            name: name.into(),
+            recipe,
+            default: FieldDefault::Literal(json.into()),
+        }
+    }
+}
+
+/// What a struct field's declared default means to a **decoder** — the fillable/required boundary,
+/// resolved once by the checker's `type_to_recipe` and baked into the recipe.
+///
+/// The language lets any field declare a default (`name: string = "(unnamed)"`, `at: Time = now()`),
+/// and every *in-process* constructor — a struct literal, the dynamic `construct(name, fields)` —
+/// fills an omitted defaulted field by running its compiled default thunk. A decode has no thunk to
+/// run: it is a pure data walk in `noeta-stdlib`, downstream of the backend that owns the program's
+/// code. So the boundary is **literalness**:
+///
+/// - a default that folds to a constant ([`FieldDefault::Literal`]) is baked into the recipe as JSON
+///   text and filled when the field is absent — exactly the subset `TypeInfo::field_defaults` carries;
+/// - any other default expression ([`FieldDefault::Dynamic`]) cannot be baked, so the field stays
+///   required in JSON and its absence is the ordinary missing-field error, worded to say why.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub enum FieldDefault {
+    /// No declared default: an absent field is a missing-field error.
+    #[default]
+    Required,
+    /// The field's declared default, rendered as **JSON text** (`"\"(unnamed)\""`, `"3"`,
+    /// `"[1, 2]"`). An absent field decodes this text through the field's own recipe, so the filled
+    /// value is built by the same walk — and the same numeric widening — a supplied value is.
+    Literal(String),
+    /// The field declared a default the checker could not fold to a constant (`= now()`,
+    /// `= other_field`). Nothing can be baked, so the field is still required in JSON; the variant
+    /// exists so the decoder can *say* that rather than reporting a bare missing field.
+    Dynamic,
 }
 
 /// One resolved **type-argument bundle** for a forwarded generic instantiation (poly-values F2b):
@@ -493,12 +691,21 @@ pub enum TypeRecipe {
 /// runtime about one concrete instantiation. Generics are erased, so a single compiled body serves
 /// every instantiation — the checker interns these bundles into a program-wide table, each
 /// instantiating call passes its entry's INDEX as a hidden argument, and the forwarded sites
-/// (`json.try_parse::<T>`, `attributes_of::<T>`) resolve their data through it at runtime. A pure
-/// function of the program, identical for both backends by construction.
+/// (`json.try_parse::<T>`, `attributes_of::<T>`, `type_name::<T>`) resolve their data through it at
+/// runtime. A pure function of the program, identical for both backends by construction.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TypeArgInfo {
-    /// The instantiation's display name (`"Order"`) — what a name-keyed consumer
-    /// (`attributes_of`'s manifest) resolves with.
+    /// The instantiation's **name-keyed identity** — its qualified head name
+    /// (`"app.storage.Order"`): what a name-keyed consumer resolves with, both `attributes_of`'s
+    /// manifest and the string `type_name::<T>()` answers with.
+    ///
+    /// The qualified head, *not* a display rendering. The runtime registries are keyed on the name
+    /// the linker qualified, so the display form (which renders the SHORT name — `Order`, not
+    /// `app.storage.Order`) silently missed every namespaced type: a forwarded
+    /// `attributes_of::<T>()` answered the empty list where the concrete `attributes_of::<Order>()`
+    /// answered the manifest. Produced by `noeta_types::Type::head_name`, the lattice twin of
+    /// `TypeRef::head_name`, so a forwarded parameter and the turbofish that instantiated it key
+    /// identically by construction rather than by convention.
     pub name: String,
     /// The instantiation's build recipe, when the type has one — what a recipe-consuming door
     /// (`json.try_parse::<T>`) decodes with. `None` for an un-recipeable type: statically
@@ -525,6 +732,17 @@ pub enum HiddenArg {
 pub struct ExtFn {
     pub name: &'static str,
     pub params: &'static [SigType],
+    /// The parameter **names**, positionally parallel to [`Self::params`] — what a `name:` label at
+    /// a call site binds against, and what tooling shows instead of a bare type.
+    ///
+    /// Empty means "this function does not accept named arguments", and a label on a call to it is
+    /// refused rather than silently ignored (see `Checker::reject_unbound_labels`). That is the
+    /// honest state for a signature nobody has named yet: a label is a compatibility surface, so a
+    /// name here is a commitment, and inventing one is a decision rather than a formality.
+    ///
+    /// A partially-named list is a declaration bug — name every parameter or none. Length is
+    /// checked against `params` by the registry's own conformance test.
+    pub param_names: &'static [&'static str],
     pub ret: RetTy,
 }
 
@@ -533,24 +751,35 @@ impl ExtFn {
     /// out-of-tree table written as `ExtFn { name, params, ret, ..ExtFn::DEFAULTS }` keeps
     /// compiling when a future optional field (a doc string, a deprecation note, …) lands here.
     pub const DEFAULTS: ExtFn = ExtFn {
+        param_names: &[],
         name: "",
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),
     };
 
-    /// The whole signature in surface syntax — `fn split(string, string): List<string>`. Native
-    /// parameters carry no names in the registry, so parameters render as their types positionally.
+    /// The whole signature in surface syntax — `fn split(sep: string, limit: int): List<string>`,
+    /// or `fn split(string, int): List<string>` for a function whose parameters are unnamed.
     pub fn render(&self) -> String {
+        let params: Vec<String> = self
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| match self.param_names.get(i) {
+                Some(n) => format!("{n}: {}", ty.render()),
+                None => ty.render(),
+            })
+            .collect();
         format!(
             "fn {}({}): {}",
             self.name,
-            self.params
-                .iter()
-                .map(SigType::render)
-                .collect::<Vec<_>>()
-                .join(", "),
+            params.join(", "),
             self.ret.render(self.params)
         )
+    }
+
+    /// Whether this signature can bind a `name:` label — i.e. whether it declares parameter names.
+    pub fn has_param_names(&self) -> bool {
+        !self.param_names.is_empty()
     }
 }
 
@@ -780,8 +1009,9 @@ pub struct ExtType {
     pub arena_getter: Option<ArenaGetter>,
     /// The **built-in traits this type declares** (p2p P2) — the extern-type analogue of a user
     /// type's `@derive`/`impl`. The checker seeds these into its trait-impl table so a
-    /// `T: Mergeable` bound (or any built-in-trait bound) is satisfied by this type. The CRDT types
-    /// declare `["Mergeable"]`; a non-built-in name is ignored. Default empty.
+    /// built-in-trait bound is satisfied by this type. A name matching a native [`ExtTrait`]
+    /// instead makes the type satisfy *that* trait (recorded by `seed_ext_traits`) — which is how
+    /// the CRDT extern types satisfy the package-declared `Mergeable`. Default empty.
     pub traits: &'static [&'static str],
     /// Whether plain-`methods` arguments are **deep-marshalled** (a `Map`/`List`/object argument
     /// projects to a full [`crate::NativeValue`] tree) rather than the cheap shallow projection
@@ -1623,7 +1853,7 @@ pub struct ExtAttrField {
 /// like any native fielded type: a consumer resolves `use std.test.{Skip}` / `use std.test` /
 /// `#[std.test.Skip]` through the same `classify_use`/`namespace_types` machinery, and the checker
 /// keys `symbols.attributes` on the [`ExtAttribute::qualified`] identity (D2). There is no global
-/// attribute namespace — std's tier attributes live under `std.test` (`Skip`/`Name`/`Group`/`Data`),
+/// attribute namespace — std's tier attributes live under `std.test` (`Skip`/`Name`/`Group`/`Data`/`Timeout`),
 /// `std.bench` (`Bench`), and `std.doc` (`Doc`), imported like any attribute.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtAttribute {
@@ -1708,6 +1938,92 @@ pub struct ExtTier {
     /// yielding [`Self::expr`]. `None` unless `expr` is set (a program-declared expr tier names its
     /// handler on the `@tier` fn instead).
     pub handler: Option<&'static str>,
+}
+
+/// One activated **code root** handed to a native tier runner — the ABI mirror of the prelude
+/// `TierRoot` value a program `@tier` runner receives. `name` is the collected fn/method's
+/// **link-qualified** identifier: `@test fn foo` yields `"foo"`, and an entry inside a `namespace`
+/// yields its dotted link name (the same string the CLI puts in the synthesized
+/// `runner([TierRoot { name: "…", … }, …])` fragment). Borrowed, not `&'static`: the CLI collects
+/// these from an activated program at run time, so a native runner reads them for the duration of
+/// the call and never retains them.
+#[derive(Debug, Clone, Copy)]
+pub struct TierRoot<'a> {
+    /// The collected root's link-qualified name.
+    pub name: &'a str,
+}
+
+/// One activated **text body** handed to a native tier runner — the ABI mirror of the prelude
+/// `TierText` value a text tier's program runner receives (`@doc { … }` → markdown). Borrowed for
+/// the same reason as [`TierRoot`].
+#[derive(Debug, Clone, Copy)]
+pub struct TierText<'a> {
+    /// The link-qualified name of the declaration the block decorates (`@doc { … } fn foo` →
+    /// `"foo"`), or empty for a standalone block tier that decorates nothing.
+    pub target: &'a str,
+    /// The block's verbatim body text, exactly as the lexer captured it.
+    pub text: &'a str,
+}
+
+/// The activated payload a native tier runner receives alongside the driver context — a **code**
+/// tier's collected roots or a **text** tier's collected bodies, discriminated so one runner slot
+/// serves both tier shapes. The counterpart of the `List<TierRoot>` / `List<TierText>` argument a
+/// program `@tier` runner is dispatched with.
+#[derive(Debug, Clone, Copy)]
+pub enum TierRoots<'a> {
+    /// A code tier (`test`/`bench`): the collected fn/method roots, in declaration order.
+    Code(&'a [TierRoot<'a>]),
+    /// A text tier (`doc`): the collected verbatim bodies, in source order.
+    Text(&'a [TierText<'a>]),
+}
+
+/// The full activation a [`TierRunner`] is invoked over: the entry file the tier was run on, plus
+/// the collected roots. The file rides along because a native runner drives the program through the
+/// [`CommandCtx`](crate::CommandCtx) — [`run_file`](crate::CommandCtx::run_file)/load, exactly as an
+/// [`ExtCommand`](crate::ExtCommand) does — rather than receiving in-process closures the way a
+/// program `@tier` runner receives its roots' `run` handles. The roots themselves are still passed
+/// (a native `doc` extractor reads them; a `test` driver may cross-check them) so the native seam
+/// carries the same information the program seam does.
+#[derive(Debug, Clone, Copy)]
+pub struct TierRun<'a> {
+    /// The entry file `noeta <tier> <file>` named — what the runner loads and runs.
+    pub file: &'a std::path::Path,
+    /// The activated roots for this tier.
+    pub roots: TierRoots<'a>,
+}
+
+/// The **native tier runner** an extension registers for one of its [`ExtTier`]s — the code/text
+/// counterpart of [`ExtTier::handler`] (which is the *expression*-tier evaluator). Where `handler`
+/// names a Noeta function an `@<name> { … }` value block desugars into, a runner is a Rust fn
+/// pointer the CLI calls **in-process** to *drive* the tier: it receives the same [`CommandCtx`]
+/// driver an [`ExtCommand`] does (so it can `run_file`/load on the real host) plus the tier's
+/// activated roots ([`TierRun`]), and returns the process exit code (0 ok, 1 program error, 2 setup
+/// failure) exactly like [`ExtCommand::run`].
+///
+/// This is the seam that lets `noeta test`/`bench`/`doc` stop being hardcoded clap verbs and become
+/// registry-dispatched the same way a program-declared `@tier(name) fn runner` and an expression
+/// tier already are. std's real runners are native and live in the CLI layer (`cmd_test`'s parallel
+/// executor, `cmd_bench`'s measurement, `cmd_doc`'s extractor), so std registers them from *there*,
+/// not from this crate — the wiring that resolves a tier to its runner and invokes it belongs to
+/// the CLI. A tier with no runner (an inline-only tier like `debug`, or an expression tier like
+/// `json` that uses [`ExtTier::handler`] instead) simply registers none.
+pub type TierRunner = for<'a> fn(&mut dyn crate::CommandCtx, &TierRun<'a>) -> u8;
+
+/// A [`TierRunner`] paired with the [`ExtTier`] name it drives — what [`Extension::tier_runners`]
+/// returns. Kept a separate registration list rather than a field on [`ExtTier`] because the tier
+/// *declarations* live beneath the CLI (in `noeta-stdlib`) while std's native runners live *in* the
+/// CLI, so the two cannot be spelled in one literal; an extension that both declares a tier and
+/// ships its runner from the same crate lists it in both [`Extension::tiers`] and here, matched by
+/// [`tier`](Self::tier). `Copy`/`'static`-clean like the rest of the ABI (it holds a `&'static str`
+/// and a fn pointer, no owned data).
+#[derive(Debug, Clone, Copy)]
+pub struct ExtTierRunner {
+    /// The [`ExtTier::name`] this runs — the runner attaches to the tier of this name declared by a
+    /// unit sharing the runner's [`Extension::root`] (so a rename/rescope resolves to the right one,
+    /// exactly as [`Registry::find_ext_tier_scoped`] resolves the declaration).
+    pub tier: &'static str,
+    /// The native driver invoked with the collected roots.
+    pub run: TierRunner,
 }
 
 /// An extension-declared **`@`-directive** — a name an extension adds to the decorator
@@ -1857,8 +2173,11 @@ impl PartialEq for ExtDirective {
 /// What an [`ExtDirective::expand`] hook is given: the invocation, and the declaration it decorates.
 ///
 /// Deliberately narrow. A hook receives what the directive was written with and what it was written
-/// on — not the surrounding program — so its output depends only on inputs the compiler can key a
-/// memoized result on.
+/// on — the declaration's name **and its own members**, but not the surrounding program — so its
+/// output depends only on inputs the compiler can key a memoized result on. A declaration's fields
+/// are part of what the directive was written on, so generating from a struct's *shape* stays inside
+/// that rationale: the fields live in the same source text the memoized link is already keyed on, and
+/// editing one re-runs the expansion.
 #[derive(Debug, Clone)]
 pub struct DirectiveCtx {
     /// Positional arguments, already checked against [`ExtDirective::max_args`], rendered as source
@@ -1867,12 +2186,40 @@ pub struct DirectiveCtx {
     /// Named arguments, already checked against [`ExtDirective::named_keys`], in written order.
     pub named: Vec<(String, String)>,
     /// The decorated declaration's name — the type or function the synthesized members join.
+    ///
+    /// Always a bare **identifier**, never a dotted path, even for a declaration in a file with a
+    /// `namespace`: generated source is spliced into that declaration, and the bare name is the
+    /// only spelling in scope there. A hook can therefore use it verbatim as a type name (a
+    /// constructor's return type, a struct literal) without unqualifying it first.
     pub target: String,
     /// Which kind of declaration that is, so one hook can serve several sites.
     pub site: TierSite,
     /// The directory of the source file the directive was written in, so a relative path argument
     /// (`"petstore.yaml"`) resolves against the file rather than the process's working directory.
     pub source_dir: String,
+    /// The decorated declaration's members as `(name, declared type spelling)` pairs, in declaration
+    /// order — so a hook can generate something derived from the declaration's **shape** and not
+    /// only from its name.
+    ///
+    /// - a `struct` or a `class`: its fields, each with its declared type;
+    /// - an `enum`: its **variants**, each with its payload spelling as declared — `"(index: int)"`
+    ///   for a named payload, `"(T)"` for a positional one, and the **empty string** for a variant
+    ///   that carries none. A variant is what an enum is made of, so it is the enum's analogue of a
+    ///   field;
+    /// - a `Function`, `Method` or `Trait` site: **empty**. Those declare no typed members.
+    ///
+    /// A spelling is the *declared surface* one, at full fidelity: `List<int>` arrives as
+    /// `"List<int>"` and never as `"List"`, and `?User` as `"?User"` and never as `"Option<User>"`.
+    /// Nothing is normalized through the type lattice, because a hook writes source and source is
+    /// written in the surface language. The one adjustment is that a namespace-qualified identity
+    /// renders as its short name (`std.id.Uuid` → `Uuid`): the linker qualifies an imported type
+    /// before a hook runs, and generated code spelling that identity would name something the
+    /// consumer's file cannot resolve. An unannotated member reports `dyn`.
+    ///
+    /// The derivation is `noeta_ast::shape`'s, shared with the checker's [`ExtDerive::validate`]
+    /// argument — one walk, so a derive recipe and an expansion hook in the same extension can never
+    /// see the same declaration differently.
+    pub fields: Vec<(String, String)>,
 }
 
 /// An extension-declared **derive recipe** (derive layer 4) — the native counterpart of deriving
@@ -1893,6 +2240,10 @@ pub struct ExtDerive {
     /// Optional compile-time shape validation: given the deriving type's name and its
     /// `(field name, field type spelling)` pairs, return `Some(message)` to reject the derive at
     /// the declaration (E0050). `None` (the field or the result) accepts.
+    ///
+    /// The pairs are the declaration's shape exactly as [`DirectiveCtx::fields`] reports it — the
+    /// same `noeta_ast::shape` derivation, so a recipe and an expansion hook in one extension read
+    /// one answer. See that field for what a spelling is.
     #[allow(clippy::type_complexity)]
     pub validate: Option<fn(&str, &[(String, String)]) -> Option<String>>,
 }
@@ -1983,6 +2334,16 @@ pub trait Extension: Sync {
     }
     /// The extension's declared dev-tiers (tier-extensions port). Default empty.
     fn tiers(&self) -> &'static [ExtTier] {
+        &[]
+    }
+    /// The extension's **native tier runners** (registry-dispatched tier runners) — the code/text
+    /// counterpart of an expression tier's [`ExtTier::handler`], keyed by [`ExtTierRunner::tier`] to
+    /// one of this unit's [`Extension::tiers`]. Default empty: a tier need not ship a native runner
+    /// (`debug` is inline-only, `json` uses a `handler`), and a package that only *declares* tiers
+    /// leaves the runners to whichever layer owns them — std's `test`/`bench`/`doc` runners are
+    /// native and register from the CLI, not here. A defaulted method keeps every existing extension
+    /// source-compatible.
+    fn tier_runners(&self) -> &'static [ExtTierRunner] {
         &[]
     }
     /// The extension's declared prelude attributes (tier knobs and metadata). Default empty.
@@ -2621,9 +2982,74 @@ impl Registry {
         self.units.iter().flat_map(|e| e.tiers().iter())
     }
 
-    /// The installed extension tier named `name`, if any.
+    /// The installed extension tier named `name`, if any. A bare-name lookup: it returns the first
+    /// unit's tier of that name, which is unambiguous only while no two units export the same tier
+    /// name. Per-package resolution (a `@name` a package's `[tiers]` binds) must go through
+    /// [`Registry::find_ext_tier_scoped`] so it lands on the *provider the binding named*.
     pub fn find_ext_tier(&self, name: &str) -> Option<&'static ExtTier> {
         self.ext_tiers().find(|t| t.name == name)
+    }
+
+    /// The **provider namespace root** of the first installed tier named `name` — the [`Extension::root`]
+    /// of the unit that declares it (`"std"` for the built-in four). This is how an *ambient* `@name`
+    /// (one a package uses without a `[tiers]` binding — always a std tier on the default registry, since
+    /// a third-party tier is reachable only through a binding) recovers its canonical identity without
+    /// hardcoding `"std"`. `None` if no installed unit declares the name.
+    pub fn ext_tier_root(&self, name: &str) -> Option<&'static str> {
+        self.units
+            .iter()
+            .find(|u| u.tiers().iter().any(|t| t.name == name))
+            .map(|u| u.root())
+    }
+
+    /// Resolve an extension tier **scoped to a set of provider namespace roots** (per-package naming
+    /// arc, the tier counterpart of [`Registry::find_ext_directive_scoped`]): the `exported` tier
+    /// declared by a unit whose [`Extension::root`] is one of `provider_roots`. This is how a
+    /// `@name { … }` block resolves to the specific provider a using package's `[tiers]` binding named
+    /// — so two providers exporting the same tier name (e.g. `std` and `criterion` both shipping
+    /// `bench`) never shadow each other. `provider_roots` empty → no match.
+    pub fn find_ext_tier_scoped(
+        &self,
+        provider_roots: &[String],
+        exported: &str,
+    ) -> Option<&'static ExtTier> {
+        self.units
+            .iter()
+            .filter(|u| provider_roots.iter().any(|r| r == u.root()))
+            .flat_map(|u| u.tiers().iter())
+            .find(|t| t.name == exported)
+    }
+
+    /// Every installed extension's native tier runners, in install order (registry-dispatched tier
+    /// runners) — the runner twin of [`Registry::ext_tiers`].
+    pub fn ext_tier_runners(&self) -> impl Iterator<Item = &'static ExtTierRunner> + '_ {
+        self.units.iter().flat_map(|e| e.tier_runners().iter())
+    }
+
+    /// The native runner registered for the tier named `name`, if any — the runner twin of
+    /// [`Registry::find_ext_tier`], and how a registry-dispatched `noeta <tier> <file>` recovers the
+    /// native driver to invoke over the tier's activated roots. A bare-name lookup, unambiguous only
+    /// while no two units register a runner for the same tier name; per-package resolution goes
+    /// through [`Registry::find_tier_runner_scoped`].
+    pub fn find_tier_runner(&self, name: &str) -> Option<&'static ExtTierRunner> {
+        self.ext_tier_runners().find(|r| r.tier == name)
+    }
+
+    /// Resolve a native tier runner **scoped to a set of provider namespace roots** — the runner
+    /// twin of [`Registry::find_ext_tier_scoped`]. The runner for the `exported` tier registered by
+    /// a unit whose [`Extension::root`] is one of `provider_roots`, so two providers shipping a
+    /// same-named tier (`std` and `criterion` both `bench`) route to their own runners. Empty
+    /// `provider_roots` → no match.
+    pub fn find_tier_runner_scoped(
+        &self,
+        provider_roots: &[String],
+        exported: &str,
+    ) -> Option<&'static ExtTierRunner> {
+        self.units
+            .iter()
+            .filter(|u| provider_roots.iter().any(|r| r == u.root()))
+            .flat_map(|u| u.tier_runners().iter())
+            .find(|r| r.tier == exported)
     }
 
     /// Every installed extension's **verbatim-body** tier names — the text tiers (`doc` →
@@ -2661,6 +3087,23 @@ impl Registry {
     /// The installed extension directive named `name`, if any.
     pub fn find_ext_directive(&self, name: &str) -> Option<&'static ExtDirective> {
         self.ext_directives().find(|d| d.name == name)
+    }
+
+    /// Resolve an extension directive **scoped to a set of provider namespace roots** (per-package
+    /// naming arc): the `exported` directive declared by a unit whose [`Extension::root`] is one of
+    /// `provider_roots`. This is how a `@name` resolves to the specific provider a using package's
+    /// `[directives]` binding named, rather than the first global match — so two packages exporting
+    /// the same directive name never shadow each other. `provider_roots` empty → no match.
+    pub fn find_ext_directive_scoped(
+        &self,
+        provider_roots: &[String],
+        exported: &str,
+    ) -> Option<&'static ExtDirective> {
+        self.units
+            .iter()
+            .filter(|u| provider_roots.iter().any(|r| r == u.root()))
+            .flat_map(|u| u.directives().iter())
+            .find(|d| d.name == exported)
     }
 
     /// Every installed extension's tier-body formatters `(language, fn)`, in install order.
@@ -2838,12 +3281,20 @@ impl Registry {
         self.structs().find(|t| t.is_qualified(qualified))
     }
 
+    /// Find a native **fielded type** (class OR struct) by its **qualified identity** — the
+    /// kind-agnostic member of the `find_*_qualified` family, for a caller that holds a qualified
+    /// name and does not care which of the two kinds answers (the lowering pass that resolves a
+    /// leaf-imported native type name to its reflection key). Allocation-free probing, like the rest
+    /// of the family.
+    pub fn find_fielded_qualified(&self, qualified: &str) -> Option<&'static ExtFielded> {
+        self.fielded().find(|t| t.is_qualified(qualified))
+    }
+
     /// Resolve a native **fielded type** (class OR struct) from either a qualified identity or a
     /// bare short name. What both backends consult to materialize a [`NativeOut::Instance`] with the
     /// right shape kind (via [`ExtFielded::kind`]) and to marshal a native fielded receiver/arg.
     pub fn resolve_fielded(&self, name: &str) -> Option<&'static ExtFielded> {
-        self.fielded()
-            .find(|t| t.is_qualified(name))
+        self.find_fielded_qualified(name)
             .or_else(|| self.fielded().find(|t| t.name == name))
     }
 
@@ -3697,8 +4148,20 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
         };
     for (axis, names) in [
         (
+            // Tier names, like command names, are enforced unique only among **std-root** units. A
+            // dependency's tier reaches a using package through a `[tiers]` binding that fixes a
+            // distinct local `@name` (resolved scoped to the provider it named), so two dependency
+            // packages exporting the same tier name — or one colliding with a std tier — coexist:
+            // the binding resolves it (`crit = "criterion:bench"`), rather than making the assembled
+            // binary refuse to start.
             "tier",
-            collect(&|e| e.tiers().iter().map(|t| (t.name, e.name())).collect()),
+            collect(&|e| {
+                if e.root() == "std" {
+                    e.tiers().iter().map(|t| (t.name, e.name())).collect()
+                } else {
+                    Vec::new()
+                }
+            }),
         ),
         (
             "attribute",
@@ -3714,8 +4177,19 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             }),
         ),
         (
+            // Command names are enforced unique only among **std-root** units. A dependency's
+            // commands reach the CLI through a `[trust.commands]` binding that fixes a distinct
+            // local name, so two dependency packages exporting the same command name coexist (the
+            // binding resolves the collision) rather than making the assembled binary refuse to
+            // start — the escape hatch that per-command binding exists to provide.
             "command",
-            collect(&|e| e.commands().iter().map(|c| (c.name, e.name())).collect()),
+            collect(&|e| {
+                if e.root() == "std" {
+                    e.commands().iter().map(|c| (c.name, e.name())).collect()
+                } else {
+                    Vec::new()
+                }
+            }),
         ),
     ] {
         if let Some(((a, b), name)) = dup_of(names) {
@@ -4004,6 +4478,12 @@ pub fn find_ext_tier(name: &str) -> Option<&'static ExtTier> {
     default_registry().and_then(|r| r.find_ext_tier(name))
 }
 
+/// The native runner for the tier named `name` on the process-global default registry — see
+/// [`Registry::find_tier_runner`].
+pub fn find_tier_runner(name: &str) -> Option<&'static ExtTierRunner> {
+    default_registry().and_then(|r| r.find_tier_runner(name))
+}
+
 pub fn ext_body_formatters() -> impl Iterator<Item = &'static BodyFormatter> {
     default_registry()
         .into_iter()
@@ -4128,7 +4608,15 @@ mod render_tests {
         assert_eq!(SigType::Var(0).render(), "T");
         assert_eq!(SigType::Var(1).render(), "U");
         assert_eq!(SigType::Var(7).render(), "T2");
-        assert_eq!(SigType::BoundedVar(0, "Mergeable").render(), "T: Mergeable");
+        assert_eq!(
+            SigType::BoundedVar(0, &["Mergeable"]).render(),
+            "T: Mergeable"
+        );
+        // A conjunction renders the way the surface spells it.
+        assert_eq!(
+            SigType::BoundedVar(0, &["Mergeable", "Syncable"]).render(),
+            "T: Mergeable + Syncable"
+        );
         assert_eq!(
             SigType::Generic("Cell", &[SigType::Var(0)]).render(),
             "Cell<T>"
@@ -4138,6 +4626,7 @@ mod render_tests {
     #[test]
     fn ext_fn_render_is_the_full_surface_signature() {
         let f = ExtFn {
+            param_names: &[],
             name: "get",
             params: &[
                 SigType::String,
@@ -4148,6 +4637,7 @@ mod render_tests {
         assert_eq!(f.render(), "fn get(string, Map<string, string>?): Response");
 
         let same_as = ExtFn {
+            param_names: &[],
             name: "add",
             params: &[SigType::Named("vec3"), SigType::Named("vec3")],
             ret: RetTy::SameAsArg(0),
@@ -4202,6 +4692,7 @@ mod runtime_registry_tests {
         methods: &[
             ExtTraitMethod {
                 sig: ExtFn {
+                    param_names: &[],
                     name: "dot",
                     params: &[SigType::Dyn],
                     ret: RetTy::Concrete(SigType::Assoc("Wide")),
@@ -4211,6 +4702,7 @@ mod runtime_registry_tests {
             },
             ExtTraitMethod {
                 sig: ExtFn {
+                    param_names: &[],
                     name: "scale_all",
                     params: &[SigType::F32],
                     ret: RetTy::SameAsArg(0),
@@ -4497,8 +4989,13 @@ mod runtime_registry_tests {
     }
 
     #[test]
-    fn a_duplicate_tier_name_across_units_is_rejected() {
-        // Tier lookup is first-wins; a collision must refuse at assembly instead of shadowing.
+    fn a_duplicate_tier_name_is_rejected_only_among_std_units() {
+        // Tier-name uniqueness is enforced only among **std-root** units (per-package naming arc,
+        // mirroring the command axis). A dependency's tier reaches a using package through a
+        // `[tiers]` binding that fixes a distinct local name (resolved scoped to the provider), so two
+        // dependency packages exporting the same tier name coexist — the binding resolves the
+        // collision (`crit = "criterion:bench"`). Two **std** units doing it would be an ambient
+        // ambiguity no binding can fix, so that still refuses to assemble.
         struct TierUnit(&'static str, &'static str);
         impl Extension for TierUnit {
             fn name(&self) -> &'static str {
@@ -4521,12 +5018,150 @@ mod runtime_registry_tests {
                 }]
             }
         }
+        // Two third-party providers exporting the same tier name — allowed (a binding disambiguates).
         static A_TIER: TierUnit = TierUnit("a.tools", "a");
         static B_TIER: TierUnit = TierUnit("b.tools", "b");
         assert!(
-            validate(&[&A_TIER, &B_TIER]).is_err(),
-            "a duplicate tier name across units must refuse to assemble"
+            validate(&[&A_TIER, &B_TIER]).is_ok(),
+            "two dependency providers may export the same tier name (a `[tiers]` binding resolves it)"
         );
+        // Two std-root units exporting the same tier name — an ambient ambiguity, still rejected.
+        static STD_A: TierUnit = TierUnit("std.a", "std");
+        static STD_B: TierUnit = TierUnit("std.b", "std");
+        assert!(
+            validate(&[&STD_A, &STD_B]).is_err(),
+            "a duplicate tier name across std units must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn a_native_tier_runner_is_stored_reachable_and_invocable() {
+        // The registry-dispatched tier-runner seam (Part A): an extension registers a native runner
+        // for one of its `ExtTier`s through `Extension::tier_runners`, matched to the declaration by
+        // name. std's real `test`/`bench`/`doc` runners register from the CLI layer (they are native
+        // and live there), so this mock unit stands in for that consumer — it both *declares* the
+        // `audit` tier and *ships* its runner, exercising the whole shape: stored, reachable by name
+        // and scoped to the provider, and invoked over the collected roots with the same driver
+        // (`CommandCtx`) an `ExtCommand` gets.
+        use crate::{CommandCtx, EntryCall};
+        use std::path::{Path, PathBuf};
+
+        // A native runner: drive the program exactly as a command does, then report over the roots.
+        // Its return threads the payload back out so the assertions can prove it saw both arms.
+        fn audit_run(ctx: &mut dyn CommandCtx, run: &TierRun<'_>) -> u8 {
+            let _ = ctx.run_file(run.file, None, None);
+            match run.roots {
+                TierRoots::Code(roots) => roots.len() as u8,
+                TierRoots::Text(bodies) => 100 + bodies.len() as u8,
+            }
+        }
+
+        struct RunnerUnit;
+        impl Extension for RunnerUnit {
+            fn name(&self) -> &'static str {
+                "audit.tools"
+            }
+            fn root(&self) -> &'static str {
+                "audit"
+            }
+            fn modules(&self) -> &'static [ExtModule] {
+                &[]
+            }
+            fn tiers(&self) -> &'static [ExtTier] {
+                &[ExtTier {
+                    name: "audit",
+                    sites: &[TierSite::Function],
+                    config: None,
+                    text: None,
+                    expr: None,
+                    handler: None,
+                }]
+            }
+            fn tier_runners(&self) -> &'static [ExtTierRunner] {
+                &[ExtTierRunner {
+                    tier: "audit",
+                    run: audit_run,
+                }]
+            }
+        }
+        static RUNNER_UNIT: RunnerUnit = RunnerUnit;
+
+        // A driver that records the file it was asked to run — the seam must reach `run_file`.
+        #[derive(Default)]
+        struct RecCtx {
+            ran: Option<PathBuf>,
+        }
+        impl CommandCtx for RecCtx {
+            fn run_file(
+                &mut self,
+                file: &Path,
+                _entry: Option<&EntryCall>,
+                _banner: Option<&str>,
+            ) -> u8 {
+                self.ran = Some(file.to_path_buf());
+                0
+            }
+        }
+
+        let reg = Registry::new(vec![&RUNNER_UNIT]);
+
+        // The declaration and its runner coexist and match by name.
+        assert!(
+            reg.find_ext_tier("audit").is_some(),
+            "the tier declaration is registered"
+        );
+        let runner = reg
+            .find_tier_runner("audit")
+            .expect("the native runner is reachable by tier name");
+        assert_eq!(runner.tier, "audit");
+        // A tier with no registered runner (`debug`/`json`) resolves to `None`.
+        assert!(reg.find_tier_runner("bench").is_none());
+
+        // Scoped resolution lands on the runner of the provider whose root the caller named — the
+        // runner twin of `find_ext_tier_scoped`, so two providers' same-named runners never shadow.
+        assert!(
+            reg.find_tier_runner_scoped(&["audit".to_string()], "audit")
+                .is_some(),
+            "scoped lookup finds the provider's runner"
+        );
+        assert!(
+            reg.find_tier_runner_scoped(&["other".to_string()], "audit")
+                .is_none(),
+            "a foreign provider root does not match"
+        );
+
+        // Invoke the runner end to end: it drives the ctx and reads the collected roots. The code
+        // arm carries `TierRoot`s…
+        let mut ctx = RecCtx::default();
+        let file = Path::new("app.noe");
+        let code_roots = [TierRoot { name: "foo" }, TierRoot { name: "bar" }];
+        let code = (runner.run)(
+            &mut ctx,
+            &TierRun {
+                file,
+                roots: TierRoots::Code(&code_roots),
+            },
+        );
+        assert_eq!(code, 2, "the runner saw both code roots");
+        assert_eq!(
+            ctx.ran.as_deref(),
+            Some(file),
+            "the runner drove `run_file` on the entry, exactly as a command does"
+        );
+
+        // …and the text arm carries `TierText`s through the very same slot.
+        let text_roots = [TierText {
+            target: "doc.me",
+            text: "# hi",
+        }];
+        let text_code = (runner.run)(
+            &mut ctx,
+            &TierRun {
+                file,
+                roots: TierRoots::Text(&text_roots),
+            },
+        );
+        assert_eq!(text_code, 101, "the runner saw one text body");
     }
 
     /// A unit with only types, under its own name and root (the `NsUnit` helper hardcodes
@@ -4990,6 +5625,7 @@ mod runtime_registry_tests {
             name: "Cellish",
             namespace: "k",
             ctx_methods: &[ExtFn {
+                param_names: &[],
                 name: "get",
                 ..ExtFn::DEFAULTS
             }],
@@ -5009,6 +5645,7 @@ mod runtime_registry_tests {
         const M_NO_DISPATCH: ExtModule = ExtModule {
             name: "orphan",
             ctx_functions: &[ExtFn {
+                param_names: &[],
                 name: "go",
                 ..ExtFn::DEFAULTS
             }],
@@ -5027,6 +5664,7 @@ mod runtime_registry_tests {
         // Routing consults the plain table first, so a doubly-declared name would silently never
         // reach its ctx dispatch.
         const F_GO: ExtFn = ExtFn {
+            param_names: &[],
             name: "go",
             ..ExtFn::DEFAULTS
         };
@@ -5051,6 +5689,7 @@ mod runtime_registry_tests {
         const M_BAD_TAIL: ExtModule = ExtModule {
             name: "tail",
             functions: &[ExtFn {
+                param_names: &[],
                 name: "f",
                 params: &[SigType::Optional(&SigType::Int), SigType::String],
                 ..ExtFn::DEFAULTS
@@ -5218,6 +5857,7 @@ mod elem_retty {
         // A migrated kernel `dot(dyn): Self::Wide` renders end-to-end through `SigType::Assoc` — the
         // signature surface the folded-in `vec.Kernels` now exposes (was `ElemWide`).
         let f = ExtFn {
+            param_names: &[],
             name: "dot",
             params: &[SigType::Dyn],
             ret: RetTy::Concrete(SigType::Assoc("Wide")),

@@ -12,6 +12,8 @@
 //! still reported: the per-document diagnostics view filters to spans its own document owns, so
 //! without re-attribution the user would see nothing at all for a real error.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use noeta_ext_abi::registry::{
     DirectiveCtx, Expansion, ExpansionError, ExtDirective, ExtModule, Extension, TierSite,
 };
@@ -67,6 +69,28 @@ fn expand_fails_with_read(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionErro
     })
 }
 
+/// How many times the **shape** hook has run. Only [`editing_a_field_re_runs_the_expansion`] uses
+/// `@ix_shape`, so the counter is not racy against the other tests in this binary.
+static SHAPE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// Generates one accessor per field of the decorated declaration, from `DirectiveCtx::fields` alone
+/// — no arguments, no reads. Its output is therefore a pure function of the declaration's shape,
+/// which is what makes a stale expansion detectable: if the memo did not participate in the field
+/// edit, the generated members would still describe the *old* struct.
+fn expand_shape(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
+    SHAPE_CALLS.fetch_add(1, Ordering::SeqCst);
+    let mut source = String::new();
+    for (name, spelling) in &ctx.fields {
+        source.push_str(&format!(
+            "fn {name}_type(): string {{ return \"{spelling}\"; }}\n"
+        ));
+    }
+    Ok(Expansion {
+        source,
+        reads: Vec::new(),
+    })
+}
+
 struct Fixture;
 
 impl Extension for Fixture {
@@ -108,6 +132,15 @@ impl Extension for Fixture {
                 expand: Some(expand_fails_with_read),
                 ..BASE
             },
+            // Argument-free, so nothing but the decorated declaration's own shape can change what
+            // it emits.
+            ExtDirective {
+                name: "ix_shape",
+                max_args: Some(0),
+                params: &[],
+                expand: Some(expand_shape),
+                ..BASE
+            },
         ]
     }
 }
@@ -127,7 +160,7 @@ fn link(text: &str) -> noeta_db::LinkedProgram {
     install();
     let db = noeta_db::LangDatabase::default();
     let entry = Source::new(SourceId(0), "/proj/main.noe", text);
-    let ws = noeta_db::workspace(&db, &entry, &[], noeta_lexer::Edition::DEFAULT);
+    let ws = noeta_db::workspace(&db, &entry, &[], noeta_lexer::Edition::DEFAULT, &[]);
     // Cloned out of the memo so the db can be dropped with it: the assertions are about the value,
     // and a test has no incrementality to preserve.
     noeta_db::linked_from(&db, ws, noeta_db::workspace_entry(&db, ws)).clone()
@@ -140,7 +173,7 @@ fn methods_of(program: &noeta_ast::Program, name: &str) -> Vec<String> {
         .iter()
         .find_map(|s| match s {
             noeta_ast::Stmt::Struct(d) if d.name == name => {
-                Some(d.methods.iter().map(|m| m.name.clone()).collect())
+                Some(d.methods.iter().map(|m| m.name.to_string()).collect())
             }
             _ => None,
         })
@@ -312,6 +345,64 @@ fn a_workspace_with_no_expanding_directive_is_unchanged() {
     );
 }
 
+/// **The incrementality crux for `DirectiveCtx::fields`.** Editing the decorated struct's *fields*
+/// must re-run its `expand` hook.
+///
+/// Expansion is memoized: it runs inside the `linked_from` salsa query, whose inputs are the
+/// workspace's `SourceProgram` texts. The declaration's fields are read out of the parsed entry, so
+/// they are part of that memo's input by construction — but "by construction" is exactly the kind of
+/// claim that quietly stops being true. A stale expansion here would be silent: the program would
+/// keep compiling, against members describing a struct that no longer exists.
+///
+/// Both halves are asserted, because either alone can pass while the feature is broken: the hook
+/// really *ran again* (the counter), and what it produced really *describes the new shape*.
+#[test]
+fn editing_a_field_re_runs_the_expansion() {
+    use salsa::Setter as _;
+
+    install();
+    let mut db = noeta_db::LangDatabase::default();
+    let before = "@ix_shape\nstruct Api { base: string }\necho 1;\n";
+    let entry = Source::new(SourceId(0), "/proj/main.noe", before);
+    let ws = noeta_db::workspace(&db, &entry, &[], noeta_lexer::Edition::DEFAULT, &[]);
+    let src = noeta_db::workspace_entry(&db, ws);
+
+    let linked = noeta_db::linked_from(&db, ws, src);
+    assert_eq!(
+        methods_of(linked.program.as_ref().expect("the entry links"), "Api"),
+        vec!["base_type"]
+    );
+    assert_eq!(
+        linked.expansions[0].source.text(),
+        "struct Api {\nfn base_type(): string { return \"string\"; }\n}\n"
+    );
+    let runs_before = SHAPE_CALLS.load(Ordering::SeqCst);
+
+    // The edit: rename the field and give it a generic type. Nothing else about the directive
+    // changes — same name, same (absent) arguments, same file, no reads.
+    src.set_text(&mut db)
+        .to("@ix_shape\nstruct Api { tags: List<int> }\necho 1;\n".to_string());
+
+    let linked = noeta_db::linked_from(&db, ws, src);
+    assert_eq!(
+        methods_of(
+            linked.program.as_ref().expect("the entry still links"),
+            "Api"
+        ),
+        vec!["tags_type"],
+        "the expansion is stale: it still describes the struct's old fields"
+    );
+    assert_eq!(
+        linked.expansions[0].source.text(),
+        // And at full fidelity — a `List<int>` field must not reach the hook as `List`.
+        "struct Api {\nfn tags_type(): string { return \"List<int>\"; }\n}\n"
+    );
+    assert!(
+        SHAPE_CALLS.load(Ordering::SeqCst) > runs_before,
+        "the hook must actually re-run — a memo that served the old answer would be the bug"
+    );
+}
+
 /// The **watcher consumer**, end to end: an `ImpactSession` over an on-disk project whose entry
 /// carries a reads-reporting directive captures the read, and reports a change to that file as
 /// `Impact::All` — so `noeta test --watch` re-runs when the spec changes. This is the whole point of
@@ -321,12 +412,7 @@ fn a_workspace_with_no_expanding_directive_is_unchanged() {
 fn an_impact_session_watches_the_files_an_expansion_read() {
     install();
     // A unique on-disk project — `ImpactSession` scans a real directory.
-    let dir = std::env::temp_dir().join(format!(
-        "noeta-reads-session-{}",
-        std::process::id() as u64 * 31 + 7
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create the project dir");
+    let dir = noeta_test_temp::TempDir::new("reads-session");
     let entry = dir.join("main.noe");
     std::fs::write(
         &entry,

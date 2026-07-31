@@ -248,6 +248,122 @@ fn test_skip_reason_is_shown() {
 }
 
 #[test]
+fn test_skip_imported_inside_the_tier_block_takes_effect() {
+    // A tier block may open with its own `use`s. That import is what the `#[Skip]` below it depends
+    // on, and it used to reach the linker's qualifier too late (a block's `use` only becomes
+    // top-level when the tier activates, *after* qualification): the attribute stayed the bare
+    // `Skip` the runner never matches, so the skip silently evaporated and `f` ran as a test and
+    // failed on its missing argument. Block-scoped and top-level `use` must agree.
+    let file = temp_program(
+        "test_skip_block_scoped_use",
+        "@test {\n    use std.test.{Skip}\n    #[Skip(\"needs an argument\")]\n    fn f(text: string): string { return text }\n}\n",
+    );
+    lang().arg("test").arg(&file).assert().success().stdout(
+        predicate::str::contains("skip  f (needs an argument)")
+            .and(predicate::str::contains("1 skipped"))
+            .and(predicate::str::contains("FAIL").not()),
+    );
+}
+
+#[test]
+fn test_a_tier_blocks_use_does_not_escape_the_block() {
+    // The counterpart: the block-scoped import stays block-scoped. On a normal run (the block is
+    // stripped) a `Skip` *outside* the `@test` block resolves to nothing, so it is still the
+    // ordinary E0029 — the fix qualifies references inside the block, it does not fold the block's
+    // imports into the file's scope.
+    let file = temp_program(
+        "test_block_use_scope",
+        "@test {\n    use std.test.{Skip}\n    fn inside(): void { assert(true) }\n}\n#[Skip(\"out of scope\")]\nfn outside(): void { }\necho \"main\"\n",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0029"));
+}
+
+/// The two spellings of the repro, as a package with one sibling module. Only the `@test` block
+/// names the sibling — the production half of the file never does.
+const BLOCK_USE_PACKAGE: &[(&str, &str)] = &[
+    (
+        "noeta.toml",
+        "[package]\nname = \"probe/lib\"\nversion = \"0.1.0\"\n",
+    ),
+    (
+        "side.noe",
+        "pub struct Thing { n: int }\npub fn make(): int { return 3 }\n",
+    ),
+];
+
+#[test]
+fn test_a_tier_blocks_use_of_a_package_module_resolves() {
+    // The linking half of a block-scoped `use`. Qualification alone was not enough: the overlay
+    // rewrote `Thing` to `lib.side.Thing` correctly, but no `use` had *merged* that
+    // declaration into the program — the linker collected the entry's top-level statements only —
+    // so `noeta check` reported 0 errors and every use site failed at run time with "cannot find
+    // type `lib.side.Thing` in this scope". A std import inside the same block worked
+    // throughout, because an extension module resolves through the registry and never needs the
+    // unit graph, which is exactly what made the bug look like a qualification problem.
+    let mut files = BLOCK_USE_PACKAGE.to_vec();
+    files.push((
+        "entry.noe",
+        "@test {\n  use lib.side.{Thing}\n\n  fn builds(): void { x = Thing { n: 3 }\n    assert(x.n == 3) }\n}\n",
+    ));
+    let dir = temp_dir("test_block_use_package", &files);
+    lang()
+        .arg("test")
+        .arg(dir.join("entry.noe"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ok    builds")
+                .and(predicate::str::contains("1 passed, 0 failed, 1 total")),
+        );
+}
+
+#[test]
+fn test_a_tier_blocks_whole_module_use_of_a_package_resolves() {
+    // The second import form (`use lib.side` + `side.Thing`), which failed identically.
+    let mut files = BLOCK_USE_PACKAGE.to_vec();
+    files.push((
+        "entry.noe",
+        "@test {\n  use lib.side\n\n  fn builds(): void { x = side.Thing { n: side.make() }\n    assert(x.n == 3) }\n}\n",
+    ));
+    let dir = temp_dir("test_block_use_package_whole", &files);
+    lang()
+        .arg("test")
+        .arg(dir.join("entry.noe"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ok    builds")
+                .and(predicate::str::contains("1 passed, 0 failed, 1 total")),
+        );
+}
+
+#[test]
+fn test_a_package_module_imported_in_a_block_stays_block_scoped() {
+    // Linking the module must not leak the import: the `use` stays inside the block, so a normal
+    // run (block stripped) still cannot see `Thing`, and the merged declaration — which carries a
+    // qualified identity and so binds no short name — does not quietly cover for the missing
+    // import. The counterpart of the std-only scope test above, for a `.noe` module.
+    let mut files = BLOCK_USE_PACKAGE.to_vec();
+    files.push((
+        "entry.noe",
+        "@test {\n  use lib.side.{Thing}\n\n  fn inside(): void { assert(true) }\n}\n\
+         fn outside(): void { y = Thing { n: 1 }\n  echo y.n }\noutside()\n",
+    ));
+    let dir = temp_dir("test_block_use_package_scope", &files);
+    lang()
+        .arg("run")
+        .arg(dir.join("entry.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot find type `Thing`"));
+}
+
+#[test]
 fn test_group_filter_runs_only_that_group() {
     let file = temp_program("test_group", ATTR_TESTS);
     lang()
@@ -326,5 +442,581 @@ fn test_data_type_mismatched_row_fails_that_case() {
             predicate::str::contains("ok    t[1]")
                 .and(predicate::str::contains("FAIL  t[\"two\"]"))
                 .and(predicate::str::contains("1 passed, 1 failed, 2 total")),
+        );
+}
+
+// --- `noeta test <DIR>` (dev-story sweep): a project's tests, not one file's -------
+
+/// A two-module project: the entry imports a helper module, and **both** declare `@test` blocks.
+/// The linker merges the module's reachable declarations into the entry but never its test blocks,
+/// so testing the entry alone sees only the entry's tests.
+fn two_module_project(name: &str) -> PathBuf {
+    temp_dir(
+        name,
+        &[
+            (
+                "src/util.noe",
+                "namespace Proj.Util;\n\
+                 pub fn double(n: int): int { return n * 2; }\n\
+                 @test {\n\
+                     fn doubles(): void { assert(double(2) == 4); }\n\
+                     fn doubles_zero(): void { assert(double(0) == 0); }\n\
+                 }\n",
+            ),
+            (
+                "src/main.noe",
+                "use Proj.Util.double;\n\
+                 echo double(21);\n\
+                 @test {\n\
+                     fn entry_test(): void { assert(double(3) == 6); }\n\
+                 }\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn test_on_a_directory_runs_every_files_tests() {
+    // The gap this closes: `noeta test src/main.noe` reports "1 passed" on this project and the
+    // module's two tests silently never run, while a directory argument used to be a raw
+    // `Is a directory (os error 21)` — so nothing ran a project's tests. Each outcome is labelled
+    // with the file it came from.
+    let dir = two_module_project("test_dir_all_files");
+    lang().arg("test").arg(&dir).assert().success().stdout(
+        predicate::str::contains("src/util.noe::doubles")
+            .and(predicate::str::contains("src/util.noe::doubles_zero"))
+            .and(predicate::str::contains("src/main.noe::entry_test"))
+            .and(predicate::str::contains("3 passed, 0 failed, 3 total")),
+    );
+    // The entry alone still tests only the entry — the single-file contract is unchanged.
+    lang()
+        .arg("test")
+        .arg(dir.join("src/main.noe"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("1 passed, 0 failed, 1 total")
+                .and(predicate::str::contains("doubles").not()),
+        );
+}
+
+#[test]
+fn test_on_a_directory_fails_when_any_files_test_fails() {
+    let dir = temp_dir(
+        "test_dir_failure",
+        &[
+            (
+                "src/a.noe",
+                "@test { fn passes(): void { assert(true); } }\n",
+            ),
+            (
+                "src/b.noe",
+                "@test { fn breaks(): void { assert(1 == 2); } }\n",
+            ),
+        ],
+    );
+    lang()
+        .arg("test")
+        .arg(&dir)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("FAIL  src/b.noe::breaks")
+                .and(predicate::str::contains("ok    src/a.noe::passes"))
+                .and(predicate::str::contains("1 passed, 1 failed, 2 total")),
+        );
+}
+
+#[test]
+fn test_on_a_directory_reports_a_file_that_does_not_check() {
+    // A module that fails to type-check renders its own diagnostic and fails the run, but must not
+    // hide the files that do check — and the summary must say so, since "0 failed" beside a
+    // nonzero exit otherwise reads as a contradiction.
+    let dir = temp_dir(
+        "test_dir_broken_file",
+        &[
+            (
+                "src/ok.noe",
+                "@test { fn passes(): void { assert(true); } }\n",
+            ),
+            (
+                "src/broken.noe",
+                "namespace Proj.Broken;\npub fn oops(): int { return \"nope\"; }\n",
+            ),
+        ],
+    );
+    lang()
+        .arg("test")
+        .arg(&dir)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("ok    src/ok.noe::passes"))
+        .stderr(
+            predicate::str::contains("E0007")
+                .and(predicate::str::contains("1 file failed to check")),
+        );
+}
+
+#[test]
+fn test_on_a_directory_reports_json_across_files() {
+    let dir = two_module_project("test_dir_json");
+    let assert = lang()
+        .arg("test")
+        .arg(&dir)
+        .arg("--json")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["passed"], 3);
+    assert_eq!(json["total"], 3);
+    let names: Vec<String> = json["tests"]
+        .as_array()
+        .expect("tests array")
+        .iter()
+        .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        names.contains(&"src/util.noe::doubles".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"src/main.noe::entry_test".to_string()),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn test_on_a_directory_keeps_the_filter_messages() {
+    // A filter that matched nothing must say why — "no tests found" would be misleading when the
+    // project does declare tests.
+    let dir = two_module_project("test_dir_filters");
+    lang()
+        .arg("test")
+        .arg(&dir)
+        .args(["--group", "nope"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no tests in group `nope`"));
+    lang()
+        .arg("test")
+        .arg(&dir)
+        .args(["--name", "nope"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no tests matching --name"));
+}
+
+/// An `async fn` test is **driven**, not merely called.
+///
+/// The runner invokes a test root by synthesizing a call to it. A call to an `async fn` evaluates to
+/// a `Future`, so without an `.await` the future was constructed, dropped, and the body never ran —
+/// which made every assertion in an async test pass, silently and totally. The failing case is the
+/// load-bearing half: it can only fail if its body executed.
+#[test]
+fn test_runs_async_tests_rather_than_dropping_their_futures() {
+    let file = temp_program(
+        "test_async",
+        "async fn later(): int { return 7; }\n\
+         @test {\n\
+             async fn an_async_body_executes(): void { assert(later().await == 3, \"seven is not three\"); }\n\
+             async fn await_yields_the_value(): void { assert(later().await == 7); }\n\
+             fn a_sync_test_is_unchanged(): void { assert(1 == 1); }\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("FAIL  an_async_body_executes")
+                .and(predicate::str::contains("seven is not three"))
+                .and(predicate::str::contains("ok    await_yields_the_value"))
+                .and(predicate::str::contains("2 passed, 1 failed, 3 total")),
+        );
+}
+
+/// The shared setup runs a top-level statement-expression that **returns**, so a mutation applied
+/// to a top-level binding is visible to every test.
+///
+/// This pins the fix for a real silent-wrong-answer bug. The filter used to decide by statement
+/// FORM — keep `Stmt::Binding`, drop every `Stmt::Expr` — so a kept `conn = db.connect(…)` sat
+/// beside a dropped `conn.migrate(…)` and every test got a live, working, **empty** database,
+/// failing with the database's own `no such table: users` and no language diagnostic anywhere.
+/// The plain-binding control passing in the same run is what made it a trap.
+///
+/// The drop policy was not wrong, it was inexpressible: a CLI entry's `os.exit(run())` and a
+/// server's `server.serve(…)` are `Stmt::Expr` too and must never run here. The filter now asks
+/// whether the call **returns** (`noeta_check::setup`, over the `never` type) instead of what shape
+/// it has. `std.cell` is the smallest native resource with per-instance state, so it shows the
+/// shape with no database in the picture.
+#[test]
+fn test_setup_runs_statement_expressions_that_mutate_a_captured_binding() {
+    let file = temp_program(
+        "test_setup_runs_stmt_expr",
+        "use std.cell\n\
+         box = cell.new(0);\n\
+         box.set(41);\n\
+         mut plain = 0;\n\
+         plain = 41;\n\
+         @test {\n\
+             fn native_sees_top_level_mutation() use (box): void {\n\
+                 assert(box.get() == 41, \"cell holds ${box.get()}, expected 41\");\n\
+             }\n\
+             fn plain_binding_sees_top_level_mutation() use (plain): void {\n\
+                 assert(plain == 41, \"plain holds ${plain}, expected 41\");\n\
+             }\n\
+         }\n",
+    );
+    lang().arg("test").arg(&file).assert().success().stdout(
+        predicate::str::contains("ok    native_sees_top_level_mutation")
+            // The control, unchanged: a kept `Stmt::Binding` reassignment is still visible.
+            .and(predicate::str::contains(
+                "ok    plain_binding_sees_top_level_mutation",
+            ))
+            .and(predicate::str::contains("2 passed, 0 failed, 2 total")),
+    );
+}
+
+/// A fixture seeded by a top-level `for` / `if` is shared setup and runs.
+///
+/// Both terminate structurally — a conditional takes one branch once, a `for` walks an iterable —
+/// so there was never a reason beyond the old syntactic denylist to drop them. Seeding a fixture
+/// with a loop is the obvious thing to reach for, and it used to leave the binding kept but empty.
+#[test]
+fn test_setup_runs_top_level_loops_and_conditionals() {
+    let file = temp_program(
+        "test_setup_runs_loops",
+        "use std.cell\n\
+         log = cell.new([]);\n\
+         for name in [\"ada\", \"grace\"] { log.set(log.get() ~ [name]); }\n\
+         if true { log.set(log.get() ~ [\"guarded\"]); }\n\
+         @test\n\
+         fn seeded_by_a_loop() use (log): void {\n\
+             assert(log.get().len() == 3, \"log has ${log.get().len()} entries, expected 3\");\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok    seeded_by_a_loop"));
+}
+
+/// The reason the filter drops anything at all: a top-level `os.exit(…)` must not exit the runner,
+/// and a top-level `server.serve(…)` must not park it in an accept loop forever.
+///
+/// Both are `Stmt::Expr` — the category the two tests above just moved into "runs" — so this is the
+/// regression that would make the whole change untenable. It is pinned on the observable outcome
+/// (the run finishes, the test reports) rather than on the filter's internals: a hang here has no
+/// error message and no exit code, only a timeout.
+#[test]
+fn test_setup_never_runs_a_call_that_does_not_return() {
+    for (label, source) in [
+        (
+            "exit",
+            "use std.os\n\
+             fn run(): int { return 3; }\n\
+             os.exit(run());\n\
+             @test\n\
+             fn the_runner_reaches_this(): void { assert(1 == 1); }\n",
+        ),
+        (
+            "serve",
+            "use std.http.server\n\
+             use std.http.{Request, Response}\n\
+             fn handle(req: Request): Response { return server.response(200, \"hi\\n\"); }\n\
+             server.serve(8099, handle);\n\
+             @test\n\
+             fn the_runner_reaches_this(): void { assert(1 == 1); }\n",
+        ),
+    ] {
+        let file = temp_program(&format!("test_setup_diverging_{label}"), source);
+        lang()
+            .arg("test")
+            .arg(&file)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("ok    the_runner_reaches_this"));
+    }
+}
+
+/// What is still dropped is **reported**, not silent — the point of the whole exercise.
+///
+/// `while true { … }` with no `break` provably never exits, so the runner cannot enter it; the
+/// binding it writes therefore reaches the tests unwritten. That is exactly the shape of the
+/// original bug, and it now arrives as `E0071` naming the statement, the binding it writes, and the
+/// test that captures it, instead of a bare assertion failure the reader has to reverse-engineer.
+#[test]
+fn test_setup_warns_when_a_dropped_statement_writes_a_captured_binding() {
+    let file = temp_program(
+        "test_setup_warns_dropped",
+        "use std.cell\n\
+         tick = cell.new(0);\n\
+         while true { tick.set(tick.get() + 1); }\n\
+         @test\n\
+         fn sees_the_loop() use (tick): void {\n\
+             assert(tick.get() > 0, \"tick is ${tick.get()}\");\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(
+            predicate::str::contains("E0071")
+                .and(predicate::str::contains(
+                    "`while true` with no `break` never exits",
+                ))
+                .and(predicate::str::contains("`tick`"))
+                .and(predicate::str::contains("`sees_the_loop`")),
+        );
+}
+
+/// A **warning** in the file under test does not fail the suite — it is reported once and the tests
+/// run. The runner used to gate on "any diagnostic", so one advisory lint anywhere in the file made
+/// every test in it unrunnable while reporting a compile failure; and because the per-case programs
+/// re-check the same source, a naive fix would repeat the warning once per test.
+#[test]
+fn a_warning_does_not_fail_the_suite_and_is_reported_once() {
+    let file = temp_program(
+        "test_warning_does_not_block",
+        "a: i32 = 5\n\
+         echo \"is i32 -> ${a is i32}\"\n\
+         @test {\n\
+             fn adds(): void { assert(1 + 1 == 2); }\n\
+             fn also_adds(): void { assert(2 + 2 == 4); }\n\
+         }\n",
+    );
+    let out = lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 passed, 0 failed, 2 total"));
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert_eq!(
+        stderr.matches("[E0063]").count(),
+        1,
+        "the warning is reported exactly once, not once per test case:\n{stderr}"
+    );
+}
+
+// --- The per-test timeout (the test-timeout rail) -----------------------------------
+
+/// A suite whose middle test never returns, surrounded by tests that pass and one that fails —
+/// so a run over it proves the rail does not just stop the hang, it still reports everything else.
+const WEDGED_TESTS: &str = "fn add(a: int, b: int): int { return a + b; }\n\
+     @test {\n\
+         fn first_passes(): void { assert(add(1, 2) == 3); }\n\
+         fn spins_forever(): void { mut i = 0; while true { i = i + 1; } assert(i > 0); }\n\
+         fn second_passes(): void { assert(add(2, 2) == 4); }\n\
+         fn third_fails(): void { assert(add(2, 2) == 5, \"math is hard\"); }\n\
+     }\n";
+
+/// The defect this rail closes: **one test that never returns used to hang the whole suite, forever,
+/// printing nothing** — the report is rendered at the end, so a hung run and a slow run were
+/// indistinguishable from the outside.
+///
+/// Now the wedged test is bounded, named as its own `TIME` outcome, and every *other* test still
+/// reports: the two that pass, and the one that legitimately fails. The run exits `1` and — the part
+/// that is easy to get wrong — the process actually terminates, even though the abandoned test is
+/// still spinning in a thread nobody can stop.
+#[test]
+fn test_a_wedged_test_times_out_and_the_rest_of_the_suite_still_reports() {
+    let file = temp_program("test_timeout_wedged", WEDGED_TESTS);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "3"])
+        // `assert_cmd`'s default is no timeout; if the rail regressed this test hangs the suite,
+        // which is the honest failure mode — a bounded assertion here would pass on a runner that
+        // reported nothing.
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("TIME  spins_forever")
+                // The message names all three things a reader needs to act on it.
+                .and(predicate::str::contains("did not finish within 3s"))
+                .and(predicate::str::contains("std.test.Timeout"))
+                .and(predicate::str::contains("--timeout"))
+                // Every other result survived the hang.
+                .and(predicate::str::contains("ok    first_passes"))
+                .and(predicate::str::contains("ok    second_passes"))
+                .and(predicate::str::contains("FAIL  third_fails"))
+                .and(predicate::str::contains(
+                    "2 passed, 1 failed, 1 timed out, 4 total",
+                )),
+        );
+}
+
+/// A timeout is its own outcome in `--json`, not a failure wearing a failure's clothes: the case
+/// carries `"outcome": "timedOut"`, the totals carry `timedOut` beside `failed`, and the older
+/// per-test `passed` boolean stays `false` so a consumer that only knows that field still reads it
+/// as not-green.
+#[test]
+fn test_timeout_is_its_own_outcome_in_json() {
+    let file = temp_program("test_timeout_json", WEDGED_TESTS);
+    let assert = lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "3"])
+        .arg("--json")
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["passed"], 2);
+    assert_eq!(json["failed"], 1, "the assertion failure, and only it");
+    assert_eq!(json["timedOut"], 1);
+    assert_eq!(json["total"], 4);
+    let tests = json["tests"].as_array().expect("tests array");
+    let wedged = tests
+        .iter()
+        .find(|t| t["name"] == "spins_forever")
+        .expect("the wedged case is reported");
+    assert_eq!(wedged["outcome"], "timedOut");
+    assert_eq!(wedged["passed"], false);
+    assert!(
+        wedged["message"]
+            .as_str()
+            .expect("a timeout message")
+            .contains("did not finish within 3s"),
+        "the message names the bound: {wedged}"
+    );
+    // A passing case still reports the outcome string, so a consumer can key on one field.
+    let ok = tests
+        .iter()
+        .find(|t| t["name"] == "first_passes")
+        .expect("a passing case");
+    assert_eq!(ok["outcome"], "passed");
+}
+
+/// `#[Timeout(N)]` is the local escape hatch, and it wins over the suite default **in both
+/// directions** — here a 2-second attribute bound fires under a 600-second `--timeout`, which is the
+/// direction that proves the number written on the test is the number that applies. The message
+/// points at the attribute rather than at the flag, because that is what the reader has to change.
+#[test]
+fn test_timeout_attribute_overrides_the_suite_default() {
+    let file = temp_program(
+        "test_timeout_attribute",
+        "@test {\n\
+             use std.test.{Timeout}\n\
+             fn quick(): void { assert(1 + 1 == 2); }\n\
+             #[Timeout(2)]\n\
+             fn spins_forever(): void { mut i = 0; while true { i = i + 1; } assert(i > 0); }\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "600"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("TIME  spins_forever")
+                .and(predicate::str::contains(
+                    "did not finish within 2s (its own `#[Timeout(2)]`)",
+                ))
+                .and(predicate::str::contains("ok    quick"))
+                .and(predicate::str::contains("1 passed, 0 failed, 1 timed out")),
+        );
+}
+
+/// The other half of the rail: a legitimately long test must not be killed. A test that grinds for
+/// several seconds passes under a bound that comfortably exceeds it, and `#[Timeout(0)]` opts a test
+/// out of the bound entirely — the same escape hatch `--timeout 0` gives the whole run.
+#[test]
+fn test_a_slow_test_is_not_killed_and_timeout_zero_disables_the_bound() {
+    let file = temp_program(
+        "test_timeout_slow_is_fine",
+        "@test {\n\
+             use std.test.{Timeout}\n\
+             fn quick(): void { assert(1 + 1 == 2); }\n\
+             fn grinds(): void {\n\
+                 mut i = 0; mut total = 0;\n\
+                 while i < 8000000 { total = total + i; i = i + 1; }\n\
+                 assert(total > 0);\n\
+             }\n\
+             #[Timeout(0)]\n\
+             fn grinds_unbounded(): void {\n\
+                 mut i = 0; mut total = 0;\n\
+                 while i < 8000000 { total = total + i; i = i + 1; }\n\
+                 assert(total > 0);\n\
+             }\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        // Generous on purpose: the bound is wall-clock, and a CI box running this suite in parallel
+        // stretches a compute-bound test well past its solo time. The assertion under test is "the
+        // runner did not kill it", not "it ran in under N seconds".
+        .args(["--timeout", "120"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ok    grinds")
+                .and(predicate::str::contains("ok    grinds_unbounded"))
+                .and(predicate::str::contains("3 passed, 0 failed, 3 total")),
+        );
+}
+
+/// `--timeout 0` restores the unbounded runner for the whole suite. Proven on a suite that *can*
+/// finish, because the alternative — proving it on the wedged suite — is a test that by construction
+/// never returns. What this pins is that the flag parses, disables the rail, and leaves an ordinary
+/// run's report and exit code exactly as they were.
+#[test]
+fn test_timeout_zero_runs_unbounded() {
+    let file = temp_program("test_timeout_zero", MIXED_TESTS);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "0"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("ok    adds")
+                .and(predicate::str::contains("FAIL  fails"))
+                // No timeout column and no timeout count on a run with no bound.
+                .and(predicate::str::contains("TIME").not())
+                .and(predicate::str::contains("1 passed, 2 failed, 3 total")),
+        );
+}
+
+/// A timeout stops a `--fail-fast` run for the same reason a failure does — the suite is not going
+/// to get greener and the point of the flag is to stop burning wall time. The wedged test is first,
+/// so the tests after it are reported as "not run (stopped early)" rather than silently missing.
+#[test]
+fn test_fail_fast_stops_on_a_timeout() {
+    let file = temp_program(
+        "test_timeout_fail_fast",
+        "@test {\n\
+             fn spins_forever(): void { mut i = 0; while true { i = i + 1; } assert(i > 0); }\n\
+             fn never_reached(): void { assert(1 == 1); }\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "3", "--jobs", "1"])
+        .arg("--fail-fast")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("TIME  spins_forever")
+                .and(predicate::str::contains("1 not run (stopped early)")),
         );
 }

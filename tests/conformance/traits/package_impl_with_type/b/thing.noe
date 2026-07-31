@@ -1,0 +1,14 @@
+// The type's OWN package implements a foreign trait for it. Legal: the impl lives with the type,
+// the other home the orphan rule allows — this is how a package opts its own types into someone
+// else's trait, and it is the mirror image of `package_impl_with_trait`.
+
+use a.speaks.{Speaks};
+
+pub class Thing {
+    pub id: int
+    fn new(id: int): Thing { return Thing { id: id } }
+}
+
+impl Speaks for Thing {
+    fn speak(): string { return "b says ${self.id}" }
+}

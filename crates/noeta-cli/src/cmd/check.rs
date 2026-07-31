@@ -7,7 +7,6 @@ use std::process::ExitCode;
 
 use noeta_diagnostics::{Diagnostic, render_mapped};
 use noeta_pm::{graph, manifest};
-use noeta_runner::resolve_providers;
 use noeta_span::SourceMap;
 
 use crate::{OutputFormat, compose};
@@ -21,6 +20,9 @@ pub(crate) struct CheckReport {
     errors: usize,
     /// The number of unique warning-severity diagnostics.
     warnings: usize,
+    /// The dev tiers whose blocks were also checked, beyond the stripped shipping shape — sorted,
+    /// deduplicated across every entry. Empty when the sources declare no code-tier block.
+    tiers_checked: Vec<String>,
     /// Every unique diagnostic, resolved to files + line/column (see [`noeta_diagnostics::to_json`]).
     diagnostics: Vec<noeta_diagnostics::JsonDiagnostic>,
 }
@@ -29,6 +31,18 @@ pub(crate) struct CheckReport {
 /// `.noe` file and verify it type-checks, printing all diagnostics and exiting non-zero if any is an
 /// error. This is `cmd_run`'s front half — load → (activate tiers) → `check_all` — stopping before
 /// `execute_real_host`, so it has no side effects.
+///
+/// **`check` covers every shape of the source, not just the one that ships.** A dev-tier block is
+/// stripped before lowering, so mirroring `run`'s empty active-tier set meant a `@test` body never
+/// reached the checker at all: `noeta check .` said "0 errors" about a file `noeta test` could not
+/// compile, and a whole session's worth of `@test` blocks could accumulate errors that nothing
+/// reported until the test run. So each entry is checked once as it ships (no tiers) and then **once
+/// per code tier its own blocks name** — the exact shape `noeta test`/`noeta bench`/`noeta <tier>`
+/// activates. One tier at a time, never all at once: a single all-tiers pass would inline `@test`
+/// and `@bench` blocks together, which no build ever does, and invent collisions between them.
+/// Diagnostics from every shape fold into the one dedup map, so an error outside a tier block is
+/// still reported once. `--tier`/`--target` still select a shape explicitly (their union is checked
+/// as one, as before); the per-tier sweep covers whatever that selection leaves out.
 ///
 /// `PATH` (default `.`) is a file or a directory; a directory is walked recursively and **every**
 /// `.noe` file is checked as its own entry. The loader links only an entry's *directory-sibling*
@@ -74,15 +88,6 @@ pub(crate) fn cmd_check(
             active.push(tier.clone());
         }
     }
-    // The target's tier → provider map steers which declaration's config attribute activation
-    // stamps (provider dispatch); empty without a target.
-    let providers = match resolve_providers(path, target) {
-        Ok(map) => map,
-        Err(err) => {
-            eprintln!("noeta: {err}");
-            return ExitCode::from(1);
-        }
-    };
     let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
 
     // The set of entry files to check: the file itself, or every `.noe` file under the directory.
@@ -105,6 +110,9 @@ pub(crate) fn cmd_check(
     type MapDiag = (std::rc::Rc<SourceMap>, Diagnostic);
     let mut diags: std::collections::BTreeMap<(String, u32, u32, &'static str), MapDiag> =
         std::collections::BTreeMap::new();
+    // Which dev tiers' blocks were covered beyond the shipping shape, across every entry — reported
+    // so a clean run says what it looked at rather than leaving "silence" ambiguous.
+    let mut covered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut fold = |sources: &std::rc::Rc<SourceMap>, diag: &Diagnostic| {
         let key = (
             sources.source(diag.span.source).name().to_string(),
@@ -126,17 +134,17 @@ pub(crate) fn cmd_check(
     // (`noeta_loader::parse_dir`/`link_entry` — per-entry semantics identical to
     // `load_with_deps`). Diagnostics still dedup/order by (file, span, code), so output is
     // unchanged.
-    let mut by_dir: std::collections::BTreeMap<PathBuf, Vec<&PathBuf>> =
-        std::collections::BTreeMap::new();
+    let mut by_dir: std::collections::BTreeMap<
+        PathBuf,
+        (Option<noeta_loader::PackageRoot>, Vec<&PathBuf>),
+    > = std::collections::BTreeMap::new();
     for entry in &entries {
-        // An empty parent (a bare relative name like `noeta check foo.noe`) is the current
-        // directory: `read_dir_modules` scans `.` for it while keeping the pool's module names
-        // unprefixed, so the entry-to-pool name match below still holds.
-        let dir = entry
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(""))
-            .to_path_buf();
-        by_dir.entry(dir).or_default().push(entry);
+        let (dir, root) = entry_pool(entry);
+        by_dir
+            .entry(dir)
+            .or_insert((root, Vec::new()))
+            .1
+            .push(entry);
     }
 
     // The directory the compose probe's graph belongs to: the checked path itself when it is a
@@ -150,7 +158,7 @@ pub(crate) fn cmd_check(
             .to_path_buf()
     };
     let mut unreadable = false;
-    for (dir, dir_entries) in &by_dir {
+    for (dir, (package_root, dir_entries)) in &by_dir {
         // Resolve the directory's dependency packages so a cross-package `use <dep-key>.…`
         // type-checks accurately under `noeta check`, matching `run` (package-manager P2.1c).
         // One resolve serves every entry in the directory (they share the manifest) — the compose
@@ -161,10 +169,10 @@ pub(crate) fn cmd_check(
         } else {
             None
         };
-        let deps = match reusable {
-            Some(graph) => graph.packages,
+        let (deps, package_uses) = match reusable {
+            Some(graph) => (graph.packages, graph.package_uses),
             None => match graph::resolve_graph(dir_entries[0]) {
-                Ok(graph) => graph.packages,
+                Ok(graph) => (graph.packages, graph.package_uses),
                 Err(err) => {
                     for entry in dir_entries {
                         eprintln!("noeta: {}: {err}", entry.display());
@@ -177,15 +185,17 @@ pub(crate) fn cmd_check(
         // Read + lex + parse the directory once; all entries share the parsed pool and one
         // SourceMap (ids are directory-stable, and the dedup key never uses them).
         let parsed = noeta_loader::parse_dir(
-            noeta_loader::read_dir_modules(dir),
+            pool_modules(dir, package_root.as_ref()),
             manifest::root_edition(dir_entries[0]),
             &deps,
+            &package_uses,
         );
         let sources = std::rc::Rc::new(parsed.source_map());
         // Check one entry of a parsed directory: link it against the shared pool, then
         // activate the resolved dev-tiers before checking, as `run`/`build`/`dump` do (with no
         // active tiers the program is checked as-is). Checking rides `check_under` with the
-        // directory's edition map, so the per-source editions travel structurally (audit-3 F8).
+        // directory's `CheckOptions`, so the per-source editions and package provenance travel
+        // structurally (audit-3 F8).
         // Entry lex/parse errors' spans live in the entry, and the shared map renders them
         // against it — the same (file, span, code) dedup key as the per-entry load produced.
         let mut check_entry = |parsed: &noeta_loader::ParsedDir,
@@ -212,21 +222,53 @@ pub(crate) fn cmd_check(
                         sources = std::rc::Rc::new(parsed.source_map_with(&linked.expansions));
                         editions = Some(parsed.editions_with(&linked.expansions));
                     }
-                    let editions = editions.as_ref().unwrap_or_else(|| parsed.editions());
-                    let program = linked.program;
-                    let program_diags = if active_refs.is_empty() {
-                        crate::context::check_under(&program, editions).diagnostics
-                    } else {
-                        let activated =
-                            noeta_check::activate_tiers_with(&program, &active_refs, &providers);
-                        let mut ds = activated.diagnostics;
-                        ds.extend(
-                            crate::context::check_under(&activated.program, editions).diagnostics,
-                        );
-                        ds
+                    // Package provenance needs no expansion twin: generated sources are
+                    // deliberately unattributed, so the directory's map covers every source the
+                    // orphan rule may judge (see `ParsedDir::packages`).
+                    let opts = noeta_check::CheckOptions {
+                        editions: editions.unwrap_or_else(|| parsed.editions().clone()),
+                        packages: parsed.packages().clone(),
+                        package_uses: package_uses.clone(),
+                        ..noeta_check::CheckOptions::default()
                     };
-                    for d in &program_diags {
-                        fold(&sources, d);
+                    let program = linked.program;
+                    let ctx = noeta_check::TierContext {
+                        uses: &opts.package_uses,
+                        packages: &opts.packages,
+                    };
+                    // Every **shape** this entry is checked in. The first is the caller's
+                    // explicit `--tier`/`--target` selection, empty by default — the stripped
+                    // shape that ships. After it, one shape per code tier the entry's *own*
+                    // blocks name and the selection did not already make live: the exact shape
+                    // `noeta test`/`noeta bench`/`noeta <tier>` compiles. One tier per shape,
+                    // never all at once — a joint pass would inline `@test` and `@bench`
+                    // together, which no build does, and invent collisions between them.
+                    let sweep = noeta_check::code_tiers_in(&program, &ctx);
+                    let mut shapes: Vec<Vec<&str>> = vec![active_refs.clone()];
+                    for tier in &sweep {
+                        // Reported as covered either way: the selection may already have
+                        // activated it, in which case it needs no extra pass.
+                        covered.insert(tier.clone());
+                        if !active_refs.contains(&tier.as_str()) {
+                            shapes.push(vec![tier.as_str()]);
+                        }
+                    }
+                    // Diagnostics from every shape fold into the one dedup map, so an error
+                    // outside any tier block — reported by all of them — still prints once.
+                    for shape in &shapes {
+                        let program_diags = if shape.is_empty() {
+                            crate::context::check_under(&program, &opts).diagnostics
+                        } else {
+                            let activated = noeta_check::activate_tiers_with(&program, shape, &ctx);
+                            let mut ds = activated.diagnostics;
+                            ds.extend(
+                                crate::context::check_under(&activated.program, &opts).diagnostics,
+                            );
+                            ds
+                        };
+                        for d in &program_diags {
+                            fold(&sources, d);
+                        }
                     }
                 }
             }
@@ -246,9 +288,10 @@ pub(crate) fn cmd_check(
                     }
                     Ok(text) => {
                         let lone = noeta_loader::parse_dir(
-                            vec![noeta_loader::RawModule { name, text }],
+                            vec![noeta_loader::RawModule::declared(name, text)],
                             manifest::root_edition(entry),
                             &deps,
+                            &package_uses,
                         );
                         let lone_sources = std::rc::Rc::new(lone.source_map());
                         check_entry(&lone, &lone_sources, 0);
@@ -280,7 +323,18 @@ pub(crate) fn cmd_check(
                 let _ = stderr.write_all(render_mapped(sources, std::iter::once(diag)).as_bytes());
             }
             let files = if n == 1 { "file" } else { "files" };
-            eprintln!("checked {n} {files}: {errors} error(s), {warnings} warning(s)");
+            // Name the tiers whose blocks were checked too, so the summary reports what it looked
+            // at — the shipping shape alone reads identically to the shipping shape *plus* every
+            // tier, and only one of those means "your `@test` bodies compile".
+            let tiers = if covered.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (tiers: {})",
+                    covered.iter().cloned().collect::<Vec<_>>().join(", ")
+                )
+            };
+            eprintln!("checked {n} {files}{tiers}: {errors} error(s), {warnings} warning(s)");
         }
         OutputFormat::Json => {
             // A single machine-readable report on stdout, so a tool can pipe `noeta check --format
@@ -290,6 +344,7 @@ pub(crate) fn cmd_check(
                 files_checked: n,
                 errors,
                 warnings,
+                tiers_checked: covered.iter().cloned().collect(),
                 diagnostics: diags
                     .values()
                     .map(|(sources, diag)| noeta_diagnostics::to_json(sources, diag))
@@ -311,6 +366,42 @@ pub(crate) fn cmd_check(
     }
 }
 
+/// The **module pool** an entry links against: the package it belongs to (walked recursively, every
+/// module carrying the path its location derives) or, for a file in no package, its own directory
+/// (flat, each module identified by the `namespace` it declares).
+///
+/// Returned as a grouping key plus the package root, because entries are batched by pool — every
+/// entry of one pool shares its sources, manifest, dependency graph and parsed module set, and is
+/// read/lexed/parsed once for all of them. Grouping by *package* rather than by directory is what
+/// makes `noeta check` see the same program `noeta run` links: an app's `src/deep/nested.noe` is a
+/// module of the app, not an unrelated file in another directory.
+pub(crate) fn entry_pool(entry: &std::path::Path) -> (PathBuf, Option<noeta_loader::PackageRoot>) {
+    match noeta_pm::sources::package_root(entry) {
+        Some(root) => (root.dir.clone(), Some(root)),
+        // An empty parent (a bare relative name like `noeta check foo.noe`) is the current
+        // directory: `read_dir_modules` scans `.` for it while keeping the pool's module names
+        // unprefixed, so the entry-to-pool name match still holds.
+        None => (
+            entry
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(""))
+                .to_path_buf(),
+            None,
+        ),
+    }
+}
+
+/// Read a pool's modules — the package walk, or the flat directory scan for a file in no package.
+pub(crate) fn pool_modules(
+    dir: &std::path::Path,
+    root: Option<&noeta_loader::PackageRoot>,
+) -> Vec<noeta_loader::RawModule> {
+    match root {
+        Some(root) => noeta_loader::read_package_modules(root),
+        None => noeta_loader::read_dir_modules(dir),
+    }
+}
+
 /// Collect every `.noe` file under `root`, recursively, in sorted order (so discovery and thus the
 /// check order are deterministic). Hand-rolled in the style of the loader's `read_siblings` — a
 /// depth-first `read_dir` walk that silently skips directories it cannot read (a partial tree still
@@ -327,6 +418,17 @@ pub(crate) fn noe_files(root: &std::path::Path) -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_dir() {
+                // Skip dotted directories, matching `noeta fmt`'s walker. `.git` is the obvious
+                // one, but the case that actually bites is `.claude/worktrees/` — a git worktree
+                // holds a SECOND copy of every module, so checking a package (or a path/patched
+                // dependency) swept an agent's in-progress branch into the same program and
+                // reported its errors against a consumer that never referenced it.
+                if p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.'))
+                {
+                    continue;
+                }
                 dirs.push(p);
             } else if p.extension().is_some_and(|ext| ext == "noe") {
                 out.push(p);

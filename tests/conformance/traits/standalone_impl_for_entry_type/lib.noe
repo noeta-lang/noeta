@@ -1,0 +1,12 @@
+use pkg.main.{Target};
+
+pub trait Decoder {
+    fn step(s: string): string
+}
+
+// The implementor lives in the *entry*, not here. An impl travels with its target type wherever that
+// type is declared; the entry's declarations are the program's tail rather than merged imports, and
+// reading only the merged half dropped this impl.
+impl Decoder for Target {
+    fn step(s: string): string { return s.upper() }
+}

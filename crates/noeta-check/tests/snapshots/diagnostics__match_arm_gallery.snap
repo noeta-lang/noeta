@@ -1,0 +1,46 @@
+---
+source: crates/noeta-check/tests/diagnostics.rs
+expression: out
+---
+================ E0066 unreachable arm after a wildcard ================
+[E0066] Error: this `match` arm can never run: the `_` arm above already matches every value
+   ╭─[ snippet.noe:4:9 ]
+   │
+ 3 │         _ => "many",
+   │         ┬  
+   │         ╰── this pattern already matches every value…
+ 4 │         1 => "one",
+   │         ┬  
+   │         ╰── …so this arm is never reached
+   │ 
+   │ Help: delete this arm, or move the catch-all `_` arm to last position
+───╯
+
+================ E0066 unreachable arm after a bare `none` the scrutinee did not resolve ================
+[E0066] Error: this `match` arm can never run: the `none` arm above already matches every value
+   ╭─[ snippet.noe:4:9 ]
+   │
+ 3 │         none => "empty",
+   │         ──┬─  
+   │           ╰─── this pattern already matches every value…
+ 4 │         some(v) => "${v}",
+   │         ───┬───  
+   │            ╰───── …so this arm is never reached
+   │ 
+   │ Help: `none` resolves to the Option case only against an `?T` scrutinee; this one is not an option, so `none` here is a plain binding — it matches every value and has to come last
+───╯
+
+================ E0011 a bare payload-free variant covers only its own case ================
+[E0011] Error: non-exhaustive `match`: missing Int, List
+   ╭─[ snippet.noe:3:12 ]
+   │
+ 3 │ ╭─▶     return match t {
+   ┆ ┆   
+ 5 │ ├─▶     }
+   │ │           
+   │ ╰─────────── non-exhaustive `match`: missing Int, List
+   │     
+   │     Help: add an arm for each missing case, or a `_` catch-all
+───╯
+
+================ clean: every payload-free variant spelled bare, no `_` needed ================

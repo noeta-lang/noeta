@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use noeta_pm::graph::{self, NativeCrate};
+use noeta_pm::graph::{self, NativeCrate, ResolvedCommandBinding};
 use sha2::{Digest, Sha256};
 
 /// The env guard that marks a composed binary: set on delegation so the composed toolchain (which
@@ -102,13 +102,25 @@ pub fn maybe_delegate(entry: &Path) -> Result<Option<graph::ResolvedGraph>, Exit
     let Ok(resolved) = graph::resolve_graph(entry) else {
         return Ok(None); // the command path re-resolves and renders the error
     };
-    if resolved.native_crates.is_empty() {
+    delegate_resolved(resolved)
+}
+
+/// The half of [`maybe_delegate`] past resolution: delegate if this app has native crates, else
+/// hand the graph back. Shared with [`maybe_delegate_cwd`], which resolves for itself so it can
+/// *report* a resolution failure rather than swallow it.
+fn delegate_resolved(
+    resolved: graph::ResolvedGraph,
+) -> Result<Option<graph::ResolvedGraph>, ExitCode> {
+    // Only **runtime** native crates force composition here: a `run`/`build`/`check` that loads a
+    // program needs the composed toolchain iff the graph carries native runtime code. A dev-only
+    // `dev-native` crate (a formatter) contributes nothing at runtime, so its presence must not
+    // drag a plain run through a compose — it is reached only by `noeta fmt` (see
+    // [`maybe_delegate_fmt`]).
+    let crates = resolved.runtime_native_crates();
+    if crates.is_empty() {
         return Ok(Some(resolved));
     }
-    match delegate(
-        &resolved.native_crates,
-        &resolved.trusted_command_identities,
-    ) {
+    match delegate(&crates, &resolved.command_bindings) {
         Ok(never) => match never {},
         Err(err) => {
             eprintln!("noeta: cannot compose the toolchain for this app's native dependencies:");
@@ -118,14 +130,72 @@ pub fn maybe_delegate(entry: &Path) -> Result<Option<graph::ResolvedGraph>, Exit
     }
 }
 
+/// `noeta fmt`'s delegation: compose and `exec` a dev toolchain whenever the app's graph carries
+/// **any** native entry crate — dev-only formatter crates INCLUDED (unlike [`delegate_resolved`],
+/// which triggers only on runtime crates). A `dev-native` package's whole point is to provide a
+/// tier-body formatter that runs here, so `fmt` is the one command that must reach it.
+///
+/// Guarded by [`COMPOSED_GUARD`]: a composed toolchain re-invokes `noeta fmt` inside itself, and
+/// that inner process must format with its own linked-in extensions, not compose a third time.
+/// Returns `Ok(())` when there is nothing to compose (a pure-Noeta app formats in-process); on a
+/// successful compose it `exec`s and never returns. `Err` on a compose/resolve failure — the caller
+/// surfaces it rather than silently formatting without the package's formatter.
+pub fn maybe_delegate_fmt(entry: &Path) -> Result<(), String> {
+    if std::env::var_os(COMPOSED_GUARD).is_some() {
+        return Ok(());
+    }
+    // `fmt` accepts a directory; the manifest is discovered from it, so probe with a synthetic child
+    // (see `maybe_delegate` — `resolve_graph` only uses the entry's parent).
+    let probe;
+    let entry = if entry.is_dir() {
+        probe = entry.join("_.noe");
+        probe.as_path()
+    } else {
+        entry
+    };
+    let resolved = match graph::resolve_graph(entry) {
+        Ok(resolved) => resolved,
+        // No manifest / not in a package: format in-process (a bare script has no formatter deps).
+        Err(_) => return Ok(()),
+    };
+    if resolved.native_crates.is_empty() {
+        return Ok(());
+    }
+    // The full set (dev-only included), always a Toolchain composition — `fmt` lives only in the
+    // full toolchain base, never the lean runner.
+    match delegate(&resolved.native_crates, &resolved.command_bindings) {
+        Ok(never) => match never {},
+        Err(err) => Err(err),
+    }
+}
+
 /// [`maybe_delegate`] keyed on the **current directory**'s manifest — for invocations that carry
 /// no file argument but may only make sense inside a composed toolchain (an unknown subcommand
 /// that is really a native dependency's `ExtCommand`). Returns `None` when there is nothing to
 /// compose, exactly like the entry-file form's `Ok` (the resolved graph has no consumer here —
 /// the unknown-subcommand chain never loads a program).
+///
+/// **A resolution failure is reported here**, unlike in [`maybe_delegate`], where the command path
+/// re-resolves and renders it. Nothing downstream re-resolves *this* one: the unknown-subcommand
+/// chain never loads a program, so the manifest error was swallowed and the user got clap's
+/// "unrecognized subcommand" instead. That is what a project still on the pre-mapping
+/// `commands = ["company/package"]` array saw for the very command it was trying to trust —
+/// the migration message naming `[trust.commands]` was written, and thrown away.
 pub fn maybe_delegate_cwd() -> Option<ExitCode> {
+    if std::env::var_os(COMPOSED_GUARD).is_some() {
+        return None;
+    }
     let cwd = std::env::current_dir().ok()?;
-    maybe_delegate(&cwd).err()
+    // The manifest is discovered from the directory, so probe with a synthetic child (see
+    // `maybe_delegate`: `resolve_graph` only uses the entry's parent).
+    let resolved = match graph::resolve_graph(&cwd.join("_.noe")) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            return Some(ExitCode::from(2));
+        }
+    };
+    delegate_resolved(resolved).err()
 }
 
 /// The uninhabited "success" of [`delegate`] — on unix `exec` replaces the process; elsewhere we
@@ -134,9 +204,9 @@ enum Never {}
 
 fn delegate(
     crates: &[NativeCrate],
-    trusted_command_identities: &[String],
+    command_bindings: &[ResolvedCommandBinding],
 ) -> Result<Never, String> {
-    let binary = compose_binary(crates, trusted_command_identities, ShimKind::Toolchain)?;
+    let binary = compose_binary(crates, command_bindings, ShimKind::Toolchain)?;
     exec(&binary)
 }
 
@@ -148,14 +218,13 @@ fn delegate(
 pub fn compose_runner_binary(entry: &Path) -> Result<Option<PathBuf>, String> {
     let resolved = graph::resolve_graph(entry)
         .map_err(|err| format!("resolving the app's native dependencies: {err}"))?;
-    if resolved.native_crates.is_empty() {
+    // A shipped `--exe` base carries only RUNTIME native crates — a dev-only formatter has no place
+    // in a production binary.
+    let crates = resolved.runtime_native_crates();
+    if crates.is_empty() {
         return Ok(None);
     }
-    let binary = compose_binary(
-        &resolved.native_crates,
-        &resolved.trusted_command_identities,
-        ShimKind::Runner,
-    )?;
+    let binary = compose_binary(&crates, &resolved.command_bindings, ShimKind::Runner)?;
     Ok(Some(binary))
 }
 
@@ -178,6 +247,8 @@ pub fn package_api_docs(identity: &str, crate_dir: &Path) -> Result<String, Stri
         // No resolved graph here (publish hands us the crate dir directly) — hash it ourselves so
         // the publish quality gate also recomposes on source edits.
         content_hash: noeta_pm::hash_tree(crate_dir).unwrap_or_default(),
+        // Publish docs a real runtime `native` crate; a dev-native package documents nothing here.
+        dev_only: false,
     };
     // A doc-generation query exposes no CLI of its own, so command-trust is irrelevant — `&[]`.
     let binary = compose_binary(&[nc], &[], ShimKind::Toolchain)?;
@@ -221,10 +292,12 @@ pub fn compose_aot_runtime_archive(
 ) -> Result<Option<(PathBuf, Vec<String>)>, String> {
     let resolved = graph::resolve_graph(entry)
         .map_err(|err| format!("resolving the app's native dependencies: {err}"))?;
-    if resolved.native_crates.is_empty() {
+    // A `--native` AOT base installs only RUNTIME native crates — a dev-only formatter never ships.
+    let crates = resolved.runtime_native_crates();
+    if crates.is_empty() {
         return Ok(None);
     }
-    let entries = resolve_entries(&resolved.native_crates)?;
+    let entries = resolve_entries(&crates)?;
     let toolchain = toolchain_source()?;
     // A stapled AOT artifact exposes no CLI, so command-trust never reaches this base — key on `&[]`.
     let key = compose_key(&entries, &toolchain, &[], ShimKind::AotRuntime, rings);
@@ -257,32 +330,106 @@ const AOT_ARCHIVE_NAME: &str = "libnoeta_composed_aot.a";
 /// building it on a miss. Shared by the toolchain delegation and the runner-artifact base.
 fn compose_binary(
     crates: &[NativeCrate],
-    trusted_command_identities: &[String],
+    command_bindings: &[ResolvedCommandBinding],
     kind: ShimKind,
 ) -> Result<PathBuf, String> {
     let entries = resolve_entries(crates)?;
     let toolchain = toolchain_source()?;
-    let key = compose_key(&entries, &toolchain, trusted_command_identities, kind, &[]);
+    let key = compose_key(&entries, &toolchain, command_bindings, kind, &[]);
     let dir = compose_dir(&key)?;
     // Content-addressed: the key covers the entry crates' package trees, the toolchain source form,
     // the running binary's build identity, and the shim kind — a hit means this exact composition
     // already built (the binary was copied into the compose dir as its own artifact).
     let binary = dir.join("bin").join(BIN_NAME);
     if !binary.is_file() {
-        build(
-            &dir,
-            &entries,
-            &toolchain,
-            trusted_command_identities,
-            &binary,
-            kind,
-        )?;
+        build(&dir, &entries, &toolchain, command_bindings, &binary, kind)?;
     }
     Ok(binary)
 }
 
 /// The shim's `[[bin]]` name (also the cached binary's file name).
 const BIN_NAME: &str = "noeta-composed";
+
+/// Explain a failed composed-toolchain build. The common cause by far is a **native ABI
+/// mismatch**: an extension crate is compiled from source against *this* toolchain (the composed
+/// build unifies every `noeta-*` crate through `[patch]`), so a package whose release predates a
+/// change to the registration contract — a new [`noeta_ext_abi::registry::ExtFn`] field, a changed
+/// dispatch signature — fails to compile against it. Raw `rustc` output pointing into the package
+/// cache is unactionable on its own, so name the package whose crate failed and say what the
+/// consumer can actually do about it. The full build log still follows: the diagnosis is a header,
+/// never a replacement.
+fn compose_failure(stderr: &str, entries: &[Entry]) -> String {
+    // Which package owns the crate rustc complained about — matched on the crate directory, since
+    // every diagnostic path inside a dependency's tree lies under it.
+    // Match on the owning package's **tree**, not the entry crate's own directory: an entry crate
+    // (`native = "native"`) usually depends on sibling crates in the same package, and it is one of
+    // those that rustc names. The tree root is the nearest ancestor holding the package manifest.
+    let culprits: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| stderr.contains(&package_tree(&e.dir).display().to_string()))
+        .collect();
+    // The signature of an out-of-date registration table: a struct literal that predates a field.
+    let abi_shaped = stderr.contains("E0063")
+        || stderr.contains("E0560")
+        || stderr.contains("missing field")
+        || stderr.contains("no field");
+    let diagnosis = match (&culprits[..], abi_shaped) {
+        ([], _) => String::new(),
+        (owners, true) => {
+            let names: Vec<&str> = owners.iter().map(|e| e.identity.as_str()).collect();
+            format!(
+                "the native code of {} does not compile against this toolchain — its registration \
+                 tables are missing a field the extension ABI now requires, so the release predates \
+                 this `noeta`. An extension is built from source against the exact toolchain, so \
+                 there is no version of it that both can load: update the package (`noeta update`) \
+                 once a release built for this ABI exists, pin a `noeta` matching the release, or \
+                 point the identity at a fixed checkout with `[patch]` in `{}`.\n\n",
+                describe_packages(&names),
+                noeta_pm::manifest::MANIFEST_NAME,
+            )
+        }
+        (owners, false) => {
+            let names: Vec<&str> = owners.iter().map(|e| e.identity.as_str()).collect();
+            format!(
+                "the native code of {} failed to compile. The build log follows — it is that \
+                 package's own build error, not your program's.\n\n",
+                describe_packages(&names),
+            )
+        }
+    };
+    format!("{diagnosis}building the composed toolchain failed:\n{stderr}")
+}
+
+/// The noeta package tree an entry crate belongs to: the nearest ancestor of `crate_dir` holding a
+/// `noeta.toml`. Falls back to `crate_dir` itself when there is none (a bare crate path), which
+/// keeps the caller's substring match as tight as it was.
+fn package_tree(crate_dir: &Path) -> &Path {
+    let mut dir = crate_dir;
+    loop {
+        if dir.join(noeta_pm::manifest::MANIFEST_NAME).is_file() {
+            return dir;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return crate_dir,
+        }
+    }
+}
+
+/// `` `para/db` `` / `` `para/db` and `para/p2p` `` — package identities for a sentence.
+fn describe_packages(names: &[&str]) -> String {
+    match names {
+        [one] => format!("`{one}`"),
+        [rest @ .., last] => format!(
+            "{} and `{last}`",
+            rest.iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        [] => "the native dependencies".to_string(),
+    }
+}
 
 /// One native entry crate, with the cargo-level facts the shim needs.
 struct Entry {
@@ -307,6 +454,13 @@ struct Entry {
     /// scan selected, so a `--native` binary that never imports the ring's modules sheds its native
     /// dep tree. Empty for a crate with no gated rings (built at default features, unchanged).
     ring_features: Vec<String>,
+    /// A **dev-only** entry crate (from `package.dev-native`) — a formatter/dev-tool. It is pulled
+    /// with `default-features = false, features = ["fmt"]` (only its formatter code, never its heavy
+    /// deps), its `NOETA_EXTENSIONS` are wrapped through [`crate::formatter_only`] so only their body
+    /// formatters reach the toolchain, and it appears ONLY in a [`ShimKind::Toolchain`] composition
+    /// (excluded from `Runner`/`AotRuntime` — a prod shim never lists a dev tool). `false` for a
+    /// normal runtime crate.
+    dev_only: bool,
 }
 
 fn resolve_entries(crates: &[NativeCrate]) -> Result<Vec<Entry>, String> {
@@ -339,6 +493,7 @@ fn resolve_entries(crates: &[NativeCrate]) -> Result<Vec<Entry>, String> {
             ident,
             dev_features,
             ring_features,
+            dev_only: nc.dev_only,
         });
     }
     // Deterministic shim content (the graph already sorts by identity; keep it locally true too).
@@ -406,7 +561,7 @@ fn toolchain_source() -> Result<ToolchainSource, String> {
 fn compose_key(
     entries: &[Entry],
     toolchain: &ToolchainSource,
-    trusted_command_identities: &[String],
+    command_bindings: &[ResolvedCommandBinding],
     kind: ShimKind,
     rings: &[String],
 ) -> String {
@@ -421,11 +576,16 @@ fn compose_key(
         h.update(b"ring:");
         h.update(ring);
     }
-    // Which packages' commands are trusted changes the shim (and the CLI surface), so a change in
-    // `[trust].commands` must recompose (Phase 4).
-    for identity in trusted_command_identities {
+    // The command bindings change the shim (and the CLI surface), so any edit to `[trust.commands]`
+    // — a new binding, a dropped one, or a rename of the local or exported name — must recompose
+    // (Phase 4). Fold each binding's three parts in, delimited, so distinct bindings can't alias.
+    for b in command_bindings {
         h.update(b"cmd:");
-        h.update(identity);
+        h.update(&b.local);
+        h.update(b"=");
+        h.update(&b.provider);
+        h.update(b":");
+        h.update(&b.exported);
     }
     match toolchain {
         ToolchainSource::Workspace(root) => {
@@ -490,7 +650,7 @@ fn build(
     dir: &Path,
     entries: &[Entry],
     toolchain: &ToolchainSource,
-    trusted_command_identities: &[String],
+    command_bindings: &[ResolvedCommandBinding],
     cached: &Path,
     kind: ShimKind,
 ) -> Result<(), String> {
@@ -508,7 +668,7 @@ fn build(
     .map_err(|err| format!("writing shim Cargo.toml: {err}"))?;
     std::fs::write(
         dir.join("src").join("main.rs"),
-        shim_main_rs(entries, trusted_command_identities, kind),
+        shim_main_rs(entries, command_bindings, kind),
     )
     .map_err(|err| format!("writing shim main.rs: {err}"))?;
     let names: Vec<&str> = entries.iter().map(|e| e.identity.as_str()).collect();
@@ -538,10 +698,8 @@ fn build(
             )
         })?;
     if !output.status.success() {
-        return Err(format!(
-            "building the composed toolchain failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(compose_failure(&stderr, entries));
     }
     let built = target_dir
         .join(if debug { "debug" } else { "release" })
@@ -555,7 +713,30 @@ fn build(
                 cached.display()
             )
         })?;
+    discard_build_scratch(dir, &target_dir);
     Ok(())
+}
+
+/// Delete the compose dir's own cargo target dir now that its artifact has been copied out.
+///
+/// The compose dir owns its artifact and the target dir is a build detail — but it was kept
+/// forever, and it is *enormous* next to what it produces: one composition measured 1.4G of target
+/// beside a 51M artifact, a 27× tail. Nothing evicts compose entries, so a machine that checks a
+/// handful of native-dependency packages accumulates several gigabytes per composition and keeps
+/// them indefinitely (41G observed, which twice filled a 450G disk).
+///
+/// Dropping it costs nothing on the hit path: [`compose_binary`] and its AOT twin test for the
+/// cached *artifact*, never the target dir, so a pruned entry still hits and never rebuilds. It
+/// costs a full rebuild only when the entry misses anyway — which is the same work a cold entry
+/// does. Best-effort: the artifact is already cached, so a failure to remove is not a build error.
+///
+/// **Only ever removes the compose dir's own `target/`.** Under `NOETA_COMPOSE_TARGET_DIR` the dir
+/// belongs to the caller — the e2e tests point it at the workspace's own build directory — and
+/// deleting that would destroy work this function never created.
+fn discard_build_scratch(dir: &Path, target_dir: &Path) {
+    if target_dir == dir.join("target") {
+        let _ = std::fs::remove_dir_all(target_dir);
+    }
 }
 
 /// Generate the composed AOT runtime staticlib project, build it with `cargo rustc … --print
@@ -642,6 +823,7 @@ fn build_aot_archive(
             cached_libs.display()
         )
     })?;
+    discard_build_scratch(dir, &target_dir);
     Ok(())
 }
 
@@ -828,6 +1010,24 @@ fn shim_cargo_toml(
     out.push_str(&toolchain_dep(kind.base_crate()));
     out.push_str(&toolchain_dep("noeta-ext-abi"));
     for (n, e) in entries.iter().enumerate() {
+        // A **dev-only** formatter crate is pulled trimmed: `default-features = false` sheds its heavy
+        // deps, and only its declared dev feature(s) (`fmt`) turn its formatter code on. It appears
+        // only in a Toolchain composition (excluded upstream from Runner/AotRuntime entry sets), so
+        // there is no prod path here to trim it out of.
+        if e.dev_only {
+            let list = e
+                .dev_features
+                .iter()
+                .map(|f| toml_quote(f))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "ext{n} = {{ package = {}, path = {}, default-features = false, features = [{list}] }}\n",
+                toml_quote(&e.cargo_name),
+                toml_quote(&e.dir.display().to_string())
+            ));
+            continue;
+        }
         // A dev toolchain turns on the crate's dev features (`fmt`); a Toolchain *and* a Runner
         // (shipped `--exe`) both enable ALL of the crate's footprint rings — a runnable binary is
         // fully capable. (Only the AOT composition footprint-gates rings; see `aot_shim_cargo_toml`.)
@@ -1005,16 +1205,16 @@ fn toolchain_patch_section(src_root: &Path) -> String {
 }
 
 /// The generated shim entry point: aggregate every entry crate's exported `NOETA_EXTENSIONS`
-/// slice and hand the whole toolchain to `run_cli`, along with the **command-trusted units** —
-/// the extension units of exactly the entries whose *package identity* the root app authorized in
-/// `[trust].commands` (Phase 4). Trust is tied to the providing package, never to a name: matching
-/// namespace-root strings would over-trust every package sharing a scope root (trusting `para/db`'s
-/// commands must not trust all of `para/*`), and for a scope-keyed package the dependency's root
-/// segment does not even equal what its extensions report as root — the defect this shape fixes.
+/// slice and hand the whole toolchain to `run_cli`, along with the **command bindings** — one per
+/// `[trust.commands]` entry, each pairing the local name the command is registered under with the
+/// exported command and the providing entry's units (Phase 4). Trust is tied to the providing
+/// package identity (never to a namespace-root string, which would over-trust every package sharing
+/// a scope root — trusting `para/db`'s commands must not trust all of `para/*`), and the local name
+/// is what resolves a collision between two packages exporting the same command name.
 /// `Box::leak` is fine — the units live for the process, exactly like the stock binary's statics.
 fn shim_main_rs(
     entries: &[Entry],
-    trusted_command_identities: &[String],
+    command_bindings: &[ResolvedCommandBinding],
     kind: ShimKind,
 ) -> String {
     let mut out = String::new();
@@ -1024,34 +1224,44 @@ fn shim_main_rs(
          \x20   let mut units: Vec<&'static (dyn noeta_ext_abi::Extension + Sync)> = Vec::new();\n",
     );
     for (n, e) in entries.iter().enumerate() {
+        if e.dev_only {
+            // A dev-only formatter crate contributes ONLY its body formatters: wrap each of its units
+            // in `formatter_only` so the toolchain sees no modules/types/commands/tiers from it —
+            // only `name()`/`root()`/`body_formatters()`. (A dev-only entry reaches only a Toolchain
+            // shim, whose base is `noeta-cli`, so `noeta_cli::formatter_only` is always in scope here.)
+            out.push_str(&format!(
+                "    for e in ext{n}::NOETA_EXTENSIONS {{ units.push(noeta_cli::formatter_only(*e)); }} // {} ({}, formatter-only)\n",
+                e.identity, e.ident
+            ));
+            continue;
+        }
         out.push_str(&format!(
             "    units.extend_from_slice(ext{n}::NOETA_EXTENSIONS); // {} ({})\n",
             e.identity, e.ident
         ));
     }
     match kind {
-        // The dev toolchain: hand the whole extension set to `run_cli`, plus the command-trusted
-        // subset — only these entries' units may contribute `noeta <cmd>` subcommands.
+        // The dev toolchain: hand the whole extension set to `run_cli`, plus one command binding per
+        // `[trust.commands]` entry — `run_cli` registers the provider's `exported` command under the
+        // `local` name. A binding whose provider isn't among the entries can't arise (the graph only
+        // resolves bindings for native packages, which all become entries), but skip defensively so
+        // a stray one drops the command rather than mis-indexing a sibling.
         ShimKind::Toolchain => {
-            let any_trusted = entries
-                .iter()
-                .any(|e| trusted_command_identities.contains(&e.identity));
-            let mutable = if any_trusted { "mut " } else { "" };
-            out.push_str(&format!(
-                "    let {mutable}command_units: Vec<&'static (dyn noeta_ext_abi::Extension + Sync)> = Vec::new();\n"
-            ));
-            for (n, e) in entries.iter().enumerate() {
-                if trusted_command_identities.contains(&e.identity) {
-                    out.push_str(&format!(
-                        "    command_units.extend_from_slice(ext{n}::NOETA_EXTENSIONS); // command-trusted: {}\n",
-                        e.identity
-                    ));
-                }
+            out.push_str("    let command_bindings: Vec<noeta_cli::CommandBinding> = vec![\n");
+            for b in command_bindings {
+                let Some(n) = entries.iter().position(|e| e.identity == b.provider) else {
+                    continue;
+                };
+                out.push_str(&format!(
+                    "        noeta_cli::CommandBinding {{ local: {:?}, exported: {:?}, units: ext{n}::NOETA_EXTENSIONS }}, // {}\n",
+                    b.local, b.exported, b.provider
+                ));
             }
+            out.push_str("    ];\n");
             out.push_str(
                 "    noeta_cli::run_cli(\n\
                  \x20       Box::leak(units.into_boxed_slice()),\n\
-                 \x20       Box::leak(command_units.into_boxed_slice()),\n\
+                 \x20       &command_bindings,\n\
                  \x20   )\n}\n",
             );
         }
@@ -1131,6 +1341,7 @@ mod tests {
             ident: "imgfx_native".to_string(),
             dev_features: vec![],
             ring_features: vec![],
+            dev_only: false,
         }]
     }
 
@@ -1144,6 +1355,22 @@ mod tests {
             ident: "imgfx_native".to_string(),
             dev_features: vec!["fmt".to_string()],
             ring_features: vec![],
+            dev_only: false,
+        }]
+    }
+
+    /// A **dev-only** formatter crate (`package.dev-native`) — admitted untrusted, composed
+    /// formatter-only. It declares the `fmt` dev feature (the code its formatter needs).
+    fn dev_only_entries() -> Vec<Entry> {
+        vec![Entry {
+            identity: "acme/htmlfmt".to_string(),
+            dir: PathBuf::from("/store/acme_htmlfmt/native"),
+            content_hash: "testhash".to_string(),
+            cargo_name: "htmlfmt-native".to_string(),
+            ident: "htmlfmt_native".to_string(),
+            dev_features: vec!["fmt".to_string()],
+            ring_features: vec![],
+            dev_only: true,
         }]
     }
 
@@ -1157,6 +1384,7 @@ mod tests {
             ident: "imgfx_native".to_string(),
             dev_features: vec![],
             ring_features: vec!["ring-p2p".to_string()],
+            dev_only: false,
         }]
     }
 
@@ -1237,8 +1465,7 @@ mod tests {
         // A workspace toolchain with two crates. `toolchain_patch_section` must emit a `[patch]` on
         // the canonical repo URL redirecting each `crates/*` member to its path — so a native package
         // that git-deps the noeta repo unifies its `noeta_ext_abi::Extension` with the shim's.
-        let root = std::env::temp_dir().join(format!("noeta_patch_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = noeta_test_temp::unique_path("patch-test");
         for c in ["noeta-ext-abi", "noeta-vm"] {
             let d = root.join("crates").join(c);
             std::fs::create_dir_all(&d).unwrap();
@@ -1276,9 +1503,7 @@ mod tests {
         // toolchain crate to the cached checkout of the BINARY's own tag — `path` entries, because
         // Cargo rejects a patch whose source is the same canonical git URL regardless of a
         // differing `tag`/`rev`/`.git` suffix (verified against cargo 1.97).
-        let checkout =
-            std::env::temp_dir().join(format!("noeta_gittag_patch_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&checkout);
+        let checkout = noeta_test_temp::unique_path("gittag-patch-test");
         for c in ["noeta-ext-abi", "noeta-stdlib"] {
             let d = checkout.join("crates").join(c);
             std::fs::create_dir_all(&d).unwrap();
@@ -1397,6 +1622,40 @@ mod tests {
     }
 
     #[test]
+    fn a_dev_only_formatter_crate_is_composed_trimmed_and_wrapped() {
+        // A `package.dev-native` formatter crate is admitted trust-free and stripped to formatter-only:
+        // in the dev toolchain manifest it is pulled `default-features = false, features = ["fmt"]`
+        // (only its formatter code, no heavy deps), and its `main.rs` wraps each unit through
+        // `formatter_only` so nothing that runs reaches the toolchain.
+        let src = ToolchainSource::Workspace(PathBuf::from("/src/noeta"));
+        let toml = shim_cargo_toml(
+            &dev_only_entries(),
+            &src,
+            Path::new("/src/noeta"),
+            ShimKind::Toolchain,
+            "cafe0123deadbeef",
+        );
+        assert!(
+            toml.contains(
+                "ext0 = { package = \"htmlfmt-native\", path = \"/store/acme_htmlfmt/native\", \
+                 default-features = false, features = [\"fmt\"] }"
+            ),
+            "a dev-only crate is trimmed to its fmt feature:\n{toml}"
+        );
+        let main = shim_main_rs(&dev_only_entries(), &[], ShimKind::Toolchain);
+        assert!(
+            main.contains(
+                "for e in ext0::NOETA_EXTENSIONS { units.push(noeta_cli::formatter_only(*e)); }"
+            ),
+            "a dev-only crate's units are wrapped formatter-only, not extended raw:\n{main}"
+        );
+        assert!(
+            !main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS)"),
+            "a dev-only crate must never contribute its full extension surface:\n{main}"
+        );
+    }
+
+    #[test]
     fn shipped_runner_keeps_a_mixed_crate_at_default_features() {
         // dev-deps D5b/D4c: the shipped base pulls the same crate at *default* features — its `fmt`
         // feature stays off, so the formatter and its parser never enter the artifact.
@@ -1489,26 +1748,39 @@ mod tests {
         assert!(!lib.contains("run_stapled_with_extensions"), "{lib}");
     }
 
-    #[test]
-    fn shim_main_aggregates_unit_slices() {
-        let main = shim_main_rs(&entries(), &["acme/imgfx".to_string()], ShimKind::Toolchain);
-        assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"));
-        assert!(main.contains("noeta_cli::run_cli("));
-        // The command-trusted package's units are registered for commands too (Phase 4): trust is
-        // keyed by the providing package's IDENTITY, so run_cli receives the trusted unit set
-        // itself — no root-name strings anywhere.
-        assert!(main.contains(
-            "command_units.extend_from_slice(ext0::NOETA_EXTENSIONS); // command-trusted: acme/imgfx"
-        ));
-        assert!(main.contains("Box::leak(command_units.into_boxed_slice()),"));
+    /// A resolved command binding for the shim tests.
+    fn binding(local: &str, provider: &str, exported: &str) -> ResolvedCommandBinding {
+        ResolvedCommandBinding {
+            local: local.to_string(),
+            provider: provider.to_string(),
+            exported: exported.to_string(),
+        }
     }
 
     #[test]
-    fn shim_main_registers_commands_for_a_scope_keyed_identity_only_when_trusted() {
+    fn shim_main_aggregates_unit_slices() {
+        let bindings = vec![binding("blur", "acme/imgfx", "blur")];
+        let main = shim_main_rs(&entries(), &bindings, ShimKind::Toolchain);
+        assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"));
+        assert!(main.contains("noeta_cli::run_cli("));
+        // The binding emits a `CommandBinding` tying the local name to the provider's exported
+        // command and its units — trust keyed by the providing package's IDENTITY (its entry index),
+        // no root-name strings anywhere.
+        assert!(
+            main.contains(
+                "noeta_cli::CommandBinding { local: \"blur\", exported: \"blur\", units: ext0::NOETA_EXTENSIONS }"
+            ),
+            "{main}"
+        );
+        assert!(main.contains("&command_bindings,"));
+    }
+
+    #[test]
+    fn shim_main_registers_commands_for_a_scope_keyed_identity_only_when_bound() {
         // The para/db-shaped defect: a scope-keyed package's dependency ROOT SEGMENT (`db`) differs
         // from its extensions' namespace root (`para`), so any root-name matching drops (or, matched
-        // the other way, over-grants) its commands. Keyed by identity, the trusted entry's units are
-        // registered for commands and an untrusted sibling's are excluded.
+        // the other way, over-grants) its commands. Keyed by identity (the entry index), a binding
+        // for `para/db` emits against ext0 only; the untrusted sibling ext1 gets no binding.
         let entries = vec![
             Entry {
                 identity: "para/db".to_string(),
@@ -1518,6 +1790,7 @@ mod tests {
                 ident: "para_db_native".to_string(),
                 dev_features: vec![],
                 ring_features: vec![],
+                dev_only: false,
             },
             Entry {
                 identity: "para/p2p".to_string(),
@@ -1527,49 +1800,100 @@ mod tests {
                 ident: "para_p2p_native".to_string(),
                 dev_features: vec![],
                 ring_features: vec![],
+                dev_only: false,
             },
         ];
-        let main = shim_main_rs(&entries, &["para/db".to_string()], ShimKind::Toolchain);
+        let bindings = vec![binding("migrate", "para/db", "migrate")];
+        let main = shim_main_rs(&entries, &bindings, ShimKind::Toolchain);
         // Both packages' units join the toolchain…
         assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS); // para/db"));
         assert!(main.contains("units.extend_from_slice(ext1::NOETA_EXTENSIONS); // para/p2p"));
-        // …but only the command-trusted package's units register commands: trusting `para/db`
-        // must NOT trust every `para/*` package's commands.
+        // …but only the bound package's command is registered, and against ext0 (para/db): trusting
+        // `para/db` must NOT trust every `para/*` package's commands.
         assert!(
             main.contains(
-                "command_units.extend_from_slice(ext0::NOETA_EXTENSIONS); // command-trusted: para/db"
+                "noeta_cli::CommandBinding { local: \"migrate\", exported: \"migrate\", units: ext0::NOETA_EXTENSIONS }"
             ),
             "{main}"
         );
         assert!(
-            !main.contains("command_units.extend_from_slice(ext1::NOETA_EXTENSIONS);"),
-            "the untrusted sibling's units must not register commands:\n{main}"
+            !main.contains("units: ext1::NOETA_EXTENSIONS }"),
+            "the untrusted sibling's units must not back a command binding:\n{main}"
         );
-        // And no name-string matching survives in the generated shim.
-        assert!(!main.contains("trusted_command_roots"), "{main}");
     }
 
     #[test]
-    fn shim_main_with_no_trusted_commands_passes_an_empty_unit_set() {
+    fn shim_main_emits_a_renamed_binding_under_its_local_name() {
+        // The escape hatch: a binding whose local name differs from the exported command name is
+        // emitted under the local name, resolving a collision with another package's same-named
+        // command. The provider's exported name is what run_cli looks up in the units.
+        let bindings = vec![binding("undo", "acme/imgfx", "rollback")];
+        let main = shim_main_rs(&entries(), &bindings, ShimKind::Toolchain);
+        assert!(
+            main.contains(
+                "noeta_cli::CommandBinding { local: \"undo\", exported: \"rollback\", units: ext0::NOETA_EXTENSIONS }"
+            ),
+            "{main}"
+        );
+    }
+
+    #[test]
+    fn shim_main_with_no_bindings_emits_an_empty_binding_list() {
         let main = shim_main_rs(&entries(), &[], ShimKind::Toolchain);
-        assert!(main.contains(
-            "let command_units: Vec<&'static (dyn noeta_ext_abi::Extension + Sync)> = Vec::new();"
-        ));
-        assert!(!main.contains("command_units.extend_from_slice"));
-        assert!(main.contains("Box::leak(command_units.into_boxed_slice()),"));
+        assert!(main.contains("let command_bindings: Vec<noeta_cli::CommandBinding> = vec!["));
+        assert!(!main.contains("noeta_cli::CommandBinding {"));
+        assert!(main.contains("&command_bindings,"));
     }
 
     #[test]
     fn runner_shim_main_installs_units_and_runs_stapled() {
         // dev-deps D4c: the runner shim installs the native runtime units then runs the stapled
         // program — no `run_cli`, no command-trust (a stapled artifact exposes no CLI).
-        let main = shim_main_rs(&entries(), &["acme/imgfx".to_string()], ShimKind::Runner);
+        let bindings = vec![binding("blur", "acme/imgfx", "blur")];
+        let main = shim_main_rs(&entries(), &bindings, ShimKind::Runner);
         assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"));
         assert!(main.contains("noeta_runner::run_stapled_with_extensions(Box::leak("));
         assert!(
             !main.contains("run_cli"),
             "the runner base must not call run_cli"
         );
-        assert!(!main.contains("command_units"));
+        assert!(!main.contains("command_bindings"));
+    }
+
+    /// The compose dir's own target dir is build scratch and is dropped once the artifact is
+    /// copied out — a 1.4G tail beside a 51M binary, retained forever by a cache nothing evicts.
+    #[test]
+    fn build_scratch_is_dropped_when_it_is_the_compose_dirs_own() {
+        let dir = noeta_test_temp::TempDir::new("compose-scratch-own");
+        let target = dir.join("target");
+        std::fs::create_dir_all(target.join("release")).expect("create scratch");
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").expect("write manifest");
+
+        discard_build_scratch(&dir, &target);
+
+        assert!(
+            !target.exists(),
+            "the compose dir's own target must be dropped"
+        );
+        assert!(
+            dir.join("Cargo.toml").is_file(),
+            "only the target dir goes — the compose entry itself stays, so the cache still hits"
+        );
+    }
+
+    /// The dangerous half. Under `NOETA_COMPOSE_TARGET_DIR` the target dir belongs to the caller —
+    /// the e2e tests point it at the workspace's own build directory — so it must never be removed.
+    #[test]
+    fn build_scratch_outside_the_compose_dir_is_left_alone() {
+        let dir = noeta_test_temp::TempDir::new("compose-scratch-external");
+        let external = noeta_test_temp::TempDir::new("compose-scratch-external-target");
+
+        discard_build_scratch(&dir, &external);
+
+        assert!(
+            external.is_dir(),
+            "a caller-supplied target dir must survive — deleting it would destroy work this \
+             function never created"
+        );
     }
 }

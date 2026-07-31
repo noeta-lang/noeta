@@ -40,7 +40,9 @@
 //!   non-exhaustive error to a compile-time one; the runtime `MatchFail` becomes unreachable
 //!   for checked programs.
 //! - **`?` on a non-fallible value** (`E0012`) — `expr?` where `expr` is concretely neither a
-//!   `Result` nor an `Option`.
+//!   `Result` nor an `Option`. Same code for the **absence-position** rule: `?` on an `Option`
+//!   early-returns `none`, so the enclosing function must be declared to return one — the twin of
+//!   the `Result` error-position rule (`E0057`).
 //! - **Operator type mismatch** (`E0007`) — arithmetic (`+ - * / %`) on a concretely
 //!   non-numeric operand (e.g. `1 + true`). Reuses the existing runtime `TypeMismatch` code at
 //!   the same span, so the static error reads identically to the old runtime one.
@@ -73,12 +75,13 @@ use noeta_ast::{
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::{Edition, EditionMap};
 use noeta_ext_abi::NominalType;
-use noeta_span::Span;
-use noeta_types::{BuiltinTrait, Type};
+use noeta_span::{PackageMap, PackageOrigin, Span};
+use noeta_types::{BuiltinTrait, ParamId, ParamRef, Type};
 
 mod args;
 mod attributes;
 mod collect;
+mod constructors;
 mod decls;
 pub mod directives;
 mod effects;
@@ -88,22 +91,26 @@ mod forwarding;
 mod packed;
 mod prelude;
 mod relevance;
+pub mod setup;
 mod sites;
 mod stdlib;
 mod subst;
 pub mod tiers;
 mod traits;
 
+pub use setup::{SetupDrop, SetupWarning, dropped_setup_warnings, is_tier_setup, setup_drop};
 pub use tiers::{
-    Activated, DeclaredTier, DocTarget, ResolvedProvider, TextBlock, TierFn, activate_tiers,
-    activate_tiers_with, dedent_doc, extend_reflection, resolve_docs, resolve_texts,
+    Activated, DeclaredTier, DocTarget, ResolvedProvider, ResolvedTier, TextBlock, TierContext,
+    TierFn, TierId, activate_tiers, activate_tiers_with, code_tiers_in, dedent_doc,
+    extend_reflection, resolve_docs, resolve_texts,
 };
 
+use constructors::compute_fresh_constructors;
 use effects::*;
 use env::*;
 use forwarding::*;
 use sites::SiteMaps;
-pub use sites::{DestructorRelevance, Sites};
+pub use sites::{DestructorRelevance, Sites, intern_type_arg_entry};
 use subst::*;
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
@@ -124,6 +131,25 @@ pub struct Checked {
     /// An IDE read-side index, not a compile input — which is why it lives beside [`Sites`], not
     /// inside it.
     pub expr_types: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// The spans of **statement-expressions that do not return** — every `Stmt::Expr` whose
+    /// expression's inferred type is [`noeta_types::Type::Never`] (`os.exit(1)`,
+    /// `server.serve(8080, fetch)`).
+    ///
+    /// This is what makes divergence a *question the language can answer* rather than one a tool
+    /// has to guess. The tier runners (`noeta test` / `noeta bench`, and the MCP execute path)
+    /// build each case as `<shared setup> + <call the test fn>`, and they must not put a statement
+    /// that exits the process or blocks forever into that setup. They used to decide by statement
+    /// **form** — dropping every `Stmt::Expr` — which also dropped `conn.migrate("…")` and handed
+    /// every test a live, empty database with no diagnostic anywhere. Now they ask this set.
+    ///
+    /// Recorded on **every** check, not just the IDE path: it is one insert on a statement that
+    /// diverges, and the whole point is that a runner can rely on it being there.
+    ///
+    /// Deliberately statement-level rather than expression-level. A diverging call nested inside a
+    /// larger expression (`x = pick(a, os.exit(1))`) is not recorded, because a *statement* is the
+    /// granularity the runners include or exclude — recording sub-expressions would invite a
+    /// consumer to conclude something about a statement it cannot conclude.
+    pub diverging_stmts: HashSet<Span>,
     /// The compile-input bundle both backends consume — see [`Sites`].
     pub sites: Sites,
     /// Method-bundle bindings by target type name (kernel-methods K4): each
@@ -143,7 +169,11 @@ pub struct Checked {
 /// ([`check_all_with`]) instead of the checker growing a `_with_types_and_editions_and_registry`
 /// combinatorial family. `Default` is an ordinary compile-path check (no type index, process-global
 /// registry, every declaration at [`Edition::DEFAULT`]) — identical to [`check_all`].
-#[derive(Default)]
+/// `Clone` so a driver can carry one configured value alongside the program it describes — the CLI's
+/// tier verbs re-check *synthesized* programs (a per-test case, a bench loop) against the parent
+/// workspace's options, and pairing the fields by hand at each of those call sites is exactly how
+/// editions and provenance would drift apart.
+#[derive(Clone, Default)]
 pub struct CheckOptions {
     /// Record every expression's inferred type into [`Checked::expr_types`] — the span→type index the
     /// IDE hover path reads. Off on the compile path (it pays nothing for the index).
@@ -155,6 +185,18 @@ pub struct CheckOptions {
     /// Which language [`Edition`] governs each source, keyed by `SourceId` (editions arc): the loader
     /// builds it per merged program. Empty means every declaration is [`Edition::DEFAULT`].
     pub editions: EditionMap,
+    /// Which **package** each source was read from, keyed by `SourceId` (the package orphan rule):
+    /// the loader builds it per merged program. Empty means provenance is unknown everywhere, and
+    /// the orphan rule stands down — the right answer for a single-file check or a synthetic
+    /// program, which have no package graph to judge against.
+    pub packages: PackageMap,
+    /// Per-package `@`-name resolution tables (`[directives]`; `[tiers]` later), keyed by
+    /// [`PackageOrigin`](noeta_span::PackageOrigin): the loader/pm builds them from each package's
+    /// manifest in that package's own dependency context. The checker resolves a `@name` by the
+    /// package that wrote it (via the span's `SourceId` through [`Self::packages`]). Empty means no
+    /// package binds any extension `@name` — the single-file default, where only built-in directives
+    /// and program-declared tiers resolve.
+    pub package_uses: noeta_span::PackageUses,
 }
 
 impl std::fmt::Debug for CheckOptions {
@@ -164,6 +206,7 @@ impl std::fmt::Debug for CheckOptions {
             // The registry is a `&'static` handle whose contents aren't `Debug`; report only presence.
             .field("registry", &self.registry.is_some())
             .field("editions", &self.editions)
+            .field("packages", &self.packages)
             .finish()
     }
 }
@@ -175,13 +218,7 @@ impl std::fmt::Debug for CheckOptions {
 pub fn check_all_with(program: &Program, opts: CheckOptions) -> Checked {
     // The batch/tool entry never cancels: cancellation is a salsa-incremental concern, wired only by
     // [`check_all_cancellable`] (which the `checked` query calls with salsa's revision poll).
-    check_all_impl(
-        program,
-        opts.record_expr_types,
-        opts.registry,
-        opts.editions,
-        &|| {},
-    )
+    check_all_impl(program, opts, &|| {})
 }
 
 /// Type-check a program once, returning both its diagnostics and its resolved-type map. This is
@@ -246,27 +283,18 @@ pub fn check_all_with_registry(
 /// (`salsa::Cancelled`), which the checker lets propagate. `record_expr_types` selects the IDE hover
 /// index exactly as [`CheckOptions::record_expr_types`] does, so the ide-flavored linked query wires
 /// the same poll. Every non-salsa caller uses the plain entries and never cancels.
-pub fn check_all_cancellable(
-    program: &Program,
-    editions: EditionMap,
-    record_expr_types: bool,
-    cancel: &dyn Fn(),
-) -> Checked {
-    check_all_impl(program, record_expr_types, None, editions, cancel)
+pub fn check_all_cancellable(program: &Program, opts: CheckOptions, cancel: &dyn Fn()) -> Checked {
+    check_all_impl(program, opts, cancel)
 }
 
-fn check_all_impl(
-    program: &Program,
-    record_expr_types: bool,
-    registry: Option<&'static noeta_ext_abi::registry::Registry>,
-    editions: EditionMap,
-    cancel: &dyn Fn(),
-) -> Checked {
+fn check_all_impl(program: &Program, opts: CheckOptions, cancel: &dyn Fn()) -> Checked {
     let mut checker = Checker {
         config: Config {
-            record_expr_types,
-            registry,
-            editions,
+            record_expr_types: opts.record_expr_types,
+            registry: opts.registry,
+            editions: opts.editions,
+            packages: opts.packages,
+            package_uses: opts.package_uses,
             ..Config::default()
         },
         ..Checker::default()
@@ -274,12 +302,22 @@ fn check_all_impl(
     checker.register_prelude();
     checker.collect_imports(program);
     checker.collect(program);
-    // The type-param forwarding pre-pass (poly-values F2b) must precede body checking: a call
-    // site of a forwarding fn records hidden arguments, whether it appears before or after the
-    // callee's declaration.
-    let fwd = compute_forwarding(program, &checker.imports.extern_types);
+    // The fresh-constructor pre-pass (generic constructor reflection) must precede body checking: a
+    // `Repo.new(...)` call site stamps its instantiation onto the result whether it is written
+    // before or after `Repo`'s declaration. It runs FIRST because the forwarding pre-pass below
+    // consumes it: a fresh constructor in a checked position is one of the sites that forwards.
+    checker.symbols.fresh_constructors = compute_fresh_constructors(program);
+    // The type-param forwarding pre-pass (poly-values F2b) must precede body checking too, for the
+    // same reason: a call site of a forwarding fn records hidden arguments, whether it appears
+    // before or after the callee's declaration.
+    let fwd = compute_forwarding(
+        program,
+        &checker.imports.extern_types,
+        &checker.symbols.fresh_constructors,
+    );
     checker.symbols.forwarding = fwd.map;
     checker.symbols.forwarding_poisoned = fwd.poisoned;
+    checker.symbols.reflective_generic_types = fwd.reflective;
     // Compute destruct-reachability + parameter relevance before checking bodies (local-binding
     // relevance is recorded inline during `check_program`, and needs the reachable set ready).
     checker.compute_relevance(program);
@@ -349,9 +387,15 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
     checker.register_prelude();
     checker.collect_imports(program);
     checker.collect(program);
-    let fwd = compute_forwarding(program, &checker.imports.extern_types);
+    checker.symbols.fresh_constructors = compute_fresh_constructors(program);
+    let fwd = compute_forwarding(
+        program,
+        &checker.imports.extern_types,
+        &checker.symbols.fresh_constructors,
+    );
     checker.symbols.forwarding = fwd.map;
     checker.symbols.forwarding_poisoned = fwd.poisoned;
+    checker.symbols.reflective_generic_types = fwd.reflective;
     checker.compute_relevance(program);
     // Tier declarations FIRST: they build the tier registry, and the directive placement check
     // resolves a declaration's unrecognized `@name` against the whole name-space (which includes
@@ -364,6 +408,7 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
     let checked = Checked {
         diagnostics: std::mem::take(&mut checker.diags),
         expr_types: checker.sites.expr_types.clone(),
+        diverging_stmts: checker.sites.diverging_stmts.clone(),
         sites: {
             let mut sites = checker.sites.clone().into_sites(checker.relevance.clone());
             // Slice E2: seed the from-scratch producer's schema-availability channel (the
@@ -452,6 +497,8 @@ impl SessionChecker {
                 record_expr_types: opts.record_expr_types,
                 registry: opts.registry,
                 editions: opts.editions,
+                packages: opts.packages,
+                package_uses: opts.package_uses,
             },
             ..Checker::default()
         };
@@ -480,15 +527,30 @@ impl SessionChecker {
         let diag_mark = self.checker.diags.len();
         self.checker.collect_imports(entry);
         self.checker.collect(entry);
+        // This entry's fresh constructors first — the forwarding pre-pass below consumes them (a
+        // fresh constructor in a checked position is a forwarding site). Accumulated, like the
+        // forwarding table.
+        self.checker
+            .symbols
+            .fresh_constructors
+            .extend(compute_fresh_constructors(entry));
         // A session entry's forwarding table extends the accumulated one (an entry may declare a
         // forwarding fn a later entry calls; cross-entry transitive forwarding is out of scope,
         // like any cross-entry forward reference).
-        let fwd = compute_forwarding(entry, &self.checker.imports.extern_types);
+        let fwd = compute_forwarding(
+            entry,
+            &self.checker.imports.extern_types,
+            &self.checker.symbols.fresh_constructors,
+        );
         self.checker.symbols.forwarding.extend(fwd.map);
         self.checker
             .symbols
             .forwarding_poisoned
             .extend(fwd.poisoned);
+        self.checker
+            .symbols
+            .reflective_generic_types
+            .extend(fwd.reflective);
         // Re-run the reachability fixpoint over the ACCUMULATED registries (this entry's
         // `destruct` class can make an earlier entry's type reachable), and record this entry's
         // parameter relevance.
@@ -532,6 +594,7 @@ impl SessionChecker {
                 ty: None,
                 default: None,
                 span,
+                positional: false,
             })
             .collect();
         let wrapper = Program {
@@ -579,6 +642,10 @@ impl SessionChecker {
         self.checker.coloring.loop_depth = 0;
         self.checker.coloring.current_forwarding.clear();
         self.checker.coloring.index_on_list.clear();
+        // Span-keyed and entry-local: each entry is parsed with its own 0-based offsets, so a
+        // stale entry's exhaustive `match` could otherwise be read as *this* entry's `match` at
+        // the same offsets and wrongly satisfy E0048.
+        self.checker.exhaustive_matches.clear();
     }
 }
 
@@ -655,14 +722,22 @@ fn is_nongeneric_nominal(repr: &noeta_ast::reflect::TypeRepr) -> bool {
     )
 }
 
-fn type_to_repr_top(
+pub(crate) fn type_to_repr_top(
     ty: &Type,
     kinds: &HashMap<String, noeta_types::TypeKind>,
 ) -> Option<noeta_ast::reflect::TypeRepr> {
     match ty {
         // An abstract kind-type (`Enum`/`Struct`/`Class`) has no precise static head — the runtime
         // value is a concrete enum/struct/class — so it defers to the runtime `type_of` path.
-        Type::Dyn | Type::Unknown | Type::Union(_) | Type::Kind(_) => None,
+        //
+        // A **trait object** defers for the same reason, and this arm is why. `type_to_repr` maps
+        // `DynTrait` to `TypeRepr::Dyn`, which is right in a *nested/declared* position (`params_of`
+        // has its own decoder and does report `Type.DynTrait(Trait)` there) but is a wrong answer at
+        // a `type_of` site: the value behind a `dyn Trait` binding carries its own concrete tag, so
+        // baking `Type.Dyn` erased a fact the runtime path recovers. `type_of(v)` on a `dyn Sp`
+        // parameter reported `Type.Dyn` while the same value laundered through a bare `dyn` hop
+        // reported `Type.Struct(D, [])` — one value, two answers, from one query.
+        Type::Dyn | Type::DynTrait(_) | Type::Unknown | Type::Union(_) | Type::Kind(_) => None,
         concrete => Some(type_to_repr(concrete, kinds, true)),
     }
 }
@@ -703,6 +778,7 @@ fn type_to_repr(
         Type::String => TypeRepr::Str,
         Type::Bytes => TypeRepr::Bytes,
         Type::Unit => TypeRepr::Unit,
+        Type::Never => TypeRepr::Never,
         Type::List(e) => TypeRepr::List(Box::new(rec(e))),
         Type::Set(e) => TypeRepr::Set(Box::new(rec(e))),
         Type::Option(e) => TypeRepr::Option(Box::new(rec(e))),
@@ -717,6 +793,11 @@ fn type_to_repr(
                 None => TypeRepr::Named(n.clone(), args),
             }
         }
+        // A still-un-instantiated type parameter projects as a bare nominal name — byte-identical
+        // to what it produced when a parameter WAS a `Named`, so no reflection output moves. It
+        // reaches here only from a template that the call site could not resolve; a resolved one
+        // has already been substituted, and projects as whatever instantiated it.
+        Type::Param(p) => TypeRepr::Named(p.name.clone(), Vec::new()),
         Type::Fn { params, ret } => {
             TypeRepr::Fn(params.iter().map(rec).collect(), Box::new(rec(ret)))
         }
@@ -837,6 +918,23 @@ struct BoundBundle {
 /// (audit-3 Finding 2): grouping makes each module's borrow surface explicit.
 #[derive(Clone, Default)]
 struct Symbols {
+    /// **Per-source** static names a binding in that source may not shadow (E0059), each with the
+    /// word the diagnostic uses for it: this file's own top-level functions and types, and the names
+    /// its own `use` statements bind.
+    ///
+    /// Keyed by [`SourceId`] because the merged program flattens every module of every package into
+    /// one table, and one flat table cannot answer this question. A package author cannot know a
+    /// consumer's `fn page`, so `document(title, page)` in para/html must not be reported against it
+    /// — and equally, a name declared in *this* file is one the author does know, so shadowing it
+    /// must be reported. The two are told apart by the file the declaration came from, which is
+    /// exactly what a span carries.
+    ///
+    /// The predecessor of this index inferred "merged from elsewhere" from a *dotted* declaration
+    /// name, on the reasoning that the entry's own declarations keep bare ones. Deriving module
+    /// paths from the filesystem made every declaration in every package dotted, which silently
+    /// turned the statics half of E0059 off for all packaged code: a top-level `fn total` and a
+    /// later `total = 5` then coexisted, with the binding swallowed and no diagnostic anywhere.
+    source_statics: HashMap<noeta_span::SourceId, HashMap<String, &'static str>>,
     /// User-declared enums: name → variants (each with its **accurate** payload types, like a
     /// struct's fields in [`Checker::records`]).
     enums: HashMap<String, Vec<VariantInfo>>,
@@ -846,7 +944,8 @@ struct Symbols {
     records: HashMap<String, Vec<(String, Type)>>,
     /// Declared type → its generic parameters **with their bounds**.
     ///
-    /// [`Self::generic_types`] keeps only the parameter *names*, which is all erasure needs. Type-
+    /// [`Self::generic_types`] keeps the parameters as bare [`ParamRef`]s, which is all erasure and
+    /// substitution need. Type-
     /// checking a standalone `impl`'s method bodies needs the bounds too — a body may call a method
     /// the bound provides (`<T: Comparable>` → `t.compare(u)`) — so that a body written outside its
     /// type's own declaration sees exactly what one written inside it sees.
@@ -881,11 +980,14 @@ struct Symbols {
     /// `impl`-block methods so a method call on a user object resolves to a real type, with the
     /// owning class's generic parameters erased to `dyn` (they accept any argument).
     methods: HashMap<(String, String), FnSig>,
-    /// Whether each `(type, method)` is an **instance** method (its body references `self`) or an
-    /// associated function (never touches `self`) — DERIVED at collection time (prelude-redesign
-    /// EX.2; well-defined because member access is explicit, EX.1). Drives the wrong-way-call check
-    /// (E0047) and the associated-vs-instance shape of a `Type.method` handle.
-    method_instance: HashMap<(String, String), bool>,
+    /// How each `(type, method)` may be reached — instance-only, associated-only, or either
+    /// ([`Receiver`]). DERIVED at collection time from the body *and* from whether a trait's
+    /// interface supplies the method (prelude-redesign EX.2; well-defined because member access is
+    /// explicit, EX.1). Drives the wrong-way-call check (E0047) and the shape of a `Type.method`
+    /// handle. Read it through [`Checker::receiver_of`], never directly: an unclassified method has
+    /// a *meaning* (`Either`), and re-deciding that meaning at each use site is exactly how the
+    /// associated-call, instance-call, and turbofish paths drifted apart.
+    method_receiver: HashMap<(String, String), Receiver>,
     /// Which built-in traits each user type satisfies: type name → set of trait names it `@derive`s
     /// or `impl`s. The basis (with the built-in-type table in [`Checker::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
@@ -956,15 +1058,32 @@ struct Symbols {
     /// — so the instantiation-site checks (`satisfies`/`satisfies_user_trait`) consult this to
     /// judge the substituted via field instead of every field (S4's `via:` twin).
     via_derives: HashMap<String, Vec<(String, String)>>,
-    /// Each generic user type's type-parameter **names**, in order — so a field/method access can
-    /// map an instance's type arguments (`Box<int>`) back onto the declaration's parameters (`T`)
-    /// and read a field/return as `int` rather than the bare parameter or `dyn` (S4.5).
-    generic_types: HashMap<String, Vec<String>>,
+    /// Each generic user type's type parameters, in declaration order — so a field/method access
+    /// can map an instance's type arguments (`Box<int>`) back onto the declaration's parameters
+    /// (`T`) and read a field/return as `int` rather than the bare parameter or `dyn` (S4.5).
+    ///
+    /// Carries [`ParamRef`]s, not names: mapping an argument onto a parameter is exactly a
+    /// substitution, and a substitution keys on identity.
+    generic_types: HashMap<String, Vec<ParamRef>>,
     /// Every name a type annotation may legally resolve to: declared records/classes/enums plus
     /// names brought in by a `use` (whether merged in by the linker or left as an opaque stub).
     /// Built-in names and in-scope generic parameters are *not* stored here — they are checked
     /// separately (a built-in via [`Type::is_builtin_name`], a parameter via [`Checker::type_params`]).
     types: HashSet<String>,
+    /// Where each declared type was **declared**: type name → its name span. The span's `SourceId`
+    /// is what the package orphan rule resolves a type's package from — the symbol tables otherwise
+    /// keep only a type's shape, and a merged program's statement list says nothing about which file
+    /// (and so which package) a declaration arrived from. Only `.noe` declarations appear: a native
+    /// `ExtType`/`ExtEnum` is registered from the registry and has no source, so its package is
+    /// (correctly) unknown.
+    type_decl_spans: HashMap<String, Span>,
+    /// Traits that came from the **extension registry** rather than a `.noe` `trait` declaration
+    /// ([`Checker::seed_ext_traits`]). Their synthesized [`noeta_ast::TraitDecl`]s carry a
+    /// placeholder `Span::new(0, 0)`, which points at the *entry* source and would make a native
+    /// trait look like a root-package declaration. Membership here means "declared by no package",
+    /// so the orphan rule requires such an impl to live with its **type** — the same judgement a
+    /// built-in trait gets.
+    native_traits: HashSet<String>,
     /// Standalone `impl Trait for T {}` declarations, grouped by target type name, as
     /// `(trait_name, trait_span)` occurrences. Collected in pass 1 so each type's coherence check
     /// (`check_coherence`) counts standalone impls alongside its `@derive`s and in-body `impl`s.
@@ -1011,6 +1130,14 @@ struct Symbols {
     /// default supplies it. Keyed by type name → optional field names. The construction gate consults
     /// this to suppress the missing-field error (E0009) for a defaulted field.
     attribute_optional_fields: HashMap<String, HashSet<String>>,
+    /// Per struct/class, each field whose declared default means something to a **JSON decode**
+    /// (json-defaults): type name → field name → [`noeta_ext_abi::FieldDefault`]. Read by
+    /// [`Checker::type_to_recipe`] when it bakes a `TypeRecipe::Struct`, so an omitted field with a
+    /// literal default decodes to that default instead of erroring — the same optionality
+    /// `attribute_optional_fields` above gives an attribute construction, and `construct(name,
+    /// fields)` gives a dynamic construction. Only non-[`noeta_ext_abi::FieldDefault::Required`]
+    /// fields are stored; an absent entry *is* `Required`.
+    field_defaults: HashMap<String, HashMap<String, noeta_ext_abi::FieldDefault>>,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
     /// The **type-param forwarding table** (poly-values F2b + composite slots D2a): top-level
@@ -1024,6 +1151,18 @@ struct Symbols {
     /// composite forward (`f<T>` demanding `List<T>`, then `List<List<T>>`, …). Reported as a
     /// clear E0058 at the declaration instead of an unbounded table.
     forwarding_poisoned: HashSet<String>,
+    /// The **fresh-constructor set** (generic constructor reflection): `(type, method)` pairs for
+    /// every associated function of a generic struct/class whose every `return` hands back a
+    /// freshly-built literal of that type ([`compute_fresh_constructors`]). A call of one records
+    /// its resolved instantiation as a construction site, so the caller stamps the object with the
+    /// type argument the constructor body could not know.
+    fresh_constructors: crate::constructors::FreshConstructors,
+    /// Generic types that **read one of their own type parameters reflectively** — a member spelling
+    /// `type_name::<T>()` or another bare-parameter query ([`reflective_generic_types`]). Such a type
+    /// needs its instances tagged at construction; one that is absent here never asks, so an untagged
+    /// instance of it is harmless. Read by [`Checker::report_unrecordable`] as the guard on turning a
+    /// provably-untaggable construction into a check-time error rather than noise.
+    reflective_generic_types: HashSet<String>,
     /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
     /// through the type's own block, its fields, or its collection elements (the fixpoint
     /// [`compute_destruct_reachable`] computes). The input to per-binding destructor-relevance.
@@ -1069,13 +1208,6 @@ struct Coloring {
     /// access on `self` *or* any same-type value is permitted (the type-scoped privacy rule). `None`
     /// at top level and inside free functions.
     current_type: Option<String>,
-    /// While checking a declaration the linker MERGED from another module (recognizable by its
-    /// qualified dotted name — the entry's own declarations keep bare names): the no-shadowing
-    /// statics half is off there. The merged program flattens every module's top-level names into
-    /// one table, so a package's param would otherwise be checked against its CONSUMERS' function
-    /// and type names — names its author cannot know. Its own module's statics were checked, with
-    /// bare names, when that package itself was the entry. Scope-hit shadowing still applies.
-    in_merged_decl: bool,
     /// While checking a **sealed** named-function/method body: top-level value bindings are not
     /// in scope there (only `use (…)` captures, `self`, and params are), so the hoisted-globals
     /// fallback in the unknown-name gate must not resolve them — the miss is the point, reported
@@ -1094,7 +1226,26 @@ struct Coloring {
     /// an operation on `T` is only allowed if a bound licenses it) and body-side TYPING: a method
     /// call on a `T`-typed receiver resolves through a bound's trait at the bound's instantiation
     /// (`x.key(): int` under `T: Keyed<int>` — [`Checker::type_param_trait_method`]).
-    type_params: HashMap<String, Vec<crate::env::BoundReq>>,
+    /// Keyed by the SPELLING that resolves to each parameter — a resolver, not a membership set.
+    type_params: ParamScope,
+    /// While checking a **generic type's instance method** body: the enclosing type's own type
+    /// parameters, in DECLARATION order, with any name the method's own `<…>` shadows replaced by
+    /// the empty string (which no identifier can equal). Empty everywhere else — at top level, in a
+    /// free function, and in an ASSOCIATED function, which has no receiver to carry the
+    /// instantiation. This is the channel that makes `type_name::<T>()` resolvable inside
+    /// `class Repo<T>`: the index found here is the argument position to read off `self`'s
+    /// reflected type tag. Saved and restored around each function.
+    /// A slot holds `None` where the method's own `<…>` shadows the class's parameter — that
+    /// parameter is a different one with no receiver channel. (This was a blank STRING, on the
+    /// reasoning that no identifier equals `""`; the identity now says it outright.)
+    self_type_params: Vec<Option<ParamRef>>,
+    /// The `(literal span, expected type)` of the **named object literal currently being checked in
+    /// a position that has an expectation** — the channel that lets a construction absorb type
+    /// arguments its field values do not pin (`r: Repo<Todo> = Repo { tbl: "todos" }`, where no
+    /// field mentions `T`). Read by `synth_object_named`, which fills only the parameters inference
+    /// left open, so an argument the fields DO determine is never overridden by the annotation.
+    /// `None` outside such a position.
+    expected_object: Option<(noeta_span::Span, Type)>,
     /// The declared return type of the function whose body is currently being checked — the
     /// expectation each `return <value>` is checked against. `Unknown` at top level and inside a
     /// function with no return annotation (so the check is a no-op there). Saved and restored
@@ -1131,6 +1282,15 @@ struct Coloring {
     /// nested `fn`'s own type parameter is masked to `Unknown` inside that nested body (D2b) so
     /// it can never match the shadowing parameter. Empty everywhere else.
     current_forwarding: Vec<Type>,
+    /// The type parameters a `type_name::<T>()` in the body being checked **would** forward — the
+    /// enclosing top-level generic fn's own parameters, minus any a nested `fn` shadows (D2b).
+    /// Empty in a method, in a nested fn's own shadowing parameters, and at top level.
+    ///
+    /// Distinct from [`Self::current_forwarding`], which holds only the slots some site actually
+    /// consumes: this is the *capability*, not the realized layout, so a diagnostic about a
+    /// different surface can say whether the composed route (`field_specs_of(type_name::<T>())`)
+    /// is open here without a `type_name::<T>()` having to appear first.
+    forwardable_params: Vec<ParamRef>,
     /// How many `fn` bodies enclose the statement being checked: `0` at top level, `1` inside a
     /// top-level fn/method body, `2+` inside a nested `fn`. Distinguishes a TOP-LEVEL fn (whose
     /// name keys the forwarding/symbol tables) from a nested one that may share its name (D2b).
@@ -1173,6 +1333,17 @@ struct Config {
     /// editions arc's S3 (the first edition-gated behaviour); until then this is threaded and
     /// per-span-queryable but consulted by no rule.
     editions: EditionMap,
+    /// Which **package** each source of the merged program came from, keyed by `SourceId`. The
+    /// loader builds this from the dependency graph it linked; the checker recovers a declaration's
+    /// package from its span via [`Checker::package_at`]. Empty — the default — means provenance is
+    /// unknown, and the package orphan rule ([`Checker::check_package_orphan`]) does not fire.
+    packages: PackageMap,
+    /// Per-package `@`-name resolution tables (`[directives]`; `[tiers]` later), keyed by
+    /// [`PackageOrigin`](noeta_span::PackageOrigin). The checker resolves an extension `@name` by the
+    /// package that wrote it — [`Checker::package_at`] gives the [`PackageOrigin`], then this maps the
+    /// local name to the provider namespace root(s) and exported name. Empty — the default — means no
+    /// package binds any extension `@name`, so only built-in directives and program tiers resolve.
+    package_uses: noeta_span::PackageUses,
 }
 
 // `Clone` so a [`SessionChecker`] entry is transactional (clone-before, restore-on-error) —
@@ -1212,6 +1383,18 @@ struct Checker {
     /// all — not checked wrongly, never *visited* — and nothing could have told us. Coverage is now
     /// a thing the checker proves about itself on every run.
     visited_bodies: HashSet<Span>,
+    /// The span of every `match` this run proved **exhaustive** (`MatchCoverage::Total`): its
+    /// unguarded arms cover the scrutinee's whole domain, so control is guaranteed to enter one of
+    /// them. Written by [`Checker::check_exhaustive`] while the `match` is typed, read afterwards
+    /// by the return-flow analysis — a statement-`match` diverges when it is exhaustive *and*
+    /// every arm diverges (`subst::expr_diverges`).
+    ///
+    /// A side table rather than a re-derivation because exhaustiveness needs the scrutinee's
+    /// **type**, which only the typing pass has: `E0048` runs as a walk over the bare AST once the
+    /// body is checked, and a second approximation there could disagree with `E0011` — the exact
+    /// way an unsound "this match always returns" would slip in. Reset per session entry
+    /// (`SessionChecker::reset_scratch`), so a previous entry's spans can never be consulted.
+    exhaustive_matches: HashSet<Span>,
     diags: Vec<Diagnostic>,
 }
 
@@ -1254,6 +1437,18 @@ impl Checker {
     #[allow(dead_code)]
     fn edition_at(&self, span: Span) -> Edition {
         self.config.editions.at(span)
+    }
+
+    /// The **package** that declared whatever `span` points at — resolved from the per-source
+    /// [`PackageMap`] the loader threaded in, via the span's `SourceId`.
+    ///
+    /// `None` means *unknown*, never "the root package": a single-file check, a REPL fragment, a
+    /// synthetic span, and compile-time generated code all land here, and the package orphan rule
+    /// treats every one of them as unjudgeable rather than guessing. This is the whole reason
+    /// provenance is a side-table and not a namespace-prefix heuristic — a namespace is declared per
+    /// file and says nothing about which package shipped it.
+    fn package_at(&self, span: Span) -> Option<&PackageOrigin> {
+        self.config.packages.at(span)
     }
 
     /// Record an error diagnostic, returning `&mut` to the just-pushed diagnostic so a help line can
@@ -1383,29 +1578,17 @@ impl Checker {
         // No hoisted-globals half: a named function's body is SEALED — top-level value bindings
         // are simply not in scope there, so a param named like a global shadows nothing. Where
         // globals genuinely are in scope (top level itself, top-level closures), the env walk
-        // above already sees them. The statics half is off inside a linker-merged declaration
-        // (see `Coloring::in_merged_decl` — the flat symbol tables there include the CONSUMER's
-        // names, which a package author cannot know).
-        let statics = !self.coloring.in_merged_decl;
+        // above already sees them. The statics half is asked **of this binding's own source**
+        // (see `Symbols::source_statics`): a name declared or imported in the same file is one its
+        // author knows about, and a merged-in package's is not.
         let shadowed = if scope_hit {
             Some("a binding already in scope")
-        } else if statics && self.symbols.functions.contains_key(name)
-            || self.imports.imported_fns.contains_key(name)
-        {
-            Some("a top-level function")
-        } else if statics
-            && (self.symbols.types.contains(name) || self.symbols.enums.contains_key(name))
-        {
-            Some("a type")
-        } else if statics
-            && (self.imports.modules.contains_key(name)
-                || self.imports.namespaces.contains_key(name))
-        {
-            Some("an imported module")
-        } else if statics && self.imports.extern_types.contains_key(name) {
-            Some("an imported type")
         } else {
-            None
+            self.symbols
+                .source_statics
+                .get(&span.source)
+                .and_then(|names| names.get(name))
+                .copied()
         };
         if let Some(what) = shadowed {
             self.error(
@@ -1429,11 +1612,13 @@ impl Checker {
         let relevance = self.relevance;
         let mut sites = self.sites;
         let expr_types = std::mem::take(&mut sites.expr_types);
+        let diverging_stmts = std::mem::take(&mut sites.diverging_stmts);
         let mut sites = sites.into_sites(relevance);
         sites.packed_type_layouts = packed_type_layouts;
         Checked {
             diagnostics: self.diags,
             expr_types,
+            diverging_stmts,
             sites,
             bundle_bindings,
             packed_layouts,
@@ -1606,19 +1791,15 @@ impl Checker {
     fn bind_nested_fns(&self, stmts: &[Stmt], env: &mut Env) {
         for stmt in stmts {
             if let Stmt::Fn(decl) = stmt {
-                let params = decl
-                    .params
-                    .iter()
-                    .map(|p| param_type(p, &self.imports.extern_types))
-                    .collect();
+                let params = decl.params.iter().map(|p| self.annot_param(p)).collect();
                 let ret = decl
                     .ret
                     .as_ref()
-                    .map(|t| from_ref_q(t, &self.imports.extern_types))
+                    .map(|t| self.annot(t))
                     .unwrap_or(Type::Unknown);
                 bind(
                     env,
-                    &decl.name,
+                    decl.name.as_str(),
                     Type::Fn {
                         params,
                         ret: Box::new(ret),
@@ -1726,7 +1907,7 @@ impl Checker {
                 match ty {
                     Some(ty) => {
                         self.check_type_ref(ty);
-                        let expected = from_ref_q(ty, &self.imports.extern_types);
+                        let expected = self.annot(ty);
                         self.check(value, &expected, env);
                         // Record destructor-relevance of this binding for the drop-insertion pass.
                         if self.type_relevant(&expected) {
@@ -1742,7 +1923,36 @@ impl Checker {
                         }
                     }
                     None => {
-                        let vty = self.check(value, &Type::Unknown, env);
+                        // **Resolve the name before checking the value.** A bare `x = …` whose name
+                        // already resolves is a *reassignment*, and then the binding's own type —
+                        // not `Unknown` — is the expectation the value is checked against. Looking
+                        // the name up only afterwards is what made
+                        // `mut acc: List<int> = [1, 2]` / `acc = []` an `E0023` whose help
+                        // suggested the annotation the code already carried: the value was checked
+                        // against `Unknown` and the un-inferable-literal gate below fired before
+                        // anything had discovered the obvious expectation sitting one line above.
+                        //
+                        // `mut x = …` is a fresh declaration, never a reassignment; the two
+                        // compound-assignment desugars (`x.f = v`, `x ??= y`) run their own checks
+                        // and deliberately change the binding's type, so both keep the open
+                        // expectation. Those are exactly the cases the branches below exempt.
+                        let target = (!*mut_decl
+                            && !matches!(value, Expr::FieldSet { .. } | Expr::Coalesce { .. }))
+                        .then(|| lookup(env, name))
+                        .flatten()
+                        .cloned();
+                        // The expectation flows only into a literal the target type is *shaped*
+                        // for, and only once that type is resolved. An unresolved target is the
+                        // accumulator pattern (`mut acc = []` then `acc = [1]`): its hole is
+                        // filled by what this write synthesizes, so checking against the hole
+                        // would freeze `List<?>` instead of refining it to `List<int>`.
+                        let expectation = target.as_ref().filter(|ty| {
+                            !ty.contains_unknown() && self.absorbs_expectation(value, ty)
+                        });
+                        let vty = match expectation {
+                            Some(expected) => self.check(value, expected, env),
+                            None => self.check(value, &Type::Unknown, env),
+                        };
                         if self.type_relevant(&vty) {
                             self.relevance.locals.insert(*name_span);
                         }
@@ -1751,7 +1961,14 @@ impl Checker {
                         // its element/payload type is fixed yet undeterminable — `E0023`, fixable
                         // with an annotation. A `mut` binding is exempt: it is an accumulator whose
                         // later writes supply the type (L3).
-                        if !*mut_decl && is_uninferable_literal(value) {
+                        //
+                        // `E0023` is a *binding-site* diagnostic — nothing in reach determines the
+                        // type — so a reassignment of an already-**resolved** binding is never one:
+                        // that binding's type is the answer. A reassignment of an unresolved one
+                        // (`mut acc = []` then `acc = []`) still is, since the write refines
+                        // nothing.
+                        let undeterminable = target.as_ref().is_none_or(Type::contains_unknown);
+                        if !*mut_decl && undeterminable && is_uninferable_literal(value) {
                             self.error(
                                 DiagnosticCode::CannotInfer,
                                 value.span(),
@@ -1783,8 +2000,9 @@ impl Checker {
                         } else {
                             // A bare `x = …` reassigns an existing binding, or introduces a fresh
                             // immutable one. Reassignment is now enforced **statically** — the
-                            // tree-walker deferred both of these to the runtime:
-                            match lookup(env, name) {
+                            // tree-walker deferred both of these to the runtime. `target` is the
+                            // resolution done above, before the value was checked.
+                            match &target {
                                 Some(existing) => {
                                     if !lookup_mutable(env, name) {
                                         // (1) Mutability: an immutable binding cannot be reassigned.
@@ -1889,20 +2107,28 @@ impl Checker {
                     bind(env, name, t);
                 }
             }
-            Stmt::Expr { expr, .. } => {
+            Stmt::Expr { expr, span } => {
                 // A `match` that is the whole of an expression statement has its value discarded, so
                 // block-bodied arms (aether F1) are legitimate here (side effects). Route it through
-                // `synth_match` with `value_used` false so it is not flagged E0059; any other
-                // expression is checked normally.
-                if let Expr::Match {
+                // `synth_match` with `value_used` false so it is not flagged E0055; any other
+                // expression is checked normally. `synth_match` also means **no expectation** reaches
+                // the arms, which is exactly right here: a discarded value has no expected type.
+                let ty = if let Expr::Match {
                     scrutinee,
                     arms,
                     span,
                 } = expr
                 {
-                    self.synth_match(scrutinee, arms, *span, env, false);
+                    self.synth_match(scrutinee, arms, *span, env, false)
                 } else {
-                    self.check(expr, &Type::Unknown, env);
+                    self.check(expr, &Type::Unknown, env)
+                };
+                // `never` here means the statement DOES NOT RETURN — `os.exit(1)`,
+                // `server.serve(…)`. Recorded so the tier runners can ask the question instead of
+                // guessing it from syntax; see [`Checked::diverging_stmts`]. This reads the type the
+                // check above already produced — it is not a second walk over the expression.
+                if ty == Type::Never {
+                    self.sites.diverging_stmts.insert(*span);
                 }
             }
             Stmt::Return { value, span } => {
@@ -1977,10 +2203,15 @@ impl Checker {
                 // done). Mirrors the per-arm narrowing in `synth_match`.
                 if let Expr::TypeTest { expr, ty, .. } = cond
                     && let Expr::Ident { name, .. } = expr.as_ref()
-                    && !reassigns(then_body, name)
+                    && !reassigns(then_body, name.as_str())
+                    // A test that can never hold (E0065 — `x is P` on an `Option<P>`) narrows
+                    // nothing: the branch is unreachable, and narrowing it to the payload is what
+                    // used to let the dead code type-check.
+                    && lookup(env, name.as_str())
+                        .is_none_or(|t| self.impossible_type_test(t, ty).is_none())
                 {
                     env.push(HashMap::new());
-                    bind(env, name, from_ref_q(ty, &self.imports.extern_types));
+                    bind(env, name.as_str(), self.annot(ty));
                     self.check_block(then_body, env);
                     env.pop();
                 } else {
@@ -2066,48 +2297,38 @@ impl Checker {
                 }
             }
             Stmt::Fn(decl) => {
-                self.check_reserved_name(&decl.name, decl.name_span);
+                self.check_reserved_name(decl.name.as_str(), decl.name_span);
                 // A NESTED fn's name is a value binding in the enclosing body (pre-bound into the
                 // current frame by `bind_nested_fns`, hence `Enclosing` — it must not flag
                 // itself). A top-level fn (depth 1) is in `symbols.functions`, where duplicate
                 // declaration has its own rules; the statics half would self-flag it, so skip.
                 if env.len() > 1 {
-                    self.check_shadow(&decl.name, decl.name_span, env, ShadowScopes::Enclosing);
+                    self.check_shadow(
+                        decl.name.as_str(),
+                        decl.name_span,
+                        env,
+                        ShadowScopes::Enclosing,
+                    );
                 }
-                let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || decl.name.contains('.');
                 self.check_fn(decl, env, &[], TargetKind::Function);
-                self.coloring.in_merged_decl = saved;
             }
             Stmt::Struct(r) => {
-                self.check_reserved_name(&r.name, r.name_span);
-                self.check_reserved_type_name(&r.name, r.name_span);
-                let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || r.name.contains('.');
+                self.check_reserved_name(r.name.as_str(), r.name_span);
+                self.check_reserved_type_name(r.name.as_str(), r.name_span);
                 self.check_struct(r, env);
-                self.coloring.in_merged_decl = saved;
             }
             Stmt::Class(c) => {
-                self.check_reserved_name(&c.name, c.name_span);
-                self.check_reserved_type_name(&c.name, c.name_span);
-                let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || c.name.contains('.');
+                self.check_reserved_name(c.name.as_str(), c.name_span);
+                self.check_reserved_type_name(c.name.as_str(), c.name_span);
                 self.check_class(c, env);
-                self.coloring.in_merged_decl = saved;
             }
             Stmt::Enum(e) => {
-                self.check_reserved_name(&e.name, e.name_span);
-                self.check_reserved_type_name(&e.name, e.name_span);
-                let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || e.name.contains('.');
+                self.check_reserved_name(e.name.as_str(), e.name_span);
+                self.check_reserved_type_name(e.name.as_str(), e.name_span);
                 self.check_enum(e, env);
-                self.coloring.in_merged_decl = saved;
             }
             Stmt::Impl(decl) => {
-                let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || decl.target.contains('.');
                 self.check_standalone_impl(decl, env);
-                self.coloring.in_merged_decl = saved;
             }
             Stmt::Trait(decl) => self.check_trait_decl(decl, env),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
@@ -2129,60 +2350,70 @@ impl Checker {
                 // (the adjacency form), so an extension's own `@`-directive arrives here too. It
                 // is not a tier: resolve it as a directive and site-check it against what it wraps,
                 // rather than reporting "unknown dev-tier" about a name the registry knows.
-                if let Some(d) = self.reg().find_ext_directive(tier) {
+                if let Some(d) = self.resolve_ext_directive_at(*tier_span, tier) {
                     self.check_ext_directive_block(d, items, *tier_span);
-                } else if !self.symbols.tier_registry.is_known(tier) {
-                    self.diags
-                        .push(tiers::unknown_tier_diagnostic(self.reg(), tier, *tier_span));
-                } else if self.symbols.tier_registry.is_expr_tier(tier) {
-                    // An expression tier's block in *statement* position (expr-tiers arc): its
-                    // value would be silently discarded — and it never activates/strips, so a
-                    // bare block would otherwise just vanish. Shared E0052 with activation.
-                    self.diags
-                        .push(tiers::expr_tier_statement_diagnostic(tier, *tier_span));
-                } else if let Some(d) = self
-                    .symbols
-                    .tier_registry
-                    .knobless_args_diagnostic(tier, args)
-                {
-                    // Args on a knob-less tier (`@test(x)`) — E0037.
-                    self.diags.push(d);
-                } else if !args.is_empty()
-                    && let Some(attr_name) = self
-                        .symbols
-                        .tier_registry
-                        .config_attribute(tier)
-                        .map(str::to_string)
-                {
-                    // Args on a knob-carrying tier construct its config attribute
-                    // (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]`) — validate that
-                    // construction through the ordinary attribute gate, so this default path
-                    // rejects exactly what the activated path's stamped attributes would.
-                    let synth = tiers::synthesized_config_attr(&attr_name, args, *tier_span);
-                    self.check_attrs(std::slice::from_ref(&synth), TargetKind::Function);
-                }
-                // The **annotation** form: `@test fn foo()` is desugared by the parser into a
-                // one-item `TierBlock`, so a tier attaching to a top-level declaration arrives
-                // here rather than at `check_directives` (a top-level `FnDecl::directives` is
-                // always empty — the parser says so). Nothing gated it, which is why
-                // `TierSite::Function` was declared by every std tier and enforced for none of
-                // them. A standalone block (`@debug { … }`) wraps items that came from *inside*
-                // the braces, so it is not an annotation and is skipped.
-                //
-                // Only when the branches above found nothing better to say. An unknown tier is
-                // already an E0036 and an expression tier an E0052 — both name the actual problem,
-                // where a site error would be a second, vaguer complaint about the same line.
-                let already_reported = self.diags.len() != diags_before;
-                if *attached && !already_reported {
-                    let sites = self.symbols.tier_registry.sites(tier);
-                    for item in items {
-                        self.check_declared_sites(
+                } else {
+                    // Resolve the `@name` in the package that wrote it (per-package naming arc), then
+                    // extract owned facts so the diagnostic pushes below don't borrow the registry — the
+                    // same resolution activation runs, so the checker accepts exactly what activation
+                    // keeps (a renamed tier is not "unknown" here). `sites` is `&'static`.
+                    let facts = self
+                        .resolve_tier_at(*tier_span, tier)
+                        .map(|r| (r.is_expr(), r.config().map(str::to_string), r.sites()));
+                    match &facts {
+                        None => self.diags.push(tiers::unknown_tier_diagnostic(
+                            self.reg(),
                             tier,
-                            sites,
-                            item.attachment_site(),
-                            None,
                             *tier_span,
-                        );
+                        )),
+                        Some((is_expr, config, _)) => {
+                            if *is_expr {
+                                // An expression tier's block in *statement* position (expr-tiers arc):
+                                // its value would be silently discarded — and it never activates/
+                                // strips. Shared E0052 with activation.
+                                self.diags
+                                    .push(tiers::expr_tier_statement_diagnostic(tier, *tier_span));
+                            } else if config.is_none() {
+                                // Args on a knob-less tier (`@test(x)`) — E0037. Resolved knob-less, so
+                                // the free check (args presence) not the name-keyed method.
+                                if let Some(d) = tiers::knobless_args_diagnostic_for(tier, args) {
+                                    self.diags.push(d);
+                                }
+                            } else if !args.is_empty()
+                                && let Some(attr_name) = config.clone()
+                            {
+                                // Args on a knob-carrying tier construct its config attribute
+                                // (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]`) — validate that
+                                // construction through the ordinary attribute gate, so this default
+                                // path rejects exactly what the activated path's stamped attributes do.
+                                let synth =
+                                    tiers::synthesized_config_attr(&attr_name, args, *tier_span);
+                                self.check_attrs(
+                                    std::slice::from_ref(&synth),
+                                    TargetKind::Function,
+                                );
+                            }
+                        }
+                    }
+                    // The **annotation** form: `@test fn foo()` is desugared by the parser into a
+                    // one-item `TierBlock`, so a tier attaching to a top-level declaration arrives
+                    // here rather than at `check_directives`. Only when the branches above found
+                    // nothing better to say — an unknown tier is already E0036, an expression tier
+                    // E0052; a site error would be a second, vaguer complaint about the same line.
+                    let already_reported = self.diags.len() != diags_before;
+                    if *attached
+                        && !already_reported
+                        && let Some((_, _, sites)) = facts
+                    {
+                        for item in items {
+                            self.check_declared_sites(
+                                tier,
+                                sites,
+                                item.attachment_site(),
+                                None,
+                                *tier_span,
+                            );
+                        }
                     }
                 }
             }
@@ -2228,26 +2459,43 @@ impl Checker {
             // then it is legal here — it is not a tier, so "unknown dev-tier" would be the wrong
             // complaint about a name the registry knows perfectly well. Its sites gate exactly as a
             // tier's do below.
-            let ext_directive = self.reg().find_ext_directive(&dir.name);
-            if ext_directive.is_none() && !self.symbols.tier_registry.is_known(&dir.name) {
+            let ext_directive = self.resolve_ext_directive_at(dir.name_span, &dir.name);
+            // Not an ext directive → resolve it as a tier for the package that wrote it (per-package
+            // naming arc). Owned facts (sites `&'static`, canonical id) so the diagnostic pushes below
+            // don't borrow the registry.
+            let tier_facts = if ext_directive.is_none() {
+                self.resolve_tier_at(dir.name_span, &dir.name)
+                    .map(|r| (r.sites(), r.id()))
+            } else {
+                None
+            };
+            if ext_directive.is_none() && tier_facts.is_none() {
                 let d = tiers::unknown_tier_diagnostic(self.reg(), &dir.name, dir.name_span);
                 self.diags.push(d);
                 continue;
             }
             let sites = match ext_directive {
                 Some(d) => d.sites,
-                None => self.symbols.tier_registry.sites(&dir.name),
+                None => tier_facts.as_ref().map_or(&[][..], |(s, _)| *s),
             };
             let before = self.diags.len();
             self.check_declared_sites(&dir.name, sites, target_sites(target), None, dir.name_span);
             if self.diags.len() != before {
                 continue;
             }
-            // A `@test`/`@bench` method is invoked with no receiver, so it must not read `self`.
+            // A `@test`/`@bench` method is invoked with no receiver, so it must not read `self` —
+            // i.e. it must be reachable without one, which is every classification but `Instance`.
+            // Judged by the std test/bench *identity* (whatever local name a rename gave it), not the
+            // spelling.
+            let is_std_test_or_bench = tier_facts.as_ref().is_some_and(|(_, id)| {
+                *id == tiers::TierId::std("test") || *id == tiers::TierId::std("bench")
+            });
             if target == TargetKind::Method
-                && matches!(dir.name.as_str(), "test" | "bench")
+                && is_std_test_or_bench
                 && let Some(ty) = self.coloring.current_type.clone()
-                && self.symbols.method_instance.get(&(ty, decl.name.clone())) == Some(&true)
+                && !self
+                    .receiver_of(&ty, decl.name.as_str())
+                    .allows_associated_call()
             {
                 self.error(
                     DiagnosticCode::InvalidDirectiveSite,
@@ -2257,6 +2505,63 @@ impl Checker {
                 .help(
                     "a test/bench method is called with no receiver, so its body must not use \
                      `self` — drop the `self` references, or make it a top-level function",
+                );
+            }
+        }
+    }
+
+    /// A declaration's own `<T>` that reuses a name the enclosing declaration's `<…>` already
+    /// bound — **E0075, a warning**.
+    ///
+    /// The rule it reports is [`extend_param_scope`]'s: layering is by replacement, so the inner
+    /// `<T>` overwrites the outer entry and every reference in the body resolves to the inner
+    /// parameter. That overwrite *is* the shadowing, which is why the condition is read here, off
+    /// the scope as it stands before the layering — after it, the outer parameter is gone and
+    /// nothing is left to compare against. (It is read here rather than inside `extend_param_scope`
+    /// itself for two reasons: that function is a pure scope builder with no diagnostic sink, and
+    /// it runs four times per declaration — collection, forwarding, and body checking — so a
+    /// warning raised there would be reported up to four times. `check_fn` is the one place every
+    /// body funnels through exactly once.)
+    ///
+    /// A **warning** and not an error: the two are different parameters, the inner one shadows, and
+    /// the program means exactly what it says. What it costs is legibility — a reader of
+    /// `Repo::<Todo>.label::<User>()` cannot tell which `T` the body means — so this reports a
+    /// readability judgement, not a correctness one.
+    ///
+    /// Scoped to *type parameters against type parameters*. A parameter that merely shares a name
+    /// with a declared type (`struct T { }` beside a `class Repo<T>`) is silent: the scope this
+    /// consults holds parameters only, so a nominal name is not in it to be hidden.
+    fn warn_shadowed_type_params(&mut self, params: &[TypeParam], target: TargetKind) {
+        for p in params {
+            let Some(outer) = self
+                .coloring
+                .type_params
+                .get(&p.name)
+                .map(|s| s.param.clone())
+            else {
+                continue;
+            };
+            // The enclosing declaration, when it is nameable — a method's is the type it is
+            // declared in. A hit with no name to give still reports; the label says where.
+            let owner = match (target, &self.coloring.current_type) {
+                (TargetKind::Method, Some(ty)) => format!(" of `{ty}`"),
+                _ => String::new(),
+            };
+            let name = &p.name;
+            let d = self.warn(
+                DiagnosticCode::ShadowedTypeParameter,
+                p.span,
+                format!("type parameter `{name}` shadows the enclosing `{name}`{owner}"),
+            );
+            d.help(format!(
+                "they are two different parameters, so `{name}` here never means the enclosing one \
+                 — rename one of them"
+            ));
+            d.label(p.span, format!("this `{name}` hides the one below"));
+            if let Some(outer_span) = outer.id.decl_span() {
+                d.label(
+                    outer_span,
+                    format!("the enclosing `{name}` is declared here"),
                 );
             }
         }
@@ -2293,15 +2598,32 @@ impl Checker {
         // carries none of its own). Union with the current set so a method does not lose the
         // class's parameters; restored after the body. Bounds are validated AFTER the parameters
         // enter scope — a bound argument may name a sibling parameter (`<K, T: Keyed<K>>`).
-        // While checking a top-level forwarding generic's body (poly-values F2b), expose its
-        // hidden-argument layout so the body's dynamic sites and onward-forwarding calls can index
-        // it. Methods/nested contexts get an empty layout (forwarding is top-level-fn only).
+        // While checking a forwarding generic's body (poly-values F2b), expose its type-argument
+        // slot layout so the body's dynamic sites and onward-forwarding calls can index
+        // it. A METHOD gets its own layout too (Axis A), keyed `Type.method`; a nested context
+        // retains the enclosing one (D2b) and a closure/destructor gets none.
         // A slot set that failed the pre-pass fixpoint (polymorphic recursion through a
         // composite forward, D2a) is a clear error at the declaration — the static table cannot
         // enumerate its instantiations.
-        if self.symbols.forwarding_poisoned.contains(&decl.name)
-            && self.coloring.fn_depth == 0
-            && target == TargetKind::Function
+        // The key this declaration's own forwarding slots are recorded under — its bare name for a
+        // top-level `fn`, `Type.method` for a method. `None` for anything that carries no slots of
+        // its own: a nested `fn` (D2b — it reads the ENCLOSING fn's, through closure capture), a
+        // closure, a destructor.
+        let fwd_key = if self.coloring.fn_depth == 0 {
+            match target {
+                TargetKind::Function => Some(decl.name.to_string()),
+                TargetKind::Method => self
+                    .coloring
+                    .current_type
+                    .as_ref()
+                    .map(|ty| format!("{ty}.{}", decl.name)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(key) = &fwd_key
+            && self.symbols.forwarding_poisoned.contains(key.as_str())
         {
             self.error(
                 DiagnosticCode::InvalidTypeArguments,
@@ -2318,10 +2640,10 @@ impl Checker {
                  enumerate; restructure so the composite is built by the caller",
             );
         }
-        let next_forwarding = if target == TargetKind::Function && self.coloring.fn_depth == 0 {
+        let next_forwarding = if let Some(key) = &fwd_key {
             self.symbols
                 .forwarding
-                .get(&decl.name)
+                .get(key.as_str())
                 .map(|f| f.iter().map(|s| s.template.clone()).collect())
                 .unwrap_or_default()
         } else if target == TargetKind::Function {
@@ -2329,7 +2651,7 @@ impl Checker {
             // reads the enclosing hidden locals through closure capture — so the layout is
             // retained, with any slot whose template mentions a name this declaration's own
             // type parameters shadow masked out (`Unknown` never matches a lookup).
-            let shadowed: Vec<String> = decl.type_params.iter().map(|p| p.name.clone()).collect();
+            let shadowed = param_ids(&decl.type_params);
             self.coloring
                 .current_forwarding
                 .iter()
@@ -2344,28 +2666,97 @@ impl Checker {
         } else {
             Vec::new()
         };
+        // The forwarding *capability* alongside the realized layout: which parameters a
+        // `type_name::<T>()` here would resolve through a hidden slot. Same top-level-fn scope and
+        // same D2b shadow-masking as the layout above, but derived from the declaration rather
+        // than from the sites, so a diagnostic can point at the composed route
+        // (`field_specs_of(type_name::<T>())`) whether or not a `type_name::<T>()` already appears.
+        // A **self-less member of a generic type** forwards its CLASS's parameters too: it has no
+        // receiver to read the instantiation's tag off, so the hidden slot is its only channel (see
+        // `forwarding::forwardable_class_params`, which decides the same thing for the layout).
+        let next_forwardable = if fwd_key.is_some() {
+            let mut ps: Vec<ParamRef> = decl.type_params.iter().map(param_ref).collect();
+            if target == TargetKind::Method
+                && let Some(ct) = self.coloring.current_type.clone()
+                && !self
+                    .receiver_of(&ct, decl.name.as_str())
+                    .allows_instance_call()
+                && let Some(class_params) = self.symbols.generic_types.get(&ct)
+            {
+                let extra: Vec<ParamRef> = class_params
+                    .iter()
+                    .filter(|p| !ps.contains(p))
+                    .cloned()
+                    .collect();
+                ps.extend(extra);
+            }
+            ps
+        } else if target == TargetKind::Function {
+            // A nested declaration's own `<…>` shadow the enclosing ones — and a shadowing `T` is a
+            // DIFFERENT parameter, so it is dropped by identity rather than by name.
+            let shadowed = param_ids(&decl.type_params);
+            self.coloring
+                .forwardable_params
+                .iter()
+                .filter(|p| !shadowed.contains(&p.id))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let saved_forwardable =
+            std::mem::replace(&mut self.coloring.forwardable_params, next_forwardable);
         let saved_forwarding =
             std::mem::replace(&mut self.coloring.current_forwarding, next_forwarding);
         self.coloring.fn_depth += 1;
-        // Record the hidden-parameter count for lowering — for EVERY forwarding fn, called or
-        // not, so the body's dynamic sites always have their slots. Top-level only: a nested fn
-        // retains the enclosing layout for its body's SITES (D2b) but carries no hidden
-        // parameters of its own (it captures the enclosing locals instead).
-        if self.coloring.fn_depth == 1 && !self.coloring.current_forwarding.is_empty() {
-            self.sites.forwarding_fns.insert(
-                decl.name.clone(),
-                self.coloring.current_forwarding.len() as u32,
-            );
+        // Record the hidden-slot count for lowering — for EVERY forwarding fn or method, called
+        // or not, so the body's dynamic sites always have their slots. Keyed exactly as the slot
+        // layout is (`fwd_key`), which is why a nested fn is absent: it retains the enclosing
+        // layout for its body's SITES (D2b) but carries no slots of its own (it captures the
+        // enclosing `$ty` locals instead).
+        if let Some(key) = fwd_key
+            && !self.coloring.current_forwarding.is_empty()
+        {
+            self.sites
+                .forwarding_fns
+                .insert(key, self.coloring.current_forwarding.len() as u32);
+        }
+        // The enclosing generic type's parameters, for `type_name::<T>()` inside an INSTANCE method
+        // (generic constructor reflection, Gap B): the instantiation is not in the body — one
+        // compiled body serves every `Repo<…>` — but the receiver carries it as a reflected type
+        // tag, so a parameter's declaration index here is the argument position to read off `self`.
+        // Only an instance method has that receiver; an associated function keeps the E0058.
+        let saved_self_params = std::mem::take(&mut self.coloring.self_type_params);
+        if target == TargetKind::Method
+            && let Some(ct) = self.coloring.current_type.clone()
+            && self
+                .receiver_of(&ct, decl.name.as_str())
+                .allows_instance_call()
+            && let Some(params) = self.symbols.generic_types.get(&ct)
+        {
+            // A method's own `<U>` shadows a same-named type parameter, and it has no receiver
+            // channel of its own — blank the slot so no lookup can match it.
+            // A method's own `<U>` shadows a same-named class parameter, and has no receiver
+            // channel of its own — blank the slot so no lookup can match it. Shadowing is decided
+            // on the SPELLING here, because that is what shadowing is: the method's `<T>` makes the
+            // name `T` mean its own parameter, so the class's is unreachable from this body.
+            let own: HashSet<&str> = decl.type_params.iter().map(|p| p.name.as_str()).collect();
+            self.coloring.self_type_params = params
+                .iter()
+                .map(|p| (!own.contains(p.name.as_str())).then(|| p.clone()))
+                .collect();
         }
         let saved_type_params = self.coloring.type_params.clone();
-        self.coloring
-            .type_params
-            .extend(decl.type_params.iter().map(|p| {
-                (
-                    p.name.clone(),
-                    bound_reqs(&p.bounds, &self.imports.extern_types),
-                )
-            }));
+        // Read the shadowing off the scope BEFORE it is layered over (E0075, warning): the entry a
+        // parameter is about to replace is the one it hides.
+        self.warn_shadowed_type_params(&decl.type_params, target);
+        // Layered over the enclosing declaration's, so a method's `<T>` inside a class `<T>` makes
+        // `T` mean the method's — the shadowing rule, stated once.
+        self.coloring.type_params = extend_param_scope(
+            &self.coloring.type_params,
+            &decl.type_params,
+            &self.imports.extern_types,
+        );
         self.check_type_param_bounds(&decl.type_params);
         for p in &decl.params {
             self.check_type_opt(&p.ty);
@@ -2377,7 +2768,7 @@ impl Checker {
         let ret = decl
             .ret
             .as_ref()
-            .map(|t| from_ref_q(t, &self.imports.extern_types))
+            .map(|t| self.annot(t))
             .unwrap_or(Type::Unknown);
         // A function whose body contains `yield` is a generator (Track G): its declared return must
         // be `Iterator<T>`, and its body's `yield e` are checked against the element type `T`. The
@@ -2475,7 +2866,7 @@ impl Checker {
             // Params land in the just-pushed frame: any env hit — a capture or a duplicate in
             // this very list (`fn(x, x)`) — is a shadow (E0059).
             self.check_shadow(&p.name, p.name_span, env, ShadowScopes::All);
-            bind(env, &p.name, param_type(p, &self.imports.extern_types));
+            bind(env, &p.name, self.annot_param(p));
         }
         self.bind_nested_fns(&decl.body, env);
         for stmt in &decl.body {
@@ -2487,7 +2878,18 @@ impl Checker {
         // function would implicitly return `unit` where its signature promised another type, and a
         // caller would silently bind that type to `unit`. (`return`s inside are already checked
         // against the declared type above; this is the complementary "did every path return" check.)
-        if must_return_value && !block_diverges(&decl.body) {
+        // Runs *after* the body is typed, so `exhaustive_matches` already holds this body's
+        // `match` verdicts — an exhaustive `match` whose arms all return counts as returning.
+        // Reads `never_exprs` alongside `exhaustive_matches`, and for the same reason: both are
+        // typing facts this body just established, so a call to a `never` function counts as a
+        // path that returned.
+        if must_return_value
+            && !block_diverges(
+                &decl.body,
+                &self.exhaustive_matches,
+                &self.sites.never_exprs,
+            )
+        {
             self.error(
                 DiagnosticCode::MissingReturn,
                 decl.name_span,
@@ -2517,8 +2919,10 @@ impl Checker {
         self.coloring.current_yield = saved_yield;
         self.coloring.loop_depth = saved_loop_depth;
         self.coloring.type_params = saved_type_params;
+        self.coloring.self_type_params = saved_self_params;
         self.coloring.fn_depth -= 1;
         self.coloring.current_forwarding = saved_forwarding;
+        self.coloring.forwardable_params = saved_forwardable;
     }
 }
 

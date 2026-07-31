@@ -86,28 +86,35 @@ enum LiveEffect<'a> {
     Unmodeled,
 }
 
-/// Up to two inline reads plus an op's argument list (`Call`/`CallGlobal`, borrowed from the op)
-/// — avoids a heap allocation per op in the fixpoint's inner loop.
+/// Up to two inline reads plus an op's borrowed register lists — a call's value arguments and, on
+/// a forwarding call, its type arguments (both borrowed from the op, so the fixpoint's inner loop
+/// allocates nothing). `list2` is empty for every op but a forwarding `Call`/`CallGlobal`; leaving
+/// those registers out would under-approximate liveness, which is the one direction that is
+/// unsound (a live type-argument register whose spill was omitted).
 struct ReadSet<'a> {
     inline: [Option<Reg>; 2],
     list: &'a [Reg],
+    list2: &'a [Reg],
 }
 
 impl<'a> ReadSet<'a> {
     const EMPTY: ReadSet<'static> = ReadSet {
         inline: [None; 2],
         list: &[],
+        list2: &[],
     };
     fn one(a: Reg) -> ReadSet<'static> {
         ReadSet {
             inline: [Some(a), None],
             list: &[],
+            list2: &[],
         }
     }
     fn two(a: Reg, b: Reg) -> ReadSet<'static> {
         ReadSet {
             inline: [Some(a), Some(b)],
             list: &[],
+            list2: &[],
         }
     }
     fn for_each(&self, mut f: impl FnMut(Reg)) {
@@ -115,6 +122,9 @@ impl<'a> ReadSet<'a> {
             f(*r);
         }
         for r in self.list {
+            f(*r);
+        }
+        for r in self.list2 {
             f(*r);
         }
     }
@@ -160,18 +170,29 @@ fn live_effect(op: &Op) -> LiveEffect<'_> {
             def: Some(*dst),
         },
         Op::Call {
-            dst, callee, args, ..
+            dst,
+            callee,
+            args,
+            type_args,
+            ..
         } => Modeled {
             reads: ReadSet {
                 inline: [Some(*callee), None],
                 list: args,
+                list2: type_args.regs(),
             },
             def: Some(*dst),
         },
-        Op::CallGlobal { dst, args, .. } => Modeled {
+        Op::CallGlobal {
+            dst,
+            args,
+            type_args,
+            ..
+        } => Modeled {
             reads: ReadSet {
                 inline: [None; 2],
                 list: args,
+                list2: type_args.regs(),
             },
             def: Some(*dst),
         },
@@ -519,6 +540,7 @@ mod tests {
                 dst: 1,
                 callee: 2,
                 args: Box::new([]),
+                type_args: noeta_bytecode::TypeArgs::NONE,
                 span: sp(),
                 supplied: None,
             },

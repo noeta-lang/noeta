@@ -87,7 +87,7 @@ pub struct Expanded {
 /// contract — an `expand` hook only ever sees an invocation that was legal.
 pub fn expand_program(
     program: &mut Program,
-    source_maps: &std::collections::HashMap<SourceId, crate::qualify::QMap>,
+    source_maps: &std::collections::HashMap<SourceId, crate::qualify::UnitMap>,
     sources: &[Source],
     next_id: u32,
     edition: noeta_lexer::Edition,
@@ -173,6 +173,11 @@ fn plan_for(stmt: &Stmt, sources: &[Source], registry: &'static Registry) -> Vec
     let Some(keyword) = keyword_of(stmt) else {
         return Vec::new();
     };
+    // The declaration's own shape, through the shared derivation the checker hands
+    // `ExtDerive::validate` — one walk, so a derive recipe and an expansion hook in the same
+    // extension can never disagree about what a struct looks like. Derived once and cloned per
+    // directive: a declaration may carry several, and they all decorate the same members.
+    let shape = noeta_ast::shape::decl_shape(stmt);
     let mut plans = Vec::new();
     for f in &at.decorators.foreign {
         let Some(directive) = registry.find_ext_directive(&f.name) else {
@@ -204,9 +209,24 @@ fn plan_for(stmt: &Stmt, sources: &[Source], registry: &'static Registry) -> Vec
                             .map(|k| (k.clone(), a.value.as_directive_arg()))
                     })
                     .collect(),
-                target: at.name.to_string(),
+                // The declaration's name as an IDENTIFIER — its last dotted segment.
+                //
+                // By the time expansion runs, the linker has already qualified this file's
+                // declarations, so `at.name` is `shop.upstream.PetStore` in any file with a
+                // `namespace`. A hook's whole job is to emit source that is spliced INTO that
+                // declaration, where the only spelling in scope is the bare one — and the wrapper
+                // this text is parsed inside (`struct <target> { … }`) is not even syntax with a
+                // dotted name, so a qualified target made every `@`-directive on a namespaced
+                // declaration fail to parse. That is every multi-file project.
+                target: at
+                    .name
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(at.name.as_ref())
+                    .to_string(),
                 site,
                 source_dir: source_dir_of(f.name_span, sources),
+                fields: shape.clone(),
             },
             keyword,
             span: f.name_span,
@@ -253,7 +273,7 @@ fn run_one(
     edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
     sources: &[Source],
-    map: Option<&crate::qualify::QMap>,
+    map: Option<&crate::qualify::UnitMap>,
 ) -> (Vec<String>, Result<Done, Box<LoadDiagnostic>>) {
     // Boxed: a `LoadDiagnostic` carries a whole `Source`, so an unboxed `Err` would make every
     // successful expansion pay for the failure case.

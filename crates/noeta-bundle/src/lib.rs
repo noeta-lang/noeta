@@ -104,7 +104,82 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// decoding a version-8 payload would read their length prefixes as the next `TypeInfo`'s bytes and
 /// desynchronise the manifest. (`field_specs_of` / `construct` add new `Op` variants too, but those
 /// only appear in bundles this reader also produced.)
-pub const FORMAT_VERSION: u8 = 8;
+///
+/// Bumped to 9 by the precise-trait-narrowing arc: `reflect::ReflectionInfo` (in
+/// `Module::reflection`) gained a trailing `trait_impls: Vec<TraitImplRecord>` — the membership
+/// table the now-precise `x is dyn Trait` / `x.as<dyn Trait>()` and the new `traits_of(value)`
+/// read — and `NarrowTarget` (in `Module::code`) gained a `DynTrait(String)` variant. Postcard is
+/// not self-describing, so the appended sequence and the new enum variant are both wire breaks by
+/// the same reasoning as every bump above.
+///
+/// Bumped to 10 by two arcs landing together — one bump, because version 9 was never released and
+/// either change alone is a wire break.
+///
+/// Bumped to 10 by the json-defaults arc: `TypeRecipe::Struct::fields` (in `Module::deserialize_recipes`
+/// and in the `Op` variants that carry a call-site recipe) changed from `Vec<(String, TypeRecipe)>` to
+/// `Vec<FieldRecipe>` — each field now also carries its `FieldDefault`, so a JSON decode can fill a
+/// field whose declaration gave it a literal default. Postcard writes the struct's fields back to back
+/// with no tag, so the extra per-field enum shifts every byte after the first field; a version-9 reader
+/// would take the `FieldDefault` discriminant as the next field's name length and desynchronise.
+///
+/// Bumped to 10 by the `returns_of` arc: `reflect::ParamRecord` (in `Module::reflection`) gained a
+/// trailing `ret: TypeRepr` — a callable's declared return type, the projection the new
+/// `returns_of(target)` query materializes. Postcard writes it back to back after `params` with no
+/// tag, so a version-9 reader decoding a version-10 payload would take the return type's variant
+/// discriminant as the next `ParamRecord`'s target-string length and desynchronise the manifest —
+/// the same wire break as every bump above. `Op` (in `Module::code`) also gained a `ReturnsOf`
+/// variant, declared beside `ParamsOf` rather than at the end, which shifts every discriminant after
+/// it — a wire break on its own by the same non-self-describing-encoding rule.
+/// Bumped to 11 by the enum-reflection arc: `reflect::VariantInfo` (in `Module::reflection`) gained
+/// two trailing fields parallel to and beside `fields` — `field_types: Vec<TypeRepr>` and `backing:
+/// Option<AttrValue>` — so the new type-level `variants_of` query can report a variant's payload
+/// types precisely and a backed enum's wire value. Same non-self-describing-encoding reasoning as
+/// every bump above: postcard writes them back to back after `fields` with no tag, so a version-10
+/// reader would read the type sequence's length prefix as the next `VariantInfo`'s name length and
+/// desynchronise the manifest. `Op` (in `Module::code`) also gained a `VariantsOf` variant, declared
+/// beside `FieldSpecsOf` rather than at the end, which shifts every discriminant after it — a wire
+/// break on its own by the same rule.
+///
+/// Bumped to 12 by the generic-forwarding arc: `Op::Call` and `Op::CallGlobal` (in `Module::code`)
+/// each gained a `type_args: Box<[Reg]>` between `args` and `span`, and `Chunk` gained a `hidden:
+/// u16` after `num_params` — the type-argument channel that replaced prepending a forwarding
+/// generic's hidden slots onto the value-argument list. Same non-self-describing-encoding rule as
+/// every bump above: postcard writes the new sequence's length prefix where a version-11 reader
+/// expects the span, and the extra `u16` shifts every byte after it in each prototype header, so an
+/// older artifact decoded here would desynchronise mid-chunk rather than fail cleanly.
+///
+/// Bumped to 13 by the same arc's Axis A and its cache-line budget: `Op::CallMethod` gained a
+/// `type_args` of its own (methods forward now), `Chunk` gained `hidden_base`, and the three call
+/// ops' `supplied` changed from `Option<u64>` to `Option<NonZeroU64>` to keep `Op` inside one cache
+/// line. The last is a wire break even though the *meaning* is identical: postcard writes an
+/// `Option`'s discriminant byte followed by the payload either way, but a niche-optimised `Option`
+/// is not guaranteed to encode as the plain one, and the two ops around it moved regardless.
+///
+/// Bumped to 14 by the narrow-over-a-type-parameter fix: `Op::Narrow` and `Op::IsType` each gained
+/// a `dynamic: Option<Reg>` — the register carrying the instantiation's runtime head name — placed
+/// after `target` and so before `Narrow`'s two shape indices. Same non-self-describing-encoding rule
+/// as every bump above: postcard writes the `Option`'s discriminant byte where a version-13 reader
+/// expects `some_shape`'s first byte, desynchronising the rest of the stream.
+///
+/// Bumped to 15 by generic-in-generic construction: `Module` gained `type_arg_reprs: Vec<Option<u32>>`
+/// — the reflection projection of `type_args`, so a construction whose instantiation arrives on a
+/// hidden slot can resolve the interned `TypeRepr` that slot names — and `Op` (in `Module::code`)
+/// gained a `RetagDynamic` variant, declared beside `Retag` rather than at the end. Both are wire
+/// breaks by the same non-self-describing-encoding rule as every bump above: the new module table's
+/// length prefix lands where a version-14 reader expects `names`, and the inserted `Op` variant shifts
+/// every discriminant after it. This arrived alongside the 14 above rather than after it, so 15 is
+/// what rejects an artifact either change alone would have labelled 14.
+///
+/// Bumped to 16 by the construct-guards arc: `reflect::TypeInfo` (in `Module::reflection`) gained a
+/// `field_public: Vec<bool>` parallel to `fields`, between `field_optional` and `field_defaults` — the
+/// per-field visibility the reflective construction door reads to refuse setting a private field (the
+/// E0035 rule the checker enforces at a literal). Same non-self-describing-encoding reasoning as
+/// version 8, which added the two `Vec`s beside it: postcard writes the sequence's length prefix
+/// where a reader of the previous version expects `field_defaults`, so the whole manifest
+/// desynchronises from that field on rather than failing cleanly. This landed independently of the 14
+/// and 15 above — all three were in flight at once, and each is its own wire break — so 16 is what
+/// rejects an artifact any one of them alone would have mislabelled.
+pub const FORMAT_VERSION: u8 = 16;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

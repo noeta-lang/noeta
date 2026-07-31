@@ -1,0 +1,72 @@
+// A type parameter in scope satisfies the bounds its own declaration gives it — there is no `impl`
+// to look up, the declaration IS the bound. That is what lets a generic type's methods call one
+// another: inside `struct Agent<P: Speaker>`, `self.inner()` substitutes the callee's `P` with the
+// receiver's `P`, and the callee also demands `P: Speaker`. Before this was fixed, every such call
+// reported "type `P` does not satisfy the bound `Speaker`" against the very declaration stating it
+// does — which made a bounded generic type with more than one method unwritable.
+//
+// Covered here: a method calling a sibling method, an associated fn calling a sibling associated
+// fn, a free generic fn calling a bounded helper, and the same for a BUILT-IN bound.
+// expect: stdout "loud: hi!"
+// expect: stdout "made: loud: hi!"
+// expect: stdout "via free fn: hi!"
+// expect: stdout "9"
+// expect: exit 0
+trait Speaker {
+    fn say(text: string): string
+}
+
+struct Loud {
+    impl Speaker {
+        fn say(text: string): string {
+            return text ~ "!"
+        }
+    }
+}
+
+struct Agent<P: Speaker> {
+    pub voice: P
+
+    fn of(v: P): Agent<P> {
+        return Agent { voice: v }
+    }
+
+    // An associated fn calling a sibling associated fn, both under the type's bound.
+    fn make(v: P): Agent<P> {
+        return Agent.of(v)
+    }
+
+    fn inner(text: string): string {
+        return self.voice.say(text)
+    }
+
+    // An instance method calling a sibling instance method.
+    fn outer(text: string): string {
+        return "loud: " ~ self.inner(text)
+    }
+}
+
+// A free generic fn forwarding its own bounded parameter into a bounded helper.
+fn shout<S: Speaker>(s: S, text: string): string {
+    return s.say(text)
+}
+
+fn relay<S: Speaker>(s: S, text: string): string {
+    return shout(s, text)
+}
+
+// The same for a built-in bound.
+fn bigger<T: Comparable>(a: T, b: T): T {
+    if a > b { return a }
+    return b
+}
+
+fn biggest<T: Comparable>(a: T, b: T, c: T): T {
+    return bigger(bigger(a, b), c)
+}
+
+a = Agent.of(Loud {})
+echo a.outer("hi")
+echo "made: " ~ Agent.make(Loud {}).outer("hi")
+echo "via free fn: " ~ relay(Loud {}, "hi")
+echo biggest(3, 9, 5)

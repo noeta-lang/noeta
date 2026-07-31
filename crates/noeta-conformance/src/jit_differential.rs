@@ -124,8 +124,8 @@ pub fn run_jit_differential(root: &Path, only: Option<&Path>) -> JitDiffReport {
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            match noeta_loader::read_workspace(&case.entry) {
-                Ok(raw) => compare_tiers_workspace(&name, &raw, &mut report),
+            match crate::read_case_workspace(&case.entry) {
+                Ok(raw) => compare_tiers_workspace(&name, &raw, &case.entry, &mut report),
                 Err(_) => report.not_run.read_failed += 1,
             }
         } else {
@@ -159,7 +159,13 @@ fn compare_tiers(name: &str, text: &str, report: &mut JitDiffReport) {
 
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
-    if !tokens.0.diagnostics.is_empty() || !parsed.0.diagnostics.is_empty() {
+    if noeta_diagnostics::has_errors(
+        tokens
+            .0
+            .diagnostics
+            .iter()
+            .chain(parsed.0.diagnostics.iter()),
+    ) {
         report.not_run.parse_failed += 1;
         return;
     }
@@ -168,7 +174,7 @@ fn compare_tiers(name: &str, text: &str, report: &mut JitDiffReport) {
     // coverage: counting it as matched (as this and the eval differential both used to) inflated
     // the headline and let a fixture that stopped compiling slip from one side of it to the other
     // without moving the number.
-    if !noeta_db::checked(&db, src).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::checked(&db, src).diagnostics) {
         report.not_run.checker_rejected += 1;
         note_rejection(name, text, report);
         return;
@@ -183,16 +189,44 @@ fn compare_tiers(name: &str, text: &str, report: &mut JitDiffReport) {
 fn compare_tiers_workspace(
     name: &str,
     raw: &noeta_loader::RawWorkspace,
+    entry: &std::path::Path,
     report: &mut JitDiffReport,
 ) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
+    // A case with package subdirectories is a *dependency graph*, so it becomes a workspace WITH
+    // deps — the same construction the eval differential makes, and for the same reason: without
+    // them its `use <pkg>.…` resolves to nothing and the case is rejected by the checker, covering
+    // neither tier while looking like an ordinary "not run". Package-less cases take the deps-free
+    // workspace they always did.
+    let deps = crate::dep_sources(entry, (raw.modules.len() + 1) as u32);
+    let ws = if deps.is_empty() {
+        noeta_db::workspace(
+            &db,
+            &raw.entry,
+            &raw.modules,
+            noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
+        )
+    } else {
+        // No `@name` tables: the corpus's dependency graph is synthesized from the case's
+        // subdirectories (`crate::dep_sources`), not from a `noeta.toml`, so no package binds a
+        // `[tiers]`/`[directives]` local name — an empty `PackageUses` is behavior-identical.
+        noeta_db::workspace_with_deps(
+            &db,
+            &raw.entry,
+            &raw.modules,
+            &deps,
+            &noeta_span::PackageUses::new(),
+            noeta_lexer::Edition::DEFAULT,
+            &raw.paths,
+        )
+    };
 
     if noeta_db::linked(&db, ws).program.is_err() {
         report.not_run.link_failed += 1;
         return;
     }
-    if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
+    if crate::has_error(&noeta_db::linked_checked(&db, ws).diagnostics) {
         report.not_run.checker_rejected += 1;
         note_rejection(name, raw.entry.text(), report);
         return;

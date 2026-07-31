@@ -1,0 +1,25 @@
+// `@derive(Trait, via: field)` over a trait with an `async` method: the synthesized forwarder is
+// itself `async` and awaits the field's future before returning. The plan used to drop `async` from
+// the template, producing a synchronous `fn` whose body evaluated to a `Future` — the same
+// soundness hole as the trait-object one, reached through the derive planner.
+// expect: stdout "body:u"
+// expect: exit 0
+use std.task.{sleep}
+
+trait Fetcher {
+    async fn fetch(url: string): string
+}
+
+struct Http {
+    impl Fetcher {
+        async fn fetch(url: string): string {
+            sleep(1).await
+            return "body:" ~ url
+        }
+    }
+}
+
+@derive(Fetcher, via: inner)
+struct Wrap { inner: Http }
+
+echo Wrap { inner: Http {} }.fetch("u").await

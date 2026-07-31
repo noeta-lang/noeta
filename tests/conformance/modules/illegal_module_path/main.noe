@@ -1,0 +1,7 @@
+// A file name that cannot be part of a module path is an error with a rename hint (E0074) — never a
+// silent `-` to `_` mapping, which would give one module two spellings.
+// expect: error E0074 at 1:1
+// expect: exit 1
+use lib.ok;
+
+echo fine()

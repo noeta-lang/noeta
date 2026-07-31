@@ -235,6 +235,9 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             variant,
             variant_index,
             fields,
+            // Already honored by `materialize_recipe` (the only producer that ever sets it), which
+            // runs the validator on the value this call builds.
+            has_validator: _,
         } => {
             let shape = noeta_object::intern_shape(
                 Shape::enum_variant(enum_name, variant, Vec::new(), false)
@@ -279,6 +282,23 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             unreachable!("recipe/spawn results never reach materialize_native")
         }
     }
+}
+
+/// The neutral [`noeta_ast::reflect::WireProbe`] for a value handed to `Enum.from` / `Enum.try_from`,
+/// or `None` when it is not a scalar an enum can be backed by. The tree-walker's twin classifies its
+/// own `Value` the same way, so the shared matcher sees identical probes on both sides.
+pub(crate) fn wire_probe(value: Value) -> Option<noeta_ast::reflect::WireProbe> {
+    use noeta_ast::reflect::WireProbe;
+    if let Some(s) = value.as_string() {
+        return Some(WireProbe::Str(s.to_string()));
+    }
+    if let Some(n) = value.as_int() {
+        return Some(WireProbe::Int(n));
+    }
+    if let Some(f) = value.as_float() {
+        return Some(WireProbe::Float(f));
+    }
+    value.as_bool().map(WireProbe::Bool)
 }
 
 /// Lift a shared stdlib [`noeta_stdlib::Output`] into a freshly-owned VM `Value` (refcount 1,
@@ -378,25 +398,37 @@ pub(crate) fn make_ordering(variant: &str) -> Value {
         "Equal" => &EQUAL,
         _ => &GREATER,
     };
-    let index = match variant {
-        "Less" => 0,
-        "Equal" => 1,
-        _ => 2,
-    };
-    let shape = cell.get_or_init(|| {
-        noeta_object::intern_shape(
-            Shape::enum_variant("Ordering", variant, Vec::new(), false).with_variant_index(index),
-        )
-    });
+    let shape = cell.get_or_init(|| prelude_enum_shape(noeta_ast::reflect::ORDERING_ENUM, variant));
     Value::enum_value(shape, Vec::new())
 }
 
-/// Build a role enum value (`Semantic.EntryPoint`, `WebRole.Controller`, …) with a fresh shape —
-/// the payload-free `roles_of()` counterpart to [`make_ordering`], for whichever `@semantic` enum a
-/// `@role` tag named. Matches the tree-walker's by structural equality.
+/// The interned shape of one **prelude enum** variant, built from the shared declaration table
+/// ([`noeta_ast::reflect::prelude_enums`]) — the same slot names and declaration index the compiler
+/// bakes into a source-written `Ordering.Less` / `Type.Int` / `Semantic.Sink`. Going through one
+/// table is what makes a *materialized* prelude value (from `.compare()`, `type_of`, `roles_of()`)
+/// and a *constructed* one intern the identical shape, so they match, compare, and display alike
+/// instead of one of them being unordered for want of a variant index.
+///
+/// A pair the table does not know — a user `@semantic` enum reached through `roles_of()`, say —
+/// falls back to the payload-free, index-less shape, exactly as before.
+pub(crate) fn prelude_enum_shape(enum_name: &str, variant: &str) -> &'static Shape {
+    let fields =
+        noeta_ast::reflect::prelude_variant_field_names(enum_name, variant).unwrap_or_default();
+    let shape = Shape::enum_variant(enum_name, variant, fields, false);
+    let shape = match noeta_ast::reflect::prelude_variant_index(enum_name, variant) {
+        Some(index) => shape.with_variant_index(index),
+        None => shape,
+    };
+    noeta_object::intern_shape(shape)
+}
+
+/// Build a role enum value (`Semantic.EntryPoint`, `WebRole.Controller`, …) — the payload-free
+/// `roles_of()` counterpart to [`make_ordering`], for whichever `@semantic` enum a `@role` tag
+/// named. The built-in `Semantic` goes through the shared prelude table (so it is interchangeable
+/// with a constructed `Semantic.EntryPoint`); a user enum keeps the index-less shape. Matches the
+/// tree-walker's by structural equality either way.
 pub(crate) fn make_role(enum_name: &str, variant: &str) -> Value {
-    let shape =
-        noeta_object::intern_shape(Shape::enum_variant(enum_name, variant, Vec::new(), false));
+    let shape = prelude_enum_shape(enum_name, variant);
     Value::enum_value(shape, Vec::new())
 }
 
@@ -480,7 +512,10 @@ pub(crate) fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
         | TypeRepr::Str
         | TypeRepr::Bytes
         | TypeRepr::Unit
-        | TypeRepr::Dyn => Vec::new(),
+        | TypeRepr::Dyn
+        // Payloadless like the other scalars. Reachable only from a *declared* reflection
+        // (`returns_of` on `os.exit`) — never from a value, since none has this type.
+        | TypeRepr::Never => Vec::new(),
         // `Type.IntN(bits: int, signed: bool)` — the width descriptor.
         TypeRepr::IntN { signed, bits } => {
             vec![Value::int(i64::from(*bits)), Value::bool(*signed)]
@@ -507,13 +542,7 @@ pub(crate) fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
             vec![Value::list(members.iter().map(build_type_value).collect())]
         }
     };
-    let shape = noeta_object::intern_shape(Shape::enum_variant(
-        TYPE_ENUM,
-        repr.variant_name(),
-        Vec::new(),
-        false,
-    ));
-    Value::enum_value(shape, data)
+    Value::enum_value(prelude_enum_shape(TYPE_ENUM, repr.variant_name()), data)
 }
 
 /// Convert a manifest attribute-argument literal tree to a VM value (for materializing an attribute
@@ -549,15 +578,24 @@ pub(crate) fn attr_value_to_vm(
             enum_name,
             variant,
             args,
-        } => make_attr_enum(enum_name, variant, args.iter().map(recur).collect()),
+        } => make_attr_enum(
+            enum_name.as_str(),
+            variant,
+            args.iter().map(recur).collect(),
+        ),
         A::Struct { type_name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-            let shape =
-                noeta_object::intern_shape(Shape::object(ShapeKind::Struct, type_name, names));
+            let shape = noeta_object::intern_shape(Shape::object(
+                ShapeKind::Struct,
+                type_name.as_str(),
+                names,
+            ));
             let values: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::object(shape, values)
         }
-        A::TypeRef { name, args } => build_type_value(&reflection.type_ref_repr(name, args)),
+        A::TypeRef { name, args } => {
+            build_type_value(&reflection.type_ref_repr(name.as_str(), args))
+        }
     }
 }
 
@@ -581,15 +619,58 @@ pub(crate) fn reflection_type_name(value: Value) -> Option<String> {
     None
 }
 
-/// Build an enum value (`Color.Red`, `Ok(5)`, `Option.none`) for an attribute argument, with a fresh
-/// payload-free or payload-carrying shape. Matches the tree-walker's `builtin_enum` by structural
-/// shape equality.
+/// The **head name** of a reflection `Type` value (`type_of(x).name()`), or `None` when `value` is
+/// not one. Read from the variant tag and the leading payload string through the shared
+/// [`noeta_ast::reflect::adt_head_name`] — the one door onto `TypeRepr::head_name` — so the VM and
+/// the tree-walker cannot word a type's name differently. Total over every `Type` case: a value the
+/// program *constructed* (`Type.Struct("app.Todo", [])`) answers exactly as one `type_of` built.
+pub(crate) fn reflection_head_name(value: Value) -> Option<String> {
+    let shape = value.shape()?;
+    if shape.name != noeta_ast::reflect::TYPE_ENUM {
+        return None;
+    }
+    // The head is spelled from at most two payload slots: the leading `name: string` of a nominal /
+    // trait object, or a `Type.IntN`'s `(bits, signed)`. `bits` outside `u8` is not a width any type
+    // has, so it reads as absent rather than as a truncated one. The tree-walker's
+    // `reflection_head_payload` reads the same two slots, so the answers cannot differ.
+    let data = value.enum_data().unwrap_or_default();
+    let name = data.first().and_then(|v| v.as_string()).unwrap_or_default();
+    let int_width = match (
+        data.first().and_then(|v| v.as_int()),
+        data.get(1).and_then(|v| v.as_bool()),
+    ) {
+        (Some(bits), Some(signed)) => u8::try_from(bits).ok().map(|bits| (bits, signed)),
+        _ => None,
+    };
+    let head = noeta_ast::reflect::AdtHead {
+        name: &name,
+        int_width,
+    };
+    noeta_ast::reflect::adt_head_name(shape.variant.as_deref()?, head)
+}
+
+/// Build an enum value (`Color.Red`, `Ok(5)`, `Mode.Fast(3)`) for an attribute argument, with a
+/// fresh payload-free or payload-carrying shape. Matches the tree-walker's `builtin_enum` by
+/// structural shape equality.
 pub(crate) fn make_attr_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
+    // A **prelude** enum's case interns the shared shape (slot names + declaration index), so an
+    // attribute argument's `Semantic.Sink` is indistinguishable from a source-written one.
+    if noeta_ast::reflect::prelude_variant_index(enum_name, variant).is_some() {
+        return Value::enum_value(prelude_enum_shape(enum_name, variant), data);
+    }
+    // `builtin_result_option` is the "this is `Result`/`Option`" flag — it drops the enum name from
+    // display (`Ok(5)`, not `Result.Ok(5)`), which is right for exactly those two and wrong for
+    // everything else. Keying it on the enum NAME is the tree-walker's rule
+    // (`EnumValue::is_builtin_result_or_option`); keying it on "does this variant carry a payload",
+    // as it used to, silently renamed every payload-carrying user enum in an attribute argument —
+    // `#[Cfg(mode: Mode.Fast(3))]` reflected as `Fast(3)` here and `Mode.Fast(3)` in the
+    // tree-walker, a differential mismatch no corpus case had reached.
+    let builtin_result_option = enum_name == "Result" || enum_name == "Option";
     let shape = noeta_object::intern_shape(Shape::enum_variant(
         enum_name,
         variant,
         Vec::new(),
-        !data.is_empty(),
+        builtin_result_option,
     ));
     Value::enum_value(shape, data)
 }
@@ -616,6 +697,44 @@ pub(crate) fn free_fn_miss_message(name: &str) -> String {
     } else {
         format!("no top-level function `{name}`")
     }
+}
+
+/// Bind an `invoke`'s arguments to the prototype it resolved to — the VM twin of the tree-walker's
+/// `bind_invoke_args`, and the same two shapes: a **positional** `List<dyn>` keeps the arity
+/// pre-check, a **named** `Map<string, dyn>` binds through the shared `plan_invoke_named`. `total` is
+/// the callee's declared parameter count with a method's receiver already excluded, and `n_defaults`
+/// how many of them carry a default.
+///
+/// Parameter names come from the reflection artifact rather than the `Chunk` (which carries none),
+/// which is also what makes the two backends agree: both read the one table `params_of` reads,
+/// keyed by the same `target` string. Returns the positional argument list plus the mask (indexed
+/// over declared parameters — a method's call site shifts it up by one for the receiver), or a
+/// ready-to-surface message for the `Result.Err`.
+pub(crate) fn bind_invoke_args(
+    reflection: &noeta_ast::reflect::ReflectionInfo,
+    target: &str,
+    kind: &str,
+    total: usize,
+    n_defaults: usize,
+    positional: Vec<Value>,
+    named: Option<&[(String, Value)]>,
+) -> Result<(Vec<Value>, Option<u64>), String> {
+    let Some(named) = named else {
+        let required = total - n_defaults;
+        if positional.len() < required || positional.len() > total {
+            return Err(arity_message(kind, required, total, positional.len()));
+        }
+        return Ok((positional, None));
+    };
+    let names: Vec<String> = named.iter().map(|(n, _)| n.clone()).collect();
+    let plan = noeta_ast::reflect::plan_invoke_named(
+        target,
+        reflection.params_for(target),
+        total,
+        &names,
+    )?;
+    let args = plan.order.iter().map(|&i| named[i].1).collect();
+    Ok((args, plan.supplied))
 }
 
 /// The arity-mismatch message, worded identically to the tree-walker's (so the differential
@@ -835,9 +954,22 @@ impl Vm<'_> {
             // `Result.Err(JsonError)`) carries a path-rich extern. A recipe decode of `T` itself
             // never yields one; it reaches here only inside a wrapper's `Err`.
             NativeOut::Extern(e) => MatOut::Value(Value::extern_value(e)),
-            // A native enum value (native-extensibility S1) — not decoded from a JSON recipe, but a
-            // native `Result`/`Option` wrapper may carry one, so materialize it through the
-            // ordinary (non-recipe) path.
+            // An enum value: decoded from a `TypeRecipe::Enum` (enum-construction arc), or carried by
+            // a native `Result`/`Option` wrapper (native-extensibility S1). Both build through the
+            // ordinary `materialize_native` path — the same interned shape a `MakeEnum` builds — so a
+            // decoded case is indistinguishable from a source-written one. Only a recipe door sets
+            // `has_validator`, and it re-enters exactly as a struct's does.
+            out @ NativeOut::Variant {
+                has_validator: true,
+                ..
+            } => {
+                let value = materialize_native(out);
+                if let Some(rejection) = self.run_validator(value, path, span)? {
+                    release(value);
+                    return Ok(MatOut::Rejected(rejection));
+                }
+                MatOut::Value(value)
+            }
             out @ NativeOut::Variant { .. } => MatOut::Value(materialize_native(out)),
             // A native class instance (native-extensibility S2) — like a `Variant`, never decoded
             // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one; materialize
@@ -909,12 +1041,64 @@ impl Vm<'_> {
         release(rendered);
         Ok(message)
     }
+
+    /// How an **unhandled** `Err` payload describes itself for the E0069 abort: a `string` payload as
+    /// itself, an `Error`-implementing payload through its `message()`, anything else through its
+    /// ordinary display — so the abort always names what went wrong, whatever was put in the `Err`.
+    /// `payload` is borrowed from the enclosing `Result` (freed by its owner).
+    ///
+    /// The `Error` test is the shared trait-membership table (the same one `is dyn Error` consults,
+    /// carrying declared `impl`s, `@derive`s, and native ABI declarations), so it agrees with "would a
+    /// `message()` call resolve" by construction and the tree-walker's twin decides identically.
+    pub(crate) fn unhandled_error_message(
+        &mut self,
+        payload: Value,
+        span: Span,
+    ) -> Result<String, Abort> {
+        if let Some(s) = payload.as_string() {
+            return Ok(s);
+        }
+        let implements_error = crate::lifecycle::vm_nominal_name(&payload)
+            .is_some_and(|name| self.module.reflection.type_implements(&name, "Error"));
+        if !implements_error {
+            return Ok(payload.display());
+        }
+        // An extern error (`std.http.HttpError`) declares `Error` through the ABI, so its `message`
+        // lives in the registry's dispatch, not a bytecode prototype. That path only *borrows* its
+        // receiver, so no retain here.
+        if payload.is_extern() {
+            let rendered = self.call_extern_method(payload, "message", &[], span)?;
+            let message = rendered.as_string().unwrap_or_default();
+            release(rendered);
+            return Ok(message);
+        }
+        let type_name = payload.shape().map(|s| s.name.clone()).unwrap_or_default();
+        // A native *fielded* type (`ExtClass`) advertising `Error` keeps its `message` in the class
+        // dispatch rather than the proto table — routed here for the same reason the extern arm
+        // exists, so the trait table stays the single gate and this helper can never fall through to
+        // the wrong dispatch. No std type is in that shape today; the arm is what keeps a future one
+        // from diverging from the tree-walker, whose generic `call_method` routes it automatically.
+        // Borrows its receiver, like the extern path.
+        if self.reg().resolve_fielded(&type_name).is_some() {
+            let rendered = self.call_native_class_method(payload, "message", &[], span)?;
+            let message = rendered.as_string().unwrap_or_default();
+            release(rendered);
+            return Ok(message);
+        }
+        // Retain before the consuming re-entry — `run_method_handle` releases the receiver, but the
+        // payload is still owned by the enclosing `Result`.
+        retain(payload);
+        let rendered = self.run_method_handle(&type_name, "message", false, vec![payload], span)?;
+        let message = rendered.as_string().unwrap_or_default();
+        release(rendered);
+        Ok(message)
+    }
 }
 
-/// The `Err` payload of a `Result::Err` value (validation arc): `Some(payload)` when `value` is
-/// `Result::Err(e)`, else `None`. The payload is **borrowed** (not retained) from `value`, matching
-/// [`crate::lifecycle::try_classify`]'s shared-payload convention.
-fn result_err_payload(value: Value) -> Option<Value> {
+/// The `Err` payload of a `Result::Err` value (validation arc, and the E0069 unhandled-error abort):
+/// `Some(payload)` when `value` is `Result::Err(e)`, else `None`. The payload is **borrowed** (not
+/// retained) from `value`, matching [`crate::lifecycle::try_classify`]'s shared-payload convention.
+pub(crate) fn result_err_payload(value: Value) -> Option<Value> {
     if !value.is_enum() {
         return None;
     }

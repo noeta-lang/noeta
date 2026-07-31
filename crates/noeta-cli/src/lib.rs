@@ -28,11 +28,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use noeta_ast::{Expr, Stmt};
+use noeta_ast::Expr;
 // `render` is re-exported here for `watch`'s diagnostic rendering (`crate::render`).
 use noeta_diagnostics::render;
-use noeta_parser::parse_fragment;
-use noeta_span::SourceId;
 
 // The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
@@ -47,14 +45,14 @@ mod compose;
 mod context;
 mod docgen;
 mod output;
+mod tier_runner;
 mod watch;
 
-use cmd::bench::cmd_bench;
 use cmd::build::{cmd_build, cmd_dump};
 use cmd::cache::cmd_cache;
 use cmd::check::cmd_check;
-use cmd::doc::cmd_doc;
 use cmd::expand::cmd_expand;
+use cmd::explain::cmd_explain;
 use cmd::fmt::cmd_fmt;
 use cmd::grammar::cmd_grammar_treesitter;
 use cmd::ide::cmd_ide;
@@ -67,7 +65,7 @@ use cmd::repl::cmd_repl;
 use cmd::run::{cmd_run, execute_real_host, try_run_stapled};
 use cmd::serve::{ext_command_clap, ext_command_dispatch};
 use cmd::servers::{cmd_dap, cmd_lsp, cmd_mcp, cmd_profile};
-use cmd::test::{call_stmt, cmd_test};
+use cmd::test::call_stmt;
 use cmd::upgrade::cmd_upgrade;
 use output::emit_diagnostics_mapped;
 
@@ -138,7 +136,12 @@ enum Command {
     },
     /// Discover and run a program's `@test` blocks (object-model slice 6).
     Test {
-        /// Path to a `.noe` file.
+        /// File or directory to test (default: the current directory, walked recursively for
+        /// `.noe` files). A directory runs every file's `@test` blocks as its own entry and
+        /// aggregates one report — the only way a multi-module project's tests all run, since an
+        /// entry links a sibling's declarations but never its test blocks. A file tests just that
+        /// one.
+        #[arg(default_value = ".")]
         file: PathBuf,
         /// Stop after the first failing test instead of running them all.
         #[arg(long)]
@@ -162,10 +165,20 @@ enum Command {
         /// runner does nothing.
         #[arg(long)]
         target: Option<String>,
+        /// Per-test deadline in seconds (default: 60). A test that does not finish within it is
+        /// reported `TIME` — it is neither a pass nor an assertion failure — and the rest of the
+        /// suite still runs and reports. Raise it for one test with `#[std.test.Timeout(N)]`
+        /// instead; `--timeout 0` removes the bound for the whole run.
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u64>,
     },
     /// Discover and run a program's `@bench` blocks, measuring each (object-model slice 6).
     Bench {
-        /// Path to a `.noe` file.
+        /// File or directory to benchmark (default: the current directory, walked recursively for
+        /// `.noe` files). A directory measures every file's `@bench` blocks as its own entry and
+        /// aggregates one report — an entry does not carry its modules' benchmarks. Baselines stay
+        /// keyed per entry file, so a directory run compares like with like.
+        #[arg(default_value = ".")]
         file: PathBuf,
         /// Override the iteration count for every benchmark, taking precedence over a per-bench
         /// `@bench(iterations: N)` directive. Without either, the count is **calibrated**: a
@@ -207,7 +220,10 @@ enum Command {
     /// Extract a program's `@doc { … }` text blocks to stdout, or — with `--out` — generate the
     /// package's documentation artifact (a registry-ready `docs.json` plus a Markdown tree).
     Doc {
-        /// Path to a `.noe` file. Omit with `--package` to fetch a published package's docs.
+        /// File or directory to document (default: the current directory when no `--package`
+        /// is given). A directory extracts every `.noe` beneath it; a file extracts that file
+        /// **and its sibling modules**, since a `@doc` block belongs to the file it sits in and
+        /// linking merges declarations without them.
         file: Option<PathBuf>,
         /// Fetch a **published** package's stored documentation from the registry instead of
         /// reading local source: `company/package` (highest published version) or
@@ -338,6 +354,20 @@ enum Command {
         /// `.noe` files) — the same resolution `noeta check` uses.
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+    /// Explain a diagnostic code: what `E0xxx` means, how to fix it, and where the rule is
+    /// documented. The catalog every rendered diagnostic's code refers to — `noeta explain E0059`.
+    /// `--all` lists every code; `--format json` emits the machine-readable catalog.
+    Explain {
+        /// The code to explain, e.g. `E0059` (`e0059` and a bare `59` work too). Omit with `--all`.
+        code: Option<String>,
+        /// List every code in the catalog instead of explaining one.
+        #[arg(long)]
+        all: bool,
+        /// Output format. `json` emits the machine-readable catalog entry (or, with `--all`, the
+        /// whole schema-versioned catalog) — the seam the docs site renders its reference from.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
     },
     /// Start an interactive REPL. Entries type-check before running (an entry with a type error
     /// prints its `E0xxx` diagnostics and is skipped) — the default since session-checker C2/C5.
@@ -501,9 +531,12 @@ enum Command {
         /// A registry SemVer requirement, e.g. `^1.2` (registry resolution lands in P2.5).
         #[arg(long)]
         version: Option<String>,
-        /// The registry package identity `company/package` for a `--version` dependency, decoupled
-        /// from the import-root key (like Cargo's `foo = { package = "real" }`). Required for a
-        /// registry dependency to resolve; also the source of a derived key when `key` is omitted.
+        /// The package identity `company/package`, decoupled from the import-root key (like
+        /// Cargo's `foo = { package = "real" }`). A `--version` dependency **resolves** by it and
+        /// needs it; on a `--path`/`--git` source it is instead a *claim* about the tree the
+        /// source points at, written into the entry and verified against that package's own
+        /// `[package] name`. Either way it is also the source of a derived key when `key` is
+        /// omitted.
         #[arg(long)]
         package: Option<String>,
     },
@@ -839,6 +872,111 @@ enum CacheAction {
     Clear,
 }
 
+/// A resolved `[trust.commands]` binding, handed to [`run_cli`] by the composed shim (package-manager
+/// Phase 4): the local name a dependency command is registered under (`noeta <local>`), the name the
+/// providing package exported it under, and that package's extension units — the `exported` command
+/// lives in one of them. The binding both authorizes the command and fixes its local name, so two
+/// packages exporting the same command name coexist under distinct local names.
+pub struct CommandBinding {
+    /// The name the command is registered + dispatched under.
+    pub local: &'static str,
+    /// The command name the providing package's extension declared (its `ExtCommand::name`).
+    pub exported: &'static str,
+    /// The providing package's extension units; the `exported` command is one unit's `ExtCommand`.
+    pub units: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
+}
+
+impl std::fmt::Debug for CommandBinding {
+    // `dyn Extension` is not `Debug`; the unit count is the useful part.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandBinding")
+            .field("local", &self.local)
+            .field("exported", &self.exported)
+            .field("units", &self.units.len())
+            .finish()
+    }
+}
+
+/// An extension wrapper that exposes ONLY its inner unit's **tier-body formatters** — its `name()`,
+/// `root()`, and `body_formatters()` forward; every other surface (modules, types, enums, classes,
+/// structs, traits, commands, tiers, tier runners, attributes, directives, derives, capabilities)
+/// returns empty. This is the mechanism that makes a package's tier-body formatter a **trust-free,
+/// dev-only** capability: a `package.dev-native` crate is admitted untrusted and composed into the
+/// dev toolchain wrapped in this, so it can contribute a `noeta fmt` formatter and *nothing that
+/// runs* — no runtime module, command, or tier ever reaches the toolchain from it. Constructed via
+/// [`formatter_only`]; the composed shim wraps each of a dev-only crate's units before `run_cli`.
+///
+/// Every runtime method is overridden explicitly (never left to a trait default) so that adding a
+/// new capability method to [`Extension`](noeta_stdlib::Extension) surfaces here as a compile note
+/// to decide it, rather than silently leaking the inner unit's default through an untrusted wrapper.
+struct FormatterOnly {
+    inner: &'static (dyn noeta_stdlib::Extension + Sync),
+}
+
+impl noeta_stdlib::Extension for FormatterOnly {
+    // --- forwarded: identity + the one capability a dev-native crate may contribute ---
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn root(&self) -> &'static str {
+        self.inner.root()
+    }
+    fn body_formatters(&self) -> &'static [noeta_stdlib::registry::BodyFormatter] {
+        self.inner.body_formatters()
+    }
+    // --- stripped: every runtime surface returns empty (explicit, not a trait default) ---
+    fn modules(&self) -> &'static [noeta_stdlib::ExtModule] {
+        &[]
+    }
+    fn types(&self) -> &'static [noeta_stdlib::ExtType] {
+        &[]
+    }
+    fn enums(&self) -> &'static [noeta_stdlib::ExtEnum] {
+        &[]
+    }
+    fn classes(&self) -> &'static [noeta_stdlib::ExtClass] {
+        &[]
+    }
+    fn structs(&self) -> &'static [noeta_stdlib::ExtStruct] {
+        &[]
+    }
+    fn traits(&self) -> &'static [noeta_stdlib::ExtTrait] {
+        &[]
+    }
+    fn commands(&self) -> &'static [noeta_stdlib::ExtCommand] {
+        &[]
+    }
+    fn tiers(&self) -> &'static [noeta_stdlib::ExtTier] {
+        &[]
+    }
+    fn tier_runners(&self) -> &'static [noeta_stdlib::ExtTierRunner] {
+        &[]
+    }
+    fn attributes(&self) -> &'static [noeta_stdlib::registry::ExtAttribute] {
+        &[]
+    }
+    fn directives(&self) -> &'static [noeta_stdlib::registry::ExtDirective] {
+        &[]
+    }
+    fn derives(&self) -> &'static [noeta_stdlib::registry::ExtDerive] {
+        &[]
+    }
+    fn capabilities(&self) -> &'static [noeta_stdlib::ExtCapability] {
+        &[]
+    }
+}
+
+/// Wrap a native extension so only its tier-body formatters are visible to the toolchain (see
+/// [`FormatterOnly`]). Used by the composed dev toolchain to admit a `package.dev-native` crate's
+/// units as **formatter-only**: trust-free (nothing that runs is exposed) and reached only at
+/// `noeta fmt`. Leaks the wrapper for the `'static` the extension registry requires — like every
+/// other unit, it lives for the process.
+pub fn formatter_only(
+    inner: &'static (dyn noeta_stdlib::Extension + Sync),
+) -> &'static (dyn noeta_stdlib::Extension + Sync) {
+    Box::leak(Box::new(FormatterOnly { inner }))
+}
+
 /// The whole toolchain as a library entry (package-manager Phase 3, N3.0): the stock binary calls
 /// this with no extras; a **composed** binary (an app whose dependency graph carries native
 /// extension crates) calls it with the extra units, which register alongside the std units before
@@ -847,29 +985,69 @@ enum CacheAction {
 /// toolchain, not a runner.
 pub fn run_cli(
     extra: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
-    command_extras: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
+    command_bindings: &[CommandBinding],
 ) -> ExitCode {
-    // First-party toolchain extensions that ship with every binary (stock or composed), in their own
-    // namespaces — the HTML body formatter (`noeta-html`) which reflows `@html` bodies under
-    // `noeta fmt`, and the CSS formatter (`noeta-css`) it delegates `<style>` blocks to. Prepended to
+    // The CLI-layer unit that registers std's native dev-tier runners (registry-dispatched tier
+    // runners, Part B): `test`/`bench`/`doc` are `std` tiers whose runners live here, above stdlib,
+    // so they attach to the `std` root from this crate rather than from `noeta-stdlib`. Prepended to
     // the caller's `extra` (a composed app's dependency units) so all are installed before any lookup.
+    //
+    // Tier-body **formatters** for `noeta fmt` (`@html`/`<style>`) are no longer hardcoded here: a
+    // formatter is a dev-only capability a package brings via `package.dev-native`, composed
+    // formatter-only and reached only through `noeta fmt` (see `compose::maybe_delegate_fmt`).
     let mut units: Vec<&'static (dyn noeta_stdlib::Extension + Sync)> =
-        vec![&noeta_html::HTML_EXTENSION, &noeta_css::CSS_EXTENSION];
+        vec![&tier_runner::STD_TIER_RUNNERS_UNIT];
     units.extend_from_slice(extra);
     noeta_stdlib::registry::install_with_extras(&units);
-    // Phase 4: a dependency's `ExtCommand`s reach the CLI only if the root app command-trusts its
-    // PACKAGE (`[trust].commands`). The composer passes the trusted packages' extension units here
-    // (`command_extras` ⊆ `extra`), so trust is keyed by the providing package's identity — never
-    // by matching root-name strings, which would over-trust every package sharing a scope root
-    // (trusting `para/db`'s commands must not trust all of `para/*`) and, for a scope-keyed
-    // dependency, didn't even match its extensions' actual root. std's own commands (root `"std"`)
-    // are always available. The stock binary passes an empty list — it has only std units.
-    let trusted_commands: Vec<_> = noeta_stdlib::registry::extensions()
-        .iter()
-        .filter(|ext| ext.root() == "std")
-        .flat_map(|ext| ext.commands().iter())
-        .chain(command_extras.iter().flat_map(|ext| ext.commands().iter()))
+    // Phase 4: std's own commands (root `"std"`) are always available under their own names. A
+    // dependency's `ExtCommand` reaches the CLI only through a `[trust.commands]` binding, which
+    // names the providing package and the command it exported and fixes the LOCAL name it is
+    // registered + dispatched under — so trust is keyed by package identity (never a root-name
+    // string, which would over-trust every package sharing a scope root — trusting `para/db`'s
+    // commands must not trust all of `para/*`), and two packages exporting the same command name
+    // coexist under distinct local names. The stock binary passes no bindings.
+    //
+    // Each entry pairs the local name (a `'static` name — std's exported name or a binding's local
+    // name, both of which clap needs by `&'static str`) with its `ExtCommand`.
+    let mut trusted_commands: Vec<(&'static str, &'static noeta_stdlib::ExtCommand)> =
+        noeta_stdlib::registry::extensions()
+            .iter()
+            .filter(|ext| ext.root() == "std")
+            .flat_map(|ext| ext.commands().iter())
+            .map(|c| (c.name, c))
+            .collect();
+    // A binding's local name may not shadow a built-in: the core CLI verbs and std's own commands
+    // are reserved (both are already registered). A shadow is a manifest error, not a silent
+    // override.
+    let reserved: std::collections::HashSet<String> = <Cli as clap::CommandFactory>::command()
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .chain(trusted_commands.iter().map(|(name, _)| name.to_string()))
         .collect();
+    for binding in command_bindings {
+        let Some(ext) = binding
+            .units
+            .iter()
+            .flat_map(|unit| unit.commands().iter())
+            .find(|c| c.name == binding.exported)
+        else {
+            eprintln!(
+                "noeta: `[trust.commands]` binds `{}` to a command `{}` its provider does not \
+                 export — check the exported command name",
+                binding.local, binding.exported
+            );
+            return ExitCode::from(2);
+        };
+        if reserved.contains(binding.local) {
+            eprintln!(
+                "noeta: `[trust.commands]` binds `{}`, but that is already a built-in `noeta` \
+                 command — pick another local name (the `[trust.commands]` key)",
+                binding.local
+            );
+            return ExitCode::from(2);
+        }
+        trusted_commands.push((binding.local, ext));
+    }
     // P-AOT L2: if this executable is a `noeta build --exe` artifact (a bundle stapled onto a copy
     // of the runtime), run the embedded program directly — the shipped app is not the toolchain, so
     // its CLI verbs are irrelevant. A plain `noeta` binary has no trailer and falls through to the
@@ -908,8 +1086,8 @@ pub fn run_cli(
                 .hide(true)
                 .action(clap::ArgAction::SetTrue),
         );
-    for ext in &trusted_commands {
-        cli = cli.subcommand(ext_command_clap(ext));
+    for (local, ext) in &trusted_commands {
+        cli = cli.subcommand(ext_command_clap(local, ext));
     }
     // An unknown subcommand may be a command contributed by a *native dependency* — visible only
     // inside the app's composed toolchain (Phase 3). Before rendering clap's error, try composing
@@ -947,7 +1125,7 @@ pub fn run_cli(
         }
     };
     if let Some((name, sub)) = matches.subcommand()
-        && let Some(ext) = trusted_commands.iter().find(|c| c.name == name)
+        && let Some((_, ext)) = trusted_commands.iter().find(|(local, _)| *local == name)
     {
         return ext_command_dispatch(ext, sub);
     }
@@ -963,6 +1141,11 @@ pub fn run_cli(
             jit_stats,
             args,
         } => cmd_run(&file, &tier, &target, no_cache, jit_stats, &args),
+        // The three std dev-tier verbs are thin aliases that enter the shared registry-seam dispatch
+        // (Part B): each stashes its parsed flags, then resolves std's native runner by identity and
+        // invokes it — so `noeta test` reaches `cmd_test` exactly as a program `@tier` runner and a
+        // third-party tier reach theirs, through `find_tier_runner_scoped`. `cmd_test`/`cmd_bench`/
+        // `cmd_doc` keep their bodies (including honoring a `--target` provider override).
         Command::Test {
             file,
             fail_fast,
@@ -971,7 +1154,19 @@ pub fn run_cli(
             names,
             json,
             target,
-        } => cmd_test(&file, fail_fast, jobs, &group, &names, json, &target),
+            timeout,
+        } => {
+            tier_runner::set_test_opts(tier_runner::TestOpts {
+                fail_fast,
+                jobs,
+                group,
+                names,
+                json,
+                target,
+                timeout,
+            });
+            tier_runner::dispatch_std_tier("test", &file)
+        }
         Command::Bench {
             file,
             iterations,
@@ -981,16 +1176,18 @@ pub fn run_cli(
             baseline,
             max_regress,
             target,
-        } => cmd_bench(
-            &file,
-            iterations,
-            &names,
-            json,
-            &save_baseline,
-            &baseline,
-            max_regress,
-            &target,
-        ),
+        } => {
+            tier_runner::set_bench_opts(tier_runner::BenchOpts {
+                iterations,
+                names,
+                json,
+                save_baseline,
+                baseline,
+                max_regress,
+                target,
+            });
+            tier_runner::dispatch_std_tier("bench", &file)
+        }
         Command::Doc {
             file,
             package,
@@ -1000,16 +1197,23 @@ pub fn run_cli(
             root,
             non_builtin,
             lint,
-        } => cmd_doc(
-            &file,
-            &package,
-            &out,
-            &target,
-            api,
-            root.as_deref(),
-            non_builtin,
-            lint,
-        ),
+        } => {
+            // `doc`'s file argument is optional; the runner reads it back from the stashed opts (its
+            // `--api`/`--package`/directory variants are not file-driven), so the seam's `TierRun`
+            // carries the entry (or `.`) only for contract fidelity.
+            let file_arg = file.clone().unwrap_or_else(|| PathBuf::from("."));
+            tier_runner::set_doc_opts(tier_runner::DocOpts {
+                file,
+                package,
+                out,
+                target,
+                api,
+                root,
+                non_builtin,
+                lint,
+            });
+            tier_runner::dispatch_std_tier("doc", &file_arg)
+        }
         Command::Build {
             file,
             out,
@@ -1037,6 +1241,7 @@ pub fn run_cli(
             format,
         } => cmd_check(&path, &tier, &target, format),
         Command::Expand { path } => cmd_expand(&path),
+        Command::Explain { code, all, format } => cmd_explain(code, all, format),
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
@@ -1255,6 +1460,18 @@ fn try_bare_file_run(err: &clap::Error) -> Option<ExitCode> {
     Some(cmd_run(&file, &[], &None, false, false, &prog_args))
 }
 
+/// How a tier the root **bound** in `[tiers]` resolves by identity, for the generic
+/// `noeta <localname> <file>` dispatch — owned so the borrow of `activated.registry` is released
+/// before `activated` is moved into `run_declared_tier`.
+enum BoundTier {
+    /// A native extension runner, scoped to `(provider_root, exported)`.
+    Ext(String, String),
+    /// A program-declared `@tier` (its runner, resolved by `run_declared_tier`).
+    Declared(noeta_check::DeclaredTier),
+    /// Bound to a provider that declares no such tier.
+    Unresolved,
+}
+
 fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     let name = err
         .get(clap::error::ContextKind::InvalidSubcommand)
@@ -1292,16 +1509,80 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     // A file that fails to load or link cannot tell us whether it declares the tier — fall
     // through (the external probe, then clap's error). Dependencies resolve first: a declared
     // tier typically lives in a dependency package (`use fuzzkit.tiers.run_fuzz`).
-    let deps = graph::resolve_graph(&file).ok()?.packages;
-    let linked = noeta_loader::load_with_deps(&file, manifest::root_edition(&file), &deps)
-        .ok()?
-        .ok()?;
-    let activated = noeta_check::activate_tiers_with(&linked.program, &[&name], &providers);
+    let resolved = graph::resolve_graph(&file).ok()?;
+    let (deps, package_uses) = (resolved.packages, resolved.package_uses);
+    let linked = noeta_loader::load_with_deps(
+        &file,
+        manifest::root_edition(&file),
+        &deps,
+        &package_uses,
+        noeta_pm::sources::package_root(&file).as_ref(),
+    )
+    .ok()?
+    .ok()?;
+    let ctx = noeta_check::TierContext {
+        uses: &linked.package_uses,
+        packages: &linked.packages,
+    };
+    let activated = noeta_check::activate_tiers_with(&linked.program, &[&name], &ctx);
+    // A tier the ROOT renamed in `[tiers]` (`crit = "depB:fuzz"`, or a collision it disambiguated)
+    // must dispatch by **identity**, not by the literal local name: the runner is registered under
+    // what the provider exported (`fuzz` on `depB`), so `find_tier_runner(&"crit")` /
+    // `declared_by(&"crit", …)` — which key on the local name — miss it. Resolve the binding in the
+    // root's own context (the same `resolve_at` activation used, so the roots already collected under
+    // the resolved identity) and dispatch to that provider's runner. An **unbound** bare name has no
+    // `[tiers]` entry and falls through to the ambient path below — a std tier, a real-named
+    // third-party tier, or a program `@tier` of that bare name — so nothing that works today changes.
+    let bound = linked
+        .package_uses
+        .get(&noeta_span::PackageOrigin::Root, &name)
+        .is_some()
+        .then(|| {
+            match activated.registry.resolve_at(
+                &name,
+                Some(&noeta_span::PackageOrigin::Root),
+                &linked.package_uses,
+            ) {
+                // A native extension runner (`std:test`, a third-party tier that ships one).
+                Some(noeta_check::ResolvedTier::Ext(t, root)) => {
+                    BoundTier::Ext(root, t.name.to_string())
+                }
+                // A dependency's program-declared `@tier` — its roots collected under the exported
+                // name (`custom[exported]`), which `run_declared_tier` reads by the tier's own name.
+                Some(noeta_check::ResolvedTier::Declared(d)) => BoundTier::Declared(d.clone()),
+                // Bound to a provider that declares no such tier — a real misconfiguration.
+                None => BoundTier::Unresolved,
+            }
+        });
+    if let Some(bound) = bound {
+        return match bound {
+            // A native runner scoped to the provider; if the provider ships none (an inline-only or
+            // expression extension tier), fall through to the external-binary probe as the ambient
+            // `ResolvedProvider::Extension` arm does.
+            BoundTier::Ext(root, exported) => {
+                tier_runner::dispatch_scoped_tier(&root, &exported, &file)
+            }
+            BoundTier::Declared(tier) => Some(ExitCode::from(run_declared_tier(
+                &name, &linked, activated, tier,
+            ))),
+            BoundTier::Unresolved => {
+                eprintln!(
+                    "noeta: tier `{name}` is bound in `[tiers]` to a provider that declares no such \
+                     tier — is the dependency imported (`use <root>.…`)?"
+                );
+                Some(ExitCode::from(2))
+            }
+        };
+    }
     let tier = match activated.registry.resolve_provider(&name, &providers) {
         Ok(noeta_check::ResolvedProvider::Declared(d)) => d.clone(),
-        // A built-in name or an unknown one — not this fallback's command; clap's error (or the
-        // external probe) is the right answer.
-        Ok(noeta_check::ResolvedProvider::Extension) => return None,
+        // An extension tier resolved by identity: if it ships a native runner, invoke it through the
+        // same registry seam the std verbs use (unifying std, package, and third-party tiers on one
+        // resolve-then-invoke path). Otherwise it is an inline-only or expression tier — fall through
+        // to the external-binary probe / clap error.
+        Ok(noeta_check::ResolvedProvider::Extension) => {
+            return tier_runner::dispatch_generic_tier(&name, &file);
+        }
         Err(err) => {
             // The name is tier-shaped (the target maps it) but the provider doesn't resolve —
             // that is a real user error, not fall-through material.
@@ -1312,7 +1593,9 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
             return None;
         }
     };
-    Some(run_declared_tier(&name, &linked, activated, tier))
+    Some(ExitCode::from(run_declared_tier(
+        &name, &linked, activated, tier,
+    )))
 }
 
 /// Run a declared tier's dispatch over an already-activated program: type-check, synthesize the
@@ -1323,10 +1606,12 @@ pub(crate) fn run_declared_tier(
     linked: &noeta_loader::Linked,
     activated: noeta_check::Activated,
     tier: noeta_check::DeclaredTier,
-) -> ExitCode {
-    if !activated.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
-        return ExitCode::from(1);
+) -> u8 {
+    // Report, then gate on errors only: a warning inside a tier's blocks is advisory, exactly as it
+    // is in ordinary code, and must not stop the tier's runner.
+    emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+    if noeta_diagnostics::has_errors(&activated.diagnostics) {
+        return 1;
     }
     // An expression tier has no runner semantics — its blocks are expressions in ordinary code,
     // evaluated wherever they appear; there is nothing for a subcommand to run.
@@ -1335,51 +1620,37 @@ pub(crate) fn run_declared_tier(
             "`{name}` is an expression tier — its `@{name} {{ … }}` blocks are values in \
              ordinary code (run the program instead: `noeta run <file>`)"
         );
-        return ExitCode::from(2);
+        return 2;
     }
-    // The activated code roots for this tier — a built-in name's roots land in the dedicated sinks
-    // (an overridden `bench = "criterion"` still collects under `benches`), a custom tier's in
-    // `custom`. A text tier has no code roots (its bodies come from `activated.texts`).
-    let roots = match name {
-        "test" => activated.tests.clone(),
-        "bench" => activated.benches.clone(),
-        _ => activated.custom.get(name).cloned().unwrap_or_default(),
-    };
+    // The activated code roots for this tier. This dispatch is reached only for a **program-declared**
+    // provider (`provider_escape` sends a std/extension tier down the native path instead), so its
+    // roots always collect under `custom`, keyed by the tier's own exported name — identity-based
+    // activation routes a declared `@tier(bench)`'s fns there, not into the std `benches` sink. A text
+    // tier has no code roots (its bodies come from `activated.texts`).
+    let roots = activated
+        .custom
+        .get(&tier.name)
+        .cloned()
+        .unwrap_or_default();
 
     // The runner call — `<runner>([TierRoot { name: "<fn>", run: <fn> }, …])`, or for a text
     // tier `<runner>([TierText { target: "<decl>", text: "<body>" }, …])` — is built as AST
     // directly: the runner (and, in a namespaced entry, a root) carries its **link-qualified**
     // dotted name, which is an identifier to the resolved program but would parse as member
-    // access from text. The root *declaration* is textual (no names to qualify) and only
-    // synthesized when the program doesn't already declare one: the checker knows it as a
-    // prelude type — that is what lets the runner's package name `List<TierRoot>` standalone —
-    // but the backends build record literals from real declarations, and a declaration of the
-    // same name shadows the prelude registration by design.
+    // access from text.
+    //
+    // The root *type* needs no synthesized declaration: `TierRoot`/`TierText` are prelude structs
+    // both backends register from the shared table, so the literal below constructs like any other.
+    // (It used to need one — a textual `struct TierRoot { … }` appended when the program declared
+    // none — because the backends registered no prelude structs at all and the literal would have
+    // aborted with E0005. A program that declares its own still shadows the prelude one, as before.)
     let is_text = tier.text.is_some();
-    let (root_ty, root_decl) = if is_text {
-        (
-            noeta_ast::reflect::TIER_TEXT,
-            "struct TierText { target: string  text: string }",
-        )
+    let root_ty = if is_text {
+        noeta_ast::reflect::TIER_TEXT
     } else {
-        (
-            noeta_ast::reflect::TIER_ROOT,
-            "struct TierRoot { name: string  run: () -> void }",
-        )
+        noeta_ast::reflect::TIER_ROOT
     };
     let mut program = activated.program;
-    let declares_root_ty = program
-        .stmts
-        .iter()
-        .any(|s| matches!(s, Stmt::Struct(d) if d.name == root_ty));
-    if !declares_root_ty {
-        let fragment = parse_fragment(SourceId(u32::MAX), "<tier-dispatch>", root_decl);
-        if !fragment.diagnostics.is_empty() {
-            eprintln!("noeta: internal error synthesizing the `{name}` dispatch");
-            return ExitCode::from(2);
-        }
-        program.stmts.extend(fragment.program.stmts);
-    }
     let span = program.span;
     let field = |name: &str, value: Expr| noeta_ast::FieldInit {
         name: name.to_string(),
@@ -1390,7 +1661,7 @@ pub(crate) fn run_declared_tier(
     let str_expr = |value: String| Expr::Str { value, span };
     let object = |fields: Vec<noeta_ast::FieldInit>| {
         Expr::Object(noeta_ast::ObjectLit {
-            type_name: Some(root_ty.to_string()),
+            type_name: Some(noeta_ast::Name::canonical(root_ty)),
             type_name_span: span,
             fields,
             spread: None,
@@ -1441,13 +1712,19 @@ pub(crate) fn run_declared_tier(
     ));
     // One check over the whole dispatch program: the user's code, the stamped attributes, the
     // runner's signature, and the synthesized call all validate together — under the project's
-    // per-package editions (the user code keeps its source ids; the synthesized nodes are default).
-    let checked = context::check_under(&program, &linked.editions);
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
-        return ExitCode::from(1);
+    // per-package editions and package provenance (the user code keeps its source ids; the
+    // synthesized nodes are default/unattributed).
+    let opts = noeta_check::CheckOptions {
+        editions: linked.editions.clone(),
+        packages: linked.packages.clone(),
+        ..noeta_check::CheckOptions::default()
+    };
+    let checked = context::check_under(&program, &opts);
+    emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
+        return 1;
     }
-    match execute_real_host(&program, &checked, std::env::args().collect()) {
+    match execute_real_host(&program, &checked, std::env::args().collect(), true) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
@@ -1455,11 +1732,15 @@ pub(crate) fn run_declared_tier(
             if trace.len() >= 2 {
                 eprint!("{}", noeta_vm::render_trace(&trace, &linked.sources));
             }
-            ExitCode::from(result.exit_code.clamp(0, 255) as u8)
+            result.exit_code.clamp(0, 255) as u8
         }
-        Err(msg) => {
-            eprintln!("noeta: {msg}");
-            ExitCode::from(1)
+        // `to_text` yields the pre-rendered failure and its `u8` code — the tier subsystem's exit
+        // type — where `CompileFailure::report` would hand back a `std::process::ExitCode`.
+        Err(u) => {
+            let failure = noeta_runner::CompileFailure::from_unsupported(&linked.sources, &u);
+            let (text, code) = failure.to_text();
+            let _ = io::stderr().write_all(text.as_bytes());
+            code
         }
     }
 }
@@ -1500,5 +1781,81 @@ fn is_executable(path: &std::path::Path) -> bool {
     #[cfg(not(unix))]
     {
         path.is_file()
+    }
+}
+
+#[cfg(test)]
+mod formatter_only_tests {
+    use super::*;
+    use noeta_stdlib::ExtCommand;
+    use noeta_stdlib::Extension;
+    use noeta_stdlib::registry::{BodyFormatter, ExtModule, SubFormat};
+
+    fn passthrough(_lang: &str, body: &str, _sub: &SubFormat) -> Option<String> {
+        Some(body.to_string())
+    }
+
+    /// A deliberately "fat" extension: non-empty modules, commands, and body formatters. It stands
+    /// in for a `package.dev-native` crate whose native code declares far more than a formatter — the
+    /// `FormatterOnly` wrapper must strip everything but the formatters.
+    struct Fat;
+    impl Extension for Fat {
+        fn name(&self) -> &'static str {
+            "acme.fat"
+        }
+        fn root(&self) -> &'static str {
+            "acme"
+        }
+        fn modules(&self) -> &'static [ExtModule] {
+            static M: &[ExtModule] = &[ExtModule {
+                name: "widgets",
+                ..ExtModule::DEFAULTS
+            }];
+            M
+        }
+        fn commands(&self) -> &'static [ExtCommand] {
+            static C: &[ExtCommand] = &[ExtCommand {
+                name: "do-it",
+                about: "",
+                run: |_, _| 0,
+                ..ExtCommand::DEFAULTS
+            }];
+            C
+        }
+        fn body_formatters(&self) -> &'static [BodyFormatter] {
+            static B: &[BodyFormatter] = &[("html", passthrough)];
+            B
+        }
+    }
+
+    #[test]
+    fn formatter_only_strips_runtime_surface_but_keeps_formatters() {
+        static FAT: Fat = Fat;
+        let inner: &'static (dyn Extension + Sync) = &FAT;
+        // The inner really does expose a runtime surface — otherwise the test proves nothing.
+        assert_eq!(inner.modules().len(), 1);
+        assert_eq!(inner.commands().len(), 1);
+        assert_eq!(inner.body_formatters().len(), 1);
+
+        let wrapped = formatter_only(inner);
+        // Identity + the one allowed capability forward.
+        assert_eq!(wrapped.name(), "acme.fat");
+        assert_eq!(wrapped.root(), "acme");
+        assert_eq!(wrapped.body_formatters().len(), 1, "formatters preserved");
+        assert_eq!(wrapped.body_formatters()[0].0, "html");
+        // Every runtime surface is stripped to empty.
+        assert!(wrapped.modules().is_empty(), "modules stripped");
+        assert!(wrapped.commands().is_empty(), "commands stripped");
+        assert!(wrapped.types().is_empty());
+        assert!(wrapped.enums().is_empty());
+        assert!(wrapped.classes().is_empty());
+        assert!(wrapped.structs().is_empty());
+        assert!(wrapped.traits().is_empty());
+        assert!(wrapped.tiers().is_empty());
+        assert!(wrapped.tier_runners().is_empty());
+        assert!(wrapped.attributes().is_empty());
+        assert!(wrapped.directives().is_empty());
+        assert!(wrapped.derives().is_empty());
+        assert!(wrapped.capabilities().is_empty());
     }
 }

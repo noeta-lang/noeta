@@ -1,0 +1,36 @@
+// The negative half of "an all-returning `match` counts as returning": the rule is gated on
+// EXHAUSTIVENESS, so a `match` the checker cannot prove total still leaves a path to the end of
+// the body and E0048 still fires. Believing otherwise would let a function fall off its end —
+// far worse than the false positive the rule removes — so the analysis only ever counts a `match`
+// the checker's own E0011 judgement calls exhaustive.
+//
+// `guarded`: every variant has an arm, but `Signal.Go`'s is guarded — the checker cannot prove a
+// guard ever true, so `Go` stays uncovered (E0011) and the `match` can fall through (E0048).
+// `open`: an `int` scrutinee has an open domain and there is no `_`, so no value is guaranteed to
+// enter an arm. E0011 stays silent (open domains are the runtime backstop's job) but E0048 fires.
+// expect: error E0048 at 21:4
+// expect: error E0011 at 22:5
+// expect: error E0048 at 30:4
+// expect: exit 1
+enum Signal {
+    Go;
+    Wait;
+    Stop
+}
+
+fn guarded(s: Signal, hot: bool): int {
+    match s {
+        Signal.Go if hot => { return 1 },
+        Signal.Wait => { return 2 },
+        Signal.Stop => { return 3 },
+    }
+}
+echo guarded(Signal.Go, true)
+
+fn open(n: int): int {
+    match n {
+        1 => { return 1 },
+        2 => { return 2 },
+    }
+}
+echo open(1)

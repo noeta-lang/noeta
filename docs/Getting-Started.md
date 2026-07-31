@@ -38,7 +38,7 @@ Everywhere below, `noeta` means "the installed binary."
 Create `hello.noe`:
 
 ```noeta
-echo "hello";
+echo "hello"
 ```
 
 Run it:
@@ -50,10 +50,11 @@ hello
 
 That is a complete program. There is **no `main` function** and no boilerplate — top-level statements run top to bottom. `echo` prints a value followed by a newline.
 
-Semicolons are optional; a newline ends a statement. This is equally valid:
+Semicolons are optional; a newline ends a statement. A `;` is still valid, and is what lets two statements share a line:
 
 ```noeta
-echo "hello"
+echo "hello";
+echo "one"; echo "two"
 ```
 
 ## 3 · A first real program
@@ -140,11 +141,14 @@ running 2 tests on 2 threads
 
 The scaffold works before you edit a line:
 
-- **`noeta.toml`** — the package identity, the `[dependencies]` table (add one with `noeta add`), and two build targets: `development` with the dev tiers (`@test`, `@bench`, `@doc`, `@debug`) live, and `production` as an explicit name for the tier-free baseline.
+- **`noeta.toml`** — the package identity, the `[dependencies]` table (add one with `noeta add`), and two build targets: `development` with the dev tiers live (`tiers = ["test", "bench", "doc", "debug"]` — a bare name turns a tier on, a `-name` turns one off) — the `@test`/`@bench`/`@doc`/`@debug` blocks that sit beside your code and are stripped from a production build (see [Dev Tiers](Dev-Tiers)) — and `production` as an explicit name for the tier-free baseline.
 - **`src/main.noe`** — a small entry file that exercises all four tiers, so `run`, `test`, `bench`, and `doc` each have something to do immediately.
 - **`.vscode/`, `AGENTS.md`, `SYNTAX.md`** — run/debug profiles for the [editor extension](Editor-and-AI-Tooling), and the docs an AI agent needs to drive the project.
 
 `noeta init` never overwrites an existing file, so it is also safe to run in a directory that already has code. The full scaffold is documented at [The CLI](The-CLI#noeta-init); the manifest it writes on the [`noeta.toml` Manifest](Manifest) page.
+
+> [!TIP]
+> Those `.vscode/` files assume the Noeta VS Code extension — install it to get syntax highlighting, live diagnostics, hover types, and one-click debugging out of the scaffold. Setup instructions: [Editor & AI Tooling](Editor-and-AI-Tooling).
 
 ## 6 · The rest of the toolchain
 
@@ -154,10 +158,12 @@ The `noeta` binary is more than a runner. In brief:
 |---|---|
 | `noeta init [dir]` | Scaffold a new project: manifest, `src/main.noe`, editor run profiles, agent docs. See [The CLI](The-CLI#noeta-init). |
 | `noeta run <file>` | Type-check and execute a program. |
+| `noeta check <file>` | Type-check without running or building — every diagnostic, no execution. See [The CLI](The-CLI#noeta-check). |
+| `noeta build <file>` | Compile to a self-contained `.noeb` bundle, or a native executable / WebAssembly with `--native`/`--wasm`. See [The CLI](The-CLI#noeta-build). |
 | `noeta repl` | Interactive REPL. |
 | `noeta test <file>` | Run the program's `@test` blocks. See [Testing](Testing). |
 | `noeta bench <file>` | Run and measure its `@bench` blocks. See [Benchmarking](Benchmarking). |
-| `noeta doc <file>` | Extract its `@doc { … }` prose to stdout. See [Documentation & Dev Tiers](Documentation-and-Tiers). |
+| `noeta doc <file>` | Extract its `@doc { … }` prose to stdout. See [Documentation](Documentation-and-Tiers). |
 | `noeta add …` | Add a dependency to `noeta.toml` and resolve it. See [Using Packages](Using-Packages). |
 | `noeta upgrade` | Self-update the toolchain to the latest release. See [The CLI](The-CLI#noeta-upgrade). |
 
@@ -172,5 +178,7 @@ Run `noeta <command> --help` for the flags of any command.
 - **[Language Tour](Language-Tour)** — learn the whole language by example.
 - **[Using Packages](Using-Packages)** — add your first dependency and run a project that uses it.
 - **[The Type System](Type-System)** — how types, inference, unions, and `dyn` fit together.
-- **[Standard Library](Standard-Library)** — the built-in types and modules you will reach for.
+- **[Diagnostics](Diagnostics)** — what any `E0xxx` the toolchain reports means.
+- **[Built-ins](Standard-Library)** — strings, lists, maps, sets and iterators, available with no import.
+- **[Standard library reference](Std)** — the `use std.{…}` modules: `math`, `json`, `fs`, and the rest.
 - **[The `noeta.toml` Manifest](Manifest)** and **[Package Registries](Package-Registries)** — dependencies, build targets, and where packages come from.

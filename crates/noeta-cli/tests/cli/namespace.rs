@@ -69,11 +69,7 @@ fn noeta_add_derives_the_import_root() {
         "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(
-        lib.join("m.noe"),
-        "namespace widgets.core;\npub fn v(): int { return 1; }\n",
-    )
-    .unwrap();
+    std::fs::write(lib.join("m.noe"), "pub fn v(): int { return 1; }\n").unwrap();
 
     // No positional key — derived from `acme/widgets` → `widgets`.
     lang()
@@ -96,6 +92,131 @@ fn noeta_add_derives_the_import_root() {
 }
 
 #[test]
+fn binding_a_package_under_its_own_scope_is_not_a_rename() {
+    // A package keyed by its SCOPE (`para/aether` under `para`) is the spelling the package guide
+    // teaches, the spelling the package's own modules declare (`namespace para.aether`), and the
+    // one that lets two packages of a scope share an import root. Warning about it told an author
+    // their correct code was surprising — a warning on the happy path is a warning people learn to
+    // ignore. A genuine rename (a key that is neither the package root nor its scope) still warns.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_scope_key");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("widgets");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(lib.join("m.noe"), "pub fn v(): int { return 1; }\n").unwrap();
+
+    // Keyed by the scope — quiet.
+    lang()
+        .current_dir(&app)
+        .args(["add", "acme", "--path", "../widgets"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("module root is").not());
+
+    // Keyed by neither the root nor the scope — a real rename, and still reported. A second,
+    // distinct package: binding the SAME one twice resolves to one instance, so it would not
+    // exercise the warning at all.
+    let other = base.join("gizmos");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(
+        other.join("noeta.toml"),
+        "[package]\nname = \"acme/gizmos\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(other.join("m.noe"), "pub fn v(): int { return 2; }\n").unwrap();
+    lang()
+        .current_dir(&app)
+        .args(["add", "gadgets", "--path", "../gizmos"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "binds a package whose own module root is `gizmos`",
+        ));
+}
+
+#[test]
+fn noeta_add_writes_and_verifies_a_package_claim_on_a_path_dependency() {
+    // `--package` used to be refused outright with `--path`, so `add` could not produce the entry
+    // the manifest reference (and every first-party scope-array member) is written with. It writes
+    // it now — and, because the identity on a path dependency is a claim rather than a selector,
+    // checks it against the target's own `[package] name` BEFORE touching the manifest.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_path_package");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("widgets");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    let original = "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n";
+    std::fs::write(app.join("noeta.toml"), original).unwrap();
+    std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(lib.join("m.noe"), "pub fn v(): int { return 1; }\n").unwrap();
+
+    // A claim that does not match the tree: refused, and the manifest is left exactly as it was.
+    lang()
+        .current_dir(&app)
+        .args([
+            "add",
+            "acme",
+            "--path",
+            "../widgets",
+            "--package",
+            "totally/wrong",
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("totally/wrong").and(predicate::str::contains("acme/widgets")),
+        );
+    assert_eq!(
+        std::fs::read_to_string(app.join("noeta.toml")).unwrap(),
+        original,
+        "a refused claim must not modify the manifest"
+    );
+
+    // The true claim: written into the entry, and the graph resolves with it.
+    lang()
+        .current_dir(&app)
+        .args([
+            "add",
+            "acme",
+            "--path",
+            "../widgets",
+            "--package",
+            "acme/widgets",
+        ])
+        .assert()
+        .success();
+    let manifest = std::fs::read_to_string(app.join("noeta.toml")).unwrap();
+    assert!(
+        manifest.contains("acme = { path = \"../widgets\", package = \"acme/widgets\" }"),
+        "the claim is written into the entry: {manifest}"
+    );
+    // And it round-trips: the manifest `add` just wrote is one `check` accepts.
+    lang()
+        .current_dir(&app)
+        .args(["check", "."])
+        .assert()
+        .success();
+}
+
+#[test]
 fn noeta_add_refuses_a_builtin_import_root() {
     // namespace-protection #2/#3: binding a dependency under `std` would shadow the compiler's own
     // `use std.…` namespace — refused before the manifest is touched.
@@ -112,7 +233,7 @@ fn noeta_add_refuses_a_builtin_import_root() {
         "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(lib.join("m.noe"), "namespace lib.core;\n").unwrap();
+    std::fs::write(lib.join("m.noe"), "").unwrap();
 
     lang()
         .current_dir(&app)
@@ -169,7 +290,7 @@ fn noeta_add_warns_when_a_release_introduces_a_new_committer() {
     .unwrap();
     commit(
         "g.noe",
-        "namespace greetlib.g;\npub fn hi(): int { return 1; }\n",
+        "pub fn hi(): int { return 1; }\n",
         "Alice Maintainer",
         "alice@example.com",
     );
@@ -880,7 +1001,7 @@ fn require_provenance_refuses_an_unsigned_registry_dependency() {
     .unwrap();
     std::fs::write(
         repo.join("hello.noe"),
-        "namespace greet.hello;\npub fn greeting(): string { return \"hi\"; }\n",
+        "pub fn greeting(): string { return \"hi\"; }\n",
     )
     .unwrap();
     git_in(&["add", "."], &repo);

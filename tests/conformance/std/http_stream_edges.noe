@@ -1,0 +1,77 @@
+// The three body shapes a streaming reader must not get wrong (http-streaming arc).
+//
+// **Empty body.** `recv()` yields `none` on the very first call — the stream opened fine (an empty
+// body is a successful response), it simply has nothing in it. A reader must not block, and must
+// not mistake "no frames" for "not open".
+//
+// **Truncated body.** The sandbox's `/stream/truncated` ends mid-block: one complete frame, then
+// `data: partial` with no terminating blank line. The complete frame arrives; the partial one is
+// **discarded**. That is the SSE spec, and it is the safe reading: a frame dispatches on its blank
+// line, so a body cut short has not delivered one, and handing the fragment over as if it were
+// complete is precisely the failure a truncated stream must not produce. (The line framings differ
+// deliberately — see `http_stream_framings`: a final unterminated LINE is still a line.)
+//
+// **`recv` past the end** keeps answering `none`, which is what lets a `while` loop terminate
+// rather than spin or abort.
+// expect: stdout "empty: 0 frames, first recv is none"
+// expect: stdout "truncated: 1 frame(s): [complete]"
+// expect: stdout "past the end: none, none"
+// expect: exit 0
+use std.http.client
+use std.http.Framing
+use std.http.Frame
+use std.http.HttpError
+
+fn blank(): Frame {
+    return Frame { event: "", data: "", id: "", retry: none }
+}
+
+// `none`/`some` as a word, so the assertions read as prose.
+fn word(f: ?Frame): string {
+    if f == none {
+        return "none"
+    }
+    return "some"
+}
+
+// `Result<void, HttpError>`, not `void`: the `?`s below early-return a failed *open*, so the
+// signature has to be able to carry one (E0012 otherwise). A failed open must never look like an
+// empty body — which is the very confusion this case exists to rule out.
+async fn run(): Result<void, HttpError> {
+    api = client.new("https://svc.test")
+
+    // An empty body: open succeeds, the first read ends the stream.
+    empty = client.stream(api.prepare("get", "/stream/empty"), Framing.Sse)?
+    first = empty.recv().await
+    mut count = 0
+    mut going = first != none
+    while going {
+        count = count + 1
+        going = empty.recv().await != none
+    }
+    echo "empty: ${count} frames, first recv is ${word(first)}"
+
+    // A truncated body: the complete frame survives, the partial one is dropped.
+    cut = client.stream(api.prepare("get", "/stream/truncated"), Framing.Sse)?
+    mut seen = ""
+    mut n = 0
+    mut more = true
+    while more {
+        next = cut.recv().await
+        if next == none {
+            more = false
+        } else {
+            f: Frame = next ?? blank()
+            n = n + 1
+            seen = "${seen}[${f.data}]"
+        }
+    }
+    echo "truncated: ${n} frame(s): ${seen}"
+
+    // Reading past the end stays `none` — idempotent, not an error.
+    a = cut.recv().await
+    b = cut.recv().await
+    echo "past the end: ${word(a)}, ${word(b)}"
+    return Ok()
+}
+run().await?

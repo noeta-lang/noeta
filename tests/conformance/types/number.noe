@@ -1,0 +1,39 @@
+// `number` — the built-in name for **any numeric scalar**: `int`, `float`, `f32`, `f64` and every
+// `i8`..`u64` width.
+//
+// It is the one built-in that desugars to a UNION rather than to a single lattice type, which is
+// what makes it cheap: assignability, narrowing and widening all come from `Type::Union` unchanged,
+// so naming the set costs a name and nothing else. The alternative — a thirteenth scalar variant —
+// would have had to define its relationship to the other twelve from scratch.
+//
+// The name existed internally long before it was writable: `Type::is_arith_numeric` reasoned about
+// this set, and a native signature could declare it (`SigType::Numeric`, what a kernel's scale
+// factor takes). A *user* could only spell it as a twelve-member union by hand.
+// expect: stdout "2"
+// expect: stdout "2.5"
+// expect: stdout "2.0"
+// expect: stdout "7"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: exit 0
+fn id(x: number): number { return x }
+
+// Every numeric kind is accepted — the widening pair and the strict fixed widths alike.
+echo id(2)
+echo id(2.5)
+echo id(2.0f32)
+echo id(7i16)
+
+// It narrows at runtime through the union machinery, in both backends. The widths erase (every
+// fixed-width integer is an int at runtime, `f64` a float, `f32` alone reified), so this is a test
+// of the three runtime kinds, not of twelve.
+a: dyn = 41
+b: dyn = 1.5f32
+c: dyn = "no"
+d: dyn = true
+echo a is number
+echo b is number
+echo c is number
+echo d is number

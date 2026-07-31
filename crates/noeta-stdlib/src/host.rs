@@ -11,10 +11,10 @@ pub use noeta_ext_abi::host::{
 };
 pub use noeta_ext_abi::{Logging, Metrics, Tracing};
 
+use crate::StdError;
 use crate::env;
 use crate::fs::Vfs;
 use crate::random;
-use crate::{ErrorKind, StdError};
 use noeta_ext_abi::ExecResult;
 use noeta_ext_abi::{
     AttrValue, InstrumentId, InstrumentKind, LogRecord, MetricData, MetricStore, MetricValue,
@@ -190,6 +190,16 @@ pub struct SandboxHost {
     /// most one listener — a differential program calls `http.serve` once — so a single slot
     /// suffices; a second `net_listen` re-arms it.
     inbound: Option<InboundState>,
+    /// Open outbound **streaming** response bodies (http-streaming arc): id → the remaining frames
+    /// of its scripted body, decoded in full at `net_stream_open`. A cursor over a pure function of
+    /// the request, so both backends hand out the identical sequence.
+    ///
+    /// Held by value in the host (not shared behind an `Arc`) so a cloned `SandboxHost` starts from
+    /// its own state — sharing would let one backend's reads advance the other's cursor and break
+    /// the differential by construction.
+    streams: BTreeMap<u64, VecDeque<noeta_ext_abi::stream::Frame>>,
+    /// The next outbound stream id. Starts at 1, like `ids`.
+    next_stream: u64,
     /// The deterministic telemetry recorder (native OTEL): in-progress spans by id, ended spans in
     /// end order, and the counters deriving deterministic span/trace ids. Since spans are write-only
     /// (never program output), this exists only so conformance can assert on emitted spans; the
@@ -241,15 +251,42 @@ struct InboundState {
     /// so an upgraded handler terminates in-oracle exactly like the request script itself.
     ws_conns: BTreeMap<u64, usize>,
     ws_transcript: Vec<(u64, String)>,
+    /// Connections switched to `text/event-stream` (http-streaming arc) — the SSE analogue of
+    /// `ws_conns`. A set rather than a map: unlike a websocket there is no inbound conversation to
+    /// keep a cursor into, only outbound frames.
+    sse_conns: std::collections::BTreeSet<u64>,
+    /// The event-stream bytes each handler wrote, in order (test introspection, like
+    /// `ws_transcript`).
+    sse_transcript: Vec<(u64, String)>,
 }
 
-/// A scripted spawned process (process-handle + streaming arcs): its instant-complete outcome and
-/// independent stdout/stderr read cursors for `read_line`/`read`/`read_err_line`.
+/// A scripted spawned process (process-handle + streaming arcs): its instant-complete outcome,
+/// independent stdout/stderr read cursors for `read_line`/`read`/`read_err_line`, and the state of
+/// its stdin pipe.
 #[derive(Debug, Clone)]
 struct ScriptedProc {
     result: ExecResult,
     stdout_cursor: usize,
     stderr_cursor: usize,
+    stdin: ScriptedStdin,
+}
+
+/// The state of a scripted child's stdin pipe (subprocess-doors arc). The sandbox models it because
+/// a failing write is the *point* of the recoverable `try_write` door: without a scripted way to
+/// reach one, the door's `Err` arm could never be compared backend-to-backend. An enum rather than a
+/// `bool` because the two failures have different causes and different fixes, and `OsError.kind()`
+/// reports them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptedStdin {
+    /// Writable — the state every scripted child spawns in, so a stdin-feeding program is a
+    /// validated no-op exactly as before.
+    Open,
+    /// Closed from the program's own side by `close_stdin`. Writing after that is the program's
+    /// mistake, and the real host reports it identically (its `ChildStdin` is dropped).
+    Closed,
+    /// The child is gone and took its stdin with it — the scripted stand-in for the condition no
+    /// liveness check can close from the language, reachable through the `dead` scripted command.
+    Broken,
 }
 
 /// The next line of `text` from `*cursor` (without its trailing newline), advancing past it; `None`
@@ -303,6 +340,8 @@ impl SandboxHost {
             procs: BTreeMap::new(),
             next_proc: 1,
             inbound: None,
+            streams: BTreeMap::new(),
+            next_stream: 1,
             tel: TelRecorder {
                 next_span: 1,
                 next_trace: 1,
@@ -322,6 +361,17 @@ impl SandboxHost {
     /// telemetry conformance oracle (native OTEL). Spans not yet ended are not included.
     pub fn recorded_spans(&self) -> &[SpanData] {
         &self.tel.recorded
+    }
+
+    /// The event-stream bytes handlers wrote, as `(conn, wire)` in write order (http-streaming
+    /// arc) — test introspection, so the exact SSE wire format a `sse` handler produced can be
+    /// asserted directly rather than inferred from the program's own output. Empty before any
+    /// `net_listen`.
+    pub fn sse_transcript(&self) -> &[(u64, String)] {
+        self.inbound
+            .as_ref()
+            .map(|state| state.sse_transcript.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Install a shared sink that also receives every ended [`SpanData`]. The telemetry conformance
@@ -462,6 +512,8 @@ impl Network for SandboxHost {
             transcript: Vec::new(),
             ws_conns: BTreeMap::new(),
             ws_transcript: Vec::new(),
+            sse_conns: std::collections::BTreeSet::new(),
+            sse_transcript: Vec::new(),
         });
         Ok(1)
     }
@@ -528,6 +580,20 @@ impl Network for SandboxHost {
         }
     }
 
+    /// Whether the scripted conversation on `conn` is spent — the sandbox's "the peer closed", and
+    /// what a session polling with `recv_timeout` checks to decide it is done. Deterministic: it
+    /// reads the same cursor `net_ws_recv_next` advances, so a timed session terminates in-oracle
+    /// exactly where an untimed one does.
+    fn net_ws_is_closed(&self, conn: u64) -> bool {
+        let Some(state) = self.inbound.as_ref() else {
+            return true;
+        };
+        match state.ws_conns.get(&conn) {
+            Some(cursor) => *cursor >= crate::net::sandbox_ws_client_frames().len(),
+            None => true,
+        }
+    }
+
     /// Record the handler's outbound frame (test introspection; the differential observes the
     /// handler's own output, exactly like replies).
     fn net_ws_send_now(&mut self, conn: u64, text: &str) -> Result<(), StdError> {
@@ -545,6 +611,88 @@ impl Network for SandboxHost {
             .expect("net_ws_close_now before net_listen")
             .ws_conns
             .remove(&conn);
+        Ok(())
+    }
+
+    // --- Streaming bodies (http-streaming arc) ---
+
+    /// Open a scripted stream: answer the head from the deterministic responder, decode the whole
+    /// deterministic body for `request` up front, and hand back a cursor over its frames.
+    ///
+    /// Decoding at open (rather than incrementally per `recv`) is what makes a streaming program
+    /// resolve at spawn like every other sandbox leaf — deterministic, ready on the first poll, and
+    /// therefore in-oracle. The frames are a pure function of the request, so both backends compute
+    /// the identical sequence.
+    ///
+    /// The head is a pure function of the request too ([`crate::net::sandbox_stream_head`], whose
+    /// status grammar is the buffered responder's), so a differential program can script a streamed
+    /// `429` and both backends observe the same status.
+    fn net_stream_open(
+        &mut self,
+        request: crate::NetRequest,
+        framing: noeta_ext_abi::stream::Framing,
+    ) -> Result<noeta_ext_abi::stream::StreamHead, noeta_ext_abi::NetError> {
+        let frames = crate::net::sandbox_stream_frames(&request, framing);
+        let (status, headers) = crate::net::sandbox_stream_head(&request);
+        let id = self.next_stream;
+        self.next_stream += 1;
+        self.streams.insert(id, frames.into());
+        Ok(noeta_ext_abi::stream::StreamHead {
+            stream: id,
+            status,
+            headers,
+            url: request.url,
+        })
+    }
+
+    /// Pop the next scripted frame; `None` once the body is exhausted — the deterministic "the
+    /// body ended" that lets a reading loop terminate in-oracle, exactly like the ws conversation.
+    ///
+    /// A stream id that is not open also yields `None` rather than erroring: after `close()` the
+    /// honest answer to "is there more?" is no, and a program that races a close against a pending
+    /// read should see the stream end, not an abort.
+    fn net_stream_recv_next(
+        &mut self,
+        stream: u64,
+    ) -> Result<Option<noeta_ext_abi::stream::Frame>, StdError> {
+        Ok(self
+            .streams
+            .get_mut(&stream)
+            .and_then(std::collections::VecDeque::pop_front))
+    }
+
+    /// Release the stream. Idempotent — closing twice, or closing a drained stream, is fine.
+    fn net_stream_close(&mut self, stream: u64) -> Result<(), StdError> {
+        self.streams.remove(&stream);
+        Ok(())
+    }
+
+    /// Begin an event-stream response: mark the connection as streaming so its frames are recorded
+    /// separately from ordinary replies.
+    fn net_sse_start_now(&mut self, conn: u64) -> Result<(), StdError> {
+        self.inbound
+            .as_mut()
+            .expect("net_sse_start_now before net_listen")
+            .sse_conns
+            .insert(conn);
+        Ok(())
+    }
+
+    /// Record the handler's outbound event-stream bytes (test introspection; the differential
+    /// observes the handler's own output, exactly like replies and ws frames).
+    fn net_sse_send_now(&mut self, conn: u64, wire: &str) -> Result<(), StdError> {
+        self.inbound
+            .as_mut()
+            .expect("net_sse_send_now before net_listen")
+            .sse_transcript
+            .push((conn, wire.to_string()));
+        Ok(())
+    }
+
+    fn net_sse_close_now(&mut self, conn: u64) -> Result<(), StdError> {
+        if let Some(state) = self.inbound.as_mut() {
+            state.sse_conns.remove(&conn);
+        }
         Ok(())
     }
 }
@@ -628,48 +776,25 @@ impl Os for SandboxHost {
     }
 
     /// The scripted exec interpreter — a tiny fixed command set so exec-driving programs stay
-    /// in-oracle (the exec analogue of the Vfs / the inbound request script):
-    ///
-    /// - `echo <args…>` → status 0, stdout = the args joined with spaces + `\n`.
-    /// - `status <n> [message…]` → status `n`, stderr = the message + `\n` when present — the
-    ///   fixture for exercising failure paths.
-    /// - anything else → an `Io` error, like launching a missing binary on a real host.
+    /// in-oracle (the exec analogue of the Vfs / the inbound request script). See
+    /// [`SandboxHost::scripted_exec`] for the command set; the failure is worded for the `exec`
+    /// door here and for the `spawn` door in `os_try_spawn`.
     fn os_exec(&mut self, command: &str, args: &[String]) -> Result<ExecResult, StdError> {
-        match command {
-            "echo" => Ok(ExecResult {
-                status: 0,
-                stdout: format!("{}\n", args.join(" ")),
-                stderr: String::new(),
-            }),
-            "status" => {
-                let status = args
-                    .first()
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(0);
-                let message = args.get(1..).unwrap_or(&[]).join(" ");
-                Ok(ExecResult {
-                    status,
-                    stdout: String::new(),
-                    stderr: if message.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{message}\n")
-                    },
-                })
-            }
-            other => Err(StdError {
-                kind: ErrorKind::Io,
-                message: format!("exec: command not found: {other}"),
-            }),
-        }
+        self.scripted_exec("exec", command, args)
+            .map_err(noeta_ext_abi::os::OsError::into_std_error)
     }
 
     /// Spawn a scripted process: run the same fixed command set as `os_exec` **eagerly** (the
     /// sandbox has no real concurrency), store the outcome, and hand back a deterministic handle
-    /// id. An unknown command is an `Io` error at spawn, exactly as a real `Command::spawn` fails
-    /// for a missing binary.
-    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError> {
-        let result = self.os_exec(command, args)?;
+    /// id. An unknown command is an `OsError` at spawn, exactly as a real `Command::spawn` fails
+    /// for a missing binary — so `os.try_spawn` of a name the script does not know is a comparable,
+    /// in-oracle `Err(OsError)` and `os.spawn` of one is the same message as an abort.
+    fn os_try_spawn(
+        &mut self,
+        command: &str,
+        args: &[String],
+    ) -> Result<u64, noeta_ext_abi::os::OsError> {
+        let result = self.scripted_exec("spawn", command, args)?;
         let id = self.next_proc;
         self.next_proc += 1;
         self.procs.insert(
@@ -678,6 +803,13 @@ impl Os for SandboxHost {
                 result,
                 stdout_cursor: 0,
                 stderr_cursor: 0,
+                // The `dead` command models a child that is already gone, so its stdin is broken
+                // from the start; every other scripted child spawns writable.
+                stdin: if command == DEAD_SCRIPTED_COMMAND {
+                    ScriptedStdin::Broken
+                } else {
+                    ScriptedStdin::Open
+                },
             },
         );
         Ok(id)
@@ -764,26 +896,118 @@ impl Os for SandboxHost {
         ))
     }
 
-    /// The scripted commands don't read stdin, so a write is a validated no-op (the handle must
-    /// exist). `close_stdin` likewise no-ops. This keeps a stdin-feeding program deterministic and
-    /// terminating in-oracle.
-    fn os_proc_write_stdin(&mut self, handle: u64, _data: &str) -> Result<(), StdError> {
-        self.require_proc(handle)
+    /// The scripted commands don't read stdin, so a write to an **open** one is a validated no-op —
+    /// which keeps a stdin-feeding program deterministic and terminating in-oracle. The two failing
+    /// states are modelled, because they are the whole point of the recoverable `try_write` door:
+    /// writing after `close_stdin` is `stdin_closed` (the real host reports the same, its
+    /// `ChildStdin` having been dropped), and writing to a child spawned as `dead` is
+    /// `broken_pipe` — the scripted stand-in for a server that crashed mid-call.
+    fn os_proc_try_write_stdin(
+        &mut self,
+        handle: u64,
+        _data: &str,
+    ) -> Result<(), noeta_ext_abi::os::OsError> {
+        use noeta_ext_abi::os::{OsError, OsErrorKind};
+        let proc = self
+            .procs
+            .get(&handle)
+            .ok_or_else(|| OsError::unknown_process("write", handle))?;
+        match proc.stdin {
+            ScriptedStdin::Open => Ok(()),
+            ScriptedStdin::Closed => Err(OsError::new(
+                "write",
+                OsErrorKind::StdinClosed,
+                "the child's stdin is closed",
+            )),
+            ScriptedStdin::Broken => Err(OsError::new(
+                "write",
+                OsErrorKind::BrokenPipe,
+                "Broken pipe",
+            )),
+        }
     }
 
+    /// Close the scripted child's stdin. Idempotent, and it does not resurrect a `Broken` pipe.
     fn os_proc_close_stdin(&mut self, handle: u64) -> Result<(), StdError> {
-        self.require_proc(handle)
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_ext_abi::os::unknown_process_error(handle))?;
+        if proc.stdin == ScriptedStdin::Open {
+            proc.stdin = ScriptedStdin::Closed;
+        }
+        Ok(())
     }
 }
 
+/// The scripted command that models a child which is **already gone** — see
+/// [`SandboxHost::scripted_exec`].
+const DEAD_SCRIPTED_COMMAND: &str = "dead";
+
 impl SandboxHost {
-    /// Assert a scripted-process handle is live (else an `Io` error) — shared by the no-op stdin
-    /// operations.
+    /// Assert a scripted-process handle is live (else an `Io` error).
     fn require_proc(&self, handle: u64) -> Result<(), StdError> {
         if self.procs.contains_key(&handle) {
             Ok(())
         } else {
             Err(noeta_ext_abi::os::unknown_process_error(handle))
+        }
+    }
+
+    /// The scripted command set both `exec` and `spawn` run — a tiny fixed interpreter so
+    /// subprocess-driving programs stay in-oracle (the exec analogue of the Vfs / the inbound
+    /// request script):
+    ///
+    /// - `echo <args…>` → status 0, stdout = the args joined with spaces + `\n`.
+    /// - `status <n> [message…]` → status `n`, stderr = the message + `\n` when present — the
+    ///   fixture for exercising failure paths.
+    /// - `dead` → status 0, no output, and (when spawned) a stdin that is **broken from the
+    ///   start**: the fixture for a child that is already gone, so the recoverable write door's
+    ///   `Err` arm is reachable deterministically.
+    /// - anything else → an [`noeta_ext_abi::os::OsError`] classified `not_found`, like launching a
+    ///   missing binary on a real host.
+    ///
+    /// `op` names the door for the message, so a failure at `exec` and the same failure at `spawn`
+    /// each read as themselves.
+    fn scripted_exec(
+        &self,
+        op: &str,
+        command: &str,
+        args: &[String],
+    ) -> Result<ExecResult, noeta_ext_abi::os::OsError> {
+        use noeta_ext_abi::os::{OsError, OsErrorKind};
+        match command {
+            "echo" => Ok(ExecResult {
+                status: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            }),
+            "status" => {
+                let status = args
+                    .first()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let message = args.get(1..).unwrap_or(&[]).join(" ");
+                Ok(ExecResult {
+                    status,
+                    stdout: String::new(),
+                    stderr: if message.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{message}\n")
+                    },
+                })
+            }
+            DEAD_SCRIPTED_COMMAND => Ok(ExecResult {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            other => Err(OsError::new(
+                op,
+                OsErrorKind::NotFound,
+                format!("command not found: {other}"),
+            )),
         }
     }
 }
@@ -961,6 +1185,8 @@ impl Metrics for SandboxHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the assertions inspect a `StdError`'s kind, so the import lives here.
+    use crate::ErrorKind;
 
     /// The overlay pattern (audit-2 F7): a custom host overrides ONE capability by hand and
     /// forwards the rest to a wrapped base with `delegate_host!` — instead of ~70 hand-written
@@ -1326,6 +1552,150 @@ mod tests {
         let transcript = &host.inbound.as_ref().unwrap().transcript;
         assert_eq!(transcript.len(), script.len());
         assert_eq!(transcript[0].0, 0);
-        assert_eq!(transcript[2].1.body, b"re:POST");
+        // Each reply echoes its own request's method — checked against the script rather than at a
+        // fixed index, which would start naming a different request as soon as the script grows.
+        for (i, request) in script.iter().enumerate() {
+            assert_eq!(
+                transcript[i].1.body,
+                format!("re:{}", request.method).into_bytes(),
+                "reply {i}"
+            );
+        }
+    }
+
+    /// http-streaming arc — the outbound stream seam: a scripted body is decoded at open, handed
+    /// out frame by frame, and ends with `None`; `close` releases it and a closed (or unknown)
+    /// stream reads as ended rather than erroring.
+    #[test]
+    fn outbound_streams_hand_out_scripted_frames_then_end() {
+        use noeta_ext_abi::stream::Framing;
+
+        let mut host = SandboxHost::new();
+        let request = crate::NetRequest {
+            method: "GET".to_string(),
+            url: "https://x.test/stream/ndjson".to_string(),
+            headers: vec![],
+            body: vec![],
+            timeout_ms: None,
+        };
+        let stream = host
+            .net_stream_open(request.clone(), Framing::Ndjson)
+            .unwrap()
+            .stream;
+
+        let mut seen = Vec::new();
+        while let Some(frame) = host.net_stream_recv_next(stream).unwrap() {
+            seen.push(frame.data);
+        }
+        assert_eq!(seen, ["{\"n\":1}", "{\"n\":2}", "{\"n\":3}"]);
+        // Past the end it stays ended — what lets a `while` loop over `recv` terminate.
+        assert!(host.net_stream_recv_next(stream).unwrap().is_none());
+
+        // Two streams are independent cursors, and closing one does not disturb the other.
+        let a = host
+            .net_stream_open(request.clone(), Framing::Ndjson)
+            .unwrap()
+            .stream;
+        let b = host
+            .net_stream_open(request, Framing::Ndjson)
+            .unwrap()
+            .stream;
+        assert_ne!(a, b);
+        host.net_stream_recv_next(a)
+            .unwrap()
+            .expect("a's first frame");
+        host.net_stream_close(a).unwrap();
+        assert!(
+            host.net_stream_recv_next(a).unwrap().is_none(),
+            "a closed stream reads as ended, not as an error"
+        );
+        assert_eq!(
+            host.net_stream_recv_next(b).unwrap().map(|f| f.data),
+            Some("{\"n\":1}".to_string()),
+            "b's cursor is its own"
+        );
+        // Closing twice, and closing something never opened, are both fine.
+        host.net_stream_close(a).unwrap();
+        host.net_stream_close(9999).unwrap();
+    }
+
+    /// http-streaming arc — the inbound SSE seam: starting a stream marks the connection, every
+    /// write lands in the transcript verbatim, and closing releases it.
+    ///
+    /// The transcript is asserted against the wire bytes the ENCODER produces (rather than a
+    /// hand-written string) so this stays a test of the seam; the encoding itself is pinned
+    /// separately, against the decoder, in `noeta_ext_abi::stream`'s round-trip test.
+    #[test]
+    fn inbound_event_streams_record_what_the_handler_wrote() {
+        use noeta_ext_abi::stream::{Frame, sse_comment_wire};
+
+        let mut host = SandboxHost::new();
+        assert!(
+            host.sse_transcript().is_empty(),
+            "nothing is recorded before a listener exists"
+        );
+        host.net_listen("127.0.0.1:0").unwrap();
+        host.net_sse_start_now(3).unwrap();
+
+        let named = Frame::named("start", "go");
+        host.net_sse_send_now(3, &named.to_sse_wire()).unwrap();
+        host.net_sse_send_now(3, &sse_comment_wire("keepalive"))
+            .unwrap();
+
+        assert_eq!(
+            host.sse_transcript(),
+            [
+                (3, "event: start\ndata: go\n\n".to_string()),
+                (3, ": keepalive\n".to_string()),
+            ]
+        );
+        // Closing is idempotent, and closing something never started is fine.
+        host.net_sse_close_now(3).unwrap();
+        host.net_sse_close_now(3).unwrap();
+        host.net_sse_close_now(404).unwrap();
+        assert_eq!(
+            host.sse_transcript().len(),
+            2,
+            "closing writes nothing to the transcript"
+        );
+    }
+
+    /// The scripted stream body is a pure function of the request, so two hosts decode byte-identical
+    /// frames — the property the differential rests on.
+    #[test]
+    fn scripted_stream_bodies_are_deterministic_across_hosts() {
+        use noeta_ext_abi::stream::Framing;
+
+        let drain = |url: &str, framing| {
+            let mut host = SandboxHost::new();
+            let request = crate::NetRequest {
+                method: "GET".to_string(),
+                url: url.to_string(),
+                headers: vec![],
+                body: vec![],
+                timeout_ms: None,
+            };
+            let stream = host.net_stream_open(request, framing).unwrap().stream;
+            let mut frames = Vec::new();
+            while let Some(frame) = host.net_stream_recv_next(stream).unwrap() {
+                frames.push(frame);
+            }
+            frames
+        };
+        for (url, framing) in [
+            ("https://x.test/stream/sse", Framing::Sse),
+            ("https://x.test/stream/ndjson", Framing::Ndjson),
+            ("https://x.test/stream/lines", Framing::Lines),
+            ("https://x.test/stream/empty", Framing::Sse),
+            ("https://x.test/stream/truncated", Framing::Sse),
+        ] {
+            assert_eq!(drain(url, framing), drain(url, framing), "{url}");
+        }
+        // The truncated body yields only the frame that got its terminating blank line.
+        let truncated = drain("https://x.test/stream/truncated", Framing::Sse);
+        assert_eq!(truncated.len(), 1);
+        assert_eq!(truncated[0].data, "complete");
+        // An empty body yields nothing at all.
+        assert!(drain("https://x.test/stream/empty", Framing::Sse).is_empty());
     }
 }

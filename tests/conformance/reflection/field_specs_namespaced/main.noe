@@ -1,0 +1,52 @@
+// The turbofish reflection surfaces resolve their type to its **qualified** identity, so they agree
+// with the runtime-string surface under a `namespace`.
+//
+// Regression: the parser used to flatten `field_specs_of::<T>()`'s type into a string literal at
+// PARSE time — before the linker's namespace qualification, which rewrites type *references*. The
+// query then asked for the bare key `Todo` while the reflection registry holds `app.main.Todo`,
+// so `field_specs_of::<Todo>()` returned the EMPTY schema and `construct::<Todo>(…)` an `Err`, both
+// with no diagnostic at all: a silent wrong answer indistinguishable from a legitimately empty type.
+//
+// The dynamic surface is checked alongside on purpose. It takes a genuine runtime string, so
+// `field_specs_of("Todo")` must still mean the *string* `Todo` (0 fields — no type is registered
+// under that key here) even though `Todo` names a local type. Qualifying by sniffing the operand
+// would have made these two lines agree for the wrong reason.
+//
+// A `main.noe` on purpose: the harness runs a *single-file* case straight from source text, with no
+// loader and therefore no namespace qualification at all, so a bare `.noe` here could not observe the
+// bug it pins. Only a directory case goes through `noeta_loader::load` and the linker.
+// Its `noeta.toml` is what makes the case a package, and therefore what derives the entry's
+// module path: delete the manifest and nothing qualifies, silently.
+// expect: stdout "qualified identity: Type.Struct(app.main.Todo, [])"
+// expect: stdout "turbofish: 2"
+// expect: stdout "by qualified string: 2"
+// expect: stdout "by bare string: 0"
+// expect: stdout "construct turbofish: Ok"
+// expect: stdout "construct by qualified string: Ok"
+// expect: stdout "construct by bare string: Err"
+// expect: exit 0
+
+pub struct Todo {
+    pub id: int
+    pub title: string
+}
+
+t = Todo { id: 2, title: "x" }
+echo "qualified identity: ${type_of(t)}"
+
+echo "turbofish: ${field_specs_of::<Todo>().len()}"
+echo "by qualified string: ${field_specs_of("app.main.Todo").len()}"
+echo "by bare string: ${field_specs_of("Todo").len()}"
+
+fields: Map<string, dyn> = {"id": 1, "title": "a"}
+
+fn verdict(r: Result<dyn, string>): string {
+    return match r {
+        Ok(_) => "Ok",
+        Err(_) => "Err",
+    }
+}
+
+echo "construct turbofish: ${verdict(construct::<Todo>(fields))}"
+echo "construct by qualified string: ${verdict(construct("app.main.Todo", fields))}"
+echo "construct by bare string: ${verdict(construct("Todo", fields))}"

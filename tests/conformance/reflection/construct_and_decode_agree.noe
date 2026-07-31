@@ -1,0 +1,84 @@
+// `construct` and a JSON decode must answer the SAME question the same way: which of a struct's
+// fields may be omitted? Both read the one optionality the declaration states — a field with a
+// default (or a `?T`) may be left out — so a body that builds through `construct(name, fields)` and a
+// body that arrives as JSON accept the same documents. (They disagreed once: a decode reported a
+// defaulted field as missing, which 400'd request bodies whose struct declared a default.)
+//
+// The test drives both doors from the SAME table: for each field `field_specs_of` reports, drop that
+// field and ask each door whether the rest is enough. `optional` and the two answers must line up.
+// The one documented exception is a default that is not a literal — `construct` runs its compiled
+// thunk, a decode is pure data and has none — and the last two lines pin exactly that.
+// expect: stdout "port optional=false construct=err decode=err"
+// expect: stdout "host optional=true construct=ok decode=ok"
+// expect: stdout "verbose optional=true construct=ok decode=ok"
+// expect: stdout "all present: 8080/example.com/true"
+// expect: stdout "dynamic default: optional=true construct=ok decode=err"
+// expect: stdout "decode says: missing field `tag` for `Note`: its default is not a literal, so a JSON decode cannot fill it"
+// expect: exit 0
+use std.json
+
+@derive(Deserialize<Json>)
+struct ServerOpts {
+    port: int
+    host: string = "localhost"
+    verbose: bool = false
+}
+
+// Every field, by name — the document/field map both doors are driven from.
+fn all_fields(): Map<string, dyn> {
+    mut m: Map<string, dyn> = {}
+    m["port"] = 8080
+    m["host"] = "example.com"
+    m["verbose"] = true
+    return m
+}
+
+fn verdict(r: Result<dyn, dyn>): string {
+    return match r {
+        Ok(_) => "ok",
+        Err(_) => "err",
+    }
+}
+
+for spec in field_specs_of::<ServerOpts>() {
+    fields = all_fields().remove(spec.name)
+    built = verdict(construct::<ServerOpts>(fields))
+    decoded = verdict(json.decode_typed("ServerOpts", json.stringify(fields)))
+    echo "${spec.name} optional=${spec.optional} construct=${built} decode=${decoded}"
+}
+
+// And with nothing dropped, both doors build the same value.
+fn render(r: Result<dyn, dyn>): string {
+    return match r {
+        Ok(v) => rendered(v.as<ServerOpts>() ?? ServerOpts { port: 0 }),
+        Err(e) => "${e}",
+    }
+}
+
+fn rendered(o: ServerOpts): string {
+    return "${o.port}/${o.host}/${o.verbose}"
+}
+
+echo "all present: " ~ render(construct::<ServerOpts>(all_fields()))
+
+// --- the one documented divergence ----------------------------------------------------------
+fn tag_default(): string {
+    return "auto"
+}
+
+@derive(Deserialize<Json>)
+struct Note {
+    body: string
+    tag: string = tag_default()
+}
+
+mut body_only: Map<string, dyn> = {}
+body_only["body"] = "hi"
+tag_spec = field_specs_of::<Note>()[1]
+built_note = verdict(construct::<Note>(body_only))
+decoded_note = json.decode_typed("Note", json.stringify(body_only))
+echo "dynamic default: optional=${tag_spec.optional} construct=${built_note} decode=${verdict(decoded_note)}"
+echo match decoded_note {
+    Ok(_) => "decode says: unexpectedly ok",
+    Err(e) => "decode says: ${e}",
+}
