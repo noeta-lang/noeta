@@ -32,7 +32,7 @@ Most codes are decided before your program runs, so [`noeta check`](The-CLI#noet
 | `E0006` | Assignment to an immutable binding — one not declared `mut`. | [Syntax Basics](Syntax-Basics#bindings-and-mutability) |
 | `E0019` | A `use` names something the module does not export, or exports without `pub`. | [Modules](Modules#visibility--pub) |
 | `E0020` | An imported name collides with another top-level name in the file. | [Modules](Modules#qualified-references) |
-| `E0046` | A declaration binds a reserved prelude name — `Ok`, `Err`, `some`, `none`, `panic`, `assert`. | — |
+| `E0046` | A name is already spoken for — a reserved word (any keyword, `true`/`false`, or a reflection primitive such as `type_name`), or one of the prelude names `Ok`, `Err`, `some`, `none`, `panic`, `assert`. | [Syntax Basics](Syntax-Basics#reserved-words) |
 | `E0049` | A declaration binds a reserved native type name, such as `Uuid` or `Iterator`. | — |
 | `E0059` | A binder reuses a name already meaning something in scope. One name, one meaning, per scope stack. | [Syntax Basics](Syntax-Basics#bindings-and-mutability) |
 

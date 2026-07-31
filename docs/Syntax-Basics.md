@@ -127,6 +127,33 @@ count: int = 3
 
 **There is no shadowing** — one name means one thing per scope stack: a binder (closure parameter, `for` variable, match-pattern binding) may not reuse a name already bound in a scope it can see (E0059), a binding may not reuse an imported name (E0020), and a plain `name = expr` never introduces a second binding — the first use in a scope declares it, and a later one reassigns it (E0006 if immutable, E0007 if the type would change). Named functions stay ergonomic because they are **sealed** — their bodies don't see surrounding value bindings, so their parameters conflict with nothing (see [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause)).
 
+### Reserved words
+
+A name has to be one the language has not already taken. The reserved words are the keywords of the grammar (`fn`, `for`, `match`, `mut`, `struct`, `use`, `is`, `in`, …), the two boolean literals `true`/`false`, the reflection primitives (`type_of`, `type_name`, `fields_of`, `field_specs_of`, `variants_of`, `construct`, `invoke`, `params_of`, `returns_of`, `roles_of`, `traits_of`, `attributes_of`, `from_bytes`), and the six prelude names `Ok`, `Err`, `some`, `none`, `panic`, `assert`. None of them can be bound — not as a parameter, a binding, a `for` variable, a closure parameter, a pattern binding, a field, a type, a generic parameter, or a function name.
+
+Writing one where a name belongs is **E0046**, and the message names the word and what took it:
+
+```noeta error
+fn field_help(type_name: string, field: string): string {
+    return type_name ~ "." ~ field
+}
+```
+
+```text
+[E0046] Error: `type_name` cannot be used as a name — it is one of the reflection primitives,
+        reserved by the language so it means one thing everywhere it appears
+   ╭─[ app.noe:1:15 ]
+   │
+ 1 │ fn field_help(type_name: string, field: string): string {
+   │               ────┬────
+   │                   ╰────── `type_name` is reserved
+   │
+   help: rename it to `type_name_`
+───╯
+```
+
+The reflection primitives are keywords for a specific reason: each has a call form — `type_name::<T>()`, `construct(name, fields)` — that a *user* function of the same name would be indistinguishable from at the call site, so the name cannot be shared.
+
 **Compound assignment** `name OP= expr` desugars to `name = name OP expr` for `+= -= *= /= %= ~=`:
 
 ```noeta
