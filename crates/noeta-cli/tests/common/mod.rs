@@ -26,8 +26,13 @@ pub fn get(addr: &str, path: &str) -> Result<String, String> {
 /// Open a websocket: HTTP upgrade with the RFC §1.3 example key, asserting the pinned accept.
 pub fn ws_connect(addr: &str, path: &str) -> Result<TcpStream, String> {
     let mut stream = TcpStream::connect(addr).map_err(|e| e.to_string())?;
+    // Generous on purpose. These tests assert WHAT the server pushes, never how fast — but a read
+    // timeout surfaces as `Resource temporarily unavailable`, which reads exactly like a missing
+    // frame and has repeatedly sent people diagnosing a real bug. A developer machine building
+    // another crate (or a loaded CI runner) can push a swap past a few seconds without anything
+    // being wrong, so the bound is here only to stop a hung test from hanging forever.
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|e| e.to_string())?;
     stream
         .write_all(

@@ -62,12 +62,33 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 /// back to the system temp dir if the path is shorter than expected (it never is for a cargo-built
 /// test binary); the per-process subdirectory below keeps even that fallback collision-free.
 fn shared_root() -> PathBuf {
-    std::env::current_exe()
+    let under_target = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.ancestors().nth(3).map(Path::to_path_buf))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("tmp")
-        .join("noeta-tests")
+        .map(|target| target.join("tmp").join("noeta-tests"));
+    match under_target {
+        // A fixture root may not contain a HIDDEN path component, and the reason is product
+        // behavior, not tidiness: watch-mode fixtures drive `noeta serve --watch`, whose watcher
+        // deliberately ignores every path under a dot-directory (`watch.rs::relevant_path` — that is
+        // where build caches churn). Rooting fixtures beside the build artifacts therefore breaks
+        // the moment the build directory is itself hidden — `CARGO_TARGET_DIR=~/.cargo-targets/…`,
+        // a common per-worktree convention — and the watcher then sees NOTHING a test writes. The
+        // hot suites fail with "the edit never hot-swapped in" or block in a socket read, identically
+        // to a real regression, no matter what the code under test does. Cost us most of an
+        // afternoon; the fallback is the system temp dir, not hidden by construction.
+        Some(root) if !has_hidden_component(&root) => root,
+        _ => std::env::temp_dir().join("noeta-tests"),
+    }
+}
+
+/// Whether any component of `path` is a dot-directory, matching the watcher's own rule (`.` and
+/// `..` are not hidden; `.git` and `.cargo-targets` are).
+fn has_hidden_component(path: &Path) -> bool {
+    path.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|s| s.starts_with('.') && s.len() > 1 && s != "..")
+    })
 }
 
 /// This process's fixture root, created once: `p<pid>.<test binary>`. The binary's name rides along
@@ -247,6 +268,26 @@ pub fn unique_path(name: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    /// The rule the fixture root must satisfy, pinned so it cannot regress: no hidden component.
+    /// A hidden one makes every watch-driven test blind (see `shared_root`).
+    #[test]
+    fn the_fixture_root_is_never_under_a_hidden_directory() {
+        assert!(
+            !has_hidden_component(&shared_root()),
+            "fixture root {} has a hidden component — watch-mode tests would see no file events",
+            shared_root().display()
+        );
+    }
+
+    #[test]
+    fn hidden_components_are_recognized_the_way_the_watcher_recognizes_them() {
+        assert!(has_hidden_component(Path::new("/home/u/.cargo-targets/x/tmp")));
+        assert!(has_hidden_component(Path::new("/a/.git/b")));
+        assert!(!has_hidden_component(Path::new("/tmp/noeta-tests")));
+        // `.` and `..` are path syntax, not hidden directories.
+        assert!(!has_hidden_component(Path::new("./a/../b")));
+    }
     use super::*;
 
     /// Two fixtures asked for under the same name are still two directories — the property the whole
