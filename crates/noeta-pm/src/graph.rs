@@ -778,6 +778,9 @@ impl Walker<'_> {
             .map_err(|err| err.map_msg(|m| format!("dependency `{key}`: {m}")))?;
         let identity = {
             let pkg = package_of(&child_manifest, key, &dir)?;
+            // The declared tree is what a `package = …` claim is about — check it here, before a
+            // `[patch]` can swap `dir` out from under it.
+            check_declared_identity(key, dep, &pkg.name, &dir)?;
             format!("{}/{}", pkg.name.company, pkg.name.package)
         };
         // Dev-time path override (`[patch]`): the ROOT manifest re-points this identity at a local
@@ -928,8 +931,8 @@ impl Walker<'_> {
         base_dir: &Path,
     ) -> Result<(PathBuf, ResolvedSource, Option<String>), PmError> {
         let memo_key = match dep {
-            Dependency::Path { path } => format!("path:{}", base_dir.join(path).display()),
-            Dependency::Git { url, git_ref } => format!("git:{url}@{}", git_ref.lock_key()),
+            Dependency::Path { path, .. } => format!("path:{}", base_dir.join(path).display()),
+            Dependency::Git { url, git_ref, .. } => format!("git:{url}@{}", git_ref.lock_key()),
             Dependency::Registry {
                 package: Some(p), ..
             } => format!("reg:{}/{}", p.company, p.package),
@@ -955,7 +958,7 @@ impl Walker<'_> {
         base_dir: &Path,
     ) -> Result<(PathBuf, ResolvedSource, Option<String>), PmError> {
         match dep {
-            Dependency::Path { path } => {
+            Dependency::Path { path, .. } => {
                 // Canonicalize the joined directory so module names/spans (and the editor URIs built
                 // from them) are clean absolute paths, not `…/app/../dep/…`. The manifest-relative
                 // `path` is kept verbatim in the lock entry.
@@ -965,7 +968,7 @@ impl Walker<'_> {
                 // walk hashes it fresh each resolve.
                 Ok((dir, ResolvedSource::Path { path: path.clone() }, None))
             }
-            Dependency::Git { url, git_ref } => self.fetch_git(key, url, git_ref, None, None),
+            Dependency::Git { url, git_ref, .. } => self.fetch_git(key, url, git_ref, None, None),
             // A scope is a group of member packages, not a single source — [`Walker::walk`] and
             // [`Walker::gather`] expand it into its members before ever materializing, so a bare
             // scope never reaches here.
@@ -1476,6 +1479,7 @@ impl Walker<'_> {
                         dir.display()
                     ))
                 })?;
+                check_declared_identity(key, dep, &pkg.name, &dir)?;
                 let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
                 // Dev-time path override (`[patch]`): the patched tree (seeded by
                 // `gather_patches`) is the sole candidate for this identity — the declared tree's
@@ -2223,6 +2227,40 @@ fn package_of<'m>(
     })
 }
 
+/// Verify the identity a **non-registry** dependency claims against the tree it actually points at.
+///
+/// A `package = "company/pkg"` on a `path`/`git` entry selects nothing — the source already picked
+/// the tree. It is documentation, and on a scope-array member it is documentation that earns its
+/// place: `{ path = "../..", package = "para/ai" }` says *which* package of the `para` scope this
+/// member is, which the path alone does not. Keeping it therefore obliges us to check it; an
+/// unverified claim is a comment that can lie, and a manifest naming a package its path does not
+/// contain would build happily while reading as though it did.
+///
+/// **A target with no `[package]` table** never reaches a mismatch here, by construction: a path/git
+/// dependency's identity *and* its namespace root both come from that table, so both entry points
+/// ([`Walker::gather_one`] and [`Walker::walk_one`]) already refuse such a tree whether or not a
+/// claim was written. This check deliberately runs *after* the identity is read, so that case is
+/// reported as the missing table — the actionable fact — rather than as a mismatch against nothing.
+fn check_declared_identity(
+    key: &str,
+    dep: &Dependency,
+    actual: &crate::manifest::PackageName,
+    dir: &Path,
+) -> Result<(), PmError> {
+    let Some(claimed) = dep.declared_package() else {
+        return Ok(());
+    };
+    if claimed == actual {
+        return Ok(());
+    }
+    Err(PmError::Manifest(format!(
+        "dependency `{key}` declares `package = \"{claimed}\"`, but the package at `{}` is \
+         `{actual}` — on a path/git dependency `package` is a claim about the tree the source \
+         points at, and it is checked; correct the identity or point the source at `{claimed}`",
+        dir.display()
+    )))
+}
+
 /// The stderr warning for a `[patch]`ed tree whose version fails a requirement the dependency
 /// graph imposes on that identity. **Warn, never error** — the documented semantics: a dev
 /// override means the developer knows best (they are typically mid-version-bump, testing
@@ -2322,6 +2360,107 @@ mod tests {
             graph.packages.iter().all(|p| p.key() == "acme"),
             "and they share the one root they were listed under"
         );
+    }
+
+    #[test]
+    fn a_path_dependencys_package_claim_is_verified() {
+        // `package` on a path/git dependency selects nothing — the source already did. It is a claim
+        // about the tree, and it is CHECKED: a claim that matches resolves as if it were absent, one
+        // that disagrees is a manifest error naming both identities and the path, and no claim at
+        // all is the ordinary spelling. Before this, the key was dropped at parse time, so a
+        // manifest could name a package its path did not contain and still build.
+
+        // Absent — the baseline.
+        let (_absent, app) = path_dep_fixture("claim_absent");
+        resolve_graph(&app.join("main.noe")).expect("no claim resolves");
+
+        // Matching — accepted, and the identity is still the tree's own.
+        let (_match, app) = path_dep_fixture("claim_match");
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nlib = { path = \"../lib\", package = \"acme/lib\" }\n",
+        )
+        .unwrap();
+        let graph = resolve_graph(&app.join("main.noe")).expect("a true claim resolves");
+        assert_eq!(graph.packages.len(), 1);
+        assert_eq!(graph.packages[0].root, "lib");
+        assert!(graph.locked.iter().any(|l| l.identity == "acme/lib"));
+
+        // Mismatched — refused, naming what was claimed, what is actually there, and where.
+        let (_wrong, app) = path_dep_fixture("claim_mismatch");
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nlib = { path = \"../lib\", package = \"totally/wrong\" }\n",
+        )
+        .unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("a false claim is refused");
+        let msg = err.message().to_string();
+        assert!(msg.contains("totally/wrong"), "names the claim: {msg}");
+        assert!(msg.contains("acme/lib"), "names the real identity: {msg}");
+        assert!(msg.contains("lib"), "names the source: {msg}");
+        assert!(msg.contains("`lib`"), "names the dependency key: {msg}");
+    }
+
+    #[test]
+    fn a_scope_members_package_claim_is_verified() {
+        // The form the claim exists for: on a scope-array member the path alone cannot say which
+        // package of the scope the member is, so the identity is documentation worth writing — and
+        // therefore worth checking. One member's wrong claim fails the whole resolve.
+        let (_fixture, app) = path_dep_fixture("claim_scope_member");
+        let other = app.parent().unwrap().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("noeta.toml"),
+            "[package]\nname = \"acme/other\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(other.join("other.noe"), "pub fn two(): int { return 2; }\n").unwrap();
+
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nacme = [ { path = \"../lib\", package = \"acme/lib\" }, \
+             { path = \"../other\", package = \"acme/other\" } ]\n",
+        )
+        .unwrap();
+        let graph = resolve_graph(&app.join("main.noe")).expect("true claims resolve");
+        assert_eq!(graph.packages.len(), 2);
+
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nacme = [ { path = \"../lib\", package = \"acme/lib\" }, \
+             { path = \"../other\", package = \"acme/lib\" } ]\n",
+        )
+        .unwrap();
+        let err =
+            resolve_graph(&app.join("main.noe")).expect_err("a false member claim is refused");
+        assert!(
+            err.message().contains("acme/other"),
+            "names the member's real identity: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn a_dependency_with_no_package_table_is_refused_as_such() {
+        // The decided answer for a target with NO `[package]` table: it is already refused, because
+        // a path/git dependency's identity and namespace root both come from that table. The claim
+        // check runs after the identity is read, so this reports the missing table — the actionable
+        // fact — rather than a mismatch against nothing. Claim or no claim, one message.
+        let (_fixture, app) = path_dep_fixture("claim_no_package_table");
+        let lib = app.parent().unwrap().join("lib");
+        std::fs::write(lib.join("noeta.toml"), "[targets.dev.tiers]\ntest = true\n").unwrap();
+        for entry in [
+            "[dependencies]\nlib = { path = \"../lib\" }\n",
+            "[dependencies]\nlib = { path = \"../lib\", package = \"acme/lib\" }\n",
+        ] {
+            std::fs::write(app.join("noeta.toml"), entry).unwrap();
+            let err = resolve_graph(&app.join("main.noe")).expect_err("no identity to resolve");
+            assert!(
+                err.message().contains("no `[package]` table"),
+                "reports the missing table, not the claim: {}",
+                err.message()
+            );
+        }
     }
 
     #[test]
