@@ -1,0 +1,37 @@
+// A `Result<void, E>`'s `Ok()` carries no payload element, and `Ok(_)` / `Ok(v)` ask for one. The
+// two are the same value and must agree: `?` already reads a payload-less `Ok` as `unit`, so a
+// `match` that refused it would fall off the end of an exhaustive-looking match with E0007 — a
+// failure the checker cannot see, on the single most common shape a validator returns.
+//
+// The leniency is confined to `Result`. For a declared enum, `Case` and `Case(x)` are the author's
+// own distinction, so the last two lines assert the arity check is still exact there; `Option`
+// cannot reach it at all, because a payload-less `some()` is refused where it is written.
+// expect: stdout "bound"
+// expect: stdout "wildcard"
+// expect: stdout "arity0"
+// expect: stdout "err nope"
+// expect: stdout "payload 7"
+// expect: stdout "bare"
+// expect: stdout "fell through"
+// expect: exit 0
+fn done(): Result<void, string> {
+    return Ok();
+}
+
+fn failed(): Result<void, string> {
+    return Err("nope");
+}
+
+enum Mood {
+    Happy
+    Sad(why: string)
+}
+
+echo match done() { Ok(v) => "bound", Err(e) => "err ${e}" };
+echo match done() { Ok(_) => "wildcard", Err(e) => "err ${e}" };
+echo match done() { Ok() => "arity0", Err(e) => "err ${e}" };
+echo match failed() { Ok(_) => "ok", Err(e) => "err ${e}" };
+echo match Ok(7) { Ok(n) => "payload ${n}", Err(e) => "err ${e}" };
+
+echo match Mood.Happy { Mood.Happy => "bare", Mood.Sad(w) => "sad ${w}" };
+echo match Mood.Happy { Mood.Happy(x) => "wrong arity matched", _ => "fell through" };

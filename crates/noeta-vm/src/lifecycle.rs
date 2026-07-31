@@ -236,6 +236,21 @@ pub(crate) fn try_classify(v: Value) -> Option<TryOutcome> {
     }
 }
 
+/// Whether a variant pattern asking for one binding may match a **payload-less** built-in `Result`
+/// value by supplying `unit`.
+///
+/// `Ok()` on a `Result<void, E>` — which is what every `impl Validate` returns — builds an enum with
+/// no payload element, while the pattern `Ok(_)` (and `Ok(v)`) asks for one. Without this, the two
+/// spellings of the same value disagree: `x?` unwraps it happily ([`try_classify`] already
+/// substitutes `unit` on exactly this shape), and `match x { Ok(_) => …, Err(e) => … }` falls off
+/// the end of an exhaustive-looking match with E0007 at run time — a failure the checker cannot see
+/// and the reader cannot explain. Restricted to the two built-in carriers because for a *declared*
+/// enum the arity is the author's own distinction: `Part.Text` and `Part.Text(t)` are different
+/// cases, and a lenient match there would be a real bug.
+pub(crate) fn unit_payload_match(builtin_carrier: bool, data_len: usize, arity: usize) -> bool {
+    builtin_carrier && data_len == 0 && arity == 1
+}
+
 /// The **nominal runtime tag** a value carries, if any: a shape's name (user struct/class/enum)
 /// or an extern value's qualified identity — the key the trait-membership table
 /// (`ReflectionInfo::trait_impls`) and `traits_of` use. `None` for every non-nominal value

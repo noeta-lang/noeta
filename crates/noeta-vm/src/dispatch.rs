@@ -3314,13 +3314,22 @@ impl<'m> Vm<'m> {
                         fail,
                     } => {
                         let v = regs[fbase + *src as usize];
+                        let builtin_carrier =
+                            v.shape().is_some_and(|s| s.name.as_str() == "Result");
                         let matches = v.is_enum()
                             && v.shape().is_some_and(|shape| {
                                 shape.variant.as_deref() == Some(module.name(*variant))
                                     && type_name
                                         .is_none_or(|t| module.name(t) == shape.name.as_str())
                             })
-                            && v.enum_data().is_some_and(|d| d.len() == *arity as usize);
+                            && v.enum_data().is_some_and(|d| {
+                                d.len() == *arity as usize
+                                    || crate::lifecycle::unit_payload_match(
+                                        builtin_carrier,
+                                        d.len(),
+                                        *arity as usize,
+                                    )
+                            });
                         if matches {
                             pc += 1;
                         } else {
@@ -3341,8 +3350,13 @@ impl<'m> Vm<'m> {
                         }
                     }
                     Op::ExtractField { dst, src, index } => {
-                        let element =
-                            regs[fbase + *src as usize].enum_data().unwrap()[*index as usize];
+                        // Past the end only on the `unit_payload_match` path — a payload-less `Ok()`
+                        // reached through an `Ok(v)` pattern — where the payload is `void` and `unit`
+                        // is the whole of it.
+                        let element = regs[fbase + *src as usize]
+                            .enum_data()
+                            .and_then(|d| d.into_iter().nth(*index as usize))
+                            .unwrap_or_else(Value::unit);
                         retain(element);
                         set_reg(regs, fbase, *dst, element);
                         pc += 1;
