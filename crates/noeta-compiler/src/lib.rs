@@ -42,6 +42,7 @@
 //! graph-coloring allocator in [`regalloc`] — see that module's header for its three safety
 //! invariants.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use noeta_ast::{BinaryOp, Program, TypeRef};
@@ -252,6 +253,47 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
     compile_with(program, checked.sites, CompileOptions::default())
 }
 
+/// Install the checker's full-fidelity `type_of` map into the compiler's ([`Policy::MergeByKey`]).
+///
+/// The one place the *ownership* difference between the two kinds of caller is spent: a
+/// whole-program compile owns its bundle, so the map is MOVED out of it (no clone tax on
+/// `noeta run`); a session install borrows the session checker's accumulated bundle, so it is
+/// cloned. Both end in the same merge, so neither caller can accidentally get the other's
+/// *semantics* — only its allocation behaviour.
+fn take_type_of_sites(
+    sites: Option<&mut Cow<'_, Sites>>,
+    dst: &mut HashMap<Span, noeta_ast::reflect::TypeRepr>,
+) {
+    let Some(sites) = sites else { return };
+    match sites {
+        Cow::Owned(owned) => {
+            let incoming = std::mem::take(&mut owned.type_of_sites);
+            if dst.is_empty() {
+                *dst = incoming;
+            } else {
+                dst.extend(incoming);
+            }
+        }
+        Cow::Borrowed(shared) => dst.extend(
+            shared
+                .type_of_sites
+                .iter()
+                .map(|(span, repr)| (*span, repr.clone())),
+        ),
+    }
+}
+
+/// The checker's decode recipes, moved out of an owned bundle and cloned out of a borrowed one —
+/// see [`take_type_of_sites`] for why the split exists.
+fn take_deserialize_recipes(
+    sites: &mut Cow<'_, Sites>,
+) -> Vec<(String, noeta_ext_abi::TypeRecipe)> {
+    match sites {
+        Cow::Owned(owned) => std::mem::take(&mut owned.deserialize_recipes),
+        Cow::Borrowed(shared) => shared.deserialize_recipes.clone(),
+    }
+}
+
 /// Convert the checker's destructor-relevance into the drop pass's form (identical sets; the two
 /// crates keep separate types so `noeta-ir-passes` needs no checker dependency).
 fn passes_relevance(r: &noeta_check::DestructorRelevance) -> noeta_ir_passes::Relevance {
@@ -295,69 +337,13 @@ pub fn compile_with(
     sites: noeta_check::Sites,
     opts: CompileOptions,
 ) -> Result<Module, Unsupported> {
-    let relevance = Some(passes_relevance(&sites.destructor_relevance));
-    let destruct_reachable = sites
-        .destructor_relevance
-        .reachable_types
-        .iter()
-        .cloned()
-        .collect();
-    compile_inner(program, sites, relevance, destruct_reachable, opts)
-}
-
-// Threads the checker's site bundle plus the pre-converted relevance through to the IR lowering,
-// then MOVES the compiler's tables into the `Module` (the production finisher — no clone tax on
-// `noeta run`). The session path (`compile_with_sites_session`) shares `compile_to_mc` and keeps
-// the compiler alive instead.
-fn compile_inner(
-    program: &Program,
-    sites: noeta_check::Sites,
-    relevance: Option<noeta_ir_passes::Relevance>,
-    destruct_reachable: Vec<String>,
-    opts: CompileOptions,
-) -> Result<Module, Unsupported> {
-    let native_roles = opts.registry.native_roles();
-    let native_traits = noeta_ir::native_trait_impls(opts.registry);
-    let mut reflection = noeta_ast::reflect::build(program, &native_roles, &native_traits);
-    // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
-    // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
-    // registry now, not the AST.
-    noeta_check::extend_reflection(&mut reflection);
-    let (module, map_packed_sites) = compile_to_mc(program, sites, relevance, opts)?;
-    Ok(Module {
-        protos: module.protos,
-        shapes: module.shapes,
-        packed_schemas: module.packed_schemas,
-        map_packed_sites,
-        methods: module.methods,
-        destructors: module.destructors,
-        field_defaults: module.field_defaults,
-        comparable_derives: module.comparable_derives,
-        tojson_derives: module.tojson_derives,
-        deserialize_recipes: module.deserialize_recipes,
-        type_args: module.type_args,
-        type_arg_reprs: module.type_arg_reprs,
-        destruct_reachable,
-        cache_slots: module.cache_slots,
-        // The attribute manifest + type registry, built from the AST by the *same* pure builder the
-        // tree-walker uses — so reflection is identical across backends by construction.
-        reflection,
-        type_reprs: module.type_reprs,
-        names: module.names,
-        // Map each top-level value binding to its slot — debug compiles only, so a release module
-        // carries none (goldens/bundles unchanged). Its slot exists because the binding emits a
-        // `StoreGlobal`; a binding the checker proved dead and elided simply has no slot and drops.
-        global_bindings: if module.debug {
-            module
-                .module_binding_names
-                .iter()
-                .filter_map(|name| module.global_slots.get(name).copied().map(GlobalId))
-                .collect()
-        } else {
-            Vec::new()
-        },
-        global_names: module.global_names,
-    })
+    // A whole-program compile is [`SessionCompiler::install`] onto an EMPTY compiler — the same
+    // pipeline, the same tables, in the same order as a session install; see that method for why
+    // there is no second copy of it. The tables are then MOVED into the `Module` (the production
+    // finisher — no clone tax on `noeta run`); the session path snapshots instead.
+    let mut compiler = SessionCompiler::empty(opts.debug, opts.registry);
+    let reachable = compiler.install(program, Some(Cow::Owned(sites)), opts.real_isolates)?;
+    Ok(compiler.into_module(reachable))
 }
 
 /// Compile a whole **checked** program and keep the compiler alive as a [`SessionCompiler`] — the
@@ -415,199 +401,124 @@ pub fn compile_session_with(
     sites: noeta_check::Sites,
     opts: CompileOptions,
 ) -> Result<(Module, SessionCompiler), Unsupported> {
-    let relevance = Some(passes_relevance(&sites.destructor_relevance));
-    let destruct_reachable: Vec<String> = sites
-        .destructor_relevance
-        .reachable_types
-        .iter()
-        .cloned()
-        .collect();
-    let native_roles = opts.registry.native_roles();
-    let native_traits = noeta_ir::native_trait_impls(opts.registry);
-    let mut reflection = noeta_ast::reflect::build(program, &native_roles, &native_traits);
-    // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
-    // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
-    // registry now, not the AST.
-    noeta_check::extend_reflection(&mut reflection);
-    // Read before `opts` moves into the compile: the launch program's facts seed the session.
-    let facts = noeta_ir::ProgramFacts::of(program, opts.registry);
-    let (mc, map_packed_sites) = compile_to_mc(program, sites, relevance, opts)?;
-    let session = SessionCompiler {
-        mc,
-        // The launch compile's own map-packed pairs join the session accumulation: a program
-        // function's `map(...)` resolves its span at run time, so every later snapshot must
-        // carry them (session-checker C5).
-        map_packed: map_packed_sites.clone(),
-        reflection,
-        // Seeded from the launch program: everything lowering derives from the whole program, which
-        // a fragment swapped in later carries only a piece of (an imported package's `@tier`
-        // declaration, an unchanged `use`, the module's own global names).
-        facts,
-    };
-    let module = session.snapshot(map_packed_sites, destruct_reachable);
-    Ok((module, session))
+    // Identical to [`compile_with`] up to the finisher: the same install onto an empty compiler,
+    // then a *snapshot* (the tables — and the launch program's facts, map-packed pairs and
+    // reflection — stay alive for the session's later installs) instead of a move.
+    let mut compiler = SessionCompiler::empty(opts.debug, opts.registry);
+    let reachable = compiler.install(program, Some(Cow::Owned(sites)), opts.real_isolates)?;
+    let module = compiler.snapshot(reachable);
+    Ok((module, compiler))
 }
 
-// The core of the checked compile: lower the program (with the checker's site maps) and compile it
-// into a live [`ModuleCompiler`], returning the compiler plus the interned `map(...)`-result packed
-// pairs. Shared by [`compile_inner`] (which moves the tables into a `Module`) and
-// [`compile_with_sites_session`] (which keeps the compiler alive and snapshots).
-fn compile_to_mc(
-    program: &Program,
-    sites: noeta_check::Sites,
-    relevance: Option<noeta_ir_passes::Relevance>,
-    // What varies the compile (isolate lowering, debug info, extension registry) — see the field
-    // docs on [`CompileOptions`]. `debug` is threaded onto `ModuleCompiler` and read at
-    // `into_chunk`/`declare_local`; the registry is stored there too and passed to lowering.
-    opts: CompileOptions,
-) -> Result<(ModuleCompiler, Vec<(Span, u32)>), Unsupported> {
-    let CompileOptions {
-        real_isolates,
-        debug,
-        registry,
-    } = opts;
-    // `sites` stays whole through lowering (`lowering_sites!` is THE one projection); the owned
-    // maps the compiler keeps (`type_of`, `map_packed`, `deserialize_recipes`) move out afterwards.
-
-    // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) so the surface
-    // pass-1 (`register_types`) and the IR pass-2 (`compile_methods`) agree on the method set. The
-    // helper is idempotent, so the lowering below re-hoisting is a no-op; rebinds only when such an
-    // impl exists.
-    //
-    // Against **this compile's** registry, not the process default: a native derive recipe
-    // (`ExtDerive`, derive layer 4) is what the hoist materializes, and an embed session's own
-    // extensions live only in its assembled registry. Resolving against the default instead meant
-    // the checker accepted `@derive(<session recipe>)` — it reads the session registry — while the
-    // hoist synthesized nothing, and `compile_methods` then panicked on the missing prototype
-    // ("no entry found for key"). The registry-threaded entry point existed for exactly this and
-    // had no caller.
-    let hoisted = noeta_ir::hoist_impl_methods_with_registry(program, Some(registry));
-    let program: &Program = hoisted.as_ref().unwrap_or(program);
-    // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
-    // lowering the IR interpreter consumes, so both backends execute one program (Phase 2). The
-    // precise-RC drop-insertion pass (Phase 3) annotates the IR with `DropVar`s at last-use death
-    // points; they lower to plain releases (prompt reclamation, no destructor) so this is
-    // behavior-neutral, reclaiming a local's value at its last use instead of at frame teardown.
-    // Lower with the checker's site maps: the `List<packed>` map streams packed-list literals into a
-    // flat buffer (P-PACK 2.5; the resolved layout rides on the IR rvalue, so the bytecode compiler
-    // reads it from there at `PackedListNew` and needs no separate span map of its own), and the
-    // index-field set fuses `list[i].field` reads into `Rvalue::IndexField` (P-PACK 2.5+).
-    let ir = noeta_ir::lower_with_sites_opts(
-        program,
-        noeta_ir::lowering_sites!(sites),
-        noeta_ir::LowerOptions {
-            real_isolates,
-            registry,
-            // A whole program is its own context; nothing is ambient to it.
-            ambient: noeta_ir::ProgramFacts::default(),
-        },
-    )
-    .map_err(|u| Unsupported {
-        reason: format!("not yet lowered to the Core IR: {}", u.feature),
-        // The IR's own `Unsupported` already knows where it stopped; dropping that here is what
-        // left the run path with nothing to render.
-        span: Some(u.span),
-    })?;
-    let ir = noeta_ir_passes::insert_drops(&ir, relevance.as_ref());
-    // Thread in-place-reuse tokens (Phase 5) onto self-update constructors. A pure function of the
-    // drop-annotated IR, run identically by the IR interpreter (`reference_run`), so both backends
-    // reuse at the same points by construction.
-    let ir = noeta_ir_passes::thread_reuse(&ir);
-    let mut module = ModuleCompiler {
-        protos: vec![Chunk::placeholder()],
-        shapes: Vec::new(),
-        packed_schemas: Vec::new(),
-        methods: Vec::new(),
-        destructors: Vec::new(),
-        field_defaults: Vec::new(),
-        comparable_derives: Vec::new(),
-        tojson_derives: Vec::new(),
-        deserialize_recipes: sites.deserialize_recipes,
-        type_args: ir.type_args.clone(),
-        type_arg_reprs: Vec::new(),
-        structural_eq_types: HashSet::new(),
-        native_type_names: HashMap::new(),
-        packed_fields: HashMap::new(),
-        key_capable_types: HashSet::new(),
-        types: HashMap::new(),
-        module_globals: HashMap::new(),
-        module_fns: HashSet::new(),
-        module_binding_names: Vec::new(),
-        type_of_sites: sites.type_of_sites,
-        cache_slots: 0,
-        type_reprs: Vec::new(),
-        names: Vec::new(),
-        name_ids: HashMap::new(),
-        global_names: Vec::new(),
-        global_slots: HashMap::new(),
-        debug,
-        registry,
-    };
-    // The type-argument table's reflection projection, interned BEFORE any body compiles so a
-    // `RetagDynamic` resolves through a table that is already complete (its own indices are the
-    // checker's, not this pool's, so ordering is a determinism property only).
-    module.type_arg_reprs = module.intern_type_arg_reprs(&ir);
-    // Type registration reads the surface declarations (shapes, derives, the method/destructor
-    // proto table) the IR carries verbatim; bodies are lowered from the IR.
-    module.register_globals(program);
-    module.register_types(program);
-    module.compile_methods(&ir)?;
-    let main = {
-        let mut fc = FnCompiler::new(&mut module, true, None, Vec::new(), Vec::new());
-        fc.init_temps(ir.temp_count);
-        fc.setup_main_scopes(&ir.top);
-        for stmt in &ir.top.stmts {
-            fc.stmt(stmt)?;
-        }
-        fc.code.push(Op::Halt);
-        fc.into_chunk(0, 0, 0, Vec::new(), Some("main".to_string()), Some(ir.span))
-    };
-    module.protos[0] = main;
-    // Intern each packed `map(...)` result layout (P-PACK 2.6 category B) and pair it with the call
-    // span the VM's `map` builtin keys on. Sorted by span first so schema interning order — and thus
-    // the `packed_schemas` table — is deterministic regardless of the `HashMap`'s iteration order.
-    let map_packed_sites = {
-        let mut entries: Vec<(Span, &noeta_ast::reflect::PackedLayout)> = sites
-            .map_packed_sites
-            .iter()
-            .map(|(s, l)| (*s, l))
-            .collect();
-        entries.sort_by_key(|(s, _)| (s.source, s.start, s.end));
-        entries
-            .into_iter()
-            .map(|(span, layout)| (span, module.intern_packed_schema(layout)))
-            .collect()
-    };
-    // Intern every `vec`-bundle-bound type's schema (scalar-unification slice 3) so the VM has the
-    // element width even for a type that never appears in a `List<T>`; deduplicated by
-    // `intern_packed_schema`, so a type already used in a packed list adds nothing.
-    for layout in &sites.bundle_schema_layouts {
-        module.intern_packed_schema(layout);
-    }
-    // Intern EVERY `@packed` struct's layout unconditionally (native type-declaration unification,
-    // Slice E2) — the from-scratch producer's schema-availability channel. A native fn's
-    // `NativeCtx::make_packed(type_name, …)` resolves the produced `List<packed>`'s element schema by
-    // matching the interned schema's shape name, so a native `@packed` struct must be present even
-    // when it never appears in a source `List<T>` literal (the `like`-less case). Deduplicated by
-    // `intern_packed_schema` (a type already interned by a list literal or a bundle binding adds
-    // nothing) and pre-sorted by name upstream, so the table stays deterministic.
-    for layout in &sites.packed_type_layouts {
-        module.intern_packed_schema(layout);
-    }
-    Ok((module, map_packed_sites))
-}
-
-/// A persistent, incremental compiler for a REPL session (REPL-on-VM). Where [`compile`] builds a
-/// fresh [`Module`] from a whole program and consumes its tables, this keeps the compile tables
-/// **alive across entries** so the proto indices, global slots, shapes, and method-table entries an
-/// entry assigns stay valid in the next — the *stable-id accumulation* the session's cross-entry
-/// object identity depends on (a closure holds a raw `proto`, an aggregate an `Rc<Shape>`; both would
-/// be corrupted by recompiling from scratch each entry).
+/// How a table behaves when a **second** program is installed into a compiler that already holds
+/// the first — a REPL entry, or a hot-swapped edit dropped onto a running program.
 ///
-/// **Checkerless**, matching the tree-walker REPL it replaces: no type errors surface at the prompt,
-/// drops are conservatively destructor-relevant (`insert_drops(_, None)`), and every declared type is
-/// treated as possibly destructor-bearing. Lowering is total over parsed programs, so a
-/// successfully-parsed entry always compiles.
+/// A cold whole-program compile installs into an *empty* compiler, where every policy below
+/// degenerates to "take the incoming value". That is exactly why this is a per-table property and
+/// not a per-caller one: [`compile_with`] and [`SessionCompiler::extend`] run the SAME
+/// [`SessionCompiler::install`], so a table's behaviour is decided once, here, next to the table —
+/// never twice, in two functions a reader has to diff in their head. Four shipped bugs lived in
+/// precisely that delta (a swap lowering with no [`noeta_ir::ProgramFacts`]; a swap compiling
+/// conservative for want of check sites; the type-argument table replaced where it had to be
+/// merged; packed schemas interned only on the cold path). The fifth cannot be written, because
+/// there is no second copy to forget.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Policy {
+    /// Overwritten wholesale by the incoming value. Sound only where the incoming value is itself
+    /// cumulative (the session checker accumulates its bundle across entries) **and** indices are
+    /// append-only, so an index a live value already holds still designates the same entry.
+    Replace,
+    /// Keyed insert, latest-wins per key: a redeclaration supersedes, everything else survives.
+    MergeByKey,
+    /// Merged **by content** through an interner: an entry already present costs nothing and — the
+    /// load-bearing half — keeps the index it was first given.
+    MergeByContent,
+    /// Appended: new entries take new ids at the end, never renumbering an existing one (a closure
+    /// holds a raw proto index, an aggregate an `Rc<Shape>`; renumbering would corrupt them). The
+    /// one deliberate in-place write in the whole pipeline — proto 0, the entry chunk — is called
+    /// out in its row, because no live value can reference the previous install's dead `main`.
+    Append,
+    /// Recomputed from scratch by the pass that owns it, out of inputs that are themselves
+    /// accumulated — so it needs no accumulation of its own.
+    Recomputed,
+    /// Not a table: install-invariant configuration, fixed when the compiler is created.
+    Fixed,
+    /// Not stored on the compiler at all — derived per install and handed to that install's module.
+    Derived,
+    /// The [`ModuleCompiler`] tables, each classified in its own right above.
+    Nested,
+}
+
+/// **Every** table the compile pipeline touches, with its [`Policy`] and the step that installs it.
+///
+/// This is the list [`SessionCompiler::install`] is written against, and it is machine-checked:
+/// `pipeline_tables::every_table_states_its_policy` parses the `ModuleCompiler` / `SessionCompiler`
+/// field lists out of this file and fails if a field is missing here, listed twice, or named here
+/// but gone from the struct. Adding a table to the compiler therefore cannot ship without its
+/// accumulation policy being *stated* — which is the property this table exists to hold, the whole
+/// bug class having been "the author only thought about the cold path".
+///
+/// Read as source *text* by that gate rather than as a value (like `noeta-ext-abi`'s
+/// declared-constraint gate, which reads its own tree), so the compiler itself never consults it:
+/// its job is to be impossible to omit, not to be executed.
+#[allow(dead_code)]
+#[rustfmt::skip]
+const TABLE_POLICIES: &[(&str, Policy, &str)] = &[
+    // ── ModuleCompiler ───────────────────────────────────────────────────────────────────────
+    ("protos", Policy::Append, "register_types reserves, compile_methods fills; proto 0 alone is overwritten in place — the dead entry chunk"),
+    ("shapes", Policy::MergeByContent, "intern_shape, from the emitting sites"),
+    ("packed_schemas", Policy::MergeByContent, "intern_packed_schema: map(…) results, vec-bundle bindings, every @packed type"),
+    ("methods", Policy::Append, "register_types"),
+    ("destructors", Policy::Append, "register_types"),
+    ("field_defaults", Policy::Append, "compile_methods"),
+    ("comparable_derives", Policy::Append, "register_types"),
+    ("tojson_derives", Policy::Append, "register_types"),
+    ("deserialize_recipes", Policy::Replace, "the checker's bundle, itself accumulated across entries; an install with no sites leaves it alone"),
+    ("type_args", Policy::MergeByContent, "absorb_type_args — live values index it, so it may only grow"),
+    ("type_arg_reprs", Policy::MergeByContent, "absorb_type_args, in lockstep with type_args"),
+    ("structural_eq_types", Policy::Append, "register_types"),
+    ("native_type_names", Policy::MergeByKey, "register_types"),
+    ("packed_fields", Policy::MergeByKey, "register_types"),
+    ("key_capable_types", Policy::Recomputed, "register_types' fixpoint over the accumulated packed_fields"),
+    ("types", Policy::MergeByKey, "register_types"),
+    ("module_globals", Policy::MergeByKey, "register_globals"),
+    ("module_fns", Policy::Append, "register_globals"),
+    ("module_binding_names", Policy::Append, "register_globals"),
+    ("type_of_sites", Policy::MergeByKey, "take_type_of_sites — the checker's full-fidelity map, span-keyed by SourceId"),
+    ("cache_slots", Policy::Append, "next_cache_slot — a monotonic counter, never reset"),
+    ("type_reprs", Policy::MergeByContent, "intern_type_repr"),
+    ("names", Policy::MergeByContent, "intern_name"),
+    ("name_ids", Policy::MergeByContent, "intern_name's dedup index"),
+    ("global_names", Policy::MergeByContent, "intern_global"),
+    ("global_slots", Policy::MergeByContent, "intern_global's dedup index — a rebound name keeps its slot"),
+    ("debug", Policy::Fixed, "SessionCompiler::empty"),
+    ("registry", Policy::Fixed, "SessionCompiler::empty"),
+    // ── SessionCompiler ──────────────────────────────────────────────────────────────────────
+    ("mc", Policy::Nested, "the tables above"),
+    ("map_packed", Policy::MergeByContent, "install: spans already paired are skipped, new ones interned in span order"),
+    ("reflection", Policy::MergeByKey, "ReflectionInfo::accumulate — latest-wins per redeclared name"),
+    ("facts", Policy::MergeByKey, "ProgramFacts::absorb — what lowering knows, the newcomer winning"),
+    // ── derived per install, stored nowhere ──────────────────────────────────────────────────
+    ("destruct_reachable", Policy::Derived, "install's return value: the checker's precise fixpoint, or every declared type when the install brought no sites"),
+];
+
+/// A persistent, incremental compiler — and the **only** compile pipeline in this crate.
+///
+/// It keeps the compile tables **alive across installs**, so the proto indices, global slots,
+/// shapes, and method-table entries one install assigns stay valid in the next — the *stable-id
+/// accumulation* a session's cross-entry object identity depends on (a closure holds a raw `proto`,
+/// an aggregate an `Rc<Shape>`; both would be corrupted by recompiling from scratch each entry).
+///
+/// A whole-program compile is the degenerate case: [`compile_with`] creates an **empty** one,
+/// [`install`](Self::install)s the program, and moves the tables straight into a [`Module`]
+/// ([`into_module`](Self::into_module)) instead of keeping them ([`snapshot`](Self::snapshot)).
+/// Cold and hot compiles are therefore the same code over a different starting state, not two
+/// implementations of one sequence — see [`Policy`] for why that distinction is the point.
+///
+/// A session install may be **checkerless** (`sites: None`), matching the tree-walker REPL: no type
+/// errors surface at the prompt, drops are conservatively destructor-relevant
+/// (`insert_drops(_, None)`), and every declared type is treated as possibly destructor-bearing.
+/// Lowering is total over parsed programs, so a successfully-parsed entry always compiles.
 pub struct SessionCompiler {
     mc: ModuleCompiler,
     /// Accumulated `map(...)`-result packed pairs (span → interned schema index), from the checked
@@ -646,8 +557,18 @@ impl Default for SessionCompiler {
 }
 
 impl SessionCompiler {
-    /// A fresh session: an empty module with just the entry-`main` placeholder at proto 0.
+    /// A fresh REPL session: an empty compiler resolving native names against the process-global
+    /// default registry (an embed session that assembled its own set installs it explicitly through
+    /// [`compile_with_sites_session_with_registry`], instance-registry IR5).
     pub fn new() -> SessionCompiler {
+        SessionCompiler::empty(false, noeta_ext_abi::registry::single_registry_process())
+    }
+
+    /// An empty compiler: the entry-`main` placeholder at proto 0 and nothing else, carrying the
+    /// two install-invariant settings ([`Policy::Fixed`]). Every table starts empty *here* and only
+    /// [`install`](Self::install) ever fills one, so the "build it fresh" and "extend it" spellings
+    /// of a table cannot drift apart — there is only the one spelling.
+    fn empty(debug: bool, registry: &'static noeta_ext_abi::registry::Registry) -> SessionCompiler {
         let mc = ModuleCompiler {
             protos: vec![Chunk::placeholder()],
             shapes: Vec::new(),
@@ -675,10 +596,8 @@ impl SessionCompiler {
             name_ids: HashMap::new(),
             global_names: Vec::new(),
             global_slots: HashMap::new(),
-            debug: false,
-            // A fresh REPL session resolves native names against the process-global default; an
-            // embed session that assembled its own set installs it explicitly (instance-registry IR5).
-            registry: noeta_ext_abi::registry::single_registry_process(),
+            debug,
+            registry,
         };
         SessionCompiler {
             mc,
@@ -694,22 +613,27 @@ impl SessionCompiler {
     /// persistent globals. New protos / shapes / global slots keep the indices they are assigned here
     /// forever.
     pub fn extend(&mut self, entry: &Program) -> Result<Module, Unsupported> {
-        self.extend_impl(entry, None)
+        // Checkerless (see the type header) and cooperative isolates, exactly like the REPL.
+        let reachable = self.install(entry, None, false)?;
+        Ok(self.snapshot(reachable))
     }
 
     /// [`SessionCompiler::extend`] with the checker's **accumulated [`Sites`]** (session-checker
     /// C5): the entry lowers with its span-keyed codegen hints active — packed lists, `type_of`
     /// full fidelity, method handles, streaming `for`s, width masking — and with PRECISE destructor
-    /// relevance/reachability instead of the conservative over-approximations. Only sound when the
-    /// checker has seen **every entry of the session** (the caller gates on that): precise
-    /// relevance derived from a registry that missed an unchecked entry's `destruct` class could
-    /// skip a destructor. Conservative is the always-safe direction; precise is the earned one.
+    /// relevance/reachability instead of the conservative over-approximations. That makes it the
+    /// *same* compile a cold start performs — which is what the hot-swap differential oracle
+    /// asserts. Only sound when the checker has seen **every entry of the session** (the caller
+    /// gates on that): precise relevance derived from a registry that missed an unchecked entry's
+    /// `destruct` class could skip a destructor. Conservative is the always-safe direction; precise
+    /// is the earned one.
     pub fn extend_checked(
         &mut self,
         entry: &Program,
         sites: &Sites,
     ) -> Result<Module, Unsupported> {
-        self.extend_impl(entry, Some(sites))
+        let reachable = self.install(entry, Some(Cow::Borrowed(sites)), false)?;
+        Ok(self.snapshot(reachable))
     }
 
     /// The session's live **type-argument table** (poly-values F2b) — the one
@@ -829,86 +753,139 @@ impl SessionCompiler {
         (remap, reprs)
     }
 
-    fn extend_impl(
+    /// **The compile pipeline** — hoist → absorb → lower → drops → reuse → the tables → the entry
+    /// chunk — run once per program installed into this compiler. A cold whole-program compile
+    /// installs one program into an empty compiler ([`compile_with`]); a REPL entry or a
+    /// hot-swapped edit installs the next program into a live one ([`extend`](Self::extend)). Same
+    /// function, same order, same tables: [`TABLE_POLICIES`] records what each table does on the
+    /// second install, and [`Policy`] says why that is written down as data rather than as two
+    /// functions to keep in step.
+    ///
+    /// `sites` is the checker's bundle: `Cow::Owned` when the caller owns it (a whole-program
+    /// compile — the tables kept verbatim are then *moved* out of it, no clone tax on `noeta run`),
+    /// `Cow::Borrowed` when it belongs to the session checker, and `None` for the checkerless REPL.
+    /// Everything the bundle drives — full-fidelity `type_of`, packed layouts, decode recipes, the
+    /// type-argument table, precise destructor relevance — is therefore identical for a swapped
+    /// program and a cold one whenever the caller has a bundle, which is the invariant the hot-swap
+    /// differential oracle asserts.
+    ///
+    /// Returns this install's destructor-reachable type set ([`Policy::Derived`]), which the caller
+    /// hands to the module it builds.
+    fn install(
         &mut self,
-        entry: &Program,
-        sites: Option<&Sites>,
-    ) -> Result<Module, Unsupported> {
-        // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) so surface
-        // registration and IR compilation agree; idempotent, so lowering re-hoisting is a no-op.
-        // Against the session's own registry — see the note in `compile_module`; a hot-swapped
-        // edit must materialize the same native derive recipes the initial compile did.
-        let hoisted = noeta_ir::hoist_impl_methods_with_registry(entry, Some(self.mc.registry));
-        let entry: &Program = hoisted.as_ref().unwrap_or(entry);
-        // ABSORB the incoming type-argument tables into the session's before anything lowers: they
-        // are index-addressed by live values, so they may only grow, and a caller who checked the
-        // whole program afresh (a hot swap of an edited file) hands us tables numbered from zero in
-        // its own order. `absorb_type_args` merges by content and hands back the bundle with its
-        // `hidden_arg_sites` rewritten into session space — see its doc. Identity remap (the
-        // append-only REPL case) borrows straight back, so nothing is cloned.
-        let absorbed = sites.map(|s| self.absorb_type_args(s));
-        let sites: Option<&Sites> = absorbed.as_deref();
-        // What this entry adds joins the session's facts, and the whole set lowers with it — so a
-        // fragment resolves the tier its *program* declared, narrows against the imports its
-        // program made, and knows its program's globals. None of which are in the fragment itself.
-        self.facts
-            .absorb(noeta_ir::ProgramFacts::of(entry, self.mc.registry));
-        // Checkerless lowering (matches the tree-walker `Session`) unless the caller supplied the
-        // checker's bundle: then the SAME lowering the file pipeline runs, sites and all. The
-        // conservative path's `insert_drops(_, None)` marks every value destructor-relevant;
-        // `thread_reuse` runs identically either way (a pure function of the drop-annotated IR).
+        program: &Program,
+        sites: Option<Cow<'_, Sites>>,
+        real_isolates: bool,
+    ) -> Result<Vec<String>, Unsupported> {
+        // ── front end ───────────────────────────────────────────────────────────────────────
+        // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) so the
+        // surface pass-1 (`register_types`) and the IR pass-2 (`compile_methods`) agree on the
+        // method set. The helper is idempotent, so the lowering below re-hoisting is a no-op;
+        // rebinds only when such an impl exists.
+        //
+        // Against **this compiler's** registry, not the process default: a native derive recipe
+        // (`ExtDerive`, derive layer 4) is what the hoist materializes, and an embed session's own
+        // extensions live only in its assembled registry. Resolving against the default instead
+        // meant the checker accepted `@derive(<session recipe>)` — it reads the session registry —
+        // while the hoist synthesized nothing, and `compile_methods` then panicked on the missing
+        // prototype ("no entry found for key").
+        let hoisted = noeta_ir::hoist_impl_methods_with_registry(program, Some(self.mc.registry));
+        let hoisted: &Program = hoisted.as_ref().unwrap_or(program);
+
+        // `type_args` / `type_arg_reprs` — MergeByContent, and it happens before anything lowers.
+        // The tables are index-addressed by LIVE runtime values, so they may only grow, and a
+        // caller who checked the whole program afresh (a hot swap of an edited file) hands us
+        // tables numbered from zero in its own order. `absorb_type_args` merges by content and
+        // hands back the bundle with its `hidden_arg_sites` rewritten into this compiler's index
+        // space — see its doc. An identity remap (an empty compiler, i.e. every cold compile, and
+        // the append-only REPL case) borrows straight back, so nothing is cloned.
+        let mut sites = sites;
+        let rewritten = sites
+            .as_deref()
+            .and_then(|bundle| match self.absorb_type_args(bundle) {
+                Cow::Owned(owned) => Some(owned),
+                Cow::Borrowed(_) => None,
+            });
+        if let Some(owned) = rewritten {
+            sites = Some(Cow::Owned(owned));
+        }
+
+        // Lower the surface program to the shared Core IR, then compile *that* to bytecode — the
+        // same lowering the IR interpreter consumes, so both backends execute one program (Phase
+        // 2). With the checker's site maps when the install brought any (`lowering_sites!` is THE
+        // one projection): the `List<packed>` map streams packed-list literals into a flat buffer
+        // (P-PACK 2.5; the resolved layout rides on the IR rvalue, so the bytecode compiler reads
+        // it from there at `PackedListNew` and needs no separate span map of its own), and the
+        // index-field set fuses `list[i].field` reads into `Rvalue::IndexField` (P-PACK 2.5+). A
+        // checkerless install lowers with the all-empty set — the same call, not a second path.
         let opts = || noeta_ir::LowerOptions {
-            // The REPL keeps cooperative isolates, exactly like the checkerless path.
-            real_isolates: false,
-            // The session's own registry (instance-registry IR5) — the default for a REPL
-            // session, an embed session's own set when it installed one.
+            real_isolates,
+            // This compiler's own registry (instance-registry IR5) — the process-global default for
+            // the CLI and a plain REPL session, an embed session's own set when it installed one.
             registry: self.mc.registry,
+            // What lowering knows from the programs installed BEFORE this one. On an empty compiler
+            // that is `ProgramFacts::default()` — a whole program is its own context, nothing is
+            // ambient to it — and on a live one it is the session's accumulated set, which is what
+            // lets a swapped fragment resolve the tier its *program* declared, narrow against the
+            // imports its program made, and know its program's globals. This program's own facts
+            // are folded in by `ProgramFacts::under` inside the lowerer either way, and absorbed
+            // into the accumulation below.
             ambient: self.facts.clone(),
         };
-        let ir = match sites {
+        let ir = match sites.as_deref() {
             None => {
-                noeta_ir::lower_with_sites_opts(entry, noeta_ir::LoweringSites::empty(), opts())
+                noeta_ir::lower_with_sites_opts(hoisted, noeta_ir::LoweringSites::empty(), opts())
             }
-            Some(sites) => {
-                noeta_ir::lower_with_sites_opts(entry, noeta_ir::lowering_sites!(sites), opts())
+            Some(bundle) => {
+                noeta_ir::lower_with_sites_opts(hoisted, noeta_ir::lowering_sites!(bundle), opts())
             }
         }
         .map_err(|u| Unsupported {
             reason: format!("not yet lowered to the Core IR: {}", u.feature),
+            // The IR's own `Unsupported` already knows where it stopped; dropping that here is what
+            // left the run path with nothing to render.
             span: Some(u.span),
         })?;
-        let relevance = sites.map(|s| passes_relevance(&s.destructor_relevance));
+        // `facts` — MergeByKey. What this program adds joins the accumulation, for the *next*
+        // install to lower against.
+        self.facts
+            .absorb(noeta_ir::ProgramFacts::of(hoisted, self.mc.registry));
+        // The precise-RC drop-insertion pass (Phase 3) annotates the IR with `DropVar`s at last-use
+        // death points; they lower to plain releases (prompt reclamation, no destructor), so this is
+        // behavior-neutral — it reclaims a local's value at its last use instead of at frame
+        // teardown. Without a bundle the conservative `None` marks every value destructor-relevant.
+        let relevance = sites
+            .as_deref()
+            .map(|s| passes_relevance(&s.destructor_relevance));
         let ir = noeta_ir_passes::insert_drops(&ir, relevance.as_ref());
+        // Thread in-place-reuse tokens (Phase 5) onto self-update constructors. A pure function of
+        // the drop-annotated IR, run identically by the IR interpreter (`reference_run`), so both
+        // backends reuse at the same points by construction.
         let ir = noeta_ir_passes::thread_reuse(&ir);
 
-        // The checker's `type_of` full-fidelity map merges into the persistent table the codegen
-        // reads (span-keyed by this entry's SourceId; re-merging the accumulated bundle is an
-        // idempotent overwrite). Must precede any FnCompiler run below.
-        if let Some(sites) = sites {
-            self.mc
-                .type_of_sites
-                .extend(sites.type_of_sites.iter().map(|(k, v)| (*k, v.clone())));
-            // `@derive(Deserialize<Json>)` decode recipes (L2.2 DI): the checker records one per
-            // deriving struct into its accumulated sites, and lowering already emits the
-            // `Rvalue::DecodeTyped` (via the accumulated `decode_typed_sites`) — but the runtime
-            // registry `json.decode_typed` resolves against is baked from `Module::deserialize_recipes`,
-            // which a REPL entry never populated. Bake the checker's accumulated recipes here, exactly
-            // as the whole-program checked compile does (`compile_with_sites`'s `sites.deserialize_recipes`),
-            // so a type declared at the prompt decodes. The snapshot is the full accumulated set
+        // ── the tables (each exactly once; policies in `TABLE_POLICIES`) ────────────────────
+        // `type_of_sites` — MergeByKey. The checker's full-fidelity map, span-keyed by this
+        // program's `SourceId`, so re-merging an accumulated bundle is an idempotent overwrite.
+        // Must precede any `FnCompiler` run below, which reads it.
+        take_type_of_sites(sites.as_mut(), &mut self.mc.type_of_sites);
+        if let Some(bundle) = sites.as_mut() {
+            // `deserialize_recipes` — Replace. `@derive(Deserialize<Json>)` decode recipes (L2.2
+            // DI): the runtime registry `json.decode_typed` resolves against is baked from
+            // `Module::deserialize_recipes`. The checker's bundle is the full accumulated set
             // (latest-wins on a redeclared name once the VM lifts it into a name→recipe map), so a
-            // wholesale replace stays idempotent across entries. The checkerless path has no checker to
-            // derive a recipe (and does not recognize `decode_typed` at all), so this is a checked-session
-            // capability by construction.
-            self.mc.deserialize_recipes = sites.deserialize_recipes.clone();
-            // The forwarding type-argument table (F2b) and its parallel reflection projection are
-            // ALREADY the session's: `absorb_type_args` merged this bundle's entries into
-            // `mc.type_args` / `mc.type_arg_reprs` by content above and handed lowering the merged
-            // superset, so `ir.type_args` is that same table by construction. Asserted rather than
-            // re-assigned — a wholesale replace here is exactly the index-instability the
-            // absorption exists to prevent, and this pins the two ends together.
+            // wholesale replace stays idempotent across installs. An install with no bundle has no
+            // recipes to contribute (and does not recognize `decode_typed` at all), so it leaves
+            // what is there rather than clearing it.
+            self.mc.deserialize_recipes = take_deserialize_recipes(bundle);
+            // The type-argument table and its parallel reflection projection are ALREADY this
+            // compiler's: `absorb_type_args` merged this bundle's entries in by content above and
+            // handed lowering the merged superset, so `ir.type_args` is that same table by
+            // construction. Asserted rather than re-assigned — a wholesale replace here is exactly
+            // the index-instability the absorption exists to prevent, and this pins the two ends
+            // together.
             debug_assert_eq!(
                 self.mc.type_args, ir.type_args,
-                "the lowered type-argument table must be the session's merged one — a replace \
+                "the lowered type-argument table must be the compiler's merged one — a replace \
                  would re-point live hidden arguments at different types"
             );
             debug_assert_eq!(
@@ -918,13 +895,19 @@ impl SessionCompiler {
             );
         }
 
-        // Register this entry's globals/types/methods into the persistent tables (all additive:
-        // `HashMap`/`HashSet` inserts, and `register_types` reserves *new* protos at the current end).
-        self.mc.register_globals(entry);
-        self.mc.register_types(entry);
+        // `module_globals` / `module_fns` / `module_binding_names` — computed before any body is
+        // compiled, so a nested function can resolve a global (and check its mutability on
+        // assignment) and the free-variable analysis can tell a global from a captured local. Then
+        // type registration (`types`, `shapes`, the derives, the method/destructor proto table),
+        // which reads the surface declarations the IR carries verbatim, and finally the bodies,
+        // lowered from the IR. All additive: map/set inserts, and `register_types` reserves *new*
+        // protos at the current end.
+        self.mc.register_globals(hoisted);
+        self.mc.register_types(hoisted);
         self.mc.compile_methods(&ir)?;
 
-        // Compile the entry's top-level statements into a fresh chunk and install it at proto 0.
+        // `protos[0]` — the one in-place write. The top-level statements become the entry chunk,
+        // replacing the previous install's now-dead `main` (no live value references proto 0).
         let main = {
             let mut fc = FnCompiler::new(&mut self.mc, true, None, Vec::new(), Vec::new());
             fc.init_temps(ir.temp_count);
@@ -937,12 +920,17 @@ impl SessionCompiler {
         };
         self.mc.protos[0] = main;
 
-        // Intern any NEW `map(...)`-result packed pairs into the accumulation (sorted by span for
-        // deterministic schema order, exactly like the whole-program compile; already-known spans
-        // re-arrive with each accumulated bundle and are skipped).
-        if let Some(sites) = sites {
+        // `packed_schemas` / `map_packed` — MergeByContent, three sources, all deduplicated by
+        // `intern_packed_schema` (a layout already interned adds nothing and keeps its index).
+        if let Some(bundle) = sites.as_deref() {
+            // (1) Each packed `map(...)` result layout (P-PACK 2.6 category B), paired with the
+            // call span the VM's `map` builtin keys on. Spans already paired are skipped — an
+            // accumulated bundle re-delivers every earlier entry's sites — and the newcomers are
+            // sorted by span before interning, so schema order is deterministic regardless of
+            // `HashMap` iteration order. On an empty compiler that is every site, in span order:
+            // exactly what a cold compile has always produced.
             let known: HashSet<Span> = self.map_packed.iter().map(|(s, _)| *s).collect();
-            let mut fresh: Vec<(Span, &noeta_ast::reflect::PackedLayout)> = sites
+            let mut fresh: Vec<(Span, &noeta_ast::reflect::PackedLayout)> = bundle
                 .map_packed_sites
                 .iter()
                 .filter(|(s, _)| !known.contains(s))
@@ -953,70 +941,85 @@ impl SessionCompiler {
                 let idx = self.mc.intern_packed_schema(layout);
                 self.map_packed.push((span, idx));
             }
+            // (2) Every `vec`-bundle-bound type's schema (scalar-unification slice 3), so the VM has
+            // the element width even for a type that never appears in a `List<T>`.
+            for layout in &bundle.bundle_schema_layouts {
+                self.mc.intern_packed_schema(layout);
+            }
+            // (3) EVERY `@packed` struct's layout unconditionally (native type-declaration
+            // unification, Slice E2) — the from-scratch producer's schema-availability channel. A
+            // native fn's `NativeCtx::make_packed(type_name, …)` resolves the produced
+            // `List<packed>`'s element schema by matching the interned schema's shape name, so a
+            // native `@packed` struct must be present even when it never appears in a source
+            // `List<T>` literal (the `like`-less case). Pre-sorted by name upstream, so the table
+            // stays deterministic.
+            for layout in &bundle.packed_type_layouts {
+                self.mc.intern_packed_schema(layout);
+            }
         }
 
-        // Destruct-reachability: PRECISE from the checker's accumulated fixpoint when supplied;
-        // otherwise the conservative over-approximation to *all* type names, so the VM walks every
-        // value container-first and no destructor is missed (correct; it only forgoes the
-        // plain-free fast path for a genuinely destructor-free type).
-        let destruct_reachable: Vec<String> = match sites {
-            Some(sites) => sites
+        // `reflection` — MergeByKey, built from the **pre-hoist** program: the tree-walker reflects
+        // the surface AST (`noeta_eval`'s `run_ir_traced`), so hoisting first would give a swapped
+        // program method records a cold one does not have. `accumulate` is latest-wins, so a query
+        // on a type declared by an earlier install still resolves.
+        let native_roles = self.mc.registry.native_roles();
+        let native_traits = noeta_ir::native_trait_impls(self.mc.registry);
+        self.reflection.accumulate(noeta_ast::reflect::build(
+            program,
+            &native_roles,
+            &native_traits,
+        ));
+        // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
+        // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
+        // registry now, not the AST. Re-run per install because `accumulate` purges a redeclared
+        // name's records; idempotent for names already present.
+        noeta_check::extend_reflection(&mut self.reflection);
+
+        // `destruct_reachable` — Derived. PRECISE from the checker's fixpoint when there is a
+        // bundle; otherwise the conservative over-approximation to *all* declared type names, so
+        // the VM walks every value container-first and no destructor is missed (correct; it only
+        // forgoes the plain-free fast path for a genuinely destructor-free type). Computed after
+        // `register_types`, so this install's own types are in the conservative set.
+        Ok(match sites.as_deref() {
+            Some(bundle) => bundle
                 .destructor_relevance
                 .reachable_types
                 .iter()
                 .cloned()
                 .collect(),
             None => self.mc.types.keys().cloned().collect(),
-        };
-
-        // Accumulate this entry's reflection into the persistent set (latest-wins), so a query on a
-        // type declared in an earlier entry resolves — the tree-walker `Session` accumulates the same
-        // way, keeping the session differential green.
-        let native_roles = self.mc.registry.native_roles();
-        let native_traits = noeta_ir::native_trait_impls(self.mc.registry);
-        self.reflection.accumulate(noeta_ast::reflect::build(
-            entry,
-            &native_roles,
-            &native_traits,
-        ));
-        // Re-embed extension attribute shapes: `accumulate` purges a redeclared name's records, and
-        // the extension shapes must survive every entry (idempotent for names already present).
-        noeta_check::extend_reflection(&mut self.reflection);
-
-        // Snapshot the persistent tables into a runnable module (cloned, not moved, so the tables
-        // stay alive for the next entry). The full map-packed accumulation rides every snapshot —
-        // an earlier checked entry's still-live `map(...)` resolves its span at run time.
-        Ok(self.snapshot(self.map_packed.clone(), destruct_reachable))
+        })
     }
 
-    /// Snapshot the persistent tables into a runnable [`Module`]. Cloned (not moved) so the tables
-    /// stay alive for the next entry; O(total bytecode) per snapshot, negligible at an interactive
-    /// prompt. `map_packed_sites` / `destruct_reachable` differ by path: a checkerless REPL entry
-    /// passes empty / all-types (conservative), the checked session seed
-    /// ([`compile_with_sites_session`]) passes the checker's precise outputs.
-    fn snapshot(
-        &self,
-        map_packed_sites: Vec<(Span, u32)>,
-        destruct_reachable: Vec<String>,
-    ) -> Module {
+    /// Build the runnable [`Module`] from the current tables, **consuming** them — the
+    /// whole-program finisher, where nothing compiles after this and a clone would be pure tax.
+    fn into_module(self, destruct_reachable: Vec<String>) -> Module {
         Module {
-            protos: self.mc.protos.clone(),
-            shapes: self.mc.shapes.clone(),
-            packed_schemas: self.mc.packed_schemas.clone(),
-            map_packed_sites,
-            methods: self.mc.methods.clone(),
-            destructors: self.mc.destructors.clone(),
-            field_defaults: self.mc.field_defaults.clone(),
-            comparable_derives: self.mc.comparable_derives.clone(),
-            tojson_derives: self.mc.tojson_derives.clone(),
-            deserialize_recipes: self.mc.deserialize_recipes.clone(),
-            type_args: self.mc.type_args.clone(),
-            type_arg_reprs: self.mc.type_arg_reprs.clone(),
+            protos: self.mc.protos,
+            shapes: self.mc.shapes,
+            packed_schemas: self.mc.packed_schemas,
+            // The FULL map-packed accumulation rides every module — an earlier install's still-live
+            // function looks its `map(...)` call span up at run time (session-checker C5).
+            map_packed_sites: self.map_packed,
+            methods: self.mc.methods,
+            destructors: self.mc.destructors,
+            field_defaults: self.mc.field_defaults,
+            comparable_derives: self.mc.comparable_derives,
+            tojson_derives: self.mc.tojson_derives,
+            deserialize_recipes: self.mc.deserialize_recipes,
+            type_args: self.mc.type_args,
+            type_arg_reprs: self.mc.type_arg_reprs,
             destruct_reachable,
             cache_slots: self.mc.cache_slots,
-            reflection: self.reflection.clone(),
-            type_reprs: self.mc.type_reprs.clone(),
-            names: self.mc.names.clone(),
+            // The attribute manifest + type registry, built from the AST by the *same* pure builder
+            // the tree-walker uses — so reflection is identical across backends by construction.
+            reflection: self.reflection,
+            type_reprs: self.mc.type_reprs,
+            names: self.mc.names,
+            // Map each top-level value binding to its slot — debug compiles only, so a release
+            // module carries none (goldens/bundles unchanged). Its slot exists because the binding
+            // emits a `StoreGlobal`; a binding the checker proved dead and elided simply has no
+            // slot and drops.
             global_bindings: if self.mc.debug {
                 self.mc
                     .module_binding_names
@@ -1026,8 +1029,23 @@ impl SessionCompiler {
             } else {
                 Vec::new()
             },
-            global_names: self.mc.global_names.clone(),
+            global_names: self.mc.global_names,
         }
+    }
+
+    /// Snapshot the tables into a runnable [`Module`] **without** consuming them, so the compiler
+    /// stays alive for the next install. One clone of the compiler feeding the one module builder
+    /// above — deliberately not a second hand-written `Module { … }`, which is how the two
+    /// finishers used to disagree about a field. O(total bytecode) per snapshot, negligible at an
+    /// interactive prompt or a file save.
+    fn snapshot(&self, destruct_reachable: Vec<String>) -> Module {
+        SessionCompiler {
+            mc: self.mc.clone(),
+            map_packed: self.map_packed.clone(),
+            reflection: self.reflection.clone(),
+            facts: self.facts.clone(),
+        }
+        .into_module(destruct_reachable)
     }
 
     /// Register `name` as a module-global binding **without compiling a declaration** — the debug
@@ -1060,6 +1078,7 @@ impl SessionCompiler {
 
 /// What a top-level type name denotes, with the layout/dispatch data the compiler needs to
 /// lower object literals, member access, method calls, and enum construction.
+#[derive(Clone)]
 enum TypeInfo {
     /// A struct (`struct X { ... }`) — the value kind: declared field order, plus each `fn`'s
     /// reserved prototype index (a struct `fn` dispatches as `X.f(...)` / `obj.f(...)`, exactly
@@ -1101,6 +1120,12 @@ struct VariantSlots {
 
 /// Accumulates the prototype table, the shape/method side tables, and the top-level type
 /// environment across compilation.
+///
+/// Every field is classified in [`TABLE_POLICIES`] — a new one does not ship without stating what a
+/// second [`SessionCompiler::install`] does to it. `Clone` so [`SessionCompiler::snapshot`] can feed
+/// the *one* module builder ([`SessionCompiler::into_module`]) rather than a second hand-written
+/// `Module { … }` that has to be kept in agreement with it.
+#[derive(Clone)]
 struct ModuleCompiler {
     protos: Vec<Chunk>,
     shapes: Vec<Shape>,
@@ -1952,21 +1977,6 @@ impl ModuleCompiler {
         let idx = self.type_reprs.len() as u32;
         self.type_reprs.push(repr.clone());
         idx
-    }
-
-    /// Intern the lowered program's type-argument **reflection projection** into [`Self::type_reprs`],
-    /// producing [`Module::type_arg_reprs`] — the table [`Op::RetagDynamic`] resolves a hidden slot's
-    /// value through. Interned through the same pool as every other reflected type, so an
-    /// instantiation whose repr a list/object construction tag already carries is stored once.
-    ///
-    /// Recomputed wholesale on a session recompile, exactly as `type_args` is: the checker accumulates
-    /// both across entries so the indices are append-only, and re-interning an already-present repr
-    /// answers the same index.
-    fn intern_type_arg_reprs(&mut self, ir: &noeta_ir::Program) -> Vec<Option<u32>> {
-        ir.type_arg_reprs
-            .iter()
-            .map(|r| r.as_ref().map(|r| self.intern_type_repr(r)))
-            .collect()
     }
 
     /// Intern a built-in `Result`/`Option` variant shape (these display with their bare
