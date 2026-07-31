@@ -222,6 +222,47 @@ fn jit_differential_tiers_agree() {
     });
 }
 
+/// The **cancel-poll** JIT differential gate (isolate-cancel, JIT half): the same corpus, the same
+/// two tiers, but the forced-JIT run carries a cancellation flag that is never set — so every
+/// compiled loop header carries the cancellation poll, and the result must still be byte-identical.
+///
+/// This is a second pass rather than a replacement because the two arms cover *different generated
+/// code*. Production runs are not cancellable and get no poll; only a bounded `@test` case (and a
+/// worker isolate, were one ever tier-1) gets the poll-bearing bodies. Testing one arm would leave
+/// the other unchecked, and the poll-bearing arm is precisely the one whose bail placement is new.
+///
+/// A never-set flag is the honest control: the interpreter's own safepoints read `false` all the
+/// way through, so the *only* difference between the arms is the native code, which is exactly what
+/// this oracle exists to compare.
+#[cfg(feature = "jit")]
+#[test]
+fn jit_differential_cancel_poll_agrees() {
+    on_deep_stack(|| {
+        let report = noeta_conformance::run_jit_differential_with(
+            &corpus_root(),
+            None,
+            noeta_conformance::JitDiffArm::CancelPoll,
+        );
+        eprintln!("{}", report.to_human());
+        assert!(
+            report.ok(),
+            "the cancellation poll changed a program's observable behaviour (or leaked):\n{}",
+            report.to_human()
+        );
+        assert_eq!(
+            report.not_run.unsupported,
+            0,
+            "the cancel-poll oracle must cover 100% of the comparable corpus; got:\n{}",
+            report.to_human()
+        );
+        assert!(
+            report.native_protos > 0,
+            "expected the corpus to compile prototypes to native code under the poll; got:\n{}",
+            report.to_human()
+        );
+    });
+}
+
 /// A **single-file** corpus case may not import a user module.
 ///
 /// Single-file cases are checked from their raw text, with no linker: an unresolved `use App.X`

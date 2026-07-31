@@ -42,6 +42,12 @@ struct Cli {
     /// zero heap residency under JIT. Requires the `jit` build feature. Any divergence or leak fails.
     #[arg(long)]
     jit_differential: bool,
+    /// With `--jit-differential`: arm the forced-JIT run with a **never-set** cancellation flag, so
+    /// the JIT emits its loop-header cancellation poll (isolate-cancel, JIT half) on every compiled
+    /// body. The program must still produce a byte-identical result — that is the whole claim the
+    /// poll rests on. Without this flag the oracle covers the production, poll-free codegen.
+    #[arg(long)]
+    cancel_poll: bool,
     /// Run the wasm differential oracle (P-WASM W1.3): compile every corpus program to a `.noeb`
     /// and execute it through the wasm runner under wasmtime (`--sandbox`), asserting stdout,
     /// exit code, and rendered stderr byte-identical to the native VM. Needs `wasmtime` (or
@@ -57,7 +63,7 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if cli.jit_differential {
-        cmd_jit_differential(cli.file.as_deref(), &cli.dir)
+        cmd_jit_differential(cli.file.as_deref(), &cli.dir, cli.cancel_poll)
     } else if cli.wasm_differential {
         cmd_wasm_differential(cli.file.as_deref(), &cli.dir)
     } else if cli.check_leaks {
@@ -156,8 +162,17 @@ fn cmd_wasm_differential(file: Option<&std::path::Path>, dir: &std::path::Path) 
 /// available in a `--features jit` build; otherwise report that and exit non-zero so a plain build
 /// cannot silently "pass" a gate it never ran.
 #[cfg(feature = "jit")]
-fn cmd_jit_differential(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode {
-    let report = noeta_conformance::run_jit_differential(dir, file);
+fn cmd_jit_differential(
+    file: Option<&std::path::Path>,
+    dir: &std::path::Path,
+    cancel_poll: bool,
+) -> ExitCode {
+    let arm = if cancel_poll {
+        noeta_conformance::JitDiffArm::CancelPoll
+    } else {
+        noeta_conformance::JitDiffArm::Plain
+    };
+    let report = noeta_conformance::run_jit_differential_with(dir, file, arm);
     print!("{}", report.to_human());
     if report.ok() {
         ExitCode::SUCCESS
@@ -168,7 +183,11 @@ fn cmd_jit_differential(file: Option<&std::path::Path>, dir: &std::path::Path) -
 
 /// Fallback when the binary was built without the `jit` feature: the oracle cannot run.
 #[cfg(not(feature = "jit"))]
-fn cmd_jit_differential(_file: Option<&std::path::Path>, _dir: &std::path::Path) -> ExitCode {
+fn cmd_jit_differential(
+    _file: Option<&std::path::Path>,
+    _dir: &std::path::Path,
+    _cancel_poll: bool,
+) -> ExitCode {
     eprintln!(
         "noeta-conformance: --jit-differential requires the `jit` feature \
          (build with `cargo run -p noeta-conformance --features jit -- --jit-differential`)"

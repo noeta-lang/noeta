@@ -145,6 +145,11 @@ jobs:
         run: cargo test -p noeta-conformance --features jit --locked
       - name: JIT differential (coverage summary)
         run: cargo run -p noeta-conformance --features jit --locked -- --jit-differential
+      # The cancellable arm: a run carrying a cancellation flag gets *different* native code (a
+      # cancellation poll at every loop header), so it needs its own pass. The flag is never set,
+      # so the only variable is the codegen.
+      - name: JIT differential — cancel-poll arm (coverage summary)
+        run: cargo run -p noeta-conformance --features jit --locked -- --jit-differential --cancel-poll
       # The shipped CLI defaults to the `jit` feature, so its integration tests and doc-sample gate now
       # exercise the production hot-counter JIT end-to-end (real-host `noeta run`/`test`). Gate that path.
       - name: JIT-enabled CLI (integration + doc samples)
