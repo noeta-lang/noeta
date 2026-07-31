@@ -2652,17 +2652,21 @@ impl Printer<'_> {
                 ty,
                 args,
                 ..
-            } => self.dot_link(
-                self.receiver(recv)?,
-                recv.span().end,
-                func_span.start,
-                Doc::concat([
-                    Doc::text(format!(".{func}::<")),
-                    self.type_ref(ty)?,
-                    Doc::text(">"),
-                    self.arg_list(args, ty.span().end)?,
-                ]),
-            ),
+            } => {
+                // The receiver is rendered first, before the link's own parts: printing walks the
+                // source with a monotone comment cursor, so rendering out of source order would let
+                // an argument's comment be consumed ahead of the receiver's — or ahead of one
+                // written in the dot gap, which [`Self::dot_link`] takes between the two.
+                let head = self.receiver(recv)?;
+                self.dot_link(head, recv.span().end, func_span.start, || {
+                    Ok(Doc::concat([
+                        Doc::text(format!(".{func}::<")),
+                        self.type_ref(ty)?,
+                        Doc::text(">"),
+                        self.arg_list(args, ty.span().end)?,
+                    ]))
+                })?
+            }
             Expr::TypedCall {
                 name,
                 type_args,
@@ -2691,19 +2695,22 @@ impl Printer<'_> {
             } => {
                 // The receiver is rendered first, before the link's own parts: printing walks the
                 // source with a monotone comment cursor, so rendering out of source order would
-                // let an argument's comment be consumed ahead of the receiver's.
+                // let an argument's comment be consumed ahead of the receiver's — or ahead of one
+                // written in the dot gap, which [`Self::dot_link`] takes between the two.
                 let head = self.receiver(recv)?;
-                let mut parts = vec![Doc::text(format!(".{name}::<"))];
-                for (i, t) in type_args.iter().enumerate() {
-                    if i > 0 {
-                        parts.push(Doc::text(", "));
+                self.dot_link(head, recv.span().end, name_span.start, || {
+                    let mut parts = vec![Doc::text(format!(".{name}::<"))];
+                    for (i, t) in type_args.iter().enumerate() {
+                        if i > 0 {
+                            parts.push(Doc::text(", "));
+                        }
+                        parts.push(self.type_ref(t)?);
                     }
-                    parts.push(self.type_ref(t)?);
-                }
-                parts.push(Doc::text(">"));
-                let anchor = type_args.last().map(|t| t.span().end).unwrap_or(0);
-                parts.push(self.arg_list(args, anchor)?);
-                self.dot_link(head, recv.span().end, name_span.start, Doc::concat(parts))
+                    parts.push(Doc::text(">"));
+                    let anchor = type_args.last().map(|t| t.span().end).unwrap_or(0);
+                    parts.push(self.arg_list(args, anchor)?);
+                    Ok(Doc::concat(parts))
+                })?
             }
             // `Repo::<Todo>` — a call-site class instantiation, printed as one unbreakable head
             // (`receiver` handles any parenthesization the underlying type reference needs). The
@@ -2916,17 +2923,45 @@ impl Printer<'_> {
     /// which is what keeps a multi-line argument nested under its own `.` — so the rule is the same
     /// one, just applied to a node that already carries its call.
     ///
+    /// A comment the author wrote in that same gap is emitted here too, above the link it documents —
+    /// the other half of the same defect [`Self::chain_segments`] fixes for an ordinary link. Because
+    /// these two node kinds are outside the [`Self::chain_ops`] walk, that fix did not reach them and
+    /// a comment above a turbofish link was still relocated below the whole statement. `link` is
+    /// therefore a **thunk**: the gap's comments have to come off the cursor before the link's own
+    /// arguments render theirs, or the shared cursor would run backwards.
+    ///
     /// Under `wrap = true` layout is re-derived from [`FmtConfig::line_width`] and the author's
-    /// breaks are not consulted; inside a tier-body hole (`force_flat`) no break may be emitted at
-    /// all. In both cases this yields and the link stays joined.
-    fn dot_link(&self, recv: Doc, recv_end: u32, link_start: u32, link: Doc) -> Doc {
-        if self.force_flat.get() || self.config.wrap || !self.broke_between(recv_end, link_start) {
-            return Doc::concat([recv, link]);
+    /// breaks are not consulted, but a comment still forces the break — a `//` cannot share a line
+    /// with what follows it, so joining would swallow the call. Inside a tier-body hole
+    /// (`force_flat`) no break may be emitted at all: the link stays joined and the comment is left
+    /// pending for the enclosing scope, exactly as an ordinary chain's is there.
+    fn dot_link(
+        &self,
+        recv: Doc,
+        recv_end: u32,
+        link_start: u32,
+        link: impl FnOnce() -> Result<Doc, FmtError>,
+    ) -> Result<Doc, FmtError> {
+        if self.force_flat.get() {
+            return Ok(Doc::concat([recv, link()?]));
         }
-        Doc::concat([
+        let comments = self.take_comments_in(recv_end, link_start);
+        let broke = !self.config.wrap && self.broke_between(recv_end, link_start);
+        let link = link()?;
+        if comments.is_empty() && !broke {
+            return Ok(Doc::concat([recv, link]));
+        }
+        let mut tail = Vec::new();
+        for c in comments {
+            tail.push(Doc::hardline());
+            tail.push(c);
+        }
+        tail.push(Doc::hardline());
+        tail.push(link);
+        Ok(Doc::concat([
             recv,
-            Doc::concat([Doc::hardline(), link]).nest(self.indent_step()),
-        ])
+            Doc::concat(tail).nest(self.indent_step()),
+        ]))
     }
 
     /// A call's `(arg, …)` list. `open_ref` is the byte just before the `(` (the callee's end), so a

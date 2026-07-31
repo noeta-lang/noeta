@@ -2218,4 +2218,25 @@ fn note(up: bool): string {
             "and that is a fixed point"
         );
     }
+
+    /// A comment between a chain's links stays there when the next link is a **turbofish** call.
+    ///
+    /// `Expr::TypedMethodCall` / `Expr::TypedModuleCall` fuse the `.name`, the type arguments and the
+    /// call into one node, so they are not part of the `chain_ops` walk that the chain-comment fix
+    /// went into — the defect survived, unreached, in exactly these two node kinds. Nothing in the
+    /// corpus writes a comment above a turbofish link, so this is the guard.
+    #[test]
+    fn a_comment_before_a_turbofish_link_stays_there() {
+        let src = "\
+fn all(db: Db): List<Todo> {
+    rows = db.table(\"todos\")
+        // Reified so the row decoder knows the shape it is filling.
+        .fetch::<Todo>()
+    return rows
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a turbofish chain");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
 }
