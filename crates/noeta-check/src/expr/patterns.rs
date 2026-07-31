@@ -85,7 +85,7 @@ impl Checker {
                 if self.diags.len() == before
                     && let Some(idiom) = self.impossible_type_test(&scrut, ty)
                 {
-                    let target = from_ref_q(ty, &self.imports.extern_types);
+                    let target = self.annot(ty);
                     self.warn(
                         DiagnosticCode::ImpossibleTypeTest,
                         ty.span(),
@@ -102,7 +102,7 @@ impl Checker {
             if let (Some(name), Pattern::IsType { ty, .. }) = (scrut_ident, &arm.pattern)
                 && self.impossible_type_test(&scrut, ty).is_none()
             {
-                bind(env, name, from_ref_q(ty, &self.imports.extern_types));
+                bind(env, name, self.annot(ty));
             }
             // The guard (`pattern if cond`) is checked in the arm scope — after the pattern
             // bindings and any `is`-narrowing above, so `Ok(age) if age >= 18` and
@@ -333,7 +333,7 @@ impl Checker {
             .iter()
             .filter_map(|a| match &a.pattern {
                 Pattern::IsType { ty, .. } if a.guard.is_none() => {
-                    Some(from_ref_q(ty, &self.imports.extern_types))
+                    Some(self.annot(ty))
                 }
                 _ => None,
             })

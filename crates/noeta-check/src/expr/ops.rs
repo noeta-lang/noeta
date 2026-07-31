@@ -265,8 +265,8 @@ impl Checker {
         if operand.defers_to_runtime() {
             return true;
         }
-        if let Type::Named(n, _) = operand
-            && let Some(bounds) = self.coloring.type_params.get(n)
+        if let Type::Param(p) = operand
+            && let Some(bounds) = self.param_bounds(p)
         {
             return bounds.iter().any(|b| b.name == t.name());
         }
@@ -277,8 +277,8 @@ impl Checker {
     /// or `None` if `operand` is not such a parameter — used to pick the diagnostic flavor.
     pub(crate) fn unbounded_type_param(&self, operand: &Type, t: BuiltinTrait) -> Option<String> {
         match operand {
-            Type::Named(n, _) => match self.coloring.type_params.get(n) {
-                Some(bounds) if !bounds.iter().any(|b| b.name == t.name()) => Some(n.clone()),
+            Type::Param(p) => match self.param_bounds(p) {
+                Some(bounds) if !bounds.iter().any(|b| b.name == t.name()) => Some(p.name.clone()),
                 _ => None,
             },
             _ => None,

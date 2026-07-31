@@ -293,8 +293,7 @@ impl Checker {
         // the *parameter name* as if it were a concrete type; erasing to `Holder<dyn>` is the honest
         // runtime fidelity. A direct literal whose args the checker inferred concretely (`Box { value:
         // 5 }` → `Box<int>`) is unaffected (it has no in-scope param to erase).
-        let params: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
-        let ty = erase_type_params(ty.clone(), &params);
+        let ty = erase_type_params(ty.clone(), &self.scope_param_ids());
         if let Some(repr) = type_to_repr_top(&ty, &self.symbols.type_kinds) {
             if is_nongeneric_nominal(&repr) {
                 return;
@@ -375,12 +374,9 @@ impl Checker {
     /// Deliberately as strict as its static twin everywhere else: a `dyn`, a `dyn Trait` or an
     /// inference hole is refused wherever it appears, and so is a mention of an in-scope parameter
     /// outside `allowed`.
-    pub(crate) fn open_only_by_params(&self, ty: &Type, allowed: &[String]) -> bool {
-        if let Type::Named(n, args) = ty
-            && args.is_empty()
-            && allowed.iter().any(|p| p == n)
-        {
-            return true;
+    pub(crate) fn open_only_by_params(&self, ty: &Type, allowed: &[ParamRef]) -> bool {
+        if let Type::Param(p) = ty {
+            return allowed.contains(p);
         }
         if matches!(ty, Type::Dyn | Type::Unknown | Type::DynTrait(_)) {
             return false;
@@ -455,7 +451,11 @@ impl Checker {
             .get(type_name)
             .cloned()
             .unwrap_or_default();
-        let names = params.join("`, `");
+        let names = params
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join("`, `");
         let is_are = if params.len() == 1 { "is" } else { "are" };
         self.error(
             DiagnosticCode::InvalidTypeArguments,
@@ -499,7 +499,12 @@ impl Checker {
         if !self.symbols.reflective_generic_types.contains(type_name) {
             return;
         }
-        let in_scope: Vec<String> = self.coloring.type_params.keys().cloned().collect();
+        let in_scope: Vec<ParamRef> = self
+            .coloring
+            .type_params
+            .values()
+            .map(|s| s.param.clone())
+            .collect();
         let Type::Named(_, args) = ret else { return };
         // ERASED rather than open by a parameter: no instantiation reached this call at all —
         // nothing is waiting to be inferred, and the object provably never gets a tag. That is the
@@ -521,15 +526,19 @@ impl Checker {
         // Non-empty by construction: the caller reached here because some argument failed
         // `fully_concrete`, and the check above already refused every other way that can fail (a
         // `dyn`, a `dyn Trait`, an inference hole), leaving a parameter mention as the only cause.
-        let open: Vec<String> = in_scope
+        let open: Vec<ParamRef> = in_scope
             .iter()
             .filter(|p| {
-                args.iter()
-                    .any(|a| mentions_param(a, std::slice::from_ref(*p)))
+                let one: ParamSet = std::iter::once(p.id).collect();
+                args.iter().any(|a| mentions_param(a, &one))
             })
             .cloned()
             .collect();
-        let names = open.join("`, `");
+        let names = open
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join("`, `");
         let is_are = if open.len() == 1 {
             "is a type parameter"
         } else {
@@ -604,7 +613,7 @@ impl Checker {
             return;
         }
         for f in &r.fields {
-            let ty = field_type(&f.ty, &self.imports.extern_types);
+            let ty = self.annot_field(&f.ty);
             if !self.is_packable_type(&ty) {
                 self.error(
                         DiagnosticCode::InvalidPackedType,

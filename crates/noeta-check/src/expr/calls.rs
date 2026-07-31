@@ -195,12 +195,19 @@ impl Checker {
                     type_args.len()
                 ),
             )
-            .help(format!("`{type_name}` declares `<{}>`", params.join(", ")));
+            .help(format!(
+                "`{type_name}` declares `<{}>`",
+                params
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
             return Vec::new();
         }
         type_args
             .iter()
-            .map(|t| from_ref_q(t, &self.imports.extern_types))
+            .map(|t| self.annot(t))
             .collect()
     }
 
@@ -293,16 +300,19 @@ impl Checker {
         }
         // The prelude constructors, typed as the generic constructors they are:
         // `Ok<T, E>(v: T): Result<T, E>` (also the nullary `Ok(): Result<void, E>`),
-        // `Err<T, E>(e: E): Result<T, E>`, `some<T>(v: T): Option<T>`. The synthetic `$T`/`$E`
-        // parameter names cannot collide with a user type (no source name contains `$`), and any
-        // residue erases to `dyn` below. `panic` has no parameters to instantiate: its value type
+        // `Err<T, E>(e: E): Result<T, E>`, `some<T>(v: T): Option<T>`. They have no source
+        // declaration to take an identity from, so they take reserved SYNTHETIC ids — which cannot
+        // alias any real parameter, where the old synthetic `$T`/`$E` *names* relied on no user
+        // ever spelling a `$`. Any residue erases to `dyn` below. `panic` has no parameters to instantiate: its value type
         // is `fn(dyn) -> ?` — the language has no bottom/`never` type, so the return stays an
         // inference hole (divergent in practice, compatible with any expected return).
-        let t = || Type::Named("$T".to_string(), Vec::new());
-        let e = || Type::Named("$E".to_string(), Vec::new());
+        let t_param = synthetic::ctor_ok();
+        let e_param = synthetic::ctor_err();
+        let t = || Type::Param(t_param.clone());
+        let e = || Type::Param(e_param.clone());
         /// The instantiable shape of a polymorphic value: its (bounded) type parameters and
         /// un-erased params/return — the same trio [`GenericInfo`] carries.
-        type CtorShape = (Vec<(String, Vec<BoundReq>)>, Vec<Type>, Type);
+        type CtorShape = (Vec<(ParamRef, Vec<BoundReq>)>, Vec<Type>, Type);
         let (params, raw_params, raw_ret): CtorShape = match name {
             "panic" => {
                 return Some(Type::Fn {
@@ -347,14 +357,14 @@ impl Checker {
             }
         };
         let is_prelude_ctor = params.is_empty();
-        let tps: HashSet<String> = if is_prelude_ctor {
-            ["$T".to_string(), "$E".to_string()].into_iter().collect()
+        let tps: ParamSet = if is_prelude_ctor {
+            [t_param.id, e_param.id].into_iter().collect()
         } else {
-            params.iter().map(|(n, _)| n.clone()).collect()
+            params.iter().map(|(p, _)| p.id).collect()
         };
         // Bind parameters first (positionally, contravariance is irrelevant for binding), then let
         // the expected return pin anything the parameters left open (`f: () -> Order = make`).
-        let mut subst: HashMap<String, Type> = HashMap::new();
+        let mut subst: Subst = Subst::new();
         for (raw, exp) in raw_params.iter().zip(exp_params) {
             bind_type_params(raw, exp, &tps, &mut subst);
         }
@@ -365,8 +375,8 @@ impl Checker {
         // `List<Result<int, Low>>` boundary exactly as the per-element calls would. A user generic
         // fn's residue erases to `dyn` (below), matching its call sites.
         if is_prelude_ctor {
-            for p in ["$T", "$E"] {
-                subst.entry(p.to_string()).or_insert(Type::Unknown);
+            for p in [t_param.id, e_param.id] {
+                subst.entry(p).or_insert(Type::Unknown);
             }
         }
         // A FORWARDING generic fn as a value (poly-deferrals D2c): the expectation pinned the
@@ -399,8 +409,8 @@ impl Checker {
     fn resolve_value_hidden_slots(
         &mut self,
         name: &str,
-        subst: &HashMap<String, Type>,
-        tps: &HashSet<String>,
+        subst: &Subst,
+        tps: &ParamSet,
         span: Span,
     ) -> Option<Vec<noeta_ext_abi::HiddenArg>> {
         if self.symbols.forwarding_poisoned.contains(name) {
@@ -411,7 +421,7 @@ impl Checker {
         for slot in &fwd {
             if params_mentioned(&slot.template, tps).iter().any(|p| {
                 subst
-                    .get(p)
+                    .get(&p.id)
                     .is_none_or(|t| t.defers_to_runtime() || t.contains_unknown())
             }) {
                 return None;
@@ -471,7 +481,7 @@ impl Checker {
         args: &[CallArg],
         callee_span: Span,
         call_span: Span,
-        seed: HashMap<String, Type>,
+        seed: Subst,
         env: &mut Env,
     ) -> Type {
         let mut arg_types: Vec<Type> = args
@@ -531,8 +541,8 @@ impl Checker {
             unreachable!("seedable_generic_call matches plain calls only")
         };
         let required = self.symbols.functions[&name].required;
-        let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
-        let mut seed: HashMap<String, Type> = HashMap::new();
+        let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
+        let mut seed: Subst = Subst::new();
         match &generic.raw_ret {
             Type::Result(ok, _) => bind_type_params(ok, success_expected, &tps, &mut seed),
             Type::Option(some) => bind_type_params(some, success_expected, &tps, &mut seed),
@@ -612,7 +622,7 @@ impl Checker {
         }
         let resolved: Vec<Type> = type_args
             .iter()
-            .map(|t| from_ref_q(t, &self.imports.extern_types))
+            .map(|t| self.annot(t))
             .collect();
         // A local binding cannot be instantiated, and shadows the free function in call position —
         // reject rather than silently routing past the shadow.
@@ -665,13 +675,13 @@ impl Checker {
                     resolved.len()
                 ),
             );
-            let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+            let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
-        let seed: HashMap<String, Type> = generic
+        let seed: Subst = generic
             .params
             .iter()
-            .map(|(n, _)| n.clone())
+            .map(|(p, _)| p.id)
             .zip(resolved)
             .collect();
         // Named arguments, normalized into parameter order exactly as the non-turbofish call does
@@ -1257,8 +1267,8 @@ impl Checker {
                 // bounds, typed at the bound's instantiation (`<T: Keyed<int>>` → `x.key(): int`,
                 // `x.same(other: int)`); a method no bound declares falls through and stays
                 // lenient as before (dispatch may still resolve at runtime).
-                if let Type::Named(n, _) = &recv
-                    && let Some((params, required, ret)) = self.type_param_trait_method(n, name)
+                if let Type::Param(p) = &recv
+                    && let Some((params, required, ret)) = self.type_param_trait_method(p, name)
                 {
                     self.finalize_closure_args(&params, args, arg_exprs, env);
                     self.check_args(&params, required, args, arg_exprs, span, name);
@@ -1494,8 +1504,8 @@ impl Checker {
         let type_args = if params.is_empty() {
             Vec::new()
         } else {
-            let pset: HashSet<String> = params.iter().cloned().collect();
-            let mut subst: HashMap<String, Type> = HashMap::new();
+            let pset: ParamSet = params.iter().map(|p| p.id).collect();
+            let mut subst: Subst = Subst::new();
             if let Some(fields) = self
                 .symbols
                 .enums
@@ -1509,7 +1519,7 @@ impl Checker {
             }
             params
                 .iter()
-                .map(|p| subst.get(p).cloned().unwrap_or(Type::Dyn))
+                .map(|p| subst.get(&p.id).cloned().unwrap_or(Type::Dyn))
                 .collect()
         };
         let ty = Type::Named(enum_name.to_string(), type_args);
@@ -1576,17 +1586,17 @@ impl Checker {
             // declared return against it, first-wins AFTER the receiver's own arguments (the
             // receiver stays authoritative for the class's parameters; the expectation fills what
             // it leaves open — typically the method's own).
-            let mut seed: HashMap<String, Type> = generic
+            let mut seed: Subst = generic
                 .params
                 .iter()
-                .map(|(n, _)| n.clone())
+                .map(|(p, _)| p.id)
                 .zip(recv_args.iter().cloned())
                 .filter(|(_, t)| !t.defers_to_runtime())
                 .collect();
             if let Some((pending_span, expected)) = self.pending_member_ret.clone()
                 && call_span == Some(pending_span)
             {
-                let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+                let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
                 bind_type_params(&generic.raw_ret, &expected, &tps, &mut seed);
             }
             // A generic METHOD forwards its OWN type parameters through the call node's
@@ -1654,7 +1664,7 @@ impl Checker {
         }
         let resolved: Vec<Type> = type_args
             .iter()
-            .map(|t| from_ref_q(t, &self.imports.extern_types))
+            .map(|t| self.annot(t))
             .collect();
         // Resolve the receiver: a bare unshadowed TYPE name is the associated form — with the
         // class's instantiation taken from a call-site turbofish if one is spelled
@@ -1783,21 +1793,26 @@ impl Checker {
                     resolved.len()
                 ),
             );
-            let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+            let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
         // The composed seed: the receiver's type arguments bind the class's parameters
         // (positionally, exactly as a plain instance call's), the turbofish binds the method's
         // own — both first-wins, so arguments can only fill what they leave open.
-        let mut seed: HashMap<String, Type> = generic
+        let mut seed: Subst = generic
             .params
             .iter()
-            .map(|(n, _)| n.clone())
+            .map(|(p, _)| p.id)
             .zip(recv_args.iter().cloned())
             .filter(|(_, t)| !t.defers_to_runtime())
             .collect();
-        for ((n, _), t) in own.iter().zip(resolved) {
-            seed.entry(n.clone()).or_insert(t);
+        // The method's OWN parameters are separate keys from the class's — even when both are
+        // spelled `T`. Keyed on the name, the class's argument occupied `"T"` first and this
+        // `or_insert` silently discarded the turbofish the user wrote, so `Repo::<Todo>
+        // .label::<User>()` answered `Todo`. Keyed on identity there is nothing to collide with,
+        // and `or_insert` now means only what it says: an explicit binding wins over inference.
+        for ((p, _), t) in own.iter().zip(resolved) {
+            seed.entry(p.id).or_insert(t);
         }
         // Named arguments, normalized into parameter order exactly as the non-turbofish method
         // call does (`call_user_method`) — see the free-function twin above.

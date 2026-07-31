@@ -110,12 +110,12 @@ impl Checker {
                 .get(&name)
                 .cloned()
                 .unwrap_or_default();
-            let subst: HashMap<String, Type> = params
+            let subst: Subst = params
                 .iter()
-                .cloned()
+                .map(|p| p.id)
                 .zip(recv_args.iter().cloned())
                 .collect();
-            let pset: HashSet<String> = params.into_iter().collect();
+            let pset: ParamSet = params.iter().map(|p| p.id).collect();
             let expected = erase_type_params(apply_subst(&fty, &subst), &pset);
             if !self.assignable(&vty, &expected) {
                 self.error(
@@ -257,7 +257,7 @@ impl Checker {
             .sig
             .params
             .iter()
-            .map(|p| param_type(p, &self.imports.extern_types))
+            .map(|p| self.annot_param(p))
             .collect();
         let required = required_params(&m.sig.params);
         // `async` is part of the return type on every path that reads a signature (`async fn m(): T`
@@ -267,7 +267,7 @@ impl Checker {
             m.sig
                 .ret
                 .as_ref()
-                .map(|t| from_ref_q(t, &self.imports.extern_types))
+                .map(|t| self.annot(t))
                 .unwrap_or(Type::Unknown),
             m.sig.is_async,
         );
@@ -287,34 +287,34 @@ impl Checker {
     /// the caller stays lenient exactly as before (bounds license, they don't close the world).
     pub(crate) fn type_param_trait_method(
         &self,
-        param: &str,
+        param: &ParamRef,
         name: &str,
     ) -> Option<(Vec<Type>, usize, Type)> {
-        let bounds = self.coloring.type_params.get(param)?;
-        for b in bounds {
+        let bounds = self.param_bounds(param)?.to_vec();
+        for b in &bounds {
             let Some(decl) = self.symbols.user_traits.get(&b.name) else {
                 continue;
             };
             let Some(m) = decl.methods.iter().find(|m| m.sig.name == name) else {
                 continue;
             };
-            let subst: HashMap<String, Type> = decl
+            let subst: Subst = decl
                 .type_params
                 .iter()
                 .enumerate()
-                .map(|(i, tp)| (tp.name.clone(), b.args.get(i).cloned().unwrap_or(Type::Dyn)))
+                .map(|(i, tp)| (ParamId::at(tp.span), b.args.get(i).cloned().unwrap_or(Type::Dyn)))
                 .collect();
             let params: Vec<Type> = m
                 .sig
                 .params
                 .iter()
-                .map(|p| apply_subst(&param_type(p, &self.imports.extern_types), &subst))
+                .map(|p| apply_subst(&self.annot_param(p), &subst))
                 .collect();
             let ret = async_return(
                 m.sig
                     .ret
                     .as_ref()
-                    .map(|t| from_ref_q(t, &self.imports.extern_types))
+                    .map(|t| self.annot(t))
                     .unwrap_or(Type::Unknown),
                 m.sig.is_async,
             );
@@ -352,19 +352,19 @@ impl Checker {
     ) -> Option<(Vec<Type>, usize, Type)> {
         let decl = self.symbols.user_traits.get(tr)?;
         let m = decl.methods.iter().find(|m| m.sig.name == name)?;
-        let subst: HashMap<String, Type> = decl
+        let subst: Subst = decl
             .type_params
             .iter()
-            .map(|tp| (tp.name.clone(), Type::Dyn))
+            .map(|tp| (ParamId::at(tp.span), Type::Dyn))
             .collect();
         let params: Vec<Type> = m
             .sig
             .params
             .iter()
-            .map(|p| apply_subst(&param_type(p, &self.imports.extern_types), &subst))
+            .map(|p| apply_subst(&self.annot_param(p), &subst))
             .collect();
         let ret = async_return(
-            field_type(&m.sig.ret, &self.imports.extern_types),
+            self.annot_field(&m.sig.ret),
             m.sig.is_async,
         );
         Some((
@@ -599,14 +599,19 @@ impl Checker {
             .get(n)
             .cloned()
             .unwrap_or_default();
-        let subst: HashMap<String, Type> = params
+        let subst: Subst = params
             .iter()
-            .cloned()
+            .map(|p| p.id)
             .zip(recv_args.iter().cloned())
             .collect();
-        let pset: HashSet<String> = params
-            .into_iter()
-            .filter(|p| !self.coloring.type_params.contains_key(p))
+        // A parameter of the receiver's type that is ALSO in scope here — i.e. we are inside that
+        // very declaration — is not erased: it is the caller's own parameter and must survive.
+        // Asked by identity, this now means exactly that; asked by name it also caught an
+        // unrelated declaration's `T`, which is the same conflation this arc removes.
+        let pset: ParamSet = params
+            .iter()
+            .filter(|p| !self.param_in_scope(p))
+            .map(|p| p.id)
             .collect();
         Some(erase_type_params(apply_subst(&ty, &subst), &pset))
     }

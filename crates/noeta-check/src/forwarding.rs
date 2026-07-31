@@ -43,9 +43,13 @@
 //! rejected at the call site with a "spell the turbofish" help.
 
 use crate::constructors::FreshConstructors;
-use crate::subst::{apply_subst, bind_type_params, from_ref_q, mentions_param};
+use crate::subst::{
+    apply_subst, bind_type_params, extend_param_scope, from_ref_q, mentions_param, param_ref,
+    param_scope, scope_ids,
+};
+use crate::env::{ParamScope, ParamSet, Subst};
 use noeta_ast::{ClosureBody, Expr, FnDecl, ObjectLit, Program, Stmt, StrPart, TypeRef};
-use noeta_types::Type;
+use noeta_types::{ParamRef, Type};
 use std::collections::{HashMap, HashSet};
 
 /// One forwarding slot of a generic function, in first-appearance order.
@@ -123,7 +127,8 @@ fn reflective_generic_types<'a>(program: &'a Program, cx: &WalkCx<'a>) -> HashSe
         if type_params.is_empty() {
             continue;
         }
-        let own: Vec<&str> = type_params.iter().map(|p| p.name.as_str()).collect();
+        let own = param_scope(type_params, cx.xt);
+        let own_ids = scope_ids(&own);
         for m in methods {
             let mut reads = false;
             {
@@ -131,9 +136,8 @@ fn reflective_generic_types<'a>(program: &'a Program, cx: &WalkCx<'a>) -> HashSe
                 // consume, and what a missing tag makes unanswerable. A composite slot
                 // (`List<T>`) belongs to the recipe channel, which is a different failure.
                 let mut mark_fn = |template: Type, _: bool| {
-                    if let Type::Named(n, args) = &template
-                        && args.is_empty()
-                        && own.contains(&n.as_str())
+                    if let Type::Param(p) = &template
+                        && own_ids.contains(&p.id)
                     {
                         reads = true;
                     }
@@ -221,10 +225,10 @@ pub(crate) fn compute_forwarding(
         .map(|f| Candidate {
             key: f.name.to_string(),
             decl: f,
-            own: f.type_params.iter().map(|p| p.name.as_str()).collect(),
+            own: param_scope(&f.type_params, xt),
         })
         .collect();
-    for (ty, method, own) in method_candidates(program) {
+    for (ty, method, own) in method_candidates(program, xt) {
         candidates.push(Candidate {
             key: format!("{ty}.{}", method.name),
             decl: method,
@@ -232,12 +236,12 @@ pub(crate) fn compute_forwarding(
         });
     }
     // The declaration-order type parameters of every candidate, for aligning turbofish arguments.
-    let decl_params: HashMap<&str, Vec<&str>> = fns
+    let decl_params: HashMap<&str, Vec<ParamRef>> = fns
         .iter()
         .map(|f| {
             (
                 f.name.as_str(),
-                f.type_params.iter().map(|p| p.name.as_str()).collect(),
+                f.type_params.iter().map(param_ref).collect(),
             )
         })
         .collect();
@@ -248,19 +252,20 @@ pub(crate) fn compute_forwarding(
     let sigs: HashMap<&str, (Vec<Type>, Type)> = fns
         .iter()
         .map(|f| {
+            let scope = param_scope(&f.type_params, xt);
             let params: Vec<Type> = f
                 .params
                 .iter()
                 .map(|p| {
                     p.ty.as_ref()
-                        .map(|t| from_ref_q(t, xt))
+                        .map(|t| from_ref_q(t, xt, &scope))
                         .unwrap_or(Type::Unknown)
                 })
                 .collect();
             let ret = f
                 .ret
                 .as_ref()
-                .map(|t| from_ref_q(t, xt))
+                .map(|t| from_ref_q(t, xt, &scope))
                 .unwrap_or(Type::Unknown);
             (f.name.as_str(), (params, ret))
         })
@@ -321,8 +326,9 @@ pub(crate) fn compute_forwarding(
     }
     // The reflective-type set rides along: it needs the same walk over a *type's* parameters, and
     // computing it here keeps "a site that consumes a bare parameter" one definition.
+    let empty = ParamScope::new();
     let cx = WalkCx {
-        params: &[],
+        params: &empty,
         map: &map,
         decl_params: &decl_params,
         sigs: &sigs,
@@ -346,15 +352,18 @@ pub(crate) fn compute_forwarding(
 struct Candidate<'a> {
     key: String,
     decl: &'a FnDecl,
-    own: Vec<&'a str>,
+    own: ParamScope,
 }
 
 /// Every method the fixpoint walks, as `(owning type name, declaration, forwardable parameters)`.
 /// Classes, structs and enums alike — all three flatten their `impl` blocks into `methods`, which is
 /// also what the `(type, method)` dispatch machinery reads, so this sees exactly the methods a call
 /// can reach. A method with nothing to forward is left out entirely.
-fn method_candidates(program: &Program) -> Vec<(&str, &FnDecl, Vec<&str>)> {
-    let mut out: Vec<(&str, &FnDecl, Vec<&str>)> = Vec::new();
+fn method_candidates<'a>(
+    program: &'a Program,
+    xt: &HashMap<String, String>,
+) -> Vec<(&'a str, &'a FnDecl, ParamScope)> {
+    let mut out: Vec<(&str, &FnDecl, ParamScope)> = Vec::new();
     for stmt in &program.stmts {
         let (name, type_params, methods, impls) = match stmt {
             Stmt::Class(d) => (d.name.as_str(), &d.type_params, &d.methods, &d.impls),
@@ -370,12 +379,17 @@ fn method_candidates(program: &Program) -> Vec<(&str, &FnDecl, Vec<&str>)> {
             .map(|m| m.name_span)
             .collect();
         for m in methods {
-            let mut own: Vec<&str> = m.type_params.iter().map(|p| p.name.as_str()).collect();
-            own.extend(forwardable_class_params(
-                type_params,
-                m,
-                from_impl.contains(&m.name_span),
-            ));
+            // The class's forwardable parameters FIRST, then the method's own layered over them:
+            // a method `<T>` shadowing a class `<T>` leaves only the method's in scope, which is
+            // what `forwardable_class_params` used to say by filtering names out of a flat list.
+            let own = extend_param_scope(
+                &param_scope(
+                    forwardable_class_params(type_params, m, from_impl.contains(&m.name_span)),
+                    xt,
+                ),
+                &m.type_params,
+                xt,
+            );
             if !own.is_empty() {
                 out.push((name, m, own));
             }
@@ -410,16 +424,14 @@ fn forwardable_class_params<'a>(
     type_params: &'a [noeta_ast::TypeParam],
     m: &FnDecl,
     from_impl: bool,
-) -> Vec<&'a str> {
+) -> &'a [noeta_ast::TypeParam] {
     if type_params.is_empty() || from_impl || m.body.iter().any(|s| s.mentions("self")) {
-        return Vec::new();
+        return &[];
     }
-    let shadowed: HashSet<&str> = m.type_params.iter().map(|p| p.name.as_str()).collect();
+    // Shadowing is no longer a filter here: the method's own parameters are layered OVER these by
+    // `extend_param_scope`, so a shadowed class parameter simply stops being reachable by name —
+    // and the two `T`s are different parameters, so nothing else has to notice.
     type_params
-        .iter()
-        .map(|p| p.name.as_str())
-        .filter(|p| !shadowed.contains(p))
-        .collect()
 }
 
 /// Every declared struct/class's **field types by name**, for the generic-in-generic construction
@@ -450,8 +462,8 @@ fn object_field_types(program: &Program) -> ObjectFieldTypes<'_> {
 
 /// Every declared generic type's parameters, in declaration order — the alignment a nested
 /// constructor's slot templates are substituted through.
-fn declared_type_params(program: &Program) -> HashMap<&str, Vec<&str>> {
-    let mut out: HashMap<&str, Vec<&str>> = HashMap::new();
+fn declared_type_params(program: &Program) -> HashMap<&str, Vec<ParamRef>> {
+    let mut out: HashMap<&str, Vec<ParamRef>> = HashMap::new();
     for stmt in &program.stmts {
         let (name, type_params) = match stmt {
             Stmt::Class(d) => (d.name.as_str(), &d.type_params),
@@ -460,7 +472,7 @@ fn declared_type_params(program: &Program) -> HashMap<&str, Vec<&str>> {
             _ => continue,
         };
         if !type_params.is_empty() {
-            out.insert(name, type_params.iter().map(|p| p.name.as_str()).collect());
+            out.insert(name, type_params.iter().map(param_ref).collect());
         }
     }
     out
@@ -469,9 +481,11 @@ fn declared_type_params(program: &Program) -> HashMap<&str, Vec<&str>> {
 /// The walk's read-only context: the enclosing fn's type parameters, the fixpoint state, every
 /// candidate's declared parameter order, and the extern-type import map.
 struct WalkCx<'a> {
-    params: &'a [&'a str],
+    /// The type parameters the walked body may forward — a SCOPE, so a written `T` resolves to the
+    /// parameter it names rather than merely being recognized as "some parameter".
+    params: &'a ParamScope,
     map: &'a ForwardingMap,
-    decl_params: &'a HashMap<&'a str, Vec<&'a str>>,
+    decl_params: &'a HashMap<&'a str, Vec<ParamRef>>,
     sigs: &'a HashMap<&'a str, (Vec<Type>, Type)>,
     xt: &'a HashMap<String, String>,
     /// The program's provable fresh constructors — the one call form whose reflected instantiation
@@ -481,7 +495,7 @@ struct WalkCx<'a> {
     obj_fields: &'a ObjectFieldTypes<'a>,
     /// Every declared generic **type**'s parameters in declaration order, for aligning a nested
     /// constructor's slot templates with the instantiation the position spells.
-    type_params: &'a HashMap<&'a str, Vec<&'a str>>,
+    type_params: &'a HashMap<&'a str, Vec<ParamRef>>,
     /// The walked declaration's declared **return** type, for the `return` position (and for
     /// resolving a target-typed `.{ … }` returned from it).
     ret: Option<&'a TypeRef>,
@@ -490,13 +504,21 @@ struct WalkCx<'a> {
 impl WalkCx<'_> {
     /// A surface type reference as the checker will see it, template-canonicalized.
     fn to_type(&self, ty: &TypeRef) -> Type {
-        from_ref_q(ty, self.xt)
+        from_ref_q(ty, self.xt, self.params)
     }
 
-    /// Whether a canonicalized type mentions one of the enclosing fn's type parameters.
+    /// Whether a canonicalized type mentions one of the enclosing declaration's type parameters.
     fn mentions(&self, t: &Type) -> bool {
-        let params: Vec<String> = self.params.iter().map(|p| p.to_string()).collect();
-        mentions_param(t, &params)
+        mentions_param(t, &scope_ids(self.params))
+    }
+
+    /// The type `ty` names, when that is exactly one of the enclosing declaration's own **bare**
+    /// parameters — the shape every name-keyed reflective consumer (`type_name`, `attributes_of`,
+    /// a narrow) forwards for. `None` for anything else, a composite included: `List<T>` heads at
+    /// `List`, a name no instantiation changes.
+    fn bare_param(&self, ty: &TypeRef) -> Option<Type> {
+        let t = self.to_type(ty);
+        matches!(t, Type::Param(_)).then_some(t)
     }
 
     /// The **generic-in-generic construction** consumer: a fresh-constructor call of a generic type
@@ -547,9 +569,9 @@ impl WalkCx<'_> {
         if let (Some(slots), Some(params)) = (self.map.get(&key), self.type_params.get(ctor_ty))
             && params.len() == args.len()
         {
-            let subst: HashMap<String, Type> = params
+            let subst: Subst = params
                 .iter()
-                .map(|p| p.to_string())
+                .map(|p| p.id)
                 .zip(args.iter().cloned())
                 .collect();
             for slot in slots {
@@ -615,10 +637,6 @@ fn head_of(ty: &TypeRef) -> Option<&str> {
 }
 
 /// Whether a surface type reference is exactly the bare type parameter `param`.
-fn is_bare_param(ty: &TypeRef, param: &str) -> bool {
-    matches!(ty, TypeRef::Named { name, args, .. } if name == param && args.is_empty())
-}
-
 fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
     match stmt {
         Stmt::Echo { value: e, .. } | Stmt::Yield { value: e, .. } => walk_expr(e, cx, mark),
@@ -642,8 +660,8 @@ fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                     ret: ann_ret,
                 } = cx.to_type(ann)
             {
-                let tps: HashSet<String> = callee_params.iter().map(|p| p.to_string()).collect();
-                let mut subst: HashMap<String, Type> = HashMap::new();
+                let tps: ParamSet = callee_params.iter().map(|p| p.id).collect();
+                let mut subst: Subst = Subst::new();
                 for (raw, exp) in raw_params.iter().zip(&ann_params) {
                     bind_type_params(raw, exp, &tps, &mut subst);
                 }
@@ -716,13 +734,14 @@ fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         // the nested declaration's own type parameters shadow (those have no call-site channel;
         // the checker rejects sites naming them).
         Stmt::Fn(decl) => {
-            let shadowed: Vec<&str> = decl.type_params.iter().map(|p| p.name.as_str()).collect();
-            let visible: Vec<&str> = cx
-                .params
-                .iter()
-                .copied()
-                .filter(|p| !shadowed.contains(p))
-                .collect();
+            // The nested declaration's own `<…>` REPLACE the enclosing entries they shadow, rather
+            // than being filtered out of a flat name list: an inner `T` is a different parameter,
+            // and a site naming it resolves to that one (which has no call-site channel, so the
+            // checker rejects it) instead of silently reading the enclosing slot.
+            let mut visible = extend_param_scope(cx.params, &decl.type_params, cx.xt);
+            for p in &decl.type_params {
+                visible.remove(&p.name);
+            }
             if visible.is_empty() {
                 return;
             }
@@ -778,10 +797,8 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         // The name-keyed manifest consumer: bare parameters only (an attribute type is a bare
         // struct name by construction).
         Expr::AttributesOf { ty, .. } => {
-            for p in cx.params {
-                if is_bare_param(ty, p) {
-                    mark(Type::Named(p.to_string(), Vec::new()), false);
-                }
+            if let Some(p) = cx.bare_param(ty) {
+                mark(p, false);
             }
         }
         // `type_name::<T>()` — the other **name-only** consumer, and the cheapest of them: it wants
@@ -791,10 +808,8 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         // `type_name::<List<T>>()` heads at `List`, a name no instantiation changes, and stays the
         // compile-time constant it always was.
         Expr::TypeName { ty, .. } => {
-            for p in cx.params {
-                if is_bare_param(ty, p) {
-                    mark(Type::Named(p.to_string(), Vec::new()), false);
-                }
+            if let Some(p) = cx.bare_param(ty) {
+                mark(p, false);
             }
         }
         // The **narrow** consumers — `v.as<T>()` and `v is T`. Name-only, like `type_name` above
@@ -806,10 +821,8 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         // reads one name, so a parameter buried in a *tested* argument position (`v is List<T>`)
         // has no slot it could be spelled as and is an E0058 at the checker instead.
         Expr::As { expr: e, ty, .. } | Expr::TypeTest { expr: e, ty, .. } => {
-            for p in cx.params {
-                if is_bare_param(ty, p) {
-                    mark(Type::Named(p.to_string(), Vec::new()), false);
-                }
+            if let Some(p) = cx.bare_param(ty) {
+                mark(p, false);
             }
             rec!(e);
         }
@@ -827,9 +840,9 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 (cx.map.get(name.as_str()), cx.decl_params.get(name.as_str()))
                 && type_args.len() == callee_params.len()
             {
-                let subst: HashMap<String, Type> = callee_params
+                let subst: Subst = callee_params
                     .iter()
-                    .map(|p| p.to_string())
+                    .map(|p| p.id)
                     .zip(type_args.iter().map(|t| cx.to_type(t)))
                     .collect();
                 for slot in slots {

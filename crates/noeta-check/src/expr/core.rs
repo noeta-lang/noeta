@@ -239,8 +239,8 @@ impl Checker {
                 let (name, callee_span, generic) =
                     self.seedable_generic_call(expr, env).expect("guarded");
                 let required = self.symbols.functions[&name].required;
-                let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
-                let mut seed: HashMap<String, Type> = HashMap::new();
+                let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
+                let mut seed: Subst = Subst::new();
                 bind_type_params(&generic.raw_ret, expected, &tps, &mut seed);
                 let actual = self.check_seeded_generic_call(
                     &name,
@@ -277,8 +277,8 @@ impl Checker {
                     unreachable!("seedable_generic_call matches plain calls only")
                 };
                 let required = self.symbols.functions[&name].required;
-                let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
-                let mut seed: HashMap<String, Type> = HashMap::new();
+                let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
+                let mut seed: Subst = Subst::new();
                 // Bind the declared SUCCESS arm against the expectation; a declared return that is
                 // not a `Result`/`Option` leaves the seed empty (the unwrap below then reports the
                 // ordinary `?`-misuse, exactly as synthesis position would).
@@ -349,7 +349,7 @@ impl Checker {
                     .enumerate()
                     .map(|(i, p)| {
                         p.ty.as_ref()
-                            .map(|t| from_ref_q(t, &self.imports.extern_types))
+                            .map(|t| self.annot(t))
                             .or_else(|| expected_params.get(i).cloned())
                             .unwrap_or(Type::Unknown)
                     })
@@ -369,7 +369,7 @@ impl Checker {
                 // the body is inferred instead; `dyn` accepts whatever comes out.
                 let declared = ann
                     .as_ref()
-                    .map(|t| from_ref_q(t, &self.imports.extern_types));
+                    .map(|t| self.annot(t));
                 let body_expected = declared
                     .clone()
                     .or_else(|| (!matches!(**ret, Type::Dyn)).then(|| (**ret).clone()));
@@ -656,12 +656,16 @@ impl Checker {
     /// says so where that route is actually open ([`Checker::forwardable_params`]), rather than
     /// sending the author to restructure a signature that no longer needs it.
     fn reject_erased_type_param(&mut self, ty: &TypeRef, surface: &str) -> bool {
-        let TypeRef::Named { name, args, span } = ty else {
+        let TypeRef::Named { args, span, .. } = ty else {
             return false;
         };
-        if !args.is_empty() || !self.coloring.type_params.contains_key(name.as_str()) {
+        if !args.is_empty() {
             return false;
         }
+        let Type::Param(param) = self.annot(ty) else {
+            return false;
+        };
+        let name = &param.name;
         // A parameter of the ENCLOSING generic type that this site cannot reach. The instantiation
         // DOES exist at run time — it is on the receiver's reflected type tag — so the blanket
         // "generics are erased" would send the author looking for a fix that is not the one. Two
@@ -682,12 +686,12 @@ impl Checker {
         // (`field_specs_of(type_name::<T>())`). Saying "this member has no receiver" there would be
         // true and useless: the parameter is reachable, just not as a compile-time key.
         if let Some(owner) = self.coloring.current_type.clone()
-            && !self.coloring.forwardable_params.iter().any(|p| p == name)
+            && !self.coloring.forwardable_params.contains(&param)
             && self
                 .symbols
                 .generic_types
                 .get(&owner)
-                .is_some_and(|ps| ps.iter().any(|p| p == name.as_str()))
+                .is_some_and(|ps| ps.iter().any(|p| p.name == *name))
         {
             let shadowed = !self.coloring.self_type_params.is_empty();
             let msg = if shadowed {
@@ -724,9 +728,7 @@ impl Checker {
         // `type_name` itself is excluded: it IS the route, so pointing it at itself says nothing.
         // (Reaching here from that surface means the slot did not resolve — a session-incremental
         // entry whose forwarding table is still growing — where the general advice still applies.)
-        let help = if surface != "type_name"
-            && self.coloring.forwardable_params.iter().any(|p| p == name)
-        {
+        let help = if surface != "type_name" && self.coloring.forwardable_params.contains(&param) {
             format!(
                 "pass the name instead of the type: `{surface}(type_name::<{name}>())` — \
                  `type_name` resolves a forwarded parameter per instantiation, which the \
@@ -773,12 +775,12 @@ impl Checker {
     ///
     /// `false` means neither reaches this body — the caller reports it, because what to *say* about
     /// it depends on the surface.
-    fn record_type_param_name(&mut self, name: &str, span: Span) -> bool {
+    fn record_type_param(&mut self, param: &ParamRef, span: Span) -> bool {
         if let Some(i) = self
             .coloring
             .self_type_params
             .iter()
-            .position(|p| p == name)
+            .position(|p| p.as_ref() == Some(param))
         {
             let owner = self.coloring.current_type.clone().unwrap_or_default();
             self.sites
@@ -790,7 +792,7 @@ impl Checker {
             .coloring
             .current_forwarding
             .iter()
-            .position(|t| matches!(t, Type::Named(p, a) if p == name && a.is_empty()))
+            .position(|t| matches!(t, Type::Param(p) if p == param))
         {
             self.sites.forwarded_slot_sites.insert(span, idx as u32);
             return true;
@@ -862,13 +864,14 @@ impl Checker {
     /// target type instead, which is the part the author would change.
     fn check_narrow_target(&mut self, ty: &TypeRef, span: Span, surface: &str) {
         // The target's own head is the parameter: the resolvable shape, and the only one.
-        if let TypeRef::Named { name, args, .. } = ty
+        if let TypeRef::Named { args, .. } = ty
             && args.is_empty()
-            && self.coloring.type_params.contains_key(name.as_str())
+            && let Type::Param(param) = self.annot(ty)
         {
-            if self.record_type_param_name(name.as_str(), span) {
+            if self.record_type_param(&param, span) {
                 return;
             }
+            let name = &param.name;
             let span = &ty.span();
             let owner = self.coloring.current_type.clone();
             let help = match &owner {
@@ -900,7 +903,7 @@ impl Checker {
         // composite has nowhere to put the rest. Refused rather than answered — the arguments are
         // compared against the value's reflected tag, where a bare `T` matches nothing at all.
         if let Some(param) = self.narrow_tested_param(ty) {
-            let target = from_ref_q(ty, &self.imports.extern_types);
+            let target = self.annot(ty);
             self.error(
                 DiagnosticCode::InvalidTypeArguments,
                 ty.span(),
@@ -940,7 +943,7 @@ impl Checker {
                 None => return,
             },
         };
-        let target = from_ref_q(ty, &self.imports.extern_types);
+        let target = self.annot(ty);
         self.error(
             DiagnosticCode::InvalidTypeArguments,
             ty.span(),
@@ -1262,20 +1265,20 @@ impl Checker {
                     self.check_reserved_name(&p.name, p.name_span);
                     // Same rule as the check-mode arm: any env hit is a shadow (E0059).
                     self.check_shadow(&p.name, p.name_span, env, crate::ShadowScopes::All);
-                    bind(env, &p.name, param_type(p, &self.imports.extern_types));
+                    bind(env, &p.name, self.annot_param(p));
                 }
                 // With an explicit return annotation, check the body against it (and adopt it as the
                 // closure's return type); otherwise infer it from the body (the arrow expression's
                 // type, or a block's joined `return`s).
                 let declared = ann
                     .as_ref()
-                    .map(|t| from_ref_q(t, &self.imports.extern_types));
+                    .map(|t| self.annot(t));
                 let ret = self.closure_body_type(body, declared.as_ref(), env);
                 env.pop();
                 Type::Fn {
                     params: params
                         .iter()
-                        .map(|p| param_type(p, &self.imports.extern_types))
+                        .map(|p| self.annot_param(p))
                         .collect(),
                     ret: Box::new(ret),
                 }
@@ -1630,7 +1633,7 @@ impl Checker {
                 // runtime name, and the same two channels `type_name::<T>()` rides deliver it.
                 // Unresolvable shapes are E0058 here rather than a silent `none` at run time.
                 self.check_narrow_target(ty, *span, ".as<…>()");
-                let target = from_ref_q(ty, &self.imports.extern_types);
+                let target = self.annot(ty);
                 // Narrowing is the explicit way *out* of an open type: the dynamic top `dyn`, an
                 // un-inferred hole (which defers), a **union** (a *closed* `dyn`), or an abstract
                 // **kind-type** (`Enum`/`Struct`/`Class` — narrow to a concrete member). A value
@@ -1680,7 +1683,7 @@ impl Checker {
                 if self.diags.len() == before
                     && let Some(idiom) = self.impossible_type_test(&scrut, ty)
                 {
-                    let target = from_ref_q(ty, &self.imports.extern_types);
+                    let target = self.annot(ty);
                     self.warn(
                         DiagnosticCode::ImpossibleTypeTest,
                         ty.span(),
@@ -1733,11 +1736,10 @@ impl Checker {
                 // and `type_name::<List<T>>()` heads at `List` whatever `T` is, so it stays the
                 // folded constant. The narrow surfaces (`.as<T>()`, `x is T`) read the same two
                 // channels through the same helper, which is what makes them agree about `T`.
-                if let TypeRef::Named { name, args, .. } = ty
+                if let TypeRef::Named { args, .. } = ty
                     && args.is_empty()
-                    && (self.coloring.type_params.contains_key(name.as_str())
-                        || self.coloring.self_type_params.iter().any(|p| p == name))
-                    && self.record_type_param_name(name.as_str(), *span)
+                    && let Type::Param(p) = self.annot(ty)
+                    && self.record_type_param(&p, *span)
                 {
                     return Type::String;
                 }
@@ -1748,7 +1750,7 @@ impl Checker {
             }
             Expr::AttributesOf { ty, span } => {
                 self.check_type_ref(ty);
-                let target = from_ref_q(ty, &self.imports.extern_types);
+                let target = self.annot(ty);
                 // The type argument must itself be an attribute — a struct marked `@attribute` (the
                 // same capability gate as a `#[T(...)]` use). Otherwise the manifest holds no `T` to
                 // materialize.
@@ -1757,10 +1759,7 @@ impl Checker {
                 // resolves the concrete NAME at runtime. Whether that instantiation is an
                 // attribute is a per-name manifest fact (an entry-less name yields the empty
                 // list, exactly like the runtime path).
-                if let Type::Named(p, targs) = &target
-                    && targs.is_empty()
-                    && self.coloring.type_params.contains_key(p)
-                {
+                if let Type::Param(_) = &target {
                     match self
                         .coloring
                         .current_forwarding
@@ -1775,9 +1774,9 @@ impl Checker {
                                 DiagnosticCode::InvalidTypeArguments,
                                 *span,
                                 format!(
-                                    "cannot forward `{p}` here: call-site-typed forwarding \
+                                    "cannot forward `{target}` here: call-site-typed forwarding \
                                      carries a generic `fn`'s or method's OWN type parameters, \
-                                     and `{p}` is not one of this body's"
+                                     and `{target}` is not one of this body's"
                                 ),
                             )
                             .help(
@@ -1845,7 +1844,7 @@ impl Checker {
                 // `@attribute` gate — must be a `@semantic` enum (only those contribute roles).
                 if let Some(ty) = ty {
                     self.check_type_ref(ty);
-                    let target = from_ref_q(ty, &self.imports.extern_types);
+                    let target = self.annot(ty);
                     let is_semantic = matches!(&target, Type::Named(n, _)
                         if self.symbols.semantic_enums.contains(n));
                     if !is_semantic {
@@ -1968,7 +1967,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(ty);
-                let elem = from_ref_q(ty, &self.imports.extern_types);
+                let elem = self.annot(ty);
                 // The element type must be a packable `@packed` struct — the blob is a flat packed
                 // buffer. Recording the layout in `packed_list_sites` (the channel list literals use)
                 // hands the backend the schema to rebuild the list. Generic over any declared packable
@@ -2011,7 +2010,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(elem);
-                let t = from_ref_q(elem, &self.imports.extern_types);
+                let t = self.annot(elem);
                 // The split-endpoint pair: a `Sender<T>` and a `Receiver<T>` over the message type.
                 Type::Tuple(vec![
                     Type::Named(stdlib::SENDER.to_string(), vec![t.clone()]),
@@ -2090,7 +2089,7 @@ impl Checker {
                 let arg_types: Vec<Type> =
                     CallArg::values(args).map(|a| self.synth(a, env)).collect();
                 self.check_type_ref(ty);
-                let t = from_ref_q(ty, &self.imports.extern_types);
+                let t = self.annot(ty);
                 // A turbofish MENTIONING an in-scope type parameter (poly-values F2b; composites
                 // D2a): the recipe is per-instantiation, delivered through the enclosing
                 // forwarding fn's hidden slot for this exact template — the bare `T` or the whole
@@ -2396,8 +2395,8 @@ impl Checker {
             .get(type_name)
             .cloned()
             .unwrap_or_default();
-        let pset: HashSet<String> = params.iter().cloned().collect();
-        let mut subst: HashMap<String, Type> = HashMap::new();
+        let pset: ParamSet = params.iter().map(|p| p.id).collect();
+        let mut subst: Subst = Subst::new();
         for f in &lit.fields {
             // A polymorphic named function assigned to a **concretely `Fn`-typed field**
             // instantiates against the field's declared type (F1, poly-values) — the field
@@ -2407,7 +2406,7 @@ impl Checker {
             let field_fn_expectation = declared_field
                 .and_then(|(_, declared)| {
                     (matches!(declared, Type::Fn { .. })
-                        && !mentions_param(declared, &params)
+                        && !mentions_param(declared, &pset)
                         && self.is_deferred_arg(&f.value, env)
                         && matches!(f.value, Expr::Ident { .. }))
                     .then(|| declared.clone())
@@ -2438,10 +2437,10 @@ impl Checker {
             // `LiveRepository<T>.new` keeps its `T`, and `dynamic_ctor_slot` (consulted by
             // `absorbs_constructor_expectation` below) is what decides whether that `T` really
             // arrives; a `T` with no slot still erases and records nothing.
-            let inferred_params: HashSet<String> = pset
+            let inferred_params: ParamSet = pset
                 .iter()
-                .filter(|p| !self.coloring.forwardable_params.contains(*p))
-                .cloned()
+                .filter(|id| !self.coloring.forwardable_params.iter().any(|p| p.id == **id))
+                .copied()
                 .collect();
             let absorbed_declared = if field_fn_expectation.is_none()
                 && let Some((_, declared)) = declared_field
@@ -2500,11 +2499,11 @@ impl Checker {
             && n == type_name
         {
             for (i, p) in params.iter().enumerate() {
-                if !subst.contains_key(p)
+                if !subst.contains_key(&p.id)
                     && let Some(t) = expected_args.get(i)
                     && self.fully_concrete(t)
                 {
-                    subst.insert(p.clone(), t.clone());
+                    subst.insert(p.id, t.clone());
                 }
             }
         }
@@ -2513,7 +2512,7 @@ impl Checker {
         } else {
             params
                 .iter()
-                .map(|p| subst.get(p).cloned().unwrap_or(Type::Dyn))
+                .map(|p| subst.get(&p.id).cloned().unwrap_or(Type::Dyn))
                 .collect()
         };
         let ty = Type::Named(type_name.to_string(), args);
@@ -2553,7 +2552,7 @@ impl Checker {
     /// - a bare type parameter — erased, and it may instantiate to the container itself;
     /// - the same container (`x is Option<…>` on an `Option`), which is the true test.
     pub(crate) fn impossible_type_test(&self, scrut: &Type, ty: &TypeRef) -> Option<String> {
-        let target = from_ref_q(ty, &self.imports.extern_types);
+        let target = self.annot(ty);
         if matches!(
             target,
             Type::Dyn | Type::Unknown | Type::DynTrait(_) | Type::Kind(_)

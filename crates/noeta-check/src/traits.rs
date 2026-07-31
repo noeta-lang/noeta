@@ -170,8 +170,8 @@ impl Checker {
                 .help("construct and return the new value from the `from` parameter alone");
             }
             if let (Some(arg), Some(param)) = (trait_args.first(), m.params.first()) {
-                let want = from_ref_q(arg, &self.imports.extern_types);
-                let got = field_type(&param.ty, &self.imports.extern_types);
+                let want = self.annot(arg);
+                let got = self.annot_field(&param.ty);
                 if !Self::sig_types_compatible(&want, &got) {
                     self.error(
                         DiagnosticCode::InvalidImpl,
@@ -191,7 +191,7 @@ impl Checker {
         if t == BuiltinTrait::Validate
             && let Some(m) = methods.iter().find(|m| m.name == "validate")
         {
-            let ret = field_type(&m.ret, &self.imports.extern_types);
+            let ret = self.annot_field(&m.ret);
             let ok_shape = match &ret {
                 Type::Result(ok, err) if matches!(**ok, Type::Unit) => Some((**err).clone()),
                 _ => None,
@@ -701,7 +701,7 @@ impl Checker {
         {
             return Type::Named(target.to_string(), Vec::new());
         }
-        field_type(ty, &self.imports.extern_types)
+        self.annot_field(ty)
     }
 
     /// Validate a user-defined `trait` declaration (L1, UT1). The declaration was registered in
@@ -1366,11 +1366,11 @@ impl Checker {
                     // field mentioning one of the type's own generic parameters is deferred to
                     // the instantiation site instead (`satisfies` judges the substituted via
                     // field — S4's `via:` twin), exactly like the field-wise recipe's deferral.
-                    let params: Vec<String> = self
+                    let params: ParamSet = self
                         .symbols
                         .generic_types
                         .get(type_name)
-                        .cloned()
+                        .map(|ps| ps.iter().map(|p| p.id).collect())
                         .unwrap_or_default();
                     let field_ty = self
                         .symbols
@@ -1394,11 +1394,11 @@ impl Checker {
                     // implement `Error`, or the delegation dispatches into nothing (the same
                     // judgement as a user-trait `via:`). A field typed as one of the deriving
                     // type's own generic parameters defers to the instantiation site.
-                    let params: Vec<String> = self
+                    let params: ParamSet = self
                         .symbols
                         .generic_types
                         .get(type_name)
-                        .cloned()
+                        .map(|ps| ps.iter().map(|p| p.id).collect())
                         .unwrap_or_default();
                     let field_ty = self
                         .symbols
@@ -1557,7 +1557,10 @@ impl Checker {
         if let Some((via, via_span)) = &spec.via
             && let Some(f) = fields.iter().find(|f| f.name == *via)
         {
-            let params: Vec<String> = self
+            // A syntactic check on the WRITTEN annotation (no lattice conversion happens here), so
+            // this one legitimately compares spellings: it is asking whether the source wrote the
+            // declaration's own parameter, and the declaration is the one that named it.
+            let params = self
                 .symbols
                 .generic_types
                 .get(type_name)
@@ -1565,7 +1568,7 @@ impl Checker {
                 .unwrap_or_default();
             let satisfied = match &f.ty {
                 Some(noeta_ast::TypeRef::Named { name, .. })
-                    if params.iter().any(|p| p == name.as_str()) =>
+                    if params.iter().any(|p| p.name == name.as_str()) =>
                 {
                     true // parameter-typed — deferred to the instantiation site
                 }
@@ -1614,11 +1617,11 @@ impl Checker {
             _ => true,
         };
         if matches!(t, BuiltinTrait::Comparable | BuiltinTrait::Serialize) {
-            let params: Vec<String> = self
+            let params: ParamSet = self
                 .symbols
                 .generic_types
                 .get(type_name)
-                .cloned()
+                .map(|ps| ps.iter().map(|p| p.id).collect())
                 .unwrap_or_default();
             let offender = if let Some(fields) = self.symbols.records.get(type_name) {
                 fields
@@ -1671,6 +1674,11 @@ impl Checker {
             | Type::IntN { .. }
             | Type::Bool
             | Type::String
+            // A type parameter orders value-dependently, exactly like `dyn`: whether it does is a
+            // property of the instantiation, judged at the instantiation site. (Callers that care
+            // about the declaration itself — the derive checks — screen parameter-typed fields out
+            // with `mentions_param` before asking.)
+            | Type::Param(_)
             // Vacuous: no two values of the bottom type exist to compare, so nothing can
             // observe a missing ordering. Permissive, like `dyn`.
             | Type::Never => true,
@@ -1813,10 +1821,10 @@ impl Checker {
     ) -> Type {
         // Seed with the receiver's type arguments (instance call); the call's own arguments then
         // refine any still-unbound parameters without overwriting the receiver's binding.
-        let seed: HashMap<String, Type> = generic
+        let seed: Subst = generic
             .params
             .iter()
-            .map(|(n, _)| n.clone())
+            .map(|(p, _)| p.id)
             .zip(recv_args.iter().cloned())
             .filter(|(_, t)| !t.defers_to_runtime())
             .collect();
@@ -1849,12 +1857,12 @@ impl Checker {
         args: &mut [Type],
         arg_exprs: &[noeta_ast::CallArg],
         span: Span,
-        seed: HashMap<String, Type>,
+        seed: Subst,
         supplied_at: &[usize],
         hidden_site: Option<(Span, String, ForwardSpelling)>,
         env: &mut Env,
     ) -> Type {
-        let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+        let tps: ParamSet = generic.params.iter().map(|(p, _)| p.id).collect();
         if args.len() < required || args.len() > generic.raw_params.len() {
             let expected = if required == generic.raw_params.len() {
                 format!("{}", generic.raw_params.len())
@@ -1871,7 +1879,7 @@ impl Checker {
             );
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
-        let mut subst: HashMap<String, Type> = seed;
+        let mut subst: Subst = seed;
         // Which parameter each argument fills. A named-argument call that SKIPS a defaulted
         // parameter (`f(1, c: 9)`) has already been compacted into parameter order, so argument
         // `i` is the `i`-th SUPPLIED parameter — not `raw_params[i]`. Checking it against
@@ -1956,7 +1964,7 @@ impl Checker {
                     .into_iter()
                     .find(|p| {
                         subst
-                            .get(p)
+                            .get(&p.id)
                             .is_none_or(|t| t.defers_to_runtime() || t.contains_unknown())
                     })
                 {
@@ -2074,8 +2082,7 @@ impl Checker {
     /// composite instantiation (`List<T>`) out of a forwarded hidden slot (only the bare
     /// parameter passes through).
     pub(crate) fn mentions_in_scope_param(&self, t: &Type) -> bool {
-        let params: Vec<String> = self.coloring.type_params.keys().cloned().collect();
-        mentions_param(t, &params)
+        mentions_param(t, &self.scope_param_ids())
     }
 
     /// Enforce a polymorphic callable's declared **trait bounds** against a resolved substitution:
@@ -2086,13 +2093,14 @@ impl Checker {
     pub(crate) fn enforce_type_param_bounds(
         &mut self,
         name: &str,
-        params: &[(String, Vec<BoundReq>)],
-        subst: &HashMap<String, Type>,
-        tps: &HashSet<String>,
+        params: &[(ParamRef, Vec<BoundReq>)],
+        subst: &Subst,
+        tps: &ParamSet,
         span: Span,
     ) {
-        for (pname, bounds) in params {
-            let Some(concrete) = subst.get(pname) else {
+        for (param, bounds) in params {
+            let pname = &param.name;
+            let Some(concrete) = subst.get(&param.id) else {
                 continue; // unconstrained by the arguments — nothing concrete to check against
             };
             for bound in bounds {
@@ -2173,16 +2181,13 @@ impl Checker {
         &self,
         concrete: &Type,
         bound: &BoundReq,
-        subst: &HashMap<String, Type>,
-        tps: &HashSet<String>,
+        subst: &Subst,
+        tps: &ParamSet,
     ) -> bool {
-        let Type::Named(n, args) = concrete else {
+        let Type::Param(p) = concrete else {
             return false;
         };
-        if !args.is_empty() {
-            return false;
-        }
-        let Some(declared) = self.coloring.type_params.get(n) else {
+        let Some(declared) = self.param_bounds(p) else {
             return false;
         };
         let want: Vec<Type> = bound

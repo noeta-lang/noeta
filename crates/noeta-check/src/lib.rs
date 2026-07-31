@@ -76,7 +76,7 @@ use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::{Edition, EditionMap};
 use noeta_ext_abi::NominalType;
 use noeta_span::{PackageMap, PackageOrigin, Span};
-use noeta_types::{BuiltinTrait, Type};
+use noeta_types::{BuiltinTrait, ParamId, ParamRef, Type};
 
 mod args;
 mod attributes;
@@ -793,6 +793,11 @@ fn type_to_repr(
                 None => TypeRepr::Named(n.clone(), args),
             }
         }
+        // A still-un-instantiated type parameter projects as a bare nominal name — byte-identical
+        // to what it produced when a parameter WAS a `Named`, so no reflection output moves. It
+        // reaches here only from a template that the call site could not resolve; a resolved one
+        // has already been substituted, and projects as whatever instantiated it.
+        Type::Param(p) => TypeRepr::Named(p.name.clone(), Vec::new()),
         Type::Fn { params, ret } => {
             TypeRepr::Fn(params.iter().map(rec).collect(), Box::new(rec(ret)))
         }
@@ -939,7 +944,8 @@ struct Symbols {
     records: HashMap<String, Vec<(String, Type)>>,
     /// Declared type → its generic parameters **with their bounds**.
     ///
-    /// [`Self::generic_types`] keeps only the parameter *names*, which is all erasure needs. Type-
+    /// [`Self::generic_types`] keeps the parameters as bare [`ParamRef`]s, which is all erasure and
+    /// substitution need. Type-
     /// checking a standalone `impl`'s method bodies needs the bounds too — a body may call a method
     /// the bound provides (`<T: Comparable>` → `t.compare(u)`) — so that a body written outside its
     /// type's own declaration sees exactly what one written inside it sees.
@@ -1052,10 +1058,13 @@ struct Symbols {
     /// — so the instantiation-site checks (`satisfies`/`satisfies_user_trait`) consult this to
     /// judge the substituted via field instead of every field (S4's `via:` twin).
     via_derives: HashMap<String, Vec<(String, String)>>,
-    /// Each generic user type's type-parameter **names**, in order — so a field/method access can
-    /// map an instance's type arguments (`Box<int>`) back onto the declaration's parameters (`T`)
-    /// and read a field/return as `int` rather than the bare parameter or `dyn` (S4.5).
-    generic_types: HashMap<String, Vec<String>>,
+    /// Each generic user type's type parameters, in declaration order — so a field/method access
+    /// can map an instance's type arguments (`Box<int>`) back onto the declaration's parameters
+    /// (`T`) and read a field/return as `int` rather than the bare parameter or `dyn` (S4.5).
+    ///
+    /// Carries [`ParamRef`]s, not names: mapping an argument onto a parameter is exactly a
+    /// substitution, and a substitution keys on identity.
+    generic_types: HashMap<String, Vec<ParamRef>>,
     /// Every name a type annotation may legally resolve to: declared records/classes/enums plus
     /// names brought in by a `use` (whether merged in by the linker or left as an opaque stub).
     /// Built-in names and in-scope generic parameters are *not* stored here — they are checked
@@ -1217,7 +1226,8 @@ struct Coloring {
     /// an operation on `T` is only allowed if a bound licenses it) and body-side TYPING: a method
     /// call on a `T`-typed receiver resolves through a bound's trait at the bound's instantiation
     /// (`x.key(): int` under `T: Keyed<int>` — [`Checker::type_param_trait_method`]).
-    type_params: HashMap<String, Vec<crate::env::BoundReq>>,
+    /// Keyed by the SPELLING that resolves to each parameter — a resolver, not a membership set.
+    type_params: ParamScope,
     /// While checking a **generic type's instance method** body: the enclosing type's own type
     /// parameters, in DECLARATION order, with any name the method's own `<…>` shadows replaced by
     /// the empty string (which no identifier can equal). Empty everywhere else — at top level, in a
@@ -1225,7 +1235,10 @@ struct Coloring {
     /// instantiation. This is the channel that makes `type_name::<T>()` resolvable inside
     /// `class Repo<T>`: the index found here is the argument position to read off `self`'s
     /// reflected type tag. Saved and restored around each function.
-    self_type_params: Vec<String>,
+    /// A slot holds `None` where the method's own `<…>` shadows the class's parameter — that
+    /// parameter is a different one with no receiver channel. (This was a blank STRING, on the
+    /// reasoning that no identifier equals `""`; the identity now says it outright.)
+    self_type_params: Vec<Option<ParamRef>>,
     /// The `(literal span, expected type)` of the **named object literal currently being checked in
     /// a position that has an expectation** — the channel that lets a construction absorb type
     /// arguments its field values do not pin (`r: Repo<Todo> = Repo { tbl: "todos" }`, where no
@@ -1277,7 +1290,7 @@ struct Coloring {
     /// consumes: this is the *capability*, not the realized layout, so a diagnostic about a
     /// different surface can say whether the composed route (`field_specs_of(type_name::<T>())`)
     /// is open here without a `type_name::<T>()` having to appear first.
-    forwardable_params: Vec<String>,
+    forwardable_params: Vec<ParamRef>,
     /// How many `fn` bodies enclose the statement being checked: `0` at top level, `1` inside a
     /// top-level fn/method body, `2+` inside a nested `fn`. Distinguishes a TOP-LEVEL fn (whose
     /// name keys the forwarding/symbol tables) from a nested one that may share its name (D2b).
@@ -1781,12 +1794,12 @@ impl Checker {
                 let params = decl
                     .params
                     .iter()
-                    .map(|p| param_type(p, &self.imports.extern_types))
+                    .map(|p| self.annot_param(p))
                     .collect();
                 let ret = decl
                     .ret
                     .as_ref()
-                    .map(|t| from_ref_q(t, &self.imports.extern_types))
+                    .map(|t| self.annot(t))
                     .unwrap_or(Type::Unknown);
                 bind(
                     env,
@@ -1898,7 +1911,7 @@ impl Checker {
                 match ty {
                     Some(ty) => {
                         self.check_type_ref(ty);
-                        let expected = from_ref_q(ty, &self.imports.extern_types);
+                        let expected = self.annot(ty);
                         self.check(value, &expected, env);
                         // Record destructor-relevance of this binding for the drop-insertion pass.
                         if self.type_relevant(&expected) {
@@ -2205,7 +2218,7 @@ impl Checker {
                     bind(
                         env,
                         name.as_str(),
-                        from_ref_q(ty, &self.imports.extern_types),
+                        self.annot(ty),
                     );
                     self.check_block(then_body, env);
                     env.pop();
@@ -2589,7 +2602,7 @@ impl Checker {
             // reads the enclosing hidden locals through closure capture — so the layout is
             // retained, with any slot whose template mentions a name this declaration's own
             // type parameters shadow masked out (`Unknown` never matches a lookup).
-            let shadowed: Vec<String> = decl.type_params.iter().map(|p| p.name.clone()).collect();
+            let shadowed = param_ids(&decl.type_params);
             self.coloring
                 .current_forwarding
                 .iter()
@@ -2613,7 +2626,7 @@ impl Checker {
         // receiver to read the instantiation's tag off, so the hidden slot is its only channel (see
         // `forwarding::forwardable_class_params`, which decides the same thing for the layout).
         let next_forwardable = if fwd_key.is_some() {
-            let mut ps: Vec<String> = decl.type_params.iter().map(|p| p.name.clone()).collect();
+            let mut ps: Vec<ParamRef> = decl.type_params.iter().map(param_ref).collect();
             if target == TargetKind::Method
                 && let Some(ct) = self.coloring.current_type.clone()
                 && !self
@@ -2621,7 +2634,7 @@ impl Checker {
                     .allows_instance_call()
                 && let Some(class_params) = self.symbols.generic_types.get(&ct)
             {
-                let extra: Vec<String> = class_params
+                let extra: Vec<ParamRef> = class_params
                     .iter()
                     .filter(|p| !ps.contains(p))
                     .cloned()
@@ -2630,11 +2643,13 @@ impl Checker {
             }
             ps
         } else if target == TargetKind::Function {
-            let shadowed: Vec<&str> = decl.type_params.iter().map(|p| p.name.as_str()).collect();
+            // A nested declaration's own `<…>` shadow the enclosing ones — and a shadowing `T` is a
+            // DIFFERENT parameter, so it is dropped by identity rather than by name.
+            let shadowed = param_ids(&decl.type_params);
             self.coloring
                 .forwardable_params
                 .iter()
-                .filter(|p| !shadowed.contains(&p.as_str()))
+                .filter(|p| !shadowed.contains(&p.id))
                 .cloned()
                 .collect()
         } else {
@@ -2672,27 +2687,24 @@ impl Checker {
         {
             // A method's own `<U>` shadows a same-named type parameter, and it has no receiver
             // channel of its own — blank the slot so no lookup can match it.
+            // A method's own `<U>` shadows a same-named class parameter, and has no receiver
+            // channel of its own — blank the slot so no lookup can match it. Shadowing is decided
+            // on the SPELLING here, because that is what shadowing is: the method's `<T>` makes the
+            // name `T` mean its own parameter, so the class's is unreachable from this body.
             let own: HashSet<&str> = decl.type_params.iter().map(|p| p.name.as_str()).collect();
             self.coloring.self_type_params = params
                 .iter()
-                .map(|p| {
-                    if own.contains(p.as_str()) {
-                        String::new()
-                    } else {
-                        p.clone()
-                    }
-                })
+                .map(|p| (!own.contains(p.name.as_str())).then(|| p.clone()))
                 .collect();
         }
         let saved_type_params = self.coloring.type_params.clone();
-        self.coloring
-            .type_params
-            .extend(decl.type_params.iter().map(|p| {
-                (
-                    p.name.clone(),
-                    bound_reqs(&p.bounds, &self.imports.extern_types),
-                )
-            }));
+        // Layered over the enclosing declaration's, so a method's `<T>` inside a class `<T>` makes
+        // `T` mean the method's — the shadowing rule, stated once.
+        self.coloring.type_params = extend_param_scope(
+            &self.coloring.type_params,
+            &decl.type_params,
+            &self.imports.extern_types,
+        );
         self.check_type_param_bounds(&decl.type_params);
         for p in &decl.params {
             self.check_type_opt(&p.ty);
@@ -2704,7 +2716,7 @@ impl Checker {
         let ret = decl
             .ret
             .as_ref()
-            .map(|t| from_ref_q(t, &self.imports.extern_types))
+            .map(|t| self.annot(t))
             .unwrap_or(Type::Unknown);
         // A function whose body contains `yield` is a generator (Track G): its declared return must
         // be `Iterator<T>`, and its body's `yield e` are checked against the element type `T`. The
@@ -2802,7 +2814,7 @@ impl Checker {
             // Params land in the just-pushed frame: any env hit — a capture or a duplicate in
             // this very list (`fn(x, x)`) — is a shadow (E0059).
             self.check_shadow(&p.name, p.name_span, env, ShadowScopes::All);
-            bind(env, &p.name, param_type(p, &self.imports.extern_types));
+            bind(env, &p.name, self.annot_param(p));
         }
         self.bind_nested_fns(&decl.body, env);
         for stmt in &decl.body {

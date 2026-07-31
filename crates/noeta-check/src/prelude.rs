@@ -18,7 +18,7 @@ impl Checker {
         self.register_prelude_struct(noeta_ast::reflect::ATTRIBUTED);
         self.symbols.generic_types.insert(
             noeta_ast::reflect::ATTRIBUTED.to_string(),
-            vec!["T".to_string()],
+            vec![synthetic::prelude_param("T")],
         );
         self.register_prelude_enums();
         self.register_semantic_prelude();
@@ -639,9 +639,11 @@ fn prelude_struct_field_type(field: noeta_ast::reflect::PreludeStructFieldTy) ->
         // spells it separately from a named enum — a role binding's role may come from any
         // `@semantic` enum, not one fixed one.
         F::EnumKind => Type::Kind(noeta_types::TypeKind::Enum),
-        // A nominal — another prelude struct, or this struct's own type parameter. Both are a named
-        // type to the lattice; a parameter resolves through `generic_types` at instantiation.
-        F::Struct(n) | F::Param(n) => Type::Named(n.to_string(), Vec::new()),
+        F::Struct(n) => Type::Named(n.to_string(), Vec::new()),
+        // This struct's OWN type parameter — a real parameter in the lattice, taking the reserved
+        // synthetic identity `generic_types` registers it under, so an instantiation substitutes
+        // it by identity exactly like a user type's.
+        F::Param(n) => Type::Param(synthetic::prelude_param(n)),
         F::List(inner) => Type::List(Box::new(prelude_struct_field_type(*inner))),
         F::Option(inner) => Type::Option(Box::new(prelude_struct_field_type(*inner))),
         F::VoidFn => Type::Fn {

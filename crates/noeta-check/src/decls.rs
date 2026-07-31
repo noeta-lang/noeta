@@ -6,6 +6,52 @@
 use super::*;
 
 impl Checker {
+    /// Turn a **written annotation** into a lattice type, in the scope the checker is currently in:
+    /// extern-imported names take their qualified identity, and a spelling the enclosing `<…>`
+    /// binds becomes the [`Type::Param`] it names.
+    ///
+    /// The single entry point for every annotation the *checking* pass reads, so no site has to
+    /// remember to resolve parameters — which is exactly the kind of "remember to consult the side
+    /// table" obligation this arc removes. (The *collecting* pass has no `coloring` yet and builds
+    /// its scope explicitly; it calls the free [`from_ref_q`] with that scope.)
+    pub(crate) fn annot(&self, ty: &TypeRef) -> Type {
+        from_ref_q(ty, &self.imports.extern_types, &self.coloring.type_params)
+    }
+
+    /// [`Self::annot`] for a parameter's declared type; `Unknown` when unannotated.
+    pub(crate) fn annot_param(&self, p: &Param) -> Type {
+        param_type(p, &self.imports.extern_types, &self.coloring.type_params)
+    }
+
+    /// [`Self::annot`] for an optional annotation (a field's type, a return); `Unknown` when absent.
+    pub(crate) fn annot_field(&self, ty: &Option<TypeRef>) -> Type {
+        field_type(ty, &self.imports.extern_types, &self.coloring.type_params)
+    }
+
+    /// The identities of every type parameter currently in scope — what erasure quantifies over
+    /// while checking this declaration.
+    pub(crate) fn scope_param_ids(&self) -> ParamSet {
+        scope_ids(&self.coloring.type_params)
+    }
+
+    /// The declared trait bounds of `p`, if it is one of the parameters currently in scope.
+    ///
+    /// Looked up **by identity**: a same-spelled parameter of some other declaration is not this
+    /// one, and reading its bounds would license an operation the type in hand never promised.
+    pub(crate) fn param_bounds(&self, p: &ParamRef) -> Option<&[BoundReq]> {
+        self.coloring
+            .type_params
+            .values()
+            .find(|s| s.param.id == p.id)
+            .map(|s| s.bounds.as_slice())
+    }
+
+    /// Whether `p` is one of the type parameters currently in scope (as opposed to one belonging
+    /// to some other declaration, which reaches here only inside an un-substituted template).
+    pub(crate) fn param_in_scope(&self, p: &ParamRef) -> bool {
+        self.param_bounds(p).is_some()
+    }
+
     /// Validate a callable's parameter defaults. Two rules: defaults must be **trailing-only** — a
     /// required parameter after a defaulted one is `E0026` — and each default's type must be
     /// assignable to its parameter (`E0007`). The default expression is synthesized in `env` *before
@@ -31,7 +77,7 @@ impl Checker {
                 .help("give this parameter a default too, or move it before the optional ones");
             }
         }
-        let tps: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
+        let tps = self.scope_param_ids();
         for p in params {
             let Some(default) = &p.default else { continue };
             // The parameter's declared type is the default's expected type, so a target-typed
@@ -40,7 +86,7 @@ impl Checker {
             // no existing inference changes.
             let declared =
                 p.ty.is_some()
-                    .then(|| erase_type_params(param_type(p, &self.imports.extern_types), &tps));
+                    .then(|| erase_type_params(self.annot_param(p), &tps));
             let actual = match (&declared, default) {
                 (Some(expected), Expr::Object(l)) if l.type_name.is_none() => {
                     self.check(default, expected, env)
@@ -71,7 +117,7 @@ impl Checker {
     /// trailing-only rule**: literal fields are named, so a default makes its field optional
     /// regardless of position. Call before binding fields into `env`.
     pub(crate) fn validate_field_defaults(&mut self, fields: &[FieldDecl], env: &mut Env) {
-        let tps: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
+        let tps = self.scope_param_ids();
         for f in fields {
             let Some(default) = &f.default else { continue };
             // The field's declared type is the default's expected type — the field analogue of the
@@ -79,7 +125,7 @@ impl Checker {
             let declared = f
                 .ty
                 .is_some()
-                .then(|| erase_type_params(field_type(&f.ty, &self.imports.extern_types), &tps));
+                .then(|| erase_type_params(self.annot_field(&f.ty), &tps));
             let actual = match (&declared, default) {
                 (Some(expected), Expr::Object(l)) if l.type_name.is_none() => {
                     self.check(default, expected, env)
@@ -277,22 +323,9 @@ impl Checker {
     /// restore once the declaration is checked). Generic parameters are erased at runtime but are
     /// legal referents for annotations within their declaration. Each parameter's trait bounds are
     /// validated here (an unknown trait in a bound is `E0014`).
-    pub(crate) fn enter_type_params(
-        &mut self,
-        params: &[TypeParam],
-    ) -> HashMap<String, Vec<BoundReq>> {
-        let saved = std::mem::replace(
-            &mut self.coloring.type_params,
-            params
-                .iter()
-                .map(|p| {
-                    (
-                        p.name.clone(),
-                        bound_reqs(&p.bounds, &self.imports.extern_types),
-                    )
-                })
-                .collect(),
-        );
+    pub(crate) fn enter_type_params(&mut self, params: &[TypeParam]) -> ParamScope {
+        let scope = param_scope(params, &self.imports.extern_types);
+        let saved = std::mem::replace(&mut self.coloring.type_params, scope);
         // Validated AFTER the parameters enter scope: a bound argument may name a sibling
         // parameter (`<K, T: Keyed<K>>`), which is a legal annotation referent here.
         self.check_type_param_bounds(params);

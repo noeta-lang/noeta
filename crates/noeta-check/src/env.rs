@@ -121,18 +121,48 @@ pub(crate) struct FnSig {
 /// bounds, and return the substituted result type.
 #[derive(Clone)]
 pub(crate) struct GenericInfo {
-    /// `(type-parameter name, trait bounds)` in declaration order. For a METHOD with its own
+    /// `(type parameter, trait bounds)` in declaration order. For a METHOD with its own
     /// type parameters (generic methods, poly-deferrals D3) this is the CLASS's parameters
     /// followed by the method's own — the two substitutions compose because the receiver's type
     /// arguments seed exactly the first `class_params` entries (positionally) and the method's
     /// own are filled by turbofish/arguments/expectation.
-    pub(crate) params: Vec<(String, Vec<BoundReq>)>,
+    pub(crate) params: Vec<(ParamRef, Vec<BoundReq>)>,
     /// How many leading entries of `params` belong to the enclosing class/struct/enum (`0` for a
     /// free function). A member-call turbofish binds the REMAINING (method-own) parameters only.
     pub(crate) class_params: usize,
     pub(crate) raw_params: Vec<Type>,
     pub(crate) raw_ret: Type,
 }
+
+/// One generic type parameter **as it is in scope** at a point in the checker: which parameter the
+/// spelling resolves to, and what its declaration demands of it.
+#[derive(Clone)]
+pub(crate) struct ScopedParam {
+    /// The parameter this spelling resolves to, identity and all.
+    pub(crate) param: ParamRef,
+    /// Its declared trait bounds (`<T: Comparable>`), including an instantiated bound's arguments.
+    pub(crate) bounds: Vec<BoundReq>,
+}
+
+/// The generic type parameters in scope, keyed by the **spelling** that resolves to each.
+///
+/// A *resolver*, not a membership set — and the distinction is the whole point of this arc. The
+/// old `HashSet<String>` answered "is `T` a parameter here?", a question with no useful answer
+/// once two declarations both spell one `T`; this answers "*which* parameter does `T` name here?",
+/// and an inner declaration's entry simply replaces the outer's, which is what shadowing is. It is
+/// consulted at exactly one boundary — turning a written annotation into a [`Type`]
+/// ([`crate::subst::resolve_params`]) — after which identity travels in the lattice itself and
+/// nothing downstream needs the map at all.
+pub(crate) type ParamScope = HashMap<String, ScopedParam>;
+
+/// A set of type parameters identified by **declaration**, never by spelling — what erasure and
+/// binding quantify over ("the callee's own parameters", "this class's parameters").
+pub(crate) type ParamSet = HashSet<ParamId>;
+
+/// A substitution from type parameters to the types instantiating them, keyed by **identity**.
+/// Two same-spelled parameters from different declarations occupy different entries, which is
+/// precisely what a name-keyed map could not do.
+pub(crate) type Subst = HashMap<ParamId, Type>;
 
 /// One demanded trait bound, checker-side: the trait name plus the demanded instantiation's type
 /// arguments (`T: Keyed<int>` → `args = [int]`; empty for a bare bound, which a generic trait

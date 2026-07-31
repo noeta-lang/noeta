@@ -168,14 +168,8 @@ impl Checker {
     /// OWN (generic methods, poly-deferrals D3); the `GenericInfo` composes them — the class's
     /// parameters first (`class_params` many, seeded positionally by the receiver's type
     /// arguments), then the method's own (filled by turbofish/arguments/expectation).
-    fn collect_method_sig(
-        &mut self,
-        type_name: &str,
-        m: &FnDecl,
-        type_tps: &HashSet<String>,
-        type_generics: &[(String, Vec<BoundReq>)],
-    ) {
-        self.collect_method_sig_classified(type_name, m, type_tps, type_generics, false);
+    fn collect_method_sig(&mut self, type_name: &str, m: &FnDecl, type_params: &[TypeParam]) {
+        self.collect_method_sig_classified(type_name, m, type_params, false);
     }
 
     /// [`Self::collect_method_sig`] with control over the receiver classification.
@@ -197,8 +191,7 @@ impl Checker {
         &mut self,
         type_name: &str,
         m: &FnDecl,
-        type_tps: &HashSet<String>,
-        type_generics: &[(String, Vec<BoundReq>)],
+        type_params: &[TypeParam],
         trait_provided: bool,
     ) {
         let uses_self = m.body.iter().any(|s| s.mentions("self"));
@@ -210,27 +203,37 @@ impl Checker {
         self.symbols
             .method_receiver
             .insert((type_name.to_string(), m.name.to_string()), receiver);
-        let own_generics: Vec<(String, Vec<BoundReq>)> = m
+        let xt = &self.imports.extern_types;
+        // The type's parameters, then the method's own LAYERED OVER them: a method `<T>` inside a
+        // class `<T>` shadows, so an annotation in this signature resolves to the METHOD's `T`.
+        // Both remain in `generic.params` below — they are different parameters with different
+        // identities, and each is seeded from its own channel (the receiver's type arguments for
+        // the class's, the turbofish/arguments for the method's).
+        let type_scope = param_scope(type_params, xt);
+        let scope = extend_param_scope(&type_scope, &m.type_params, xt);
+        let type_generics: Vec<(ParamRef, Vec<BoundReq>)> = type_params
+            .iter()
+            .map(|p| (param_ref(p), bound_reqs(&p.bounds, xt, &type_scope)))
+            .collect();
+        let own_generics: Vec<(ParamRef, Vec<BoundReq>)> = m
             .type_params
             .iter()
-            .map(|p| {
-                (
-                    p.name.clone(),
-                    bound_reqs(&p.bounds, &self.imports.extern_types),
-                )
-            })
+            .map(|p| (param_ref(p), bound_reqs(&p.bounds, xt, &scope)))
             .collect();
-        let mut tps = type_tps.clone();
-        tps.extend(m.type_params.iter().map(|p| p.name.clone()));
+        // Erasure quantifies over BOTH lists — including a class parameter the method shadowed,
+        // which the signature cannot name but which costs nothing to include and would be a silent
+        // gap if the shadowing rule ever changed.
+        let mut tps = param_ids(type_params);
+        tps.extend(param_ids(&m.type_params));
         let raw_params: Vec<Type> = m
             .params
             .iter()
-            .map(|p| param_type(p, &self.imports.extern_types))
+            .map(|p| param_type(p, xt, &scope))
             .collect();
         let raw_ret = async_return(
             m.ret
                 .as_ref()
-                .map(|t| from_ref_q(t, &self.imports.extern_types))
+                .map(|t| from_ref_q(t, xt, &scope))
                 .unwrap_or(Type::Unknown),
             m.is_async,
         );
@@ -242,8 +245,8 @@ impl Checker {
         let ret = erase_type_params(raw_ret.clone(), &tps);
         let generic =
             (!type_generics.is_empty() || !own_generics.is_empty()).then(|| GenericInfo {
-                params: type_generics.iter().cloned().chain(own_generics).collect(),
                 class_params: type_generics.len(),
+                params: type_generics.into_iter().chain(own_generics).collect(),
                 raw_params,
                 raw_ret,
             });
@@ -302,13 +305,16 @@ impl Checker {
         for stmt in &program.stmts {
             match stmt {
                 Stmt::Struct(r) => {
+                    // Field types resolve against the type's OWN parameters, so a `T`-typed field
+                    // is a `Type::Param` a later instantiation substitutes by identity.
+                    let scope = param_scope(&r.type_params, &self.imports.extern_types);
                     let fields = r
                         .fields
                         .iter()
                         .map(|f| {
                             (
                                 f.name.clone(),
-                                field_type(&f.ty, &self.imports.extern_types),
+                                field_type(&f.ty, &self.imports.extern_types, &scope),
                             )
                         })
                         .collect();
@@ -360,7 +366,7 @@ impl Checker {
                     self.record_attribute(r.name.as_str(), r.decorators.attribute.as_deref());
                     self.symbols.generic_types.insert(
                         r.name.to_string(),
-                        r.type_params.iter().map(|p| p.name.clone()).collect(),
+                        r.type_params.iter().map(param_ref).collect(),
                     );
                     // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
                     self.symbols
@@ -370,44 +376,34 @@ impl Checker {
                     // for a class (this closed a long-standing gap: struct associated calls —
                     // `B.new(1)` — previously typed as a hole because struct methods were never
                     // registered; prelude-redesign EX.2 needs the classification for all kinds).
-                    let tps: HashSet<String> =
-                        r.type_params.iter().map(|p| p.name.clone()).collect();
-                    let struct_generics: Vec<(String, Vec<BoundReq>)> = r
-                        .type_params
-                        .iter()
-                        .map(|p| {
-                            (
-                                p.name.clone(),
-                                bound_reqs(&p.bounds, &self.imports.extern_types),
-                            )
-                        })
-                        .collect();
                     // Inherent methods classify from their bodies; an `impl Trait { … }` block's do
                     // not (see `collect_method_sig_classified`). Registration order matches the
                     // flattened walk this replaces — inherent first, so a same-named impl method
                     // still wins.
                     for m in &r.methods {
-                        self.collect_method_sig(r.name.as_str(), m, &tps, &struct_generics);
+                        self.collect_method_sig(r.name.as_str(), m, &r.type_params);
                     }
                     for (m, provided) in impl_block_methods(&r.impls) {
                         self.collect_method_sig_classified(
                             r.name.as_str(),
                             m,
-                            &tps,
-                            &struct_generics,
+                            &r.type_params,
                             provided,
                         );
                     }
-                    self.bake_impl_assoc(r.name.as_str(), &r.impls, &tps, &struct_generics);
+                    self.bake_impl_assoc(r.name.as_str(), &r.impls, &r.type_params);
                 }
                 Stmt::Class(c) => {
+                    // Field types resolve against the type's OWN parameters, so a `T`-typed field
+                    // is a `Type::Param` a later instantiation substitutes by identity.
+                    let scope = param_scope(&c.type_params, &self.imports.extern_types);
                     let fields = c
                         .fields
                         .iter()
                         .map(|f| {
                             (
                                 f.name.clone(),
-                                field_type(&f.ty, &self.imports.extern_types),
+                                field_type(&f.ty, &self.imports.extern_types, &scope),
                             )
                         })
                         .collect();
@@ -465,44 +461,30 @@ impl Checker {
                     // so `obj.method(...)` resolves to a concrete type and its arguments are
                     // checked. The class's generic parameters are erased to `dyn` (erased at
                     // runtime, they accept any argument).
-                    let tps: HashSet<String> =
-                        c.type_params.iter().map(|p| p.name.clone()).collect();
-                    // A generic class's type parameters + bounds, shared by every method's
-                    // `GenericInfo` so a call instantiates the class's `T` from the arguments and
-                    // enforces its bounds (S4.3b) — the class-level mirror of a generic function.
-                    let class_generics: Vec<(String, Vec<BoundReq>)> = c
-                        .type_params
-                        .iter()
-                        .map(|p| {
-                            (
-                                p.name.clone(),
-                                bound_reqs(&p.bounds, &self.imports.extern_types),
-                            )
-                        })
-                        .collect();
                     self.symbols.generic_types.insert(
                         c.name.to_string(),
-                        c.type_params.iter().map(|p| p.name.clone()).collect(),
+                        c.type_params.iter().map(param_ref).collect(),
                     );
                     // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
                     self.symbols
                         .type_params
                         .insert(c.name.to_string(), c.type_params.clone());
                     for m in &c.methods {
-                        self.collect_method_sig(c.name.as_str(), m, &tps, &class_generics);
+                        self.collect_method_sig(c.name.as_str(), m, &c.type_params);
                     }
                     for (m, provided) in impl_block_methods(&c.impls) {
                         self.collect_method_sig_classified(
                             c.name.as_str(),
                             m,
-                            &tps,
-                            &class_generics,
+                            &c.type_params,
                             provided,
                         );
                     }
-                    self.bake_impl_assoc(c.name.as_str(), &c.impls, &tps, &class_generics);
+                    self.bake_impl_assoc(c.name.as_str(), &c.impls, &c.type_params);
                 }
                 Stmt::Enum(e) => {
+                    // As for a struct's fields: a payload naming the enum's `T` is a parameter.
+                    let scope = param_scope(&e.type_params, &self.imports.extern_types);
                     let variants = e
                         .variants
                         .iter()
@@ -517,7 +499,7 @@ impl Checker {
                             fields: v
                                 .fields
                                 .iter()
-                                .map(|v| field_type(&v.ty, &self.imports.extern_types))
+                                .map(|v| field_type(&v.ty, &self.imports.extern_types, &scope))
                                 .collect(),
                             // A backed variant's literal, through the one `fold_const_expr` the
                             // reflection manifest also folds with — so the backing a decode recipe
@@ -557,7 +539,7 @@ impl Checker {
                     self.record_from_impls(e.name.as_str(), &e.impls);
                     self.symbols.generic_types.insert(
                         e.name.to_string(),
-                        e.type_params.iter().map(|p| p.name.clone()).collect(),
+                        e.type_params.iter().map(param_ref).collect(),
                     );
                     // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
                     self.symbols
@@ -567,50 +549,38 @@ impl Checker {
                     // object-model slice 3) under `(Enum, method)`, exactly like a class's, so an
                     // instance call `status.label()` and an associated call `Status.parse(s)` resolve
                     // to a concrete type. The enum's generic parameters are erased to `dyn`.
-                    let tps: HashSet<String> =
-                        e.type_params.iter().map(|p| p.name.clone()).collect();
-                    let enum_generics: Vec<(String, Vec<BoundReq>)> = e
-                        .type_params
-                        .iter()
-                        .map(|p| {
-                            (
-                                p.name.clone(),
-                                bound_reqs(&p.bounds, &self.imports.extern_types),
-                            )
-                        })
-                        .collect();
                     for m in &e.methods {
-                        self.collect_method_sig(e.name.as_str(), m, &tps, &enum_generics);
+                        self.collect_method_sig(e.name.as_str(), m, &e.type_params);
                     }
                     for (m, provided) in impl_block_methods(&e.impls) {
                         self.collect_method_sig_classified(
                             e.name.as_str(),
                             m,
-                            &tps,
-                            &enum_generics,
+                            &e.type_params,
                             provided,
                         );
                     }
-                    self.bake_impl_assoc(e.name.as_str(), &e.impls, &tps, &enum_generics);
+                    self.bake_impl_assoc(e.name.as_str(), &e.impls, &e.type_params);
                 }
                 Stmt::Fn(f) => {
                     // The registered signature is **erased** (generic parameters → `dyn`): the
                     // arity check and the non-generic fast path use it. A generic function also
                     // carries un-erased `GenericInfo` so a call site can instantiate it precisely
                     // and enforce its bounds (S4.2); a non-generic function carries `None`.
-                    let tps: HashSet<String> =
-                        f.type_params.iter().map(|p| p.name.clone()).collect();
+                    let xt = &self.imports.extern_types;
+                    let scope = param_scope(&f.type_params, xt);
+                    let tps = param_ids(&f.type_params);
                     let raw_params: Vec<Type> = f
                         .params
                         .iter()
-                        .map(|p| param_type(p, &self.imports.extern_types))
+                        .map(|p| param_type(p, xt, &scope))
                         .collect();
                     // An `async fn f(): T` call produces `Future<T>` (Track A); wrap before erasure so
                     // the erased signature and the generic instantiation both carry the future.
                     let raw_ret = async_return(
                         f.ret
                             .as_ref()
-                            .map(|t| from_ref_q(t, &self.imports.extern_types))
+                            .map(|t| from_ref_q(t, xt, &scope))
                             .unwrap_or(Type::Unknown),
                         f.is_async,
                     );
@@ -624,12 +594,7 @@ impl Checker {
                         params: f
                             .type_params
                             .iter()
-                            .map(|p| {
-                                (
-                                    p.name.clone(),
-                                    bound_reqs(&p.bounds, &self.imports.extern_types),
-                                )
-                            })
+                            .map(|p| (param_ref(p), bound_reqs(&p.bounds, xt, &scope)))
                             .collect(),
                         class_params: 0,
                         raw_params,
@@ -701,7 +666,7 @@ impl Checker {
                         let args: Vec<Type> = decl
                             .trait_args
                             .iter()
-                            .map(|t| from_ref_q(t, &self.imports.extern_types))
+                            .map(|t| from_ref_q(t, &self.imports.extern_types, &ParamScope::new()))
                             .collect();
                         self.symbols
                             .user_trait_impls
@@ -724,7 +689,7 @@ impl Checker {
                 if self.symbols.user_traits.contains_key(trait_name.as_str()) {
                     let args: Vec<Type> = trait_args
                         .iter()
-                        .map(|t| from_ref_q(t, &self.imports.extern_types))
+                        .map(|t| from_ref_q(t, &self.imports.extern_types, &ParamScope::new()))
                         .collect();
                     self.symbols
                         .user_trait_impls
@@ -848,16 +813,6 @@ impl Checker {
                 .get(d.target.as_str())
                 .cloned()
                 .unwrap_or_default();
-            let tps: HashSet<String> = type_params.iter().map(|p| p.name.clone()).collect();
-            let generics: Vec<(String, Vec<BoundReq>)> = type_params
-                .iter()
-                .map(|p| {
-                    (
-                        p.name.clone(),
-                        bound_reqs(&p.bounds, &self.imports.extern_types),
-                    )
-                })
-                .collect();
             // Mirror the in-body path's `Self::Name` projection (slice 1a, `bake_impl_assoc`): a
             // signature written against an associated type resolves to this impl's binding for it,
             // so a concrete receiver types against the implementor's type rather than a hole.
@@ -872,8 +827,7 @@ impl Checker {
                     self.collect_method_sig_classified(
                         d.target.as_str(),
                         m,
-                        &tps,
-                        &generics,
+                        &type_params,
                         provided,
                     );
                 } else {
@@ -881,8 +835,7 @@ impl Checker {
                     self.collect_method_sig_classified(
                         d.target.as_str(),
                         &resolved,
-                        &tps,
-                        &generics,
+                        &type_params,
                         provided,
                     );
                 }
@@ -1121,15 +1074,18 @@ impl Checker {
         if self.symbols.methods.contains_key(&key) {
             return;
         }
+        // Hoisted from a trait, whose methods declare no type parameters of their own (E0058) —
+        // so there is nothing here for a scope to resolve.
+        let scope = param_scope(&m.type_params, &self.imports.extern_types);
         let params: Vec<Type> = m
             .params
             .iter()
-            .map(|p| param_type(p, &self.imports.extern_types))
+            .map(|p| param_type(p, &self.imports.extern_types, &scope))
             .collect();
         let ret = async_return(
             m.ret
                 .as_ref()
-                .map(|t| from_ref_q(t, &self.imports.extern_types))
+                .map(|t| from_ref_q(t, &self.imports.extern_types, &scope))
                 .unwrap_or(Type::Unknown),
             m.is_async,
         );
@@ -1174,12 +1130,15 @@ impl Checker {
             if let Some(default) = &a.default {
                 map.insert(
                     a.name.clone(),
-                    from_ref_q(default, &self.imports.extern_types),
+                    from_ref_q(default, &self.imports.extern_types, &ParamScope::new()),
                 );
             }
         }
         for (name, ty) in bindings {
-            map.insert(name.clone(), from_ref_q(ty, &self.imports.extern_types));
+            map.insert(
+                name.clone(),
+                from_ref_q(ty, &self.imports.extern_types, &ParamScope::new()),
+            );
         }
         self.symbols
             .trait_assoc
@@ -1191,13 +1150,7 @@ impl Checker {
     /// concrete receiver types against the implementor's associated type. Overwrites the flattened
     /// (unresolved) registration from the main method walk. A block with no bindings is skipped (there
     /// is nothing to resolve).
-    fn bake_impl_assoc(
-        &mut self,
-        type_name: &str,
-        impls: &[ImplBlock],
-        type_tps: &HashSet<String>,
-        type_generics: &[(String, Vec<BoundReq>)],
-    ) {
+    fn bake_impl_assoc(&mut self, type_name: &str, impls: &[ImplBlock], type_params: &[TypeParam]) {
         for b in impls {
             if b.assoc_bindings.is_empty() {
                 continue;
@@ -1210,13 +1163,7 @@ impl Checker {
             let provided = trait_supplies_instance_interface(b.trait_name.as_str());
             for m in &b.methods {
                 let resolved = subst_self_assoc_in_fn(m, &map);
-                self.collect_method_sig_classified(
-                    type_name,
-                    &resolved,
-                    type_tps,
-                    type_generics,
-                    provided,
-                );
+                self.collect_method_sig_classified(type_name, &resolved, type_params, provided);
             }
         }
     }
@@ -1339,7 +1286,11 @@ impl Checker {
     pub(crate) fn record_from_impls(&mut self, target: &str, impls: &[noeta_ast::ImplBlock]) {
         for block in impls {
             if block.trait_name == BuiltinTrait::From.name() && block.trait_args.len() == 1 {
-                let source = from_ref_q(&block.trait_args[0], &self.imports.extern_types);
+                let source = from_ref_q(
+                    &block.trait_args[0],
+                    &self.imports.extern_types,
+                    &ParamScope::new(),
+                );
                 self.symbols
                     .from_impls
                     .entry(target.to_string())
