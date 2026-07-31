@@ -334,6 +334,9 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
             }
             Ok(Ok(linked)) => linked,
         };
+        // The entry source, kept past the `Loaded` rewrap: the hot path's diff baseline is the
+        // entry unit of THIS program — the one about to be compiled and served.
+        let entry_source = linked.entry.clone();
         // Rewrap as the runner's `Loaded` so the type check below rides `Loaded::check` — the
         // editions-threading choke point (audit-3 F8).
         let loaded = crate::context::loaded(linked);
@@ -346,7 +349,8 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         // Hot mode (server-hmr W1, armed by the `--watch` wrapper for `serve`): run through the
         // debug-session machinery with the hot-swap mailbox, so edits swap into the LIVE process.
         if std::env::var_os("NOETA_HOT").is_some() {
-            return run_program_hot(file, &loaded, tail);
+            let baseline = watch::EntryUnit::of(&loaded.program, &entry_source);
+            return run_program_hot(file, &loaded, tail, baseline);
         }
         // An entry call injected before compiling means the module differs from `run`'s for the
         // same source — a command run must never share the startup cache's `(source+tiers)` key,
@@ -427,6 +431,9 @@ pub(crate) fn serve_parallel_impl(
         }
         Ok(Ok(linked)) => linked,
     };
+    // The entry source, kept past the `Loaded` rewrap — the hot fleet's diff baseline (see the
+    // single-worker path).
+    let entry_source = linked.entry.clone();
     // Rewrap as the runner's `Loaded` so the type check below rides `Loaded::check` — the
     // editions-threading choke point (audit-3 F8).
     let loaded = crate::context::loaded(linked);
@@ -452,9 +459,11 @@ pub(crate) fn serve_parallel_impl(
     // Hot multi-core (F5): each worker runs the debug-session hot path; ONE watcher deposits into
     // the shared broadcast queue and every worker drains it, so a swap spans the whole fleet.
     if std::env::var_os("NOETA_HOT").is_some() {
+        let baseline = watch::EntryUnit::of(&loaded.program, &entry_source);
         return serve_parallel_hot(
             file,
             tail,
+            baseline,
             &loaded.program,
             &checked,
             &loaded.sources,
@@ -563,6 +572,7 @@ pub(crate) fn run_worker(
 pub(crate) fn serve_parallel_hot(
     entry_path: &std::path::Path,
     tail: Vec<Stmt>,
+    baseline: watch::EntryUnit,
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
     sources: &SourceMap,
@@ -578,6 +588,7 @@ pub(crate) fn serve_parallel_hot(
     watch::spawn_hot_watcher(
         entry_path.to_path_buf(),
         tail,
+        baseline,
         std::sync::Arc::clone(&mailbox),
         std::sync::Arc::clone(&wake),
     );
@@ -678,6 +689,7 @@ pub(crate) fn run_program_hot(
     entry_path: &std::path::Path,
     loaded: &Loaded,
     tail: Vec<Stmt>,
+    baseline: watch::EntryUnit,
 ) -> u8 {
     // `Loaded::check`: the editions ride structurally with the program they govern.
     let checked = loaded.check();
@@ -709,6 +721,7 @@ pub(crate) fn run_program_hot(
     watch::spawn_hot_watcher(
         entry_path.to_path_buf(),
         tail,
+        baseline,
         std::sync::Arc::clone(&mailbox),
         std::sync::Arc::clone(&wake),
     );

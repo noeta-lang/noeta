@@ -395,43 +395,34 @@ fn relevant_path(path: &Path, reads: &[PathBuf]) -> bool {
 /// with [`HOT_RESTART_CODE`] so the `--watch` wrapper restarts it.
 ///
 /// `tail` is the driver's synthesized entry call (`server.serve(port, fetch, host)`), passed so
-/// the re-link is byte-for-byte the boot's: it goes through the loader, not onto the linked
-/// program, for the same reasons [`noeta_loader::load_with_deps_appending`] documents.
+/// each re-link is byte-for-byte the boot's: it goes through the loader, not onto the linked
+/// program, for the same reasons [`noeta_loader::load_with_deps_appending`] documents. `applied` is
+/// the entry unit of the program the VM **actually compiled** — the diff baseline, handed over
+/// rather than re-derived here, so it cannot disagree with what is running and so nothing slow
+/// stands between this thread starting and its file watcher being armed.
 pub(crate) fn spawn_hot_watcher(
     entry: std::path::PathBuf,
     tail: Vec<noeta_ast::Stmt>,
+    applied: EntryUnit,
     mailbox: noeta_vm::HotSwapMailbox,
     wake: std::sync::Arc<noeta_host_real::Notify>,
 ) {
-    std::thread::spawn(move || hot_watcher(entry, tail, mailbox, wake));
+    std::thread::spawn(move || hot_watcher(entry, tail, applied, mailbox, wake));
 }
 
 fn hot_watcher(
     entry: std::path::PathBuf,
     tail: Vec<noeta_ast::Stmt>,
+    mut applied: EntryUnit,
     mailbox: noeta_vm::HotSwapMailbox,
     wake: std::sync::Arc<noeta_host_real::Notify>,
 ) {
     let entry_canon = entry.canonicalize().unwrap_or_else(|_| entry.clone());
-    // Files an expansion hook read (an `@openapi` spec). A change to one is never entry-swappable —
-    // it regenerates members — so it must reach the `all_entry` check below and force a restart,
-    // which means passing the event filter first. Computed once: the hot process is restarted
-    // wholesale (and this recomputed) whenever the entry itself changes.
-    let reads = noeta_ide::impact::spec_reads(&entry);
-    // The baseline: the program that is currently RUNNING, re-linked at spawn — the run thread just
-    // compiled exactly this project, so this reproduces its qualified identities.
-    let mut applied = match relink_entry_unit(&entry, &tail) {
-        Ok(unit) => unit,
-        Err(err) => {
-            eprint!("{}", err.text());
-            eprintln!(
-                "[hot] cannot re-link {} — falling back to restarts",
-                entry.display()
-            );
-            return;
-        }
-    };
-
+    // ARM THE WATCH FIRST. Everything else here — reading spec reads, and once upon a time
+    // re-linking to recover the baseline — takes long enough that an edit saved right after boot
+    // lands in the gap and is never seen at all: no event, no swap, no output, the developer's
+    // first edit silently ignored. `notify` queues into the channel from its own thread, so events
+    // arriving while the rest of this setup runs are waiting in `rx` when the loop starts.
     let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
     let Ok(mut watcher) = notify::recommended_watcher(tx) else {
         eprintln!("[hot] cannot start the file watcher — edits will not reload");
@@ -453,6 +444,11 @@ fn hot_watcher(
             );
         }
     }
+    // Files an expansion hook read (an `@openapi` spec). A change to one is never entry-swappable —
+    // it regenerates members — so it must reach the `all_entry` check below and force a restart,
+    // which means passing the event filter first. Computed once: the hot process is restarted
+    // wholesale (and this recomputed) whenever the entry itself changes.
+    let reads = noeta_ide::impact::spec_reads(&entry);
     loop {
         let event = match rx.recv() {
             Ok(event) => event,
@@ -489,19 +485,18 @@ fn hot_watcher(
         // (the browser overlay, server-hmr L3) — waking the run thread to deliver promptly.
         let new_unit = match relink_entry_unit(&entry, &tail) {
             Ok(unit) => unit,
-            Err(RelinkError::Unreadable(text)) => {
-                // A half-written file mid-save: no verdict to draw, and the next event will carry
-                // the finished text.
-                eprint!("{text}");
-                continue;
-            }
-            Err(RelinkError::Diagnostics(rendered)) => {
-                eprint!("{rendered}");
-                eprintln!("[hot] check failed — still serving the old version");
-                if let Ok(mut slot) = mailbox.error.lock() {
-                    *slot = Some(rendered);
+            Err(err) => {
+                eprint!("{}", err.text());
+                // Red code: report, keep serving, and put the diagnostics under the browser's
+                // overlay. An unreadable project (a half-written file mid-save) is no verdict at
+                // all — the next event carries the finished text.
+                if let RelinkError::Diagnostics(rendered) = err {
+                    eprintln!("[hot] check failed — still serving the old version");
+                    if let Ok(mut slot) = mailbox.error.lock() {
+                        *slot = Some(rendered);
+                    }
+                    wake_all(&wake);
                 }
-                wake_all(&wake);
                 continue;
             }
         };
@@ -558,9 +553,37 @@ fn wake_all(wake: &noeta_host_real::Notify) {
 /// The entry file's own statements **as the linker qualified them**, with the text they were parsed
 /// from. The diff baseline and each candidate are both this, so a swap plan's declarations carry
 /// the identities the running module actually bound.
-struct EntryUnit {
+pub(crate) struct EntryUnit {
     program: noeta_ast::Program,
     src: String,
+}
+
+impl EntryUnit {
+    /// The entry unit of a **linked program the driver already built** — the boot's, which is the
+    /// diff baseline: the code the VM compiled and is serving.
+    ///
+    /// The linked program is every module's declarations merged; only the entry's belong in a diff
+    /// whose two sides are two versions of that one file. Statements with an **empty** span are the
+    /// driver's synthesized entry call (`server.serve(port, fetch, host)`, stamped at offset 0 of
+    /// the entry source): they are not in the file the user edits, they have no text to fingerprint,
+    /// and a re-running swap that replayed them would start a second server.
+    pub(crate) fn of(program: &noeta_ast::Program, entry: &noeta_span::Source) -> EntryUnit {
+        EntryUnit {
+            program: noeta_ast::Program {
+                stmts: program
+                    .stmts
+                    .iter()
+                    .filter(|stmt| {
+                        let span = stmt.span();
+                        span.source == entry.id() && !span.is_empty()
+                    })
+                    .cloned()
+                    .collect(),
+                span: program.span,
+            },
+            src: entry.text().to_string(),
+        }
+    }
 }
 
 /// Why a re-link produced no candidate to diff.
@@ -572,7 +595,8 @@ enum RelinkError {
 }
 
 impl RelinkError {
-    fn text(&self) -> &str {
+    /// What to print either way — diagnostics, or the reason the project could not be read.
+    pub(crate) fn text(&self) -> &str {
         match self {
             RelinkError::Unreadable(text) | RelinkError::Diagnostics(text) => text,
         }
@@ -630,32 +654,7 @@ fn relink_entry_unit(entry: &Path, tail: &[noeta_ast::Stmt]) -> Result<EntryUnit
             checked.diagnostics.iter(),
         )));
     }
-    Ok(EntryUnit {
-        program: entry_unit(&loaded.program, &entry_source),
-        src: entry_source.text().to_string(),
-    })
-}
-
-/// The entry file's statements, sliced out of the linked program by `SourceId`.
-///
-/// The linked program is every module's declarations merged; only the entry's belong in a diff
-/// whose two sides are two versions of that one file. Statements with an **empty** span are the
-/// driver's synthesized `tail` (`server.serve(port, fetch, host)`, stamped at offset 0 of the entry
-/// source): they are not in the file the user edits, they have no text to fingerprint, and a
-/// re-running swap that replayed them would start a second server.
-fn entry_unit(program: &noeta_ast::Program, entry: &noeta_span::Source) -> noeta_ast::Program {
-    noeta_ast::Program {
-        stmts: program
-            .stmts
-            .iter()
-            .filter(|stmt| {
-                let span = stmt.span();
-                span.source == entry.id() && !span.is_empty()
-            })
-            .cloned()
-            .collect(),
-        span: program.span,
-    }
+    Ok(EntryUnit::of(&loaded.program, &entry_source))
 }
 
 #[cfg(test)]
