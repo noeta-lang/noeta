@@ -2239,4 +2239,42 @@ fn all(db: Db): List<Todo> {
         assert_eq!(out, src, "fmt moved a comment out of a turbofish chain");
         assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
     }
+
+    /// A record-update spread keeps the position the author wrote it in.
+    ///
+    /// `...self` first is the convention actually written, and the printer appended the spread after
+    /// the fields under a comment claiming source order. It is semantics-preserving either way, which
+    /// is why no gate saw it: `spread` is a separate AST field, not an element of `fields`.
+    #[test]
+    fn a_record_update_spread_keeps_its_position() {
+        let first = "fn at(r: Redact, n: int): Redact {\n    return Redact { ...r, at: n }\n}\n";
+        assert_eq!(
+            fmt(first).unwrap(),
+            first,
+            "fmt moved the spread to the end"
+        );
+        assert_eq!(fmt(&fmt(first).unwrap()).unwrap(), fmt(first).unwrap());
+
+        let last = "fn at(r: Redact, n: int): Redact {\n    return Redact { at: n, ...r }\n}\n";
+        assert_eq!(fmt(last).unwrap(), last, "fmt moved a trailing spread");
+    }
+
+    /// And a comment written above the spread stays above it, which the append-last order could not
+    /// express: the interleaving cursor is monotone in source position, so a spread visited out of
+    /// order took the comments of the fields that follow it.
+    #[test]
+    fn a_comment_above_a_spread_stays_above_it() {
+        let src = "\
+fn at(r: Redact, n: int): Redact {
+    return Redact {
+        // Everything not named below is carried over unchanged.
+        ...r,
+        at: n,
+    }
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment off the spread");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
 }

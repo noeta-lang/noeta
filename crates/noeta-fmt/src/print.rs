@@ -3649,12 +3649,27 @@ impl Printer<'_> {
         if obj.fields.is_empty() && obj.spread.is_none() {
             return Ok(Doc::text(format!("{head}{{}}")));
         }
-        // The fields, then the record-update spread, in source order — so a comment written between
-        // any two of them interleaves onto its own line instead of migrating past `}`.
+        // The fields and the record-update spread, **in source order** — so a comment written between
+        // any two of them interleaves onto its own line instead of migrating past `}`, and so the
+        // spread keeps the position the author wrote it in.
+        //
+        // The spread lives in its own [`ObjectLit`] field rather than among `fields`, so appending it
+        // was the obvious thing and it re-emitted `T { ...self, at: at }` as `T { at: at, ...self }`.
+        // That is semantics-preserving — a spread supplies the fields not named explicitly, wherever
+        // it sits — which is exactly why no gate saw it: the safety gate compares the AST, and the
+        // AST is the same. It is still fmt rewriting what the author wrote, and `...self` first is
+        // the order actually written. It also broke the comment interleave, whose cursor is monotone
+        // in source position: a spread visited last took the comments belonging to the fields that
+        // *follow* it, so a note above `...self` came out above the field below it instead.
+        //
+        // Sorting by span is exact here. The spread's span is its **operand's** (`self`), starting
+        // just past the `...` that introduces it, and nothing else can sit in that gap — so the
+        // operand's order is the spread's order.
         let mut items: Vec<ObjItem> = obj.fields.iter().map(ObjItem::Field).collect();
         if let Some(spread) = &obj.spread {
             items.push(ObjItem::Spread(spread));
         }
+        items.sort_by_key(|it| it.span().start);
         // The `{` sits just after the type name; a break before the first field (or spread) means the
         // author wrote the literal across lines. `type_name_span.end` is the source-directed break
         // reference the previous form keyed off, kept verbatim.
