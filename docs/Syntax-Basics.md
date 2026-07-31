@@ -218,7 +218,7 @@ echo `
 // Order #7 shipped.
 ```
 
-String methods (`.upper()`, `.split(",")`, …) are covered in the [Standard Library](Standard-Library).
+String methods (`.upper()`, `.split(",")`, …) are covered in [Built-ins](Standard-Library).
 
 ## Operators
 

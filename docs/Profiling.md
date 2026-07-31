@@ -101,6 +101,6 @@ Every profiler rides **one seam**: a hook the VM consults before each instructio
 
 ## Current limitations
 
-- **Tier-1 attribution is function-level** — `--jit` samples native code at the trampoline and names the hot function (` [jit]`), but there is no per-line breakdown inside a JIT frame (`--lines` is tier-0 only); native segments fuse several source lines, so a leaf line would be dishonest.
-- **Isolate profiles are separate, not merged** — each worker isolate gets its own named profile (see [Threads](#threads)); there is no combined cross-thread view or merged function table yet.
+- **Tier-1 attribution is function-level** — `--jit` samples native code at the trampoline and names the hot function (` [jit]`), but there is no per-line breakdown inside a JIT frame; native segments fuse several source lines, so a leaf line would be dishonest. `--lines` still applies to the tier-0 frames of the same run, so a `--jit --lines` profile mixes the two — `inner:3` for an interpreted frame beside `inner [jit]` for its compiled one.
+- **Isolate profiles are separate, not merged** — each worker isolate gets its own named profile (see [Threads](#threads)); there is no combined cross-thread view or merged function table.
 - **Per-line self-time** in the instrumenting table is function-granular today (line attribution is a sampling feature via `--lines`).

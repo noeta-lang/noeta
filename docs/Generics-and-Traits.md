@@ -79,7 +79,7 @@ h = Holder.new(Repo.new("notes"))                            // a field's declar
 echo describe(Repo.new("tags"))
 ```
 
-Reach for the call-site turbofish when **none** of them does — the value is echoed straight out, passed to a `dyn` parameter, or simply bound with no annotation you want to write. Before it existed such a call had no instantiation to record, and reading `T` back off the value aborted at run time; now it is a check-time E0058 whose help names this spelling.
+Reach for the call-site turbofish when **none** of them does — the value is echoed straight out, passed to a `dyn` parameter, or simply bound with no annotation you want to write. A construction that records no instantiation at all is a check-time E0058 whose help names this spelling, rather than a clean check and an abort at the first attempt to read `T` back off the value.
 
 If an annotation and a call-site turbofish **disagree**, the turbofish wins the instantiation and the disagreement is an ordinary assignability error at the binding:
 
@@ -238,7 +238,7 @@ The E0058 diagnostic points at exactly this route wherever it is open. See [Refl
 
 The two channels are separate and both reach a method body, so a method's own `<U>` and its class's `<K>` can be asked about in the same expression: `U` resolves through the slot the call supplied, `K` off the receiver's type tag. Where a name shadows, the method's own wins — ordinary scoping.
 
-What stays E0058 is a site **no** channel reaches: a self-less member of a generic type, whose parameter rides a receiver it does not have. A *composite* turbofish is unaffected either way: `type_name::<List<T>>()` heads at `List` whatever `T` is, so it stays the compile-time constant it always was.
+What stays E0058 is a site **no** channel reaches: a self-less member of a generic type, whose parameter rides a receiver it does not have. A *composite* turbofish is unaffected either way: `type_name::<List<T>>()` heads at `List` whatever `T` is, so it is a compile-time constant.
 
 ## Generic functions as values
 

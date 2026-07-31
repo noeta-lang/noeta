@@ -3,8 +3,8 @@
 **Onboarding**
 - [Getting Started](Getting-Started)
 - [Language Tour](Language-Tour)
+- [Package Quickstart](Quickstart-Packages)
 - [Using Packages](Using-Packages)
-  - [Package Quickstart](Quickstart-Packages)
 
 **Tools**
 - [The `noeta` CLI](The-CLI)
@@ -32,13 +32,16 @@
   - [Derives](Derives)
 - [The Type System](Type-System)
 - [Error Handling](Error-Handling)
-- [Validation](Validation)
+  - [Validation](Validation)
 - [Modules & Visibility](Modules)
-- [Fixed-Width Ints & Packed Types](Fixed-Width-Integers)
-- [Attributes & Reflection](Attributes-and-Reflection)
 - [Concurrency](Concurrency)
 - [Reactivity](Reactivity)
 - [Built-ins (Ring 1)](Standard-Library)
+- [Diagnostics (`E0xxx`)](Diagnostics)
+
+**Specialized**
+- [Fixed-Width Ints & Packed Types](Fixed-Width-Integers)
+- [Attributes & Reflection](Attributes-and-Reflection)
 
 **Concepts & design**
 - [Architecture & Pipeline](Architecture-and-Pipeline)

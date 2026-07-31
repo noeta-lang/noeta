@@ -198,6 +198,12 @@ fn fetch(req: Request): Response {
 }
 ```
 
-## What's next
+## Layers built on this graph
 
-This is the reactive **core**. Layers that consume it have landed: **CRDT-synced signals** — reactive state several peers edit concurrently, converging without coordination (the `para/p2p` package, github.com/noeta-lang/para-p2p); the **view/diff push protocol** above, which carries signal changes to a browser over the bundled WebSocket server; and **LiveView** — server-side reactive HTML via `@html` templates whose holes are signals, built on this graph and that transport (the `para/html` package, github.com/noeta-lang/para-html). Reactive persistence and hot-module-reload polish (signals survive code edits under `noeta serve --watch`) continue to build on the same graph.
+This page is the reactive **core**. Three surfaces consume it:
+
+- **CRDT-synced signals** — reactive state several peers edit concurrently, converging without coordination (the `para/p2p` package, github.com/noeta-lang/para-p2p).
+- **The view/diff push protocol** above, which carries signal changes to a browser over the bundled WebSocket server.
+- **LiveView** — server-side reactive HTML via `@html` templates whose holes are signals, built on this graph and that transport (the `para/html` package, github.com/noeta-lang/para-html).
+
+Signals also survive code edits under [`noeta serve --watch`](The-CLI#noeta-serve-and---watch): an unchanged `signal(...)` binding keeps its value across a hot swap, while plain top-level bindings re-initialize.

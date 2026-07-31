@@ -8,7 +8,7 @@ Noeta's editor story ships in four layers, all in-tree: **static syntax highligh
 
 The extension in [`editors/vscode-noeta/`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta) bundles everything on this page: the static TextMate grammar, the language server, the debugger type, the profiler view, and MCP auto-registration.
 
-1. Run [`noeta ide --vscode`](The-CLI#noeta-ide). It downloads the `.vsix` matching your toolchain's version from the GitHub release, verifies it against the release's checksums, and installs it into the first of `code` / `codium` / `code-insiders` on your PATH (pick one explicitly with `--bin <NAME|PATH>`). A marketplace listing is still pending; this path also covers VSCodium and offline installs.
+1. Run [`noeta ide --vscode`](The-CLI#noeta-ide). It downloads the `.vsix` matching your toolchain's version from the GitHub release, verifies it against the release's checksums, and installs it into the first of `code` / `codium` / `code-insiders` on your PATH (pick one explicitly with `--bin <NAME|PATH>`). The release asset is the extension's distribution channel, so this path covers VS Code, VSCodium, and offline installs alike.
 2. Open a `.noe` file — highlighting is immediate, and the extension starts `noeta lsp` automatically (set `noeta.server.path` if the binary isn't on your PATH).
 3. After a `noeta upgrade`, re-run `noeta ide --vscode` so the extension moves in step with the toolchain.
 
@@ -18,7 +18,7 @@ The TextMate grammar is **static** — it colorizes without running the compiler
 
 ### Neovim, Helix, Zed
 
-There is no one-command installer for these yet — you wire the two pieces (grammar + language server) with your editor's own mechanisms:
+These editors have no one-command installer — you wire the two pieces (grammar + language server) with your editor's own mechanisms:
 
 1. Clone the [tree-sitter grammar](https://github.com/noeta-lang/noeta/tree/main/editors/tree-sitter-noeta) and run `tree-sitter generate` in it (the generated parser is not committed; see its README). It parses ≈99% of the conformance corpus and models Noeta's newline-terminated statements and case-insensitive identifiers faithfully.
 2. Register the grammar for the `.noe` extension the way your editor takes a local tree-sitter grammar — Neovim: an nvim-treesitter parser config entry; Helix: a `[[grammar]]` with a path source plus a `[[language]]` entry in `languages.toml`; Zed: a local extension wrapping the grammar.

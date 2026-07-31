@@ -118,7 +118,7 @@ echo Point { x: 1 }.describe()   // a thing!
 
 ## Derive errors
 
-Deriving a non-derivable trait (`@derive(Add)`) or wrong generic arity (`@derive(Comparable<int>)`, `@derive(Serialize)` without a format) is E0014. The old `#[derive(...)]` spelling is E0017.
+Deriving a non-derivable trait (`@derive(Add)`) or wrong generic arity (`@derive(Comparable<int>)`, `@derive(Serialize)` without a format) is E0014. Spelling a derive as the data-attribute `#[derive(...)]` is E0017 — `@derive` is a codegen directive, not an attribute.
 
 ## Bridging a required member
 
