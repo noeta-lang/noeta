@@ -64,6 +64,7 @@ Because the arm is checked against the whole expression's expected type, a misma
 | Cannot infer a binding | E0023 |
 | Bound not satisfied | E0025 |
 | Conflicting trait impls (coherence uniqueness) | E0027 |
+| Two implemented traits supplying a default body for one method name | E0027 |
 | `impl Trait for Type` in a package declaring neither (the coherence orphan rule) | E0070 |
 | Invalid `.as<T>()` narrow | E0028 |
 

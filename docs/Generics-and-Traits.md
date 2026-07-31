@@ -459,6 +459,8 @@ Each type has **at most one** implementation of a given trait, across `@derive(T
 
 Uniqueness is always decidable here, and that is a property of the language: Noeta links **one whole program** at a time, so every module and every dependency is resolved into a single program before it is checked, and there is no separately-compiled unit that could hold an implementation this one cannot see.
 
+The same rule holds one level down, over method **names**: two traits a type implements may not each hand it a default body for the same method. A method table has one slot per name — there is no overloading — so two inherited defaults are two bodies for one slot, and nothing in the source says which one is meant; that is E0027 too, labelling both bindings. Resolve it the way an implementor resolves any default it does not want: **provide the method**, which overrides every default and, where both traits' signatures accept it, satisfies both — or implement one of the traits fewer. Two traits merely *naming* the same method is not the conflict; only two defaults contending for a slot the type leaves empty is.
+
 ### The orphan rule
 
 An `impl Trait for Type` must live in the **same package** as the trait **or** as the type. A package that declares neither is E0070.

@@ -14,6 +14,14 @@
 //! class at all: the hasher's per-thread seed is fixed for the life of the thread, so both arms of
 //! an in-process comparison agree on the same wrong order.
 //!
+//! The oracle has **two halves per program**: the digest of the compiled module's bytes, and the
+//! digest of the checker's *verdict* — its diagnostics ([`verdict_bytes`]). The second exists
+//! because the first can only speak for programs the checker accepted, which left the same bug
+//! class one pass earlier completely uncovered: a hash-ordered decision inside the checker changes
+//! what it concludes, and a program it rejects compiles nothing to digest. The rejected programs are
+//! most of the corpus's diagnostic surface, so the verdict half is where a checker-side divergence
+//! actually shows up.
+//!
 //! Why the whole corpus rather than a handful of samples: the divergence is per-program and
 //! probabilistic (a two-element hash set lands in the same order half the time), so breadth *is*
 //! the sensitivity. Over a thousand programs, any field whose order is hash-derived diverges in
@@ -26,7 +34,8 @@ use noeta_span::{Source, SourceId};
 
 use crate::collect_cases;
 
-/// Every corpus program that compiled, paired with the digest of its module's bytes.
+/// The corpus's digests: one `<case>` entry per program that compiled (its module's bytes) and one
+/// `<case> [diagnostics]` entry per program that parsed (its checker verdict).
 #[derive(Debug, Default, Clone)]
 pub struct DeterminismReport {
     /// `(case name, digest)` in case order — the order is itself part of the comparison, so a
@@ -115,10 +124,62 @@ fn digest(bytes: &[u8]) -> String {
     format!("{h:016x}-{:x}", bytes.len())
 }
 
-/// Compile every `.noe` file under `root` and digest each resulting module's bytes.
+/// The **verdict** half of the oracle: the checker's diagnostics for one program, rendered into the
+/// bytes that get digested.
 ///
-/// Gated exactly like the bundle oracle (parse-clean, checker-accepted, compilable), so the two
-/// oracles cover the same set of programs and a divergence here is never "one arm skipped it".
+/// A module digest can only speak for a program the checker *accepted*, so on its own the gate is
+/// blind to the same bug class one pass earlier — a `HashMap` walk that decides what the checker
+/// concludes. That is not hypothetical: two traits defaulting one method used to have their winner
+/// chosen by hash order, and since the winner supplies the method's *signature*, the same file
+/// checked green in one process and failed E0007 in the next; the compiled-module gate never saw it
+/// (a rejected program compiles nothing) and the conformance corpus only saw it as a flake. So every
+/// program contributes a verdict digest — accepted or rejected — and a verdict that depends on the
+/// hasher's seed diverges here.
+///
+/// Rendered rather than hashed field-by-field so a divergence is *describable*: everything a reader
+/// would compare by eye (code, severity, span, message, each label, the help) is in the bytes, in
+/// emission order — the order is part of the verdict too.
+fn verdict_bytes(diagnostics: &[noeta_diagnostics::Diagnostic]) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for d in diagnostics {
+        let _ = writeln!(
+            out,
+            "{} {:?} {}..{} {}",
+            d.code.code(),
+            d.severity,
+            d.span.start,
+            d.span.end,
+            d.message
+        );
+        for label in &d.labels {
+            let _ = writeln!(
+                out,
+                "  label {}..{} {}",
+                label.span.start, label.span.end, label.message
+            );
+        }
+        if let Some(help) = &d.help {
+            let _ = writeln!(out, "  help {help}");
+        }
+    }
+    out.into_bytes()
+}
+
+/// The digest entry name for a program's verdict. Suffixed rather than separate so both halves of a
+/// case sit together in the report — and after the case's own module entry, which keeps the whole
+/// list ascending for [`DeterminismReport::diff`]'s merge.
+fn verdict_name(name: &str) -> String {
+    format!("{name} [diagnostics]")
+}
+
+/// Compile every `.noe` file under `root` and digest each resulting module's bytes — plus each
+/// program's checker verdict ([`verdict_bytes`]).
+///
+/// The **module** half is gated exactly like the bundle oracle (parse-clean, checker-accepted,
+/// compilable), so the two oracles cover the same set of programs and a divergence there is never
+/// "one arm skipped it". The **verdict** half is gated only on parsing, because a rejected program
+/// is precisely the case the module half cannot see.
 pub fn digest_corpus(root: &Path) -> DeterminismReport {
     crate::ensure_std_registry();
     let mut cases = Vec::new();
@@ -164,16 +225,22 @@ fn digest_single(name: &str, text: &str, report: &mut DeterminismReport) {
         report.not_run.parse_failed += 1;
         return;
     }
-    if crate::has_error(&noeta_db::checked(&db, src).diagnostics) {
+    let checked = noeta_db::checked(&db, src);
+    if crate::has_error(&checked.diagnostics) {
         report.not_run.checker_rejected += 1;
-        return;
+    } else {
+        match &noeta_db::bytecode(&db, src).0 {
+            Err(_) => report.not_run.unsupported += 1,
+            Ok(module) => report
+                .digests
+                .push((name.to_string(), digest(&module.encode()))),
+        }
     }
-    match &noeta_db::bytecode(&db, src).0 {
-        Err(_) => report.not_run.unsupported += 1,
-        Ok(module) => report
-            .digests
-            .push((name.to_string(), digest(&module.encode()))),
-    }
+    // The verdict rides along even for a rejected program — see `verdict_bytes`.
+    report.digests.push((
+        verdict_name(name),
+        digest(&verdict_bytes(&checked.diagnostics)),
+    ));
 }
 
 /// The multi-file analogue of [`digest_single`].
@@ -191,14 +258,19 @@ fn digest_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut D
         report.not_run.link_failed += 1;
         return;
     }
-    if crate::has_error(&noeta_db::linked_checked(&db, ws).diagnostics) {
+    let checked = noeta_db::linked_checked(&db, ws);
+    if crate::has_error(&checked.diagnostics) {
         report.not_run.checker_rejected += 1;
-        return;
+    } else {
+        match &noeta_db::linked_bytecode(&db, ws).0 {
+            Err(_) => report.not_run.unsupported += 1,
+            Ok(module) => report
+                .digests
+                .push((name.to_string(), digest(&module.encode()))),
+        }
     }
-    match &noeta_db::linked_bytecode(&db, ws).0 {
-        Err(_) => report.not_run.unsupported += 1,
-        Ok(module) => report
-            .digests
-            .push((name.to_string(), digest(&module.encode()))),
-    }
+    report.digests.push((
+        verdict_name(name),
+        digest(&verdict_bytes(&checked.diagnostics)),
+    ));
 }

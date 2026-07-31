@@ -195,6 +195,43 @@ const GADGET: ExtTrait = ExtTrait {
     ..ExtTrait::DEFAULTS
 };
 
+/// A **second** native trait defaulting the same method name as `Gadget`, and answering it
+/// differently. It exists to pin the ambiguity rule: a type that implements both leaves one method
+/// slot with two claimant bodies, and which one used to win was decided by a `HashMap` walk in
+/// `seed_native_trait_defaults` — per process, so `tag()` could answer `gadget:default` in one run
+/// and `trinket:default` in the next. That is now E0027 instead (`report_trait_default_conflicts`).
+fn trinket_dispatch(
+    method: &str,
+    _ctx: &mut dyn NativeCtx,
+    _recv: Slot,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
+    match method {
+        "tag" => {
+            ctx_arity(method, args, 0)?;
+            Ok(CtxOut::Out(NativeOut::Str("trinket:default".to_string())))
+        }
+        _ => Err(no_method_error("fx.Trinket", method).into()),
+    }
+}
+
+const TRINKET: ExtTrait = ExtTrait {
+    name: "Trinket",
+    namespace: "fx",
+    methods: &[ExtTraitMethod {
+        sig: ExtFn {
+            param_names: &[],
+            name: "tag",
+            params: &[],
+            ret: RetTy::Concrete(SigType::String),
+        },
+        has_default: true,
+        ..ExtTraitMethod::DEFAULTS
+    }],
+    dispatch: Some(trinket_dispatch),
+    ..ExtTrait::DEFAULTS
+};
+
 // --- The module that constructs the native values -------------------------------------------------
 
 const KIT_FNS: &[ExtFn] = &[
@@ -245,7 +282,7 @@ impl noeta_stdlib::registry::Extension for FxExtension {
         &[CHIP, CHIP2]
     }
     fn traits(&self) -> &'static [ExtTrait] {
-        &[GADGET]
+        &[GADGET, TRINKET]
     }
 }
 
@@ -401,6 +438,41 @@ fn an_empty_impl_of_an_all_defaulted_native_trait_is_accepted() {
     assert!(
         diags.is_empty(),
         "an empty impl adopting all defaults must check clean, got {diags:?}"
+    );
+}
+
+/// **Two native traits may not both answer one method on one type.** `Gadget` and `Trinket` each
+/// default `tag`, with *different* bodies; a type implementing both leaves the slot with two
+/// claimants and says nothing about which it means. The route used to be whichever trait a
+/// `HashMap` walk reached last (`Symbols::native_trait_default_sites` is keyed by `(type, method)`
+/// and was written last-wins), so the same program answered `gadget:default` in one process and
+/// `trinket:default` in the next — a *runtime* answer decided by a hash seed. It is E0027 now, the
+/// same verdict the bundle spelling of this collision has always given ("binding `vec.SatKernels`
+/// would make the name ambiguous").
+#[test]
+fn two_native_traits_may_not_both_default_one_method() {
+    let diags = check_diagnostics(
+        "use fx.Gadget\nuse fx.Trinket\nstruct Both { n: int }\nimpl Gadget for Both {}\nimpl Trinket for Both {}\nb = Both { n: 1 }\necho b.tag()\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("already inherits a default `tag`")
+                && d.contains("would make the name ambiguous")),
+        "two native defaults for one method must be rejected, got {diags:?}"
+    );
+}
+
+/// …and the resolution is the documented one: a provided method overrides every default, so the slot
+/// has one owner again and both native traits are satisfied by that one body.
+#[test]
+fn an_override_resolves_two_native_traits_defaulting_one_method() {
+    let diags = check_diagnostics(
+        "use fx.Gadget\nuse fx.Trinket\nstruct Both { n: int }\nimpl Gadget for Both { fn tag(): string { return \"mine\" } }\nimpl Trinket for Both {}\nb = Both { n: 1 }\necho b.tag()\n",
+    );
+    assert!(
+        diags.is_empty(),
+        "an override resolves the ambiguity, got {diags:?}"
     );
 }
 

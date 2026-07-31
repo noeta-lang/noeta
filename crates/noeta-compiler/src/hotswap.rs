@@ -41,6 +41,17 @@ use noeta_span::Span;
 /// The swappable subset of a version-to-version diff: a fragment of the NEW program to re-evaluate
 /// against the live session (added/changed `use` imports, changed/added `fn` declarations, and
 /// type declarations whose only changes are method bodies), plus the bookkeeping a driver reports.
+///
+/// **Every reported name list is sorted** ([`SwapPlan::changed`], [`added`], [`removed`],
+/// [`preserved`], and the [`SwapBlocker`]s of a [`SwapDiff::NeedsRestart`]). They are filled by
+/// walking hash-keyed indexes of the two versions, so their *discovery* order varies per process;
+/// what a developer reads (`[hot] swapped: …`) and what a driver logs must not. The fragment itself
+/// never depended on this — the include set is membership-only and the fragment is assembled in the
+/// new program's source order — so the sort is about a reproducible report, not a correct swap.
+///
+/// [`added`]: SwapPlan::added
+/// [`removed`]: SwapPlan::removed
+/// [`preserved`]: SwapPlan::preserved
 #[derive(Debug, Clone)]
 pub struct SwapPlan {
     /// The statements to re-evaluate, cloned from the new program in its source order. Running
@@ -269,6 +280,9 @@ pub fn diff_programs(old: &Program, old_src: &str, new: &Program, new_src: &str)
     if !rerun_top_level && fragment_stmts.is_empty() && removed.is_empty() {
         return SwapDiff::Unchanged;
     }
+    // Sorted because they were discovered through hash-keyed walks of the two versions: unsorted,
+    // the `[hot] swapped: …` line a developer reads (and every driver that logs a plan) would
+    // reorder itself from run to run for one unchanged edit. See the type's docs.
     changed.sort();
     added.sort();
     removed.sort();

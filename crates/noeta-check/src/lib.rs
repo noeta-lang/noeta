@@ -913,6 +913,21 @@ struct BoundBundle {
     span: Span,
 }
 
+/// Two implemented traits contending for one method slot on one type (see
+/// [`Symbols::trait_default_conflicts`]): both declare `method` **with a default body**, and the
+/// type provides no method of that name to override them with. Found in pass 1 — where "provided
+/// vs inherited" is decidable — and reported in pass 2, where the binding sites are known.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TraitDefaultConflict {
+    /// The implementing type.
+    type_name: String,
+    /// The contested method name.
+    method: String,
+    /// The two traits that each supply a default for it. Which one is "first" is decided at report
+    /// time by the *source* position of the two bindings, never by the order they were found in.
+    traits: (String, String),
+}
+
 /// The checker's **symbol tables** — everything `collect` (pass 0/1) registers about the
 /// program's declarations, read by every later pass. One of [`Checker`]'s four field groups
 /// (audit-3 Finding 2): grouping makes each module's borrow surface explicit.
@@ -1013,6 +1028,25 @@ struct Symbols {
     /// call from the trait's synthesized decl. Excludes overrides and inherent methods by construction
     /// (source 1 wins), and never holds a `.noe` trait (its default hoists — source 3).
     native_trait_default_sites: HashMap<(String, String), (String, String)>,
+    /// Where each `(type, trait)` implementation was **written** — the trait path's span in the
+    /// `@derive(T)` argument, the in-body `impl T { }` header, or the standalone `impl T for Type`
+    /// header. Populated in pass 1 alongside [`Self::user_trait_impls`] (the same walk, the same
+    /// three spellings), so a whole-program diagnostic about *two* implementations can point at
+    /// both of them without re-walking the AST — the two-label discipline `check_coherence`
+    /// established. A binding with no source site (a native type advertising a trait through its
+    /// registry declaration) records nothing and is therefore never blamed.
+    trait_impl_sites: HashMap<(String, String), Span>,
+    /// **Ambiguous inherited defaults** found in pass 1: `(type, method)` that two implemented
+    /// traits each supply a *default body* for, while the type itself provides no method of that
+    /// name. Recorded rather than resolved — the winner used to be whichever trait a `HashMap`
+    /// iteration reached first, which made the same source file check green in one process and red
+    /// in the next (the method typed from a different trait's signature each run) while the
+    /// backends' hoist always took the textually-first one. Reported as E0027 by
+    /// [`Checker::report_trait_default_conflicts`], on the same ground the bundle path already
+    /// reports it ("binding `X` would make the name ambiguous", `check_bundle_binding`) and the
+    /// same ground coherence rejects a duplicate impl: a method table has one slot per name, and a
+    /// contest for it is answered by the programmer, not by the compiler.
+    trait_default_conflicts: Vec<TraitDefaultConflict>,
     /// Associated-type bindings per implementor (ExtBundle→ExtTrait convergence, slice 1a):
     /// `(type, trait)` → `assoc-name → concrete Type`. Populated at collect from each impl's
     /// `type Name = Concrete;` bindings merged over the trait's defaulted associated types. The basis
@@ -1699,6 +1733,10 @@ impl Checker {
         }
         self.coloring.current_async = false;
         self.check_unrefined_muts(&program.stmts);
+        // Whole-program, like coherence itself: the two traits contending for one method slot can
+        // be bound in two different modules, so the judgement belongs to the linked program rather
+        // than to either declaration's own check.
+        self.report_trait_default_conflicts();
         self.verify_body_coverage(program);
     }
 
