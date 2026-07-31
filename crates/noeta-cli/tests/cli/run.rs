@@ -894,17 +894,27 @@ fn run_without_jit_stats_prints_no_report() {
 /// statement, exiting on its own merits.
 ///
 /// `noeta run` used to gate on "any diagnostic" rather than "any error", so one E0063 (`i32` erases
-/// to `int`, so `x is i32` is always false — advisory, and `noeta check` scores it `0 error(s), 1
-/// warning(s)` and exits 0) meant the program never started: no stdout at all, not even the `echo`
-/// on the line *before* the warned-about one, and exit 1. A file the checker called fine could not
-/// be executed. That also made every new warning a hard stop, which is what makes advisory lints
-/// unshippable — so this asserts the three things that must all hold at once: the warning is still
-/// reported, the program's full output is produced, and the exit code is the program's own.
+/// to `int`, so `x is i32` is unanswerable at run time — advisory, and `noeta check` scores it
+/// `0 error(s), 1 warning(s)` and exits 0) meant the program never started: no stdout at all, not
+/// even the `echo` on the line *before* the warned-about one, and exit 1. A file the checker called
+/// fine could not be executed. That also made every new warning a hard stop, which is what makes
+/// advisory lints unshippable — so this asserts the three things that must all hold at once: the
+/// warning is still reported, the program's full output is produced, and the exit code is the
+/// program's own.
+///
+/// The scrutinee is laundered through `dyn` on purpose. E0063 now fires only where the width is
+/// *genuinely* unrecoverable; a binding whose static type names the width (`a: i32 = 5`) is
+/// answered by the checker and folded, so the old fixture stopped warning at all — and this test,
+/// which is about warnings and not about widths, silently stopped testing anything. Any still-live
+/// warning would do; if this one is ever answered too, swap the fixture rather than the assertion.
 #[test]
 fn a_warning_is_reported_and_the_program_still_runs() {
     let file = temp_program(
         "warning_does_not_block",
-        "echo \"BEFORE\"\na: i32 = 5\necho \"is i32 -> ${a is i32}\"\necho \"AFTER\"\n",
+        "fn erased(x: dyn): bool { return x is i32 }\n\
+         echo \"BEFORE\"\n\
+         echo \"is i32 -> ${erased(5)}\"\n\
+         echo \"AFTER\"\n",
     );
 
     // `check` agrees the program is fine: zero errors, exit 0.
@@ -936,7 +946,8 @@ fn a_warning_is_reported_and_the_program_still_runs() {
 fn a_warning_is_reported_on_every_run_not_just_the_first() {
     let file = temp_program(
         "warning_survives_cache",
-        "a: i32 = 5\necho \"is i32 -> ${a is i32}\"\n",
+        "fn erased(x: dyn): bool { return x is i32 }\n\
+         echo \"is i32 -> ${erased(5)}\"\n",
     );
     for run in 1..=2 {
         let out = lang()
@@ -973,7 +984,8 @@ fn an_error_still_blocks_the_run_entirely() {
 fn a_warning_does_not_fail_build_or_dump() {
     let file = temp_program(
         "warning_build_dump",
-        "a: i32 = 5\necho \"is i32 -> ${a is i32}\"\n",
+        "fn erased(x: dyn): bool { return x is i32 }\n\
+         echo \"is i32 -> ${erased(5)}\"\n",
     );
     let out = lang().arg("dump").arg(&file).assert().success();
     let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();

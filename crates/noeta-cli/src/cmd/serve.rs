@@ -555,7 +555,7 @@ pub(crate) fn run_worker(
         (host, executor)
     });
     let (result, trace, _) = VmBackend::new()
-        .run_module_with_host_and_executor_parallel(module, host, executor, factory, false);
+        .run_module_with_host_and_executor_parallel(module, host, executor, factory, false, None);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
     // The program's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout flushes.

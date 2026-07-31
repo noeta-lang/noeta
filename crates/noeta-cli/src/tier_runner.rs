@@ -96,16 +96,7 @@ pub(crate) fn set_doc_opts(opts: DocOpts) {
 /// verb stashed (defaults on the generic `noeta test`-shaped path, which parses none).
 fn test_runner(_ctx: &mut dyn CommandCtx, run: &TierRun<'_>) -> u8 {
     let o = TEST_OPTS.with(|c| std::mem::take(&mut *c.borrow_mut()));
-    cmd_test(
-        run.file,
-        o.fail_fast,
-        o.jobs,
-        &o.group,
-        &o.names,
-        o.json,
-        &o.target,
-        o.timeout,
-    )
+    cmd_test(run.file, &o)
 }
 
 /// The native `bench` runner: drive `cmd_bench` over the entry the seam names, with the stashed flags.
