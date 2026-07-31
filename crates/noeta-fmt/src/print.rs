@@ -30,16 +30,26 @@ enum Marker {
     On,
 }
 
-/// One postfix operation in a member/method chain — the unit width-driven chain wrapping breaks on
+/// Where a dot-link's `.` sits in the source: `recv_end` is the byte just past the receiver and
+/// `link_start` the byte the link's name begins at, so the gap between them is exactly the
+/// whitespace-plus-`.` the author wrote. A newline in it is the author's break before the link (see
+/// [`Printer::source_chain`]).
+#[derive(Clone, Copy)]
+struct DotAnchor {
+    recv_end: u32,
+    link_start: u32,
+}
+
+/// One postfix operation in a member/method chain — the unit chain wrapping breaks on
 /// (see [`Printer::chain_ops`]). `Member`/`TupleIndex`/`Await` are dot-links (a break point);
 /// `Call`/`Index`/`Try` attach to the preceding link.
 enum ChainOp<'a> {
     /// `.name` field or method access.
-    Member(&'a str),
+    Member(&'a str, DotAnchor),
     /// `.0` tuple index.
-    TupleIndex(u32),
+    TupleIndex(u32, DotAnchor),
     /// `.await`.
-    Await,
+    Await(DotAnchor),
     /// `?` try-postfix.
     Try,
     /// `(args)` call — the args and the byte just before `(` (for source-directed arg breaking).
@@ -2002,15 +2012,26 @@ impl Printer<'_> {
     /// than a long single line. A shorter chain (or a lone postfix) formats inline as before.
     fn is_wrappable_chain(&self, e: &Expr) -> bool {
         let (_, ops) = self.chain_ops(e);
-        ops.iter()
-            .filter(|o| {
-                matches!(
-                    o,
-                    ChainOp::Member(_) | ChainOp::TupleIndex(_) | ChainOp::Await
-                )
-            })
-            .count()
-            >= 2
+        ops.iter().filter(|o| is_dot_link(o)).count() >= 2
+    }
+
+    /// Whether the author broke **before** at least one dot-link of the chain rooted at `e` — the
+    /// `Mock.new()⏎    .reply_tool(…)` shape. This is the source-directed signal
+    /// [`Self::source_chain`] keys off, exactly as [`Self::seq_broke`] is the one a delimited
+    /// sequence keys off.
+    fn chain_broke(&self, e: &Expr) -> bool {
+        let (_, ops) = self.chain_ops(e);
+        ops.iter().any(|op| self.dot_broke(op))
+    }
+
+    /// Whether `op` is a dot-link the author broke before (see [`DotAnchor`]).
+    fn dot_broke(&self, op: &ChainOp) -> bool {
+        match op {
+            ChainOp::Member(_, a) | ChainOp::TupleIndex(_, a) | ChainOp::Await(a) => {
+                self.broke_between(a.recv_end, a.link_start)
+            }
+            ChainOp::Try | ChainOp::Call(..) | ChainOp::Index(_) => false,
+        }
     }
 
     /// Flatten a postfix/member chain from `e` inward into its base receiver and the ordered
@@ -2029,8 +2050,13 @@ impl Printer<'_> {
                     ops.push(ChainOp::Call(args, callee.span().end));
                     cur = callee;
                 }
-                Expr::Member { receiver, name, .. } => {
-                    ops.push(ChainOp::Member(name));
+                Expr::Member {
+                    receiver,
+                    name,
+                    name_span,
+                    ..
+                } => {
+                    ops.push(ChainOp::Member(name, dot_anchor(receiver, name_span.start)));
                     cur = receiver;
                 }
                 Expr::Index {
@@ -2039,18 +2065,23 @@ impl Printer<'_> {
                     ops.push(ChainOp::Index(index));
                     cur = receiver;
                 }
+                // Neither a tuple index nor `.await` has a span of its own, so the link is anchored
+                // at the node's end: the gap `receiver.end .. span.end` is whitespace plus `.0` /
+                // `.await`, neither of which can contain a newline itself.
                 Expr::TupleIndex {
-                    receiver, index, ..
+                    receiver,
+                    index,
+                    span,
                 } => {
-                    ops.push(ChainOp::TupleIndex(*index));
+                    ops.push(ChainOp::TupleIndex(*index, dot_anchor(receiver, span.end)));
                     cur = receiver;
                 }
                 Expr::Try { expr, .. } => {
                     ops.push(ChainOp::Try);
                     cur = expr;
                 }
-                Expr::Await { expr, .. } => {
-                    ops.push(ChainOp::Await);
+                Expr::Await { expr, span } => {
+                    ops.push(ChainOp::Await(dot_anchor(expr, span.end)));
                     cur = expr;
                 }
                 _ => break,
@@ -2066,27 +2097,9 @@ impl Printer<'_> {
     /// so the broken form re-parses to the same chain; being derived purely from the AST, it is
     /// idempotent.
     fn member_chain(&self, e: &Expr) -> Result<Doc, FmtError> {
-        let (base, ops) = self.chain_ops(e);
-        let mut head: Vec<Doc> = vec![self.receiver(base)?];
-        // Each dot-link starts a new breakable segment; trailing postfixes (call/index/?) attach to
-        // the segment (or, before the first dot-link, to the base head).
-        let mut links: Vec<Vec<Doc>> = Vec::new();
-        for op in &ops {
-            let is_dot = matches!(
-                op,
-                ChainOp::Member(_) | ChainOp::TupleIndex(_) | ChainOp::Await
-            );
-            let doc = self.chain_op_doc(op)?;
-            if is_dot {
-                links.push(vec![doc]);
-            } else if let Some(last) = links.last_mut() {
-                last.push(doc);
-            } else {
-                head.push(doc);
-            }
-        }
+        let (head, links) = self.chain_segments(e)?;
         let mut tail = Vec::new();
-        for link in links {
+        for (_, link) in links {
             tail.push(Doc::softline());
             tail.push(Doc::concat(link));
         }
@@ -2097,12 +2110,71 @@ impl Printer<'_> {
         .group())
     }
 
+    /// Render a chain the author laid out across lines (see [`Self::chain_broke`]): the base and
+    /// every joined link on the first line, and a **hard** break before exactly the dot-links the
+    /// author broke before, each continuation indented one step.
+    ///
+    /// The default config's contract is that it keeps the author's line breaks; without this the
+    /// printer collapsed every chain onto one line regardless of width, which is the single most
+    /// common deliberate layout in real code (`Mock.new()⏎    .reply_tool(…)⏎    .reply_text(…)`).
+    /// The decision is **per link**, not per chain: `Mock.new()` was written joined, so it stays
+    /// joined. That is the faithful reading of intent, and it is what makes the rule a fixed point —
+    /// the output carries a newline in precisely the gaps the input did, so a second pass reads the
+    /// same answer.
+    ///
+    /// The whole chain is flattened and printed here, rather than a break being attached at each
+    /// `Expr::Member` as it recurses, because a call's `(args)` belongs to the **link before it**:
+    /// printed per-node, `.reply_tools([…])`'s list literal would nest against the statement rather
+    /// than against its own link, and a multi-line argument would drift left of the `.` it belongs
+    /// to. [`Self::chain_segments`] is the shared grouping the width-driven [`Self::member_chain`]
+    /// already used for the same reason.
+    fn source_chain(&self, e: &Expr) -> Result<Doc, FmtError> {
+        let (head, links) = self.chain_segments(e)?;
+        let mut tail = Vec::new();
+        for (broke, link) in links {
+            if broke {
+                tail.push(Doc::hardline());
+            }
+            tail.push(Doc::concat(link));
+        }
+        Ok(Doc::concat([
+            Doc::concat(head),
+            Doc::concat(tail).nest(self.indent_step()),
+        ]))
+    }
+
+    /// Split the postfix chain rooted at `e` into the base head and its dot-link segments.
+    ///
+    /// Each dot-link (`.name` / `.0` / `.await`) starts a new segment and carries whether the author
+    /// broke before it; the postfixes that follow it (`(args)`, `[i]`, `?`) attach to that segment,
+    /// so a segment is the whole unit a break may precede. Postfixes before the first dot-link
+    /// belong to the head.
+    #[allow(clippy::type_complexity)]
+    fn chain_segments(&self, e: &Expr) -> Result<(Vec<Doc>, Vec<(bool, Vec<Doc>)>), FmtError> {
+        let (base, ops) = self.chain_ops(e);
+        let mut head: Vec<Doc> = vec![self.receiver(base)?];
+        let mut links: Vec<(bool, Vec<Doc>)> = Vec::new();
+        for op in &ops {
+            let broke = self.dot_broke(op);
+            let is_dot = is_dot_link(op);
+            let doc = self.chain_op_doc(op)?;
+            if is_dot {
+                links.push((broke, vec![doc]));
+            } else if let Some(last) = links.last_mut() {
+                last.1.push(doc);
+            } else {
+                head.push(doc);
+            }
+        }
+        Ok((head, links))
+    }
+
     /// One postfix operation of a member chain as a `Doc` (see [`Printer::chain_ops`]).
     fn chain_op_doc(&self, op: &ChainOp) -> Result<Doc, FmtError> {
         Ok(match op {
-            ChainOp::Member(name) => Doc::text(format!(".{name}")),
-            ChainOp::TupleIndex(index) => Doc::text(format!(".{index}")),
-            ChainOp::Await => Doc::text(".await"),
+            ChainOp::Member(name, _) => Doc::text(format!(".{name}")),
+            ChainOp::TupleIndex(index, _) => Doc::text(format!(".{index}")),
+            ChainOp::Await(_) => Doc::text(".await"),
             ChainOp::Try => Doc::text("?"),
             ChainOp::Call(args, open_ref) => self.arg_list(args, *open_ref)?,
             ChainOp::Index(index) => {
@@ -2125,6 +2197,22 @@ impl Printer<'_> {
                 if self.config.wrap && self.is_wrappable_chain(e) =>
             {
                 self.member_chain(e)?
+            }
+            // Source-directed member-chain layout (the `wrap = false` default): a chain the author
+            // broke across lines keeps its breaks. Routed from here, on the chain's **outermost**
+            // node, so the whole chain is laid out at once — see [`Printer::source_chain`] for why
+            // a per-node break would mis-nest a call's arguments. A chain with no author break, a
+            // tier-body hole (`force_flat`, where no newline may be emitted at all), and the
+            // width-driven arm above all fall through to the per-node arms unchanged.
+            e @ (Expr::Call { .. }
+            | Expr::Member { .. }
+            | Expr::Index { .. }
+            | Expr::TupleIndex { .. }
+            | Expr::Try { .. }
+            | Expr::Await { .. })
+                if !self.config.wrap && !self.force_flat.get() && self.chain_broke(e) =>
+            {
+                self.source_chain(e)?
             }
             // An expression-tier block `@sql { … ${hole} … }`. The foreign-language text between holes
             // is emitted **verbatim from source** (escapes intact — the AST's `statics` are unescaped
@@ -2302,6 +2390,8 @@ impl Printer<'_> {
                 self.receiver(callee)?,
                 self.arg_list(args, callee.span().end)?,
             ]),
+            // Reached only when the chain carries no author break (the arm above claims the ones
+            // that do), so these are always flat.
             Expr::Member { receiver, name, .. } => {
                 Doc::concat([self.receiver(receiver)?, Doc::text(format!(".{name}"))])
             }
@@ -2376,6 +2466,8 @@ impl Printer<'_> {
                 None => self.match_expr(scrutinee, arms, *span)?,
             },
             Expr::Object(obj) => self.object(obj)?,
+            // `?` is not a dot-link: it does not continue a line, so a break before it would end the
+            // statement and change the parse. It always trails its receiver.
             Expr::Try { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text("?")]),
             Expr::Await { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text(".await")]),
             Expr::Spawn {
@@ -2486,16 +2578,21 @@ impl Printer<'_> {
             Expr::TypedModuleCall {
                 recv,
                 func,
+                func_span,
                 ty,
                 args,
                 ..
-            } => Doc::concat([
+            } => self.dot_link(
                 self.receiver(recv)?,
-                Doc::text(format!(".{func}::<")),
-                self.type_ref(ty)?,
-                Doc::text(">"),
-                self.arg_list(args, ty.span().end)?,
-            ]),
+                recv.span().end,
+                func_span.start,
+                Doc::concat([
+                    Doc::text(format!(".{func}::<")),
+                    self.type_ref(ty)?,
+                    Doc::text(">"),
+                    self.arg_list(args, ty.span().end)?,
+                ]),
+            ),
             Expr::TypedCall {
                 name,
                 type_args,
@@ -2517,11 +2614,16 @@ impl Printer<'_> {
             Expr::TypedMethodCall {
                 recv,
                 name,
+                name_span,
                 type_args,
                 args,
                 ..
             } => {
-                let mut parts = vec![self.receiver(recv)?, Doc::text(format!(".{name}::<"))];
+                // The receiver is rendered first, before the link's own parts: printing walks the
+                // source with a monotone comment cursor, so rendering out of source order would
+                // let an argument's comment be consumed ahead of the receiver's.
+                let head = self.receiver(recv)?;
+                let mut parts = vec![Doc::text(format!(".{name}::<"))];
                 for (i, t) in type_args.iter().enumerate() {
                     if i > 0 {
                         parts.push(Doc::text(", "));
@@ -2531,7 +2633,7 @@ impl Printer<'_> {
                 parts.push(Doc::text(">"));
                 let anchor = type_args.last().map(|t| t.span().end).unwrap_or(0);
                 parts.push(self.arg_list(args, anchor)?);
-                Doc::concat(parts)
+                self.dot_link(head, recv.span().end, name_span.start, Doc::concat(parts))
             }
             // `Repo::<Todo>` — a call-site class instantiation, printed as one unbreakable head
             // (`receiver` handles any parenthesization the underlying type reference needs). The
@@ -2733,6 +2835,28 @@ impl Printer<'_> {
     /// common "each element on its own line" layout always breaks right after the delimiter.
     fn seq_broke(&self, open_ref: u32, first: u32) -> bool {
         !self.force_flat.get() && self.broke_between(open_ref, first)
+    }
+
+    /// Attach one **turbofish** dot-link (`.name::<T>(…)`) to its receiver, preserving a line break
+    /// the author put before the `.`.
+    ///
+    /// [`Expr::TypedMethodCall`] / [`Expr::TypedModuleCall`] fuse the `.name`, the type arguments and
+    /// the call into one node, so they are not part of the [`Self::chain_ops`] walk and cannot be
+    /// laid out by [`Self::source_chain`]. `link` is the whole fused unit — the arguments included,
+    /// which is what keeps a multi-line argument nested under its own `.` — so the rule is the same
+    /// one, just applied to a node that already carries its call.
+    ///
+    /// Under `wrap = true` layout is re-derived from [`FmtConfig::line_width`] and the author's
+    /// breaks are not consulted; inside a tier-body hole (`force_flat`) no break may be emitted at
+    /// all. In both cases this yields and the link stays joined.
+    fn dot_link(&self, recv: Doc, recv_end: u32, link_start: u32, link: Doc) -> Doc {
+        if self.force_flat.get() || self.config.wrap || !self.broke_between(recv_end, link_start) {
+            return Doc::concat([recv, link]);
+        }
+        Doc::concat([
+            recv,
+            Doc::concat([Doc::hardline(), link]).nest(self.indent_step()),
+        ])
     }
 
     /// A call's `(arg, …)` list. `open_ref` is the byte just before the `(` (the callee's end), so a
@@ -3359,6 +3483,25 @@ fn use_sort_key(stmt: &Stmt) -> (Vec<String>, Vec<String>) {
             (path.clone(), leaves)
         }
         _ => (Vec::new(), Vec::new()),
+    }
+}
+
+/// Whether `op` is a **dot-link** — the unit a chain break may precede. `Call`/`Index`/`Try` are
+/// not: they attach to the link before them, and none of `(`, `[` or `?` continues a line, so a
+/// break before one would end the statement and change the parse.
+fn is_dot_link(op: &ChainOp) -> bool {
+    matches!(
+        op,
+        ChainOp::Member(..) | ChainOp::TupleIndex(..) | ChainOp::Await(..)
+    )
+}
+
+/// The [`DotAnchor`] for a dot-link applied to `receiver`, whose name (or, for a span-less link like
+/// `.0` / `.await`, whose node) ends the gap at byte `link_start`.
+fn dot_anchor(receiver: &Expr, link_start: u32) -> DotAnchor {
+    DotAnchor {
+        recv_end: receiver.span().end,
+        link_start,
     }
 }
 
