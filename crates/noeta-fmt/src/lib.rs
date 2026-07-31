@@ -2175,4 +2175,106 @@ fn github(): Client {
         );
         assert_eq!(fmt(&out).unwrap(), out, "and it is idempotent");
     }
+
+    /// A conditional **expression** the author broke across lines keeps its breaks.
+    ///
+    /// `if_then_else_form` printed the reconstructed surface form unconditionally flat, so a
+    /// three-line conditional became one line — 200 columns of it in para/ai's provider example.
+    /// This is the same defect the one-line `match` had, in the other direction: under `wrap = false`
+    /// there is no width to re-derive a layout from, so the author's break is the only signal.
+    #[test]
+    fn a_broken_if_then_else_keeps_its_breaks() {
+        let src = "\
+fn note(up: bool): string {
+    return if up
+        then \"a local Ollama is answering\"
+        else \"no local Ollama — the live checks will skip\"
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt collapsed a multi-line if…then…else");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// The one-line form is untouched, and a partially-broken one normalizes to the fully exploded
+    /// shape: both breaks are the author's layout, and one line of a three-part construct is
+    /// not a shape worth preserving.
+    #[test]
+    fn a_one_line_if_then_else_stays_on_its_line() {
+        let flat = "fn note(up: bool): string {\n    return if up then \"y\" else \"n\"\n}\n";
+        assert_eq!(fmt(flat).unwrap(), flat, "fmt broke a one-line conditional");
+
+        let partial =
+            "fn note(up: bool): string {\n    return if up then \"y\"\n        else \"n\"\n}\n";
+        let exploded = "fn note(up: bool): string {\n    return if up\n        then \"y\"\n        else \"n\"\n}\n";
+        assert_eq!(
+            fmt(partial).unwrap(),
+            exploded,
+            "a partially-broken conditional normalizes to the exploded form"
+        );
+        assert_eq!(
+            fmt(exploded).unwrap(),
+            exploded,
+            "and that is a fixed point"
+        );
+    }
+
+    /// A comment between a chain's links stays there when the next link is a **turbofish** call.
+    ///
+    /// `Expr::TypedMethodCall` / `Expr::TypedModuleCall` fuse the `.name`, the type arguments and the
+    /// call into one node, so they are not part of the `chain_ops` walk that the chain-comment fix
+    /// went into — the defect survived, unreached, in exactly these two node kinds. Nothing in the
+    /// corpus writes a comment above a turbofish link, so this is the guard.
+    #[test]
+    fn a_comment_before_a_turbofish_link_stays_there() {
+        let src = "\
+fn all(db: Db): List<Todo> {
+    rows = db.table(\"todos\")
+        // Reified so the row decoder knows the shape it is filling.
+        .fetch::<Todo>()
+    return rows
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a turbofish chain");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// A record-update spread keeps the position the author wrote it in.
+    ///
+    /// `...self` first is the convention actually written, and the printer appended the spread after
+    /// the fields under a comment claiming source order. It is semantics-preserving either way, which
+    /// is why no gate saw it: `spread` is a separate AST field, not an element of `fields`.
+    #[test]
+    fn a_record_update_spread_keeps_its_position() {
+        let first = "fn at(r: Redact, n: int): Redact {\n    return Redact { ...r, at: n }\n}\n";
+        assert_eq!(
+            fmt(first).unwrap(),
+            first,
+            "fmt moved the spread to the end"
+        );
+        assert_eq!(fmt(&fmt(first).unwrap()).unwrap(), fmt(first).unwrap());
+
+        let last = "fn at(r: Redact, n: int): Redact {\n    return Redact { at: n, ...r }\n}\n";
+        assert_eq!(fmt(last).unwrap(), last, "fmt moved a trailing spread");
+    }
+
+    /// And a comment written above the spread stays above it, which the append-last order could not
+    /// express: the interleaving cursor is monotone in source position, so a spread visited out of
+    /// order took the comments of the fields that follow it.
+    #[test]
+    fn a_comment_above_a_spread_stays_above_it() {
+        let src = "\
+fn at(r: Redact, n: int): Redact {
+    return Redact {
+        // Everything not named below is carried over unchanged.
+        ...r,
+        at: n,
+    }
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment off the spread");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
 }

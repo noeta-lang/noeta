@@ -779,8 +779,10 @@ impl Walker<'_> {
         let identity = {
             let pkg = package_of(&child_manifest, key, &dir)?;
             // The declared tree is what a `package = …` claim is about — check it here, before a
-            // `[patch]` can swap `dir` out from under it.
-            check_declared_identity(key, dep, &pkg.name, &dir)?;
+            // `[patch]` can swap `dir` out from under it, and before anything downstream trusts the
+            // identity this tree just declared (the native-trust gate, the lock's hash pin, and the
+            // transparency set are all keyed by it).
+            check_declared_identity(key, dep, pkg, &dir, self.identity_role(dep, &source))?;
             format!("{}/{}", pkg.name.company, pkg.name.package)
         };
         // Dev-time path override (`[patch]`): the ROOT manifest re-points this identity at a local
@@ -914,6 +916,45 @@ impl Walker<'_> {
             .expect("just inserted")
             .edges = child_edges;
         Ok(identity)
+    }
+
+    /// Which flavour of the identity rule applies to `dep` once it has been materialized from
+    /// `source` ([`IdentityRole`] — the whole difference is who is wrong when the check fails).
+    /// Only a registry dependency's `package` is a *selector*; everything else claims.
+    fn identity_role<'r>(
+        &'r self,
+        dep: &Dependency,
+        source: &'r ResolvedSource,
+    ) -> IdentityRole<'r> {
+        let Dependency::Registry {
+            package: Some(selector),
+            ..
+        } = dep
+        else {
+            return IdentityRole::Claim;
+        };
+        let identity = format!("{}/{}", selector.company, selector.package);
+        // A `[patch]`ed identity never reached the index (`materialize` returns the local tree), so
+        // there is no served release to hold to account — and `gather_patches` already validated the
+        // tree declares this identity.
+        if self.patches.contains_key(&identity) {
+            return IdentityRole::Overridden;
+        }
+        let selected = self.solution.get(&identity);
+        IdentityRole::Served {
+            source,
+            selected,
+            pinned: selected.is_some_and(|version| self.pins_release(&identity, version)),
+        }
+    }
+
+    /// Whether `noeta.lock` pins this exact release — the lockfile fast path's own condition (see
+    /// [`Walker::materialize`]), asked again here because it changes what a served-tree disagreement
+    /// *means*: under a pin the coordinates were fixed before this resolve began, so a tree that no
+    /// longer matches them changed underneath the pin rather than being freshly mis-served.
+    fn pins_release(&self, identity: &str, version: &Version) -> bool {
+        self.lock.registry_coords(identity).is_some()
+            && self.lock.locked_version(identity) == Some(version)
     }
 
     /// Materialize one dependency to an on-disk directory (package-manager P2.4): a path dep is its
@@ -1479,7 +1520,10 @@ impl Walker<'_> {
                         dir.display()
                     ))
                 })?;
-                check_declared_identity(key, dep, &pkg.name, &dir)?;
+                // Only a path/git dependency is gathered by materializing it, so the claim flavour is
+                // the only one reachable here; a registry dependency's tree is first seen (and its
+                // served identity checked) in `walk_one`.
+                check_declared_identity(key, dep, pkg, &dir, IdentityRole::Claim)?;
                 let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
                 // Dev-time path override (`[patch]`): the patched tree (seeded by
                 // `gather_patches`) is the sole candidate for this identity — the declared tree's
@@ -2227,38 +2271,165 @@ fn package_of<'m>(
     })
 }
 
-/// Verify the identity a **non-registry** dependency claims against the tree it actually points at.
+/// What a dependency's `package` key *is* at a given call site — the one thing that differs between
+/// the two flavours of [`check_declared_identity`]. Both flavours check the same equation; they
+/// disagree only about who is wrong when it fails, which is what decides the error's kind and its
+/// remedy.
+enum IdentityRole<'a> {
+    /// A `path`/`git` dependency: the source already picked the tree, so `package` is a **claim
+    /// about** it. A mismatch is the author's own manifest disagreeing with their own tree — a
+    /// [`PmError::Manifest`] they fix by editing one of the two.
+    Claim,
+    /// A **registry** dependency: `package` is the **selector** — it is what the index was queried
+    /// for. A mismatch therefore cannot be a typo the author can correct, because the identity they
+    /// wrote is the one that was resolved: the tree that came back is not the package it was
+    /// published under. That is a [`PmError::Trust`] signal about the supply chain, carrying the
+    /// coordinates it came from (and whether `noeta.lock` pinned them) so the reader can tell "the
+    /// index served the wrong tree" from "the tree changed under a pin".
+    Served {
+        /// Where the tree was fetched from — the lock pin / `ResolvedSource` coordinates.
+        source: &'a ResolvedSource,
+        /// The version the solve selected for this identity — the other half of the release the tree
+        /// must agree it is. On a live solve that is what the index served; under the lockfile fast
+        /// path it is what `noeta.lock` pinned, which is deliberate: a lock written before this rule
+        /// existed pins the *tree's* own version, so it stays self-consistent and keeps resolving,
+        /// and the disagreement surfaces on the next `noeta update` that reconsults the index.
+        /// `None` only for a walk that ran without a solve, which [`Walker::materialize`] already
+        /// refuses for a registry dependency; the identity half is still checked either way.
+        selected: Option<&'a Version>,
+        /// Whether `noeta.lock` pins this exact release (see [`Walker::pins_release`]).
+        pinned: bool,
+    },
+    /// A `[patch]`ed **registry** identity: the tree is the developer's own working copy, which
+    /// [`Walker::gather_patches`] already validated declares this identity, and which is not a
+    /// served release at all (the same reason it is excluded from provenance and transparency).
+    /// Neither flavour's question applies, so neither is asked.
+    Overridden,
+}
+
+/// Verify the identity a dependency's `package` key names against the tree that was actually
+/// resolved. **One rule, two flavours** ([`IdentityRole`]) — the equation is the same, the meaning
+/// of a failure is not.
 ///
-/// A `package = "company/pkg"` on a `path`/`git` entry selects nothing — the source already picked
+/// On a `path`/`git` entry a `package = "company/pkg"` selects nothing — the source already picked
 /// the tree. It is documentation, and on a scope-array member it is documentation that earns its
 /// place: `{ path = "../..", package = "para/ai" }` says *which* package of the `para` scope this
 /// member is, which the path alone does not. Keeping it therefore obliges us to check it; an
 /// unverified claim is a comment that can lie, and a manifest naming a package its path does not
 /// contain would build happily while reading as though it did.
 ///
-/// **A target with no `[package]` table** never reaches a mismatch here, by construction: a path/git
-/// dependency's identity *and* its namespace root both come from that table, so both entry points
-/// ([`Walker::gather_one`] and [`Walker::walk_one`]) already refuse such a tree whether or not a
+/// On a **registry** entry the same key is the *selector*, so the check answers a different
+/// question: not "did the author describe their tree correctly" but "did the registry serve the
+/// package it was asked for". A tree whose own `[package]` disagrees with the release it was
+/// resolved as means something upstream is wrong — a mis-published release (the publisher's
+/// coordinates name a commit that holds something else), a corrupted store, or a mirror serving
+/// another package's tree. That is why the registry flavour is a [`PmError::Trust`] failure naming
+/// the coordinates, not a manifest error telling the author to correct a name they got right. Its
+/// **version** half is checked for the same reason: a release is `(identity, version, commit)` —
+/// the triple the publish attestation signs — so a tree that declares a different version is the
+/// same disagreement one field over, and left unchecked it would put a version the index never
+/// served into `noeta.lock`.
+///
+/// This is also what keeps the rest of the walk sound, because everything downstream is keyed by the
+/// identity read *from the tree*: the `[trust].native` authority gate, the lockfile's content-hash
+/// pin, and transparency enforcement (which is keyed by the *declared* identity, so a tree that
+/// renamed itself would drop straight out of the enforced set). The check runs before all three.
+///
+/// **A target with no `[package]` table** never reaches a mismatch here, by construction: a
+/// dependency's identity *and* its namespace root both come from that table, so every entry point
+/// ([`Walker::gather_one`] and [`Walker::walk_one`]) already refuses such a tree whether or not a
 /// claim was written. This check deliberately runs *after* the identity is read, so that case is
 /// reported as the missing table — the actionable fact — rather than as a mismatch against nothing.
 fn check_declared_identity(
     key: &str,
     dep: &Dependency,
-    actual: &crate::manifest::PackageName,
+    actual: &crate::manifest::PackageMeta,
     dir: &Path,
+    role: IdentityRole<'_>,
 ) -> Result<(), PmError> {
     let Some(claimed) = dep.declared_package() else {
         return Ok(());
     };
-    if claimed == actual {
-        return Ok(());
+    match role {
+        IdentityRole::Overridden => Ok(()),
+        IdentityRole::Claim => {
+            if claimed == &actual.name {
+                return Ok(());
+            }
+            Err(PmError::Manifest(format!(
+                "dependency `{key}` declares `package = \"{claimed}\"`, but the package at `{}` is \
+                 `{}` — on a path/git dependency `package` is a claim about the tree the source \
+                 points at, and it is checked; correct the identity or point the source at \
+                 `{claimed}`",
+                dir.display(),
+                actual.name
+            )))
+        }
+        IdentityRole::Served {
+            source,
+            selected,
+            pinned,
+        } => {
+            let refuse = |says: String| {
+                Err(PmError::Trust(served_mismatch(
+                    key, &says, claimed, selected, source, dir, pinned,
+                )))
+            };
+            if claimed != &actual.name {
+                return refuse(format!("declares itself `{}`", actual.name));
+            }
+            if selected.is_some_and(|v| v != &actual.version) {
+                return refuse(format!("declares version {}", actual.version));
+            }
+            Ok(())
+        }
     }
-    Err(PmError::Manifest(format!(
-        "dependency `{key}` declares `package = \"{claimed}\"`, but the package at `{}` is \
-         `{actual}` — on a path/git dependency `package` is a claim about the tree the source \
-         points at, and it is checked; correct the identity or point the source at `{claimed}`",
+}
+
+/// The [`IdentityRole::Served`] refusal: the release that was resolved, the coordinates it was
+/// fetched from, and how the tree there disagrees (`says`, e.g. "declares itself `other/pkg`").
+///
+/// Pure and separate so the wording is unit-testable without a registry, a network, or a store —
+/// the mismatch it reports is by definition one no ordinary fixture reaches.
+fn served_mismatch(
+    key: &str,
+    says: &str,
+    selected_name: &crate::manifest::PackageName,
+    selected_version: Option<&Version>,
+    source: &ResolvedSource,
+    dir: &Path,
+    pinned: bool,
+) -> String {
+    let resolved = match selected_version {
+        Some(version) => format!("`{selected_name}` {version}"),
+        None => format!("`{selected_name}`"),
+    };
+    let at = match source {
+        ResolvedSource::Git { url, git_ref, sha } => {
+            format!("`{url}` at `{}` (`{sha}`)", git_ref.lock_key())
+        }
+        ResolvedSource::Path { path } => format!("`{}`", path.display()),
+    };
+    let provenance = if pinned {
+        format!(
+            "`{}` pins this release, so the tree changed under a pin — the package store, or the \
+             source it was re-fetched from, no longer holds what was locked",
+            crate::lock::LOCK_NAME
+        )
+    } else {
+        "the index served coordinates that do not hold the release they were published under — a \
+         release cut from the wrong tree (the common one: a tag made before the manifest was \
+         updated), a mis-published release, a corrupted store, or a mirror serving another \
+         package's tree"
+            .to_string()
+    };
+    format!(
+        "dependency `{key}` resolved {resolved} from the registry, but the tree fetched from {at} \
+         {says} (unpacked at `{}`). On a registry dependency `package` is the selector, so this is \
+         not a claim to correct: {provenance}. Refusing to install it — verify the release \
+         upstream, then `noeta update` to re-resolve.",
         dir.display()
-    )))
+    )
 }
 
 /// The stderr warning for a `[patch]`ed tree whose version fails a requirement the dependency
@@ -2438,6 +2609,129 @@ mod tests {
             "names the member's real identity: {}",
             err.message()
         );
+    }
+
+    /// The `[package]` table of a tree a registry claims to have served.
+    fn served_tree(name: &str, version: &str) -> Manifest {
+        Manifest::parse(&format!(
+            "[package]\nname = \"{name}\"\nversion = \"{version}\"\n"
+        ))
+        .expect("a two-key manifest parses")
+    }
+
+    /// A registry dependency selecting `name`, and the coordinates a release of it resolves to.
+    fn registry_dep(name: &str) -> (Dependency, ResolvedSource) {
+        (
+            Dependency::Registry {
+                package: Some(crate::manifest::PackageName::parse(name).unwrap()),
+                req: VersionReq::parse("^1.0").unwrap(),
+            },
+            ResolvedSource::Git {
+                url: "https://example.test/greet.git".to_string(),
+                git_ref: crate::manifest::GitRef::Tag("v1.2.0".to_string()),
+                sha: "0f1e2d3c4b5a".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_registry_dependencys_served_tree_must_be_the_release_it_selected() {
+        // The registry flavour of the one identity rule. Here `package` is the SELECTOR — it is what
+        // the index was queried for — so a tree that declares something else is not a claim the
+        // author can correct: the coordinates that were resolved do not hold the release they were
+        // published under. That is a TRUST failure (a mis-published release, a corrupted store, a
+        // mirror serving another package's tree), not a manifest one, and it is refused before the
+        // walk trusts that identity for the `[trust].native` gate, the lock's hash pin, or the
+        // transparency set — each of which is keyed by the identity read from the tree.
+        //
+        // Unit-level deliberately: a served-tree disagreement cannot be produced by an on-disk
+        // fixture, only by a registry serving one. The end-to-end proof — a real publish whose
+        // coordinates name a commit holding a different package — is in the CLI suite.
+        let (dep, source) = registry_dep("acme/greet");
+        let selected = Version::new(1, 2, 0);
+        let dir = Path::new("/store/0f1e2d3c4b5a");
+        let role = |pinned| IdentityRole::Served {
+            source: &source,
+            selected: Some(&selected),
+            pinned,
+        };
+
+        // The tree that agrees with its coordinates resolves — both halves of the release match.
+        let honest = served_tree("acme/greet", "1.2.0");
+        check_declared_identity("gc", &dep, honest.package().unwrap(), dir, role(false))
+            .expect("the release the index served is the one the tree declares");
+
+        // A different identity: refused, naming the release that was asked for, what came back, and
+        // the coordinates it came from.
+        let impostor = served_tree("evil/other", "1.2.0");
+        let err =
+            check_declared_identity("gc", &dep, impostor.package().unwrap(), dir, role(false))
+                .expect_err("a tree that renames itself is refused");
+        let msg = err.message().to_string();
+        assert!(
+            matches!(err, PmError::Trust(_)),
+            "a served-tree disagreement is a trust signal, not a manifest error: {err:?}"
+        );
+        assert!(msg.contains("acme/greet"), "names what was selected: {msg}");
+        assert!(msg.contains("1.2.0"), "at which version: {msg}");
+        assert!(msg.contains("evil/other"), "names what came back: {msg}");
+        assert!(
+            msg.contains("example.test/greet.git") && msg.contains("0f1e2d3c4b5a"),
+            "names the coordinates it came from: {msg}"
+        );
+        assert!(
+            msg.contains("selector"),
+            "says why this is not the author's mistake: {msg}"
+        );
+
+        // The same disagreement one field over: the right package at the wrong version. A release is
+        // the (identity, version, commit) triple the publish attestation signs, so a tree declaring
+        // a version the index never served is the same lie — and unchecked it would write that
+        // version into `noeta.lock`.
+        let misversioned = served_tree("acme/greet", "9.9.9");
+        let err = check_declared_identity(
+            "gc",
+            &dep,
+            misversioned.package().unwrap(),
+            dir,
+            role(false),
+        )
+        .expect_err("a tree at another version is refused");
+        assert!(matches!(err, PmError::Trust(_)), "{err:?}");
+        assert!(
+            err.message().contains("9.9.9") && err.message().contains("1.2.0"),
+            "names both versions: {}",
+            err.message()
+        );
+
+        // Under a lock pin the event is worse and reads differently: the coordinates were fixed
+        // before this resolve began, so the tree changed *underneath* the pin.
+        let err = check_declared_identity("gc", &dep, impostor.package().unwrap(), dir, role(true))
+            .expect_err("still refused");
+        assert!(
+            err.message().contains(crate::lock::LOCK_NAME) && err.message().contains("under a pin"),
+            "distinguishes a drifted pin from a freshly mis-served release: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn a_patched_registry_identity_is_not_held_to_the_served_rule() {
+        // A `[patch]`ed identity never reached the index — `materialize` returns the developer's own
+        // working tree — so there is no served release to hold to account, and `gather_patches`
+        // already validated that tree declares the identity it overrides. The role is `Overridden`
+        // rather than a skipped call so the reason is written down where the rule is: a registry
+        // trust refusal about a local directory would name the wrong culprit entirely.
+        let (dep, _source) = registry_dep("acme/greet");
+        let working_copy = served_tree("acme/greet", "2.0.0-dev");
+        check_declared_identity(
+            "gc",
+            &dep,
+            working_copy.package().unwrap(),
+            Path::new("/home/dev/greet"),
+            IdentityRole::Overridden,
+        )
+        .expect("a dev override answers to `gather_patches`, not to the registry");
     }
 
     #[test]

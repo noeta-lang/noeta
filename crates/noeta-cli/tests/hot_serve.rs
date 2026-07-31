@@ -1,8 +1,12 @@
 //! `noeta serve --watch` hot-reload integration test (server-hmr W1): spawn the watch wrapper
 //! around a stateful server, edit the handler mid-flight, and assert that (a) the edit's new body
 //! serves without a restart and (b) the signal-held request counter SURVIVES the swap — the arc's
-//! headline behavior. `#[ignore]` so CI stays hermetic (real port, real processes, real fs
-//! events) — run explicitly: `cargo test -p noeta-cli --test hot_serve -- --ignored`.
+//! headline behavior.
+//!
+//! `#[ignore]`d because it binds a real port and spawns real processes — not because it is optional.
+//! `scripts/hot-e2e.sh` lists it, and both ci.yml and `scripts/gate.sh` run that script; the census
+//! in `tests/cli/automation.rs` fails the build if the list drops it. Run it yourself with
+//! `cargo test -p noeta-cli --test hot_serve -- --ignored`.
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};

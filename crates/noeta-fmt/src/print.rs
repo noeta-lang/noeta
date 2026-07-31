@@ -2652,17 +2652,21 @@ impl Printer<'_> {
                 ty,
                 args,
                 ..
-            } => self.dot_link(
-                self.receiver(recv)?,
-                recv.span().end,
-                func_span.start,
-                Doc::concat([
-                    Doc::text(format!(".{func}::<")),
-                    self.type_ref(ty)?,
-                    Doc::text(">"),
-                    self.arg_list(args, ty.span().end)?,
-                ]),
-            ),
+            } => {
+                // The receiver is rendered first, before the link's own parts: printing walks the
+                // source with a monotone comment cursor, so rendering out of source order would let
+                // an argument's comment be consumed ahead of the receiver's — or ahead of one
+                // written in the dot gap, which [`Self::dot_link`] takes between the two.
+                let head = self.receiver(recv)?;
+                self.dot_link(head, recv.span().end, func_span.start, || {
+                    Ok(Doc::concat([
+                        Doc::text(format!(".{func}::<")),
+                        self.type_ref(ty)?,
+                        Doc::text(">"),
+                        self.arg_list(args, ty.span().end)?,
+                    ]))
+                })?
+            }
             Expr::TypedCall {
                 name,
                 type_args,
@@ -2691,19 +2695,22 @@ impl Printer<'_> {
             } => {
                 // The receiver is rendered first, before the link's own parts: printing walks the
                 // source with a monotone comment cursor, so rendering out of source order would
-                // let an argument's comment be consumed ahead of the receiver's.
+                // let an argument's comment be consumed ahead of the receiver's — or ahead of one
+                // written in the dot gap, which [`Self::dot_link`] takes between the two.
                 let head = self.receiver(recv)?;
-                let mut parts = vec![Doc::text(format!(".{name}::<"))];
-                for (i, t) in type_args.iter().enumerate() {
-                    if i > 0 {
-                        parts.push(Doc::text(", "));
+                self.dot_link(head, recv.span().end, name_span.start, || {
+                    let mut parts = vec![Doc::text(format!(".{name}::<"))];
+                    for (i, t) in type_args.iter().enumerate() {
+                        if i > 0 {
+                            parts.push(Doc::text(", "));
+                        }
+                        parts.push(self.type_ref(t)?);
                     }
-                    parts.push(self.type_ref(t)?);
-                }
-                parts.push(Doc::text(">"));
-                let anchor = type_args.last().map(|t| t.span().end).unwrap_or(0);
-                parts.push(self.arg_list(args, anchor)?);
-                self.dot_link(head, recv.span().end, name_span.start, Doc::concat(parts))
+                    parts.push(Doc::text(">"));
+                    let anchor = type_args.last().map(|t| t.span().end).unwrap_or(0);
+                    parts.push(self.arg_list(args, anchor)?);
+                    Ok(Doc::concat(parts))
+                })?
             }
             // `Repo::<Todo>` — a call-site class instantiation, printed as one unbreakable head
             // (`receiver` handles any parenthesization the underlying type reference needs). The
@@ -2916,17 +2923,45 @@ impl Printer<'_> {
     /// which is what keeps a multi-line argument nested under its own `.` — so the rule is the same
     /// one, just applied to a node that already carries its call.
     ///
+    /// A comment the author wrote in that same gap is emitted here too, above the link it documents —
+    /// the other half of the same defect [`Self::chain_segments`] fixes for an ordinary link. Because
+    /// these two node kinds are outside the [`Self::chain_ops`] walk, that fix did not reach them and
+    /// a comment above a turbofish link was still relocated below the whole statement. `link` is
+    /// therefore a **thunk**: the gap's comments have to come off the cursor before the link's own
+    /// arguments render theirs, or the shared cursor would run backwards.
+    ///
     /// Under `wrap = true` layout is re-derived from [`FmtConfig::line_width`] and the author's
-    /// breaks are not consulted; inside a tier-body hole (`force_flat`) no break may be emitted at
-    /// all. In both cases this yields and the link stays joined.
-    fn dot_link(&self, recv: Doc, recv_end: u32, link_start: u32, link: Doc) -> Doc {
-        if self.force_flat.get() || self.config.wrap || !self.broke_between(recv_end, link_start) {
-            return Doc::concat([recv, link]);
+    /// breaks are not consulted, but a comment still forces the break — a `//` cannot share a line
+    /// with what follows it, so joining would swallow the call. Inside a tier-body hole
+    /// (`force_flat`) no break may be emitted at all: the link stays joined and the comment is left
+    /// pending for the enclosing scope, exactly as an ordinary chain's is there.
+    fn dot_link(
+        &self,
+        recv: Doc,
+        recv_end: u32,
+        link_start: u32,
+        link: impl FnOnce() -> Result<Doc, FmtError>,
+    ) -> Result<Doc, FmtError> {
+        if self.force_flat.get() {
+            return Ok(Doc::concat([recv, link()?]));
         }
-        Doc::concat([
+        let comments = self.take_comments_in(recv_end, link_start);
+        let broke = !self.config.wrap && self.broke_between(recv_end, link_start);
+        let link = link()?;
+        if comments.is_empty() && !broke {
+            return Ok(Doc::concat([recv, link]));
+        }
+        let mut tail = Vec::new();
+        for c in comments {
+            tail.push(Doc::hardline());
+            tail.push(c);
+        }
+        tail.push(Doc::hardline());
+        tail.push(link);
+        Ok(Doc::concat([
             recv,
-            Doc::concat([Doc::hardline(), link]).nest(self.indent_step()),
-        ])
+            Doc::concat(tail).nest(self.indent_step()),
+        ]))
     }
 
     /// A call's `(arg, …)` list. `open_ref` is the byte just before the `(` (the callee's end), so a
@@ -3095,6 +3130,13 @@ impl Printer<'_> {
     /// the author wrote `if…then…else` (a literal `match` begins at `match`). The arm shape confirms
     /// it: `true`/`false` for a plain condition, or `is T`/`_` for a `cond is T` test (which prints
     /// back as `cond is T`). Returns `None` for a literal `match`; the caller then formats normally.
+    ///
+    /// Its **layout** is the author's, exactly as [`Self::match_expr`]'s is: this printed the
+    /// reconstructed form unconditionally flat, so a conditional written across three lines came back
+    /// as one — 200 columns of it in para/ai's provider example. Under `wrap = false` there is no
+    /// width to re-derive a layout from, so the author's break is the only signal there is; under
+    /// `wrap = true` there is, and the whole thing becomes one group for the renderer to decide.
+    /// See [`Self::conditional_broke`] for which source gaps carry the signal and why.
     fn if_then_else_form(
         &self,
         scrutinee: &Expr,
@@ -3108,15 +3150,21 @@ impl Printer<'_> {
         if arms.iter().any(|a| a.guard.is_some()) {
             return Ok(None);
         }
-        let cond = match (&arms[0].pattern, &arms[1].pattern) {
-            (Pattern::Bool { value: true, .. }, Pattern::Bool { value: false, .. }) => {
-                self.restricted_head(scrutinee, false)?
-            }
-            (Pattern::IsType { ty, .. }, Pattern::Wildcard { .. }) => Doc::concat([
+        // `cond_end` is the byte the condition's source ends at — the start of the ` then ` gap. The
+        // `is T` form's condition runs to the end of the *type*, not of the scrutinee.
+        let (cond, cond_end) = match (&arms[0].pattern, &arms[1].pattern) {
+            (Pattern::Bool { value: true, .. }, Pattern::Bool { value: false, .. }) => (
                 self.restricted_head(scrutinee, false)?,
-                Doc::text(" is "),
-                self.type_ref(ty)?,
-            ]),
+                scrutinee.span().end,
+            ),
+            (Pattern::IsType { ty, .. }, Pattern::Wildcard { .. }) => (
+                Doc::concat([
+                    self.restricted_head(scrutinee, false)?,
+                    Doc::text(" is "),
+                    self.type_ref(ty)?,
+                ]),
+                ty.span().end,
+            ),
             // The `if` keyword but not a desugar-shaped match — leave it to the normal `match` path.
             _ => return Ok(None),
         };
@@ -3124,14 +3172,72 @@ impl Printer<'_> {
         else {
             return Ok(None); // a block arm cannot be the parser's if-then-else desugar
         };
+        let broke = self.conditional_broke(cond_end, then_e, else_e);
+        let head = Doc::concat([Doc::text("if "), cond]);
+        // The branches are rendered once and laid out either way, in source order, so the comment
+        // cursor is walked exactly once however the layout falls out — no speculative render to undo.
+        let then_doc = Doc::concat([Doc::text("then "), self.expr(then_e)?]);
+        let else_doc = Doc::concat([Doc::text("else "), self.expr(else_e)?]);
+        // `wrap = true` re-derives layout from the width and does not consult the author's breaks, so
+        // the two branches become a group's break points — the same yield [`Self::dot_link`] and
+        // [`Self::breaks_at_author_gaps`] make.
+        if self.config.wrap {
+            return Ok(Some(
+                Doc::concat([
+                    head,
+                    Doc::concat([Doc::line(), then_doc, Doc::line(), else_doc])
+                        .nest(self.indent_step()),
+                ])
+                .group(),
+            ));
+        }
+        let flat = Doc::concat([
+            head.clone(),
+            Doc::text(" "),
+            then_doc.clone(),
+            Doc::text(" "),
+            else_doc.clone(),
+        ]);
+        // Flatness is asserted, not assumed: a branch may have dragged a hard break along (a
+        // multiline string, a chain with a comment in it, a broken call), and printing that as "flat"
+        // would put a newline inside the node — which the *next* run would read back as an author
+        // break in the `else` gap and explode, so the rule would not be a fixed point. Inside a
+        // tier-body hole no newline may be emitted at all, so flat is the only legal form there and
+        // the check does not apply (that is the pre-existing behavior of this node, unchanged).
+        if self.force_flat.get() || (!broke && flat.never_breaks()) {
+            return Ok(Some(flat));
+        }
         Ok(Some(Doc::concat([
-            Doc::text("if "),
-            cond,
-            Doc::text(" then "),
-            self.expr(then_e)?,
-            Doc::text(" else "),
-            self.expr(else_e)?,
+            head,
+            Doc::concat([Doc::hardline(), then_doc, Doc::hardline(), else_doc])
+                .nest(self.indent_step()),
         ])))
+    }
+
+    /// Whether the author broke a conditional **expression** across lines — a newline in the gap
+    /// before `then` or the one before `else`.
+    ///
+    /// Those two gaps, not the node as a whole, are the signal, and for the reason [`Self::gap_breaks`]
+    /// gives: a gap between two adjacent parts is exactly the keyword and the whitespace around it, so
+    /// a newline in it is unambiguously the author's. A newline anywhere in the *node* would also be
+    /// produced by a branch that merely spans lines on its own (`if c then f(⏎ a,⏎ b) else g()`), and
+    /// exploding on that would be this printer breaking a line the author had joined — the very thing
+    /// being fixed here, in the other direction. [`Self::match_stays_flat`] can afford the coarser
+    /// whole-node test because a leaked newline there yields the *pre-existing* exploded form; here it
+    /// would be a new regression.
+    ///
+    /// A conditional broken in only one of its two gaps normalizes to the fully exploded form, as a
+    /// partially-broken `match` normalizes to one arm per line: both breaks are the author's layout,
+    /// and one line of a three-part construct is not a shape worth preserving.
+    ///
+    /// Fixed point in both directions: the exploded form puts a newline in *both* gaps, so the next
+    /// pass reads `true` again; the flat form puts none in either — asserted via [`Doc::never_breaks`],
+    /// since a branch's own hard break would otherwise land in the `else` gap — so the next pass reads
+    /// `false`.
+    fn conditional_broke(&self, cond_end: u32, then_e: &Expr, else_e: &Expr) -> bool {
+        let then_span = then_e.span();
+        self.broke_between(cond_end, then_span.start)
+            || self.broke_between(then_span.end, else_e.span().start)
     }
 
     /// Whether the source at `span.start` begins with the `if` keyword as a whole token — so an
@@ -3543,12 +3649,27 @@ impl Printer<'_> {
         if obj.fields.is_empty() && obj.spread.is_none() {
             return Ok(Doc::text(format!("{head}{{}}")));
         }
-        // The fields, then the record-update spread, in source order — so a comment written between
-        // any two of them interleaves onto its own line instead of migrating past `}`.
+        // The fields and the record-update spread, **in source order** — so a comment written between
+        // any two of them interleaves onto its own line instead of migrating past `}`, and so the
+        // spread keeps the position the author wrote it in.
+        //
+        // The spread lives in its own [`ObjectLit`] field rather than among `fields`, so appending it
+        // was the obvious thing and it re-emitted `T { ...self, at: at }` as `T { at: at, ...self }`.
+        // That is semantics-preserving — a spread supplies the fields not named explicitly, wherever
+        // it sits — which is exactly why no gate saw it: the safety gate compares the AST, and the
+        // AST is the same. It is still fmt rewriting what the author wrote, and `...self` first is
+        // the order actually written. It also broke the comment interleave, whose cursor is monotone
+        // in source position: a spread visited last took the comments belonging to the fields that
+        // *follow* it, so a note above `...self` came out above the field below it instead.
+        //
+        // Sorting by span is exact here. The spread's span is its **operand's** (`self`), starting
+        // just past the `...` that introduces it, and nothing else can sit in that gap — so the
+        // operand's order is the spread's order.
         let mut items: Vec<ObjItem> = obj.fields.iter().map(ObjItem::Field).collect();
         if let Some(spread) = &obj.spread {
             items.push(ObjItem::Spread(spread));
         }
+        items.sort_by_key(|it| it.span().start);
         // The `{` sits just after the type name; a break before the first field (or spread) means the
         // author wrote the literal across lines. `type_name_span.end` is the source-directed break
         // reference the previous form keyed off, kept verbatim.

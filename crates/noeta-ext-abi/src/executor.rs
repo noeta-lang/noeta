@@ -162,6 +162,84 @@ impl ExternIo for FsIo {
     }
 }
 
+/// The **wake half of a cancellation request** (interruptible-io): the `AtomicBool` a run polls at
+/// its safepoints says *what* was asked; this says *how to rouse a party that is not at a
+/// safepoint*.
+///
+/// Cancellation is honored at safepoints — the dispatch loop's frame transfers and taken loop
+/// back-edges, and every round of the scheduler's driving loops. A worker that is blocked *outside*
+/// the interpreter reaches none of them: parked in [`Executor::advance`] for one long `sleep`, it
+/// observes the flag only when the sleep ends (measured: a `sleep(3000)` cancelled at 200 ms stopped
+/// 2.8 s later). So the canceller fires this alongside the flag store, and anything that can block
+/// outside the interpreter registers a hook here at startup — the hook's whole job is to make that
+/// block **return early**, never to decide anything. The party then reaches its next safepoint and
+/// the ordinary poll makes the call, so every rule about *when* a cancellation may be honored stays
+/// in one place (`observe_cancel` clears the flag once honored; `run_destructor` lifts it).
+///
+/// Deliberately hook-shaped rather than a channel or a concrete primitive: a blocked party's wake is
+/// whatever its own blocking primitive understands (the real executor's tokio `Notify`, a condvar a
+/// blocking host leaf waits on), and none of those types may leak into `noeta-vm`, which owns the
+/// cancel but has no tokio and no host. A registration that arrives *after* the wake fires runs
+/// immediately, so a startup race cannot swallow a request.
+///
+/// Spurious wakes are safe by construction: a woken party re-polls, which the cooperative model
+/// already tolerates everywhere (`WakeSignal`, the executor's external `wake`).
+#[derive(Default)]
+pub struct CancelWake {
+    /// The hooks and whether the wake already fired, under **one** lock: a hook registered
+    /// concurrently with a wake either runs in that wake or runs immediately at registration, never
+    /// neither.
+    state: std::sync::Mutex<WakeState>,
+}
+
+/// [`CancelWake`]'s interior — see its field docs.
+#[derive(Default)]
+struct WakeState {
+    /// Registered wakes, run in registration order by [`CancelWake::wake`]. A hook must not block
+    /// and must not re-enter this type (the lock is held across the call) — `notify_one()` on a
+    /// tokio `Notify` or `notify_all()` on a condvar is the intended shape.
+    hooks: Vec<Box<dyn Fn() + Send + Sync>>,
+    /// Whether [`CancelWake::wake`] has already fired.
+    fired: bool,
+}
+
+impl std::fmt::Debug for CancelWake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancelWake").finish_non_exhaustive()
+    }
+}
+
+impl CancelWake {
+    /// A fresh wake with no hooks registered.
+    pub fn new() -> CancelWake {
+        CancelWake::default()
+    }
+
+    /// Register a wake hook — see the type docs for the contract. Runs `hook` **immediately** when
+    /// the wake has already fired, so a party that starts up after its cancellation was requested
+    /// does not park.
+    pub fn register(&self, hook: impl Fn() + Send + Sync + 'static) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.fired {
+            drop(state);
+            hook();
+            return;
+        }
+        state.hooks.push(Box::new(hook));
+    }
+
+    /// Fire every registered hook (and, through [`register`](CancelWake::register), every hook
+    /// registered later). Idempotent — a cancellation is requested at most once per party, and a
+    /// repeat is only a repeated spurious wake.
+    pub fn wake(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.fired = true;
+        for hook in &state.hooks {
+            hook();
+        }
+    }
+}
+
 /// The async scheduler's clock + timer seam, injected into each backend exactly like [`crate::Host`].
 ///
 /// The cooperative scheduler (round-robin polling of the tasks in a `concurrent` scope) lives in the
@@ -200,6 +278,19 @@ pub trait Executor {
     /// Poll a descriptor begun by [`Self::spawn_ext`]: `Some(outcome)` once completed (the
     /// ticket is then spent), `None` while pending. A ticket is polled at most once to `Some`.
     fn poll_ext(&mut self, id: u64) -> Option<Result<crate::NativeOut, StdError>>;
+
+    /// Arm this executor against the cancellation of the run it drives (interruptible-io): register
+    /// a hook on `wake` that makes a blocked [`advance`](Self::advance) return promptly, so a party
+    /// parked on a long timer reaches its next safepoint and the ordinary cancellation poll decides.
+    /// Called once at startup, before any user code runs, by whoever owns the run's cancellation —
+    /// today the isolate worker, whose parent fires the wake from `h.cancel()`.
+    ///
+    /// Default: a no-op, which is correct for any executor whose `advance` cannot block —
+    /// [`SandboxExecutor`] *jumps* logical time, so there is nothing to interrupt and the sandbox
+    /// stays byte-identical (and in-oracle) with this seam present.
+    fn set_cancel_wake(&mut self, wake: std::sync::Arc<CancelWake>) {
+        let _ = wake;
+    }
 }
 
 /// The deterministic sandbox executor: a logical clock (milliseconds, starting at zero) and the set
@@ -282,6 +373,52 @@ mod tests {
         assert_eq!(exec.advance(), Some(30));
         assert_eq!(exec.now(), 30);
         // Nothing left — a deadlock signal.
+        assert_eq!(exec.advance(), None);
+    }
+
+    #[test]
+    fn a_cancel_wake_fires_every_registered_hook() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let wake = CancelWake::new();
+        let count = std::sync::Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            let c = std::sync::Arc::clone(&count);
+            wake.register(move || {
+                c.fetch_add(1, Ordering::Relaxed);
+            });
+        }
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            0,
+            "registration must not fire"
+        );
+        wake.wake();
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_hook_registered_after_the_wake_fires_immediately() {
+        // The startup race: a worker whose cancellation was requested before its executor came up
+        // must not then park. Registration on an already-fired wake runs the hook at once.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let wake = CancelWake::new();
+        wake.wake();
+        let count = std::sync::Arc::new(AtomicUsize::new(0));
+        let c = std::sync::Arc::clone(&count);
+        wake.register(move || {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn the_sandbox_executor_ignores_a_cancel_wake() {
+        // The default trait body: `SandboxExecutor::advance` jumps logical time, so there is
+        // nothing to interrupt — arming it must leave the deterministic behavior untouched.
+        let mut exec = SandboxExecutor::new();
+        exec.set_cancel_wake(std::sync::Arc::new(CancelWake::new()));
+        exec.register_timer(10);
+        assert_eq!(exec.advance(), Some(10));
         assert_eq!(exec.advance(), None);
     }
 

@@ -45,15 +45,22 @@ SUITES=(
     "parallel_hot:1"    # `--parallel 3`: one edit must reach EVERY worker isolate
     "live_serve:1"      # LiveView over a real RFC 6455 socket: snapshot, patches, second session
     "graceful_drain:1"  # SIGINT mid-request drains it, then the listener closes
+    # The four siblings this list was first scoped to leave out. It was scoped to the hot-swap arc;
+    # the class is "everything `#[ignore]`d because it needs a real port or a real child process",
+    # and a sibling left out of the list is a sibling nothing runs. Added on the measurement the
+    # note here asked for: 85 consecutive runs of all nine suites, 765 suite-runs, zero failures —
+    # at ambient load, beside a lean-CLI build, beside a release build, with unrestricted intra-suite
+    # threads, and pinned to two cores. All four cost under 3s of test time.
+    "serve:1"           # plain routing over a loopback socket, plus the empty-probe regression
+    "parallel_serve:1"  # `--parallel 4`: shared listener, concurrent slow requests, SIGINT drains all
+    "live_stream:3"     # SSE both directions, including a body split mid-frame and mid-CRLF
+    "impact_watch:2"    # `noeta test --watch` impact filtering, single-file and across modules
 )
 
-# Four sibling `#[ignore]`d real-socket suites are deliberately NOT here yet, because this step was
-# scoped to the hot-swap story: `serve` (plain routing), `parallel_serve` (`--parallel` + SIGINT),
-# `live_stream` (SSE both directions), `impact_watch` (`noeta test --watch` impact filtering — the
-# closest sibling, server-hmr W3). They were measured alongside the five above and are just as cheap
-# and just as stable (8 runs each, 0 failures, every one under 3s of test time), so adding them is a
-# one-line change and not a research project. Do it when someone wants the whole class covered
-# rather than this one arc.
+# Nothing `#[ignore]`d in `noeta-cli` is left off this list by accident: `tests/cli/automation.rs`
+# is a census that fails the build when an ignored test is named by neither this script nor an
+# explicit, written exemption — and it checks the counts above against the tree, so the "bump the
+# number" instruction is itself enforced rather than remembered.
 TC="${NOETA_GATE_TOOLCHAIN:-}"
 if [[ -n "$TC" && "$TC" != "default" ]]; then
     CARGO=(cargo "+$TC")
