@@ -28,6 +28,8 @@ noeta-attestation-v1
 <commit sha>
 ```
 
+The attestation binds a *name* to a *commit*, and both come from the publisher — nothing at publish time opens the tagged tree to confirm it holds the package being released. So the binding is only as true as the publisher's own coordinates, and the consumer closes that gap on resolve: a fetched tree whose `[package] name` or `version` disagrees with the release it was resolved as is refused (see [`package` on a dependency](Manifest#dependencies--what-the-package-builds-against)). A signature therefore proves *who* attested this name-version-commit triple; the resolve proves the commit actually holds it.
+
 Keyless signing wraps them in an [in-toto Statement](https://in-toto.io) — subject digest = `sha256(canonical bytes)`, predicate type `https://noeta.dev/attestation/publish/v1` carrying `{name, version, sha, url, tag}` — inside a DSSE envelope. The registry stores the resulting **Sigstore bundle** next to the release; the raw key path stores a bare Ed25519 signature.
 
 ## Keyless signing (Sigstore)
