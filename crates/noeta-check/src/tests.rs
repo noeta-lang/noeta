@@ -3093,14 +3093,19 @@ fn the_checker_visits_every_body_it_is_given() {
     );
 }
 
-// ----- E0063: erased-width scalar `is` narrowing (packed-widths slice 2) -----
+// ----- E0063: unanswerable width `is` test (packed-widths slice 2) -----
 //
-// A bare-scalar `x is iN` / `x is f64` is statically always false: an erased width carries no
-// runtime tag on a scalar. Rather than silently compile an always-false test, the checker emits an
-// advisory **warning** (E0063). Warnings are not corpus-pinnable — the `.noe` `// expect:` header
-// has no `warning` directive and the differential harness treats any diagnostic as a rejection — so
-// this rule is pinned here instead. (The reified `f32` narrowing is corpus-pinned in
-// `tests/conformance/narrowing/f32_width_subtype.noe`.)
+// A bare-scalar `x is iN` / `x is f64` is the one test the *runtime* cannot answer: an erased width
+// carries no tag on a scalar, so the shared matcher reaches no head and always says `false`. Where
+// the scrutinee's static type settles the question the **checker** answers it instead and the
+// constant is folded at lowering (`Sites::folded_type_tests`) — no warning, because a decided
+// answer is not an erasure problem. E0063 is left for a scrutinee that leaves the width genuinely
+// unrecoverable: a `dyn` launder, a union, an erased type parameter.
+//
+// The observable end of that (what the folded test *prints*, and the surviving warning) is
+// corpus-pinned in `tests/conformance/narrowing/is_erased_width_static.noe`; what is pinned here is
+// the checker-side rule — which scrutinees warn, which fold, and to what. (The reified `f32`
+// narrowing is corpus-pinned in `tests/conformance/narrowing/f32_width_subtype.noe`.)
 
 /// Return every warning-severity diagnostic's code for `text`, in order.
 fn warn_codes(text: &str) -> Vec<String> {
@@ -3167,9 +3172,96 @@ fn scalar_is_base_types_do_not_warn() {
 #[test]
 fn container_of_erased_width_does_not_warn() {
     // A container target reifies its element width (packed storage, sibling slice), so
-    // `x is List<i32>` is legitimate — only a *bare scalar* width target is always-false.
+    // `x is List<i32>` is legitimate — only a *bare scalar* width target is unanswerable.
     assert!(codes("fn f(x: dyn): bool { return x is List<i32>; }\n").is_empty());
     assert!(codes("fn f(x: dyn): bool { return x is List<f64>; }\n").is_empty());
+}
+
+/// Every answer the checker folded for `text`, in span order — the `folded_type_tests` channel.
+fn folded_answers(text: &str) -> Vec<bool> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
+    let mut folded: Vec<(noeta_span::Span, bool)> = super::check_all(&parsed.program)
+        .sites
+        .folded_type_tests
+        .into_iter()
+        .collect();
+    folded.sort_by_key(|(span, _)| span.start);
+    folded.into_iter().map(|(_, answer)| answer).collect()
+}
+
+#[test]
+fn a_width_test_the_checker_can_answer_is_folded_not_warned() {
+    // `a`'s declared type IS `i32`, so the test is decided — `true`, and silently. Answering
+    // `false` (what the runtime does, having no width to look at) would be simply wrong, and
+    // warning about it was noise on a program that had nothing wrong with it.
+    let src = "fn f(): bool { a: i32 = 5; return a is i32; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+    assert_eq!(folded_answers(src), [true]);
+}
+
+#[test]
+fn a_width_test_decided_false_is_folded_silently_too() {
+    // A *different* width, or a different signedness, is equally decided — `i32` is not `i64` and
+    // not `u32`, since widths have identity-only subtyping. This is a decided answer, not an
+    // erasure problem, so it gets no E0063. (Whether an always-false test deserves a complaint of
+    // its own is a separate question from erasure, and no code makes it today: `s is int` on a
+    // `string` is just as impossible and just as silent.)
+    for target in ["i64", "u32", "i8"] {
+        let src = format!("fn f(): bool {{ a: i32 = 5; return a is {target}; }}\n");
+        assert!(codes(&src).is_empty(), "`is {target}` should be silent");
+        assert_eq!(folded_answers(&src), [false], "`is {target}` should fold false");
+    }
+}
+
+#[test]
+fn float_and_f64_are_distinct_static_types_so_both_directions_fold() {
+    // `f64` is bit-identical to `float` at runtime, which is exactly why the runtime cannot tell
+    // them apart. Statically they are distinct types that do not widen into each other, so both
+    // tests are decided.
+    assert_eq!(
+        folded_answers("fn f(): bool { x: f64 = 1.5; return x is f64; }\n"),
+        [true]
+    );
+    assert_eq!(
+        folded_answers("fn f(): bool { x: float = 1.5; return x is f64; }\n"),
+        [false]
+    );
+}
+
+#[test]
+fn a_scrutinee_that_does_not_fix_the_width_still_warns_and_folds_nothing() {
+    // The genuinely unanswerable scrutinees: the `dyn` top, a union (`number` is one), and an
+    // erased type parameter. In each the checker knows a *set* — or nothing — and the value cannot
+    // be asked, so no answer exists to fold.
+    for scrut in ["dyn", "number", "int | string"] {
+        let src = format!("fn f(x: {scrut}): bool {{ return x is i32; }}\n");
+        assert_eq!(codes(&src), ["E0063"], "`{scrut}` should warn");
+        assert!(folded_answers(&src).is_empty(), "`{scrut}` must not fold");
+    }
+    let param = "fn f<T>(x: T): bool { return x is i32; }\n";
+    assert_eq!(codes(param), ["E0063"]);
+    assert!(folded_answers(param).is_empty());
+}
+
+#[test]
+fn f32_needs_no_special_case_and_gets_none() {
+    // `f32` is reified — it has a real runtime tag — so it is not an erased width, nothing folds,
+    // and the runtime answers it. That holds whether or not the checker also knows the answer.
+    assert!(folded_answers("fn f(): bool { x: f32 = 1.5f32; return x is f32; }\n").is_empty());
+    assert!(codes("fn f(): bool { x: f32 = 1.5f32; return x is f32; }\n").is_empty());
+}
+
+#[test]
+fn a_folded_true_test_still_narrows_its_branch() {
+    // Folding must not cost the narrowing the test performs. The branch below binds a `dyn`-typed
+    // field off `a` only because `a` is seen as an `i32` there; the E0007 that would follow a lost
+    // narrowing is what this asserts the absence of.
+    let src = "fn f(): int { a: i32 = 5; if a is i32 { b: i32 = a; return b.to_int(); } return 0; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
 
 // ----- associated types on traits (ExtBundle→ExtTrait convergence, slice 1a) -----
