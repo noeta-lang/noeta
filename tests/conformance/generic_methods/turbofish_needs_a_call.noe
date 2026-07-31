@@ -1,0 +1,28 @@
+// A `::<…>` type argument list with **no call to instantiate** is rejected on its own terms.
+//
+// The message this replaces was chumsky's expected-set — `` found `(` expected `.` `` — which named
+// a token the writer never typed on purpose and said nothing about the rule. It was also what the
+// composed spelling `Repo::<Todo>.blank::<int>()` used to produce before it parsed at all, so the
+// one report covered both a real gap in the language and a genuine mistake, and read as neither.
+//
+// The rule it now states is the true one: a type argument list is part of a CALL, never an
+// expression of its own. Every legal position is in the help — `f::<T>(args)`,
+// `recv.method::<T>(args)`, `Type::<T>.method(args)`, and the two together.
+//
+// The span is the token that followed, which is exactly where the missing call should have begun.
+// expect: error E0003 at 27:23
+// expect: exit 1
+class Box<T> {
+    value: T
+
+    fn new(v: T): Box<T> {
+        return Box { value: v };
+    }
+
+    fn choose<U>(other: U): U {
+        return other;
+    }
+}
+b = Box.new(1);
+x = b.choose::<string>;
+echo x;

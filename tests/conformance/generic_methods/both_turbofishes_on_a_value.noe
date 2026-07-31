@@ -1,0 +1,26 @@
+// A class turbofish on a **value** receiver stays refused, even now that a class turbofish and a
+// method turbofish may appear on one call.
+//
+// The composed form is `Type::<Args>.member::<Args>(…)` — a TYPE carrying its instantiation. A value
+// carries its own already, off the tag its construction site stamped, so `r::<Todo>.tagged::<int>()`
+// would be asking the language to either believe a second, unrelated instantiation or silently
+// discard the one it is given. E0058, the same one a bare `Repo::<Todo>` gets, and for the same
+// reason: nothing here consumes the type arguments.
+// expect: error E0058 at 26:6
+// expect: exit 1
+struct Todo {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    fn tagged<U>(): string {
+        return self.tbl ~ "/" ~ type_name::<T>() ~ "/" ~ type_name::<U>();
+    }
+}
+r = Repo::<Todo>.new("todos");
+echo r::<Todo>.tagged::<int>();
