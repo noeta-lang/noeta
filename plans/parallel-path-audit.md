@@ -299,3 +299,42 @@ Recording these so the next audit does not re-walk them.
 3. The three live one-liners: the cache-key gaps (row 2), `package_uses` at `impact.rs:517` and `execute.rs:399` (row 3), the four stale vocabulary entries (row 11).
 4. Rows 1, 10 as one pass, then row 3's constructor and row 5 as the next — they are four views of "the tail, the install and the options are copied", and the chokepoints overlap.
 5. Rows 6, 7, 8, 9, 12 as separate small arcs.
+
+---
+
+## Status after the first pass (2026-07-31)
+
+Fixed and merged: the `noeta audit` silence (row 4's first half) and the `noeta-pm`
+CI gap (`--all-features`, not a feature list — 57 tests, 23% of the crate, had
+never run); the wasm oracle's missing `stderr` (row 1's tripwire); the
+startup-cache key (row 2 — `open_startup_cache` and `key_deps` now *destructure*,
+so a new field is a compile error rather than an omission); the spurious E0036
+(row 3 — four sites, two the audit had not found, plus a `CheckOptions` census);
+`isolate` missing from completion (row 11, with a test deriving the list from the
+lexer's own tokens).
+
+**Open, in the order they now matter:**
+
+1. **The wasm differential is RED and has been skipping.** `reflection/field_specs_of_native_struct.noe`
+   diverges on *stdout* — `construct` does not build a `Frame` under wasm — and
+   that comparison predates this pass, so the gate has been failing whenever it
+   ran at all. It mostly does not run: `wasmtime` is not on `PATH` (it is at
+   `~/.wasmtime/bin/wasmtime`) and `wasm32-wasip1` is installed for `stable`, not
+   the `1.97.0` gate pin, so the step SKIPs. A gate that skips is how a red gate
+   stays red — fix the environment detection first, then the divergence.
+2. **Row 1's chokepoint.** With the oracle fixed, three corpus programs now fail
+   on `stderr` (`io/streams`, `io/to_string_parity`,
+   `http_server/serve_handler_abort_is_reported`). They are the seven hand-written
+   run tails, failing loudly at last. One tail, seven callers.
+3. **`CheckOptions::for_workspace(...)` + `#[non_exhaustive]`** — endorsed by the
+   agent that fixed all four of its bugs: `..Default::default()` converts "I did
+   not consider this field" into "I chose the default", and the compiler cannot
+   tell them apart. The census merged here is a stopgap and says so.
+4. **A grammar census** (~120 lines, Rust, reading the JSON/JS as text) for the
+   TextMate and tree-sitter keyword/intrinsic lists. Four drifts are known and
+   were deliberately NOT hand-edited: hand-editing the files whose problem is
+   silent hand-editing is the wrong trade.
+5. Rows 5–12 as originally written, plus: `MANIFEST.sha256` is still
+   self-referential (the new CI step catches a local edit, not an un-propagated
+   copy), and `list_advisories` classifies a malformed feed body as `Network`, so
+   a JSON-shape drift still degrades to a note.
