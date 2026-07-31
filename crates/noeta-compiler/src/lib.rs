@@ -429,6 +429,8 @@ pub fn compile_session_with(
     // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
     // registry now, not the AST.
     noeta_check::extend_reflection(&mut reflection);
+    // Read before `opts` moves into the compile: the launch program's facts seed the session.
+    let facts = noeta_ir::ProgramFacts::of(program, opts.registry);
     let (mc, map_packed_sites) = compile_to_mc(program, sites, relevance, opts)?;
     let session = SessionCompiler {
         mc,
@@ -437,9 +439,10 @@ pub fn compile_session_with(
         // carry them (session-checker C5).
         map_packed: map_packed_sites.clone(),
         reflection,
-        // Seeded from the launch program, which is where an imported package's `@tier` declaration
-        // is: a fragment swapped in later carries none of its own.
-        expr_tiers: noeta_ast::desugar::expr_tier_handlers(program),
+        // Seeded from the launch program: everything lowering derives from the whole program, which
+        // a fragment swapped in later carries only a piece of (an imported package's `@tier`
+        // declaration, an unchanged `use`, the module's own global names).
+        facts,
     };
     let module = session.snapshot(map_packed_sites, destruct_reachable);
     Ok((module, session))
@@ -495,8 +498,8 @@ fn compile_to_mc(
         noeta_ir::LowerOptions {
             real_isolates,
             registry,
-            // A whole program carries its own tier declarations; nothing is ambient to it.
-            ambient_expr_tiers: HashMap::new(),
+            // A whole program is its own context; nothing is ambient to it.
+            ambient: noeta_ir::ProgramFacts::default(),
         },
     )
     .map_err(|u| Unsupported {
@@ -618,12 +621,12 @@ pub struct SessionCompiler {
     /// only see the current entry's declarations. The tree-walker `Session` accumulates identically,
     /// so the session differential stays green.
     reflection: noeta_ast::reflect::ReflectionInfo,
-    /// Expression-tier handlers (`@html` → the `@tier(html, …, expr: Html)` fn) accumulated across
-    /// the launch compile and every entry since — the ambient table a later fragment lowers
-    /// against. A hot-swapped definition contains no `@tier` declaration (it lives in the package
-    /// the program imports), so without this its `@html { … }` lowers to a panic instead of a
-    /// template. Accumulated latest-wins, like [`Self::reflection`].
-    expr_tiers: HashMap<String, String>,
+    /// What lowering knows about the program ([`noeta_ir::ProgramFacts`]), accumulated across the
+    /// launch compile and every entry since — the ambient set a later *fragment* lowers against.
+    /// A hot-swapped definition carries only its own statements, so without this its `@html { … }`
+    /// lowers to a panic, its `x is Uuid` answers `false`, and a swapped `async` body that touches
+    /// a module global panics. Accumulated latest-wins, like [`Self::reflection`].
+    facts: noeta_ir::ProgramFacts,
 }
 
 impl std::fmt::Debug for SessionCompiler {
@@ -681,7 +684,7 @@ impl SessionCompiler {
             mc,
             map_packed: Vec::new(),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
-            expr_tiers: HashMap::new(),
+            facts: noeta_ir::ProgramFacts::default(),
         }
     }
 
@@ -720,11 +723,11 @@ impl SessionCompiler {
         // edit must materialize the same native derive recipes the initial compile did.
         let hoisted = noeta_ir::hoist_impl_methods_with_registry(entry, Some(self.mc.registry));
         let entry: &Program = hoisted.as_ref().unwrap_or(entry);
-        // Expression tiers this entry declares join the session's table, and the whole table
-        // lowers with the entry — so a fragment's `@html { … }` resolves the handler its *program*
-        // declared, which is never in the fragment itself.
-        self.expr_tiers
-            .extend(noeta_ast::desugar::expr_tier_handlers(entry));
+        // What this entry adds joins the session's facts, and the whole set lowers with it — so a
+        // fragment resolves the tier its *program* declared, narrows against the imports its
+        // program made, and knows its program's globals. None of which are in the fragment itself.
+        self.facts
+            .absorb(noeta_ir::ProgramFacts::of(entry, self.mc.registry));
         // Checkerless lowering (matches the tree-walker `Session`) unless the caller supplied the
         // checker's bundle: then the SAME lowering the file pipeline runs, sites and all. The
         // conservative path's `insert_drops(_, None)` marks every value destructor-relevant;
@@ -735,7 +738,7 @@ impl SessionCompiler {
             // The session's own registry (instance-registry IR5) — the default for a REPL
             // session, an embed session's own set when it installed one.
             registry: self.mc.registry,
-            ambient_expr_tiers: self.expr_tiers.clone(),
+            ambient: self.facts.clone(),
         };
         let ir = match sites {
             None => {

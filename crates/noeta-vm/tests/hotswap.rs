@@ -153,6 +153,61 @@ fn a_swapped_body_keeps_an_expression_tier_from_the_program_that_declared_it() {
     oracle(&app("v1"), &app("v2"), "echo page();");
 }
 
+/// The sibling of the tier case, for the table built from the program's **`use` statements**: only
+/// a *new or changed* import rides in a fragment, so a body swapped under an UNCHANGED import
+/// lowered with no alias for it — and `v is Uuid` quietly answered `false` where a cold start
+/// answers `true`. A narrowing that silently flips is the worst shape this bug class takes.
+#[test]
+fn a_swapped_body_narrows_against_an_unchanged_native_import() {
+    let app = |tag: &str| {
+        format!(
+            "use std.id\n\
+             use std.id.Uuid\n\
+             fn kind(): string {{\n\
+             \x20   v = id.uuid()\n\
+             \x20   return \"{tag} ${{v is Uuid}}\"\n\
+             }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "echo kind();");
+}
+
+/// The same table read the other way: `type_of` on a value whose type came in through an unchanged
+/// import must report the qualified identity the reflection artifact registers, not the bare local
+/// name the fragment happens to see.
+#[test]
+fn a_swapped_body_reflects_an_unchanged_native_imports_qualified_name() {
+    let app = |tag: &str| {
+        format!(
+            "use std.id\n\
+             use std.id.Uuid\n\
+             fn describe(): string {{\n\
+             \x20   v = id.uuid()\n\
+             \x20   return \"{tag} ${{type_of(v).name()}}\"\n\
+             }}\n"
+        )
+    };
+    oracle(&app("v1"), &app("v2"), "echo describe();");
+}
+
+/// Module globals: the async/generator state-machine desugar needs the program's top-level names so
+/// a bare assignment to one stays a global store instead of being hoisted into a state cell. A
+/// fragment holds only the changed declarations, so the set was all but empty and a swapped async
+/// body that touched a global **panicked** — where the same code cold-starts fine.
+#[test]
+fn a_swapped_async_body_still_sees_the_module_globals() {
+    let app = |tag: &str| {
+        format!(
+            "mut count = 0\n\
+             async fn bump() use (count): int {{\n\
+             \x20   count = count + 1\n\
+             \x20   return count + {tag}\n\
+             }}\n"
+        )
+    };
+    oracle(&app("0"), &app("10"), "echo bump().await\necho count\n");
+}
+
 #[test]
 fn an_unchanged_caller_dispatches_to_the_swapped_callee() {
     // THE HMR property: `describe` is byte-identical across versions (never recompiled), yet its
