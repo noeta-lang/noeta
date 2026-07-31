@@ -3263,7 +3263,20 @@ impl Printer<'_> {
                     None => variant.clone(),
                 };
                 if bindings.is_empty() {
-                    Doc::text(head)
+                    // A payload-less variant pattern keeps its `()` when it is UNQUALIFIED.
+                    // `Ok()` and `Ok` are different patterns: the first matches the payload-less
+                    // constructor, the second is a `Pattern::Binding` that matches anything (and,
+                    // for a prelude name, does not even compile — E0046). Dropping the parens
+                    // rewrote `Ok() => …` into `Ok => …`, and the safety gate could not see it:
+                    // `Pretty` rendered both as the bare name.
+                    //
+                    // A qualified `Color.Red` needs none — the `Type.` prefix already makes it a
+                    // constructor, and `Color.Red()` parses to the very same node.
+                    Doc::text(if type_name.is_some() {
+                        head
+                    } else {
+                        format!("{head}()")
+                    })
                 } else {
                     let mut ds = Vec::new();
                     for b in bindings {
