@@ -991,6 +991,137 @@ mod tests {
     }
 
     #[test]
+    fn author_broken_method_chains_stay_broken() {
+        // The default config's contract is that it keeps the author's line breaks. A chain laid out
+        // one call per line is the single most common deliberate layout in real Noeta code, and
+        // collapsing it — regardless of width — was the whole remaining `noeta fmt` diff on
+        // `para/ai`. The break is preserved **per link**: `Mock.new()` was written joined, so it
+        // stays joined, while the two `.reply_*` links stay on their own indented lines.
+        let src = "m = Mock.new()\n    .reply_tool(\"c1\", \"shout\")\n    .reply_text(\"hej\")";
+        let want = "m = Mock.new()\n    .reply_tool(\"c1\", \"shout\")\n    .reply_text(\"hej\")\n";
+        let once = fmt(src).unwrap();
+        assert_eq!(once, want);
+        assert_eq!(fmt(&once).unwrap(), once, "chain break is a fixed point");
+    }
+
+    #[test]
+    fn a_chain_written_on_one_line_is_left_alone() {
+        // Preserving a break is not the same as forbidding a join: a chain the author wrote inline
+        // stays inline however long it is (the default config is not width-driven at all), and a
+        // chain broken only at *some* links keeps exactly those.
+        assert_eq!(
+            fmt("y = xs.map(f).filter(g).take(n)").unwrap(),
+            "y = xs.map(f).filter(g).take(n)\n"
+        );
+        let once = fmt("y = xs.map(f)\n    .filter(g).take(n)").unwrap();
+        assert_eq!(once, "y = xs.map(f)\n    .filter(g).take(n)\n");
+        assert_eq!(fmt(&once).unwrap(), once);
+    }
+
+    #[test]
+    fn every_dot_link_kind_keeps_an_author_break() {
+        // `.field`, `.0` and `.await` are all dot-links; `?` and `[i]` are not (neither continues a
+        // line, so a break before them would end the statement — they always trail their receiver).
+        for (src, want) in [
+            ("v = cfg.server\n    .port", "v = cfg.server\n    .port\n"),
+            ("v = pair.first\n    .0", "v = pair.first\n    .0\n"),
+            (
+                "async fn f(): void {\n    v = client.send(r)\n        .await\n}",
+                "async fn f(): void {\n    v = client.send(r)\n        .await\n}\n",
+            ),
+        ] {
+            let once = fmt(src).unwrap_or_else(|e| panic!("{src:?}: {e}"));
+            assert_eq!(once, want, "unexpected layout for {src:?}");
+            assert_eq!(fmt(&once).unwrap(), once, "not idempotent: {src:?}");
+        }
+    }
+
+    #[test]
+    fn a_chain_break_nests_one_level_not_one_per_link() {
+        // The chain is left-nested, so a naive `nest` per link would stair-step the continuation
+        // deeper and deeper — and each reformat would step it again, which is exactly how a
+        // source-reading rule stops being a fixed point. Every broken link sits in one column.
+        let src = "fn f(): void {\n    a.b()\n        .c()\n        .d()\n        .e()\n}";
+        let once = fmt(src).unwrap();
+        assert_eq!(once, format!("{src}\n"));
+        assert_eq!(fmt(&once).unwrap(), once);
+    }
+
+    #[test]
+    fn a_broken_link_owns_its_arguments() {
+        // A call's `(args)` belongs to the dot-link before it, not to the statement. Attaching the
+        // break at each `Expr::Member` as the printer recursed put the argument list *outside* the
+        // link's indent, so this list literal drifted a level left of the `.reply_tools` it is an
+        // argument of — and it stayed there on every reformat.
+        let src = "fn f(): void {\n    m = Mock.new()\n        .reply_tools([\n            Call { id: \"a\" },\n        ])\n        .reply_text(\"done\")\n}";
+        let once = fmt(src).unwrap();
+        assert_eq!(once, format!("{src}\n"));
+        assert_eq!(fmt(&once).unwrap(), once);
+    }
+
+    #[test]
+    fn a_break_between_arguments_is_kept_where_it_was_written() {
+        // The other half of the same loss: the author kept the first argument on the `(` line and
+        // broke before the second — the canonical `assert(cond,⏎    "why")` shape. `seq_broke` only
+        // sees a break *after* the open delimiter, so this collapsed onto one line however long it
+        // was. The break comes back in exactly the gap it was written in, one continuation indent.
+        let src = "fn f(): void {\n    assert(a == b,\n        \"why\")\n}";
+        let once = fmt(src).unwrap();
+        assert_eq!(once, format!("{src}\n"));
+        assert_eq!(fmt(&once).unwrap(), once, "arg break is a fixed point");
+    }
+
+    #[test]
+    fn only_the_gaps_the_author_broke_carry_a_break() {
+        // Three arguments, one break: the other gap stays a space. The fully-expanded
+        // one-per-line-plus-trailing-comma form is reserved for a break *after* the `(`, which is
+        // the stronger "I expanded this list" signal — see the two shapes side by side.
+        let once = fmt("g(a, b,\n    c)").unwrap();
+        assert_eq!(once, "g(a, b,\n    c)\n");
+        assert_eq!(fmt(&once).unwrap(), once);
+
+        let expanded = fmt("g(\n    a, b, c)").unwrap();
+        assert_eq!(expanded, "g(\n    a,\n    b,\n    c,\n)\n");
+        assert_eq!(fmt(&expanded).unwrap(), expanded);
+    }
+
+    #[test]
+    fn a_multiline_argument_does_not_fake_a_gap_break() {
+        // The signal is the gap *between* two adjacent arguments — the comma and its whitespace —
+        // never "a newline anywhere in the list". An argument that spans lines on its own (here a
+        // chain the author broke) must not drag the argument after it onto a new line.
+        let once = fmt("fn f(): void {\n    h(xs.map(g)\n        .filter(p), 1)\n}").unwrap();
+        assert_eq!(
+            once,
+            "fn f(): void {\n    h(xs.map(g)\n        .filter(p), 1)\n}\n"
+        );
+        assert_eq!(fmt(&once).unwrap(), once);
+    }
+
+    #[test]
+    fn wrap_still_re_derives_chain_layout_from_width() {
+        // `wrap = true` is the width-driven policy: it re-derives layout from `line_width` and does
+        // *not* consult the author's breaks. A broken chain that fits is joined back up.
+        assert_eq!(
+            fmt_wrapped("y = xs.map(f)\n    .filter(g)", 40).unwrap(),
+            "y = xs.map(f).filter(g)\n"
+        );
+    }
+
+    #[test]
+    fn a_chain_break_inside_a_tier_hole_stays_flat() {
+        // A `${…}` hole is emitted inline (`force_flat`): a newline there would land inside the
+        // foreign-language body and change the tier's value.
+        let src = format!("{SQL_TIER}r = @sql {{ select ${{cfg.server\n    .port}} from t }}\n");
+        let once = fmt_with_sql_formatter(&src).expect("formats");
+        assert!(
+            once.contains("${cfg.server.port}"),
+            "hole must stay inline, got:\n{once}"
+        );
+        assert_eq!(fmt_with_sql_formatter(&once).unwrap(), once);
+    }
+
+    #[test]
     fn wrap_breaks_long_method_chains() {
         // Fits → flat.
         assert_eq!(
