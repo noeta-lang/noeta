@@ -9,7 +9,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use noeta_diagnostics::{Diagnostic, render, render_mapped};
+use noeta_diagnostics::{Diagnostic, has_errors, render, render_mapped};
 use noeta_pm::manifest;
 use noeta_span::{Source, SourceMap};
 
@@ -26,6 +26,11 @@ struct CacheSlot {
 pub struct Compiled {
     pub module: Arc<noeta_bytecode::Module>,
     pub sources: SourceMap,
+    /// The non-blocking diagnostics (warnings/notes) the compile produced — tier activation's and
+    /// the type-check's. A warning describes the program without condemning it, so it never fails
+    /// the compile; it rides out here instead, and the caller renders it against `sources` before
+    /// doing whatever it does with the module. Never dropped: proceeding must not mean going quiet.
+    pub warnings: Vec<Diagnostic>,
 }
 
 /// A whole-file compile failure, carrying what's needed to render it. [`report`](Self::report)
@@ -239,6 +244,10 @@ pub struct Loaded {
     /// [`noeta_span::PackageOrigin`] — read by the checker via a span's `SourceId` so a `@name`
     /// resolves in the package that wrote it. Carried alongside `packages`, from the same resolve.
     pub package_uses: noeta_span::PackageUses,
+    /// Non-blocking diagnostics the front half already produced (tier activation's warnings), to be
+    /// rendered alongside whatever the later type-check reports. Carried rather than dropped for the
+    /// same reason [`Compiled::warnings`] is.
+    pub warnings: Vec<Diagnostic>,
 }
 
 impl Loaded {
@@ -281,8 +290,8 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
     let packages = linked.packages;
     // Activation inlines each `@<tier> { … }` block; with no active tiers the program runs as-is and
     // every tier block is stripped at lowering (the default). Activation is only done when needed.
-    let program = if facts.active.is_empty() {
-        linked.program
+    let (program, warnings) = if facts.active.is_empty() {
+        (linked.program, Vec::new())
     } else {
         let active_refs: Vec<&str> = facts.active.iter().map(String::as_str).collect();
         // Activation resolves each `@name` per the package that wrote it (per-package naming arc):
@@ -291,14 +300,16 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
             uses: &facts.package_uses,
             packages: &packages,
         };
-        let activated = noeta_check::activate_tiers_with(&linked.program, &active_refs, &ctx);
-        if !activated.diagnostics.is_empty() {
+        let mut activated = noeta_check::activate_tiers_with(&linked.program, &active_refs, &ctx);
+        // Only an *error* stops the load; anything advisory rides out on `Loaded::warnings` for the
+        // caller to report.
+        if has_errors(&activated.diagnostics) {
             return Err(CompileFailure::Diagnostics {
                 sources,
                 diagnostics: activated.diagnostics,
             });
         }
-        activated.program
+        (activated.program, std::mem::take(&mut activated.diagnostics))
     };
     Ok(Loaded {
         program,
@@ -306,6 +317,7 @@ pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFa
         editions,
         packages,
         package_uses: facts.package_uses.clone(),
+        warnings,
     })
 }
 
@@ -395,18 +407,26 @@ pub fn compile_whole_file_with(
         return Ok(Compiled {
             module: Arc::new(module),
             sources: slot.sources.clone(),
+            // A program that warns is never *stored* (see below), so a hit is by construction a
+            // warning-free program — there is nothing the skipped front-end would have said.
+            warnings: Vec::new(),
         });
     }
 
     // Miss: load → link → activate → check → compile.
     let loaded = load_project(file, &facts)?;
     let checked = loaded.check();
-    if !checked.diagnostics.is_empty() {
+    // Errors block the compile; warnings do not — they ride out on `Compiled::warnings`. A
+    // well-formed program must still produce a module (and run), or every advisory lint would be a
+    // hard stop.
+    if has_errors(&checked.diagnostics) {
         return Err(CompileFailure::Diagnostics {
             sources: loaded.sources,
             diagnostics: checked.diagnostics,
         });
     }
+    let mut warnings = loaded.warnings.clone();
+    warnings.extend(checked.diagnostics.iter().cloned());
     let module = match compile_real(&loaded.program, &checked) {
         Ok(module) => Arc::new(module),
         // The source map is already in hand here — nothing to thread — so the run path renders an
@@ -419,13 +439,23 @@ pub fn compile_whole_file_with(
     // this already-slow miss path. Panic-isolated: a cache write must never abort an otherwise-
     // successful run (`noeta_bundle::write`'s postcard encode carries an `.expect`). `AssertUnwindSafe`:
     // on unwind we observe none of the captured state (`slot`/`module` are only read then discarded).
-    if let Some(slot) = &cache {
+    // A program that warns is deliberately *not* cached: the cache short-circuits the whole
+    // front-end, so a stored module would make the warning appear on the first run and never again —
+    // a lint you cannot see is worse than no lint. Warning-free programs (the overwhelming majority,
+    // and every program once its warnings are addressed) still get the fast path.
+    if let Some(slot) = &cache
+        && warnings.is_empty()
+    {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = slot.cache.store(&slot.key, &noeta_bundle::write(&module));
             let _ = slot.cache.prune_to(noeta_cache::max_bytes());
         }));
     }
-    Ok(Compiled { module, sources })
+    Ok(Compiled {
+        module,
+        sources,
+        warnings,
+    })
 }
 
 /// Build the startup-cache slot for a source run: open the cache and compute the content key from

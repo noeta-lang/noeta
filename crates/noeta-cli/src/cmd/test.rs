@@ -664,11 +664,14 @@ pub(crate) fn run_one_test(
     let program = Program { stmts, span };
 
     let checked = check_under(&program, opts);
-    if !checked.diagnostics.is_empty() {
+    // Only an error fails the case. Warnings are not repeated here: this per-case program is the
+    // *same* source the prologue already checked and reported, so re-emitting would print every
+    // file-level warning once per test.
+    if let Some(error) = checked.diagnostics.iter().find(|d| d.is_error()) {
         return TestOutcome {
             name: display,
             passed: false,
-            message: Some(checked.diagnostics[0].message.clone()),
+            message: Some(error.message.clone()),
             stdout: String::new(),
         };
     }
@@ -679,11 +682,14 @@ pub(crate) fn run_one_test(
     match execute_real_host(&program, &checked, std::env::args().collect(), false) {
         // The `@test` runner reports the failing diagnostic; the trace is a `noeta run` affordance.
         Ok((result, _trace)) => {
-            let passed = result.exit_code == 0 && result.diagnostics.is_empty();
+            // An abort fails the case; an advisory diagnostic does not.
+            let passed =
+                result.exit_code == 0 && !noeta_diagnostics::has_errors(&result.diagnostics);
             let message = (!passed).then(|| {
                 result
                     .diagnostics
-                    .first()
+                    .iter()
+                    .find(|d| d.is_error())
                     .map(|d| d.message.clone())
                     .unwrap_or_else(|| format!("exited with code {}", result.exit_code))
             });

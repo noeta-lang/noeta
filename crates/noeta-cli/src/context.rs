@@ -113,6 +113,9 @@ pub(crate) fn loaded(linked: noeta_loader::Linked) -> Loaded {
         editions: linked.editions,
         packages: linked.packages,
         package_uses: linked.package_uses,
+        // A raw link performs no tier activation, so there is nothing advisory to carry yet — the
+        // caller's own check supplies whatever warnings there are.
+        warnings: Vec::new(),
     }
 }
 
@@ -233,8 +236,10 @@ pub(crate) fn tier_prologue(
         Ok(activated) => activated,
         Err(code) => return Prologue::Ran(code),
     };
-    if !activated.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+    // Report what activation found, then gate on **errors** only: a warning is advisory, and a
+    // `noeta test` that refuses to run because one line lints is a broken test runner.
+    emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+    if noeta_diagnostics::has_errors(&activated.diagnostics) {
         return Prologue::Ran(1);
     }
 
@@ -254,10 +259,14 @@ pub(crate) fn tier_prologue(
         editions,
         packages,
         package_uses,
+        // Activation's own diagnostics were reported above; nothing left to carry.
+        warnings: Vec::new(),
     };
     let checked = checking.check();
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&checking.sources, checked.diagnostics.iter());
+    // Reported once, here — the per-case programs the verb synthesizes below re-check the *same*
+    // source, so they deliberately stay silent rather than repeating every warning per test case.
+    emit_diagnostics_mapped(&checking.sources, checked.diagnostics.iter());
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return Prologue::Ran(1);
     }
     let diverging = checked.diverging_stmts;
@@ -267,6 +276,9 @@ pub(crate) fn tier_prologue(
         packages,
         package_uses,
         sources,
+        // Empty by construction here (this `Loaded` was built above with none), and activation's own
+        // diagnostics were already reported.
+        warnings: _,
     } = checking;
     activated.program = program;
     Prologue::Ready(Box::new(TierRun {

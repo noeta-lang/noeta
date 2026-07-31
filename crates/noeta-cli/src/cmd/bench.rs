@@ -636,8 +636,11 @@ pub(crate) fn measure_iterations(
     };
 
     let checked = check_under(&program, opts);
-    if !checked.diagnostics.is_empty() {
-        return Err(checked.diagnostics[0].message.clone());
+    // Only an error aborts the measurement. Warnings stay silent here for the same reason they do in
+    // the `@test` runner: this synthesized per-case program re-checks source the prologue already
+    // reported on, so repeating it would print each warning once per benchmark.
+    if let Some(error) = checked.diagnostics.iter().find(|d| d.is_error()) {
+        return Err(error.message.clone());
     }
 
     // Take the minimum of three runs: `min` is the standard robust estimator (the fastest run is
@@ -646,10 +649,12 @@ pub(crate) fn measure_iterations(
     let mut best: Option<std::time::Duration> = None;
     for _ in 0..runs.max(1) {
         let (result, elapsed) = bench_execute(&program, &checked)?;
-        if result.exit_code != 0 || !result.diagnostics.is_empty() {
+        // An abort invalidates the measurement; an advisory diagnostic does not.
+        if result.exit_code != 0 || noeta_diagnostics::has_errors(&result.diagnostics) {
             return Err(result
                 .diagnostics
-                .first()
+                .iter()
+                .find(|d| d.is_error())
                 .map(|d| d.message.clone())
                 .unwrap_or_else(|| format!("exited with code {}", result.exit_code)));
         }

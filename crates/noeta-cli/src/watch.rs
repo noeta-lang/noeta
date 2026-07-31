@@ -648,11 +648,19 @@ fn relink_entry_unit(entry: &Path, tail: &[noeta_ast::Stmt]) -> Result<EntryUnit
     let entry_source = linked.entry.clone();
     let loaded = crate::context::loaded(linked);
     let checked = loaded.check();
-    if !checked.diagnostics.is_empty() {
+    // Only errors block a hot swap. A warning still reaches the developer — printed here, since the
+    // edit that introduced it is the moment it is worth seeing — but the edit swaps in regardless.
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return Err(RelinkError::Diagnostics(noeta_diagnostics::render_mapped(
             &loaded.sources,
             checked.diagnostics.iter(),
         )));
+    }
+    if !checked.diagnostics.is_empty() {
+        eprint!(
+            "{}",
+            noeta_diagnostics::render_mapped(&loaded.sources, checked.diagnostics.iter())
+        );
     }
     Ok(EntryUnit::of(&loaded.program, &entry_source))
 }

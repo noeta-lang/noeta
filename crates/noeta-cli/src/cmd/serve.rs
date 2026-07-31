@@ -439,8 +439,12 @@ pub(crate) fn serve_parallel_impl(
     let loaded = crate::context::loaded(linked);
 
     let checked = loaded.check();
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&loaded.sources, checked.diagnostics.iter());
+    // Report first, gate on errors only — a warning must not stop a server from starting.
+    emit_diagnostics_mapped(
+        &loaded.sources,
+        loaded.warnings.iter().chain(checked.diagnostics.iter()),
+    );
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
 
@@ -693,8 +697,12 @@ pub(crate) fn run_program_hot(
 ) -> u8 {
     // `Loaded::check`: the editions ride structurally with the program they govern.
     let checked = loaded.check();
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&loaded.sources, checked.diagnostics.iter());
+    // Report first, gate on errors only — the same rule `noeta run` follows.
+    emit_diagnostics_mapped(
+        &loaded.sources,
+        loaded.warnings.iter().chain(checked.diagnostics.iter()),
+    );
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
     let (module, compiler) = match noeta_compiler::compile_with_sites_session(
