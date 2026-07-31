@@ -93,7 +93,7 @@ The exhaustive rules, one page per topic. These are written to be read in order 
 - [Concurrency](Concurrency)
 - [Reactivity](Reactivity)
 - [Built-ins (Ring 1)](Standard-Library) — and the generated [standard library reference](Std) for `use std.{…}`
-- [Diagnostics (`E0xxx`)](Diagnostics) — every code the toolchain reports
+- [Diagnostics (`E0xxx`)](Diagnostics) — every code the toolchain reports, generated from the compiler
 
 ### Specialized
 Reach for these when the problem calls for them, not on the way through.

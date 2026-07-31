@@ -81,7 +81,7 @@ In **VS Code 1.101+** the Noeta extension registers the server automatically (vi
 - `docs_search` / `docs_get` — search and read this documentation (also exposed as MCP *resources*).
 - `examples_find` — CI-tested example programs by feature, concept, or diagnostic code.
 - `stdlib_api` — the real standard-library signatures, straight from the compiler's own registry.
-- `explain_diagnostic` — what an `E0xxx` means, with real programs that trigger and fix it.
+- `explain_diagnostic` — what an `E0xxx` means and how to fix it (the compiler's own explanation catalog, the same text [`noeta explain`](The-CLI#noeta-explain) prints), with real programs that trigger it.
 - `project_docs` / `doc_browse` / `doc_page` — the *project's own* `@doc { … }` documentation (distinct from `docs_search`, which reads this language guide): `project_docs` collects every block resolved to what it documents; `doc_browse` walks the same navigable tree the editor's docs browser shows (root → modules → declarations → members); `doc_page` reads one node's signature and prose. All three work from a parse alone, so they read work-in-progress code.
 
 Every tool that takes a `file` analyzes **the whole program** — the entry, its sibling modules, and the packages its `noeta.toml` depends on, each under its own language edition. Dependency resolution is a read-only query: asking a question never rewrites `noeta.lock`.
