@@ -398,6 +398,11 @@ pub fn test(p: &Prepared, filter: Option<&str>, real: bool, limits: &RunLimits) 
         noeta_check::CheckOptions {
             editions: noeta_db::workspace_editions(&p.db, p.ws),
             packages: noeta_db::workspace_packages(&p.db, p.ws),
+            // …and the `@name` tables that go WITH that package map. Empty does not mean "unknown"
+            // here — it means "no package binds any extension `@name`", so a `@directive` anywhere
+            // in the project resolves to nothing and this reports a spurious E0036, failing the
+            // whole suite before a single case runs on a project `noeta test` runs clean.
+            package_uses: p.ws.package_uses(&p.db).0.clone(),
             ..noeta_check::CheckOptions::default()
         },
     );

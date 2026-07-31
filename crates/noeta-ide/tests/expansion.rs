@@ -448,3 +448,77 @@ fn an_impact_session_watches_the_files_an_expansion_read() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **The `package_uses` pin.** A project that *renames* a dependency's directive in its manifest —
+/// `[directives] ixlocal = "idefixture:ix_expand"`, the per-package naming arc's whole point —
+/// checks clean through the editor's impact path.
+///
+/// Renaming is what makes the omission observable. An unrenamed `@ix_expand` resolves through the
+/// checker's global fallback whether or not the `@name` tables were threaded, so it proves nothing;
+/// a local `@ixlocal` exists *only* in this package's `[directives]` table, and a check that was not
+/// handed that table reports E0036 — `impact.rs` then degrades every keystroke to
+/// `Impact::All { reason: "the edit does not check" }` on a project `noeta check` calls clean.
+///
+/// The salsa workspace carries the tables (`resolve_dep_modules` puts `graph.package_uses` on the
+/// `Workspace` input), so the field was in hand at the call site the whole time; the literal simply
+/// set `editions` and `packages` and let `..Default::default()` answer for the third.
+#[test]
+fn a_renamed_directive_checks_clean_through_the_impact_path() {
+    install();
+    let root = noeta_test_temp::TempDir::new("renamed-directive");
+    let app = root.join("app");
+    // The provider package's own root segment IS the extension's namespace root, which is what
+    // `[directives] … = "idefixture:…"` resolves the binding against.
+    let dep = root.join("idefixture");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(&dep).expect("mk dep");
+
+    std::fs::write(
+        dep.join("noeta.toml"),
+        "[package]\nname = \"test/idefixture\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write the dep manifest");
+    // A module path DERIVES from where the file sits, so the dep declares no `namespace`.
+    std::fs::write(dep.join("lib.noe"), "pub fn ping(): int { return 1; }\n")
+        .expect("write the dep module");
+
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"test/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nidefixture = { path = \"../idefixture\" }\n\
+         [directives]\nixlocal = \"idefixture:ix_expand\"\n",
+    )
+    .expect("write the app manifest");
+    let entry = app.join("main.noe");
+    std::fs::write(
+        &entry,
+        "@ixlocal(\"petstore\")\nstruct Api { base: string }\n\
+         fn touch(): int { return 1; }\n\
+         @test fn t(): void { assert(touch() == 1); }\n",
+    )
+    .expect("write the entry");
+
+    let mut session =
+        noeta_ide::impact::ImpactSession::new(&entry).expect("the entry anchors a project");
+    // An ordinary body edit: attributable, and the only thing that can widen it to `All` is the
+    // project failing to check.
+    std::fs::write(
+        &entry,
+        "@ixlocal(\"petstore\")\nstruct Api { base: string }\n\
+         fn touch(): int { return 2 - 1; }\n\
+         @test fn t(): void { assert(touch() == 1); }\n",
+    )
+    .expect("rewrite the entry");
+
+    match session.impact_of_changes(std::slice::from_ref(&entry)) {
+        noeta_ide::impact::Impact::All { reason } => panic!(
+            "the project checks clean under `noeta check`; the editor must not disagree: {reason}"
+        ),
+        // Narrowed, which is only reachable at all once the check comes back clean. (`t` is not in
+        // the closure: `@test` is a std tier, and the impact path activates only the program's own
+        // declared tiers, so the block is stripped before the graph is built.)
+        noeta_ide::impact::Impact::Decls(decls) => assert_eq!(decls, vec!["touch".to_string()]),
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
