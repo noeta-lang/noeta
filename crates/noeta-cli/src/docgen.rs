@@ -119,16 +119,16 @@ pub enum ApiScope<'a> {
 
 /// The unit names of the extensions the toolchain itself installs — [`run_cli`](crate::run_cli)'s
 /// exact builtin set, derived from the same statics it assembles (the `std` family from
-/// `std_units()` plus the first-party `html`/`css` formatter units), never a parallel string list.
-/// The complement of this set in any composed registry is the composition's own package surface.
+/// `std_units()`), never a parallel string list. Tier-body formatters (`html`/`css`) are no longer
+/// among the toolchain's own units — they arrive as a `package.dev-native` dependency, composed
+/// formatter-only. The complement of this set in any composed registry is the composition's own
+/// package surface.
 pub fn builtin_extension_names() -> Vec<&'static str> {
     use noeta_stdlib::Extension;
     let mut names: Vec<&'static str> = noeta_stdlib::registry::std_units()
         .iter()
         .map(|e| e.name())
         .collect();
-    names.push(noeta_html::HTML_EXTENSION.name());
-    names.push(noeta_css::CSS_EXTENSION.name());
     // The CLI-layer unit that registers std's native dev-tier runners (Part B). It attaches to the
     // `std` root but ships no documented surface, so the publish lint must count it among the
     // toolchain's own units rather than flagging it as a package squatting `std`.
@@ -141,13 +141,10 @@ pub fn builtin_extension_names() -> Vec<&'static str> {
 /// claim. Assembly-time validation cannot catch this squat (a fresh module under `std.` collides
 /// with nothing), so the lint is where it surfaces.
 pub fn toolchain_roots() -> Vec<&'static str> {
-    use noeta_stdlib::Extension;
     let mut roots: Vec<&'static str> = noeta_stdlib::registry::std_units()
         .iter()
         .map(|e| e.root())
         .collect();
-    roots.push(noeta_html::HTML_EXTENSION.root());
-    roots.push(noeta_css::CSS_EXTENSION.root());
     roots.extend_from_slice(noeta_pm::reserved::builtin_scopes());
     roots.sort_unstable();
     roots.dedup();

@@ -854,6 +854,12 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
             args.iter_mut()
                 .for_each(|a| visit_expr_types(&mut a.value, f));
         }
+        Expr::InstantiatedType {
+            recv, type_args, ..
+        } => {
+            visit_expr_types(recv, f);
+            type_args.iter_mut().for_each(&mut *f);
+        }
         Expr::Member { receiver, .. } | Expr::TupleIndex { receiver, .. } => {
             visit_expr_types(receiver, f)
         }

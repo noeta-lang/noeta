@@ -435,6 +435,7 @@ module.exports = grammar({
       $.identifier,
       $.self,
       $.turbofish_call,
+      $.instantiated_call_expression,
       $.field_expression,
       $.index_expression,
       $.call_expression,
@@ -488,6 +489,18 @@ module.exports = grammar({
     turbofish_call: $ => prec(PREC.call, seq(
       field('function', $.identifier),
       '::', '<', commaSep1($._type), '>',
+      field('arguments', $.arguments),
+    )),
+
+    // Call-site class instantiation: `Repo::<Todo>.new("todos")` — the turbofish applies to the
+    // generic TYPE, and the associated call that consumes it is part of the rule (the compiler
+    // requires the trailing `.member`, and including it keeps this disjoint from `turbofish_call`,
+    // which takes `(` where this takes `.`).
+    instantiated_call_expression: $ => prec(PREC.call + 2, seq(
+      field('type', $.identifier),
+      '::', '<', commaSep1($._type), '>',
+      '.',
+      field('method', $.identifier),
       field('arguments', $.arguments),
     )),
 

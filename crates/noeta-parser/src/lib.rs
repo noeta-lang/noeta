@@ -31,7 +31,7 @@ use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use noeta_ast::{
-    AssocTypeDecl, AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, ClassDecl,
+    AssocTypeDecl, AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, CallArg, ClassDecl,
     ClosureBody, Decorators, DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern,
     ImplBlock, MatchArm, MethodDirective, Name, ObjectLit, PackedDirective, PackedLayout, Param,
     Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod,
@@ -58,6 +58,25 @@ use literals::{
 enum DotKeyword {
     As(TypeRef),
     Await,
+}
+
+/// The member-access postfix family, folded into one pratt entry (the op-tuple is at its 26-entry
+/// cap): `.member`, its explicit method instantiation `.m::<U>(args)`, and the call-site class
+/// instantiation `::<T>.member`.
+///
+/// The last one is why the family is a `choice` rather than a single shape: `Repo::<Todo>.new(…)`
+/// applies the turbofish to the *receiver* (the class's own parameters), not to the member, so it
+/// leads with `::` where the other two lead with `.`. Requiring the trailing `.member` is what keeps
+/// `Repo::<Todo>` from parsing as a value and keeps `x.m::<T>` (no argument list) reporting exactly
+/// the error it reported before.
+#[derive(Clone)]
+enum MemberPostfix {
+    /// `.name`, optionally `::<U, …>(args)` — a plain member access or an explicitly instantiated
+    /// method call.
+    Dot((String, Span), Option<(Vec<TypeRef>, Vec<CallArg>)>),
+    /// `::<T, …>.name` — the receiver is a type reference carrying an explicit instantiation. The
+    /// [`Span`] is the turbofish's, joined with the receiver's to span the type reference.
+    Instantiate(Vec<TypeRef>, Span, (String, Span)),
 }
 
 /// A prefix operator, folded into one pratt entry: `-x`/`!x` and the Track-A `spawn e`. Kept together
@@ -3318,13 +3337,40 @@ where
                     expr
                 },
             ),
-            // `.member`, optionally followed by an explicit method instantiation
-            // `::<T, ...>(args)` (generic methods, D3) — folded into ONE postfix entry (the pratt
-            // op-tuple is at its arity cap): the turbofish half must see its `(` args to commit,
-            // so a bare `.member` keeps parsing exactly as before.
+            // The member-access family, folded into ONE postfix entry (the pratt op-tuple is at its
+            // arity cap) — see [`MemberPostfix`]:
+            //
+            //   * `.member` — plain member access, parsed exactly as before;
+            //   * `.member::<U, ...>(args)` — an explicit METHOD instantiation (generic methods,
+            //     D3). The turbofish half must see its `(` args to commit, so a bare `.member`
+            //     never loses its parse to it;
+            //   * `::<T, ...>.member` — an explicit CLASS instantiation at the call site
+            //     (`Repo::<Todo>.new("todos")`). The trailing `.member` is required, which is what
+            //     keeps `Repo::<Todo>` from being an expression of its own and keeps `x.m::<T>`
+            //     (a method turbofish with no argument list) failing where it failed before.
+            //
+            // `Repo<Todo>.new(…)` stays a parse error on purpose: a bare `<` after an identifier is
+            // genuinely ambiguous with less-than in expression position, and `::<>` is this
+            // grammar's established disambiguator everywhere else a type argument is spelled.
             postfix(
                 14,
-                just(T::Dot).ignore_then(member_name).then(
+                choice((
+                    just(T::Dot)
+                        .ignore_then(member_name)
+                        .then(
+                            just(T::ColonColon)
+                                .ignore_then(
+                                    type_parser(ctx)
+                                        .separated_by(just(T::Comma))
+                                        .at_least(1)
+                                        .allow_trailing()
+                                        .collect::<Vec<_>>()
+                                        .delimited_by(just(T::Lt), just(T::Gt)),
+                                )
+                                .then(member_call_args.clone())
+                                .or_not(),
+                        )
+                        .map(|(name, turbo)| MemberPostfix::Dot(name, turbo)),
                     just(T::ColonColon)
                         .ignore_then(
                             type_parser(ctx)
@@ -3332,26 +3378,49 @@ where
                                 .at_least(1)
                                 .allow_trailing()
                                 .collect::<Vec<_>>()
-                                .delimited_by(just(T::Lt), just(T::Gt)),
+                                .delimited_by(just(T::Lt), just(T::Gt))
+                                .map_with(move |tys, e| (tys, ctx.to_span(e.span()))),
                         )
-                        .then(member_call_args.clone())
-                        .or_not(),
-                ),
-                move |receiver, ((name, name_span), turbo), e| match turbo {
-                    Some((type_args, args)) => Expr::TypedMethodCall {
-                        recv: Box::new(receiver),
-                        name,
-                        name_span,
-                        type_args,
-                        args,
-                        span: ctx.to_span(e.span()),
-                    },
-                    None => Expr::Member {
+                        .then_ignore(just(T::Dot))
+                        .then(member_name)
+                        .map(|((tys, turbo_span), name)| {
+                            MemberPostfix::Instantiate(tys, turbo_span, name)
+                        }),
+                )),
+                move |receiver, op, e| match op {
+                    MemberPostfix::Dot((name, name_span), Some((type_args, args))) => {
+                        Expr::TypedMethodCall {
+                            recv: Box::new(receiver),
+                            name,
+                            name_span,
+                            type_args,
+                            args,
+                            span: ctx.to_span(e.span()),
+                        }
+                    }
+                    MemberPostfix::Dot((name, name_span), None) => Expr::Member {
                         receiver: Box::new(receiver),
                         name,
                         name_span,
                         span: ctx.to_span(e.span()),
                     },
+                    MemberPostfix::Instantiate(type_args, turbo_span, (name, name_span)) => {
+                        let recv_span = receiver.span();
+                        Expr::Member {
+                            receiver: Box::new(Expr::InstantiatedType {
+                                recv: Box::new(receiver),
+                                type_args,
+                                span: Span::new_in(
+                                    recv_span.source,
+                                    recv_span.start,
+                                    turbo_span.end,
+                                ),
+                            }),
+                            name,
+                            name_span,
+                            span: ctx.to_span(e.span()),
+                        }
+                    }
                 },
             ),
             // `receiver[index]` — index access (the `Index` trait / list element access).

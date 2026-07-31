@@ -1820,6 +1820,27 @@ pub enum Expr {
         args: Vec<CallArg>,
         span: Span,
     },
+    /// A **type reference carrying an explicit instantiation** — the head of
+    /// `Repo::<Todo>.new("todos")` (call-site type arguments). `recv` is the type reference itself
+    /// (a bare `Expr::Ident`, or the member chain a qualified reference parses to before the linker
+    /// collapses it); `type_args` are the class's OWN type parameters, in declaration order.
+    ///
+    /// It exists **only as the receiver of a member access**, which is what the grammar accepts: the
+    /// turbofish must be followed by `.`, so `Repo::<Todo>` alone stays a parse error and the node
+    /// can never reach a value position. The checker reads it in exactly one place — the
+    /// `Type.assoc(args)` static-call arm — where the resolved arguments become the receiver
+    /// instantiation the arm otherwise gets from an expected type, and the ordinary
+    /// [`Checker::note_constructor_call`](../noeta_check/struct.Checker.html) recording follows
+    /// unchanged. Anywhere else it is `E0058`.
+    ///
+    /// Purely a check-time carrier: generics are erased at runtime, so this lowers as its `recv`
+    /// does and the instantiation reaches the value through the construction-site tag the checker
+    /// records at the call span — the same channel an annotated binding uses.
+    InstantiatedType {
+        recv: Box<Expr>,
+        type_args: Vec<TypeRef>,
+        span: Span,
+    },
     /// The reflection query `roles_of()` / `roles_of::<RoleEnum>()` — the compiler-built
     /// `(declaration, Role)` index (P2.7), returned as a `List<RoleBinding>` (each
     /// `{ target: string, role: Role }`). Compile-time resolved from the attribute manifest's
@@ -2201,6 +2222,29 @@ impl Stmt {
 }
 
 impl Expr {
+    /// The type reference under a call-site instantiation — `Repo` for `Repo::<Todo>` — or `self`
+    /// where there is none.
+    ///
+    /// Every consumer that recognizes a static call by pattern-matching its receiver
+    /// (`Expr::Member { receiver: Expr::Ident, .. }`) must peel first, or `Repo::<Todo>.new(…)`
+    /// silently stops being recognized as one — falling back to the deferred `dyn` method path with
+    /// no diagnostic, which is the failure the explicit spelling exists to remove.
+    pub fn peel_instantiation(&self) -> &Expr {
+        match self {
+            Expr::InstantiatedType { recv, .. } => recv.peel_instantiation(),
+            other => other,
+        }
+    }
+
+    /// The explicit call-site type arguments this receiver carries (`[Todo]` for `Repo::<Todo>`),
+    /// empty where the instantiation is left to inference.
+    pub fn call_site_type_args(&self) -> &[TypeRef] {
+        match self {
+            Expr::InstantiatedType { type_args, .. } => type_args,
+            _ => &[],
+        }
+    }
+
     pub fn span(&self) -> Span {
         match self {
             Expr::Str { span, .. }
@@ -2240,6 +2284,7 @@ impl Expr {
             | Expr::TypedModuleCall { span, .. }
             | Expr::TypedCall { span, .. }
             | Expr::TypedMethodCall { span, .. }
+            | Expr::InstantiatedType { span, .. }
             | Expr::RolesOf { span, .. }
             | Expr::ParamsOf { span, .. }
             | Expr::ReturnsOf { span, .. }
@@ -2370,6 +2415,9 @@ impl Expr {
             // The callee is a top-level fn name, never a local binding, so only the arguments count.
             Expr::TypedCall { args, .. } => any_args(args),
             Expr::TypedMethodCall { recv, args, .. } => recv.mentions(name) || any_args(args),
+            // The turbofish carries only types; a binding can be mentioned solely by the type
+            // reference the instantiation is applied to.
+            Expr::InstantiatedType { recv, .. } => recv.mentions(name),
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.mentions(name) || value.mentions(name),
@@ -2484,6 +2532,7 @@ impl Expr {
             Expr::TypedModuleCall { recv, args, .. } => recv.has_await() || any_args(args),
             Expr::TypedCall { args, .. } => any_args(args),
             Expr::TypedMethodCall { recv, args, .. } => recv.has_await() || any_args(args),
+            Expr::InstantiatedType { recv, .. } => recv.has_await(),
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.has_await() || value.has_await(),

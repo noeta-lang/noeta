@@ -595,7 +595,9 @@ fn fresh_ctor_call_type<'e>(
     let Expr::Member { receiver, name, .. } = callee.as_ref() else {
         return None;
     };
-    let Expr::Ident { name: tn, .. } = receiver.as_ref() else {
+    // Peel a call-site instantiation: `Repo::<T>.new(…)` is the same fresh-constructor call as
+    // `Repo.new(…)`, just with the instantiation written down.
+    let Expr::Ident { name: tn, .. } = receiver.peel_instantiation() else {
         return None;
     };
     fresh
@@ -898,11 +900,39 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
             rec!(fallback);
         }
         Expr::Call { callee, args, .. } => {
+            // `Repo::<T>.new(…)` — a call-site instantiation is a **checked position** in exactly
+            // the sense [`WalkCx::mark_ctor_position`] means, and the most direct one there is: the
+            // site spells the whole instantiation itself rather than having it read off a declared
+            // field/return/binding. So it feeds the same consumer with the same template
+            // (`Repo<T>`), and a self-less member of a generic can construct out of its own
+            // parameter with the type written at the call.
+            //
+            // A concrete instantiation (`Repo::<Todo>`) mentions no enclosing parameter and
+            // `mark_ctor_position` drops it — no slot, nothing forwarded, exactly as for a
+            // concrete field type.
+            if let Expr::Member { receiver, .. } = callee.as_ref()
+                && let Expr::InstantiatedType {
+                    recv,
+                    type_args,
+                    span,
+                } = receiver.as_ref()
+                && let Expr::Ident { name, .. } = recv.as_ref()
+            {
+                let position = TypeRef::Named {
+                    name: name.clone(),
+                    args: type_args.clone(),
+                    span: *span,
+                };
+                cx.mark_ctor_position(Some(&position), expr, mark);
+            }
             rec!(callee);
             for a in noeta_ast::CallArg::values(args) {
                 rec!(a);
             }
         }
+        // The instantiation itself carries only types; the reference under it recurses like any
+        // other receiver.
+        Expr::InstantiatedType { recv, .. } => rec!(recv),
         Expr::Index {
             receiver, index, ..
         } => {

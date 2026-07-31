@@ -1,14 +1,16 @@
-// The instantiation is genuinely unknowable here: `Repo.new("todos")` binds no `T` (no argument
-// mentions it and the binding carries no annotation), so nothing records one on the object. The
-// method's `type_name::<T>()` then **aborts** with a message naming the type and the parameter,
-// rather than answering `"dyn"` or the empty string.
+// `r = Repo.new("todos")` binds no `T` — no argument mentions it, and the binding carries no
+// annotation — so nothing records an instantiation on the object.
 //
-// The abort is the point. This surface exists to hand a NAME to something that keys on it — a
-// table, a route, a decoder — so a plausible-looking wrong name would travel silently and fail
-// somewhere else entirely. The construction site is where the fix belongs, and the message says so.
-// The two backends share one message (`noeta_ast::reflect::missing_type_arg_message`), so they
-// cannot word it differently.
-// expect: error E0058 at 24:33
+// This case used to pin the RUN-TIME abort: it checked clean (`0 error(s)`) and died at the first
+// `type_name::<T>()`. It was a hole for exactly one reason — there was no way to say the type at
+// the call site, so erroring would have rejected code with no fix. `Repo::<Todo>.new("todos")` is
+// that fix, and its existence is what turns the silence into a diagnostic.
+//
+// The error now lands on the CONSTRUCTION, not on the far-away `type_name::<T>()` that was merely
+// the first to notice it, and the help names both routes: state the instantiation at the call, or
+// put the call in a position that declares it. The shared abort message stays for what a static
+// check cannot reach — see `literal_type_argument_unrecorded.noe`.
+// expect: error E0058 at 29:5
 // expect: exit 1
 struct Todo {
     id: int

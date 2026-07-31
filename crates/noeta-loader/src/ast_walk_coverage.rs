@@ -991,6 +991,11 @@ fn expr_variants() -> Vec<Expr> {
             args: vec![arg(&n("TypedMethodCall"), "args")],
             span: SP,
         },
+        Expr::InstantiatedType {
+            recv: bx(&n("InstantiatedType"), "recv"),
+            type_args: vec![tref(&n("InstantiatedType"), "type_args")],
+            span: SP,
+        },
         Expr::RolesOf {
             ty: Some(tref(&n("RolesOf"), "ty")),
             span: SP,

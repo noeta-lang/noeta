@@ -161,9 +161,10 @@ fn the_dependency_graph_links_no_dev_tooling() {
         "noeta-lsp v",
         "noeta-dap v",
         "noeta-mcp v",
-        "noeta-html v",
-        "noeta-css v",
         "noeta-prof v",
+        // The html/css tier-body formatters are no longer toolchain crates — they arrive as a
+        // `package.dev-native` dependency, composed formatter-only. `malva` (the CSS formatter's
+        // heavy backend) must still never reach the lean runtime, dev-native or not.
         "malva v",
     ] {
         assert!(

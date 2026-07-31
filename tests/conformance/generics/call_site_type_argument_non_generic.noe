@@ -1,0 +1,18 @@
+// A non-generic type has nothing to instantiate, so a call-site turbofish on one is refused rather
+// than ignored: silently accepting decoration is how a spelling that means nothing gets written and
+// believed. The help points at the other surface, in case the method — not the type — is the
+// generic one.
+// expect: error E0058 at 17:5
+// expect: exit 1
+class Plain {
+    pub tbl: string
+
+    fn new(tbl: string): Plain {
+        return Plain { tbl: tbl };
+    }
+}
+struct Todo {
+    id: int
+}
+p = Plain::<Todo>.new("todos");
+echo p.tbl;
