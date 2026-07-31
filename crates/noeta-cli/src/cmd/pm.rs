@@ -216,8 +216,15 @@ pub(crate) fn acquire_claim_proof(audience: &str) -> Result<registry::ClaimProof
     Ok(registry::ClaimProof::GithubToken(token))
 }
 
-/// `noeta add [key] --path/--git+--tag/--version [--package company/pkg]` — add a dependency to the
-/// nearest `noeta.toml`, then resolve so `noeta.lock` reflects it (package-manager P2.4d).
+/// `noeta add [key] (--path|--git+--tag|--version) [--package company/pkg]` — add a dependency to
+/// the nearest `noeta.toml`, then resolve so `noeta.lock` reflects it (package-manager P2.4d).
+///
+/// `--package` applies to **every** source form. A `--version` dependency resolves by it. A
+/// `--path`/`--git` dependency is already selected by its source, so there it is written into the
+/// entry as a *claim* and verified — against the target's own `[package] name` up front for a
+/// `--path` (nothing is written if it disagrees), and at resolve time for a `--git`. That is the
+/// spelling a scope-array member wants: `{ path = "../..", package = "para/ai" }` says which
+/// package of the scope the member is, which the path alone does not.
 ///
 /// The import-root `key` may be omitted: it is then **derived** from the package's own root segment
 /// (the `package` half of `--package`, or a `--path` dep's `[package]` name). When a key *is* given
@@ -232,15 +239,13 @@ pub(crate) fn cmd_add(
     version: Option<&str>,
     package: Option<&str>,
 ) -> ExitCode {
-    // `--package` names a registry identity, so it applies only to a `--version` dependency.
-    if package.is_some() && version.is_none() {
-        eprintln!(
-            "noeta: `--package` names a registry identity (`company/package`) — it applies only to a \
-             `--version` dependency"
-        );
-        return ExitCode::from(2);
-    }
-    // Parse `--package` up front so a malformed identity fails before touching the manifest.
+    // `--package` names a `company/package` identity, and it is meaningful on every source form: it
+    // is what a `--version` dependency *resolves by*, and on a `--path`/`--git` dependency it is a
+    // claim about the tree the source points at, written into the entry and checked at resolve time.
+    // The claim is what makes a scope-array member readable (`{ path = "../..", package = "para/ai" }`
+    // says which package of the scope the member is), so `add` must be able to produce it.
+    //
+    // Parse it up front so a malformed identity fails before touching the manifest.
     let package_name = match package {
         Some(s) => match manifest::PackageName::parse(s) {
             Ok(p) => Some(p),
@@ -252,9 +257,18 @@ pub(crate) fn cmd_add(
         None => None,
     };
 
+    // `, package = "company/pkg"` for the table forms, or empty when no `--package` was given.
+    let package_field = match &package_name {
+        Some(p) => format!(", package = {}", toml_string(&p.to_string())),
+        None => String::new(),
+    };
+
     // Exactly one source form.
     let value_toml = match (path, git, version) {
-        (Some(p), None, None) => format!("{{ path = {} }}", toml_string(&p.display().to_string())),
+        (Some(p), None, None) => format!(
+            "{{ path = {}{package_field} }}",
+            toml_string(&p.display().to_string())
+        ),
         (None, Some(url), None) => {
             let Some(tag) = tag else {
                 eprintln!(
@@ -263,7 +277,7 @@ pub(crate) fn cmd_add(
                 return ExitCode::from(2);
             };
             format!(
-                "{{ git = {}, tag = {} }}",
+                "{{ git = {}, tag = {}{package_field} }}",
                 toml_string(url),
                 toml_string(tag)
             )
@@ -271,11 +285,7 @@ pub(crate) fn cmd_add(
         (None, None, Some(req)) => match &package_name {
             // A registry dependency resolves only with its identity, so fold `--package` into the
             // table form; without it, keep the bare shorthand (it errors at resolve, pointing here).
-            Some(p) => format!(
-                "{{ version = {}, package = {} }}",
-                toml_string(req),
-                toml_string(&format!("{}/{}", p.company, p.package))
-            ),
+            Some(_) => format!("{{ version = {}{package_field} }}", toml_string(req)),
             None => toml_string(req),
         },
         (None, None, None) => {
@@ -300,18 +310,37 @@ pub(crate) fn cmd_add(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
 
+    // A `--path` dependency's own declared identity, read straight from the tree it points at. It
+    // answers two questions at once: whether a `--package` claim about that tree is true, and what
+    // import root/scope to derive when no key was given. `None` when there is no `--path`, or when
+    // that tree has no readable `[package]` (the resolve below reports that, and reports it better).
+    let path_identity: Option<String> = path.and_then(|rel| {
+        manifest::current_package(&manifest_dir.join(rel).join(manifest::MANIFEST_NAME))
+            .ok()
+            .map(|(identity, _)| identity)
+    });
+
+    // `--package` on a `--path` source is a **claim** about that tree, not a selector — so check it
+    // here, while the manifest is still untouched, rather than writing an entry that only fails when
+    // the graph resolves. (A `--git` claim needs the repo fetched, so the resolve checks that one.)
+    if let (Some(claimed), Some(actual)) = (&package_name, &path_identity)
+        && claimed.to_string() != *actual
+    {
+        eprintln!(
+            "noeta: `--package {claimed}` does not match the package at `{}`, which declares \
+             `{actual}` — on a path dependency `--package` is a checked claim about that tree",
+            path.expect("a path identity is only read for a --path source")
+                .display()
+        );
+        return ExitCode::from(2);
+    }
+
     // The package's declared **root segment**, computed cheaply where the identity is known without
     // fetching: `--package`'s `package` half, or a `--path` dep's `[package]` name. `None` for a
     // `--git` (or bare `--version`) source, whose identity isn't known until it is materialized.
-    let derived_root: Option<String> = if let Some(p) = &package_name {
-        Some(p.package.clone())
-    } else if let Some(rel) = path {
-        let dep_manifest = manifest_dir.join(rel).join(manifest::MANIFEST_NAME);
-        manifest::current_package(&dep_manifest)
-            .ok()
-            .and_then(|(identity, _)| identity.split('/').nth(1).map(str::to_string))
-    } else {
-        None
+    let derived_root: Option<String> = match &package_name {
+        Some(p) => Some(p.package.clone()),
+        None => identity_half(path_identity.as_deref(), 1),
     };
 
     // The package's **scope** (the `company` half), derived the same way and for the same reason as
@@ -319,15 +348,9 @@ pub(crate) fn cmd_add(
     // package's own scope, and the scope is a legitimate import root that several packages share
     // (`para.aether`, `para.api`). Without this, the documented spelling from the package guide
     // earns a warning telling the author their correct code is surprising.
-    let derived_scope: Option<String> = if let Some(p) = &package_name {
-        Some(p.company.clone())
-    } else if let Some(rel) = path {
-        let dep_manifest = manifest_dir.join(rel).join(manifest::MANIFEST_NAME);
-        manifest::current_package(&dep_manifest)
-            .ok()
-            .and_then(|(identity, _)| identity.split('/').next().map(str::to_string))
-    } else {
-        None
+    let derived_scope: Option<String> = match &package_name {
+        Some(p) => Some(p.company.clone()),
+        None => identity_half(path_identity.as_deref(), 0),
     };
 
     // The import-root key: the one given, else the derived root, else an error (a `--git` source with
@@ -415,6 +438,13 @@ pub(crate) fn cmd_add(
             ExitCode::from(1)
         }
     }
+}
+
+/// One half of a `company/package` identity — `0` for the scope, `1` for the root segment.
+fn identity_half(identity: Option<&str>, index: usize) -> Option<String> {
+    identity
+        .and_then(|id| id.split('/').nth(index))
+        .map(str::to_string)
 }
 
 /// `noeta update` — discard the current pins and re-resolve, rewriting `noeta.lock` (P2.4d). Removing

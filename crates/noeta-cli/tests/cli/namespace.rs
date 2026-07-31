@@ -147,6 +147,76 @@ fn binding_a_package_under_its_own_scope_is_not_a_rename() {
 }
 
 #[test]
+fn noeta_add_writes_and_verifies_a_package_claim_on_a_path_dependency() {
+    // `--package` used to be refused outright with `--path`, so `add` could not produce the entry
+    // the manifest reference (and every first-party scope-array member) is written with. It writes
+    // it now — and, because the identity on a path dependency is a claim rather than a selector,
+    // checks it against the target's own `[package] name` BEFORE touching the manifest.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_path_package");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("widgets");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    let original = "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n";
+    std::fs::write(app.join("noeta.toml"), original).unwrap();
+    std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(lib.join("m.noe"), "pub fn v(): int { return 1; }\n").unwrap();
+
+    // A claim that does not match the tree: refused, and the manifest is left exactly as it was.
+    lang()
+        .current_dir(&app)
+        .args([
+            "add",
+            "acme",
+            "--path",
+            "../widgets",
+            "--package",
+            "totally/wrong",
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("totally/wrong").and(predicate::str::contains("acme/widgets")),
+        );
+    assert_eq!(
+        std::fs::read_to_string(app.join("noeta.toml")).unwrap(),
+        original,
+        "a refused claim must not modify the manifest"
+    );
+
+    // The true claim: written into the entry, and the graph resolves with it.
+    lang()
+        .current_dir(&app)
+        .args([
+            "add",
+            "acme",
+            "--path",
+            "../widgets",
+            "--package",
+            "acme/widgets",
+        ])
+        .assert()
+        .success();
+    let manifest = std::fs::read_to_string(app.join("noeta.toml")).unwrap();
+    assert!(
+        manifest.contains("acme = { path = \"../widgets\", package = \"acme/widgets\" }"),
+        "the claim is written into the entry: {manifest}"
+    );
+    // And it round-trips: the manifest `add` just wrote is one `check` accepts.
+    lang()
+        .current_dir(&app)
+        .args(["check", "."])
+        .assert()
+        .success();
+}
+
+#[test]
 fn noeta_add_refuses_a_builtin_import_root() {
     // namespace-protection #2/#3: binding a dependency under `std` would shadow the compiler's own
     // `use std.…` namespace — refused before the manifest is touched.

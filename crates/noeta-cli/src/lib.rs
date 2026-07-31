@@ -510,9 +510,12 @@ enum Command {
         /// A registry SemVer requirement, e.g. `^1.2` (registry resolution lands in P2.5).
         #[arg(long)]
         version: Option<String>,
-        /// The registry package identity `company/package` for a `--version` dependency, decoupled
-        /// from the import-root key (like Cargo's `foo = { package = "real" }`). Required for a
-        /// registry dependency to resolve; also the source of a derived key when `key` is omitted.
+        /// The package identity `company/package`, decoupled from the import-root key (like
+        /// Cargo's `foo = { package = "real" }`). A `--version` dependency **resolves** by it and
+        /// needs it; on a `--path`/`--git` source it is instead a *claim* about the tree the
+        /// source points at, written into the entry and verified against that package's own
+        /// `[package] name`. Either way it is also the source of a derived key when `key` is
+        /// omitted.
         #[arg(long)]
         package: Option<String>,
     },
