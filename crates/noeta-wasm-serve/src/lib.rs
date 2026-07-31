@@ -239,11 +239,19 @@ mod tests {
     fn a_handler_reaches_upstream_through_the_outbound_hook() {
         // The proxy shape: the handler fetches an upstream service and composes its reply. The
         // hook stands in for the wasi:http client (injected identically on the wasi build).
+        //
+        // The handler `match`es the client's `Result` rather than `?`-ing it: a `serve` handler
+        // must produce a `Response` on every path, so a `?` here has nowhere to send the `Err`
+        // (E0012). `compile()` goes straight to bytecode and never runs the checker, so this
+        // fixture would keep passing in the stale spelling — it is kept in the idiom `noeta
+        // check` accepts so it stays the honest native twin of the wasi:http e2e.
         let module = compile(
             "use std.http.server\nuse std.http.client\nuse std.http.{Request, Response}\n\n\
              fn handle(req: Request): Response {\n\
-                 upstream = client.get(\"http://api.internal/data\")?\n\
-                 return server.response(200, \"upstream said: ${upstream.body()}\")\n\
+                 return match client.get(\"http://api.internal/data\") {\n\
+                     Ok(upstream) => server.response(200, \"upstream said: ${upstream.body()}\"),\n\
+                     Err(e) => server.response(502, \"upstream unreachable: ${e.kind()}\"),\n\
+                 }\n\
              }\n\n\
              server.serve(8080, handle)",
         );
