@@ -179,7 +179,16 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// desynchronises from that field on rather than failing cleanly. This landed independently of the 14
 /// and 15 above — all three were in flight at once, and each is its own wire break — so 16 is what
 /// rejects an artifact any one of them alone would have mislabelled.
-pub const FORMAT_VERSION: u8 = 16;
+/// Bumped to 17 by the swap-reflection-fidelity fix: `reflect::ReflectionInfo` (in
+/// `Module::reflection`) gained a `role_tags: Vec<RoleTagRecord>` between `roles` and `params` — the
+/// `@role(Enum.Variant)` tags as they ride on the *attribute declaration*, which `roles` is now
+/// explicitly the derived join of. They are carried rather than discarded because the tag and the
+/// use of the attribute are separable declarations and so land in different hot-swap fragments: with
+/// only the join stored, a fragment re-declaring an annotated function purged its role binding and
+/// had nothing to put back. Same non-self-describing-encoding rule as every bump above — postcard
+/// writes the new sequence's length prefix where a version-16 reader expects `params`, so the whole
+/// tail desynchronises rather than failing cleanly.
+pub const FORMAT_VERSION: u8 = 17;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

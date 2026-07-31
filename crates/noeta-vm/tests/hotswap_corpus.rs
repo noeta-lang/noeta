@@ -52,8 +52,9 @@
 //! range, so it is an ordinary test — no `#[ignore]`, no flag to remember, no coverage that only
 //! exists when someone opts in.
 //!
-//! What it finds today is in [`KNOWN_DIVERGENCES`]: nine real hot-swap defects in three families,
-//! left unfixed here on purpose so this stays reviewable as a harness.
+//! What it finds today is in [`KNOWN_DIVERGENCES`]. It reported nine real hot-swap defects in three
+//! families when it landed; six of them — the two reflection families — are fixed, and the list is
+//! enforced in both directions, so it cannot outlive the bugs it names.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -983,13 +984,10 @@ fn indent(text: &str) -> String {
 
 // ------------------------------------------------------------------ the open defects this found
 
-/// The divergences the corpus differential reports **today** — real hot-swap defects, deliberately
-/// left unfixed so this branch is reviewable as a harness rather than as a harness plus a pile of
-/// fixes. Listed here so the sweep can be an enforcing gate: anything *not* on this list fails the
-/// build, and anything on it that stops reproducing fails it too, which is what stops the list from
-/// quietly outliving the bugs.
-///
-/// Three families, all of the shape the hand-written corpus was written to catch and did not:
+/// The divergences the corpus differential reports **today** — real hot-swap defects, listed here
+/// so the sweep can be an enforcing gate: anything *not* on this list fails the build, and anything
+/// on it that stops reproducing fails it too, which is what stops the list from quietly outliving
+/// the bugs.
 ///
 /// 1. **A fragment-compiled body skips a destructor.** `gc/self_update_own_destructor_no_reuse`
 ///    pins that `acc = Counter { ...acc, n: 1 }` must *not* reuse the allocation when the type has
@@ -997,17 +995,13 @@ fn indent(text: &str) -> String {
 ///    `drop counter 0` never prints — a silent change to when destructors run, reported
 ///    independently by three of the four generators.
 ///
-/// 2. **A swapped fn's `@role` binding is dropped from `roles_of()`.** `reflection/roles_of`,
-///    `reflection/roles_of_scoped` and `reflection/prelude_enums_constructible` all lose exactly the
-///    binding belonging to the function the swap touched: `renderHome=controller` simply stops being
-///    in the index, and a `roles_of()` scan that found `Semantic.TrustBoundary` before the swap
-///    answers `false` after it. `reflection/prelude_structs_constructible` is the same defect
-///    escalating: the program **aborts** mid-run (E0016) where a cold start finishes.
-///
-/// 3. **The attribute manifest reorders across a swap.** `reflection/attributes_on_functions` and
-///    `reflection/attributes_on_params` emit the same entries in a different order once a swap has
-///    re-registered one of the annotated declarations — enough to break the very conformance
-///    expectations those files carry, which assert an ordered stdout.
+/// Two further families the sweep found have since been **fixed**, both in
+/// `ReflectionInfo::accumulate`, and are pinned in the hand-written oracle (`hotswap.rs`) rather
+/// than only swept for: a swapped declaration losing the `@role` binding its unchanged attribute
+/// conferred (`reflection/roles_of`, `roles_of_scoped`, `prelude_enums_constructible`, and the
+/// E0016 abort in `prelude_structs_constructible`, which was the same defect escalating), and the
+/// attribute manifest reordering when a re-registered declaration was appended instead of
+/// superseded in place (`reflection/attributes_on_functions`, `attributes_on_params`).
 const KNOWN_DIVERGENCES: &[(&str, Generator)] = &[
     // (1) destructor skipped by a fragment-compiled body.
     (
@@ -1020,29 +1014,6 @@ const KNOWN_DIVERGENCES: &[(&str, Generator)] = &[
     ),
     (
         "gc/self_update_own_destructor_no_reuse.noe",
-        Generator::RerunWithBodyEdit,
-    ),
-    // (3) attribute manifest order.
-    (
-        "reflection/attributes_on_functions.noe",
-        Generator::RerunWithBodyEdit,
-    ),
-    (
-        "reflection/attributes_on_params.noe",
-        Generator::RerunWithBodyEdit,
-    ),
-    // (2) `@role` bindings lost by a swapped declaration.
-    (
-        "reflection/prelude_enums_constructible.noe",
-        Generator::RerunWithBodyEdit,
-    ),
-    (
-        "reflection/prelude_structs_constructible.noe",
-        Generator::RerunWithBodyEdit,
-    ),
-    ("reflection/roles_of.noe", Generator::RerunWithBodyEdit),
-    (
-        "reflection/roles_of_scoped.noe",
         Generator::RerunWithBodyEdit,
     ),
 ];

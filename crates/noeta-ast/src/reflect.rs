@@ -21,7 +21,24 @@ pub struct ReflectionInfo {
     /// `@role(Enum.Variant)` tag, the declaration's name paired with that role's enum and variant.
     /// This is the labeled dependency graph `roles_of()` surfaces — built beside the attribute
     /// manifest from the same AST, so both backends agree by construction.
+    ///
+    /// **Derived, never primary**: it is exactly [`derive_roles`] of [`Self::manifest`] and
+    /// [`Self::role_tags`], and both [`build`] and [`ReflectionInfo::accumulate`] recompute it that
+    /// way. Materialized into the artifact rather than joined at run time because that is what
+    /// `roles_of()` reads, but it carries no information the two inputs do not.
     pub roles: Vec<RoleRecord>,
+    /// Which `@role(Enum.Variant)` tags each **attribute declaration** carries — the other half of
+    /// the join [`Self::roles`] is.
+    ///
+    /// It is here, and not folded into the derived index, because the tag and the *use* of the
+    /// attribute live in different declarations and therefore in different hot-swap fragments: a
+    /// fragment carrying only `#[Page("/")] fn renderHome` re-declares the manifest entry while
+    /// `@role(WebRole.Controller) struct Page` stays behind, unchanged, in the live session. With
+    /// the join computed per fragment and stored as if it were primary data, `accumulate`'s purge
+    /// dropped `renderHome`'s binding and the fragment had nothing to put back — reflection lost
+    /// exactly the declaration the swap touched. Keeping the inputs and re-deriving makes the index
+    /// a function of the whole accumulated session, which is what a cold start compares against.
+    pub role_tags: Vec<RoleTagRecord>,
     /// Every callable's declared parameter list, keyed by its target (a top-level fn's bare name,
     /// a method's qualified `Type.method` name — the same target keying the attribute manifest).
     /// This is what `params_of(target)` surfaces for a web framework's dependency injection, built
@@ -43,72 +60,110 @@ impl ReflectionInfo {
     /// attribute declared in an earlier entry stays queryable (`attributes_of` / `type_of` /
     /// `roles_of` across entries) while a type *redefined* in a later entry supersedes its old records
     /// — matching how method dispatch resolves to the newest declaration. Records for names the
-    /// incoming fragment does not touch are left in place; the fragment's own records are appended in
-    /// source order after purging any they redeclare.
+    /// incoming fragment does not touch are left in place; the fragment's own records land **where
+    /// the records they supersede were**, and only a genuinely new name appends.
+    ///
+    /// That placement rule is the whole of the second half. Superseding a declaration is not the
+    /// same as re-declaring it last: `attributes_of::<T>()` hands its manifest back in source order
+    /// and callers pin that order, so purge-and-append moved the first annotated declaration behind
+    /// every one the fragment never touched, and an ordered listing came out permuted by nothing
+    /// more than which body a developer saved. Anchoring each incoming group at the position of the
+    /// first record it supersedes keeps the accumulated tables in declaration order, which is the
+    /// order a cold compile of the same source produces.
     pub fn accumulate(&mut self, fragment: ReflectionInfo) {
         // The declaration names this fragment (re)defines — a type it declares, or any attribute /
         // role target it carries. Their old records are superseded wholesale before the new ones land.
-        let redeclared: std::collections::HashSet<&str> = fragment
+        // Owned rather than borrowed from `fragment`, because the fragment's own tables are moved
+        // into the merges below while these are still being consulted.
+        let redeclared: std::collections::HashSet<String> = fragment
             .types
             .iter()
-            .map(|t| t.name.as_str())
-            .chain(fragment.manifest.iter().map(|a| a.target.as_str()))
-            .chain(fragment.roles.iter().map(|r| r.target.as_str()))
+            .map(|t| t.name.clone())
+            .chain(fragment.manifest.iter().map(|a| a.target.clone()))
+            .chain(fragment.roles.iter().map(|r| r.target.clone()))
             .collect();
         // Every callable this fragment (re)declares, by the target its parameters are keyed under.
         // A callable always emits a `ParamRecord` (`push_params` emits both renderings together), so
         // this set is exactly "the callables whose parameter lists this fragment redefines".
-        let fragment_callables: std::collections::HashSet<&str> =
-            fragment.params.iter().map(|p| p.target.as_str()).collect();
-        self.types.retain(|t| !redeclared.contains(t.name.as_str()));
-        self.manifest.retain(|a| {
-            match split_param_attr_target(&a.target) {
-                // A parameter row lives and dies with its callable's parameter list, not with its
-                // own key: redeclaring `fn build(target: string)` without the `#[Arg]` it used to
-                // carry must *drop* the old row, and the new fragment names no such target to
-                // supersede it. Keying the purge on the callable is the same move the `params`
-                // purge below makes, for the same reason — and it is why the parameter key is
-                // built to be splittable back into its callable at all.
-                Some((callable, _)) => {
-                    !fragment_callables.contains(callable)
-                        && !redeclared.contains(param_base(callable))
-                }
-                None => !redeclared.contains(a.target.as_str()),
-            }
-        });
-        self.roles
-            .retain(|r| !redeclared.contains(r.target.as_str()));
+        let fragment_callables: std::collections::HashSet<String> =
+            fragment.params.iter().map(|p| p.target.clone()).collect();
         // Param records are keyed by a callable's target (`fn` or `Type.method`); a redeclared
         // callable purges its old params. A plain fn or method carries no attribute, so its target
         // is not in `redeclared` (which is built from type names + attribute/role targets) — key the
         // purge on the target's declaration base (the type name before `.`, or the bare fn name) and
         // on the incoming fragment's own param targets, so redefining a callable supersedes its old
         // parameter list even when it bears no attribute.
-        let param_bases: std::collections::HashSet<&str> = fragment
+        let param_bases: std::collections::HashSet<String> = fragment
             .params
             .iter()
-            .map(|p| param_base(&p.target))
+            .map(|p| param_base(&p.target).to_string())
             .collect();
-        self.params.retain(|p| {
-            let base = param_base(&p.target);
-            !redeclared.contains(base) && !param_bases.contains(base)
-        });
+
+        supersede(
+            &mut self.types,
+            fragment.types,
+            |t| redeclared.contains(t.name.as_str()),
+            |t| t.name.clone(),
+        );
+        supersede(
+            &mut self.manifest,
+            fragment.manifest,
+            |a| {
+                match split_param_attr_target(&a.target) {
+                    // A parameter row lives and dies with its callable's parameter list, not with
+                    // its own key: redeclaring `fn build(target: string)` without the `#[Arg]` it
+                    // used to carry must *drop* the old row, and the new fragment names no such
+                    // target to supersede it. Keying the purge on the callable is the same move the
+                    // `params` purge below makes, for the same reason — and it is why the parameter
+                    // key is built to be splittable back into its callable at all.
+                    Some((callable, _)) => {
+                        fragment_callables.contains(callable)
+                            || redeclared.contains(param_base(callable))
+                    }
+                    None => redeclared.contains(a.target.as_str()),
+                }
+            },
+            // A callable's own row and its parameter rows are ONE group, anchored together: `build`
+            // is emitted immediately before `build#target` / `build#release`, and splitting them
+            // into separate anchors would let the parameter rows drift away from their callable.
+            |a| manifest_group(&a.target).to_string(),
+        );
+        supersede(
+            &mut self.params,
+            fragment.params,
+            |p| {
+                let base = param_base(&p.target);
+                redeclared.contains(base) || param_bases.contains(base)
+            },
+            |p| param_base(&p.target).to_string(),
+        );
+        // A redeclared *attribute's* role tags are superseded with it — re-declaring
+        // `struct Page` without its `@role` must drop the role, and the fragment carries whatever
+        // tags the new declaration has. Tags for attributes the fragment does not touch (the common
+        // hot-swap case, and every native attribute re-supplied per install) stay put; identical
+        // re-supplied tags are dropped rather than duplicated.
+        supersede_set(
+            &mut self.role_tags,
+            fragment.role_tags,
+            |t| redeclared.contains(t.attribute.as_str()),
+            |t| t.attribute.clone(),
+        );
         // A redeclared type's trait impls are superseded wholesale — the fragment's own records
-        // (re-collected from its `impl`s/derives) land below, exactly like its `TypeInfo`.
-        self.trait_impls
-            .retain(|r| !redeclared.contains(r.type_name.as_str()));
+        // (re-collected from its `impl`s/derives) land in their place, exactly like its `TypeInfo`.
+        supersede_set(
+            &mut self.trait_impls,
+            fragment.trait_impls,
+            |r| redeclared.contains(r.type_name.as_str()),
+            |r| r.type_name.clone(),
+        );
         drop(redeclared);
         drop(param_bases);
         drop(fragment_callables);
-        self.types.extend(fragment.types);
-        self.manifest.extend(fragment.manifest);
-        self.roles.extend(fragment.roles);
-        self.params.extend(fragment.params);
-        for record in fragment.trait_impls {
-            if !self.trait_impls.contains(&record) {
-                self.trait_impls.push(record);
-            }
-        }
+        // `roles` is derived, so it is *recomputed* rather than merged: the fragment's own join is
+        // discarded (it could only see the tags its own declarations carried) and the index is
+        // re-derived from the merged manifest and the merged tag table. This is what makes the
+        // accumulated index equal a cold compile's — see [`ReflectionInfo::role_tags`].
+        self.roles = derive_roles(&self.manifest, &self.role_tags);
     }
 
     /// The parameter list declared for `target`, or empty if the target names no known callable — the
@@ -393,6 +448,47 @@ pub struct RoleRecord {
     pub variant: String,
 }
 
+/// One `@role(Enum.Variant)` tag as it rides on the **attribute declaration** that confers it —
+/// `@role(WebRole.Controller) struct Page` — before any declaration has been annotated with it.
+/// [`derive_roles`] joins these with the attribute manifest to produce [`RoleRecord`]s.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RoleTagRecord {
+    /// The attribute's name (e.g. `Page`), or a native attribute's qualified identity — matched
+    /// against [`AttributeRecord::name`], which is the same spelling a linked application carries.
+    pub attribute: String,
+    /// The role's `@semantic` enum name (e.g. `Semantic`, `WebRole`).
+    pub enum_name: String,
+    /// The role's variant name (e.g. `EntryPoint`, `Controller`).
+    pub variant: String,
+}
+
+/// Join the attribute manifest with the role tags: every declaration bearing a role-tagged
+/// attribute is indexed `(target, enum, variant)`, in manifest order. Identical entries (two
+/// attributes conferring the same role on one declaration) are de-duplicated while preserving that
+/// order.
+///
+/// The **whole** definition of [`ReflectionInfo::roles`], called from [`build`] on a program and
+/// from [`ReflectionInfo::accumulate`] on the merged session state — so a session that has absorbed
+/// a hot-swap fragment holds the same index a cold compile of the same source produces, rather than
+/// whatever the last fragment happened to be able to re-derive on its own.
+pub fn derive_roles(manifest: &[AttributeRecord], tags: &[RoleTagRecord]) -> Vec<RoleRecord> {
+    let mut roles: Vec<RoleRecord> = Vec::new();
+    for entry in manifest {
+        for tag in tags.iter().filter(|t| t.attribute == entry.name) {
+            let record = RoleRecord {
+                target: entry.target.clone(),
+                target_span: entry.target_span,
+                enum_name: tag.enum_name.clone(),
+                variant: tag.variant.clone(),
+            };
+            if !roles.contains(&record) {
+                roles.push(record);
+            }
+        }
+    }
+    roles
+}
+
 /// One callable's declared **signature** — a top-level fn or a method — keyed by the same target
 /// convention as the attribute manifest (a bare fn name, or a qualified `Type.method`). `params_of()`
 /// materializes the parameters into a `List<ParamInfo>` (each `{ name: string, type: Type, optional:
@@ -434,6 +530,93 @@ pub struct ParamSig {
     /// (a CLI framework mapping required parameters to positional arguments and optional ones to
     /// flags; a router splitting required from optional query parameters).
     pub optional: bool,
+}
+
+/// The group an attribute-manifest row belongs to for latest-wins *placement*: a parameter row
+/// (`build#release`) groups with its callable (`build`), everything else with itself.
+///
+/// A callable's own row is emitted immediately before its parameter rows, so they must move as one
+/// block when the callable is superseded — giving the parameter rows their own anchor would let
+/// them drift away from the declaration they describe the moment anything between them changed.
+fn manifest_group(target: &str) -> &str {
+    split_param_attr_target(target)
+        .map(|(callable, _)| callable)
+        .unwrap_or(target)
+}
+
+/// Merge `fragment`'s records into `base`, **in place**: the records of each incoming key land at
+/// the position of the first record they supersede, and records whose key superseded nothing append
+/// in the fragment's own order.
+///
+/// `purged` says whether a record already in `base` is superseded by this fragment; `key` names the
+/// declaration a record belongs to, over `base` and `fragment` alike.
+///
+/// The in-place rule exists because these tables are **ordered surfaces**: `attributes_of` hands the
+/// manifest back in declaration order and callers pin it, so appending a superseded declaration's
+/// records permuted a listing on nothing more than which body was edited last.
+///
+/// Ordering discipline for the append path: the fragment's records keep their relative order
+/// whatever their keys, because a whole-program compile is *this same merge onto an empty table* —
+/// nothing is anchored, everything appends, and the result must be the builder's output verbatim.
+/// Batching by key would quietly re-sort a table like `trait_impls`, whose rows legitimately
+/// interleave two types.
+fn supersede<T, F, G>(base: &mut Vec<T>, fragment: Vec<T>, purged: F, key: G)
+where
+    F: Fn(&T) -> bool,
+    G: Fn(&T) -> String,
+{
+    merge(base, fragment, purged, key, |_, _| false)
+}
+
+/// [`supersede`] for a **set-like** table — one re-supplied in full on every install (the native
+/// registry's trait impls and role tags): an appended record the merged table already holds is
+/// dropped rather than duplicated, so a long session does not grow a copy per install. The
+/// distinction is not cosmetic — a *sequence*-like table (the attribute manifest) may legitimately
+/// hold two equal rows, and silently collapsing them would be a second reflection bug.
+fn supersede_set<T, F, G>(base: &mut Vec<T>, fragment: Vec<T>, purged: F, key: G)
+where
+    T: PartialEq,
+    F: Fn(&T) -> bool,
+    G: Fn(&T) -> String,
+{
+    merge(base, fragment, purged, key, |merged: &[T], record: &T| {
+        merged.contains(record)
+    })
+}
+
+fn merge<T, F, G, D>(base: &mut Vec<T>, fragment: Vec<T>, purged: F, key: G, already_held: D)
+where
+    F: Fn(&T) -> bool,
+    G: Fn(&T) -> String,
+    D: Fn(&[T], &T) -> bool,
+{
+    // The incoming records, in fragment order; each is taken as it is placed.
+    let mut incoming: Vec<Option<T>> = fragment.into_iter().map(Some).collect();
+    let mut merged: Vec<T> = Vec::with_capacity(base.len());
+    let mut anchored: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for record in base.drain(..) {
+        if !purged(&record) {
+            merged.push(record);
+            continue;
+        }
+        // The first record a key supersedes is that key's anchor: every incoming record of that
+        // key lands here. The remaining superseded records are dropped — their replacements have
+        // already been placed.
+        let k = key(&record);
+        if anchored.insert(k.clone()) {
+            for slot in incoming.iter_mut() {
+                if slot.as_ref().is_some_and(|r| key(r) == k) {
+                    merged.push(slot.take().expect("just matched Some"));
+                }
+            }
+        }
+    }
+    for record in incoming.into_iter().flatten() {
+        if !already_held(&merged, &record) {
+            merged.push(record);
+        }
+    }
+    *base = merged;
 }
 
 /// The declaration base a param record's target keys on for latest-wins purging: the type name
@@ -588,10 +771,12 @@ pub fn build(
     // Every callable's declared parameter list, keyed by target (bare fn name or `Type.method`) — the
     // index `params_of(target)` surfaces, built in source order alongside the attribute manifest.
     let mut params: Vec<ParamRecord> = Vec::new();
-    // Attribute name → its `@role(Enum.Variant)` tags, harvested from the attribute records
+    // Attribute name → its `@role(Enum.Variant)` tags, harvested from the attribute declarations
     // themselves; joined with the manifest below so every *use* of a role-tagged attribute is
-    // indexed. One entry per (attribute, role) pair — an attribute may carry several roles.
-    let mut role_of: Vec<(String, (String, String))> = Vec::new();
+    // indexed. One entry per (attribute, role) pair — an attribute may carry several roles. Kept in
+    // the artifact beside the join it feeds, because the tag and the use are separable declarations
+    // (see [`ReflectionInfo::role_tags`]).
+    let mut role_tags: Vec<RoleTagRecord> = Vec::new();
     for stmt in &program.stmts {
         match stmt {
             Stmt::Struct(decl) => {
@@ -607,10 +792,11 @@ pub fn build(
                 // never reaches a runnable program (the checker rejects it).
                 if let Some(roles) = decl.decorators.role.as_ref() {
                     for tag in roles {
-                        role_of.push((
-                            decl.name.to_string(),
-                            (tag.enum_name.to_string(), tag.variant.clone()),
-                        ));
+                        role_tags.push(RoleTagRecord {
+                            attribute: decl.name.to_string(),
+                            enum_name: tag.enum_name.to_string(),
+                            variant: tag.variant.clone(),
+                        });
                     }
                 }
                 // A method's attributes are keyed by its qualified `Struct.method` name, exactly as
@@ -748,36 +934,25 @@ pub fn build(
             _ => {}
         }
     }
-    // Native `@role`-bearing attributes (Slice D3): merge the registry-assembled tags into `role_of`
-    // keyed by the attribute's qualified identity — the identity a linked native attribute application
-    // carries in the manifest — so the join below treats a native role-bearing attribute exactly like a
-    // `.noe` one. Empty for the pure `.noe` path (byte-identical result).
+    // Native `@role`-bearing attributes (Slice D3): merge the registry-assembled tags into
+    // `role_tags` keyed by the attribute's qualified identity — the identity a linked native
+    // attribute application carries in the manifest — so the join below treats a native role-bearing
+    // attribute exactly like a `.noe` one. Empty for the pure `.noe` path (byte-identical result).
     for (attr, tags) in native_roles {
         for (enum_name, variant) in tags {
-            role_of.push((attr.clone(), (enum_name.clone(), variant.clone())));
-        }
-    }
-    // Join the manifest with the role tags: every declaration bearing a role-tagged attribute is
-    // indexed `(target, enum, variant)`. Identical entries (two attributes conferring the same role
-    // on one declaration) are de-duplicated while preserving source order.
-    let mut roles: Vec<RoleRecord> = Vec::new();
-    for entry in &manifest {
-        for (_, (enum_name, variant)) in role_of.iter().filter(|(name, _)| name == &entry.name) {
-            let record = RoleRecord {
-                target: entry.target.clone(),
-                target_span: entry.target_span,
+            role_tags.push(RoleTagRecord {
+                attribute: attr.clone(),
                 enum_name: enum_name.clone(),
                 variant: variant.clone(),
-            };
-            if !roles.contains(&record) {
-                roles.push(record);
-            }
+            });
         }
     }
+    let roles = derive_roles(&manifest, &role_tags);
     ReflectionInfo {
         manifest,
         types,
         roles,
+        role_tags,
         params,
         trait_impls: collect_trait_impls(program, native_traits),
     }
@@ -3392,6 +3567,56 @@ mod tests {
         base.accumulate(fragment);
         assert_eq!(base.traits_for("Dog"), vec!["Fetches"]);
         assert_eq!(base.traits_for("Cat"), vec!["Purrs"]);
+    }
+
+    /// `accumulate` re-derives the role index from the merged manifest and the merged **tag** table,
+    /// so a fragment that re-declares an annotated function without re-declaring the attribute that
+    /// tags it keeps the binding — and the manifest keeps the position it superseded, rather than
+    /// moving to the end of an ordered surface callers read back.
+    #[test]
+    fn accumulate_re_derives_roles_and_supersedes_in_place() {
+        let attr = |target: &str, name: &str| AttributeRecord {
+            target: target.to_string(),
+            target_span: Span::empty_at(0),
+            name: name.to_string(),
+            args: Vec::new(),
+        };
+        let mut base = ReflectionInfo {
+            manifest: vec![attr("greet", "Page"), attr("Api.list", "Page")],
+            role_tags: vec![RoleTagRecord {
+                attribute: "Page".to_string(),
+                enum_name: "WebRole".to_string(),
+                variant: "Controller".to_string(),
+            }],
+            ..Default::default()
+        };
+        base.roles = derive_roles(&base.manifest, &base.role_tags);
+        assert_eq!(base.roles.len(), 2);
+
+        // The fragment is a body edit of `greet` alone: its manifest row, and NOT the `@role`-tagged
+        // `struct Page` that confers the role — that declaration is unchanged and stayed behind.
+        let fragment = ReflectionInfo {
+            manifest: vec![attr("greet", "Page")],
+            ..Default::default()
+        };
+        base.accumulate(fragment);
+
+        let targets: Vec<&str> = base.manifest.iter().map(|a| a.target.as_str()).collect();
+        assert_eq!(
+            targets,
+            vec!["greet", "Api.list"],
+            "the superseded row lands where it was, not after the rows the fragment never touched"
+        );
+        let bindings: Vec<(&str, &str)> = base
+            .roles
+            .iter()
+            .map(|r| (r.target.as_str(), r.variant.as_str()))
+            .collect();
+        assert_eq!(
+            bindings,
+            vec![("greet", "Controller"), ("Api.list", "Controller")],
+            "the role the unchanged attribute confers survives the swap of what it annotates"
+        );
     }
 
     #[test]
