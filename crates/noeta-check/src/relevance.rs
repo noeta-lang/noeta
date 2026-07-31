@@ -118,10 +118,15 @@ impl Checker {
                 break;
             }
         }
-        self.symbols.destruct_reachable = reachable.clone();
         // Export the per-type reachable set for the backends' field-walk gate (Phase 4.3), alongside
-        // the per-binding sets the drop pass reads.
-        self.relevance.reachable_types = reachable;
+        // the per-binding sets the drop pass reads. **Ordered** ([`DestructorRelevance::reachable_types`]):
+        // the compiler collects it straight into the serialized `Module::destruct_reachable`, so a
+        // hash-derived order would be a per-process-random difference in the compiled bytes. The
+        // fixpoint above stays hash-backed — it is all membership queries — and so does the copy the
+        // analysis keeps for [`Self::type_relevant`]; this costs exactly the one full clone it always
+        // did, now landing in a set that has an order.
+        self.relevance.reachable_types = reachable.iter().cloned().collect();
+        self.symbols.destruct_reachable = reachable;
         self.record_param_relevance(program);
     }
 

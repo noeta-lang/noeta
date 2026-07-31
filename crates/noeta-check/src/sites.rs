@@ -550,5 +550,16 @@ pub struct DestructorRelevance {
     /// uses only `locals`/`params`; `passes_relevance` drops this field.) Includes every type with its
     /// own `destruct` by construction (the fixpoint seeds with them), so own-destructor firing is never
     /// gated away.
-    pub reachable_types: HashSet<String>,
+    ///
+    /// A **`BTreeSet`, and that is load-bearing**: the compiler collects this field straight into
+    /// `Module::destruct_reachable`, which is serialized into the `.noeb` bundle. A `HashSet` here
+    /// made that table's order the hasher's random per-process seed, so the *same program compiled
+    /// to different bytes on every run* — reproducible builds, content-addressed caching, and any
+    /// artifact diff were all off the table for as long as it stayed one. A set whose order is
+    /// observable downstream is a set that must have one, so it gets it here at the source rather
+    /// than by a sort at each collect site (which the next collect site would forget). The
+    /// membership queries the analysis itself runs go through
+    /// [`Symbols::destruct_reachable`](crate::Symbols), still hash-backed — this set is built once
+    /// per check and only iterated.
+    pub reachable_types: BTreeSet<String>,
 }

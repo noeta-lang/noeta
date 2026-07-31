@@ -979,6 +979,13 @@ impl SessionCompiler {
         // the VM walks every value container-first and no destructor is missed (correct; it only
         // forgoes the plain-free fast path for a genuinely destructor-free type). Computed after
         // `register_types`, so this install's own types are in the conservative set.
+        //
+        // **Both arms are ordered**, because this lands in `Module::destruct_reachable` and the
+        // module is serialized: the checker's set is a `BTreeSet` so the precise arm is ordered by
+        // construction, and the conservative arm sorts the type table's keys, which are a
+        // `HashMap`'s and therefore in per-process-random order. The VM reads this back into a set
+        // and only ever asks it `contains`, so the order is invisible to behaviour and visible only
+        // in the bytes — which is exactly why it has to be stable.
         Ok(match sites.as_deref() {
             Some(bundle) => bundle
                 .destructor_relevance
@@ -986,7 +993,11 @@ impl SessionCompiler {
                 .iter()
                 .cloned()
                 .collect(),
-            None => self.mc.types.keys().cloned().collect(),
+            None => {
+                let mut names: Vec<String> = self.mc.types.keys().cloned().collect();
+                names.sort_unstable();
+                names
+            }
         })
     }
 

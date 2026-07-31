@@ -65,7 +65,7 @@
 //! load-bearing and defeats HM's symmetric unification. The fallback to [`Type::Unknown`] is gone
 //! at every typed boundary; only an un-inferable *interior* type stays tolerated, by design.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use noeta_ast::{
     AttrValue, Attribute, BinaryOp, BuiltinTy, ClassDecl, DeriveSpec, EnumDecl, Expr, FieldDecl,
