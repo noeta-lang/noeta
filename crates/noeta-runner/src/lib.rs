@@ -43,12 +43,18 @@ pub use compile::{CompileFailure, Compiled, compile_real, compile_whole_file, re
 /// killed before it finishes — shows nothing at all, which is exactly what made a slow run
 /// indistinguishable from a hung one. The `@test` runner passes `false`, because capturing a
 /// passing test's stdout and showing only a failing one's is the behavior its report is built on.
+///
+/// `cancel` arms the run's cooperative stop request (`noeta_vm::RunOptions::cancel`): `None` for an
+/// ordinary run, `Some` for a `noeta test` case, whose runner asks an overrunning case to stop when
+/// its deadline expires. A cancelled run's [`RunResult`] describes a body that never finished, so
+/// the asking caller discards it.
 pub fn run_module_real_host(
     module: Arc<Module>,
     args: Vec<String>,
     app_id: Option<String>,
     jit_report: bool,
     live_output: bool,
+    cancel: Option<noeta_vm::CancelFlag>,
 ) -> (RunResult, Vec<TraceFrame>, Option<JitReport>) {
     let factory: noeta_vm::IsolateFactory = Arc::new(move || {
         let host: Box<dyn noeta_stdlib::Host> = Box::new(
@@ -66,8 +72,9 @@ pub fn run_module_real_host(
     let (host, executor) = factory();
     // Real isolates run on OS threads (out-of-oracle); channel-shipping isolates fall back to
     // cooperative tasks (cross-thread channels are I.4c). The differential keeps the sandbox pair.
-    VmBackend::new()
-        .run_module_with_host_and_executor_parallel(module, host, executor, factory, jit_report)
+    VmBackend::new().run_module_with_host_and_executor_parallel(
+        module, host, executor, factory, jit_report, cancel,
+    )
 }
 
 /// Run a compiled module and render its stdout / diagnostics / abort trace / `--jit-stats` report to
@@ -85,7 +92,7 @@ pub fn run_compiled_module(
     // Live: this is a foreground run whose output a human is reading. Anything the program already
     // streamed has left the buffer, so the `print!` below renders only the unterminated tail.
     let (result, trace, report) =
-        run_module_real_host(Arc::clone(&module), args, app_id, jit_stats, true);
+        run_module_real_host(Arc::clone(&module), args, app_id, jit_stats, true, None);
     print!("{}", result.stdout);
     let _ = std::io::stdout().flush();
     // The program's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout is

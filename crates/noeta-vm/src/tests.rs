@@ -2610,3 +2610,49 @@ fn a_cancelled_worker_reports_cancelled_and_frees_its_heap() {
         "a cancelled worker tears its heap down exactly like a completed one (residency 0)"
     );
 }
+
+/// test-timeout: a **top-level** run can be asked to stop too, through the identical flag.
+///
+/// A worker isolate is not the only thing that can wedge. `noeta test` runs each case as a whole
+/// program on its own thread, and the timeout rail asks that program to stop the same way a parent
+/// asks a worker — [`RunOptions::cancel`] installs the flag on the top-level VM's
+/// `IsolateState::cancel_flag`, and the dispatch loop's safepoints do the rest. Without it there is
+/// no way to reach a running case at all and abandoning its thread is the only option.
+///
+/// The proof is that a loop with no exit condition **returns**: `while true` never terminates on its
+/// own, so a `RunResult` at all means the safepoints observed the request and unwound. Residency
+/// back to zero says the unwind ran the ordinary teardown rather than leaving the heap stranded —
+/// which is exactly what makes joining the case's thread better than abandoning it.
+///
+/// The flag is set before the run starts, so the stop is deterministic (the body's first frame
+/// transfer sees it) and this test cannot hang even if the poll regresses to never firing... except
+/// that it would, which is the point: a `while true` with no cancellation is an infinite loop, and
+/// an honest hang beats an assertion that passes on a broken runner.
+#[test]
+fn a_cancelled_top_level_run_stops_and_frees_its_heap() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    noeta_stdlib::registry::default_seeded();
+    let src = "mut i = 0\nwhile true { i = i + 1 }\necho i\n";
+    let source = Source::new(SourceId::FIRST, "test.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let module = compile(&parsed.program).expect("in subset");
+    let before = noeta_value::live_count();
+    let out = VmBackend::new().run_module_with(
+        &module,
+        RunOptions {
+            cancel: Some(Arc::new(AtomicBool::new(true))),
+            ..RunOptions::default()
+        },
+    );
+    assert_eq!(
+        out.result.stdout, "",
+        "the body never reached its `echo`: it stopped at a safepoint inside the loop"
+    );
+    assert_eq!(
+        noeta_value::live_count(),
+        before,
+        "a cancelled run tears its heap down exactly like a completed one (residency 0)"
+    );
+}

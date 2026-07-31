@@ -1724,7 +1724,7 @@ pub(crate) fn run_declared_tier(
     if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
-    match execute_real_host(&program, &checked, std::env::args().collect(), true) {
+    match execute_real_host(&program, &checked, std::env::args().collect(), true, None) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
