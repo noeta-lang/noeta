@@ -66,9 +66,16 @@ A language feature is added as a **vertical slice**, in this order:
 
 ## Before you're done
 
+`scripts/gate.sh` runs the CI workflow's jobs locally, in the same split, and prints a per-step PASS/FAIL summary — a step that cannot run is reported SKIP, never PASS, and a failure never stops the remaining steps. Run the tier that matches the moment:
+
+```sh
+scripts/gate.sh --quick   # fmt + both clippy splits                        (~1 min warm)
+scripts/gate.sh           # + the suite & oracles, doc samples, JIT gates   (~15 min warm)
+scripts/gate.sh --full    # + wasm portability, miri, editor tooling        (before a release tag)
+```
+
 - Zero compiler warnings (`cargo build` produces no `warning:` lines).
-- `cargo fmt --all` and `cargo clippy --all-targets -- -D warnings` clean.
-- The full test suite passes, and `--differential` is at 0 skipped.
+- The gate is green at the merge tier, and `--differential` is at 0 skipped.
 - New functionality has tests; architectural changes update the docs.
 
 ## Conventions (summary — full list in `AGENTS.md`)
