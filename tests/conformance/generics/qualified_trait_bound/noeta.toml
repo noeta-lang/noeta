@@ -1,0 +1,5 @@
+# A package, so `lib.noe` derives the module path `pkg.lib` and its trait is reachable only under a
+# qualified spelling.
+[package]
+name = "local/pkg"
+version = "0.1.0"

@@ -3833,8 +3833,33 @@ where
         // In declaration position a `<` right after the type name is unambiguous — no comparison
         // expression can appear there. (`>` always lexes singly, so a nested close like
         // `<T: Keyed<int>>` ends both delimiters exactly as `List<List<int>>` does.)
-        let trait_bound = id
+        // A bound's trait name may be **dotted** — `<P: para.ai.provider.Provider>`, the same
+        // qualified spelling every other type position takes (`x: http.Response`,
+        // `impl vec.Kernels for T`, `dyn para.ai.tools.ToolSource`). Without it a bound was the one
+        // place in the language that accepted only a bare identifier, so a trait reachable *only*
+        // by its qualified name had no spelling at all in a `where` position and the parser said
+        // `found '.' expected '+', ',', '<', or '>'` — which reads as a syntax error in the
+        // generics rather than a missing feature. The segments join into one name the linker
+        // resolves exactly as it resolves a dotted type.
+        let bound_path = id
             .clone()
+            .then(
+                just(T::Dot)
+                    .ignore_then(id.clone())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .map(|((first, first_span), rest): ((String, Span), Vec<(String, Span)>)| {
+                let mut name = first;
+                let mut span = first_span;
+                for (seg, seg_span) in rest {
+                    name.push('.');
+                    name.push_str(&seg);
+                    span.end = seg_span.end;
+                }
+                (name, span)
+            });
+        let trait_bound = bound_path
             .then(
                 type_parser(ctx)
                     .separated_by(just(T::Comma))
