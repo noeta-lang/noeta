@@ -414,6 +414,17 @@ pub struct PackageMeta {
     /// Rust into a consumer's build, which should never be triggered by the mere presence of a
     /// directory.
     pub native: Option<String>,
+    /// The relative directory of this package's **dev-only** native crate (formatter/dev-tool):
+    /// `dev-native = "native"` points at a `Cargo.toml` whose crate exports formatter units (an
+    /// [`Extension`] contributing only `body_formatters()`). Unlike [`native`], a `dev-native`
+    /// crate is admitted **untrusted** — it never needs a `[trust].native` grant — because it runs
+    /// **only** at `noeta fmt`, never in a prod `run`/`build`, and is stripped to formatter-only at
+    /// composition (its runtime surface is discarded). Declaring both `native` and `dev-native` in
+    /// one manifest is a manifest error: a crate is either a runtime dependency or a dev tool.
+    /// `None` for a package with no dev-only native crate.
+    ///
+    /// [`native`]: PackageMeta::native
+    pub dev_native: Option<String>,
     /// The declared license as an **SPDX expression** (`license = "MIT OR Apache-2.0"`). Sent with
     /// a publish and recorded in the registry's immutable release record (and its transparency-log
     /// leaf). `None` when the package declares none. Shape-checked at parse time; the claim is the
@@ -1460,6 +1471,23 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
             Some(validate_native_dir(dir)?)
         }
     };
+    let dev_native = match pkg.get("dev-native") {
+        None => None,
+        Some(v) => {
+            let dir = v
+                .as_str()
+                .ok_or("`package.dev-native` must be a string (a relative directory)")?;
+            Some(validate_native_dir(dir)?)
+        }
+    };
+    if native.is_some() && dev_native.is_some() {
+        return Err(
+            "a package may declare `native` or `dev-native`, not both — a native crate \
+                    is either a runtime dependency (`native`, trust-gated) or a dev-only tool \
+                    (`dev-native`, formatter-only, admitted untrusted)"
+                .to_string(),
+        );
+    }
     let license = match pkg.get("license") {
         None => None,
         Some(v) => {
@@ -1491,6 +1519,7 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
         edition,
         toolchain,
         native,
+        dev_native,
         license,
         keywords,
         description,
@@ -2599,6 +2628,54 @@ mod tests {
         assert!(Manifest::parse(&manifest("")).is_err());
         // A nested relative dir is fine.
         assert!(Manifest::parse(&manifest("rust/imgfx")).is_ok());
+    }
+
+    // --- `package.dev-native` (a dev-only formatter/dev-tool crate) -----------------------------
+
+    #[test]
+    fn parses_a_dev_native_crate() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/htmlfmt\"\n\
+             version = \"1.0.0\"\n\
+             dev-native = \"native\"\n",
+        )
+        .expect("valid");
+        assert_eq!(m.package().unwrap().dev_native.as_deref(), Some("native"));
+        // A dev-native package declares no runtime `native` crate.
+        assert_eq!(m.package().unwrap().native, None);
+    }
+
+    #[test]
+    fn dev_native_is_absent_for_a_pure_package() {
+        let m = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").expect("valid");
+        assert_eq!(m.package().unwrap().dev_native, None);
+    }
+
+    #[test]
+    fn dev_native_rejects_absolute_escape_and_empty() {
+        let manifest = |dir: &str| {
+            format!("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\ndev-native = \"{dir}\"\n")
+        };
+        assert!(Manifest::parse(&manifest("/abs/dir")).is_err());
+        assert!(Manifest::parse(&manifest("../outside")).is_err());
+        assert!(Manifest::parse(&manifest("")).is_err());
+        assert!(Manifest::parse(&manifest("rust/htmlfmt")).is_ok());
+    }
+
+    #[test]
+    fn native_and_dev_native_together_are_an_error() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"a/b\"\n\
+             version = \"1.0.0\"\n\
+             native = \"native\"\n\
+             dev-native = \"devnative\"\n",
+        );
+        assert!(
+            m.is_err(),
+            "declaring both native and dev-native must be rejected"
+        );
     }
 
     // --- `[trust]` (package-manager Phase 4) ---------------------------------------------------

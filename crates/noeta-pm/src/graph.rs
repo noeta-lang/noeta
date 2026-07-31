@@ -148,6 +148,21 @@ pub struct ResolvedGraph {
     pub registry_identities: std::collections::BTreeSet<String>,
 }
 
+impl ResolvedGraph {
+    /// The native crates that contribute **runtime** code — every entry crate except the dev-only
+    /// formatter/dev-tool crates (`package.dev-native`). This is what decides whether `run`/`build`/
+    /// `check` must delegate to a composed toolchain: a dev-only crate never contributes runtime
+    /// modules, commands, or tiers, so its mere presence must not force composition of a prod path.
+    /// `noeta fmt` uses the full [`Self::native_crates`] set instead (it wants the formatters too).
+    pub fn runtime_native_crates(&self) -> Vec<NativeCrate> {
+        self.native_crates
+            .iter()
+            .filter(|nc| !nc.dev_only)
+            .cloned()
+            .collect()
+    }
+}
+
 /// A resolved package's native entry crate (Phase 3, N3.1): where the composed build finds its
 /// `Cargo.toml`, validated to exist at resolve time.
 #[derive(Debug, Clone)]
@@ -161,6 +176,13 @@ pub struct NativeCrate {
     /// edit (unlike a store-materialized git/registry dep, whose dir is per-SHA), so without the
     /// content hash an edit to the crate's source would keep serving the stale composed binary.
     pub content_hash: String,
+    /// A **dev-only** crate (reached via `package.dev-native`): a formatter/dev-tool that runs only
+    /// at `noeta fmt`, admitted untrusted and stripped to formatter-only at composition. A dev-only
+    /// crate is present in a [`ShimKind::Toolchain`] composition (built at `default-features = false,
+    /// features = ["fmt"]`) but **excluded** from `Runner`/`AotRuntime` prod shims, and it never
+    /// forces composition for `run`/`build`/`check` (see [`ResolvedGraph::runtime_native_crates`]).
+    /// `false` for a normal runtime `native` crate.
+    pub dev_only: bool,
 }
 
 /// A resolved package pinned for the lockfile (package-manager P2.4c).
@@ -240,6 +262,10 @@ struct Instance {
     source: ResolvedSource,
     /// The manifest's relative native-crate dir, validated against `dir` (Phase 3, N3.1).
     native: Option<String>,
+    /// The manifest's relative **dev-only** native-crate dir (`package.dev-native`) — a
+    /// formatter/dev-tool crate, admitted untrusted and composed formatter-only. Mutually exclusive
+    /// with [`Self::native`] (the manifest parser rejects declaring both).
+    dev_native: Option<String>,
     /// This package's own `[dependencies]`: local key → the resolved child identities. A normal
     /// dependency contributes exactly one identity; a **scope** dependency (`key = [ … ]`) contributes
     /// one per member package, all sharing the scope, so a key may map to several.
@@ -465,7 +491,11 @@ fn resolve_graph_impl(
     // package trusting its own native code is redundant friction — the same reason cargo never asks
     // you to authorize your own `build.rs`.
     if let Some(pkg) = manifest.package()
-        && let Some(native) = &pkg.native
+        && let Some((native, dev_only)) = pkg
+            .native
+            .as_ref()
+            .map(|n| (n, false))
+            .or_else(|| pkg.dev_native.as_ref().map(|n| (n, true)))
     {
         let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
         // Guard against double-linking if the root ever appears as its own instance (a
@@ -489,6 +519,7 @@ fn resolve_graph_impl(
                 identity,
                 crate_dir,
                 content_hash,
+                dev_only,
             });
         }
     }
@@ -812,6 +843,17 @@ impl Walker<'_> {
                 err.map_msg(|m| format!("dependency `{key}` (`{identity}`): {m}"))
             })?;
         }
+        // A **dev-only** native crate (`package.dev-native`) is admitted UNTRUSTED — no
+        // `[trust].native` gate. It runs only at `noeta fmt` as a pure `str→str` formatter,
+        // composed formatter-only (its runtime surface stripped), and never in a prod `run`/`build`.
+        // Because it can neither run at runtime nor contribute a command/tier/module, authorizing it
+        // would grant nothing a consumer needs protection from. Its dir must still exist (a typo is
+        // still an error), so `validate_native_crate` runs unchanged.
+        if let Some(dev_native) = &pkg.dev_native {
+            validate_native_crate(&dir, dev_native).map_err(|err| {
+                err.map_msg(|m| format!("dependency `{key}` (`{identity}`): {m}"))
+            })?;
+        }
         // A git fetch already hashed its (immutable, store-materialized) tree — reuse it; a
         // path tree is mutable, so it hashes fresh.
         let content_hash = match fetched_hash {
@@ -855,6 +897,7 @@ impl Walker<'_> {
                 content_hash,
                 source,
                 native: pkg.native.clone(),
+                dev_native: pkg.dev_native.clone(),
                 edges: BTreeMap::new(),
                 directives: child_manifest.directives().clone(),
                 tiers: child_manifest.tiers().clone(),
@@ -2020,13 +2063,25 @@ fn assemble(
             edition: inst.edition,
             patched: inst.patched,
         });
+        // A runtime `native` crate contributes to the loader (`native_identities`) and the composed
+        // toolchain; a `dev-native` crate contributes ONLY the latter, formatter-only, so it is a
+        // `NativeCrate` with `dev_only = true` but is never recorded as a runtime native identity (it
+        // adds no loader modules and no `noeta <command>`). The two dirs are mutually exclusive.
         if let Some(native) = &inst.native {
             native_crates.push(NativeCrate {
                 identity: identity.clone(),
                 crate_dir: inst.dir.join(native),
                 content_hash: inst.content_hash.clone(),
+                dev_only: false,
             });
             native_identities.insert(identity.clone());
+        } else if let Some(dev_native) = &inst.dev_native {
+            native_crates.push(NativeCrate {
+                identity: identity.clone(),
+                crate_dir: inst.dir.join(dev_native),
+                content_hash: inst.content_hash.clone(),
+                dev_only: true,
+            });
         }
     }
     // Resolve each `[trust.commands]` binding against the native packages actually in the graph. A
@@ -2266,6 +2321,57 @@ mod tests {
         assert!(
             graph.packages.iter().all(|p| p.key() == "acme"),
             "and they share the one root they were listed under"
+        );
+    }
+
+    #[test]
+    fn an_untrusted_native_dependency_is_refused() {
+        // A `native`-declaring dependency runs arbitrary Rust, so it is refused without a
+        // `[trust].native` grant — the baseline the dev-native path deliberately diverges from.
+        let (_fixture, app) = path_dep_fixture("untrusted_native");
+        let lib = app.parent().unwrap().join("lib");
+        std::fs::write(
+            lib.join("noeta.toml"),
+            "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(lib.join("native")).unwrap();
+        std::fs::write(
+            lib.join("native").join("Cargo.toml"),
+            "[package]\nname = \"lib-native\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("untrusted native is refused");
+        let msg = err.message().to_string();
+        assert!(msg.contains("acme/lib"), "names the package: {msg}");
+        assert!(msg.contains("[trust].native"), "points at the grant: {msg}");
+    }
+
+    #[test]
+    fn a_dev_native_dependency_is_admitted_untrusted() {
+        // A `dev-native` (formatter/dev-tool) dependency is admitted WITHOUT any `[trust].native`
+        // grant: it runs only at `noeta fmt` as a formatter, never at runtime. It contributes a
+        // `NativeCrate` marked `dev_only`, excluded from the runtime set.
+        let (_fixture, app) = path_dep_fixture("dev_native_untrusted");
+        let lib = app.parent().unwrap().join("lib");
+        std::fs::write(
+            lib.join("noeta.toml"),
+            "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\ndev-native = \"native\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(lib.join("native")).unwrap();
+        std::fs::write(
+            lib.join("native").join("Cargo.toml"),
+            "[package]\nname = \"lib-fmt\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let graph = resolve_graph(&app.join("main.noe"))
+            .expect("a dev-native dependency needs no trust grant");
+        assert_eq!(graph.native_crates.len(), 1, "the dev crate is present");
+        assert!(graph.native_crates[0].dev_only, "and marked dev-only");
+        assert!(
+            graph.runtime_native_crates().is_empty(),
+            "but excluded from the runtime set (never composes a prod path)"
         );
     }
 

@@ -1,0 +1,15 @@
+// `Repo<Todo>.new(…)` — without the `::` — stays a **parse error**, and deliberately so: a bare `<`
+// after an identifier in expression position is genuinely ambiguous with less-than, which is why
+// every other type argument in this grammar (`f::<T>(x)`, `x.m::<T>(y)`, `type_name::<T>()`,
+// `attributes_of::<T>()`) is already spelled with the turbofish. Accepting the bare form for this
+// one position would make the disambiguator optional in exactly one place.
+// expect: error E0004 at 15:15
+// expect: exit 1
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+}
+r = Repo<Todo>.new("todos");

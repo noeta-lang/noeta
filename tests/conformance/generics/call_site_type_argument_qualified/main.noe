@@ -1,0 +1,22 @@
+// A call-site instantiation on a **qualified** receiver, with a **qualified** type argument:
+// `storage.Repo::<storage.Todo>.new("todos")` from a sibling module.
+//
+// Both halves have to survive the linker, and they survive by different routes. The receiver is a
+// member chain the qualifier collapses into one qualified reference — the checker's static-call arm
+// only ever sees an `Expr::Ident`, so a receiver that stopped collapsing would silently fall out of
+// the arm and take the deferred `dyn` method path with no diagnostic. The type argument is an
+// ordinary `TypeRef` the qualification pass must rewrite, which is the shape of the three
+// silent-wrong-answer bugs the AST walk-coverage gate exists to prevent.
+//
+// A directory case with a manifest on purpose: a single-file case runs straight from source text
+// with no loader, so neither property could be observed. The last line is the oracle — the name
+// read off the object's tag must equal the one folded from a written `type_name`.
+// expect: stdout "todos:app.storage.Todo"
+// expect: stdout "true"
+// expect: exit 0
+use app.storage;
+use app.storage.Todo;
+
+r = storage.Repo::<storage.Todo>.new("todos");
+echo r.model();
+echo r.model() == "todos:" ~ type_name::<Todo>();

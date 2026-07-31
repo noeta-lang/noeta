@@ -429,7 +429,8 @@ mod tests {
         fn new(tag: &str) -> Scratch {
             static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("noeta-derive-{tag}-{}-{n}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("noeta-derive-{tag}-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             Scratch(dir)
         }
@@ -449,7 +450,10 @@ mod tests {
     fn a_nested_cargo_crate_is_outside_the_package() {
         let s = Scratch::new("boundary");
         s.write("Cargo.toml", "[package]\nname=\"x\"\n");
-        assert!(is_outside_package(&s.0), "a directory with a Cargo.toml is a Rust crate, not source");
+        assert!(
+            is_outside_package(&s.0),
+            "a directory with a Cargo.toml is a Rust crate, not source"
+        );
 
         let plain = Scratch::new("plain");
         plain.write("keep.noe", "");
@@ -464,8 +468,14 @@ mod tests {
         // the dependency; the Cargo.toml boundary keeps them out of the module set entirely.
         let s = Scratch::new("native");
         s.write("surface.noe", "echo 1\n");
-        s.write("crates/noeta-para-p2p/Cargo.toml", "[package]\nname=\"noeta-para-p2p\"\n");
-        s.write("crates/noeta-para-p2p/tests/conformance/synced/case.noe", "echo 2\n");
+        s.write(
+            "crates/noeta-para-p2p/Cargo.toml",
+            "[package]\nname=\"noeta-para-p2p\"\n",
+        );
+        s.write(
+            "crates/noeta-para-p2p/tests/conformance/synced/case.noe",
+            "echo 2\n",
+        );
 
         let root = PackageRoot::new(s.0.clone(), prefix(&["para", "p2p"]));
         let mods = read_package_modules(&root);

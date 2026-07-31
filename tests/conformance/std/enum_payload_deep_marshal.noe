@@ -1,0 +1,65 @@
+// The **deep** value projection (`to_native_deep`) carries an enum as a real variant — case *and*
+// payload — not as the bare case name its *display* form starts with. `json.stringify` is the
+// observable door onto that projection (the `json` module is `deep_marshal`), and it is the same
+// projection every other `deep_marshal` consumer takes (a SQL bind parameter, an `http` argument),
+// so what this case pins is not a JSON convention but that no field is dropped in transit.
+// A payload-carrying variant encodes as `{"Case":[fields]}`: the tag names the case, the array
+// carries the positional payload. A payload-FREE variant is byte-identical to the old encoding
+// (just its case name), which is the whole reason the old form looked correct.
+// The payload is marshalled *deeply*, so it recurses: a struct payload is a JSON object, and an
+// `Option` payload still flattens through itself (`some(7)` is `7`) — the two conventions meet
+// inside a variant and neither one leaks.
+// `Result` is a plain enum, so it travels the same road: `Ok(5)` is `{"Ok":[5]}`. Encoding it as the
+// bare string `"Ok"` — the value 5 discarded — was a defect, not a contract.
+// expect: stdout "\"Empty\""
+// expect: stdout "{"Circle":[3]}"
+// expect: stdout "{"Rect":[2,4]}"
+// expect: stdout "[{"Circle":[1]},"Empty"]"
+// expect: stdout "{"Tagged":["a",{"x":1,"y":2}]}"
+// expect: stdout "doors agree: true"
+// expect: stdout "{"Maybe":[7]}"
+// expect: stdout "{"Maybe":[null]}"
+// expect: stdout "7"
+// expect: stdout "{"Ok":[5]}"
+// expect: stdout "{"Err":["nope"]}"
+// expect: stdout "Shape.Circle(3)"
+// expect: exit 0
+use std.json
+
+struct Point { x: int; y: int }
+
+enum Shape { Empty; Circle(int); Rect(int, int) }
+
+@derive(Serialize<Json>)
+enum Node { Tagged(string, Point); Maybe(?int) }
+
+// A payload-free variant: byte-identical to the old tag-only encoding, so nothing moved for it.
+echo json.stringify(Shape.Empty)
+
+// A payload-carrying variant: the payload used to vanish here, silently, leaving only `"Circle"`.
+echo json.stringify(Shape.Circle(3))
+echo json.stringify(Shape.Rect(2, 4))
+
+// Inside a container each element takes the same projection — this is the reported shape of the
+// defect: an enum element of a `List<dyn>` argument reaching a native consumer as a tag.
+echo json.stringify([Shape.Circle(1), Shape.Empty])
+
+// The payload marshals deeply, so a struct payload is a nested JSON object, and the
+// `@derive(Serialize<Json>)` door produces the identical bytes (one shared encoder).
+tagged = Node.Tagged("a", Point { x: 1, y: 2 })
+echo json.stringify(tagged)
+echo "doors agree: ${tagged.to_json() == json.stringify(tagged)}"
+
+// An `Option` payload keeps its own convention *within* the variant: `some(7)` flattens to `7` and
+// `none` to `null`, exactly as a bare `Option` does at the top level (`json_option_payload.noe`).
+echo json.stringify(Node.Maybe(some(7)))
+echo json.stringify(Node.Maybe(none))
+echo json.stringify(some(7))
+
+// `Result` is a plain enum: both cases carry their value across instead of collapsing to a tag.
+echo json.stringify(Ok(5))
+echo json.stringify(Err("nope"))
+
+// `echo` is unaffected: the *display* form of an enum is unchanged. Only the value projection moved,
+// which is the point — the two had been sharing the display vocabulary.
+echo Shape.Circle(3)

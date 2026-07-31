@@ -128,7 +128,10 @@ impl Checker {
         let Expr::Member { receiver, name, .. } = callee.as_ref() else {
             return None;
         };
-        let Expr::Ident { name: tn, .. } = receiver.as_ref() else {
+        // A call-site instantiation is peeled: `Repo::<Todo>.new(…)` is the same fresh-constructor
+        // call as `Repo.new(…)`. Missing this would drop the call out of the deferred-argument and
+        // absorbing paths, and the argument/field positions would stop pinning it.
+        let Expr::Ident { name: tn, .. } = receiver.peel_instantiation() else {
             return None;
         };
         (lookup(env, tn.as_str()).is_none()
@@ -137,6 +140,68 @@ impl Checker {
                 .fresh_constructors
                 .contains(&(tn.to_string(), name.to_string())))
         .then_some(tn.as_str())
+    }
+
+    /// The **class type arguments a call site spells explicitly** — `[Todo]` for
+    /// `Repo::<Todo>.new("todos")` — or empty where the receiver is a bare type name and the
+    /// instantiation is left to inference.
+    ///
+    /// This is the whole of the new form's semantics. The result is handed to
+    /// [`Checker::call_user_method`] as `recv_args`, the channel a *value* receiver's type arguments
+    /// already travel on, so everything downstream is unchanged: the seed wins over argument
+    /// inference and over an expected type by `bind_type_params`' first-wins `or_insert`, and
+    /// [`Checker::note_constructor_call`] records the resulting instantiation through the one
+    /// recording path. There is no second channel.
+    ///
+    /// Arity is checked against the type's **declared** parameters (E0058) — not the method's, which
+    /// is what `Repo.new::<Todo>(…)` means and why the two spellings stay distinct. A non-generic
+    /// type is refused for the same reason: it has nothing to instantiate, so the turbofish would be
+    /// decoration.
+    fn call_site_class_args(&mut self, receiver: &Expr, type_name: &str) -> Vec<Type> {
+        let type_args = receiver.call_site_type_args();
+        if type_args.is_empty() {
+            return Vec::new();
+        }
+        for t in type_args {
+            self.check_type_ref(t);
+        }
+        let params = self
+            .symbols
+            .generic_types
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default();
+        let span = receiver.span();
+        if params.is_empty() {
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                span,
+                format!("`{type_name}` is not generic, so it takes no type arguments"),
+            )
+            .help(format!(
+                "drop the `::<...>` and call `{type_name}.method(args)`. A method with type \
+                 parameters OF ITS OWN is instantiated on the method \
+                 (`{type_name}.method::<T>(args)`)"
+            ));
+            return Vec::new();
+        }
+        if type_args.len() != params.len() {
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                span,
+                format!(
+                    "`{type_name}` expects {} type argument(s), found {}",
+                    params.len(),
+                    type_args.len()
+                ),
+            )
+            .help(format!("`{type_name}` declares `<{}>`", params.join(", ")));
+            return Vec::new();
+        }
+        type_args
+            .iter()
+            .map(|t| from_ref_q(t, &self.imports.extern_types))
+            .collect()
     }
 
     /// Whether a fresh-constructor call **absorbs** `expected` — the pre-filter that keeps this arm
@@ -1010,7 +1075,7 @@ impl Checker {
                 // typed (a constructor result is `Box`, not a hole) and a generic class enforces its
                 // bounds at construction. Guard on the receiver naming a type that is not shadowed
                 // by a local variable.
-                if let Expr::Ident { name: tn, .. } = receiver.as_ref()
+                if let Expr::Ident { name: tn, .. } = receiver.peel_instantiation()
                     && lookup(env, tn.as_str()).is_none()
                     && self.symbols.types.contains(tn.as_str())
                     && let Some(sig) = self
@@ -1039,6 +1104,13 @@ impl Checker {
                     // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`)
                     // — and, in a checked position, the expected type does (`r: Repo<Todo> =
                     // Repo.new("todos")` binds `T = Todo` through the return-position seed).
+                    //
+                    // A **call-site instantiation** (`Repo::<Todo>.new("todos")`) supplies them
+                    // here instead, on the very channel a value receiver uses: the class's type
+                    // arguments. Nothing downstream is special-cased — `call_user_method` seeds the
+                    // class's parameters from `recv_args` exactly as it does for `r.method(…)`, so
+                    // the same `note_constructor_call` records the same construction site.
+                    let class_args = self.call_site_class_args(receiver, tn.as_str());
                     let ret = self.call_user_method(
                         name,
                         Some(tn.as_str()),
@@ -1046,7 +1118,7 @@ impl Checker {
                         args,
                         arg_exprs,
                         span,
-                        &[],
+                        &class_args,
                         Some(call_span),
                         env,
                     );

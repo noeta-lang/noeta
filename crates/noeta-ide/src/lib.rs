@@ -1801,6 +1801,11 @@ impl DocumentStore {
                 .and_then(nominal_name)
                 .map(|type_name| completion::members_of(program, type_name))
                 .unwrap_or_default();
+            // A TYPE reference receiver (`Repo.n|`, `Repo::<Todo>.n|`) has no value type to read a
+            // nominal off — offer the named type's members instead.
+            if members.is_empty() {
+                members = type_receiver_members(entry_text, receiver_span, program);
+            }
             // Bundle-contributed methods (kernel-methods K4): a bound `@packed` type offers its
             // bundles' Element methods, a `List<T>` of one their Bulk methods.
             if let Some(repr) = checked.expr_types.get(&receiver_span) {
@@ -3427,6 +3432,33 @@ fn is_bare_dot(text: &str, offset: u32) -> bool {
     o >= 1 && o <= bytes.len() && bytes[o - 1] == b'.' && (o < 2 || bytes[o - 2] != b'.')
 }
 
+/// Members of the **type a receiver names**, when the receiver is a type reference rather than a
+/// value — `Repo.n|` (associated functions) and `Repo::<Todo>.n|` (the same, with a call-site
+/// instantiation whose type arguments do not change *which* type's members are offered).
+///
+/// A type name is not an expression, so it has no `expr_types` entry for the nominal lookup to read,
+/// and both spellings completed to nothing at all before this: a type's associated functions were
+/// simply unreachable from member completion. Text-driven on purpose — the receiver of a static call
+/// is never synthesized, so there is no checking result to consult — and narrow: the text before any
+/// `::` must name a declared type of this program, or nothing is offered and the caller falls
+/// through to ordinary identifier completion.
+fn type_receiver_members(
+    text: &str,
+    receiver_span: Span,
+    program: &noeta_ast::Program,
+) -> Vec<completion::Candidate> {
+    let Some(head) = text.get(receiver_span.range()).map(|t| {
+        t.split("::")
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .trim_start()
+    }) else {
+        return Vec::new();
+    };
+    completion::members_of(program, head)
+}
+
 /// Member candidates for a bare dot (`receiver.|`): the statement does not parse with a dangling dot,
 /// so a synthetic member name is spliced in at `offset`, and the copy is re-lexed/parsed/checked off
 /// the salsa graph to recover the receiver's type. The members themselves are listed from `program`
@@ -3453,10 +3485,17 @@ fn bare_dot_members(
     if let Some(prefix) = namespaces.get(&munged[receiver_span.range()]) {
         return Some(completion::namespace_members(prefix));
     }
-    let repr = checked.expr_types.get(&receiver_span)?;
+    let Some(repr) = checked.expr_types.get(&receiver_span) else {
+        // No value type at the receiver: it may be a TYPE reference (`Repo.|`, `Repo::<Todo>.|`),
+        // whose associated functions are still worth offering.
+        return Some(type_receiver_members(&munged, receiver_span, program));
+    };
     let mut members = nominal_name(repr)
         .map(|type_name| completion::members_of(program, type_name))
         .unwrap_or_default();
+    if members.is_empty() {
+        members = type_receiver_members(&munged, receiver_span, program);
+    }
     // Bundle-contributed methods (kernel-methods K4), as in the parsed-member path above.
     members.extend(bundle_members_for(repr, &checked.bundle_bindings));
     Some(members)
@@ -4058,6 +4097,115 @@ mod tests {
             !hints.iter().any(|(_, label)| label.contains("Counter")),
             "no `: Counter` receiver hint anywhere: {hints:?}"
         );
+    }
+
+    /// A **generic instantiation** hints with its type arguments, not head-only.
+    ///
+    /// `inlay.rs` had no generic coverage at all, and the risk is specific: the hint reads
+    /// `expr_types`, and a head-only entry (`Repo` for a `Repo<Todo>`) would render a *misleading*
+    /// hint rather than none — the failure mode the whole index exists to avoid. It does not
+    /// happen, because `expr_types` records `type_to_repr_top` of the full resolved `Type`, so a
+    /// nominal's arguments are in the `TypeRepr` and `display_short` prints them. This pins it.
+    ///
+    /// It matters most for the call-site turbofish: every other way of instantiating a generic is
+    /// ANNOTATED, and an annotated binding shows no hint (the type is already on screen), so this
+    /// is the first spelling where the hint is the only place the instantiation appears un-typed.
+    #[test]
+    fn inlay_hints_show_a_generic_instantiations_type_arguments() {
+        let mut store = test_store();
+        store.open(
+            "file:///generic.noe",
+            "struct Todo { id: int }\n\
+             class Repo<T> {\n  \
+             pub tbl: string\n  \
+             fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }\n\
+             }\n\
+             class Box2<T> {\n  \
+             pub v: T\n  \
+             fn new(v: T): Box2<T> { return Box2 { v: v } }\n\
+             }\n\
+             r = Repo::<Todo>.new(\"todos\")\n\
+             b = Box2.new(7)\n\
+             a: Repo<Todo> = Repo.new(\"annotated\")\n"
+                .to_string(),
+        );
+        let hints = hints_of(&store, "file:///generic.noe");
+        // The call-site turbofish: un-annotated, so the hint fires — and it must carry `<Todo>`.
+        assert!(
+            hints.contains(&(9, ": Repo<Todo>".to_string())),
+            "call-site instantiation: {hints:?}"
+        );
+        // The argument-inferred instantiation, for the same reason.
+        assert!(
+            hints.contains(&(10, ": Box2<int>".to_string())),
+            "argument-inferred instantiation: {hints:?}"
+        );
+        // An annotated binding still shows nothing — the new form did not widen that rule.
+        assert!(
+            !hints.iter().any(|(line, _)| *line == 11),
+            "annotated binding must not hint: {hints:?}"
+        );
+    }
+
+    /// Member completion after a call-site instantiation offers the TYPE's members, exactly as a
+    /// bare type receiver does — the turbofish must not turn the receiver into something the
+    /// completion path no longer recognizes.
+    #[test]
+    fn completions_after_a_call_site_instantiation_offer_the_types_members() {
+        let mut store = test_store();
+        let text = "struct Todo { id: int }\n\
+                    class Repo<T> {\n  \
+                    pub tbl: string\n  \
+                    fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }\n  \
+                    fn open(tbl: string): Repo<T> { return Repo { tbl: tbl } }\n\
+                    }\n\
+                    r = Repo::<Todo>.ne\n";
+        store.open("file:///comp.noe", text.to_string());
+        let line = text.lines().count() as u32 - 1;
+        let character = text.lines().last().unwrap().chars().count() as u32;
+        let items = store
+            .completions(
+                "file:///comp.noe",
+                Position { line, character },
+                Encoding::Utf8,
+            )
+            .expect("open document offers completions");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"new"),
+            "members after `::<T>.`: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"open"),
+            "members after `::<T>.`: {labels:?}"
+        );
+    }
+
+    /// The same for the **bare-dot** trigger (`Repo::<Todo>.|`), which takes the other completion
+    /// path entirely (the dangling dot does not parse, so the buffer is re-checked with a synthetic
+    /// member spliced in) — and for a bare type receiver (`Repo.|`), whose associated functions were
+    /// unreachable from completion before the type-reference fallback existed.
+    #[test]
+    fn completions_after_a_bare_dot_on_a_type_offer_its_associated_functions() {
+        let head = "struct Todo { id: int }\n                    class Repo<T> {\n                      pub tbl: string\n                      fn new(tbl: string): Repo<T> { return Repo { tbl: tbl } }\n                      fn open(tbl: string): Repo<T> { return Repo { tbl: tbl } }\n                    }\n";
+        for tail in ["r = Repo::<Todo>.", "r = Repo."] {
+            let mut store = test_store();
+            let text = format!("{head}{tail}\n");
+            store.open("file:///baredot.noe", text.clone());
+            let items = store
+                .completions(
+                    "file:///baredot.noe",
+                    Position {
+                        line: text.lines().count() as u32 - 1,
+                        character: tail.chars().count() as u32,
+                    },
+                    Encoding::Utf8,
+                )
+                .expect("open document offers completions");
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(labels.contains(&"new"), "`{tail}|` offers: {labels:?}");
+            assert!(labels.contains(&"open"), "`{tail}|` offers: {labels:?}");
+        }
     }
 
     #[test]

@@ -1,0 +1,45 @@
+// A call site can state the instantiation itself: `Repo::<Todo>.new("todos")`.
+//
+// Until now the instantiation reached a generic constructor only from an **expected type** — an
+// annotated binding, a declared return, a field's declared type, or a parameter's. All four still
+// work and are pinned in `call_site_type_argument_positions.noe`. What none of them could do is
+// make the call SELF-SUFFICIENT: with no expected type anywhere, `r = Repo.new("todos")` had no
+// instantiation to record, and there was no way to write one down.
+//
+// The type arguments travel the channel a VALUE receiver's already do (`recv_args`), so nothing
+// downstream is special-cased: the class's parameters are seeded exactly as for `r.method(…)`, and
+// the same construction-site recording tags the object. The oracle is the tag itself — `model()`
+// reads `type_name::<T>()` off the object at run time, and the two repositories must disagree.
+//
+// `::<>` and not `<>`: a bare `<` after an identifier is ambiguous with less-than in expression
+// position, so `Repo<Todo>.new(…)` stays a parse error (`call_site_type_argument_bare_angle.noe`).
+// expect: stdout "todos:Todo"
+// expect: stdout "users:User"
+// expect: stdout "Type.Class(Repo, [Type.Struct(Todo, [])])"
+// expect: stdout "false"
+// expect: exit 0
+struct Todo {
+    id: int
+}
+struct User {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+
+    fn model(): string {
+        return self.tbl ~ ":" ~ type_name::<T>();
+    }
+}
+rt = Repo::<Todo>.new("todos");
+ru = Repo::<User>.new("users");
+echo rt.model();
+echo ru.model();
+dt: dyn = rt;
+du: dyn = ru;
+echo type_of(dt);
+echo type_of(dt) == type_of(du);

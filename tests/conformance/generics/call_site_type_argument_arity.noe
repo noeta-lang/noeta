@@ -1,0 +1,17 @@
+// The turbofish instantiates the CLASS's declared parameters, so its arity is checked against
+// those — not against the method's, which is what `Repo.new::<T>(…)` means and why the two
+// spellings stay distinct surfaces (`generic_methods/member_turbofish_arity.noe` pins the other).
+// expect: error E0058 at 16:5
+// expect: exit 1
+struct Todo {
+    id: int
+}
+class Repo<T> {
+    pub tbl: string
+
+    fn new(tbl: string): Repo<T> {
+        return Repo { tbl: tbl };
+    }
+}
+r = Repo::<Todo, Todo>.new("todos");
+echo r.tbl;

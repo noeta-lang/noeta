@@ -29,8 +29,7 @@ fn admin_handler(): void { /* handle the request */ }
 
 - Attributes are **structs, not classes** (a struct has one canonical all-fields construction).
 - Arguments map to fields — positional in declaration order, or named. A field with a default is optional.
-- Using an unmarked struct as an attribute is E0029. Writing `@attribute` itself on a class or
-  enum is a misplaced directive, E0054.
+- Using an unmarked struct as an attribute is E0029. Writing `@attribute` itself on a class or enum is a misplaced directive, E0054.
 - Placement can be constrained by listing target kinds — `@attribute(Method, Function)` — and a misplaced attribute is E0030. The kinds are `Struct`, `Class`, `Enum`, `Function`, `Method`, `Field`, `Variant`.
 - Arguments are a **constant literal tree** — scalars, lists, maps, sets, enum values, nested struct literals, and a type reference (which becomes a reflection `Type` value). A non-literal argument (e.g. `1 + 2`) is E0003.
 - A type-reference argument keeps its **generic arguments** at full fidelity — `#[Builds(target: List<int>)]` reflects as `Type.List(Type.Int)`, not an erased `Type.List(Type.Dyn)` — and is validated exactly like a type annotation anywhere else: an unknown name inside it is E0013, and a built-in constructor applied at the wrong arity (`List<int, string>`) is E0058.
@@ -57,8 +56,7 @@ Marks an **enum** (only) as a source of role variants. The language ships a buil
 @semantic enum WebRole { Controller; Middleware; ErrorHandler }
 ```
 
-Applying `@role`/`@semantic` to the wrong declaration kind is E0054 — the one code every
-misplaced directive reports, whichever directive it is.
+Applying `@role`/`@semantic` to the wrong declaration kind is E0054 — the one code every misplaced directive reports, whichever directive it is.
 
 ### Other `@` directives
 
@@ -268,6 +266,8 @@ echo field_specs_of(type_name::<Todo>()).len()  // 1
 Turbofish only — a `type_name(s)` taking a runtime string would be the identity function on `s`. The value of the surface is that the **compiler** resolves the type: the name follows the module's path, a `use … as` alias, and a rename, none of which a string literal does. A name-keyed repository (`Repository.new(type_name::<Todo>(), "todos", "id")`) is the motivating case — before this it had to be handed `"app.storage.Todo"` spelled out by hand, and nothing checked it.
 
 An unresolvable type is `E0013`, exactly as in any other annotation. A **type parameter** resolves wherever the instantiation actually reaches the site — a top-level generic function's parameter and a generic type's parameter in an instance method both do — and is `E0058` where neither channel does; see below.
+
+A generic type's parameter reaches an instance method off the **value's recorded instantiation**, so the value has to have been built at one the checker could see. Four positions supply it from an expected type (an annotated binding, a declared return, a field's declared type, a parameter's), and the call site can now state it itself — `Repo::<Todo>.new("todos")`, see [Instantiating a generic *type* at the call site](Generics-and-Traits#instantiating-a-generic-type-at-the-call-site). A construction none of them reaches is `E0058` at the construction, not a clean check and a run-time abort at the first `type_name::<T>()`.
 
 ### Reflection over a type parameter
 

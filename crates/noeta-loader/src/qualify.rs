@@ -750,6 +750,13 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
             bound_in_expr(recv, names);
             CallArg::values(args).for_each(|a| bound_in_expr(a, names));
         }
+        // A call-site class instantiation (`Repo::<Todo>.new(…)`): only the type reference it wraps
+        // can bind anything. The turbofish is types, which bind no value names.
+        Expr::InstantiatedType {
+            recv,
+            type_args: _,
+            span: _,
+        } => bound_in_expr(recv, names),
         Expr::Invoke {
             recv,
             name,
@@ -1326,6 +1333,19 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_expr(recv, visit);
             type_args.iter_mut().for_each(|t| q_typeref(t, visit));
             args.iter_mut().for_each(|a| q_expr(&mut a.value, visit));
+        }
+        // `Repo::<Todo>.new(…)` — the call-site class instantiation. BOTH halves must be visited:
+        // the receiver is the type reference itself (a bare `Repo`, or the member chain a qualified
+        // reference parses to), and the turbofish names types that live in the same namespace as
+        // every other spelled type argument. Missing either is bug 1's shape — a type argument that
+        // resolves to nothing under a `namespace`, with no diagnostic.
+        Expr::InstantiatedType {
+            recv,
+            type_args,
+            span: _,
+        } => {
+            q_expr(recv, visit);
+            type_args.iter_mut().for_each(|t| q_typeref(t, visit));
         }
         Expr::Unary {
             op: _,

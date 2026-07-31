@@ -1,65 +1,35 @@
 # Editor & AI Tooling
 
-Noeta's editor story ships in four layers, all in-tree: **static syntax highlighting** (TextMate +
-tree-sitter grammars), a **language server** (`noeta lsp`), a **debugger** (`noeta dap`, on its own
-page: [Debugging](Debugging)), and an **agent surface** (`noeta mcp`) — a Model Context Protocol
-server that hands AI coding agents the same compiler ground truth the editor gets.
+Noeta's editor story ships in four layers, all in-tree: **static syntax highlighting** (TextMate + tree-sitter grammars), a **language server** (`noeta lsp`), a **debugger** (`noeta dap`, on its own page: [Debugging](Debugging)), and an **agent surface** (`noeta mcp`) — a Model Context Protocol server that hands AI coding agents the same compiler ground truth the editor gets.
 
 ## Installing, per editor
 
 ### VS Code / VSCodium
 
-The extension in [`editors/vscode-noeta/`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta)
-bundles everything on this page: the static TextMate grammar, the language server, the debugger
-type, the profiler view, and MCP auto-registration.
+The extension in [`editors/vscode-noeta/`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta) bundles everything on this page: the static TextMate grammar, the language server, the debugger type, the profiler view, and MCP auto-registration.
 
-1. Run [`noeta ide --vscode`](The-CLI#noeta-ide). It downloads the `.vsix` matching your
-   toolchain's version from the GitHub release, verifies it against the release's checksums, and
-   installs it into the first of `code` / `codium` / `code-insiders` on your PATH (pick one
-   explicitly with `--bin <NAME|PATH>`). A marketplace listing is still pending; this path also
-   covers VSCodium and offline installs.
-2. Open a `.noe` file — highlighting is immediate, and the extension starts `noeta lsp`
-   automatically (set `noeta.server.path` if the binary isn't on your PATH).
-3. After a `noeta upgrade`, re-run `noeta ide --vscode` so the extension moves in step with the
-   toolchain.
+1. Run [`noeta ide --vscode`](The-CLI#noeta-ide). It downloads the `.vsix` matching your toolchain's version from the GitHub release, verifies it against the release's checksums, and installs it into the first of `code` / `codium` / `code-insiders` on your PATH (pick one explicitly with `--bin <NAME|PATH>`). A marketplace listing is still pending; this path also covers VSCodium and offline installs.
+2. Open a `.noe` file — highlighting is immediate, and the extension starts `noeta lsp` automatically (set `noeta.server.path` if the binary isn't on your PATH).
+3. After a `noeta upgrade`, re-run `noeta ide --vscode` so the extension moves in step with the toolchain.
 
-From a source checkout, symlink the folder into `~/.vscode/extensions/` instead (VSCodium works
-identically); the extension's README has details and a `sample.noe` exercising every construct.
+From a source checkout, symlink the folder into `~/.vscode/extensions/` instead (VSCodium works identically); the extension's README has details and a `sample.noe` exercising every construct.
 
-The TextMate grammar is **static** — it colorizes without running the compiler, instantly and
-offline — and covers the whole surface: keywords, the three string forms with `${…}` interpolation,
-every numeric literal form, primitive and container types, PascalCase user types,
-`@directive`/tier blocks, `#[attribute]`s, and the full operator set.
+The TextMate grammar is **static** — it colorizes without running the compiler, instantly and offline — and covers the whole surface: keywords, the three string forms with `${…}` interpolation, every numeric literal form, primitive and container types, PascalCase user types, `@directive`/tier blocks, `#[attribute]`s, and the full operator set.
 
 ### Neovim, Helix, Zed
 
-There is no one-command installer for these yet — you wire the two pieces (grammar + language
-server) with your editor's own mechanisms:
+There is no one-command installer for these yet — you wire the two pieces (grammar + language server) with your editor's own mechanisms:
 
-1. Clone the [tree-sitter grammar](https://github.com/noeta-lang/noeta/tree/main/editors/tree-sitter-noeta)
-   and run `tree-sitter generate` in it (the generated parser is not committed; see its README).
-   It parses ≈99% of the conformance corpus and models Noeta's newline-terminated statements and
-   case-insensitive identifiers faithfully.
-2. Register the grammar for the `.noe` extension the way your editor takes a local tree-sitter
-   grammar — Neovim: an nvim-treesitter parser config entry; Helix: a `[[grammar]]` with a path
-   source plus a `[[language]]` entry in `languages.toml`; Zed: a local extension wrapping the
-   grammar.
-3. Point your editor's LSP client at `noeta lsp` (stdio) for `.noe` files — diagnostics, hover,
-   completion, and the rest of the [server's feature table](#the-language-server-noeta-lsp) work in
-   any LSP client.
-4. (Neovim) Optionally wire `noeta dap` into nvim-dap for debugging — config snippet on the
-   [Debugging](Debugging) page.
+1. Clone the [tree-sitter grammar](https://github.com/noeta-lang/noeta/tree/main/editors/tree-sitter-noeta) and run `tree-sitter generate` in it (the generated parser is not committed; see its README). It parses ≈99% of the conformance corpus and models Noeta's newline-terminated statements and case-insensitive identifiers faithfully.
+2. Register the grammar for the `.noe` extension the way your editor takes a local tree-sitter grammar — Neovim: an nvim-treesitter parser config entry; Helix: a `[[grammar]]` with a path source plus a `[[language]]` entry in `languages.toml`; Zed: a local extension wrapping the grammar.
+3. Point your editor's LSP client at `noeta lsp` (stdio) for `.noe` files — diagnostics, hover, completion, and the rest of the [server's feature table](#the-language-server-noeta-lsp) work in any LSP client.
+4. (Neovim) Optionally wire `noeta dap` into nvim-dap for debugging — config snippet on the [Debugging](Debugging) page.
 
-For a project with third-party text tiers (`@tier(<name>, text: "<lang>")`), `noeta grammar
-tree-sitter --out <dir>` emits a per-project overlay so those `@<name> { … }` bodies parse and
-highlight as their language — the static grammar's `@doc` → markdown rule is the fallback.
+For a project with third-party text tiers (`@tier(<name>, text: "<lang>")`), `noeta grammar tree-sitter --out <dir>` emits a per-project overlay so those `@<name> { … }` bodies parse and highlight as their language — the static grammar's `@doc` → markdown rule is the fallback.
 
 ## The language server (`noeta lsp`)
 
-`noeta lsp` speaks LSP over stdio, and the VS Code extension starts it automatically for `.noe`
-files. It is a thin adapter over the compiler's incremental [salsa query graph](Architecture-and-Pipeline)
-(`tokens → ast → checked → bytecode`, plus the module graph), so an edit re-checks only what
-changed — the diagnostics you see are the *actual compiler's* diagnostics, live.
+`noeta lsp` speaks LSP over stdio, and the VS Code extension starts it automatically for `.noe` files. It is a thin adapter over the compiler's incremental [salsa query graph](Architecture-and-Pipeline) (`tokens → ast → checked → bytecode`, plus the module graph), so an edit re-checks only what changed — the diagnostics you see are the *actual compiler's* diagnostics, live.
 
 What it does today:
 
@@ -75,65 +45,27 @@ What it does today:
 | **Semantic tokens** | Compiler-accurate token coloring layered over the static grammar. |
 | **Inlay hints** | rust-analyzer style: the inferred type of every un-annotated binding (`mut xs`&nbsp;`: List<int>`&nbsp;`= …`) and of inference-typed closure parameters, plus parameter **names** at call sites. Types show their in-scope short name (hover keeps the fully-qualified identity); packed storage is marked compactly on the label (`: Vec3 · packed`, `: List<Cell> · SoA`). Annotated bindings, reassignments, and same-named arguments show nothing. Toggle with VS Code's `editor.inlayHints.enabled`. |
 
-Under load the server stays honest about *which* version it answers for: every open document in
-a directory shares one salsa workspace (one parse per file, however many tabs are open), the
-expensive requests (diagnostics, semantic tokens, completion) run off the message loop and are
-**cancelled when a newer edit supersedes them** — a stale computation answers `ContentModified`
-and the client silently re-asks — and a burst of keystrokes produces one diagnostics publish for
-the final text, not one per keystroke.
+Under load the server stays honest about *which* version it answers for: every open document in a directory shares one salsa workspace (one parse per file, however many tabs are open), the expensive requests (diagnostics, semantic tokens, completion) run off the message loop and are **cancelled when a newer edit supersedes them** — a stale computation answers `ContentModified` and the client silently re-asks — and a burst of keystrokes produces one diagnostics publish for the final text, not one per keystroke.
 
-The same salsa graph powers the [debugger](Debugging)'s launch compile and the conformance
-harness, so all three tools read one source of truth.
+The same salsa graph powers the [debugger](Debugging)'s launch compile and the conformance harness, so all three tools read one source of truth.
 
 ## Debugging
 
-`noeta dap` is a full DAP server: breakpoints, line-granular stepping, stack/scopes/variables, and
-a debug console that is effectively a REPL over the paused program (closures included). It debugs
-the **production VM** — same bytecode, JIT unarmed. See [Debugging](Debugging).
+`noeta dap` is a full DAP server: breakpoints, line-granular stepping, stack/scopes/variables, and a debug console that is effectively a REPL over the paused program (closures included). It debugs the **production VM** — same bytecode, JIT unarmed. See [Debugging](Debugging).
 
 ## Tracing the architecture
 
-Every `@role`-bearing declaration — `@role` is the decorator that confers a typed architectural
-role (entry point, handler layer, persistence boundary, …) on the declarations an attribute
-annotates; see [Attributes & Reflection](Attributes-and-Reflection) — gets a **CodeLens**
-(`⚑ Layer.Handler · trace call paths`);
-running it — or **Trace Call Paths from Here** in the Architecture sidebar's context menu, or
-**Noeta: Trace Call Paths** from the palette for the whole role surface — opens the **trace view**:
-the same static call-graph walk `noeta mcp`'s `trace` tool serves, rendered as a role-colored
-**boundary rail** (each pill a toggle: click to highlight every path reaching that boundary —
-the other pills mute while one is active — double-click to jump to it) over collapsible call
-trees whose indent rails are tinted by role, so the layers read as colored bands. Every row jumps
-to source; the walk's honesty markers are visible — dynamic and external callees dimmed,
-*passed-as-value* references badged (a callback registration is part of the flow but never a
-syntactic call), recursion marked, truncation explicit — and trivial low-level calls stay hidden
-behind a toggle so the architectural shape stays foregrounded.
+Every `@role`-bearing declaration — `@role` is the decorator that confers a typed architectural role (entry point, handler layer, persistence boundary, …) on the declarations an attribute annotates; see [Attributes & Reflection](Attributes-and-Reflection) — gets a **CodeLens** (`⚑ Layer.Handler · trace call paths`); running it — or **Trace Call Paths from Here** in the Architecture sidebar's context menu, or **Noeta: Trace Call Paths** from the palette for the whole role surface — opens the **trace view**: the same static call-graph walk `noeta mcp`'s `trace` tool serves, rendered as a role-colored **boundary rail** (each pill a toggle: click to highlight every path reaching that boundary — the other pills mute while one is active — double-click to jump to it) over collapsible call trees whose indent rails are tinted by role, so the layers read as colored bands. Every row jumps to source; the walk's honesty markers are visible — dynamic and external callees dimmed, *passed-as-value* references badged (a callback registration is part of the flow but never a syntactic call), recursion marked, truncation explicit — and trivial low-level calls stay hidden behind a toggle so the architectural shape stays foregrounded.
 
-The header's **Tree | Lanes** switcher turns the same trace into the **swimlane view**: the call
-trees collapsed to the *role graph* — one column per role, a card per role-bearing function, and
-edges connecting each bearer to the nearest bearers it reaches (the non-role intermediate calls
-collapse away; a connection that exists only through a passed-as-value chain renders dashed). It
-is the layered architecture diagram — Handler → Service → Store as columns — derived from the
-code, never hand-drawn. The boundary rail filters here too: an active boundary dims everything
-except its upstream cards and edges.
+The header's **Tree | Lanes** switcher turns the same trace into the **swimlane view**: the call trees collapsed to the *role graph* — one column per role, a card per role-bearing function, and edges connecting each bearer to the nearest bearers it reaches (the non-role intermediate calls collapse away; a connection that exists only through a passed-as-value chain renders dashed). It is the layered architecture diagram — Handler → Service → Store as columns — derived from the code, never hand-drawn. The boundary rail filters here too: an active boundary dims everything except its upstream cards and edges.
 
 ## Profiling
 
-`noeta profile` reports where a program spends its time — a wall-time **flamegraph** (sampling),
-the exact call-count/self-time table *and* exact call-tree flamegraph (`--instrument`), or the
-bytes-weighted **memory flamegraph** (`--alloc`). Same production VM, tier-0, and — like the
-debugger — outside the differential oracle. The VS Code extension renders profiles **in-editor**:
-an interactive flame-graph view with click-to-source, a sortable function table, hot-line
-annotations in the source itself, and a **thread picker** when the run spawned isolates. All three
-modes are commands (**Noeta: Profile File (Sampling / Instrumenting / Allocations)**, also in the
-run-button dropdown). See [Profiling](Profiling).
+`noeta profile` reports where a program spends its time — a wall-time **flamegraph** (sampling), the exact call-count/self-time table *and* exact call-tree flamegraph (`--instrument`), or the bytes-weighted **memory flamegraph** (`--alloc`). Same production VM, tier-0, and — like the debugger — outside the differential oracle. The VS Code extension renders profiles **in-editor**: an interactive flame-graph view with click-to-source, a sortable function table, hot-line annotations in the source itself, and a **thread picker** when the run spawned isolates. All three modes are commands (**Noeta: Profile File (Sampling / Instrumenting / Allocations)**, also in the run-button dropdown). See [Profiling](Profiling).
 
 ## The agent surface (`noeta mcp`)
 
-`noeta mcp` is a **Model Context Protocol** server over stdio — the compiler's adapter for an AI
-coding agent, the way `noeta lsp` is its adapter for an editor and `noeta dap` for a debug UI.
-Agents have essentially no Noeta in their training data, so the server's first job is **grounding**:
-every answer comes from the real compiler, its real documentation, and its CI-tested examples — not
-from a model's guess.
+`noeta mcp` is a **Model Context Protocol** server over stdio — the compiler's adapter for an AI coding agent, the way `noeta lsp` is its adapter for an editor and `noeta dap` for a debug UI. Agents have essentially no Noeta in their training data, so the server's first job is **grounding**: every answer comes from the real compiler, its real documentation, and its CI-tested examples — not from a model's guess.
 
 Register it with an agent, e.g. Claude Code:
 
@@ -141,10 +73,7 @@ Register it with an agent, e.g. Claude Code:
 claude mcp add noeta -- noeta mcp
 ```
 
-In **VS Code 1.101+** the Noeta extension registers the server automatically (via the editor's MCP
-provider API), so agents running in the editor — Copilot agent mode and friends — discover it with
-no configuration; the extension's `noeta.server.path` setting points at the binary for `lsp`, `dap`,
-and `mcp` alike.
+In **VS Code 1.101+** the Noeta extension registers the server automatically (via the editor's MCP provider API), so agents running in the editor — Copilot agent mode and friends — discover it with no configuration; the extension's `noeta.server.path` setting points at the binary for `lsp`, `dap`, and `mcp` alike.
 
 ### The tools
 
@@ -153,61 +82,27 @@ and `mcp` alike.
 - `examples_find` — CI-tested example programs by feature, concept, or diagnostic code.
 - `stdlib_api` — the real standard-library signatures, straight from the compiler's own registry.
 - `explain_diagnostic` — what an `E0xxx` means, with real programs that trigger and fix it.
-- `project_docs` / `doc_browse` / `doc_page` — the *project's own* `@doc { … }` documentation
-  (distinct from `docs_search`, which reads this language guide): `project_docs` collects every
-  block resolved to what it documents; `doc_browse` walks the same navigable tree the editor's docs
-  browser shows (root → modules → declarations → members); `doc_page` reads one node's signature and
-  prose. All three work from a parse alone, so they read work-in-progress code.
+- `project_docs` / `doc_browse` / `doc_page` — the *project's own* `@doc { … }` documentation (distinct from `docs_search`, which reads this language guide): `project_docs` collects every block resolved to what it documents; `doc_browse` walks the same navigable tree the editor's docs browser shows (root → modules → declarations → members); `doc_page` reads one node's signature and prose. All three work from a parse alone, so they read work-in-progress code.
 
-Every tool that takes a `file` analyzes **the whole program** — the entry, its sibling modules, and
-the packages its `noeta.toml` depends on, each under its own language edition. Dependency
-resolution is a read-only query: asking a question never rewrites `noeta.lock`.
+Every tool that takes a `file` analyzes **the whole program** — the entry, its sibling modules, and the packages its `noeta.toml` depends on, each under its own language edition. Dependency resolution is a read-only query: asking a question never rewrites `noeta.lock`.
 
-A failing tool fails **one request, not the session**: an internal error comes back as a JSON-RPC
-error naming the tool, and the server keeps serving. Retry it or ask something else — no reconnect.
+A failing tool fails **one request, not the session**: an internal error comes back as a JSON-RPC error naming the tool, and the server keeps serving. Retry it or ask something else — no reconnect.
 
 **Understand** — the compiler's semantic answers:
 - `check` — type-check code; the same JSON diagnostics `noeta check --format json` emits.
 - `type_at` / `symbols` — the inferred type at a symbol/position (plus a `layout` storage fact for `@packed`/flat-list types, same wording as editor hover); a file's declaration outline.
-- `definition` / `references` / `completions` / `signature` — navigation over the **same
-  `noeta-ide` engine the language server serves**, so agent and editor can never disagree; a `file`
-  entry resolves cross-file through sibling modules and dependency packages.
+- `definition` / `references` / `completions` / `signature` — navigation over the **same `noeta-ide` engine the language server serves**, so agent and editor can never disagree; a `file` entry resolves cross-file through sibling modules and dependency packages.
 
 **Introspect** — the compiler's artifacts:
-- `ast` / `bytecode` / `pipeline` / `module_graph` — the syntax tree, the VM disassembly, a
-  per-stage health summary, and the `use` import graph (each module labeled with the `@role`
-  bindings it declares).
-- `reflect` — the [attributes & `@role` reflection manifest](Attributes-and-Reflection): which
-  declarations are entry points, trust boundaries, persistence boundaries, sinks, or layers —
-  each with its source location, joinable with every other tool. The `symbols` outline carries
-  the same roles per node, so the architecture shows on the map itself. A role conferred by a
-  **dependency package's** `@role`-bearing attribute is indexed exactly like one declared in the
-  file at hand — tagging a package's tool attribute `@role(Semantic.TrustBoundary)` is what makes
-  "what can a language model reach in this program?" answerable off the architecture graph, and
-  the answer here is the same one `roles_of()` gives in-language.
-- `trace` — unfold the **static call path from a role**: `trace(from: "EntryPoint")` starts at
-  every function bearing the role and walks the call graph — each node a function with its own
-  roles, declaration and call sites; external module calls and dynamic callees are labeled
-  leaves, and passed-function references (handler registrations, callbacks) are followed as
-  `reference` edges. The `boundaries` summary answers the architectural question directly: which
-  persistence/trust boundaries does this entry point reach.
+- `ast` / `bytecode` / `pipeline` / `module_graph` — the syntax tree, the VM disassembly, a per-stage health summary, and the `use` import graph (each module labeled with the `@role` bindings it declares).
+- `reflect` — the [attributes & `@role` reflection manifest](Attributes-and-Reflection): which declarations are entry points, trust boundaries, persistence boundaries, sinks, or layers — each with its source location, joinable with every other tool. The `symbols` outline carries the same roles per node, so the architecture shows on the map itself. A role conferred by a **dependency package's** `@role`-bearing attribute is indexed exactly like one declared in the file at hand — tagging a package's tool attribute `@role(Semantic.TrustBoundary)` is what makes "what can a language model reach in this program?" answerable off the architecture graph, and the answer here is the same one `roles_of()` gives in-language.
+- `trace` — unfold the **static call path from a role**: `trace(from: "EntryPoint")` starts at every function bearing the role and walks the call graph — each node a function with its own roles, declaration and call sites; external module calls and dynamic callees are labeled leaves, and passed-function references (handler registrations, callbacks) are followed as `reference` edges. The `boundaries` summary answers the architectural question directly: which persistence/trust boundaries does this entry point reach.
 
 **Execute** — run and observe, not just read:
-- `run` / `eval` / `test` — run a program (stdout/exit/traceback), evaluate an expression
-  (value + type), run `@test` blocks. **Sandboxed and deterministic by default** (in-memory fs,
-  logical clock, seeded random; `real: true` opts into the real host). All three are bounded by
-  liveness limits — a runaway loop is stopped in-VM, never hung: `run` reports `limit_hit`, `eval`
-  returns with `limit_hit` set, and a `test` case that spins fails (with `limit_hit`) instead of
-  hanging the suite. Every bound is defaulted and tunable per call (`limits`).
-- `debug_start` / `debug_inspect` / `debug_step` / `debug_eval` / `debug_stop` — interactive debug
-  sessions over the VM's own debugger seam: pause at entry or breakpoints, read the call stack and
-  live locals, step by line, evaluate expressions in a paused frame (type-checked against the
-  program first). A runaway `continue` lands in an inspectable `limit` **pause** — for an agent
-  chasing an infinite loop, seeing the live counter mid-spin *is* the diagnosis.
+- `run` / `eval` / `test` — run a program (stdout/exit/traceback), evaluate an expression (value + type), run `@test` blocks. **Sandboxed and deterministic by default** (in-memory fs, logical clock, seeded random; `real: true` opts into the real host). All three are bounded by liveness limits — a runaway loop is stopped in-VM, never hung: `run` reports `limit_hit`, `eval` returns with `limit_hit` set, and a `test` case that spins fails (with `limit_hit`) instead of hanging the suite. Every bound is defaulted and tunable per call (`limits`).
+- `debug_start` / `debug_inspect` / `debug_step` / `debug_eval` / `debug_stop` — interactive debug sessions over the VM's own debugger seam: pause at entry or breakpoints, read the call stack and live locals, step by line, evaluate expressions in a paused frame (type-checked against the program first). A runaway `continue` lands in an inspectable `limit` **pause** — for an agent chasing an infinite loop, seeing the live counter mid-spin *is* the diagnosis.
 
 **Transform**:
 - `format` — canonical formatting, the same engine as `noeta fmt`; declines on unparseable source.
 
-Also useful to an agent (or a human): `noeta dump <file>` prints the exact VM bytecode a program
-compiles to — what actually runs, which fast paths fired, how names and constants are laid out. See
-[The CLI](The-CLI#noeta-dump).
+Also useful to an agent (or a human): `noeta dump <file>` prints the exact VM bytecode a program compiles to — what actually runs, which fast paths fired, how names and constants are laid out. See [The CLI](The-CLI#noeta-dump).

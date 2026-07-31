@@ -845,6 +845,9 @@ impl Resolver {
                 self.walk_args(args);
             }
             Expr::TypedCall { args, .. } => self.walk_args(args),
+            // `Repo::<Todo>` — the type arguments are types (not walked as expressions here, like
+            // every other turbofish above); the reference they instantiate is an ordinary one.
+            Expr::InstantiatedType { recv, .. } => self.walk_expr(recv),
             Expr::TypedMethodCall { recv, args, .. } => {
                 self.walk_expr(recv);
                 self.walk_args(args);

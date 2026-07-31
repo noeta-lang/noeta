@@ -7278,9 +7278,10 @@ fn value_to_json(value: &Value) -> String {
 }
 
 /// Deeply marshal a tree-walker value into the neutral [`noeta_stdlib::NativeValue`] tree the shared
-/// JSON serializer consumes. Numbers become scalars; strings, enum variants, and the opaque
+/// JSON serializer consumes. Numbers become scalars; strings and the opaque
 /// `<fn>`/`<module …>` summaries become [`NativeValue::Str`]; a `bytes` buffer becomes
-/// [`noeta_stdlib::NativeValue::Bytes`]; lists/tuples/sets become a
+/// [`noeta_stdlib::NativeValue::Bytes`]; an enum value a
+/// [`noeta_stdlib::NativeValue::Variant`] carrying its payload; lists/tuples/sets become a
 /// [`NativeValue::List`]; maps and objects a [`NativeValue::Map`] (objects in declared field order).
 /// Mirrors the VM's [`noeta_value::Value::to_native_deep`] so both backends agree — per-
 /// representation glue, mirrored by design (see `plans/backend-mirror.md`); divergence is caught
@@ -7342,8 +7343,19 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
                 .unwrap_or(NativeValue::Unit),
             _ => NativeValue::Unit,
         },
-        // Any other enum marshals to its variant name (the tag).
-        Value::Enum(e) => NativeValue::Str(e.variant.clone()),
+        // Any other enum crosses as ITSELF — the full variant (enum name + case + declaration index
+        // + payload), exactly as the shallow [`marshal_native_arg`] projects it, so a value's shallow
+        // and deep projections agree. It used to flatten to `NativeValue::Str(variant)`, the *display*
+        // vocabulary standing in for the value: the payload was dropped with no error, so
+        // `json.stringify(Shape.Circle(3))` was `"Circle"` and every `deep_marshal` consumer received
+        // a tag where it was handed a value. The payload marshals recursively (deeply, like every
+        // other nested value here).
+        Value::Enum(e) => NativeValue::Variant {
+            enum_name: e.enum_name.clone(),
+            variant: e.variant.clone(),
+            variant_index: e.variant_index as u32,
+            fields: e.data.iter().map(value_to_native_deep).collect(),
+        },
         Value::Function(_)
         | Value::Builtin(_)
         | Value::ModuleFn(..)

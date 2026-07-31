@@ -43,11 +43,7 @@ fn unwrap_or_zero(r: Result<int, string>): int {
 
 ## Sealed functions & the `use (…)` capture clause
 
-A named function is **sealed**: its body sees its parameters and the program's *declarations*
-(other functions, types, imports) — never the surrounding **value bindings**. A top-level `items`
-does not leak into `fn place(items: …)`; inside the body, `items` means the parameter, always.
-To read a surrounding binding, import it explicitly with a capture clause between the parameter
-list and the return type:
+A named function is **sealed**: its body sees its parameters and the program's *declarations* (other functions, types, imports) — never the surrounding **value bindings**. A top-level `items` does not leak into `fn place(items: …)`; inside the body, `items` means the parameter, always. To read a surrounding binding, import it explicitly with a capture clause between the parameter list and the return type:
 
 ```noeta
 tax_rate = 0.25
@@ -57,18 +53,9 @@ fn with_tax(price: float) use (tax_rate): float {
 echo with_tax(100.0)   // 125.0
 ```
 
-A capture is a **live view** of the named binding (a `mut` global mutated later is seen; writing
-through the capture follows the binding's own `mut` rules). The clause works on methods and
-nested `fn`s the same way — a nested `fn` importing an enclosing `mut` local is the explicit form
-of a closure counter. Without the clause, a reference to a top-level binding is an error with the
-fix spelled out (E0005: *add `use (name)` to the signature, or pass it as a parameter*), and a
-bare assignment to an unlisted name simply declares a fresh local.
+A capture is a **live view** of the named binding (a `mut` global mutated later is seen; writing through the capture follows the binding's own `mut` rules). The clause works on methods and nested `fn`s the same way — a nested `fn` importing an enclosing `mut` local is the explicit form of a closure counter. Without the clause, a reference to a top-level binding is an error with the fix spelled out (E0005: *add `use (name)` to the signature, or pass it as a parameter*), and a bare assignment to an unlisted name simply declares a fresh local.
 
-**No shadowing (E0059).** One name means one thing per scope stack — the rule in full lives in
-[Syntax Basics](Syntax-Basics#bindings-and-mutability). Sealing is what keeps it ergonomic here:
-named-fn params conflict with nothing because the surrounding bindings genuinely are not in
-scope, while an anonymous closure captures implicitly — so `fn(base) => …` under a visible
-`base` is rejected; rename one.
+**No shadowing (E0059).** One name means one thing per scope stack — the rule in full lives in [Syntax Basics](Syntax-Basics#bindings-and-mutability). Sealing is what keeps it ergonomic here: named-fn params conflict with nothing because the surrounding bindings genuinely are not in scope, while an anonymous closure captures implicitly — so `fn(base) => …` under a visible `base` is rejected; rename one.
 
 ## Default (optional) parameters
 

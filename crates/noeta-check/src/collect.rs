@@ -1520,6 +1520,7 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
             }
         }
         Expr::Unary { operand: inner, .. }
+        | Expr::InstantiatedType { recv: inner, .. }
         | Expr::Member {
             receiver: inner, ..
         }

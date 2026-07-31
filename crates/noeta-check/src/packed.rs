@@ -360,7 +360,7 @@ impl Checker {
             self.sites.dynamic_construction_sites.insert(span, slot);
             return;
         }
-        self.report_unrecordable(type_name, ret, span);
+        self.report_unrecordable(type_name, method, ret, span);
     }
 
     /// Whether `ty` is concrete **except** for bare mentions of the type parameters `allowed` — the
@@ -402,6 +402,78 @@ impl Checker {
         }
     }
 
+    /// Whether `ty` is concrete **except** for `dyn`/unresolved holes — the third openness, and the
+    /// one that means *no instantiation reached this construction*.
+    ///
+    /// The two are one bucket because by the time a call's result is in hand they are literally the
+    /// same type: `subst_or_dyn` erases a type parameter no argument, receiver or expectation bound
+    /// to `dyn`, so `r = Repo.new("t")` and `r: Repo<dyn> = Repo.new("t")` both arrive here as
+    /// `Repo<dyn>` with nothing left to tell them apart. It costs nothing to conflate them, because
+    /// the consequence is identical: a `Repo` that reads `type_name::<T>()` cannot answer for an
+    /// erased `T` either way, and aborts.
+    ///
+    /// The sibling of [`Self::open_only_by_params`], and deliberately as strict everywhere else. A
+    /// `dyn Trait` is refused — a trait object names a real bound and the head-only runtime
+    /// classification still describes it, so it is not the missing-answer shape — and so is a
+    /// mention of an in-scope type parameter, which is the other function's case.
+    pub(crate) fn open_only_by_erasure(&self, ty: &Type) -> bool {
+        if matches!(ty, Type::Unknown | Type::Dyn) {
+            return true;
+        }
+        if matches!(ty, Type::DynTrait(_)) {
+            return false;
+        }
+        let rec = |t: &Type| self.open_only_by_erasure(t);
+        match ty {
+            Type::Named(n, args) => {
+                !self.mentions_in_scope_param(&Type::Named(n.clone(), Vec::new()))
+                    && args.iter().all(rec)
+            }
+            Type::Tuple(args) | Type::Union(args) => args.iter().all(rec),
+            Type::List(e) | Type::Set(e) | Type::Option(e) => rec(e),
+            Type::Map(k, v) | Type::Result(k, v) => rec(k) && rec(v),
+            Type::Fn { params, ret } => params.iter().all(&rec) && rec(ret),
+            _ => true,
+        }
+    }
+
+    /// Report a fresh generic construction **nothing supplied an instantiation for** (`E0058`) — the
+    /// call that used to check clean and abort at run time on the first `type_name::<T>()`.
+    ///
+    /// It existed as a hole for one reason: there was no way to say the type at the call site, so
+    /// erroring would have rejected code with no fix. `Repo::<Todo>.new(…)` is that fix, which is
+    /// what turns silence into a diagnostic here — and the help names the new spelling first,
+    /// because it is the only one that works without moving the call.
+    ///
+    /// Guarded by the same `reflective_generic_types` filter as its sibling: a generic type that
+    /// never asks what `T` is does not care whether it carries a tag, so the erasure is harmless and
+    /// erroring would be noise.
+    fn report_unsupplied_instantiation(&mut self, type_name: &str, method: &str, span: Span) {
+        let params = self
+            .symbols
+            .generic_types
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default();
+        let names = params.join("`, `");
+        let is_are = if params.len() == 1 { "is" } else { "are" };
+        self.error(
+            DiagnosticCode::InvalidTypeArguments,
+            span,
+            format!(
+                "this `{type_name}` records no type argument for `{names}`: nothing at or around \
+                 this call supplies an instantiation, so `{names}` {is_are} erased and the object \
+                 can never report it"
+            ),
+        )
+        .help(format!(
+            "state it AT the call — `{type_name}::<...>.{method}(args)` — or put the call in a \
+             position that declares the type: an annotated binding \
+             (`r: {type_name}<...> = …`), a declared `return`, a field's declared type, or a \
+             parameter's"
+        ));
+    }
+
     /// Report a fresh generic construction whose instantiation is **structurally unrecordable**
     /// (`E0058`) — the check-time replacement for a run-time abort, and the reason it is worth an
     /// error rather than silence.
@@ -423,12 +495,20 @@ impl Checker {
     ///   run-time abort `constructor_type_arg_open_parameter` pins on purpose.
     ///
     /// The message names the real cause, which differs by channel, and the route that works.
-    fn report_unrecordable(&mut self, type_name: &str, ret: &Type, span: Span) {
+    fn report_unrecordable(&mut self, type_name: &str, method: &str, ret: &Type, span: Span) {
         if !self.symbols.reflective_generic_types.contains(type_name) {
             return;
         }
         let in_scope: Vec<String> = self.coloring.type_params.keys().cloned().collect();
         let Type::Named(_, args) = ret else { return };
+        // ERASED rather than open by a parameter: no instantiation reached this call at all —
+        // nothing is waiting to be inferred, and the object provably never gets a tag. That is the
+        // check/run divergence this arc closes, and it is now sayable at the call site, so it gets
+        // its own diagnostic.
+        if args.iter().all(|a| self.open_only_by_erasure(a)) {
+            self.report_unsupplied_instantiation(type_name, method, span);
+            return;
+        }
         if !args.iter().all(|a| self.open_only_by_params(a, &in_scope)) {
             return;
         }

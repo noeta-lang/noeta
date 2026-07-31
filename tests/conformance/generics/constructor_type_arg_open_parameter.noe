@@ -1,12 +1,15 @@
 // The **`fully_concrete` gate**, from the other side: an argument position whose parameter type is
-// still OPEN records nothing. `fn keep<T>(x: T): T` says nothing about `Inner`'s instantiation, so
-// the call keeps synthesizing bottom-up and binds `T = Inner` itself — and the `Inner` it returns
-// carries no type argument, so `type_name::<T>()` aborts.
+// still OPEN supplies nothing. `fn keep<T>(x: T): T` makes no claim about `Inner`'s instantiation,
+// so the call keeps synthesizing bottom-up and binds `T = Inner` itself — and the `Inner` it
+// returns has no type argument to carry.
 //
-// Deliberate, not a gap. A tag is a claim about the value; recording `Inner<dyn>` here would invent
-// a fact the site does not have, which is the silent-wrong-name failure the abort exists to prevent.
-// This case is what keeps the expectation-driven positions from widening into a guess.
-// expect: error E0058 at 22:33
+// The gate itself is deliberate and unchanged: a tag is a claim about the value, and recording
+// `Inner<dyn>` here would invent a fact the site does not have — the silent-wrong-name failure the
+// whole tag exists to prevent. What changed is the REPORT. The instantiation is now sayable at the
+// call (`keep(Inner::<Todo>.new("todos"))`), so an erased construction of a type that reflects on
+// its own parameter is a check-time E0058 at the construction, instead of a clean check and an
+// abort at the `type_name::<T>()` that happened to read it first.
+// expect: error E0058 at 31:11
 // expect: exit 1
 struct Todo {
     id: int

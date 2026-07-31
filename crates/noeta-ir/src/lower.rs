@@ -1878,6 +1878,12 @@ impl Lowerer<'_> {
                 },
                 *span,
             )),
+            // `Repo::<Todo>` — a type reference carrying an explicit instantiation. Generics are
+            // erased at runtime and the instantiation already reached the value at check time (the
+            // construction-site tag recorded at the enclosing call's span), so the node is
+            // TRANSPARENT here: it lowers as the type reference it wraps, and `Repo::<Todo>.new(x)`
+            // emits byte-for-byte what `Repo.new(x)` emits.
+            Expr::InstantiatedType { recv, .. } => self.lower_expr(recv, out),
             Expr::Str { value, .. } => Ok(Atom::Const(Const::Str(value.clone()))),
             // `type_name::<T>()` — a **compile-time constant string**, with no runtime node at all:
             // by the time lowering runs the program is linked, so this `TypeRef` already carries its
