@@ -646,6 +646,12 @@ pub fn workspace_with_deps(
 /// it. Idempotent: releasing an already-emptied source is a cheap re-confirmation.
 pub fn release_source(db: &mut LangDatabase, ws: Workspace, src: SourceProgram) {
     use salsa::Setter as _;
+    // 0. The tier shapes this source had *before* it was emptied. Their memos
+    //    (`tier_activated_from`/`tier_checked_from`) are keyed on the tier name, so once the text is
+    //    gone `entry_code_tiers` comes back empty and nothing would name them again — they would stay
+    //    resident at full size (a whole activated `Program`) forever. Captured here, recomputed in
+    //    step 2 over the emptied source. Empty for nearly every file, which costs nothing.
+    let tiers: Vec<String> = entry_code_tiers(db, ws, src).clone();
     // 1. Free the source text and name (the unbounded per-file allocations the input holds).
     src.set_name(db).to(String::new());
     src.set_text(db).to(String::new());
@@ -656,6 +662,12 @@ pub fn release_source(db: &mut LangDatabase, ws: Workspace, src: SourceProgram) 
     let _ = ast_in(db, ws, src); // recomputes tokens_in + ast_in
     let _ = linked_checked_ide_from(db, ws, src); // recomputes linked_from + the ide check as entry
     let _ = linked_bytecode_from(db, ws, src); // recomputes linked_checked_from + linked_from + Module
+    let _ = entry_code_tiers(db, ws, src); // now empty
+    for tier in tiers {
+        // Recomputes tier_activated_from + tier_checked_from over the emptied source, overwriting
+        // each fat memo (an activated `Program` and its `Checked`) with an empty-program equivalent.
+        let _ = tier_checked_from(db, ws, src, tier);
+    }
 }
 
 /// Flatten a rename map to the `[local0, global0, …]` pairs a [`DepModule`] stores.
@@ -1281,6 +1293,208 @@ pub fn linked_checked_ide_from(
     }
 }
 
+// ---------------------------------------------------------------------------
+// The dev-tier shapes of an entry (the tier-aware check)
+// ---------------------------------------------------------------------------
+//
+// `linked_checked_from` checks exactly ONE shape of a file: the stripped, shipping one. A
+// `@test { … }` block is dropped before the checker sees it, so its body's type error is
+// invisible to every consumer of that query — which is why a green `noeta check` could be
+// followed by a `noeta test` that does not compile. The CLI closed that for `noeta check` by
+// checking each entry once as it ships and then once per code tier its own blocks name; these
+// queries are the same sweep as a salsa graph, so the MCP `check` tool and the editor agree with
+// the CLI instead of each re-deriving it.
+//
+// ```text
+//   linked_from(ws, entry) ─┬─► linked_checked_from / linked_checked_ide_from   (shipping shape)
+//                           │
+//                           ├─► entry_code_tiers(ws, entry) -> Vec<String>      (backdates)
+//                           │
+//                           └─► tier_activated_from(ws, entry, tier)  (backdates)
+//                                        └─► tier_checked_from(ws, entry, tier)
+// ```
+//
+// Four properties make this affordable on the editor's per-keystroke path:
+//
+// 1. **It is its own query family.** Hover, inlay hints, completion and semantic tokens read
+//    `linked_checked_ide_from` and pay nothing for it; only the diagnostics publish walks it.
+// 2. **An entry with no code-tier block pays nothing** — `entry_code_tiers` is an AST walk over an
+//    already-linked program and comes back empty for nearly every file, and no check runs.
+// 3. **A tier pass records no `expr_types`.** It exists to produce diagnostics, so it runs the
+//    cheaper compile-flavored options, not the IDE-flavored ones.
+// 4. **`tier_activated_from` backdates.** Activation for tier T *drops* every other tier's block,
+//    so an edit inside a `@bench` body leaves the `@test`-activated program byte-identical and
+//    salsa skips the `@test` check entirely; so does an edit that does not change the AST at all.
+//    Activation re-runs (its input, `linked_from`, never backdates) but that is one AST walk, and
+//    the expensive half — the type check — is what gets skipped.
+//
+// One tier per pass, never a joint one: no build compiles `@test` and `@bench` together, and a
+// joint pass would invent collisions between two blocks' same-named helpers.
+
+/// One dev tier's **activated** shape of an entry: the program that tier's blocks build, with every
+/// other tier's block dropped — plus activation's own diagnostics (`E0036` for an unknown tier).
+///
+/// `program` is `None` when the entry did not link (there is nothing to activate); the shipping
+/// shape's query already carries the link diagnostics, so this contributes none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TierActivated {
+    pub program: Option<Program>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+// Backdating, deliberately — this is the narrowing that makes the editor path affordable (see
+// above): an edit that leaves *this* tier's shape unchanged must not re-run its type check.
+backdating_update!(TierActivated);
+
+/// Every **code** tier the entry's own `@<tier> { … }` blocks name — the shapes besides the
+/// shipping one that a tool can still build out of this source, in first-appearance order.
+///
+/// The salsa form of [`noeta_check::code_tiers_in`], so the editor and the MCP tool ask the same
+/// question the CLI's `noeta check` asks. Text tiers (`@doc`, any `text:` tier), expression tiers,
+/// and a *dependency's* blocks contribute none — a text/expression body holds no statements to
+/// type-check, and a dependency's tiers are not this entry's to check.
+///
+/// Backdates: the value changes only when a tier block is added, removed or renamed, so ordinary
+/// editing inside a block leaves it equal and its readers stay memoized.
+#[salsa::tracked(returns(ref))]
+pub fn entry_code_tiers(
+    db: &dyn salsa::Database,
+    ws: Workspace,
+    entry: SourceProgram,
+) -> Vec<String> {
+    match &linked_from(db, ws, entry).program {
+        Ok(program) => {
+            let packages = workspace_packages(db, ws);
+            noeta_check::code_tiers_in(
+                program,
+                &noeta_check::TierContext {
+                    uses: &ws.package_uses(db).0,
+                    packages: &packages,
+                },
+            )
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The entry's program with **exactly `tier`** live — the shape `noeta test`/`noeta bench`/
+/// `noeta <tier>` compiles. See the module-level note on why this is its own (backdating) query.
+#[salsa::tracked(returns(ref))]
+pub fn tier_activated_from(
+    db: &dyn salsa::Database,
+    ws: Workspace,
+    entry: SourceProgram,
+    tier: String,
+) -> TierActivated {
+    match &linked_from(db, ws, entry).program {
+        Ok(program) => {
+            let packages = workspace_packages(db, ws);
+            let activated = noeta_check::activate_tiers_with(
+                program,
+                &[tier.as_str()],
+                &noeta_check::TierContext {
+                    uses: &ws.package_uses(db).0,
+                    packages: &packages,
+                },
+            );
+            TierActivated {
+                program: Some(activated.program),
+                diagnostics: activated.diagnostics,
+            }
+        }
+        Err(_) => TierActivated {
+            program: None,
+            diagnostics: Vec::new(),
+        },
+    }
+}
+
+/// Type-check the entry as `tier` builds it — the tier-aware analogue of [`linked_checked_from`],
+/// memoized per `(ws, entry, tier)`.
+///
+/// The `SourceId`s survive activation, so the workspace's edition and package maps stay valid over
+/// the derived program (that is why [`workspace_editions`]/[`workspace_packages`] are public).
+/// Deliberately *not* the IDE flavor: this feeds diagnostics only, and an `expr_types` index over a
+/// shape the user is not editing would be paid for on every keystroke and read by nothing.
+#[salsa::tracked(returns(ref))]
+pub fn tier_checked_from(
+    db: &dyn salsa::Database,
+    ws: Workspace,
+    entry: SourceProgram,
+    tier: String,
+) -> Checked {
+    let activated = tier_activated_from(db, ws, entry, tier);
+    let Some(program) = &activated.program else {
+        return Checked {
+            diagnostics: Vec::new(),
+            expr_types: std::collections::HashMap::new(),
+            sites: noeta_check::Sites::default(),
+            bundle_bindings: std::collections::HashMap::new(),
+            packed_layouts: std::collections::HashMap::new(),
+        };
+    };
+    let mut checked = from_check_output(noeta_check::check_all_cancellable(
+        program,
+        noeta_check::CheckOptions {
+            editions: workspace_editions(db, ws),
+            packages: workspace_packages(db, ws),
+            package_uses: ws.package_uses(db).0.clone(),
+            ..noeta_check::CheckOptions::default()
+        },
+        &|| db.unwind_if_revision_cancelled(),
+    ));
+    // Activation's own `E0036` (a block naming an unknown tier) is part of what this shape reports.
+    let mut diagnostics = activated.diagnostics.clone();
+    diagnostics.append(&mut checked.diagnostics);
+    checked.diagnostics = diagnostics;
+    checked
+}
+
+/// The diagnostics of every **non-shipping** shape of `entry`: one pass per code tier its own
+/// blocks name, deduplicated across tiers by `(source, span, code)` so a fault outside any tier
+/// block — which every pass reports — appears once.
+///
+/// A plain function, not a tracked query: it is a loop over already-memoized per-tier results, and
+/// a memo of its own would only add a second copy of the diagnostics that can never backdate.
+/// Empty (and free) for an entry that declares no code-tier block.
+///
+/// The caller merges these with the shipping shape's own diagnostics, deduplicating on
+/// [`diagnostic_key`] — the shipping pass reports the same faults outside the tier blocks.
+pub fn tier_diagnostics_from(
+    db: &dyn salsa::Database,
+    ws: Workspace,
+    entry: SourceProgram,
+) -> Vec<Diagnostic> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for tier in entry_code_tiers(db, ws, entry) {
+        for diagnostic in &tier_checked_from(db, ws, entry, tier.clone()).diagnostics {
+            if seen.insert(diagnostic_key(diagnostic)) {
+                out.push(diagnostic.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The identity a diagnostic is deduplicated by when several *shapes* of one entry are checked:
+/// where it is and what it is, never which pass produced it. The same key `noeta check` folds its
+/// per-tier passes into, so the CLI, the MCP tool and the editor never disagree about how many
+/// times one fault is reported.
+pub fn diagnostic_key(d: &Diagnostic) -> (SourceId, u32, u32, &'static str) {
+    (d.span.source, d.span.start, d.span.end, d.code.code())
+}
+
+/// Classic single-entry tier sweep: [`tier_diagnostics_from`] the workspace's first member.
+pub fn tier_diagnostics(db: &dyn salsa::Database, ws: Workspace) -> Vec<Diagnostic> {
+    tier_diagnostics_from(db, ws, workspace_entry(db, ws))
+}
+
+/// Classic single-entry code tiers: [`entry_code_tiers`] of the workspace's first member.
+pub fn workspace_code_tiers(db: &dyn salsa::Database, ws: Workspace) -> &Vec<String> {
+    entry_code_tiers(db, ws, workspace_entry(db, ws))
+}
+
 /// Classic single-entry ide check: [`linked_checked_ide_from`] the workspace's first member.
 pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> &Checked {
     linked_checked_ide_from(db, ws, workspace_entry(db, ws))
@@ -1417,6 +1631,128 @@ mod tests {
         // The session is not corrupted by the unwind: the next query recomputes cleanly over the
         // new (now-tiny) text.
         assert!(checked(&db, src).diagnostics.is_empty());
+    }
+
+    /// A [`LangDatabase`] that records the name of every tracked query salsa actually **executes**
+    /// — the only way to prove memoization narrows rather than merely returning the right answer.
+    fn logging_db(log: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> LangDatabase {
+        LangDatabase {
+            storage: salsa::Storage::new(Some(Box::new(move |event: salsa::Event| {
+                if let salsa::EventKind::WillExecute { database_key } = event.kind {
+                    log.lock().unwrap().push(format!("{database_key:?}"));
+                }
+            }))),
+        }
+    }
+
+    /// How many times a query whose name contains `needle` executed. Non-destructive — the caller
+    /// clears the log explicitly, so asking two questions about one revision does not lose the
+    /// second answer.
+    fn executions(log: &std::sync::Mutex<Vec<String>>, needle: &str) -> usize {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|k| k.contains(needle))
+            .count()
+    }
+
+    /// A file's `@test` and `@bench` blocks are checked as two separate builds — and editing inside
+    /// one must not re-check the other.
+    ///
+    /// This is the property that makes the tier sweep affordable on the editor's per-keystroke path.
+    /// `tier_activated_from` *drops* every tier but its own, so an edit inside `@bench` leaves the
+    /// `@test`-activated program identical, its backdating `Update` reports "unchanged", and salsa
+    /// skips the `@test` type check — the expensive half. Activation itself re-runs (its input,
+    /// `linked_from`, never backdates), which is one AST walk.
+    #[test]
+    fn editing_one_tier_block_does_not_recheck_another() {
+        seed_std();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut db = logging_db(std::sync::Arc::clone(&log));
+        let program = |bench_body: &str| {
+            format!(
+                "fn add(a: int, b: int): int {{ return a + b }}\n\n\
+                 @test {{\n    fn adds(): void {{ assert(add(1, 2) == 3) }}\n}}\n\n\
+                 @bench {{\n    fn adding(): void {{ echo {bench_body} }}\n}}\n"
+            )
+        };
+        let source = Source::new(SourceId::FIRST, "tiered.noe", program("add(1, 2)"));
+        let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+        let ws = Workspace::new(&db, vec![src], Vec::new(), WorkspaceUses::default());
+
+        assert_eq!(entry_code_tiers(&db, ws, src), &["test", "bench"]);
+        assert!(tier_diagnostics_from(&db, ws, src).is_empty());
+        // Both shapes were checked the first time round.
+        assert_eq!(executions(&log, "tier_checked_from"), 2);
+
+        // An edit *inside the `@bench` block only*.
+        log.lock().unwrap().clear();
+        {
+            use salsa::Setter as _;
+            src.set_text(&mut db).to(program("add(2, 3)"));
+        }
+        assert!(tier_diagnostics_from(&db, ws, src).is_empty());
+        assert_eq!(
+            executions(&log, "tier_activated_from"),
+            2,
+            "activation re-runs for both shapes — it is one AST walk"
+        );
+        assert_eq!(
+            executions(&log, "tier_checked_from"),
+            1,
+            "only the `@bench` shape changed, so only it may be re-checked"
+        );
+    }
+
+    /// The overwhelmingly common file declares no code-tier block, and must pay for **no** extra
+    /// type check at all — not one per edit, not one ever.
+    #[test]
+    fn a_file_with_no_tier_block_runs_no_extra_check() {
+        seed_std();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut db = logging_db(std::sync::Arc::clone(&log));
+        let source = Source::new(SourceId::FIRST, "plain.noe", "echo 1 + 2\n");
+        let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+        let ws = Workspace::new(&db, vec![src], Vec::new(), WorkspaceUses::default());
+
+        assert!(tier_diagnostics_from(&db, ws, src).is_empty());
+        assert_eq!(executions(&log, "tier_checked_from"), 0);
+        log.lock().unwrap().clear();
+        {
+            use salsa::Setter as _;
+            src.set_text(&mut db).to("echo 2 + 3\n".to_string());
+        }
+        assert!(tier_diagnostics_from(&db, ws, src).is_empty());
+        assert_eq!(
+            executions(&log, "tier_checked_from"),
+            0,
+            "no code-tier block, no tier check"
+        );
+    }
+
+    /// A type error inside a `@test` body is invisible to the shipping-shape query (the block is
+    /// stripped before the checker sees it) and must be reported by the tier sweep.
+    #[test]
+    fn the_tier_sweep_sees_a_stripped_blocks_type_error() {
+        seed_std();
+        let db = LangDatabase::default();
+        let source = Source::new(
+            SourceId::FIRST,
+            "tiered.noe",
+            "fn add(a: int, b: int): int { return a + b }\n\n@test {\n    fn adds(): void { n: int = \"lots\" }\n}\n",
+        );
+        let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+        let ws = Workspace::new(&db, vec![src], Vec::new(), WorkspaceUses::default());
+
+        assert!(
+            linked_checked(&db, ws).diagnostics.is_empty(),
+            "the shipping shape strips the block — that is the whole point"
+        );
+        let swept = tier_diagnostics(&db, ws);
+        assert!(
+            swept.iter().any(|d| d.code.code() == "E0007"),
+            "the tier sweep must see it; got {swept:?}"
+        );
     }
 
     #[test]

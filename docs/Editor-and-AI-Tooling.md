@@ -35,7 +35,7 @@ What it does today:
 
 | Feature | Notes |
 |---|---|
-| **Live diagnostics** | Every `E0xxx` with its span, on every keystroke (incremental `didChange`). |
+| **Live diagnostics** | Every `E0xxx` with its span, on every keystroke (incremental `didChange`) — including **inside `@test`/`@bench`/`@debug` blocks**, each checked as the shape its own build compiles, exactly as [`noeta check`](The-CLI#noeta-check) does. A tier body's type error underlines where you wrote it instead of waiting for `noeta test`. |
 | **Hover types** | The inferred static type of the expression under the cursor, in surface syntax (`List<int>`, `Result<Order, OrderError>`). Non-default storage adds a fact line: a `@packed` type shows `@packed — 12 bytes`, a `List<packed>` shows `flat packed storage — 12 bytes/element, row-major` (or `column-major (SoA)` for `@packed(Layout.Column)`). |
 | **Go to definition** | Cross-module: a name defined in an imported module resolves to that file. |
 | **Find references / rename** | Including struct/class **members**; rename is prepare-checked so you can't rename what isn't renameable. |
@@ -89,7 +89,7 @@ Every tool that takes a `file` analyzes **the whole program** — the entry, its
 A failing tool fails **one request, not the session**: an internal error comes back as a JSON-RPC error naming the tool, and the server keeps serving. Retry it or ask something else — no reconnect.
 
 **Understand** — the compiler's semantic answers:
-- `check` — type-check code; the same JSON diagnostics `noeta check --format json` emits.
+- `check` — type-check code; the same JSON diagnostics `noeta check --format json` emits, over the same shapes: once as the source ships, then once per dev-tier block it declares, with `tiers_checked` naming which. A `@test` body that does not compile is an error here, not a surprise at `noeta test`.
 - `type_at` / `symbols` — the inferred type at a symbol/position (plus a `layout` storage fact for `@packed`/flat-list types, same wording as editor hover); a file's declaration outline.
 - `definition` / `references` / `completions` / `signature` — navigation over the **same `noeta-ide` engine the language server serves**, so agent and editor can never disagree; a `file` entry resolves cross-file through sibling modules and dependency packages.
 
