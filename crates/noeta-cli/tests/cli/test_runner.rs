@@ -779,3 +779,215 @@ fn test_setup_warns_when_a_dropped_statement_writes_a_captured_binding() {
                 .and(predicate::str::contains("`sees_the_loop`")),
         );
 }
+
+// --- The per-test timeout (the test-timeout rail) -----------------------------------
+
+/// A suite whose middle test never returns, surrounded by tests that pass and one that fails —
+/// so a run over it proves the rail does not just stop the hang, it still reports everything else.
+const WEDGED_TESTS: &str = "fn add(a: int, b: int): int { return a + b; }\n\
+     @test {\n\
+         fn first_passes(): void { assert(add(1, 2) == 3); }\n\
+         fn spins_forever(): void { mut i = 0; while true { i = i + 1; } assert(i > 0); }\n\
+         fn second_passes(): void { assert(add(2, 2) == 4); }\n\
+         fn third_fails(): void { assert(add(2, 2) == 5, \"math is hard\"); }\n\
+     }\n";
+
+/// The defect this rail closes: **one test that never returns used to hang the whole suite, forever,
+/// printing nothing** — the report is rendered at the end, so a hung run and a slow run were
+/// indistinguishable from the outside.
+///
+/// Now the wedged test is bounded, named as its own `TIME` outcome, and every *other* test still
+/// reports: the two that pass, and the one that legitimately fails. The run exits `1` and — the part
+/// that is easy to get wrong — the process actually terminates, even though the abandoned test is
+/// still spinning in a thread nobody can stop.
+#[test]
+fn test_a_wedged_test_times_out_and_the_rest_of_the_suite_still_reports() {
+    let file = temp_program("test_timeout_wedged", WEDGED_TESTS);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "3"])
+        // `assert_cmd`'s default is no timeout; if the rail regressed this test hangs the suite,
+        // which is the honest failure mode — a bounded assertion here would pass on a runner that
+        // reported nothing.
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("TIME  spins_forever")
+                // The message names all three things a reader needs to act on it.
+                .and(predicate::str::contains("did not finish within 3s"))
+                .and(predicate::str::contains("std.test.Timeout"))
+                .and(predicate::str::contains("--timeout"))
+                // Every other result survived the hang.
+                .and(predicate::str::contains("ok    first_passes"))
+                .and(predicate::str::contains("ok    second_passes"))
+                .and(predicate::str::contains("FAIL  third_fails"))
+                .and(predicate::str::contains(
+                    "2 passed, 1 failed, 1 timed out, 4 total",
+                )),
+        );
+}
+
+/// A timeout is its own outcome in `--json`, not a failure wearing a failure's clothes: the case
+/// carries `"outcome": "timedOut"`, the totals carry `timedOut` beside `failed`, and the older
+/// per-test `passed` boolean stays `false` so a consumer that only knows that field still reads it
+/// as not-green.
+#[test]
+fn test_timeout_is_its_own_outcome_in_json() {
+    let file = temp_program("test_timeout_json", WEDGED_TESTS);
+    let assert = lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "3"])
+        .arg("--json")
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["passed"], 2);
+    assert_eq!(json["failed"], 1, "the assertion failure, and only it");
+    assert_eq!(json["timedOut"], 1);
+    assert_eq!(json["total"], 4);
+    let tests = json["tests"].as_array().expect("tests array");
+    let wedged = tests
+        .iter()
+        .find(|t| t["name"] == "spins_forever")
+        .expect("the wedged case is reported");
+    assert_eq!(wedged["outcome"], "timedOut");
+    assert_eq!(wedged["passed"], false);
+    assert!(
+        wedged["message"]
+            .as_str()
+            .expect("a timeout message")
+            .contains("did not finish within 3s"),
+        "the message names the bound: {wedged}"
+    );
+    // A passing case still reports the outcome string, so a consumer can key on one field.
+    let ok = tests
+        .iter()
+        .find(|t| t["name"] == "first_passes")
+        .expect("a passing case");
+    assert_eq!(ok["outcome"], "passed");
+}
+
+/// `#[Timeout(N)]` is the local escape hatch, and it wins over the suite default **in both
+/// directions** — here a 2-second attribute bound fires under a 600-second `--timeout`, which is the
+/// direction that proves the number written on the test is the number that applies. The message
+/// points at the attribute rather than at the flag, because that is what the reader has to change.
+#[test]
+fn test_timeout_attribute_overrides_the_suite_default() {
+    let file = temp_program(
+        "test_timeout_attribute",
+        "@test {\n\
+             use std.test.{Timeout}\n\
+             fn quick(): void { assert(1 + 1 == 2); }\n\
+             #[Timeout(2)]\n\
+             fn spins_forever(): void { mut i = 0; while true { i = i + 1; } assert(i > 0); }\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "600"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("TIME  spins_forever")
+                .and(predicate::str::contains(
+                    "did not finish within 2s (its own `#[Timeout(2)]`)",
+                ))
+                .and(predicate::str::contains("ok    quick"))
+                .and(predicate::str::contains("1 passed, 0 failed, 1 timed out")),
+        );
+}
+
+/// The other half of the rail: a legitimately long test must not be killed. A test that grinds for
+/// several seconds passes under a bound that comfortably exceeds it, and `#[Timeout(0)]` opts a test
+/// out of the bound entirely — the same escape hatch `--timeout 0` gives the whole run.
+#[test]
+fn test_a_slow_test_is_not_killed_and_timeout_zero_disables_the_bound() {
+    let file = temp_program(
+        "test_timeout_slow_is_fine",
+        "@test {\n\
+             use std.test.{Timeout}\n\
+             fn quick(): void { assert(1 + 1 == 2); }\n\
+             fn grinds(): void {\n\
+                 mut i = 0; mut total = 0;\n\
+                 while i < 8000000 { total = total + i; i = i + 1; }\n\
+                 assert(total > 0);\n\
+             }\n\
+             #[Timeout(0)]\n\
+             fn grinds_unbounded(): void {\n\
+                 mut i = 0; mut total = 0;\n\
+                 while i < 8000000 { total = total + i; i = i + 1; }\n\
+                 assert(total > 0);\n\
+             }\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        // Generous on purpose: the bound is wall-clock, and a CI box running this suite in parallel
+        // stretches a compute-bound test well past its solo time. The assertion under test is "the
+        // runner did not kill it", not "it ran in under N seconds".
+        .args(["--timeout", "120"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ok    grinds")
+                .and(predicate::str::contains("ok    grinds_unbounded"))
+                .and(predicate::str::contains("3 passed, 0 failed, 3 total")),
+        );
+}
+
+/// `--timeout 0` restores the unbounded runner for the whole suite. Proven on a suite that *can*
+/// finish, because the alternative — proving it on the wedged suite — is a test that by construction
+/// never returns. What this pins is that the flag parses, disables the rail, and leaves an ordinary
+/// run's report and exit code exactly as they were.
+#[test]
+fn test_timeout_zero_runs_unbounded() {
+    let file = temp_program("test_timeout_zero", MIXED_TESTS);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "0"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("ok    adds")
+                .and(predicate::str::contains("FAIL  fails"))
+                // No timeout column and no timeout count on a run with no bound.
+                .and(predicate::str::contains("TIME").not())
+                .and(predicate::str::contains("1 passed, 2 failed, 3 total")),
+        );
+}
+
+/// A timeout stops a `--fail-fast` run for the same reason a failure does — the suite is not going
+/// to get greener and the point of the flag is to stop burning wall time. The wedged test is first,
+/// so the tests after it are reported as "not run (stopped early)" rather than silently missing.
+#[test]
+fn test_fail_fast_stops_on_a_timeout() {
+    let file = temp_program(
+        "test_timeout_fail_fast",
+        "@test {\n\
+             fn spins_forever(): void { mut i = 0; while true { i = i + 1; } assert(i > 0); }\n\
+             fn never_reached(): void { assert(1 == 1); }\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "3", "--jobs", "1"])
+        .arg("--fail-fast")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("TIME  spins_forever")
+                .and(predicate::str::contains("1 not run (stopped early)")),
+        );
+}

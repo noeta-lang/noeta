@@ -2,9 +2,11 @@
 //! isolates, plus the tier-fn attribute helpers the bench runner shares.
 
 use std::io::{self, Write};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use noeta_ast::{AttrValue, Expr, Program, Stmt};
 use noeta_check::TierFn;
@@ -14,13 +16,111 @@ use crate::cmd::run::execute_real_host;
 use crate::context::{Prologue, check_under, tier_prologue};
 use crate::output::{emit_diagnostics_mapped, plural};
 
-/// The outcome of running one `@test` fn: whether it passed, the failure message (the first
-/// diagnostic, typically the assertion/panic), and anything it wrote to stdout (shown on failure).
+/// The per-test deadline in seconds when nothing overrides it — the number a test has to exceed
+/// before the runner declares it stuck and moves on.
+///
+/// **Where it comes from.** Two constraints pin it from opposite sides. From below: it must never
+/// fire on a legitimate test. Everything a `@test` body can do that is *slow* rather than *stuck*
+/// bottoms out in an I/O client that already carries its own bound — `std.http`'s request timeout,
+/// a database driver's connect timeout, a subprocess `wait` — and those bounds are conventionally
+/// 30 s or less, so a test that is merely waiting on the world resolves under a minute or fails on
+/// its own terms first. Measured against this repo's own corpus the margin is far wider than that:
+/// the slowest `@test` in `examples/` runs in tens of milliseconds, i.e. three orders of magnitude
+/// under this. From above: it must be short enough that a wedged suite is an inconvenience rather
+/// than an outage. The incident that motivated this rail sat **25+ minutes** with no output; a
+/// 60 s bound turns that into a named failure in about a fortieth of the time, and a suite of `N`
+/// wedged tests into `N`-over-`--jobs` minutes rather than never.
+///
+/// 60 s is also the period `cargo-nextest` uses before it calls a test slow, so the number will not
+/// surprise anyone arriving from Rust.
+pub(crate) const DEFAULT_TEST_TIMEOUT_SECS: u64 = 60;
+
+/// How one `@test` case ended. A timeout is deliberately **not** folded into `Failed`: a failing
+/// test ran and disagreed with an assertion, a timed-out test did not finish, and the two want
+/// different reactions (fix the code vs. raise the bound or find the deadlock). The report, the
+/// `--json` seam and the summary counts all keep them apart.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Passed,
+    Failed,
+    TimedOut,
+}
+
+impl Outcome {
+    /// The stable `--json` spelling.
+    fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Passed => "passed",
+            Outcome::Failed => "failed",
+            Outcome::TimedOut => "timedOut",
+        }
+    }
+}
+
+/// The outcome of running one `@test` fn: how it ended, the failure/timeout message (for a failure,
+/// the first diagnostic — typically the assertion or panic), and anything it wrote to stdout (shown
+/// on failure).
 pub(crate) struct TestOutcome {
     name: String,
-    passed: bool,
+    outcome: Outcome,
     message: Option<String>,
     stdout: String,
+}
+
+impl TestOutcome {
+    fn passed(&self) -> bool {
+        self.outcome == Outcome::Passed
+    }
+}
+
+/// The deadline one case runs under, and *which knob set it* — so the message a timed-out test
+/// prints can name the thing the reader has to change.
+#[derive(Clone, Copy)]
+pub(crate) enum Bound {
+    /// No deadline at all: `--timeout 0`, or this test's own `#[Timeout(0)]`.
+    None,
+    /// The suite-wide default — the built-in [`DEFAULT_TEST_TIMEOUT_SECS`] or `--timeout N`.
+    Suite(u64),
+    /// This test's own `#[Timeout(N)]`, which wins over the suite default in both directions.
+    Attribute(u64),
+}
+
+impl Bound {
+    /// The suite default `secs` (0 ⇒ no bound), before any per-test attribute.
+    fn suite(secs: u64) -> Bound {
+        if secs == 0 {
+            Bound::None
+        } else {
+            Bound::Suite(secs)
+        }
+    }
+
+    /// How long to wait, or `None` when this case is unbounded.
+    fn duration(self) -> Option<Duration> {
+        match self {
+            Bound::None => None,
+            Bound::Suite(s) | Bound::Attribute(s) => Some(Duration::from_secs(s)),
+        }
+    }
+
+    /// What a test that blew this bound should say. It names all three things a reader needs to
+    /// act: what the bound was, where it came from, and the exact spelling that raises it.
+    fn timeout_message(self, fn_name: &str) -> String {
+        match self {
+            // Unreachable in practice (an unbounded case cannot time out), but a total match beats
+            // an `unwrap` in a reporting path.
+            Bound::None => "did not finish, and had no deadline to exceed".to_string(),
+            Bound::Suite(s) => format!(
+                "timed out: did not finish within {s}s (the suite deadline). Raise it for this \
+                 test with `#[std.test.Timeout(<seconds>)]` on `{fn_name}`, for the whole run \
+                 with `noeta test --timeout <seconds>`, or remove the bound with `--timeout 0`"
+            ),
+            Bound::Attribute(s) => format!(
+                "timed out: did not finish within {s}s (its own `#[Timeout({s})]`). Raise the \
+                 number on `{fn_name}`, or write `#[Timeout(0)]` to remove the bound"
+            ),
+        }
+    }
 }
 
 /// `noeta test [PATH]` — discover `@test` blocks (object-model slice 6) and run each as an isolated
@@ -43,6 +143,7 @@ pub(crate) fn cmd_test(
     names: &[String],
     json: bool,
     target: &Option<String>,
+    timeout: Option<u64>,
 ) -> u8 {
     let opts = TestOptions {
         fail_fast,
@@ -51,6 +152,7 @@ pub(crate) fn cmd_test(
         names,
         json,
         target,
+        timeout: timeout.unwrap_or(DEFAULT_TEST_TIMEOUT_SECS),
     };
     if path.is_dir() {
         return test_directory(path, &opts);
@@ -88,6 +190,9 @@ struct TestOptions<'a> {
     names: &'a [String],
     json: bool,
     target: &'a Option<String>,
+    /// The suite-wide per-test deadline in seconds; `0` disables it. Already defaulted, so the
+    /// runner never has to re-derive it.
+    timeout: u64,
 }
 
 /// Why a file contributed no test outcomes, and what its report should say.
@@ -167,7 +272,7 @@ fn test_directory(dir: &std::path::Path, opts: &TestOptions) -> u8 {
                 total += t;
             }
         }
-        if fail_fast && (broken > 0 || outcomes.iter().any(|o| !o.passed)) {
+        if fail_fast && (broken > 0 || outcomes.iter().any(|o| !o.passed())) {
             break;
         }
     }
@@ -207,6 +312,7 @@ fn run_file_tests(file: &std::path::Path, opts: &TestOptions, label: Option<&str
         names,
         json: quiet,
         target,
+        timeout,
     } = *opts;
     // The shared tier prologue: compose delegation, the `--target` gate, the dep-aware load,
     // provider dispatch (a `test = "<pkg>"` target hands the tier to that package's runner),
@@ -286,7 +392,10 @@ fn run_file_tests(file: &std::path::Path, opts: &TestOptions, label: Option<&str
 
     // Expand each runnable test into its case(s): a `#[Data([…])]` test runs once per row (reported
     // `name[row]`); an ordinary test is a single zero-arg case.
-    let cases: Vec<TestCase> = runnable.iter().flat_map(|t| test_cases(t)).collect();
+    let cases: Vec<TestCase> = runnable
+        .iter()
+        .flat_map(|t| test_cases(t, Bound::suite(timeout)))
+        .collect();
     let total = cases.len() + skipped.len();
     let run_count = cases.len();
     let jobs = jobs
@@ -335,6 +444,7 @@ fn run_file_tests(file: &std::path::Path, opts: &TestOptions, label: Option<&str
 /// One runnable test invocation: which fn to call, the report label, and an optional argument (a
 /// `#[Data]` row — `None` for an ordinary zero-arg test). A `#[Data([a, b])]` test expands to one
 /// `TestCase` per row.
+#[derive(Clone)]
 pub(crate) struct TestCase {
     /// The fn to invoke.
     fn_name: String,
@@ -349,10 +459,14 @@ pub(crate) struct TestCase {
     /// body never runs *passes*, assertions and all. This flag is the difference between an async
     /// test and a decorative one.
     is_async: bool,
+    /// This case's deadline, and which knob set it. A `#[Data]` test's rows each get the fn's
+    /// bound — the attribute describes one *test*, and every row is a separate run of it.
+    bound: Bound,
 }
 
 /// A test case's argument: none (an ordinary zero-arg test), a `#[Data]` row value, or an invalid
 /// row whose literal cannot become a runtime value (the case fails with this message).
+#[derive(Clone)]
 pub(crate) enum CaseArg {
     None,
     Value(Expr),
@@ -362,8 +476,9 @@ pub(crate) enum CaseArg {
 /// Expand a runnable test into its cases: one zero-arg case normally, or one per row when the test
 /// carries `#[Data([…])]`. A row literal that cannot be a runtime value (e.g. a bare type name)
 /// becomes a case that fails with a clear message rather than being silently dropped.
-pub(crate) fn test_cases(test: &TierFn) -> Vec<TestCase> {
+pub(crate) fn test_cases(test: &TierFn, suite_bound: Bound) -> Vec<TestCase> {
     let base = test_display_name(test);
+    let bound = test_bound(test, suite_bound);
     let Some(rows) = data_rows(test) else {
         return vec![TestCase {
             fn_name: test.name.clone(),
@@ -371,6 +486,7 @@ pub(crate) fn test_cases(test: &TierFn) -> Vec<TestCase> {
             arg: CaseArg::None,
             span: test.span,
             is_async: test.is_async,
+            bound,
         }];
     };
     rows.iter()
@@ -388,9 +504,26 @@ pub(crate) fn test_cases(test: &TierFn) -> Vec<TestCase> {
                 arg,
                 span: test.span,
                 is_async: test.is_async,
+                bound,
             }
         })
         .collect()
+}
+
+/// The deadline one test runs under: its own `#[Timeout(N)]` when it carries one, else the suite
+/// default. The attribute wins in **both** directions — a test that needs 10 minutes writes
+/// `#[Timeout(600)]`, and one that must never take 10 seconds writes `#[Timeout(10)]` — because a
+/// bound that could only be raised would make the attribute's number a lie whenever `--timeout`
+/// happened to be larger.
+pub(crate) fn test_bound(test: &TierFn, suite: Bound) -> Bound {
+    match int_attr(test, noeta_ast::reflect::TEST_ATTR_TIMEOUT) {
+        // `#[Timeout(0)]` is the local escape hatch: this one test is not bounded at all.
+        Some(0) => Bound::None,
+        // A negative literal is not a duration; ignore it rather than saturating it to a bound the
+        // author plainly did not ask for, and let the suite default keep the rail in place.
+        Some(secs) if secs > 0 => Bound::Attribute(secs as u64),
+        _ => suite,
+    }
 }
 
 /// Convert a `#[Data]` row literal to an expression to pass as the test argument. Scalars and lists
@@ -472,6 +605,16 @@ pub(crate) fn test_display_name(test: &TierFn) -> String {
 /// A test's group — the string in `#[Group("…")]` if present, for `--group` filtering.
 pub(crate) fn test_group(test: &TierFn) -> Option<String> {
     string_attr(test, noeta_ast::reflect::TEST_ATTR_GROUP)
+}
+
+/// The first int-valued argument of the attribute named `name` on `test`, if any — the shape
+/// `#[Timeout(30)]` parses to.
+pub(crate) fn int_attr(test: &TierFn, name: &str) -> Option<i64> {
+    let attr = test.attrs.iter().find(|a| a.name == name)?;
+    attr.args.iter().find_map(|arg| match &arg.value {
+        AttrValue::Int(n) => Some(*n),
+        _ => None,
+    })
 }
 
 /// The first string-valued argument of the attribute named `name` on `test`, if any.
@@ -589,6 +732,9 @@ pub(crate) fn default_jobs() -> usize {
 /// index. By default every case runs; with `fail_fast` a failure sets a shared stop flag and the
 /// workers drain out. Results are gathered with their original index and returned in declaration
 /// order, so the report is deterministic regardless of completion order.
+///
+/// Each case is bounded by its own deadline (see [`run_one_test_bounded`]) — the pool itself is
+/// unchanged, but no single case can hold a worker past its bound.
 pub(crate) fn run_tests(
     setup: &[Stmt],
     opts: &noeta_check::CheckOptions,
@@ -597,6 +743,11 @@ pub(crate) fn run_tests(
     jobs: usize,
     fail_fast: bool,
 ) -> Vec<TestOutcome> {
+    // The bounded runner hands each case to a **detached** thread, which needs `'static` data — so
+    // the setup and the check options are shared by `Arc` rather than borrowed off the stack. One
+    // clone per run, not per case.
+    let setup = Arc::new(setup.to_vec());
+    let opts = Arc::new(opts.clone());
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
     let results: Mutex<Vec<(usize, TestOutcome)>> = Mutex::new(Vec::with_capacity(cases.len()));
@@ -612,10 +763,13 @@ pub(crate) fn run_tests(
                     if idx >= cases.len() {
                         break;
                     }
-                    let outcome = run_one_test(setup, opts, &cases[idx], span);
-                    let failed = !outcome.passed;
+                    let outcome = run_one_test_bounded(&setup, &opts, &cases[idx], span);
+                    // A timeout stops a `--fail-fast` run for the same reason a failure does: the
+                    // suite is not going to get greener, and the point of `--fail-fast` is to stop
+                    // burning wall time.
+                    let ended_badly = !outcome.passed();
                     results.lock().unwrap().push((idx, outcome));
-                    if fail_fast && failed {
+                    if fail_fast && ended_badly {
                         stop.store(true, Ordering::Relaxed);
                         break;
                     }
@@ -627,6 +781,121 @@ pub(crate) fn run_tests(
     let mut collected = results.into_inner().unwrap();
     collected.sort_by_key(|(idx, _)| *idx);
     collected.into_iter().map(|(_, outcome)| outcome).collect()
+}
+
+/// Run one case under its deadline, returning a `TimedOut` outcome if it does not finish in time.
+///
+/// # The shape of the rail
+///
+/// Two questions, kept apart on purpose:
+///
+/// 1. **When has this case exceeded its bound, and what does the report say?** That is this
+///    function, and it is complete: the case runs on its own thread, the worker waits on a channel
+///    with a deadline, and on expiry it produces a `TimedOut` outcome naming the test, the bound and
+///    how to raise it. Every other case still runs, the report still prints, and the run still exits.
+/// 2. **What happens to the overrunning case itself?** That is [`stop_overrun_case`], and it is the
+///    one place to change when the runtime can genuinely stop a running test.
+///
+/// Today (2) is *abandon it*, because `h.cancel()` on a real isolate does not stop anything — it
+/// sets a flag the OS-thread isolate never reads and reports `Err(Cancelled)` to the joiner while
+/// the isolate runs to completion, side effects and all. That is a **defect under repair** (the
+/// `isolate-cancel` branch), not a law of the runtime, which is exactly why the mechanism is one
+/// function and not a structure: no beacon files, no watchdog isolate, nothing to unpick when real
+/// cancellation lands.
+///
+/// The split also means (1) is worth having on its own. Even with perfect cancellation there is a
+/// residual class — a thread blocked inside a native call — that no safepoint can interrupt, and for
+/// that class "stop waiting, report, and move on" is the whole answer rather than a stopgap.
+fn run_one_test_bounded(
+    setup: &Arc<Vec<Stmt>>,
+    opts: &Arc<noeta_check::CheckOptions>,
+    case: &TestCase,
+    span: Span,
+) -> TestOutcome {
+    let Some(deadline) = case.bound.duration() else {
+        // Unbounded (`--timeout 0` / `#[Timeout(0)]`): run it right here, exactly as before this
+        // rail existed. No detached thread, no channel, nothing to leak.
+        return run_one_test(setup, opts, case, span);
+    };
+    let (tx, rx) = mpsc::channel();
+    let spawned = {
+        let (setup, opts, owned) = (Arc::clone(setup), Arc::clone(opts), case.clone());
+        // Name the thread after the case: a leaked thread is visible in a debugger and in `/proc`,
+        // and "which test is still spinning" should not need guessing.
+        thread::Builder::new()
+            .name(format!("noeta-test:{}", case.display))
+            .spawn(move || {
+                // The receiver is gone once the worker gives up; a failed send is the expected shape
+                // of "this test finished after we stopped listening", not an error.
+                let _ = tx.send(run_one_test(&setup, &opts, &owned, span));
+            })
+    };
+    let handle = match spawned {
+        Ok(handle) => handle,
+        // The OS refused a thread (an `RLIMIT_NPROC`/memory ceiling under heavy parallelism). Run
+        // the case inline rather than reporting a test failure the test did not cause; it is
+        // unbounded, which is what the runner did for every test before this rail.
+        Err(_) => return run_one_test(setup, opts, case, span),
+    };
+    let outcome = match rx.recv_timeout(deadline) {
+        Ok(outcome) => outcome,
+        Err(RecvTimeoutError::Timeout) => TestOutcome {
+            name: case.display.clone(),
+            outcome: Outcome::TimedOut,
+            message: Some(case.bound.timeout_message(&case.fn_name)),
+            // The isolate is still running, so its captured output is not ours to read — and even a
+            // finished isolate's buffers do not currently reach the parent's `RunResult` (a known
+            // gap in `run_isolate_worker`). Reporting an empty stdout is honest; reporting a
+            // partial one would not be.
+            stdout: String::new(),
+        },
+        // The sender was dropped without sending: the case's thread panicked (a bug in the
+        // toolchain, not in the test). Before this rail that panic unwound through `thread::scope`
+        // and took the whole run with it; now it is one failing test with the reason named.
+        Err(RecvTimeoutError::Disconnected) => TestOutcome {
+            name: case.display.clone(),
+            outcome: Outcome::Failed,
+            message: Some(format!(
+                "the test runner panicked while running `{}` (see stderr)",
+                case.fn_name
+            )),
+            stdout: String::new(),
+        },
+    };
+    if outcome.outcome == Outcome::TimedOut {
+        stop_overrun_case(handle, case);
+    } else {
+        // The case answered, so its thread has already returned; dropping the handle is free.
+        drop(handle);
+    }
+    outcome
+}
+
+/// Deal with a case that blew its deadline — **the one seam** between "the runner decided this test
+/// is over" and however the runtime actually stops it.
+///
+/// The current implementation **abandons** the thread: dropping a `JoinHandle` detaches it, and the
+/// join is precisely what a wedged test never returns from. Nothing else is available yet — a real
+/// isolate ignores `cancel` today — and there is no safe way to kill a native thread from outside in
+/// Rust regardless: `pthread_cancel` against a thread holding an allocator or runtime lock turns a
+/// hung test into a hung process.
+///
+/// **What abandoning leaks, precisely.** One OS thread per timed-out case and everything its isolate
+/// owns: the VM, its heap, its `tokio` runtime, and any descriptors or sockets it holds. A test that
+/// is spinning rather than parked also keeps burning a core for the rest of the run, so a suite with
+/// several wedged tests gets slower as it goes. Nothing is reclaimed until the process exits — which
+/// it does, normally and promptly: detached threads are not joined by `thread::scope`, by `main`'s
+/// return, or by the runtime's teardown, so the exit is not blocked by the very thing that hung.
+///
+/// The trade is deliberate and it is not close: a leaked thread that lets the suite finish and name
+/// the culprit is worth far more than a tidy suite that never returns.
+///
+/// **When isolate cancellation lands, change this function and nothing else.** The shape it wants is
+/// "ask the case's isolate to stop, then join it with a short grace period, and abandon only if that
+/// grace expires" — which shrinks the leak to the genuinely uninterruptible class (blocked in a
+/// native call) instead of covering every overrun.
+fn stop_overrun_case(handle: thread::JoinHandle<()>, _case: &TestCase) {
+    drop(handle);
 }
 
 /// Run a single test case: synthesize `setup + <call the fn (with its data arg, if any)>`, run it in
@@ -647,7 +916,7 @@ pub(crate) fn run_one_test(
         CaseArg::Invalid(message) => {
             return TestOutcome {
                 name: case.display.clone(),
-                passed: false,
+                outcome: Outcome::Failed,
                 message: Some(message.clone()),
                 stdout: String::new(),
             };
@@ -667,7 +936,7 @@ pub(crate) fn run_one_test(
     if !checked.diagnostics.is_empty() {
         return TestOutcome {
             name: display,
-            passed: false,
+            outcome: Outcome::Failed,
             message: Some(checked.diagnostics[0].message.clone()),
             stdout: String::new(),
         };
@@ -689,7 +958,11 @@ pub(crate) fn run_one_test(
             });
             TestOutcome {
                 name: display,
-                passed,
+                outcome: if passed {
+                    Outcome::Passed
+                } else {
+                    Outcome::Failed
+                },
                 message,
                 stdout: result.stdout,
             }
@@ -698,7 +971,7 @@ pub(crate) fn run_one_test(
         // rendering — which now at least names the construct precisely.
         Err(u) => TestOutcome {
             name: display,
-            passed: false,
+            outcome: Outcome::Failed,
             message: Some(u.to_string()),
             stdout: String::new(),
         },
@@ -714,60 +987,107 @@ pub(crate) fn run_one_test(
 /// skipped labels, and the totals. The seam the editor's test explorer parses; same exit-code
 /// semantics as the human report.
 pub(crate) fn report_json(outcomes: &[TestOutcome], skipped: &[String], total: usize) -> u8 {
-    let passed = outcomes.iter().filter(|o| o.passed).count();
-    let failed = outcomes.len() - passed;
-    let not_run = total.saturating_sub(skipped.len() + outcomes.len());
+    let tally = Tally::of(outcomes, skipped.len(), total);
     let json = serde_json::json!({
         "tests": outcomes.iter().map(|o| serde_json::json!({
             "name": o.name,
-            "passed": o.passed,
+            // The precise outcome — `"passed"` / `"failed"` / `"timedOut"`. The boolean beside it
+            // is the older seam and stays: a timed-out test is not passing, so a consumer that only
+            // knows `passed` still colors it red rather than silently green.
+            "outcome": o.outcome.as_str(),
+            "passed": o.passed(),
             "message": o.message,
             "stdout": o.stdout,
         })).collect::<Vec<_>>(),
         "skipped": skipped,
-        "passed": passed,
-        "failed": failed,
-        "notRun": not_run,
+        "passed": tally.passed,
+        // `failed` counts assertion/abort failures only; a test that never finished is counted
+        // under `timedOut`, because the two ask for different reactions.
+        "failed": tally.failed,
+        "timedOut": tally.timed_out,
+        "notRun": tally.not_run,
         "total": total,
     });
     println!("{json}");
     let _ = io::stdout().flush();
-    if failed == 0 && not_run == 0 { 0 } else { 1 }
+    tally.exit_code()
+}
+
+/// The summary counts both reporters derive, in one place so the human table and the JSON can never
+/// disagree about how many tests passed or what the exit code should be.
+struct Tally {
+    passed: usize,
+    failed: usize,
+    timed_out: usize,
+    not_run: usize,
+}
+
+impl Tally {
+    fn of(outcomes: &[TestOutcome], skipped: usize, total: usize) -> Tally {
+        let count = |want: Outcome| outcomes.iter().filter(|o| o.outcome == want).count();
+        Tally {
+            passed: count(Outcome::Passed),
+            failed: count(Outcome::Failed),
+            timed_out: count(Outcome::TimedOut),
+            not_run: total.saturating_sub(skipped + outcomes.len()),
+        }
+    }
+
+    /// `0` only when every selected test ran and passed. A timeout fails the suite: "we do not know
+    /// whether this test passes" is not a green result.
+    fn exit_code(&self) -> u8 {
+        if self.failed == 0 && self.timed_out == 0 && self.not_run == 0 {
+            0
+        } else {
+            1
+        }
+    }
 }
 
 pub(crate) fn report(outcomes: &[TestOutcome], skipped: &[String], total: usize) -> u8 {
-    let mut passed = 0usize;
     for outcome in outcomes {
-        if outcome.passed {
-            passed += 1;
-            println!("  ok    {}", outcome.name);
-        } else {
-            println!("  FAIL  {}", outcome.name);
-            if let Some(message) = &outcome.message {
-                println!("        {message}");
-            }
-            for line in outcome.stdout.lines() {
-                println!("        | {line}");
-            }
+        // The status column stays four characters wide, so `TIME` is the marker and the line under
+        // it carries the whole story (what the bound was, and how to raise it).
+        let status = match outcome.outcome {
+            Outcome::Passed => "ok  ",
+            Outcome::Failed => "FAIL",
+            Outcome::TimedOut => "TIME",
+        };
+        println!("  {status}  {}", outcome.name);
+        if outcome.passed() {
+            continue;
+        }
+        if let Some(message) = &outcome.message {
+            println!("        {message}");
+        }
+        for line in outcome.stdout.lines() {
+            println!("        | {line}");
         }
     }
     for name in skipped {
         println!("  skip  {name}");
     }
 
-    let failed = outcomes.len() - passed;
-    let not_run = total - skipped.len() - outcomes.len();
+    let tally = Tally::of(outcomes, skipped.len(), total);
     println!();
-    let mut parts = vec![format!("{passed} passed"), format!("{failed} failed")];
+    let mut parts = vec![
+        format!("{} passed", tally.passed),
+        format!("{} failed", tally.failed),
+    ];
+    // Only mentioned when it happened — a suite that never hangs should not have to read a "0 timed
+    // out" on every green run.
+    if tally.timed_out > 0 {
+        parts.push(format!("{} timed out", tally.timed_out));
+    }
     if !skipped.is_empty() {
         parts.push(format!("{} skipped", skipped.len()));
     }
-    if not_run > 0 {
-        parts.push(format!("{not_run} not run (stopped early)"));
+    if tally.not_run > 0 {
+        parts.push(format!("{} not run (stopped early)", tally.not_run));
     }
     parts.push(format!("{total} total"));
     println!("{}", parts.join(", "));
     let _ = io::stdout().flush();
 
-    if failed == 0 && not_run == 0 { 0 } else { 1 }
+    tally.exit_code()
 }
