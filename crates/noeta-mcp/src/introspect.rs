@@ -370,14 +370,14 @@ enum Color { Red; Green }
         let out = ast(&prep());
         assert!(out.ast.starts_with("(program @0.."));
         // Attributes/directives print between the head and the name
-        // (`(#[Route("/x")] fn handle [n]`, `(struct @attribute … Route [path]`),
+        // (`(#[Route("/x")] fn handle [n: int]`, `(struct @attribute … Route [path: string]`),
         // so assert on head + name/params without anchoring `(head name` adjacency.
         // A parameter renders with its type annotation: the fmt safety gate compares the dump
         // field-for-field, so dropping `: int` would let two different signatures compare equal.
         assert!(out.ast.contains("fn handle [n: int]"));
         assert!(out.ast.contains("#[Route"));
         assert!(out.ast.contains("(struct "));
-        assert!(out.ast.contains("Route [path]"));
+        assert!(out.ast.contains("Route [path: string]"));
     }
 
     #[test]
