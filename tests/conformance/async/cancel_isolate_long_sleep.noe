@@ -1,0 +1,29 @@
+// interruptible-io — a cancelled worker's stop does not depend on how long it was going to sleep.
+// The sandbox has always had this for free (logical time is *jumped*, and a parked task is stopped
+// exactly where it parked), and this case pins that it stays free: ten minutes of `sleep` costs the
+// deterministic run nothing and the reported outcome is the cancellation, not the value.
+//
+// The reason it is worth a case is the CLI's real path, where the same program used to sit out the
+// remaining sleep (measured: a 3s sleep cancelled at 200ms stopped 2.8s later) because a worker
+// parked in the real executor's wall-clock sleep reaches no safepoint. The request now carries a
+// wake that ends that sleep, so both paths stop at the same place for the same reason — see
+// `crates/noeta-cli/tests/cli/isolates.rs::run_real_isolate_cancel_reaches_a_worker_parked_in_one_long_sleep`.
+// expect: stdout "napping"
+// expect: stdout "cancelled"
+// expect: exit 0
+use std.task.{sleep}
+async fn nap(ms: int): int {
+    echo "napping"
+    sleep(ms).await
+    echo "awake"
+    return 1
+}
+concurrent {
+    h = isolate nap(600000)
+    sleep(1).await
+    h.cancel()
+    echo match h.join() {
+        Ok(v)  => "ok=" ~ v,
+        Err(_) => "cancelled",
+    }
+}

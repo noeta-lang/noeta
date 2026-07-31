@@ -48,6 +48,14 @@ pub struct RealExecutor {
     /// loop runs its per-tick hooks; `Notify` stores at most one permit, so a spurious extra
     /// iteration is bounded, not a spin.
     wake: Option<std::sync::Arc<tokio::sync::Notify>>,
+    /// This executor's **own** cancellation wake (interruptible-io): fired through the run's
+    /// [`CancelWake`] when whoever owns this run asks it to stop, so a worker parked here on one
+    /// long `sleep` returns immediately and its scheduler's next round observes the request. Always
+    /// present and per-executor — unlike `wake`, which is a *shared* external source (the process
+    /// shutdown notify, or the hot-reload watcher's) and is not this run's to consume.
+    ///
+    /// Nobody fires it on an uncancellable run, so it is one never-ready branch in the selects.
+    cancel_wake: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl RealExecutor {
@@ -71,6 +79,7 @@ impl RealExecutor {
             // blocked serve loop. A driver with its own out-of-band source (the hot-reload
             // watcher) overrides this via `set_wake`.
             wake: Some(crate::shutdown_notify()),
+            cancel_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -121,24 +130,27 @@ impl Executor for RealExecutor {
                 runtime,
                 tasks,
                 wake,
+                cancel_wake,
                 ..
             } = self;
             let wake = wake.as_deref();
+            let cancel_wake = cancel_wake.as_ref();
             let joined = match next_timer {
                 // A due timer must not be starved by pending IO: skip the block, clear it below.
                 Some(next) if next <= now => None,
-                // Wait for whichever completes first: any IO task, the earliest deadline, or an
-                // external wake (a `None` join with real time passed reads as plain progress).
+                // Wait for whichever completes first: any IO task, the earliest deadline, an
+                // external wake, or this run's cancellation (a `None` join with real time passed
+                // reads as plain progress, and the caller's next round polls the cancel flag).
                 Some(next) => {
                     let wait = Duration::from_millis(next - now);
                     runtime.block_on(async {
-                        tokio::time::timeout(wait, join_or_wake(tasks, wake))
+                        tokio::time::timeout(wait, join_or_wake(tasks, wake, cancel_wake))
                             .await
                             .ok()
                             .flatten()
                     })
                 }
-                None => runtime.block_on(join_or_wake(tasks, wake)),
+                None => runtime.block_on(join_or_wake(tasks, wake, cancel_wake)),
             };
             if let Some(Ok((id, result))) = joined {
                 self.resolved.insert(id, result);
@@ -155,14 +167,17 @@ impl Executor for RealExecutor {
             // The `Sleep` future must be *constructed inside* the runtime (it registers with the time
             // driver on creation), so build it in the async block rather than as a `block_on` argument.
             // An external wake also ends the sleep early (the woken caller re-polls; not-yet-due
-            // timers stay pending below).
+            // timers stay pending below), and so does this run's cancellation — **the** case this
+            // select exists for on a worker: one long `sleep` is the whole of its pending work, so
+            // without a wake here the request is observed only when the sleep ends.
             let wait = Duration::from_millis(next - now);
             let wake = self.wake.clone();
+            let cancel_wake = std::sync::Arc::clone(&self.cancel_wake);
             self.runtime.block_on(async move {
                 let sleep = tokio::time::sleep(wait);
-                match wake {
-                    Some(n) => tokio::select! { _ = sleep => {}, _ = n.notified() => {} },
-                    None => sleep.await,
+                tokio::select! {
+                    _ = sleep => {},
+                    _ = any_wake(wake.as_deref(), &cancel_wake) => {},
                 }
             });
         }
@@ -208,6 +223,14 @@ impl Executor for RealExecutor {
         id
     }
 
+    fn set_cancel_wake(&mut self, wake: std::sync::Arc<noeta_stdlib::CancelWake>) {
+        // Hand the run's cancel a hook that ends whatever this executor is blocked on. `notify_one`
+        // stores a permit when nobody is waiting, so a request that lands between two `advance`
+        // calls still returns the next one immediately — there is no missed-wakeup window.
+        let notify = std::sync::Arc::clone(&self.cancel_wake);
+        wake.register(move || notify.notify_one());
+    }
+
     fn poll_ext(&mut self, id: u64) -> Option<Result<NativeOut, StdError>> {
         // Harvested by a prior `advance`?
         if let Some(result) = self.resolved.remove(&id) {
@@ -229,19 +252,31 @@ impl Executor for RealExecutor {
     }
 }
 
-/// Wait for the next completed task, or an external wake (server-hmr L3) — a woken wait returns
-/// `None`, indistinguishable from a timeout, which the caller reports as plain progress so its
-/// scheduler loop runs a tick.
+/// Wait for the next completed task, an external wake (server-hmr L3), or this run's cancellation
+/// (interruptible-io) — a woken wait returns `None`, indistinguishable from a timeout, which the
+/// caller reports as plain progress so its scheduler loop runs a tick (and, on a cancellation, polls
+/// the flag at the top of that round).
 async fn join_or_wake(
     tasks: &mut tokio::task::JoinSet<(u64, Result<NativeOut, StdError>)>,
     wake: Option<&tokio::sync::Notify>,
+    cancel_wake: &tokio::sync::Notify,
 ) -> Option<Result<(u64, Result<NativeOut, StdError>), tokio::task::JoinError>> {
+    tokio::select! {
+        joined = tasks.join_next() => joined,
+        _ = any_wake(wake, cancel_wake) => None,
+    }
+}
+
+/// Resolve when either wake fires: the optional shared external source (shutdown / hot-reload) or
+/// this run's own cancellation wake. Split out so the timer sleep and the task join share one
+/// definition of "something roused us".
+async fn any_wake(wake: Option<&tokio::sync::Notify>, cancel_wake: &tokio::sync::Notify) {
     match wake {
         Some(n) => tokio::select! {
-            joined = tasks.join_next() => joined,
-            _ = n.notified() => None,
+            _ = n.notified() => {},
+            _ = cancel_wake.notified() => {},
         },
-        None => tasks.join_next().await,
+        None => cancel_wake.notified().await,
     }
 }
 
@@ -263,6 +298,26 @@ fn join_error(err: tokio::task::JoinError) -> StdError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A descriptor whose real body just sleeps on the blocking pool — the shape every blocking
+    /// leaf (`fs.read_async`, a `Process` read) presents to the executor, with the IO replaced by a
+    /// known duration.
+    #[derive(Debug)]
+    struct SleepIo(Duration);
+
+    impl ExternIo for SleepIo {
+        fn run_sync(&mut self, _host: &mut dyn Host) -> Result<NativeOut, StdError> {
+            std::thread::sleep(self.0);
+            Ok(NativeOut::Unit)
+        }
+        fn run_real(&mut self) -> Option<RealBody> {
+            let wait = self.0;
+            Some(RealBody::Blocking(Box::new(move || {
+                std::thread::sleep(wait);
+                Ok(NativeOut::Unit)
+            })))
+        }
+    }
 
     #[test]
     fn now_advances_with_real_time() {
@@ -294,6 +349,131 @@ mod tests {
             exec.advance(),
             None,
             "no timers left is a deterministic deadlock signal"
+        );
+    }
+
+    #[test]
+    fn a_cancel_wake_ends_a_long_timer_sleep_early() {
+        // The hole this closes, at the unit level: `advance` sleeps real time to the earliest
+        // deadline in one call, so a worker parked on a long timer observes its cancellation only
+        // when the sleep ends. A wake fired from another thread must return it promptly instead.
+        //
+        // No race with a fixed sleep: the timer is 60 s and the assertion is an upper bound far
+        // below it, so an unwoken `advance` cannot pass by finishing early — it can only fail.
+        let mut exec = RealExecutor::new().unwrap();
+        let wake = std::sync::Arc::new(noeta_stdlib::CancelWake::new());
+        exec.set_cancel_wake(std::sync::Arc::clone(&wake));
+        exec.register_timer(60_000);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            wake.wake();
+        });
+        let start = Instant::now();
+        assert!(exec.advance().is_some(), "a woken advance reports progress");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the cancel wake must end the 60s sleep at once; took {elapsed:?}"
+        );
+        // The deadline is *not* cleared — real time never reached it — so the caller that decides
+        // not to stop after all keeps its pending timer.
+        assert!(
+            exec.timers.contains(&60_000),
+            "a not-yet-due timer stays pending across a wake"
+        );
+    }
+
+    #[test]
+    fn a_cancel_wake_ends_a_wait_on_pending_io_early() {
+        // The other place `advance` blocks: waiting on the `JoinSet` for whichever IO leaf finishes
+        // first. A worker awaiting `fs.read_async` or `p.read_line_async` is parked exactly here,
+        // and the same wake must return it — otherwise the cancellation reaches a worker on a timer
+        // and not one on IO, which is the arbitrary half-fix.
+        //
+        // The pending body sleeps 60 s, so an unwoken `advance` cannot pass by finishing early.
+        let mut exec = RealExecutor::new().unwrap();
+        let wake = std::sync::Arc::new(noeta_stdlib::CancelWake::new());
+        exec.set_cancel_wake(std::sync::Arc::clone(&wake));
+        let mut host = noeta_stdlib::SandboxHost::new();
+        exec.spawn_ext(&mut host, Box::new(SleepIo(Duration::from_secs(60))));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            wake.wake();
+        });
+        let start = Instant::now();
+        assert!(exec.advance().is_some(), "a woken advance reports progress");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the cancel wake must end the wait on a pending IO leaf; took {:?}",
+            start.elapsed()
+        );
+        // Nothing was harvested, so the ticket is still pending — the caller re-polls (and, on a
+        // real cancellation, unwinds at its next safepoint instead).
+        assert!(exec.poll_ext(0).is_none());
+        // Do not drop `exec` here with the body still running: see the test below for why that
+        // waits, and `forget` is the only way to end this test in bounded time.
+        std::mem::forget(exec);
+    }
+
+    #[test]
+    fn a_started_blocking_body_outlives_the_executor_it_was_spawned_on() {
+        // **The floor on interrupting a blocking leaf**, pinned because it is the part that is easy
+        // to assume away. Ending the *wait* is cheap — the test above does it — but the work itself
+        // is a `spawn_blocking` closure on the isolate's own tokio runtime, and dropping a runtime
+        // waits for every blocking task that has already started. So a worker that unwinds on a
+        // cancellation still cannot finish its teardown until the leaf returns, and a leaf that
+        // never returns (a FIFO read with no writer) holds the worker — and therefore the
+        // `concurrent` block joining it — indefinitely. Measured end to end at the CLI: that
+        // program hangs past 20 s, and unwedging the FIFO at 900 ms ends the run at 903 ms.
+        //
+        // Interrupting host IO for real therefore needs the leaf to *return* (an `Interrupted`
+        // outcome), not merely to be abandoned. See `plans/interruptible-host-io.md`.
+        //
+        // The sequence is the worker's: spawn the leaf, block in `advance` (which is where the
+        // descriptor's body actually *starts* — `spawn_ext` only queues an async task, so a body
+        // nobody polled has not begun and its runtime drops instantly), take the wake, then tear
+        // down. Both halves are asserted from that one run.
+        let mut exec = RealExecutor::new().unwrap();
+        let wake = std::sync::Arc::new(noeta_stdlib::CancelWake::new());
+        exec.set_cancel_wake(std::sync::Arc::clone(&wake));
+        let mut host = noeta_stdlib::SandboxHost::new();
+        exec.spawn_ext(&mut host, Box::new(SleepIo(Duration::from_secs(2))));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            wake.wake();
+        });
+        let start = Instant::now();
+        exec.advance();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "the wake returns the wait long before the 2s body finishes; took {:?}",
+            start.elapsed()
+        );
+        let teardown = Instant::now();
+        drop(exec);
+        assert!(
+            teardown.elapsed() >= Duration::from_millis(500),
+            "dropping the runtime waits for a started blocking body (took {:?}) — if this ever \
+             stops being true, the teardown half of interruptible host IO got easier",
+            teardown.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_cancel_wake_that_arrives_first_does_not_park() {
+        // The startup race, end to end through the seam: the request lands before the executor ever
+        // blocks. `CancelWake::register` fires an already-fired wake immediately, so the permit is
+        // stored and the very first `advance` returns rather than sleeping out the deadline.
+        let mut exec = RealExecutor::new().unwrap();
+        let wake = std::sync::Arc::new(noeta_stdlib::CancelWake::new());
+        wake.wake();
+        exec.set_cancel_wake(wake);
+        exec.register_timer(60_000);
+        let start = Instant::now();
+        assert!(exec.advance().is_some());
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "a pre-fired wake must not be swallowed"
         );
     }
 

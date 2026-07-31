@@ -2518,6 +2518,7 @@ fn worker_teardown_reaps_stranded_reference_cycles() {
             // Never cancelled here: this test is about the worker's teardown, and a cancelled
             // worker's teardown is exercised end to end by the CLI isolate tests instead.
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(noeta_stdlib::CancelWake::new()),
             noeta_span::Span::new(0, 0),
         );
         assert!(
@@ -2656,6 +2657,7 @@ fn a_cancelled_worker_reports_cancelled_and_frees_its_heap() {
             None,
             false,
             cancel,
+            Arc::new(noeta_stdlib::CancelWake::new()),
             noeta_span::Span::new(0, 0),
         );
         let residual = noeta_value::live_count() as i64 - before as i64;
@@ -2670,6 +2672,120 @@ fn a_cancelled_worker_reports_cancelled_and_frees_its_heap() {
     assert_eq!(
         residual, 0,
         "a cancelled worker tears its heap down exactly like a completed one (residency 0)"
+    );
+}
+
+/// interruptible-io: a worker **arms its executor against its own cancellation** before it runs a
+/// line of user code.
+///
+/// The flag alone cannot reach a worker that is blocked outside the interpreter — parked in
+/// `Executor::advance` for one long `sleep`, it reaches no safepoint until that sleep ends. So the
+/// parent fires a [`CancelWake`](noeta_stdlib::CancelWake) beside the flag store and the worker
+/// registers its executor's wake on it at startup. This pins the *plumbing* half: that the
+/// registration happens at all, and that it happens on the worker's own executor (which is built on
+/// the worker's thread — a `RealExecutor` owns a non-`Send` tokio runtime — and is why the wake
+/// travels out to the parent rather than the executor travelling home). The behavior half is
+/// `noeta-host-real`'s `a_cancel_wake_ends_a_long_timer_sleep_early`, and the end-to-end half is
+/// the CLI's `..._cancel_reaches_a_worker_parked_in_one_long_sleep`.
+///
+/// The wake is fired **before** the worker starts, which tests two things at once: registration on
+/// an already-fired wake runs the hook immediately (the startup race a worker cancelled during
+/// spawn would otherwise lose), and a wake with the flag *unset* is a spurious wake the worker must
+/// simply ignore — it completes and reports `Done`.
+#[test]
+fn a_worker_arms_its_executor_against_its_own_cancellation() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A `SandboxExecutor` that records having been armed. The sandbox executor's own
+    /// `set_cancel_wake` is the trait's no-op default (its `advance` jumps logical time and cannot
+    /// block), so recording it here is the only way to observe the call.
+    #[derive(Debug)]
+    struct ArmedExecutor {
+        inner: noeta_stdlib::SandboxExecutor,
+        woken: Arc<AtomicBool>,
+    }
+    impl noeta_stdlib::Executor for ArmedExecutor {
+        fn now(&self) -> u64 {
+            self.inner.now()
+        }
+        fn register_timer(&mut self, deadline: u64) {
+            self.inner.register_timer(deadline);
+        }
+        fn advance(&mut self) -> Option<u64> {
+            self.inner.advance()
+        }
+        fn spawn_ext(
+            &mut self,
+            host: &mut dyn noeta_stdlib::Host,
+            io: Box<dyn noeta_stdlib::ExternIo>,
+        ) -> u64 {
+            self.inner.spawn_ext(host, io)
+        }
+        fn poll_ext(
+            &mut self,
+            id: u64,
+        ) -> Option<Result<noeta_stdlib::NativeOut, noeta_stdlib::StdError>> {
+            self.inner.poll_ext(id)
+        }
+        fn set_cancel_wake(&mut self, wake: Arc<noeta_stdlib::CancelWake>) {
+            let woken = Arc::clone(&self.woken);
+            wake.register(move || woken.store(true, Ordering::SeqCst));
+        }
+    }
+
+    let _ = noeta_stdlib::registry::default_seeded();
+    let src = "fn double(n: int): int { return n + n }\n";
+    let source = Source::new(SourceId::FIRST, "test.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let module = Arc::new(compile(&parsed.program).expect("in subset"));
+    let proto = module
+        .protos
+        .iter()
+        .position(|p| p.name.as_deref() == Some("double"))
+        .expect("double proto") as u32;
+    let woken = Arc::new(AtomicBool::new(false));
+    let factory_woken = Arc::clone(&woken);
+    let factory: crate::IsolateFactory = Arc::new(move || {
+        (
+            Box::new(noeta_stdlib::SandboxHost::new()) as Box<dyn noeta_stdlib::Host>,
+            Box::new(ArmedExecutor {
+                inner: noeta_stdlib::SandboxExecutor::new(),
+                woken: Arc::clone(&factory_woken),
+            }) as Box<dyn noeta_stdlib::Executor>,
+        )
+    });
+    let wake = Arc::new(noeta_stdlib::CancelWake::new());
+    wake.wake();
+    let outcome = std::thread::spawn(move || {
+        crate::lifecycle::run_isolate_worker(
+            &module,
+            &factory,
+            None,
+            proto,
+            vec![crate::isolate::IsoArg::Copied(crate::isolate::Wire::Int(
+                21,
+            ))],
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            Arc::new(AtomicBool::new(false)),
+            wake,
+            noeta_span::Span::new(0, 0),
+        )
+    })
+    .join()
+    .unwrap();
+    assert!(
+        woken.load(Ordering::SeqCst),
+        "the worker must arm its own executor against its cancellation before running the body"
+    );
+    assert!(
+        matches!(outcome, crate::lifecycle::IsolateOutcome::Done(_)),
+        "a wake with the flag unset is spurious: the worker re-polls and completes normally"
     );
 }
 
