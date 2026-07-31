@@ -135,24 +135,20 @@ impl Bound {
 /// entry, never its `@test` blocks, so `noeta test src/main.noe` on a two-module project reported
 /// "4 passed" while a whole module's tests silently never ran — and a directory argument used to be
 /// a raw `Is a directory (os error 21)`, so there was no spelling that did run them.
-pub(crate) fn cmd_test(
-    path: &std::path::Path,
-    fail_fast: bool,
-    jobs: Option<usize>,
-    group: &Option<String>,
-    names: &[String],
-    json: bool,
-    target: &Option<String>,
-    timeout: Option<u64>,
-) -> u8 {
+///
+/// The flags arrive as the `TestOpts` the verb already parsed them into, rather than as eight
+/// positional parameters. The runner funnelled them into a `TestOptions` on its first line anyway,
+/// so the flat list was a third spelling of one record — and every new knob had to be threaded
+/// through all three.
+pub(crate) fn cmd_test(path: &std::path::Path, flags: &crate::tier_runner::TestOpts) -> u8 {
     let opts = TestOptions {
-        fail_fast,
-        jobs,
-        group,
-        names,
-        json,
-        target,
-        timeout: timeout.unwrap_or(DEFAULT_TEST_TIMEOUT_SECS),
+        fail_fast: flags.fail_fast,
+        jobs: flags.jobs,
+        group: &flags.group,
+        names: &flags.names,
+        json: flags.json,
+        target: &flags.target,
+        timeout: flags.timeout.unwrap_or(DEFAULT_TEST_TIMEOUT_SECS),
     };
     if path.is_dir() {
         return test_directory(path, &opts);
@@ -160,10 +156,13 @@ pub(crate) fn cmd_test(
     match run_file_tests(path, &opts, None) {
         FileTests::Ran(code) => code,
         FileTests::None { any_declared } => {
-            if json {
+            if flags.json {
                 return report_json(&[], &[], 0);
             }
-            println!("{}", empty_message(any_declared, group, names));
+            println!(
+                "{}",
+                empty_message(any_declared, &flags.group, &flags.names)
+            );
             0
         }
         FileTests::Collected {
@@ -171,7 +170,7 @@ pub(crate) fn cmd_test(
             skipped,
             total,
         } => {
-            if json {
+            if flags.json {
                 report_json(&outcomes, &skipped, total)
             } else {
                 report(&outcomes, &skipped, total)
