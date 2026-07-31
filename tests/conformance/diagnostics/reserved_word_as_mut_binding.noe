@@ -1,0 +1,4 @@
+// `mut` names its binder outright, so the parse fails at the name and the report lands there.
+// expect: error E0046 at 4:5
+// expect: exit 1
+mut type_name = 1

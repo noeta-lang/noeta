@@ -1,0 +1,8 @@
+// The rule covers every word the lexer holds back, not just the reflection primitives, and the
+// message names the role so a reader learns which surface took the name. `match` is a keyword of
+// the grammar; `type_name` (see `reserved_word_as_parameter.noe`) is a reflection primitive.
+// expect: error E0046 at 6:9
+// expect: exit 1
+fn look(match: string): string {
+    return "x"
+}

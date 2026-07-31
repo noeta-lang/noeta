@@ -1,0 +1,7 @@
+// A declared field's name is a name: `type_name` could never be read back as `s.type_name`, so the
+// declaration is refused where it is written.
+// expect: error E0046 at 6:5
+// expect: exit 1
+struct S {
+    type_name: string
+}

@@ -1,0 +1,6 @@
+// A type parameter is a name bound in the signature's scope, and takes the same rule.
+// expect: error E0046 at 4:7
+// expect: exit 1
+fn id<type_name>(x: int): int {
+    return x
+}
