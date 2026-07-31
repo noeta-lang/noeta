@@ -1106,10 +1106,20 @@ impl<'m> Vm<'m> {
     /// `attribute_shape`, same `materialize_args` field resolution — so the value a consumer reads
     /// off `ParamInfo.attrs` is indistinguishable from the one it would read off an `Attributed`.
     pub(crate) fn materialize_param_attrs(&self, callable: &str, param: &str) -> Value {
-        let items: Vec<Value> = self
-            .module
-            .reflection
-            .param_attributes_for(callable, param)
+        self.materialize_attr_instances(
+            self.module.reflection.param_attributes_for(callable, param),
+        )
+    }
+
+    /// A member's manifest rows, materialized into a `List<dyn>` of attribute-struct instances —
+    /// the one builder both `ParamInfo.attrs` and `FieldSpec.attrs` go through, so "a field's
+    /// attributes are built exactly as a parameter's" is a shared call rather than a claim two
+    /// copies have to keep. An empty row set yields an empty list, never an absence.
+    pub(crate) fn materialize_attr_instances(
+        &self,
+        records: Vec<&noeta_ast::reflect::AttributeRecord>,
+    ) -> Value {
+        let items: Vec<Value> = records
             .into_iter()
             .map(|a| {
                 let shape = noeta_ast::reflect::attribute_shape(&a.name, &self.module.reflection);
@@ -1174,11 +1184,17 @@ impl<'m> Vm<'m> {
         Value::list(items)
     }
 
-    /// Materialize a declared type's field schema into a `List<FieldSpec>` (`{ name, type, optional }`,
-    /// declaration order) — the type-level reflection `field_specs_of`. An unknown or non-fielded type
-    /// yields the empty list. Each `type` is the field's declared type (precise, from the reflection
-    /// artifact). The shape is built fresh; structural shape equality matches the tree-walker's, so the
-    /// materialized values agree across the differential by construction.
+    /// Materialize a declared type's field schema into a `List<FieldSpec>` (`{ name, type, optional,
+    /// attrs }`, declaration order) — the type-level reflection `field_specs_of`. An unknown or
+    /// non-fielded type yields the empty list. Each `type` is the field's declared type (precise,
+    /// from the reflection artifact). The shape is built fresh; structural shape equality matches the
+    /// tree-walker's, so the materialized values agree across the differential by construction.
+    ///
+    /// `attrs` is **joined from the attribute manifest**, exactly as `materialize_params` joins a
+    /// parameter's: the rows are the ones `attributes_of::<T>()` returns for the same field, reached
+    /// through the shared `field_attributes_for` key. So the field door and the parameter door hand
+    /// a schema deriver the same shape, and a field attribute cannot be visible through one query
+    /// and missing from the other.
     pub(crate) fn materialize_field_specs(&self, type_name: &str) -> Value {
         let spec_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
@@ -1197,6 +1213,11 @@ impl<'m> Vm<'m> {
                         Value::string(spec.name),
                         build_type_value(spec.ty),
                         Value::bool(spec.optional),
+                        self.materialize_attr_instances(
+                            self.module
+                                .reflection
+                                .field_attributes_for(type_name, spec.name),
+                        ),
                     ],
                 )
             })
@@ -1240,6 +1261,10 @@ impl<'m> Vm<'m> {
                                 Value::string(spec.name),
                                 build_type_value(spec.ty),
                                 Value::bool(spec.optional),
+                                // Empty, and that is the true answer rather than a stub: a variant
+                                // payload slot has no syntax for an attribute (the `#[…]` a variant
+                                // bears is the *variant*'s, keyed `Enum.Variant`).
+                                Value::list(Vec::new()),
                             ],
                         )
                     })
