@@ -111,16 +111,61 @@ pub fn maybe_delegate(entry: &Path) -> Result<Option<graph::ResolvedGraph>, Exit
 fn delegate_resolved(
     resolved: graph::ResolvedGraph,
 ) -> Result<Option<graph::ResolvedGraph>, ExitCode> {
-    if resolved.native_crates.is_empty() {
+    // Only **runtime** native crates force composition here: a `run`/`build`/`check` that loads a
+    // program needs the composed toolchain iff the graph carries native runtime code. A dev-only
+    // `dev-native` crate (a formatter) contributes nothing at runtime, so its presence must not
+    // drag a plain run through a compose — it is reached only by `noeta fmt` (see
+    // [`maybe_delegate_fmt`]).
+    let crates = resolved.runtime_native_crates();
+    if crates.is_empty() {
         return Ok(Some(resolved));
     }
-    match delegate(&resolved.native_crates, &resolved.command_bindings) {
+    match delegate(&crates, &resolved.command_bindings) {
         Ok(never) => match never {},
         Err(err) => {
             eprintln!("noeta: cannot compose the toolchain for this app's native dependencies:");
             eprintln!("{err}");
             Err(ExitCode::from(1))
         }
+    }
+}
+
+/// `noeta fmt`'s delegation: compose and `exec` a dev toolchain whenever the app's graph carries
+/// **any** native entry crate — dev-only formatter crates INCLUDED (unlike [`delegate_resolved`],
+/// which triggers only on runtime crates). A `dev-native` package's whole point is to provide a
+/// tier-body formatter that runs here, so `fmt` is the one command that must reach it.
+///
+/// Guarded by [`COMPOSED_GUARD`]: a composed toolchain re-invokes `noeta fmt` inside itself, and
+/// that inner process must format with its own linked-in extensions, not compose a third time.
+/// Returns `Ok(())` when there is nothing to compose (a pure-Noeta app formats in-process); on a
+/// successful compose it `exec`s and never returns. `Err` on a compose/resolve failure — the caller
+/// surfaces it rather than silently formatting without the package's formatter.
+pub fn maybe_delegate_fmt(entry: &Path) -> Result<(), String> {
+    if std::env::var_os(COMPOSED_GUARD).is_some() {
+        return Ok(());
+    }
+    // `fmt` accepts a directory; the manifest is discovered from it, so probe with a synthetic child
+    // (see `maybe_delegate` — `resolve_graph` only uses the entry's parent).
+    let probe;
+    let entry = if entry.is_dir() {
+        probe = entry.join("_.noe");
+        probe.as_path()
+    } else {
+        entry
+    };
+    let resolved = match graph::resolve_graph(entry) {
+        Ok(resolved) => resolved,
+        // No manifest / not in a package: format in-process (a bare script has no formatter deps).
+        Err(_) => return Ok(()),
+    };
+    if resolved.native_crates.is_empty() {
+        return Ok(());
+    }
+    // The full set (dev-only included), always a Toolchain composition — `fmt` lives only in the
+    // full toolchain base, never the lean runner.
+    match delegate(&resolved.native_crates, &resolved.command_bindings) {
+        Ok(never) => match never {},
+        Err(err) => Err(err),
     }
 }
 
@@ -173,14 +218,13 @@ fn delegate(
 pub fn compose_runner_binary(entry: &Path) -> Result<Option<PathBuf>, String> {
     let resolved = graph::resolve_graph(entry)
         .map_err(|err| format!("resolving the app's native dependencies: {err}"))?;
-    if resolved.native_crates.is_empty() {
+    // A shipped `--exe` base carries only RUNTIME native crates — a dev-only formatter has no place
+    // in a production binary.
+    let crates = resolved.runtime_native_crates();
+    if crates.is_empty() {
         return Ok(None);
     }
-    let binary = compose_binary(
-        &resolved.native_crates,
-        &resolved.command_bindings,
-        ShimKind::Runner,
-    )?;
+    let binary = compose_binary(&crates, &resolved.command_bindings, ShimKind::Runner)?;
     Ok(Some(binary))
 }
 
@@ -203,6 +247,8 @@ pub fn package_api_docs(identity: &str, crate_dir: &Path) -> Result<String, Stri
         // No resolved graph here (publish hands us the crate dir directly) — hash it ourselves so
         // the publish quality gate also recomposes on source edits.
         content_hash: noeta_pm::hash_tree(crate_dir).unwrap_or_default(),
+        // Publish docs a real runtime `native` crate; a dev-native package documents nothing here.
+        dev_only: false,
     };
     // A doc-generation query exposes no CLI of its own, so command-trust is irrelevant — `&[]`.
     let binary = compose_binary(&[nc], &[], ShimKind::Toolchain)?;
@@ -246,10 +292,12 @@ pub fn compose_aot_runtime_archive(
 ) -> Result<Option<(PathBuf, Vec<String>)>, String> {
     let resolved = graph::resolve_graph(entry)
         .map_err(|err| format!("resolving the app's native dependencies: {err}"))?;
-    if resolved.native_crates.is_empty() {
+    // A `--native` AOT base installs only RUNTIME native crates — a dev-only formatter never ships.
+    let crates = resolved.runtime_native_crates();
+    if crates.is_empty() {
         return Ok(None);
     }
-    let entries = resolve_entries(&resolved.native_crates)?;
+    let entries = resolve_entries(&crates)?;
     let toolchain = toolchain_source()?;
     // A stapled AOT artifact exposes no CLI, so command-trust never reaches this base — key on `&[]`.
     let key = compose_key(&entries, &toolchain, &[], ShimKind::AotRuntime, rings);
@@ -406,6 +454,13 @@ struct Entry {
     /// scan selected, so a `--native` binary that never imports the ring's modules sheds its native
     /// dep tree. Empty for a crate with no gated rings (built at default features, unchanged).
     ring_features: Vec<String>,
+    /// A **dev-only** entry crate (from `package.dev-native`) — a formatter/dev-tool. It is pulled
+    /// with `default-features = false, features = ["fmt"]` (only its formatter code, never its heavy
+    /// deps), its `NOETA_EXTENSIONS` are wrapped through [`crate::formatter_only`] so only their body
+    /// formatters reach the toolchain, and it appears ONLY in a [`ShimKind::Toolchain`] composition
+    /// (excluded from `Runner`/`AotRuntime` — a prod shim never lists a dev tool). `false` for a
+    /// normal runtime crate.
+    dev_only: bool,
 }
 
 fn resolve_entries(crates: &[NativeCrate]) -> Result<Vec<Entry>, String> {
@@ -438,6 +493,7 @@ fn resolve_entries(crates: &[NativeCrate]) -> Result<Vec<Entry>, String> {
             ident,
             dev_features,
             ring_features,
+            dev_only: nc.dev_only,
         });
     }
     // Deterministic shim content (the graph already sorts by identity; keep it locally true too).
@@ -954,6 +1010,24 @@ fn shim_cargo_toml(
     out.push_str(&toolchain_dep(kind.base_crate()));
     out.push_str(&toolchain_dep("noeta-ext-abi"));
     for (n, e) in entries.iter().enumerate() {
+        // A **dev-only** formatter crate is pulled trimmed: `default-features = false` sheds its heavy
+        // deps, and only its declared dev feature(s) (`fmt`) turn its formatter code on. It appears
+        // only in a Toolchain composition (excluded upstream from Runner/AotRuntime entry sets), so
+        // there is no prod path here to trim it out of.
+        if e.dev_only {
+            let list = e
+                .dev_features
+                .iter()
+                .map(|f| toml_quote(f))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "ext{n} = {{ package = {}, path = {}, default-features = false, features = [{list}] }}\n",
+                toml_quote(&e.cargo_name),
+                toml_quote(&e.dir.display().to_string())
+            ));
+            continue;
+        }
         // A dev toolchain turns on the crate's dev features (`fmt`); a Toolchain *and* a Runner
         // (shipped `--exe`) both enable ALL of the crate's footprint rings — a runnable binary is
         // fully capable. (Only the AOT composition footprint-gates rings; see `aot_shim_cargo_toml`.)
@@ -1150,6 +1224,17 @@ fn shim_main_rs(
          \x20   let mut units: Vec<&'static (dyn noeta_ext_abi::Extension + Sync)> = Vec::new();\n",
     );
     for (n, e) in entries.iter().enumerate() {
+        if e.dev_only {
+            // A dev-only formatter crate contributes ONLY its body formatters: wrap each of its units
+            // in `formatter_only` so the toolchain sees no modules/types/commands/tiers from it —
+            // only `name()`/`root()`/`body_formatters()`. (A dev-only entry reaches only a Toolchain
+            // shim, whose base is `noeta-cli`, so `noeta_cli::formatter_only` is always in scope here.)
+            out.push_str(&format!(
+                "    for e in ext{n}::NOETA_EXTENSIONS {{ units.push(noeta_cli::formatter_only(*e)); }} // {} ({}, formatter-only)\n",
+                e.identity, e.ident
+            ));
+            continue;
+        }
         out.push_str(&format!(
             "    units.extend_from_slice(ext{n}::NOETA_EXTENSIONS); // {} ({})\n",
             e.identity, e.ident
@@ -1256,6 +1341,7 @@ mod tests {
             ident: "imgfx_native".to_string(),
             dev_features: vec![],
             ring_features: vec![],
+            dev_only: false,
         }]
     }
 
@@ -1269,6 +1355,22 @@ mod tests {
             ident: "imgfx_native".to_string(),
             dev_features: vec!["fmt".to_string()],
             ring_features: vec![],
+            dev_only: false,
+        }]
+    }
+
+    /// A **dev-only** formatter crate (`package.dev-native`) — admitted untrusted, composed
+    /// formatter-only. It declares the `fmt` dev feature (the code its formatter needs).
+    fn dev_only_entries() -> Vec<Entry> {
+        vec![Entry {
+            identity: "acme/htmlfmt".to_string(),
+            dir: PathBuf::from("/store/acme_htmlfmt/native"),
+            content_hash: "testhash".to_string(),
+            cargo_name: "htmlfmt-native".to_string(),
+            ident: "htmlfmt_native".to_string(),
+            dev_features: vec!["fmt".to_string()],
+            ring_features: vec![],
+            dev_only: true,
         }]
     }
 
@@ -1282,6 +1384,7 @@ mod tests {
             ident: "imgfx_native".to_string(),
             dev_features: vec![],
             ring_features: vec!["ring-p2p".to_string()],
+            dev_only: false,
         }]
     }
 
@@ -1522,6 +1625,40 @@ mod tests {
     }
 
     #[test]
+    fn a_dev_only_formatter_crate_is_composed_trimmed_and_wrapped() {
+        // A `package.dev-native` formatter crate is admitted trust-free and stripped to formatter-only:
+        // in the dev toolchain manifest it is pulled `default-features = false, features = ["fmt"]`
+        // (only its formatter code, no heavy deps), and its `main.rs` wraps each unit through
+        // `formatter_only` so nothing that runs reaches the toolchain.
+        let src = ToolchainSource::Workspace(PathBuf::from("/src/noeta"));
+        let toml = shim_cargo_toml(
+            &dev_only_entries(),
+            &src,
+            Path::new("/src/noeta"),
+            ShimKind::Toolchain,
+            "cafe0123deadbeef",
+        );
+        assert!(
+            toml.contains(
+                "ext0 = { package = \"htmlfmt-native\", path = \"/store/acme_htmlfmt/native\", \
+                 default-features = false, features = [\"fmt\"] }"
+            ),
+            "a dev-only crate is trimmed to its fmt feature:\n{toml}"
+        );
+        let main = shim_main_rs(&dev_only_entries(), &[], ShimKind::Toolchain);
+        assert!(
+            main.contains(
+                "for e in ext0::NOETA_EXTENSIONS { units.push(noeta_cli::formatter_only(*e)); }"
+            ),
+            "a dev-only crate's units are wrapped formatter-only, not extended raw:\n{main}"
+        );
+        assert!(
+            !main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS)"),
+            "a dev-only crate must never contribute its full extension surface:\n{main}"
+        );
+    }
+
+    #[test]
     fn shipped_runner_keeps_a_mixed_crate_at_default_features() {
         // dev-deps D5b/D4c: the shipped base pulls the same crate at *default* features — its `fmt`
         // feature stays off, so the formatter and its parser never enter the artifact.
@@ -1656,6 +1793,7 @@ mod tests {
                 ident: "para_db_native".to_string(),
                 dev_features: vec![],
                 ring_features: vec![],
+                dev_only: false,
             },
             Entry {
                 identity: "para/p2p".to_string(),
@@ -1665,6 +1803,7 @@ mod tests {
                 ident: "para_p2p_native".to_string(),
                 dev_features: vec![],
                 ring_features: vec![],
+                dev_only: false,
             },
         ];
         let bindings = vec![binding("migrate", "para/db", "migrate")];
