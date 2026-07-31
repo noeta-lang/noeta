@@ -2138,4 +2138,41 @@ fn pick(e: int): int {
             "and it is still idempotent"
         );
     }
+
+    /// A comment written **between two links of a method chain** stays between them.
+    ///
+    /// The expression printer interleaved no comments at all, so one written inside a chain fell
+    /// through to the enclosing statement sequence and was re-emitted *after the whole statement* —
+    /// a note explaining `.retry(3)` landing below the binding it belongs to. The corpus placement
+    /// property did not catch it because the brace depth is identical on both sides; that is the
+    /// blind spot the next-token anchor closes.
+    #[test]
+    fn a_comment_between_two_chain_links_stays_there() {
+        let src = "\
+fn github(): Client {
+    api = client.new(\"https://api.github.com\")
+        .timeout(30000)
+        // Retries transient transport failures, backing off 250ms doubled per attempt.
+        .retry(3)
+    return api
+}
+";
+        let out = fmt(src).unwrap();
+        assert_eq!(out, src, "fmt moved a comment out of a method chain");
+        assert_eq!(fmt(&out).unwrap(), out, "and it is still idempotent");
+    }
+
+    /// A comment in a chain the author did *not* break still has to sit on its own line, so it pins
+    /// the chain open at exactly that link — the rest stays joined, as written.
+    #[test]
+    fn a_comment_breaks_an_otherwise_joined_chain() {
+        let src = "fn f(c: Client): Client {\n    return c.a().b() /* why */ .d()\n}\n";
+        let out = fmt(src).unwrap();
+        assert!(out.contains("c.a().b()\n"), "links stayed joined: {out}");
+        assert!(
+            out.contains("/* why */\n"),
+            "the comment owns its line: {out}"
+        );
+        assert_eq!(fmt(&out).unwrap(), out, "and it is idempotent");
+    }
 }
