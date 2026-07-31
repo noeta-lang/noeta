@@ -1,0 +1,23 @@
+// The resolution the ambiguity diagnostic asks for: a method the type provides overrides every
+// trait default, so the contested slot has one owner again and both traits are satisfied by that one
+// body. No E0027 — the rule is about a slot with *two* claimants and no answer, not about two traits
+// naming the same method.
+// expect: stdout "mine"
+// expect: exit 0
+trait Greet {
+    fn hello(): string { return "greet" }
+}
+
+trait Wave {
+    fn hello(): string { return "wave" }
+}
+
+struct P {
+    x: int
+    impl Greet {
+        fn hello(): string { return "mine" }
+    }
+    impl Wave {}
+}
+
+echo P { x: 1 }.hello()

@@ -667,6 +667,10 @@ impl Checker {
                             .or_default()
                             .entry(decl.trait_name.to_string())
                             .or_insert(args);
+                        self.symbols
+                            .trait_impl_sites
+                            .entry((decl.target.to_string(), decl.trait_name.to_string()))
+                            .or_insert(decl.trait_span);
                         continue;
                     }
                     Stmt::Struct(d) => (d.name.as_str(), &d.impls, &d.decorators.derives),
@@ -674,10 +678,10 @@ impl Checker {
                     Stmt::Enum(d) => (d.name.as_str(), &d.impls, &d.decorators.derives),
                     _ => continue,
                 };
-            for (trait_name, trait_args) in impls
+            for (trait_name, trait_args, site) in impls
                 .iter()
-                .map(|b| (&b.trait_name, b.trait_args.as_slice()))
-                .chain(derives.iter().map(|d| (&d.name, d.args.as_slice())))
+                .map(|b| (&b.trait_name, b.trait_args.as_slice(), b.trait_span))
+                .chain(derives.iter().map(|d| (&d.name, d.args.as_slice(), d.span)))
             {
                 if self.symbols.user_traits.contains_key(trait_name.as_str()) {
                     let args: Vec<Type> = trait_args
@@ -690,6 +694,10 @@ impl Checker {
                         .or_default()
                         .entry(trait_name.to_string())
                         .or_insert(args);
+                    self.symbols
+                        .trait_impl_sites
+                        .entry((type_name.to_string(), trait_name.to_string()))
+                        .or_insert(site);
                 }
             }
         }
@@ -838,6 +846,11 @@ impl Checker {
         // defaults' signatures — `impl Cache<string>` registers `fn get(k: string): …` — so the
         // member calls type concretely. The non-generic case is covered by the name-set loop
         // below; an arity mismatch registers nothing (`check_trait_impl` reports it).
+        //
+        // This walk is `program.stmts`, so where a *generic* trait's default collides with another
+        // trait's the winner is the textually-first one — arbitrary, but stable, and the same one
+        // the backends' hoist takes. The ambiguity rule below (E0027) therefore does not extend
+        // here: it exists to replace a per-process coin flip, and there is none to replace.
         for stmt in &program.stmts {
             let mut register =
                 |type_name: &str,
@@ -926,8 +939,29 @@ impl Checker {
             })
             .map(|(local, _)| local.clone())
             .collect();
-        for (type_name, trait_names) in self.symbols.user_trait_impls.clone() {
-            for trait_name in trait_names.into_keys() {
+        // Sorted, because a `HashMap` walk here decided *which trait* an omitted method was typed
+        // from whenever two of them defaulted the same name — per process, so one source file
+        // checked green in one run and red in the next. Two traits contending for one slot is now a
+        // diagnostic (recorded below, reported as E0027 in pass 2), so this order never picks a
+        // winner between rival defaults; it is what keeps the pass itself reproducible.
+        let mut bindings: Vec<(String, Vec<String>)> = self
+            .symbols
+            .user_trait_impls
+            .iter()
+            .map(|(ty, traits)| {
+                let mut names: Vec<String> = traits.keys().cloned().collect();
+                names.sort();
+                (ty.clone(), names)
+            })
+            .collect();
+        bindings.sort();
+        // Which trait supplied each `(type, method)` slot *by default* — a second supplier is the
+        // ambiguity, and it is the programmer's to resolve (an override, or one implementation
+        // fewer). A slot filled by a real method (the type's own, an impl body, a derive's bridge)
+        // is not in here, so overriding the method silences this by construction.
+        let mut supplied_by: HashMap<(String, String), String> = HashMap::new();
+        for (type_name, trait_names) in bindings {
+            for trait_name in trait_names {
                 if native_default_traits.contains(&trait_name) {
                     continue;
                 }
@@ -938,7 +972,27 @@ impl Checker {
                     continue;
                 }
                 for tm in decl.methods.iter().filter(|tm| tm.has_default) {
+                    let key = (type_name.clone(), tm.sig.name.to_string());
+                    if let Some(first) = supplied_by.get(&key) {
+                        self.symbols
+                            .trait_default_conflicts
+                            .push(crate::TraitDefaultConflict {
+                                type_name: type_name.clone(),
+                                method: tm.sig.name.to_string(),
+                                traits: (first.clone(), trait_name.clone()),
+                            });
+                        continue;
+                    }
+                    // `register_synth_method` is a no-op on a slot that is already filled — by the
+                    // type's own method, an impl body, a derive's bridge, or a generic trait's
+                    // instantiated default (all registered above, all in source order). Such a slot
+                    // has a real owner, so this default is inert and nothing is contested; record
+                    // ownership only where this default actually took an empty slot.
+                    let taken = self.symbols.methods.contains_key(&key);
                     self.register_synth_method(&type_name, &tm.sig);
+                    if !taken {
+                        supplied_by.insert(key, trait_name.clone());
+                    }
                 }
             }
         }
@@ -1234,10 +1288,27 @@ impl Checker {
             }
         }
         // Resolve the routes under the immutable registry/import borrows, then write them in.
+        // Sorted for the same reason the UT5 fallback below is: a `(type, method)` reachable through
+        // *two* native traits used to be routed to whichever the hash walk reached last — and the
+        // route is the body that runs, so two traits whose defaults disagree (the shipped
+        // `vec.Kernels`/`vec.SatKernels` pair differs by wrapping vs saturating arithmetic) would
+        // compute different answers in different processes. Rival routes are a diagnostic now
+        // (E0027, reported in pass 2), so this order settles nothing but reproducibility.
         let impls = self.symbols.user_trait_impls.clone();
+        let mut sorted_impls: Vec<(String, Vec<String>)> = impls
+            .iter()
+            .map(|(ty, traits)| {
+                let mut names: Vec<String> = traits.keys().cloned().collect();
+                names.sort();
+                (ty.clone(), names)
+            })
+            .collect();
+        sorted_impls.sort();
         let mut routes: Vec<((String, String), (String, String))> = Vec::new();
-        for (type_name, traits) in &impls {
-            for local in traits.keys() {
+        let mut routed_by: HashMap<(String, String), String> = HashMap::new();
+        let mut conflicts: Vec<crate::TraitDefaultConflict> = Vec::new();
+        for (type_name, traits) in &sorted_impls {
+            for local in traits {
                 // Native traits only (a `use`-imported extern-type alias); `.noe` traits resolve nothing.
                 let Some(qualified) = self.imports.extern_types.get(local).cloned() else {
                     continue;
@@ -1260,16 +1331,24 @@ impl Checker {
                     if provided {
                         continue;
                     }
-                    routes.push((
-                        (type_name.clone(), method.to_string()),
-                        (qualified.clone(), local.clone()),
-                    ));
+                    let key = (type_name.clone(), method.to_string());
+                    if let Some(first) = routed_by.get(&key) {
+                        conflicts.push(crate::TraitDefaultConflict {
+                            type_name: type_name.clone(),
+                            method: method.to_string(),
+                            traits: (first.clone(), local.clone()),
+                        });
+                        continue;
+                    }
+                    routed_by.insert(key.clone(), local.clone());
+                    routes.push((key, (qualified.clone(), local.clone())));
                 }
             }
         }
         for (key, route) in routes {
             self.symbols.native_trait_default_sites.insert(key, route);
         }
+        self.symbols.trait_default_conflicts.extend(conflicts);
     }
 
     /// Record a type's declared `From` conversions (error-ergonomics): each in-body

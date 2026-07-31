@@ -1,0 +1,30 @@
+// Coherence over method NAMES: two traits may not each hand one type a default body for the same
+// method. A method table has one slot per name (there is no overloading), and nothing here says
+// which body belongs in it — so it is E0027, like every other contest coherence settles, and like
+// the bundle spelling of the identical collision ("binding `vec.SatKernels` would make the name
+// ambiguous"). It used to be resolved by `HashMap` iteration order, which made this very file check
+// green in one process and fail E0007 in the next.
+// expect: error E0027 at 21:10
+// expect: error E0007 at 29:14
+// expect: exit 1
+trait Greet {
+    fn hello(): string { return "greet" }
+}
+
+trait Wave {
+    fn hello(): int { return 42 }
+}
+
+struct P {
+    x: int
+    impl Greet {}
+    impl Wave {}
+}
+
+// The binding is annotated deliberately: under the old hash-order winner this line was where the
+// coin flip became visible — `hello` typed as `string` from `Greet` (E0007) or as `int` from `Wave`
+// (green), about half the time each. It is also what makes this case load-bearing for the
+// determinism gate's verdict digest, which compares the checker's diagnostics across processes.
+// The E0007 below is that cascade, now stable: the ambiguity above is the fault to fix.
+mut n: int = P { x: 1 }.hello()
+echo n

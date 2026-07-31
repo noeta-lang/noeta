@@ -1108,6 +1108,85 @@ impl Checker {
         }
     }
 
+    /// Coherence's **second** uniqueness rule, over method *names* rather than trait names: two
+    /// traits a type implements may not each hand it a **default body** for one method, because a
+    /// method table has one slot per name (there is no overloading — the same fact that limits a
+    /// type to one `From`, `check_coherence`) and nothing in the source says which body belongs in
+    /// it. E0027, like every other contest coherence settles.
+    ///
+    /// The rule is not new here; the *enforcement* is. The bundle spelling of the identical
+    /// collision has always been rejected — "`Color` already acquires `add` from bundle `Kernels` —
+    /// binding `vec.SatKernels` would make the name ambiguous" ([`Self::check_bundle_binding`]) —
+    /// while the `.noe` trait spelling silently picked a winner by `HashMap` iteration order. That
+    /// made a *checked* fact depend on the process: `p.hello()` typed from `Greet` in one run and
+    /// from `Wave` in the next, so a program with two colliding defaults compiled green roughly
+    /// half the time and failed E0007 the rest, while both backends' hoist always ran the
+    /// textually-first body. Ambiguity is a diagnostic, never a guess (the derive-bridge rule,
+    /// E0050, says the same thing about two candidate fields).
+    ///
+    /// The programmer resolves it the way the language already documents: **override the method**
+    /// (a provided body wins over every default, so the slot has one owner again), or implement one
+    /// of the two traits fewer. An override that both traits' signatures accept satisfies both.
+    ///
+    /// Reported here, in pass 2, because this is where the binding *sites* are known — the
+    /// collision itself is found in pass 1, where "provided vs inherited" is decidable
+    /// ([`crate::Symbols::trait_default_conflicts`]). The two spans are ordered by source position,
+    /// so the later binding carries the diagnostic and the earlier one is labelled: the same
+    /// two-label discipline duplicate impls get, and for the same reason — the rival
+    /// implementations are routinely in different files.
+    pub(crate) fn report_trait_default_conflicts(&mut self) {
+        // Taken, not read: a session/REPL re-collects on every entry, and a conflict already
+        // reported must not be reported again on the next one.
+        let mut conflicts = std::mem::take(&mut self.symbols.trait_default_conflicts);
+        conflicts.sort();
+        conflicts.dedup();
+        for conflict in conflicts {
+            let (a, b) = &conflict.traits;
+            let ty = &conflict.type_name;
+            // A binding with no source site (a native type advertising the trait through its
+            // registry declaration) cannot be blamed — there is nothing to point at.
+            let (Some(a_span), Some(b_span)) = (
+                self.symbols
+                    .trait_impl_sites
+                    .get(&(ty.clone(), a.clone()))
+                    .copied(),
+                self.symbols
+                    .trait_impl_sites
+                    .get(&(ty.clone(), b.clone()))
+                    .copied(),
+            ) else {
+                continue;
+            };
+            let ((first, first_span), (later, later_span)) = if a_span.start <= b_span.start {
+                ((a, a_span), (b, b_span))
+            } else {
+                ((b, b_span), (a, a_span))
+            };
+            let method = &conflict.method;
+            self.error(
+                DiagnosticCode::ConflictingTraitImpl,
+                later_span,
+                format!(
+                    "`{ty}` already inherits a default `{method}` from trait `{first}` — \
+                     implementing `{later}` would make the name ambiguous"
+                ),
+            )
+            .label(
+                later_span,
+                format!("`{later}` also supplies a default `{method}`"),
+            )
+            .label(
+                first_span,
+                format!("`{first}`'s default `{method}` is inherited here"),
+            )
+            .help(format!(
+                "a method table has one slot per name — give `{ty}` its own `fn {method}` (a \
+                 provided method overrides every trait default, and one body can satisfy both \
+                 traits), or implement only one of `{first}` and `{later}`"
+            ));
+        }
+    }
+
     /// The `?` **failure-position rule** — the `Result` twin of [`Self::check_try_option`], plus the
     /// error-conversion rule layered on top of it.
     ///
