@@ -88,6 +88,15 @@ jobs:
       # proves the Cranelift-free binary still compiles (the point of the feature gate).
       - name: cargo test --workspace (default, Cranelift-free)
         run: cargo test --workspace --exclude noeta-jit --exclude noeta-cli --locked
+      # `noeta-pm` declares no `default` feature and gates every crypto/trust module behind one, so the
+      # workspace step above builds it BARE — 57 of its 250 tests never ran in CI (audit row 4b). Among
+      # them the `test_data/wire` fixture pin, which is the only thing keeping this repo's registry
+      # protocol byte-compatible with the noeta-registry Worker's copy of the same fixtures, plus the
+      # advisory-feed and transparency-log chain verification and the attestation goldens. Excluding
+      # `noeta-cli` from the workspace run took these with it: nothing else enables the features.
+      # `--all-features`, not a feature list — a list is a second place to forget.
+      - name: cargo test -p noeta-pm --all-features (registry wire fixtures + trust chain)
+        run: cargo test -p noeta-pm --all-features --locked
       # The `noeta` binary is JIT-enabled by default; prove `--no-default-features` still yields a
       # working interpreter-only CLI (identical behaviour, no Cranelift).
       - name: lean CLI build (--no-default-features, Cranelift-free)

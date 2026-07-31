@@ -968,6 +968,12 @@ fn cmd_publish_docs_only(
 /// every resolved dependency, its source, and the elevated authority (`native` / `commands`) the root
 /// `[trust]` grants make active. Transparency/informed-consent: since an *unauthorized* native
 /// dependency fails resolution, a successful audit lists exactly the elevated authority that is live.
+///
+/// Exit 0 means *checked and clean*. It is non-zero when a matched advisory's tier policy says `fail`,
+/// and also when the registry's advisory data did not **verify** — an audit that could not read the
+/// feed has not cleared the graph, and saying so only on stdout while exiting 0 made drift in the
+/// signed formats indistinguishable from a clean run in CI (audit row 4a). An *unreachable* registry
+/// stays a note: this section is best-effort, and offline is not evidence of anything.
 pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
     let start = if path.is_dir() {
         path.to_path_buf()
@@ -1135,13 +1141,44 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
     // matched *active* advisory makes the audit exit non-zero so CI catches it. The advisory key + feed
     // head are pinned trust-on-first-use in the lock, so a later feed whose count shrank is surfaced as
     // a possible rollback (a withheld advisory).
+    //
+    // Two *failures* to distinguish here, because "could not verify" is not "verified clean" (audit
+    // row 4a). A [`PmError::Network`]/`Io` is transient and environmental — an offline CI box, a 502 —
+    // and degrades to a note, exactly as the IDE's resolve does (`noeta-ide/src/workspace.rs`) and as
+    // this whole section's best-effort contract says. A [`PmError::Trust`] is a signature that did not
+    // verify, a head that does not attest to the served advisories, or a log leaf that does not match:
+    // never routine, and it means *no dependency was checked against the feed at all*. That is reported
+    // on stderr and exits non-zero, the same answer `noeta watch-scope` already gives to the same call
+    // and the same answer resolution gives to a bad release signature. The `[trust.advisories]` policy
+    // is deliberately NOT consulted: it selects which *intake tier's* hits fail a build, and an
+    // unverifiable feed has no tier — nothing was read to have one.
     let mut advisory_hits = 0usize;
     let mut advisory_fails = 0usize;
+    // What failed to verify, in the words of the exit line below — set at the failing site. At most one
+    // of the two can fire: a feed that does not verify never reaches the log-binding check.
+    let mut advisory_unverified: Option<&'static str> = None;
     if let Ok(Some(index)) = registry::open_http() {
         println!("\n  Security advisories:");
         let old = lock::Lock::read(&manifest_dir).advisory_trust().cloned();
-        match index.fetch_advisories(old.as_ref().map(|a| a.public_key.as_str())) {
-            Ok(feed) => {
+        // The feed key: the lock's pin (trust-on-first-use) when there is one, else the key the
+        // registry serves. A registry that serves *no* advisory key runs no feed at all (`None` here) —
+        // a note, like the transparency-log section above, not a verification failure. Once a key is
+        // pinned we never ask again, so a registry that stops serving one cannot quietly un-pin itself
+        // into that note: it fails the head verification below instead.
+        let fetched = match old.as_ref().map(|a| a.public_key.clone()) {
+            Some(pinned) => Some(index.fetch_advisories(Some(&pinned))),
+            None => match index.advisory_public_key() {
+                Ok(Some(served)) => Some(index.fetch_advisories(Some(&served))),
+                Ok(None) => None,
+                // Transient — report it as the "not checked" note below, not as "no feed".
+                Err(err) => Some(Err(err)),
+            },
+        };
+        match fetched {
+            None => {
+                println!("    (this registry serves no advisory feed — nothing to check against)")
+            }
+            Some(Ok(feed)) => {
                 if let Some(prev) = &old
                     && feed.count < prev.count as usize
                 {
@@ -1220,7 +1257,16 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
                     ),
                     Ok(Some(_)) => {}
                     Ok(None) => {} // this registry runs no transparency log
-                    Err(err) => println!("    ⚠ advisory-log verification failed — {err}"),
+                    // Same split as the feed fetch: a checkpoint that does not verify, or a logged leaf
+                    // that is not the advisory served, is evidence — not a note.
+                    Err(err @ noeta_pm::PmError::Trust(_)) => {
+                        advisory_unverified = Some(
+                            "the advisories were read, but the registry's transparency-log evidence \
+                             for them did not hold",
+                        );
+                        eprintln!("    ✗ advisory-log verification failed — {err}");
+                    }
+                    Err(err) => println!("    ⚠ advisory-log not checked — {err}"),
                 }
                 // Pin (or refresh) the verified advisory-feed head, trust-on-first-use.
                 let pin = lock::AdvisoryTrust {
@@ -1236,8 +1282,28 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
                     Some(&pin),
                 );
             }
-            Err(err) => println!("    not checked — {err}"),
+            // The feed did not VERIFY: a bad per-advisory signature, a head that does not attest to the
+            // served advisories (a withheld advisory), a malformed key. Nothing was checked, so this is
+            // reported like any other trust refusal — on stderr, with a non-zero exit.
+            Some(Err(err @ noeta_pm::PmError::Trust(_))) => {
+                advisory_unverified =
+                    Some("the dependency graph was NOT checked against the advisory feed");
+                eprintln!("    ✗ the advisory feed did not verify — {err}");
+            }
+            // Transient/environmental (offline, a 5xx, a malformed response): the section is
+            // best-effort by design, so it stays a note and the audit still succeeds.
+            Some(Err(err)) => println!("    not checked — {err}"),
         }
+    }
+
+    // Advisory data that could not be VERIFIED is not a clean audit. Reported before the matched-advisory
+    // tally because it subsumes it — a feed that never verified produced no matches to tally.
+    if let Some(what) = advisory_unverified {
+        eprintln!(
+            "\nthe registry's advisory data did not verify (marked ✗ above) — {what}. Treat this build \
+             as unaudited, not as clean."
+        );
+        return ExitCode::from(1);
     }
 
     // A matched advisory fails the audit only when its tier's `[trust.advisories]` policy says `fail`

@@ -545,6 +545,8 @@ Answers *"what am I actually running?"* for the resolved dependency tree: every 
 
 It also cross-references every dependency against the registry's **security advisory feed**, showing each hit's **intake tier** (`operator` / `publisher` / `imported`) and, for a publisher advisory, its verified signing identity. An imported advisory that carried a **CVSS v3.x vector** upstream shows its severity band with the base score re-derived client-side from that vector — `high (CVSS 7.8)`. Whether a tier fails or merely warns is set per-project by `[trust.advisories]` (default: all warn) — see [Package Provenance](Package-Provenance#security-advisories-and-intake-tiers).
 
+Exit 0 means *checked and clean*. Besides a `fail`-tier advisory hit, the audit also exits non-zero when the advisory data **did not verify** — a signature that fails against the pinned feed key, a signed head that does not attest to the advisories served, or a transparency-log leaf that does not match the advisory it is supposed to be. Nothing was checked in that case, and "could not verify" is not "verified clean"; the reason is printed on stderr. An *unreachable* registry is different and stays a note with exit 0: this whole section is best-effort, and being offline is evidence of nothing. `[trust.advisories]` does not soften a verification failure — it selects which intake tier's *hits* fail the build, and a feed that never verified has no tier.
+
 ### `noeta advisory`
 
 ```text
