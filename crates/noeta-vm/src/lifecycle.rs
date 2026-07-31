@@ -162,6 +162,13 @@ pub(crate) struct IsolateSlot {
     /// Set by the parent's `cancel_task` (isolate-cancel). The worker reads it with a relaxed load
     /// at every safepoint; nothing else writes it, so it only ever goes `false → true`.
     pub(crate) cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// The **wake half** of that request (interruptible-io): fired by the parent right after the
+    /// flag store, so a worker blocked *outside* the interpreter — parked in its executor's
+    /// real-time sleep for one long `sleep(ms)` — returns from that block and reaches the safepoint
+    /// that reads the flag. The worker registers its executor's hook on it at startup (before any
+    /// user code runs); a `CancelWake` with no hooks registered is inert, so this costs nothing on
+    /// a worker whose executor cannot block.
+    pub(crate) wake: Arc<noeta_stdlib::CancelWake>,
 }
 
 /// What a worker isolate ships home when its thread finishes (isolate-cancel). Three terminal
@@ -949,10 +956,18 @@ pub(crate) fn run_isolate_worker(
     registry: Option<&'static noeta_stdlib::registry::Registry>,
     stall_tracked: bool,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    cancel_wake: Arc<noeta_stdlib::CancelWake>,
     span: Span,
 ) -> IsolateOutcome {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
-    let (host, executor) = factory();
+    let (host, mut executor) = factory();
+    // Arm the executor against this worker's cancellation (interruptible-io) *before* the VM is
+    // built, so the request can never land in the window between construction and the first
+    // suspension: a wake that already fired runs the hook at registration. The executor is built on
+    // THIS thread by the factory (a `RealExecutor` owns a tokio runtime, which is not `Send`), which
+    // is why the wake travels out to the parent through a shared handle rather than the executor
+    // travelling home.
+    executor.set_cancel_wake(cancel_wake);
     let mut wvm = Vm::load(module, host, executor);
     // Per-isolate profiling (injected by `noeta profile`): this worker gets its own collector, and
     // the seam propagates so isolates IT spawns are profiled too. The display name is the spawned

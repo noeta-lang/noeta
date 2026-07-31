@@ -752,10 +752,11 @@ fn run_real_isolate_cancel_reaches_a_worker_parked_on_timers() {
     // reach. This watcher sleeps in 5 ms slices for what would be 5 s; cancelled 200 ms in, it must
     // stop promptly rather than sit out the remaining wait.
     //
-    // Slices, not one `sleep(5000)`, and that is the documented rule rather than a test artifact: a
-    // single long sleep parks the worker inside the executor's real-time wait, which the poll cannot
-    // interrupt, so it observes the request only when the sleep ends (measured at 2.8 s for a 3 s
-    // sleep cancelled at 200 ms). See the follow-up row in `plans/backlog.md`.
+    // Slices here, one long sleep in the test below: both stop promptly now. The slicing used to be
+    // load-bearing (a single long sleep parked the worker inside the executor's real-time wait,
+    // which no poll could interrupt — measured at 2.8 s for a 3 s sleep cancelled at 200 ms); the
+    // cancellation **wake** closed that, and this case keeps covering the *poll* half — a worker
+    // that suspends constantly and is stopped between two rounds rather than mid-block.
     let file = temp_program(
         "isolate_cancel_timers",
         "use std.io\n\
@@ -789,5 +790,56 @@ fn run_real_isolate_cancel_reaches_a_worker_parked_on_timers() {
         elapsed < std::time::Duration::from_millis(2_000),
         "a cancelled worker parked on timers must stop at the next scheduler round, not sit out its \
          remaining 4.8s; took {elapsed:?}"
+    );
+}
+
+#[test]
+fn run_real_isolate_cancel_reaches_a_worker_parked_in_one_long_sleep() {
+    // **The wake half.** A worker whose only pending work is a single timer is parked *inside*
+    // `RealExecutor::advance`, which sleeps real time to the earliest deadline in one call — it is
+    // not executing Noeta and its scheduler loop, where the cancellation poll lives, is exactly what
+    // it has left. The flag alone was therefore observed only when the sleep ended (measured: a
+    // 3 s sleep cancelled at 200 ms stopped 2.8 s later). The parent now fires the worker's
+    // `CancelWake` alongside the flag store; the executor's hook ends the sleep, the worker's next
+    // round polls the flag, and it stops at once.
+    //
+    // **The house rule, structurally rather than numerically.** The worker sleeps for ten minutes,
+    // so it cannot finish — not on any machine, at any load, since its bound is real time and a
+    // busy box only makes it longer. `cancelled` is the only reachable outcome and a working wake is
+    // the only way this program terminates; a broken one runs into `assert_cmd`'s 60 s bound, which
+    // kills the child and fails loudly. The elapsed ceiling below is a smoke bound on top of that,
+    // not the claim — it is two orders of magnitude under the sleep it would have had to sit out.
+    let file = temp_program(
+        "isolate_cancel_long_sleep",
+        "use std.io\n\
+         use std.task.{sleep}\n\
+         async fn napper(ms: int): int {\n\
+         sleep(ms).await\n\
+         return 1\n\
+         }\n\
+         async fn run(): int {\n\
+         concurrent {\n\
+         h = isolate napper(600000)\n\
+         sleep(200).await\n\
+         h.cancel()\n\
+         io.outln(match h.join() { Ok(v) => \"ok=\" ~ v, Err(_) => \"cancelled\" })\n\
+         }\n\
+         return 0\n\
+         }\n\
+         echo run().await",
+    );
+    let start = std::time::Instant::now();
+    lang()
+        .arg("run")
+        .arg(&file)
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .stdout("cancelled\n0\n");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "a cancelled worker parked in one long sleep must be woken, not sit out its remaining \
+         599.8s; took {elapsed:?}"
     );
 }
