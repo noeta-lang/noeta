@@ -1,6 +1,7 @@
 //! The wasm differential oracle (P-WASM W1.3): every corpus program, compiled to a `.noeb` and
 //! executed by the **wasm runner under wasmtime** (`--sandbox`), must be byte-identical to the
-//! native VM run — stdout, exit code, and rendered stderr (diagnostics + traceback).
+//! native VM run — stdout, exit code, and the whole stderr stream: the program's own `std.io`
+//! `err`/`errln` output, then diagnostics, then the traceback, in the order a run tail writes them.
 //!
 //! This is the ship-safety gate for the wasm target, the exact analogue of the bundle oracle
 //! (L1.3): the only variable is "native VM vs the same VM compiled to wasm32-wasip1", so any
@@ -313,6 +314,12 @@ fn compare(
     };
     let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, source_name, "")]);
     let mut expected_stderr = String::new();
+    // The program's OWN stderr stream first (`std.io`'s `err`/`errln`), in the order every run tail
+    // writes it: program stderr, then diagnostics, then traceback (`noeta_runner::
+    // run_compiled_module`). This is program output buffered into `RunResult.stderr` exactly as
+    // stdout is — leaving it out of the expected string made the whole stream unobserved on both
+    // sides at once, so `tests/conformance/io/streams.noe` ran here with a vacuous assertion.
+    expected_stderr.push_str(&native.stderr);
     if !native.diagnostics.is_empty() {
         expected_stderr.push_str(&noeta_diagnostics::render_mapped(
             &sources,
