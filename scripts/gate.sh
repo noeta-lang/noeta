@@ -30,12 +30,21 @@
 # CARGO_BUILD_JOBS=8. The two long poles in the merge gate are `cargo test --workspace` (4m50s warm,
 # 9m53s cold) and the lean-CLI build (8m warm, 9m cold — it is a second, Cranelift-free link of the
 # whole CLI); the JIT group adds 13m cold and a few minutes warm. `--full` adds miri (1m12s, 63
-# tests) and the editor tooling (4s) — cheap. Its wasm legs were NOT measured here: they SKIP
-# without `wasmtime` on PATH and without the wasm targets installed *for the gating toolchain*, and
-# the runner/playground/component builds behind them are the expensive part when they do run.
+# tests) and the editor tooling (4s) — cheap. Its wasm legs were NOT measured here: they need
+# wasmtime and the wasm targets installed *for the gating toolchain*, and the runner / playground /
+# component builds behind them are the expensive part when they do run.
 #
 # Budget accordingly, and do not be surprised: a gate whose cost is a surprise gets skipped, and a
 # skipped gate is exactly what we already have.
+#
+# On SKIP: a step whose prerequisite is missing prints the exact missing piece and the command that
+# fixes it, and the summary lists every skipped step in full rather than as a one-line footnote.
+# This is not cosmetic. The wasm differential oracle sat red while reporting SKIP, and the reason it
+# printed ("wasmtime not on PATH") was wrong twice over: wasmtime WAS installed, in `~/.wasmtime/bin`
+# where its own installer puts it and where a non-interactive shell never looks, and the real gap was
+# `wasm32-wasip1` being installed for `stable` but not for the pinned `1.97.0`. A gate that cannot
+# run has to be loud about precisely why, and in CI it should not be a SKIP at all — see
+# NOETA_GATE_REQUIRE_TOOLS below.
 #
 # Options:
 #   --quick / --full        pick a tier (default: the merge gate, in between)
@@ -55,6 +64,15 @@
 #                           target dir produces phantom failures this script would faithfully
 #                           report as real.
 #   CARGO_BUILD_JOBS        respected, not set. With several agents on one box, divide the cores.
+#   NOETA_GATE_REQUIRE_TOOLS  1 = a missing prerequisite is a FAIL, not a SKIP. Defaults to 1 when
+#                           `$CI` is set, else 0. The asymmetry is deliberate: on a dev box not
+#                           everyone has wasmtime / nightly miri / npm, and hard-failing there would
+#                           make `--full` unrunnable and push people back to `--quick` forever. In
+#                           an environment that INSTALLS the tooling, "prerequisite missing" does
+#                           not mean "unavailable" — it means the install or the detection broke,
+#                           and that must never read as a pass.
+#   NOETA_WASMTIME          path to the wasmtime binary. Not normally needed: the gate probes
+#                           `$PATH` and then the usual install dirs (`~/.wasmtime/bin`, …).
 #
 # On the hook: `--install-hook` exists, is opt-in, never runs on its own, and will not clobber an
 # existing hook without --force. It is NOT recommended as this repo's primary mechanism, for three
@@ -125,6 +143,15 @@ if [[ "$TC" == "default" ]]; then
     CARGO=(cargo)
 else
     CARGO=(cargo "+$TC")
+fi
+
+# Whether a missing prerequisite is a failure rather than a SKIP. Defaults ON when `$CI` is set:
+# an automated environment installs the tooling it means to exercise, so "wasmtime not found" there
+# is a broken install step, not an absent tool — and a SKIP that reads as a pass is exactly how the
+# wasm differential stayed red without anyone noticing. Force either way with 0/1.
+REQUIRE_TOOLS="${NOETA_GATE_REQUIRE_TOOLS:-}"
+if [[ -z "$REQUIRE_TOOLS" ]]; then
+    if [[ -n "${CI:-}" ]]; then REQUIRE_TOOLS=1; else REQUIRE_TOOLS=0; fi
 fi
 
 # ------------------------------------------------------------------------------ the opt-in hook
@@ -230,17 +257,32 @@ step() {
     fi
 }
 
-# skip <tier> <group> <name> <reason>
+# skip <tier> <group> <name> <reason> [fix-command]
+#
+# A step whose prerequisite is missing. On a dev box that is a SKIP: not everyone has wasmtime, a
+# nightly miri, or npm, and hard-failing there would make `--full` unrunnable and push people back
+# to `--quick` forever — the opposite of the point. Under REQUIRE_TOOLS it is a FAIL instead: in an
+# environment that installs the tooling (CI), "prerequisite missing" does not mean "not available",
+# it means the detection or the install step broke, and that must not read as a pass.
 skip() {
-    local tier="$1" group="$2" name="$3" reason="$4"
+    local tier="$1" group="$2" name="$3" reason="$4" fix="${5:-}"
     selected "$tier" "$group" "$name" || return 0
     STEP_N=$((STEP_N + 1))
     if ((LIST_ONLY)); then
         printf '  [%-7s] %-52s (SKIP: %s)\n' "$group" "$name" "$reason"
         return 0
     fi
-    printf '\n\033[1m== [%s] %s\033[0m\n   \033[33mSKIP\033[0m  %s\n' "$group" "$name" "$reason"
-    record "$group" "$name" SKIP 0 "" "" "$reason"
+    printf '\n\033[1m== [%s] %s\033[0m\n' "$group" "$name"
+    if ((REQUIRE_TOOLS)); then
+        FAILED=$((FAILED + 1))
+        printf '   \033[31mMISSING\033[0m  %s\n' "$reason"
+        printf '   (NOETA_GATE_REQUIRE_TOOLS is on: a missing prerequisite is a failure here.)\n'
+        record "$group" "$name" FAIL 0 "" "$fix" "prerequisite missing: $reason"
+        return 0
+    fi
+    printf '   \033[33mSKIP\033[0m  %s\n' "$reason"
+    [[ -n "$fix" ]] && printf '   fix: %s\n' "$fix"
+    record "$group" "$name" SKIP 0 "" "$fix" "$reason"
 }
 
 # Render a command array as a line you can actually paste back into a shell. `$*` would drop the
@@ -264,6 +306,36 @@ fmt_dur() {
 }
 
 have() { command -v "$1" > /dev/null 2>&1; }
+
+# Find wasmtime. `$PATH` alone is not enough: wasmtime's own installer (the documented way to get
+# it, https://wasmtime.dev/install.sh) drops the binary in `~/.wasmtime/bin` and edits a shell rc
+# file — so a non-interactive `bash scripts/gate.sh` never sees it, and the differential oracle
+# reported SKIP on a machine where wasmtime was installed and working. Probe the install locations
+# that actually exist before concluding it is missing.
+find_wasmtime() {
+    if [[ -n "${NOETA_WASMTIME:-}" ]]; then
+        printf '%s' "$NOETA_WASMTIME"
+        return 0
+    fi
+    if have wasmtime; then
+        command -v wasmtime
+        return 0
+    fi
+    local candidate
+    for candidate in \
+        "$HOME/.wasmtime/bin/wasmtime" \
+        "$HOME/.cargo/bin/wasmtime" \
+        "$HOME/.local/bin/wasmtime" \
+        /usr/local/bin/wasmtime \
+        /opt/homebrew/bin/wasmtime \
+        /opt/wasmtime/bin/wasmtime; do
+        if [[ -x "$candidate" ]]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
 
 # Is a cross-compilation target installed for the toolchain we are gating with? (A target installed
 # for `stable` does nothing for a `+1.97.0` build, so ask about the right toolchain.)
@@ -354,13 +426,35 @@ step 2 jit "hot-reload e2e (#[ignore]d real-socket suites)" -- \
     env "NOETA_GATE_TOOLCHAIN=$TC" bash "$ROOT/scripts/hot-e2e.sh"
 
 # --- wasm: the portability invariant + the wasm/browser/serve oracles --------------------------
-if [[ "$TC" == "default" ]]; then
-    TARGET_HINT="target not installed — rustup target add"
-else
-    TARGET_HINT="target not installed for toolchain $TC — rustup target add --toolchain $TC"
+#
+# Two prerequisites, and BOTH have silently disarmed this group before, so each reports which one
+# is missing and the exact command that fixes it:
+#
+#   * the rustup target, FOR THE GATING TOOLCHAIN. `rustup target add wasm32-wasip1` adds it to the
+#     default toolchain; this gate pins `+1.97.0`. A target added to the wrong toolchain looks
+#     installed (it is, for `stable`) and does nothing here.
+#   * wasmtime, which its own installer puts in `~/.wasmtime/bin` and exports from a shell rc file
+#     — invisible to a non-interactive run. See `find_wasmtime`.
+target_hint() { # <target> -> the command that installs it for the gating toolchain
+    if [[ "$TC" == "default" ]]; then
+        printf 'rustup target add %s' "$1"
+    else
+        printf 'rustup target add --toolchain %s %s' "$TC" "$1"
+    fi
+}
+target_reason() { # <target> -> why the step cannot run
+    if [[ "$TC" == "default" ]]; then
+        printf 'target %s not installed' "$1"
+    else
+        printf 'target %s not installed for the gating toolchain %s (it may be installed for another)' "$1" "$TC"
+    fi
+}
+WASMTIME="$(find_wasmtime || true)"
+WASMTIME_REASON="wasmtime not found on PATH or in the usual install dirs (~/.wasmtime/bin, /usr/local/bin, …)"
+WASMTIME_FIX="curl https://wasmtime.dev/install.sh -sSf | bash    # or set NOETA_WASMTIME=/path/to/wasmtime"
+if [[ -n "$WASMTIME" ]]; then
+    printf '\ngate: wasmtime: %s\n' "$WASMTIME"
 fi
-WASMTIME="${NOETA_WASMTIME:-}"
-if [[ -z "$WASMTIME" ]] && have wasmtime; then WASMTIME="$(command -v wasmtime)"; fi
 
 if has_target wasm32-wasip1; then
     step 3 wasm "check pipeline crates (wasm32-wasip1)" -- \
@@ -370,18 +464,27 @@ if has_target wasm32-wasip1; then
     step 3 wasm "build the wasm runner (wasm-release)" -- \
         "${CARGO[@]}" build -p noeta-wasm-runner --target wasm32-wasip1 --profile wasm-release --locked
 else
-    # Note the toolchain: the wasm targets are commonly installed for `stable` only, and this gate
-    # defaults to the `+1.97.0` CI pin — a target added to the wrong toolchain looks like it is
-    # there and is not.
-    skip 3 wasm "check pipeline crates (wasm32-wasip1)" "$TARGET_HINT wasm32-wasip1"
-    skip 3 wasm "build the wasm runner (wasm-release)" "$TARGET_HINT wasm32-wasip1"
+    skip 3 wasm "check pipeline crates (wasm32-wasip1)" \
+        "$(target_reason wasm32-wasip1)" "$(target_hint wasm32-wasip1)"
+    skip 3 wasm "build the wasm runner (wasm-release)" \
+        "$(target_reason wasm32-wasip1)" "$(target_hint wasm32-wasip1)"
 fi
 
+# The ship-safety oracle for the wasm target. Name whichever prerequisite is actually missing —
+# "wasmtime not on PATH" was printed even when wasmtime was present and the rustup target was the
+# real gap, which sent people looking in the wrong place.
 if [[ -n "$WASMTIME" ]] && has_target wasm32-wasip1; then
     step 3 wasm "wasm differential oracle (runner vs native VM)" -- \
         env "NOETA_WASMTIME=$WASMTIME" "${CARGO[@]}" run -p noeta-conformance --locked -- --wasm-differential
+elif [[ -z "$WASMTIME" ]] && ! has_target wasm32-wasip1; then
+    skip 3 wasm "wasm differential oracle (runner vs native VM)" \
+        "$WASMTIME_REASON; and $(target_reason wasm32-wasip1)" \
+        "$(target_hint wasm32-wasip1)  &&  $WASMTIME_FIX"
+elif [[ -z "$WASMTIME" ]]; then
+    skip 3 wasm "wasm differential oracle (runner vs native VM)" "$WASMTIME_REASON" "$WASMTIME_FIX"
 else
-    skip 3 wasm "wasm differential oracle (runner vs native VM)" "wasmtime not on PATH (set NOETA_WASMTIME)"
+    skip 3 wasm "wasm differential oracle (runner vs native VM)" \
+        "$(target_reason wasm32-wasip1)" "$(target_hint wasm32-wasip1)"
 fi
 
 if has_target wasm32-unknown-unknown; then
@@ -392,19 +495,29 @@ if has_target wasm32-unknown-unknown; then
             node crates/noeta-playground/tests/browser_smoke.mjs \
             "${CARGO_TARGET_DIR:-$ROOT/target}/wasm32-unknown-unknown/wasm-release/noeta_playground.wasm"
     else
-        skip 3 wasm "browser-engine smoke (node over the raw ABI)" "node not on PATH"
+        skip 3 wasm "browser-engine smoke (node over the raw ABI)" "node not on PATH" \
+            "install Node.js (https://nodejs.org)"
     fi
 else
-    skip 3 wasm "build the playground engine (wasm32-unknown-unknown)" "$TARGET_HINT wasm32-unknown-unknown"
-    skip 3 wasm "browser-engine smoke (node over the raw ABI)" "$TARGET_HINT wasm32-unknown-unknown"
+    skip 3 wasm "build the playground engine (wasm32-unknown-unknown)" \
+        "$(target_reason wasm32-unknown-unknown)" "$(target_hint wasm32-unknown-unknown)"
+    skip 3 wasm "browser-engine smoke (node over the raw ABI)" \
+        "$(target_reason wasm32-unknown-unknown)" "$(target_hint wasm32-unknown-unknown)"
 fi
 
 if [[ -n "$WASMTIME" ]] && has_target wasm32-wasip2; then
     step 3 wasm "wasi:http serve e2e (component under wasmtime serve)" -- \
         env "NOETA_WASMTIME=$WASMTIME" "PATH=$(dirname "$WASMTIME"):$PATH" \
         bash crates/noeta-wasm-serve/tests/e2e.sh
+elif [[ -z "$WASMTIME" ]] && ! has_target wasm32-wasip2; then
+    skip 3 wasm "wasi:http serve e2e (component under wasmtime serve)" \
+        "$WASMTIME_REASON; and $(target_reason wasm32-wasip2)" \
+        "$(target_hint wasm32-wasip2)  &&  $WASMTIME_FIX"
+elif [[ -z "$WASMTIME" ]]; then
+    skip 3 wasm "wasi:http serve e2e (component under wasmtime serve)" "$WASMTIME_REASON" "$WASMTIME_FIX"
 else
-    skip 3 wasm "wasi:http serve e2e (component under wasmtime serve)" "needs wasmtime + target wasm32-wasip2"
+    skip 3 wasm "wasi:http serve e2e (component under wasmtime serve)" \
+        "$(target_reason wasm32-wasip2)" "$(target_hint wasm32-wasip2)"
 fi
 
 # --- miri: the one place `unsafe` lives -------------------------------------------------------
@@ -413,7 +526,8 @@ if rustup component list --toolchain nightly --installed 2>/dev/null | grep -q '
         env PROPTEST_CASES=16 MIRIFLAGS=-Zmiri-disable-isolation \
         cargo +nightly miri test -p noeta-value -p noeta-gc --locked
 else
-    skip 3 miri "cargo miri test (noeta-value, noeta-gc)" "nightly miri not installed (rustup +nightly component add miri)"
+    skip 3 miri "cargo miri test (noeta-value, noeta-gc)" "nightly miri not installed" \
+        "rustup +nightly component add miri"
 fi
 
 # --- editors: tree-sitter grammar + the VS Code extension's TextMate tests ---------------------
@@ -425,7 +539,8 @@ if have npm; then
     step 3 editors "tree-sitter: npm run generate" -- env -C "$ROOT/editors/tree-sitter-noeta" npm run generate
     step 3 editors "tree-sitter: npm test" -- env -C "$ROOT/editors/tree-sitter-noeta" npm test
 else
-    skip 3 editors "editor tooling (tree-sitter + VS Code)" "npm not on PATH"
+    skip 3 editors "editor tooling (tree-sitter + VS Code)" "npm not on PATH" \
+        "install Node.js (https://nodejs.org)"
 fi
 
 # ---------------------------------------------------------------------------------- the summary
@@ -469,7 +584,13 @@ if ((n_fail)); then
     echo ' Reproduce the failures:'
     for i in "${!S_NAME[@]}"; do
         [[ "${S_STATUS[$i]}" == FAIL ]] || continue
-        printf '   %s\n     log: %s\n' "${S_CMD[$i]}" "${S_LOG[$i]}"
+        if [[ -n "${S_LOG[$i]}" ]]; then
+            printf '   %s\n     log: %s\n' "${S_CMD[$i]}" "${S_LOG[$i]}"
+        else
+            # A missing prerequisite under REQUIRE_TOOLS: there is no log, the fix is the command.
+            printf '   %s\n     %s\n' "${S_NAME[$i]}" "${S_NOTE[$i]}"
+            [[ -n "${S_CMD[$i]}" ]] && printf '     fix: %s\n' "${S_CMD[$i]}"
+        fi
     done
     echo
     echo ' GATE FAILED — do not merge.'
@@ -478,8 +599,17 @@ fi
 
 if ((n_skip)); then
     echo
-    echo ' NOTE: a SKIP is not a PASS. The steps above did not run; install their prerequisites'
-    echo '       (or accept that CI would be the first thing to execute them) before a release tag.'
+    printf ' \033[33mWARNING: %d step(s) did NOT RUN. A SKIP is not a PASS.\033[0m\n' "$n_skip"
+    echo '  These gates tested NOTHING in this run:'
+    for i in "${!S_NAME[@]}"; do
+        [[ "${S_STATUS[$i]}" == SKIP ]] || continue
+        printf '   [%-7s] %s\n     %s\n' "${S_GROUP[$i]}" "${S_NAME[$i]}" "${S_NOTE[$i]}"
+        [[ -n "${S_CMD[$i]}" ]] && printf '     fix: %s\n' "${S_CMD[$i]}"
+    done
+    echo
+    echo '  Install the prerequisites above, or accept that CI is the first thing to execute these.'
+    echo '  To make a missing prerequisite a hard failure instead: NOETA_GATE_REQUIRE_TOOLS=1'
+    echo '  (already the default when $CI is set).'
 fi
 
 echo
