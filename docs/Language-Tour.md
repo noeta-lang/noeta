@@ -483,6 +483,7 @@ total: 24.48
 
 You have seen the whole surface. For depth:
 
+- **Conventions** — [how the ecosystem names things](Conventions), and which of those names the compiler enforces.
 - **Reference** — the [Language reference](Home#language-reference) has one page per topic.
 - **Tools** — [Testing](Testing), [Benchmarking](Benchmarking), [Dev Tiers](Dev-Tiers), and [Documentation](Documentation-and-Tiers) cover the `@test`/`@bench`/`@doc` workflow.
 - **Under the hood** — [The Virtual Machine](The-Virtual-Machine) and [Memory Management](Memory-Management) explain how it all runs.
