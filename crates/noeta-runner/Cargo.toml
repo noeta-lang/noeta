@@ -52,8 +52,11 @@ jit = ["noeta-vm/jit"]
 
 [dev-dependencies]
 # The integration test compiles a tiny program to a bundle through the salsa pipeline and runs the
-# runner binary over it (mirrors noeta-wasm-runner's test harness).
+# runner binary over it (mirrors noeta-wasm-runner's test harness). The fixtures live in
+# per-process directories (`noeta-test-temp`), never the shared system temp dir: the runner
+# compiles any non-bundle file as source, and the loader links the entry's siblings as its project.
 noeta-db = { workspace = true }
+noeta-test-temp = { workspace = true }
 
 [lints]
 workspace = true

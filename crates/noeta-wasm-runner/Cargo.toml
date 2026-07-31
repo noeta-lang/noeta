@@ -17,8 +17,10 @@ noeta-wasi-host = { workspace = true }
 
 [dev-dependencies]
 # The integration test compiles a tiny program to a bundle through the salsa pipeline and runs
-# the (native-built) runner binary over it — the runner is target-agnostic by design.
+# the (native-built) runner binary over it — the runner is target-agnostic by design. Fixtures go
+# in per-process directories (`noeta-test-temp`), not the shared system temp dir.
 noeta-db = { workspace = true }
+noeta-test-temp = { workspace = true }
 
 # One of the workspace's few `unsafe` opt-outs (see ARCHITECTURE.md): reading the stapled-bundle
 # slot (W1.2) takes a `read_volatile` of the patchable static — volatile so LLVM cannot
