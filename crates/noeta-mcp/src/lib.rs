@@ -90,6 +90,13 @@ pub struct CheckOutput {
     pub warnings: usize,
     /// Every diagnostic, resolved to file + line/column + byte offsets, in checker order.
     pub diagnostics: Vec<JsonDiagnostic>,
+    /// The dev tiers whose blocks were checked **beyond** the stripped shipping shape — the entry's
+    /// own `@test`/`@bench`/`@<tier>` code blocks, each checked as its own build (the same
+    /// `tiers_checked` field `noeta check --format json` carries). Empty when the source declares no
+    /// code-tier block. Reported because a green result means something different depending on what
+    /// was looked inside: a tool that silently checks more is nearly as confusing as one that
+    /// silently checks less.
+    pub tiers_checked: Vec<String>,
 }
 
 /// Arguments to `check`: inline `source` OR a `file` path (exactly one).
@@ -476,7 +483,10 @@ impl NoetaMcp {
     #[tool(
         description = "Type-check Noeta (.noe) code and return its diagnostics (stable E0xxx code, \
 severity, source span, message, help). Provide `source` (inline) or `file` (a path; sibling .noe \
-modules are resolved so imports check). Run this before claiming Noeta code compiles."
+modules are resolved so imports check). Checks every shape of the source the way `noeta check` \
+does: once as it ships, then once per dev-tier block it declares (`@test`, `@bench`, …), so a type \
+error inside a `@test` body is reported here too — `tiers_checked` names which were covered. Run \
+this before claiming Noeta code compiles."
     )]
     async fn check(
         &self,
@@ -1267,17 +1277,42 @@ pub(crate) fn resolve_workspace(
 /// Run the whole-program check over `resolved` — the entry, its siblings, **and** its dependency
 /// packages — and resolve the diagnostics into the canonical `JsonDiagnostic` form (the same one
 /// `noeta check --format json` emits). Uses a fresh `LangDatabase` — the memoization is per call.
+///
+/// **Every shape of the source, not just the one that ships**, exactly as `noeta check` does. A
+/// dev-tier block is stripped before the checker sees it, so checking only the shipping shape meant
+/// a `@test` body's type error was invisible here while the CLI reported it — and the generated
+/// `AGENTS.md` offers this tool *as* the equivalent of `noeta check`, so an agent got a green check
+/// the CLI would have failed. The entry is therefore checked once as it ships and then once per
+/// code tier its own blocks name (`noeta_db::entry_code_tiers` — the salsa form of
+/// `noeta_check::code_tiers_in`), one tier per pass: no build compiles `@test` and `@bench`
+/// together, and a joint pass would invent collisions between them. Text tiers (`@doc`, any `text:`
+/// tier), expression tiers, and a *dependency's* blocks add no pass. Diagnostics from every shape
+/// fold into one dedup map keyed on `(source, span, code)`, so a fault outside any tier block —
+/// which every pass reports — is returned once; `tiers_checked` names what was looked inside.
 fn run_check(resolved: &ResolvedWorkspace) -> CheckOutput {
     let db = noeta_db::LangDatabase::default();
     let ws = resolved.workspace(&db);
     let checked = noeta_db::linked_checked(&db, ws);
     // The `SourceMap` resolves each diagnostic's span → file + line/column (entry is SourceId 0).
     let source_map = SourceMap::new(resolved.sources.clone());
-    let diagnostics: Vec<JsonDiagnostic> = checked
+    let mut seen: std::collections::HashSet<_> = checked
+        .diagnostics
+        .iter()
+        .map(noeta_db::diagnostic_key)
+        .collect();
+    let mut diagnostics: Vec<JsonDiagnostic> = checked
         .diagnostics
         .iter()
         .map(|d| to_json(&source_map, d))
         .collect();
+    // The non-shipping shapes, after them — an entry with no code-tier block adds nothing and pays
+    // for nothing (the sweep is empty and no second check runs).
+    let tiers_checked = noeta_db::workspace_code_tiers(&db, ws).clone();
+    for diagnostic in noeta_db::tier_diagnostics(&db, ws) {
+        if seen.insert(noeta_db::diagnostic_key(&diagnostic)) {
+            diagnostics.push(to_json(&source_map, &diagnostic));
+        }
+    }
     let errors = diagnostics.iter().filter(|d| d.severity == "error").count();
     let warnings = diagnostics
         .iter()
@@ -1288,6 +1323,7 @@ fn run_check(resolved: &ResolvedWorkspace) -> CheckOutput {
         errors,
         warnings,
         diagnostics,
+        tiers_checked,
     }
 }
 
@@ -1431,6 +1467,95 @@ mod tests {
         assert!(err.code.starts_with('E'), "code was {:?}", err.code);
         assert_eq!(err.file, "<inline>");
         assert!(err.location.line >= 1 && err.location.column >= 1);
+    }
+
+    /// The tool must fail on a type error inside a `@test` body, because `noeta check` does and the
+    /// generated `AGENTS.md` offers this tool as its equivalent. Before the tier sweep the block was
+    /// stripped before the checker saw it and this came back green.
+    #[test]
+    fn a_type_error_inside_a_tier_block_fails_the_check() {
+        let out = check_source(
+            "fn add(a: int, b: int): int { return a + b }\n\n@test {\n    fn adds(): void { n: int = \"lots\" }\n}\n",
+        );
+        assert!(
+            !out.ok,
+            "expected the `@test` body's error to fail the check"
+        );
+        assert!(
+            out.diagnostics.iter().any(|d| d.code == "E0007"),
+            "expected E0007 from inside the tier block, got {:?}",
+            out.diagnostics
+        );
+        assert_eq!(
+            out.tiers_checked,
+            vec!["test".to_string()],
+            "the response must name what it looked inside"
+        );
+    }
+
+    /// Every shape is covered, and each is its own pass: a file declaring both `@test` and `@bench`
+    /// reports the error in each body and names both tiers.
+    #[test]
+    fn each_code_tier_is_its_own_pass() {
+        let out = check_source(
+            "fn add(a: int, b: int): int { return a + b }\n\n@test {\n    fn adds(): void { n: int = \"lots\" }\n}\n\n@bench {\n    fn adding(): void { m: int = true }\n}\n",
+        );
+        assert_eq!(
+            out.tiers_checked,
+            vec!["test".to_string(), "bench".to_string()]
+        );
+        assert_eq!(
+            out.diagnostics.iter().filter(|d| d.code == "E0007").count(),
+            2,
+            "both tier bodies' errors, got {:?}",
+            out.diagnostics
+        );
+    }
+
+    /// One tier per pass, never all at once. No build compiles `@test` and `@bench` together, so two
+    /// same-named helpers in two different tiers are not a collision and must not be reported as one.
+    #[test]
+    fn two_tiers_are_never_conflated_into_one_program() {
+        let out = check_source(
+            "fn add(a: int, b: int): int { return a + b }\n\n@test {\n    fn helper(): int { return 1 }\n    fn adds(): void { assert(add(helper(), 2) == 3) }\n}\n\n@bench {\n    fn helper(): int { return 2 }\n    fn adding(): void { echo add(helper(), 2) }\n}\n",
+        );
+        assert!(out.ok, "unexpected diagnostics: {:?}", out.diagnostics);
+        assert_eq!(
+            out.tiers_checked,
+            vec!["test".to_string(), "bench".to_string()]
+        );
+    }
+
+    /// A fault outside any tier block is reported by the shipping pass *and* every tier pass; the
+    /// dedup keeps it one diagnostic, exactly as `noeta check` does.
+    #[test]
+    fn a_fault_outside_a_tier_block_is_reported_once() {
+        let out = check_source(
+            "count: int = \"lots\"\n\n@test {\n    fn t(): void { assert(true) }\n}\n\n@bench {\n    fn b(): void { echo 2 }\n}\n",
+        );
+        assert_eq!(
+            out.errors, 1,
+            "one fault, one diagnostic: {:?}",
+            out.diagnostics
+        );
+    }
+
+    /// Text tiers (`@doc`, any `text:` tier) carry no statements to type-check, so they add no pass
+    /// and never appear in `tiers_checked`.
+    #[test]
+    fn a_text_tier_adds_no_pass() {
+        let out = check_source(
+            "@doc {\n  count: int = \"this is prose, not code\"\n}\nfn main(): int {\n  return 1;\n}\n",
+        );
+        assert!(out.ok, "unexpected diagnostics: {:?}", out.diagnostics);
+        assert!(out.tiers_checked.is_empty(), "got {:?}", out.tiers_checked);
+    }
+
+    /// A source with no tier block reports no coverage and pays for no extra pass.
+    #[test]
+    fn a_source_with_no_tier_block_reports_no_coverage() {
+        let out = check_source("fn main(): int {\n  return 1;\n}\n");
+        assert!(out.tiers_checked.is_empty());
     }
 
     #[test]

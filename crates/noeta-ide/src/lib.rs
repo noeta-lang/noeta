@@ -467,6 +467,18 @@ impl DocumentStore {
     /// the ide flavor only additionally records `expr_types`, which the other features need
     /// anyway). A name imported from a sibling module resolves and no longer reports a false
     /// "unknown name". A load or parse failure carries its diagnostics through the same query.
+    ///
+    /// **Every shape of the file, not just the one that ships.** A `@test { … }` block is stripped
+    /// before the checker sees it, so the shipping-shape query alone showed the file as clean while
+    /// `noeta check` failed on it — the compiler/editor disagreement this whole surface exists to
+    /// end. So the document is also reported against each code tier its own blocks name
+    /// ([`tier_diagnostics_from`](noeta_db::tier_diagnostics_from)), one tier per pass, deduplicated
+    /// against the shipping shape so a fault outside a tier block still underlines once.
+    ///
+    /// That sweep is deliberately *not* folded into `linked_checked_ide_from`: hover, inlay hints
+    /// and completion read that query on the same keystroke and must pay nothing for it. A file with
+    /// no code-tier block — nearly every file — adds one AST walk and no check at all; see the
+    /// query-family note in `noeta-db` for the rest of the narrowing.
     pub fn diagnostics(&self, uri: &str) -> Option<(Vec<noeta_diagnostics::Diagnostic>, String)> {
         let (cache, doc, source) = self.doc_cache(uri)?;
         let db = &self.db;
@@ -477,6 +489,18 @@ impl DocumentStore {
                 .filter(|d| d.span.source == source)
                 .cloned()
                 .collect();
+        // The non-shipping shapes — what `noeta test`/`noeta bench` will compile. Deduplicated on
+        // the same key the CLI and the MCP tool fold their per-tier passes into, so one fault stays
+        // one squiggle no matter how many shapes reported it.
+        let mut seen: std::collections::HashSet<_> =
+            diags.iter().map(noeta_db::diagnostic_key).collect();
+        for diagnostic in noeta_db::tier_diagnostics_from(db, cache.workspace, doc) {
+            if diagnostic.span.source == source
+                && seen.insert(noeta_db::diagnostic_key(&diagnostic))
+            {
+                diags.push(diagnostic);
+            }
+        }
         // A hard dependency-resolution failure (audit-5 #7): surface the real cause — a trust
         // refusal, a version conflict, a broken manifest — at the top of the file instead of
         // leaving only the spurious unknown-import errors it causes downstream. Reported under
@@ -4936,6 +4960,56 @@ mod tests {
         let range = LineIndex::new(&text).range(diags[0].span, Encoding::Utf8);
         assert_eq!(range.start.line, 0);
         assert_eq!(diags[0].severity, noeta_diagnostics::Severity::Error);
+    }
+
+    /// A type error inside a `@test` body must underline in the editor. The shipping shape strips
+    /// the block before the checker sees it, so the whole-workspace check alone reported the file as
+    /// clean while `noeta check` failed on it — the exact editor/compiler disagreement this surface
+    /// exists to end.
+    #[test]
+    fn a_type_error_inside_a_tier_block_is_reported() {
+        let mut store = test_store();
+        store.open(
+            "file:///tiered.noe",
+            "fn add(a: int, b: int): int { return a + b }\n\n@test {\n    fn adds(): void { n: int = \"lots\" }\n}\n"
+                .to_string(),
+        );
+        let (diags, _text) = store.diagnostics("file:///tiered.noe").unwrap();
+        assert!(
+            diags.iter().any(|d| d.code.code() == "E0007"),
+            "the `@test` body's type error must reach the editor; got {diags:?}"
+        );
+    }
+
+    /// The shipping shape and every tier pass all report a fault that sits *outside* any tier block,
+    /// so without a dedup the editor would draw one squiggle per shape.
+    #[test]
+    fn a_fault_outside_a_tier_block_is_reported_once() {
+        let mut store = test_store();
+        store.open(
+            "file:///dedup.noe",
+            "count: int = \"lots\"\n\n@test {\n    fn t(): void { assert(true) }\n}\n".to_string(),
+        );
+        let (diags, _text) = store.diagnostics("file:///dedup.noe").unwrap();
+        assert_eq!(
+            diags.iter().filter(|d| d.code.code() == "E0007").count(),
+            1,
+            "one fault, one diagnostic — got {diags:?}"
+        );
+    }
+
+    /// A file whose only tier block is a **text** tier carries no statements to type-check, so it
+    /// must add no pass (and a `@doc` body full of prose must never be read as code).
+    #[test]
+    fn a_text_tier_block_adds_no_pass() {
+        let mut store = test_store();
+        store.open(
+            "file:///doc.noe",
+            "@doc {\n  count: int = \"this is prose, not code\"\n}\nfn main(): int {\n  return 1;\n}\n"
+                .to_string(),
+        );
+        let (diags, _text) = store.diagnostics("file:///doc.noe").unwrap();
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
     }
 
     #[test]
