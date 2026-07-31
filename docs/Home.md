@@ -80,22 +80,25 @@ Everything the `noeta` binary does beyond running code.
 - [WebAssembly & the Edge (`--wasm`, `--serve`, the playground)](WebAssembly-and-the-Edge)
 - [Edge Deployment (Fermyon Spin, Fastly Compute)](Edge-Deployment)
 
-### Language & standard-library reference
-The exhaustive reference for syntax, semantics, and the stdlib.
+### Language reference
+The exhaustive rules, one page per topic. These are written to be read in order after the Tour, or dipped into for a specific rule.
 - [Syntax Basics](Syntax-Basics)
 - [Control Flow & Pattern Matching](Control-Flow-and-Pattern-Matching)
 - [Functions & Closures](Functions-and-Closures)
 - [Structs, Classes & Enums](Structs-Classes-and-Enums)
-- [Generics & Traits](Generics-and-Traits)
+- [Generics & Traits](Generics-and-Traits) · [Derives](Derives)
 - [The Type System](Type-System)
-- [Error Handling](Error-Handling)
-- [Validation](Validation)
+- [Error Handling](Error-Handling) · [Validation](Validation)
 - [Modules & Visibility](Modules)
-- [Fixed-Width Integers, Bitwise & Packed Types](Fixed-Width-Integers)
-- [Attributes & Reflection](Attributes-and-Reflection)
 - [Concurrency](Concurrency)
 - [Reactivity](Reactivity)
-- [Standard Library](Standard-Library)
+- [Built-ins (Ring 1)](Standard-Library) — and the generated [standard library reference](Std) for `use std.{…}`
+- [Diagnostics (`E0xxx`)](Diagnostics) — every code the toolchain reports
+
+### Specialized
+Reach for these when the problem calls for them, not on the way through.
+- [Fixed-Width Integers, Bitwise & Packed Types](Fixed-Width-Integers) — binary formats, protocol code, bulk numeric data
+- [Attributes & Reflection](Attributes-and-Reflection) — `#[…]` metadata and the runtime reflection surface, for framework and codegen work
 
 ### Concepts & design
 How the implementation actually works — for the curious and the systems-minded. Noeta runs on a register-based bytecode VM over NaN-boxed values, a shape-based object model with inline caches, compiled precise reference counting with in-place reuse, and a cycle collector.
@@ -114,4 +117,4 @@ Build the compiler, run the tests, and add a feature.
 ## Project status
 
 > [!NOTE]
-> **Alpha.** Prebuilt binaries cover Linux and macOS (x86_64/aarch64) — see [Getting Started](Getting-Started#1--install-the-toolchain); other platforms build from source. The language core and its tooling are complete and usable today: the full syntax, the type system, traits/generics/derives, multi-file modules, a layered standard library, real host IO, structured concurrency, the package manager, native AOT and WebAssembly builds (`noeta build --native`/`--wasm`/`--serve`), and the `run`/`repl`/`test`/`bench`/`doc` toolchain, along with `noeta lsp`/`noeta dap` editor tooling and the `noeta mcp` agent surface. Still on the roadmap: desktop packaging. Until beta, anything may change without notice — syntax, stdlib, and file formats included. Where a feature is a plan rather than a reality, these docs say so plainly.
+> **Alpha.** Prebuilt binaries cover Linux and macOS (x86_64/aarch64) — see [Getting Started](Getting-Started#1--install-the-toolchain); other platforms build from source. The language core and its tooling are complete and usable today: the full syntax, the type system, traits/generics/derives, multi-file modules, a layered standard library, real host IO, structured concurrency, the package manager, native AOT and WebAssembly builds (`noeta build --native`/`--wasm`/`--serve`), and the `run`/`repl`/`test`/`bench`/`doc` toolchain, along with `noeta lsp`/`noeta dap` editor tooling and the `noeta mcp` agent surface. Until beta, anything may change without notice — syntax, stdlib, and file formats included. These docs describe what ships today.

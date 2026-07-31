@@ -194,4 +194,4 @@ Every integer (and fixed-width integer) carries bit-manipulation methods and tot
 
 ## Diagnostic codes you'll see
 
-`E0007` type/arity mismatch · `E0016` index/slice out of bounds · `E0018` map key not found · `E0010` `panic` / deadlock · `E0021` IO error. The full catalog is in the [reference appendix](Syntax-Basics).
+`E0007` type/arity mismatch · `E0016` index/slice out of bounds · `E0018` map key not found · `E0010` `panic` / deadlock · `E0021` IO error. The full catalog is [Diagnostics](Diagnostics).

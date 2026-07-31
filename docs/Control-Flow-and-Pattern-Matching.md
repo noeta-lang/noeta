@@ -174,9 +174,9 @@ Resolution is **scrutinee-directed**, which is the whole of the rule:
 - a guard changes nothing;
 - `for` loops, `let`-destructuring and other binder positions are not match arms and are unaffected.
 
-`none` follows the same rule against the built-in `Option`, so it is the none *case* rather than a catch-all — which is why `match o { none => …, some(v) => … }` now means what it reads as. (It used to bind, silently swallowing the `some` arm below it.)
+`none` follows the same rule against the built-in `Option`, so it is the none *case* rather than a catch-all — which is why `match o { none => …, some(v) => … }` means what it reads as.
 
-The cost of the rule: a catch-all can no longer be *named* after a case of the scrutinee's enum. Writing
+The cost of the rule: a catch-all cannot be *named* after a case of the scrutinee's enum. Writing
 
 ```noeta error
 fn describe(k: Kind): string {
@@ -187,7 +187,7 @@ fn describe(k: Kind): string {
 }
 ```
 
-gives you two case arms, not a case and a catch-all — and if you meant to bind, rename it (`rest`, `other`, `k2`). Naming a catch-all after a variant was always a coin flip for the reader; now it simply is not one.
+gives you two case arms, not a case and a catch-all — and if you meant to bind, rename it (`rest`, `other`, `k2`). A name that reads as a variant *is* that variant, so a reader never has to guess which one an arm meant.
 
 ### Arm order — an arm after a catch-all is dead (E0066)
 

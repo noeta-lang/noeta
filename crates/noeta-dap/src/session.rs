@@ -166,7 +166,11 @@ fn compile_checked(
     noeta_compiler::compile_with_sites_session(
         program,
         checked.sites.clone(),
-        // Real execution lowers `isolate f(args)` to real OS-thread spawns, as `noeta run` does.
+        // Lower `isolate f(args)` to `Op::SpawnIsolate`, as `noeta run` does. Note this is the
+        // *lowering* only: the debug run never populates `RunOptions::isolates`, so
+        // `parallel_isolates` stays false and the op falls back to a cooperative task
+        // (`spawn_isolate_coop`). Worker isolates are therefore cooperative strands under the
+        // debugger — which is what makes the all-stop pause model sound.
         true,
         true,
     )

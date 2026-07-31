@@ -57,7 +57,7 @@ The `~` operator concatenates (display-concatenating non-strings):
 echo "users/" ~ 42 ~ "/profile"    // users/42/profile
 ```
 
-Strings carry a rich method set — `.upper()`, `.trim()`, `.split(",")`, `.replace(a, b)`, `.contains(s)`, and more. See [Standard Library](Standard-Library).
+Strings carry a rich method set — `.upper()`, `.trim()`, `.split(",")`, `.replace(a, b)`, `.contains(s)`, and more. See [Built-ins](Standard-Library).
 
 ---
 
@@ -289,7 +289,7 @@ echo [1, 2, 3, 4, 5].iter()
     .collect()                 // [10, 20, 30]
 ```
 
-→ [Standard Library](Standard-Library).
+→ [Built-ins](Standard-Library).
 
 ---
 
@@ -483,6 +483,6 @@ total: 24.48
 
 You have seen the whole surface. For depth:
 
-- **Reference** — the [Language & standard-library section](Home#language--standard-library-reference) has one page per topic.
+- **Reference** — the [Language reference](Home#language-reference) has one page per topic.
 - **Tools** — [Testing](Testing), [Benchmarking](Benchmarking), [Dev Tiers](Dev-Tiers), and [Documentation](Documentation-and-Tiers) cover the `@test`/`@bench`/`@doc` workflow.
 - **Under the hood** — [The Virtual Machine](The-Virtual-Machine) and [Memory Management](Memory-Management) explain how it all runs.

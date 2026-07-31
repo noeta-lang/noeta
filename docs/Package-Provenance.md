@@ -69,7 +69,7 @@ You never have to do any of this — **resolution verifies every bundle automati
 
 The log is what turns a compromise from *silent* to *detectable*. Every keyless signature — including one made by an attacker who hijacked your CI or stole a publish token — is publicly recorded with the identity that made it. You (or anyone) can monitor Rekor for *"a release of my package signed by an identity that isn't mine"*, even for packages nobody has installed yet. Because Fulcio and Rekor are operated by OpenSSF — not by the Noeta registry — this holds **even against a compromised registry operator**.
 
-**Residual trust, stated honestly:** you still trust the Sigstore root of trust (independently operated, TUF-rotated, witnessed) and the OIDC issuer (e.g. GitHub) to authenticate identities. The toolchain embeds a pinned snapshot of Sigstore's `trusted_root.json`; `NOETA_SIGSTORE_TRUST_ROOT=<path>` overrides it if a root rotation lands before a toolchain update ships. Automatic TUF-based root refresh is planned.
+**Residual trust, stated honestly:** you still trust the Sigstore root of trust (independently operated, TUF-rotated, witnessed) and the OIDC issuer (e.g. GitHub) to authenticate identities. The toolchain embeds a pinned snapshot of Sigstore's `trusted_root.json`, refreshed with each toolchain release; `NOETA_SIGSTORE_TRUST_ROOT=<path>` points at your own copy when a root rotation lands ahead of one.
 
 ## Key-based signing
 

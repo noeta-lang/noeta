@@ -316,4 +316,4 @@ assert(balance >= 0, "balance went negative")
 ## See also
 
 - [The Type System](Type-System) — how `?T`, `Result`, and unions fit the type lattice.
-- [Standard Library](Standard-Library) — the option-returning stdlib methods.
+- [Built-ins](Standard-Library) — the option-returning built-in methods.

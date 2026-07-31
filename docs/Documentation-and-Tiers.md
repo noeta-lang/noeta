@@ -140,7 +140,7 @@ The markers are ordinary comments, so **the whole block still compiles and still
 
 - the **Docs browser** (VS Code) shows the marked region, with a *Show full example* expander;
 - **`noeta doc --out`** and other static markdown bake the same fold in as a `<details>` block, so a reader on GitHub gets the short version with the full program one click away;
-- a block with **no markers** renders exactly as it always has.
+- a block with **no markers** renders in full, unchanged.
 
 A block may mark several regions — they concatenate in order, so a page can show two interesting stretches of one program and fold the plumbing between them. Shortening a sample this way is strictly better than deleting the context: the deleted version stops compiling, and a sample that does not compile is a sample nothing can check.
 

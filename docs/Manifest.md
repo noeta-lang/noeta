@@ -160,7 +160,7 @@ Because the local name is yours, two packages exporting the same command name co
 
 Unlike [`[tiers]`](#tiers--tier-providers) and [`[directives]`](#directives--extension-directives), which are per-package and keyed by the using package's own dependency keys, this table is **root-only** and keyed by full package **identity**: it is a capability grant, and a grant is the top-level project's alone to make. A dependency's own `[trust.commands]` is not read.
 
-The pre-binding form — `commands = ["company/package"]`, an array that granted every command a package shipped — is refused with a message naming its replacement.
+A bare `commands = ["company/package"]` array — granting every command a package ships, rather than binding them one at a time — is refused with a message naming this table as its replacement.
 
 ### `[trust.advisories]` — per-tier advisory policy
 

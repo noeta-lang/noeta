@@ -100,7 +100,7 @@ Two files that derive the same path are **E0073**, naming both:
    help: one module path is one module — rename or move one of the files so their paths differ
 ```
 
-That is the collapse rule biting: `src/api/api.noe`'s stem repeats the directory it sits in, so it lands on `hello.api` alongside `src/api.noe`. Pick one of the two spellings for the module — either a file or a directory with a root file, not both. The collision used to be silent: the second file's exports simply vanished, and the failure surfaced against whoever imported them.
+That is the collapse rule biting: `src/api/api.noe`'s stem repeats the directory it sits in, so it lands on `hello.api` alongside `src/api.noe`. Pick one of the two spellings for the module — either a file or a directory with a root file, not both. Reporting the collision here is what keeps one file's exports from vanishing into the other's, with the failure surfacing against whoever imported them.
 
 ### Case is preserved
 
@@ -108,9 +108,9 @@ That is the collapse rule biting: `src/api/api.noe`'s stem repeats the directory
 
 The usual objection is PSR-4's cross-platform wound, and it does not apply here. PHP's autoloader *builds a path out of the name and asks the filesystem to open it*, which is where a case-insensitive filesystem bites — the same code resolves on macOS and 404s on Linux. Noeta's loader does the opposite: it **scans the directory and matches derived strings**, so the filesystem's case rules never enter the comparison and a mis-cased `use` fails identically on every platform, at check time. It also keeps one rule end to end — `Uuid` is not `uuid` anywhere else in the language either, and lowercasing module segments alone would make the path fuzzy while the imported item stayed exact.
 
-### `namespace` is redundant
+### A module's path cannot be declared
 
-`namespace` is **retired syntax inside a package**. A file under a `noeta.toml` that declares one is **E0072**, whatever it says — its path is derived, so a declaration could only restate that or contradict it, and neither is worth a line of source:
+Inside a package, a module's path is derived and **only** derived. A file under a `noeta.toml` that declares a `namespace` is **E0072**, whatever it says — its path already comes from where it sits, so a declaration could only restate that or contradict it, and neither is worth a line of source:
 
 ```text
 [E0072] `namespace App.Models` — a module's path is derived from where its file sits, so it cannot be declared
@@ -118,9 +118,9 @@ The usual objection is PSR-4's cross-platform wound, and it does not apply here.
          delete the declaration, or move the file to where it says it lives
 ```
 
-Deleting the line is the whole migration: the path it named is the path the file already derives, as long as the file sits where the declaration said it did. If the two ever disagreed, the declaration was the wrong half — move the file.
+Deleting the line is the whole fix: the path it names is the path the file already derives, as long as the file sits where the declaration says it lives. Where the two disagree, the declaration is the wrong half — move the file.
 
-**One exception, and it is not a leftover.** A loose script with *no* manifest has no package, hence no prefix, hence nothing to derive a path from — so there a `namespace` declaration is still how a sibling module gets a name, and it is still accepted. Retirement is scoped to files whose path *can* be derived. If you want derived paths, that is what `noeta init` gives you: a manifest.
+**One exception.** A loose script with *no* manifest has no package, hence no prefix, hence nothing to derive a path from — so there a `namespace` declaration is how a sibling module gets a name, and it is accepted. The rule is scoped to files whose path *can* be derived. If you want derived paths, that is what `noeta init` gives you: a manifest.
 
 ### Derivation needs a package
 
@@ -130,7 +130,7 @@ A prefix comes from a manifest, so a file with **no `noeta.toml` above it** has 
 
 | Code | When | Fix |
 |---|---|---|
-| **E0072** | a file **in a package** declares a `namespace` — retired syntax | delete the line; move the file if you meant to rename the module |
+| **E0072** | a file **in a package** declares a `namespace` — a derived path cannot be declared | delete the line; move the file if you meant to rename the module |
 | **E0073** | two files derive the same module path | rename or move one — one path is one module |
 | **E0074** | a directory name or file stem is not a legal identifier segment | rename it to the spelling the help offers |
 
@@ -211,6 +211,7 @@ Because identity is qualified, a short name only ever clashes *within a single f
 **Native types work identically.** A standard-library type such as `std.id.Uuid` is imported — and aliased — with the same `use`, and carries the same kind of qualified identity (`std.id.Uuid`). A file may declare its own `Counter` while importing a native one under an alias; the two coexist:
 
 ```noeta check
+use std.id                           // the module handle, for `id.uuid()`
 use std.id.Uuid as NativeId          // the native type, renamed locally
 
 struct Uuid { tag: int }             // your own, unrelated type
@@ -287,5 +288,5 @@ A single file checked in isolation stays lenient about names its siblings or dep
 
 ## See also
 
-- [Standard Library](Standard-Library) — the always-available Ring 1 surface (no import needed).
+- [Built-ins (Ring 1)](Standard-Library) — the always-available surface (no import needed).
 - [Standard library reference](Std) — the generated per-module API pages for `use std.{…}`.

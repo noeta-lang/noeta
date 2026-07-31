@@ -134,7 +134,7 @@ Where a label **cannot** bind it is refused (E0061) rather than ignored:
 - A **function value** — a closure stored in a binding, field, or parameter. The closure literal had parameter names, but the `(int, int) -> int` type it flows through carries only types, so the call site cannot see them. No signature can fix this one.
 - A **built-in method** on a primitive or collection (`"s".replace`, `xs.map`), and any native signature that has not declared names. These resolve from the receiver's type rather than a named signature.
 
-All of this used to be accepted with the label silently discarded, which meant `math.pow(exp: 3.0, base: 2.0)` computed 3² and a label naming nothing at all — `"abc".replace(zzz: "a", "b")` — ran without complaint. A label is now honoured or refused, never ignored.
+A label is always honoured or refused, never silently ignored — so `math.pow(exp: 3.0, base: 2.0)` cannot quietly compute 3², and a label naming nothing at all (`"abc".replace(zzz: "a", "b")`) cannot pass unremarked.
 
 > [!NOTE]
 > A call that *skips* a defaulted parameter can only name parameters among the first 63; one that names a later parameter as well is rejected. Reordering and labelling are unaffected, at any arity, as is a call that simply supplies a prefix.

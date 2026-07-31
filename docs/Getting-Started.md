@@ -50,10 +50,11 @@ hello
 
 That is a complete program. There is **no `main` function** and no boilerplate — top-level statements run top to bottom. `echo` prints a value followed by a newline.
 
-Semicolons are optional; a newline ends a statement. This is equally valid:
+Semicolons are optional; a newline ends a statement. A `;` is still valid, and is what lets two statements share a line:
 
 ```noeta
-echo "hello"
+echo "hello";
+echo "one"; echo "two"
 ```
 
 ## 3 · A first real program
@@ -177,5 +178,7 @@ Run `noeta <command> --help` for the flags of any command.
 - **[Language Tour](Language-Tour)** — learn the whole language by example.
 - **[Using Packages](Using-Packages)** — add your first dependency and run a project that uses it.
 - **[The Type System](Type-System)** — how types, inference, unions, and `dyn` fit together.
-- **[Standard Library](Standard-Library)** — the built-in types and modules you will reach for.
+- **[Diagnostics](Diagnostics)** — what any `E0xxx` the toolchain reports means.
+- **[Built-ins](Standard-Library)** — strings, lists, maps, sets and iterators, available with no import.
+- **[Standard library reference](Std)** — the `use std.{…}` modules: `math`, `json`, `fs`, and the rest.
 - **[The `noeta.toml` Manifest](Manifest)** and **[Package Registries](Package-Registries)** — dependencies, build targets, and where packages come from.

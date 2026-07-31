@@ -38,7 +38,7 @@ The `#[Skip]` / `#[Name]` / `#[Group]` / `#[Data]` attributes used by the [test 
 
 ### `@role(Enum.Variant)` — a semantic role tag
 
-Roles exist to make **architecture queryable**: they tag declarations with typed architectural meaning — this is an entry point, that crosses a trust boundary — that tooling can index and answer questions about, from `roles_of()` in-language to the manifest `noeta mcp` serves to AI agents (see [Where this is headed](#where-this-is-headed)).
+Roles exist to make **architecture queryable**: they tag declarations with typed architectural meaning — this is an entry point, that crosses a trust boundary — that tooling can index and answer questions about, from `roles_of()` in-language to the manifest `noeta mcp` serves to AI agents (see [The manifest outside the language](#the-manifest-outside-the-language)).
 
 `@role` rides on an `@attribute` struct and confers a typed architectural role on every declaration the attribute annotates, indexed at build time (zero runtime cost). Only a struct marked `@attribute` may carry `@role`, and the variant must be fieldless.
 
@@ -263,11 +263,11 @@ echo type_name::<Todo>()                        // Todo
 echo field_specs_of(type_name::<Todo>()).len()  // 1
 ```
 
-Turbofish only — a `type_name(s)` taking a runtime string would be the identity function on `s`. The value of the surface is that the **compiler** resolves the type: the name follows the module's path, a `use … as` alias, and a rename, none of which a string literal does. A name-keyed repository (`Repository.new(type_name::<Todo>(), "todos", "id")`) is the motivating case — before this it had to be handed `"app.storage.Todo"` spelled out by hand, and nothing checked it.
+Turbofish only — a `type_name(s)` taking a runtime string would be the identity function on `s`. The value of the surface is that the **compiler** resolves the type: the name follows the module's path, a `use … as` alias, and a rename, none of which a string literal does. A name-keyed repository (`Repository.new(type_name::<Todo>(), "todos", "id")`) is the motivating case: the alternative is spelling `"app.storage.Todo"` out by hand, with nothing to check it.
 
 An unresolvable type is `E0013`, exactly as in any other annotation. A **type parameter** resolves wherever the instantiation actually reaches the site — a top-level generic function's parameter and a generic type's parameter in an instance method both do — and is `E0058` where neither channel does; see below.
 
-A generic type's parameter reaches an instance method off the **value's recorded instantiation**, so the value has to have been built at one the checker could see. Four positions supply it from an expected type (an annotated binding, a declared return, a field's declared type, a parameter's), and the call site can now state it itself — `Repo::<Todo>.new("todos")`, see [Instantiating a generic *type* at the call site](Generics-and-Traits#instantiating-a-generic-type-at-the-call-site). A construction none of them reaches is `E0058` at the construction, not a clean check and a run-time abort at the first `type_name::<T>()`.
+A generic type's parameter reaches an instance method off the **value's recorded instantiation**, so the value has to have been built at one the checker could see. Four positions supply it from an expected type (an annotated binding, a declared return, a field's declared type, a parameter's), and the call site can state it itself — `Repo::<Todo>.new("todos")`, see [Instantiating a generic *type* at the call site](Generics-and-Traits#instantiating-a-generic-type-at-the-call-site). A construction none of them reaches is `E0058` at the construction, not a clean check and a run-time abort at the first `type_name::<T>()`.
 
 ### Reflection over a type parameter
 
@@ -293,7 +293,7 @@ fn count_of<T>(): int {
 echo count_of::<Todo>()      // 1 — the real schema, per instantiation
 ```
 
-The `E0058` help says exactly this wherever that route is open. Where it is not — a generic **type**'s parameter inside a method, which reaches the body as a name but not as a recipe — the older advice stands: reflect where the type is concrete and pass the result in, taking a `List<FieldSpec>` (or a `string`) as a parameter and letting the caller supply it. A generic **method's own** `<U>` forwards like a function's, so it needs none of that.
+The `E0058` help says exactly this wherever that route is open. Where it is not — a generic **type**'s parameter inside a method, which reaches the body as a name but not as a recipe — reflect where the type is concrete and pass the result in, taking a `List<FieldSpec>` (or a `string`) as a parameter and letting the caller supply it. A generic **method's own** `<U>` forwards like a function's, so it needs none of that.
 
 Two reflection turbofishes take a forwarded type parameter directly, both riding the hidden type-argument slot a generic call already carries: `attributes_of::<T>()`, which reads the slot's name to key the manifest, and `type_name::<T>()`, which *is* that name. The rest key on a compile-time constant by design.
 
@@ -875,6 +875,6 @@ Unlike `construct`, the named form does **not** type-check an argument against i
 
 A parameter with a default may be omitted from either shape, exactly as at a direct call site — the pair to `ParamInfo.optional`. A panic *inside* the invoked body is a normal abort; only the by-name resolution is caught.
 
-## Where this is headed
+## The manifest outside the language
 
-The reflection manifest — declarations, their `#[…]` attributes, and their `@role`/`@semantic` tags — backs an agentic tooling surface: `noeta mcp` serves this manifest over stdio (roles, attributes, and the architectural graph) to MCP clients. See [Editor & AI Tooling](Editor-and-AI-Tooling) for the tool inventory.
+The reflection manifest — declarations, their `#[…]` attributes, and their `@role`/`@semantic` tags — also backs the agentic tooling surface: `noeta mcp` serves it over stdio (roles, attributes, and the architectural graph) to MCP clients, so an agent asks the same index `roles_of()` and `attributes_of` answer in-language. See [Editor & AI Tooling](Editor-and-AI-Tooling) for the tool inventory.

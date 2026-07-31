@@ -123,7 +123,7 @@ What makes that uniform typing honest is that an implementation must match its t
 A `concurrent { … }` scope runs tasks concurrently and joins them at the closing brace. Inside it:
 
 - **`spawn expr()`** schedules a future as a task, yielding a handle you can `.await` (or `.cancel()` / `.join()` — see [Cancellation](#cancellation)).
-- **`isolate f(args)`** runs in a fresh isolate (own heap, true parallelism); its arguments and result must be `Send` (see below).
+- **`isolate f(args)`** runs in a fresh isolate (own heap, true parallelism); its arguments and result must be `Send` (see below). Like `spawn`, it takes a **future** — so `f` must be an `async fn`; handing it a synchronous call is E0041.
 
 ```noeta
 use std.task.{sleep, all}

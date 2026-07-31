@@ -2,7 +2,7 @@
 
 This page is the developer's entry point to *building* the language — the compiler, not programs in it. It complements the in-repo `AGENTS.md` (the exhaustive conventions reference) and `ARCHITECTURE.md` (the technical overview); this page orients you and points at them.
 
-Noeta is a young pre-1.0 implementation — public, with tagged releases (v0.2.x at the time of writing) — built primarily through agentic engineering, so the discipline below is written to be followed by humans and AI agents alike.
+Noeta is a pre-1.0 implementation — public, with tagged releases — built primarily through agentic engineering, so the discipline below is written to be followed by humans and AI agents alike.
 
 ## Orientation
 

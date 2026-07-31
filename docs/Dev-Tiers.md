@@ -153,9 +153,6 @@ The **global config is the default**: omit `--target` and a command sees `[depen
 
 This is why a **shipped artifact is safe by default**: `noeta build` with no `--target` produces the global (baseline) build, and (as [The CLI](The-CLI#shipped-artifacts-are-lean-by-construction) covers) that artifact links only runtime code — never the dev toolchain. `--target dev` layers dev tiers/deps back in when you actually want them.
 
-> [!NOTE]
-> The table shape leaves room for a target to carry more of the build recipe later.
-
 ---
 
 ## Related: the decorator directives

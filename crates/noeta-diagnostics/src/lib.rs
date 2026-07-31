@@ -826,4 +826,28 @@ mod all_list_guard {
             );
         }
     }
+
+    /// The published catalog (`docs/Diagnostics.md`) is the only place a *user* can look a code
+    /// up — there is no `noeta explain`. A code added here but not documented there is a code
+    /// whose first appearance in someone's terminal is unsearchable, so the two are gated to
+    /// agree exactly.
+    #[test]
+    fn every_code_is_documented() {
+        let page = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/Diagnostics.md");
+        let Ok(text) = std::fs::read_to_string(page) else {
+            // The docs tree is not vendored into every consumer of this crate; skip rather than
+            // fail where it genuinely is not present.
+            return;
+        };
+        let missing: Vec<&str> = DiagnosticCode::ALL
+            .iter()
+            .map(|c| c.code())
+            .filter(|code| !text.contains(&format!("`{code}`")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "docs/Diagnostics.md is missing {missing:?} — add a row for each, \
+             so the code is findable by whoever hits it"
+        );
+    }
 }

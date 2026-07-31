@@ -1,6 +1,6 @@
 # Quickstart: Packages
 
-From nothing to a running program with a registry dependency in five commands. Every command and every line of output on this page was run against the released `noeta` v0.2.0 on x86_64 Linux.
+From nothing to a running program with a registry dependency in five commands. Every command and every line of output on this page was run against the released `noeta` v0.2.3 on x86_64 Linux.
 
 ## 1 · Install the toolchain
 
@@ -9,7 +9,7 @@ curl -fsSL https://noeta.dev/install | sh
 ```
 
 ```
-installing noeta v0.2.0 for x86_64-unknown-linux-gnu
+installing noeta v0.2.3 for x86_64-unknown-linux-gnu
 installed …/bin/noeta
 ```
 
@@ -20,7 +20,7 @@ noeta --version
 ```
 
 ```
-noeta 0.2.0
+noeta 0.2.3
 ```
 
 ## 2 · Create a project
@@ -137,15 +137,15 @@ noeta build src/main.noe
 ```
 
 ```
-wrote src/main.noeb (15630 bytes)
+wrote src/main.noeb (4879 bytes)
 ```
 
 The `.noeb` bundle is the compiled program; `noeta build --native` produces a standalone executable instead.
 
 ## Where to go next
 
-- [Getting Started](Getting-Started) — the language itself, from hello world up
 - [Using Packages](Using-Packages) — the full walkthrough: `[trust]` grants, the lockfile, `noeta update` and `noeta audit`
+- [Language Tour](Language-Tour) — the language itself, example-driven, in one sitting
 - [Manifest](Manifest) — everything `noeta.toml` can express
 - [Package Registries](Package-Registries) — path, git, and registry dependencies in depth
 - [Package Provenance](Package-Provenance) — how signing, the transparency log, and trust gates work

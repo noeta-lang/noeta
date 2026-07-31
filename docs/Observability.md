@@ -250,6 +250,8 @@ Once telemetry is configured, the runtime opens spans for you at the boundaries 
 Auto-propagation covers Noeta's own boundaries. To bridge a boundary Noeta doesn't own — an outbound HTTP call to another service, a queue — thread the `traceparent` yourself:
 
 ```noeta check
+use std.{tracing}
+
 // Inject on the way out:
 tp = tracing.current_context()          // "00-<trace>-<span>-01"
 // … send `tp` as the `traceparent` header / message field …
