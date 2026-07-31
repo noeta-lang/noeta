@@ -29,6 +29,10 @@ pub struct Compiled {
     /// The session type-checker the checked launch compile left behind (session-checker C3) —
     /// console fragments check against it before running.
     pub checker: noeta_check::SessionChecker,
+    /// The launch compile's non-blocking diagnostics, already rendered. A warning must not refuse to
+    /// start a debug session — the program is well-formed and the whole point of attaching is to
+    /// watch it run — so it rides here and is replayed as the run's first `stderr` chunk.
+    pub warnings: String,
 }
 
 /// One chunk of program output, tagged with the DAP `output`-event category it belongs to.
@@ -76,12 +80,15 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
     // The session flavor keeps the checker alive (C3): console fragments will check against the
     // typing environment this whole-program check accumulates.
     let (checked, checker) = loaded.check_session();
-    if !checked.diagnostics.is_empty() {
+    // Errors only: an advisory diagnostic describes a program that still runs, and a debugger that
+    // refuses to launch over one is the least useful moment to be pedantic.
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return Err(RunOutput::failed(
             render_mapped(&loaded.sources, checked.diagnostics.iter()),
             1,
         ));
     }
+    let warnings = render_mapped(&loaded.sources, checked.diagnostics.iter());
 
     match compile_checked(&loaded.program, &checked) {
         Ok((module, session)) => Ok(Compiled {
@@ -89,6 +96,7 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
             sources: loaded.sources,
             session,
             checker,
+            warnings,
         }),
         // Rendered against real source when the compiler knew where it stopped — the debugger's
         // console shows the offending construct instead of one unlocatable sentence.
@@ -116,6 +124,7 @@ pub fn run_compiled(compiled: Compiled, debugger: Option<Box<dyn Debugger>>) -> 
         Err(err) => return RunOutput::failed(format!("noeta: cannot start executor: {err}\n"), 2),
     };
 
+    let warnings = compiled.warnings;
     let (result, trace) = VmBackend::new().run_module_debug_session(
         &compiled.module,
         compiled.session,
@@ -125,6 +134,14 @@ pub fn run_compiled(compiled: Compiled, debugger: Option<Box<dyn Debugger>>) -> 
     );
 
     let mut chunks = Vec::new();
+    // The launch compile's warnings first — they are facts about the whole file, so they belong
+    // ahead of anything the program itself says.
+    if !warnings.is_empty() {
+        chunks.push(OutputChunk {
+            category: "stderr",
+            text: warnings,
+        });
+    }
     if !result.stdout.is_empty() {
         chunks.push(OutputChunk {
             category: "stdout",
