@@ -23,8 +23,17 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
     // the `type_of` site map the backend needs, so the checker runs exactly once (it previously
     // ran again inside the backend).
     let checked = loaded.check();
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&loaded.sources, checked.diagnostics.iter());
+    // Report everything the front half found — activation's and the check's — *then* decide. Only an
+    // **error** stops the program: a warning describes well-formed code, and a lint that refuses to
+    // run what `noeta check` calls fine is a hard stop wearing a nudge's clothes. Diagnostics go out
+    // first, before a single byte of the program's own output, because they are compile-time facts
+    // about the whole file; interleaving them with the run would misattribute them to whatever line
+    // happened to be printing.
+    emit_diagnostics_mapped(
+        &loaded.sources,
+        loaded.warnings.iter().chain(checked.diagnostics.iter()),
+    );
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
 
@@ -185,12 +194,17 @@ pub(crate) fn cmd_run(
             package_uses: g.package_uses,
         }),
     ) {
-        Ok(compiled) => run_compiled_module(
-            compiled.module,
-            &compiled.sources,
-            program_args(file, args),
-            jit_stats,
-        ),
+        // Warnings first, then the program: a compile-time fact about the file belongs before the
+        // file's own output, not spliced into it.
+        Ok(compiled) => {
+            emit_diagnostics_mapped(&compiled.sources, compiled.warnings.iter());
+            run_compiled_module(
+                compiled.module,
+                &compiled.sources,
+                program_args(file, args),
+                jit_stats,
+            )
+        }
         Err(failure) => failure.report(),
     }
 }

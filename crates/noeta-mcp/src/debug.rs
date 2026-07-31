@@ -512,7 +512,9 @@ fn compile_debug(entry: &Entry, real_isolates: bool) -> Result<Compiled, String>
     };
 
     let (checked, checker) = noeta_check::check_all_session_with(&program, editions);
-    if !checked.diagnostics.is_empty() {
+    // Errors only — a warning leaves a runnable program, and refusing to attach to it is the one
+    // thing a debugger must never do.
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return Err(render_mapped(&sources, checked.diagnostics.iter()));
     }
 

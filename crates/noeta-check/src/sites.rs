@@ -141,6 +141,22 @@ pub struct Sites {
     /// lowering wraps the op's result in `Rvalue::MaskWidth` to wrap the erased i64 into the width. A
     /// pure function of the program, like the other site maps — the masking is invisible to `RunResult`.
     pub width_sites: HashMap<Span, (bool, u8)>,
+    /// **Statically decided type tests**: `Expr::TypeTest` spans the checker answered itself → the
+    /// answer. Lowering emits the constant (after still evaluating the scrutinee for its effects)
+    /// instead of an `Rvalue::TypeTest`, so both backends agree by construction.
+    ///
+    /// Recorded for exactly one family today — a bare **erased-width** target (`x is iN` /
+    /// `x is f64`) whose scrutinee's static type settles the question. That is the family the
+    /// *runtime* cannot answer at all: no scalar value carries a width tag, so the runtime matcher
+    /// reaches no head for it and always says `false`. Where the checker knows the width
+    /// (`a: i32` → `a is i32`), `false` is simply the wrong answer, and folding is what makes the
+    /// two agree; where it does not (a `dyn` launder, a union, an erased type parameter), the test
+    /// stays unanswerable and E0063 says so rather than a fold happening silently.
+    ///
+    /// Deliberately *not* extended to tests the runtime already answers correctly (`x is int` on an
+    /// `int`): folding those would change no answer and would put the checker's subtyping opinion
+    /// where the shared runtime matcher is the single source of truth.
+    pub folded_type_tests: HashMap<Span, bool>,
     /// Unbound method-handle sites (`Type.method` in value position) → the resolved
     /// `(ty, method, associated)`. Lowering emits an [`Rvalue::MethodHandle`] at these spans.
     pub handle_sites: HashMap<Span, (String, String, bool)>,
@@ -191,6 +207,13 @@ pub struct Sites {
     /// call of a forwarding generic fn resolved, interned by structural equality. Lowering embeds
     /// it into the IR `Program` (and the VM `Module`), and a hidden call argument indexes it at
     /// runtime. A pure function of the program, like the other site maps.
+    ///
+    /// **Numbered per check run.** A fresh whole-program check numbers this table from zero in its
+    /// own discovery order, so the indices are meaningful only *together with the bundle that
+    /// produced them*. A LIVE session (the REPL, a hot swap) whose runtime values already hold
+    /// indices into an earlier table must therefore ABSORB this one by content rather than adopt it
+    /// — `noeta_compiler::SessionCompiler::absorb_type_args` does exactly that, merging on the same
+    /// dedup key this table is interned with and remapping [`Sites::hidden_arg_sites`] to match.
     pub type_arg_table: Vec<noeta_ext_abi::TypeArgInfo>,
     /// The **reflection projection** of [`Sites::type_arg_table`], indexed identically (same length,
     /// entry `i` describes entry `i`): each interned instantiation's [`noeta_ast::reflect::TypeRepr`],
@@ -216,6 +239,11 @@ pub struct Sites {
     /// puts the matching atoms in the call node's `type_args` channel, beside its value
     /// arguments — never inside them, so the callee's value parameter positions are exactly what
     /// the source wrote.
+    ///
+    /// The ONLY field of this bundle carrying a [`Sites::type_arg_table`] **index** — the `u32`s in
+    /// `forwarded_slot_sites` / `dynamic_construction_sites`, like `Forward(j)` here, are per-body
+    /// hidden SLOT ordinals, resolved through the slot's runtime value. So a session absorbing a
+    /// fresh table (see [`intern_type_arg_entry`]) remaps this map and nothing else.
     pub hidden_arg_sites: HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
     /// Spans whose turbofish is a **FORWARDED type parameter** of the enclosing top-level generic
     /// `fn` → the hidden slot index holding the instantiation's entry in [`Sites::type_arg_table`].
@@ -259,6 +287,48 @@ pub struct Sites {
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
     pub destructor_relevance: DestructorRelevance,
+}
+
+/// **The type-argument table's interning key, and the only place it is applied.** Look `(info,
+/// repr)` up in the parallel tables [`Sites::type_arg_table`] / [`Sites::type_arg_reprs`], returning
+/// the existing entry's index or appending a new one to *both* and returning that.
+///
+/// Two callers, deliberately one function. The checker
+/// ([`Checker::intern_type_arg`](crate::Checker::intern_type_arg)) builds the table while checking;
+/// a LIVE session (`noeta_compiler::SessionCompiler::absorb_type_args`) re-runs the very same
+/// interning to ABSORB a freshly-checked table into the one its running values already index. If
+/// those two disagreed about the key, the session would fold two entries the checker kept apart —
+/// or split one it merged — and a hidden type-argument slot would silently resolve to the wrong
+/// type with nothing to crash. The key has already widened once (the repr joined it when generic
+/// classes started constructing from their own `T`); this is what makes the next widening reach
+/// both sides at once.
+///
+/// The key is the PAIR. `TypeArgInfo::name` is head-keyed and a class carries no decode recipe, so
+/// `Repository<Todo>` and `Repository<Order>` produce an identical [`noeta_ext_abi::TypeArgInfo`]
+/// and are told apart only by the repr — see [`Sites::type_arg_reprs`].
+pub fn intern_type_arg_entry(
+    table: &mut Vec<noeta_ext_abi::TypeArgInfo>,
+    reprs: &mut Vec<Option<noeta_ast::reflect::TypeRepr>>,
+    info: noeta_ext_abi::TypeArgInfo,
+    repr: Option<noeta_ast::reflect::TypeRepr>,
+) -> u32 {
+    debug_assert_eq!(
+        table.len(),
+        reprs.len(),
+        "the type-argument table and its reflection projection are grown in lockstep"
+    );
+    match table
+        .iter()
+        .zip(reprs.iter())
+        .position(|(e, r)| *e == info && *r == repr)
+    {
+        Some(i) => i as u32,
+        None => {
+            table.push(info);
+            reprs.push(repr);
+            (table.len() - 1) as u32
+        }
+    }
 }
 
 /// The checker's **codegen-hint output**: span-keyed site maps the backends and the lowering consult
@@ -369,6 +439,8 @@ pub(crate) struct SiteMaps {
     /// `IntN` → the result's `(signed, bits)`. Lowering reads this (via [`Checked::width_sites`]) to
     /// wrap the op's result in `Rvalue::MaskWidth`. Empty for programs with no fixed-width arithmetic.
     pub(crate) width_sites: HashMap<Span, (bool, u8)>,
+    /// Statically decided type tests — see [`Sites::folded_type_tests`].
+    pub(crate) folded_type_tests: HashMap<Span, bool>,
     /// Unbound method-handle sites: a `Type.method` member expression in value position → the
     /// resolved `(ty, method, associated)`. Lowering reads this (via [`Checked::handle_sites`]) to
     /// emit an [`Rvalue::MethodHandle`] instead of a field load. A pure function of the program.
@@ -435,6 +507,7 @@ impl SiteMaps {
             arg_orders: self.arg_orders,
             for_stream_sites: self.for_stream_sites,
             width_sites: self.width_sites,
+            folded_type_tests: self.folded_type_tests,
             handle_sites: self.handle_sites,
             bound_handle_sites: self.bound_handle_sites,
             field_call_sites: self.field_call_sites,

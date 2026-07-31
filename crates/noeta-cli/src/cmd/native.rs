@@ -644,14 +644,16 @@ mod tests {
         let source = Source::new(SourceId(0), "<test>", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
+        // Errors only: this fixture is about AOT ring selection, so an unrelated lint elsewhere in
+        // the toolchain must not be able to fail it.
         assert!(
-            parsed.diagnostics.is_empty(),
+            !noeta_diagnostics::has_errors(&parsed.diagnostics),
             "parse errors: {:?}",
             parsed.diagnostics
         );
         let checked = noeta_check::check_all(&parsed.program);
         assert!(
-            checked.diagnostics.is_empty(),
+            !noeta_diagnostics::has_errors(&checked.diagnostics),
             "check errors: {:?}",
             checked.diagnostics
         );

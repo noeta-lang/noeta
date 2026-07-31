@@ -38,6 +38,9 @@ pub(crate) fn cmd_dump(
         }),
     ) {
         Ok(compiled) => {
+            // Warnings to stderr before the listing to stdout — the two streams stay separable
+            // (`noeta dump f.noe > f.txt` still captures only the disassembly).
+            crate::output::emit_diagnostics_mapped(&compiled.sources, compiled.warnings.iter());
             print!("{}", compiled.module.disassemble());
             let _ = io::stdout().flush();
             ExitCode::SUCCESS
@@ -85,7 +88,11 @@ pub(crate) fn cmd_build(
             package_uses: g.package_uses,
         }),
     ) {
-        Ok(compiled) => compiled.module,
+        // A warning does not fail a build — it is reported and the artifact is still produced.
+        Ok(compiled) => {
+            crate::output::emit_diagnostics_mapped(&compiled.sources, compiled.warnings.iter());
+            compiled.module
+        }
         Err(failure) => return failure.report(),
     };
     let module = module.as_ref();

@@ -65,7 +65,8 @@ pub fn debug_source(request_json: &str) -> String {
     };
 
     let (db, src, diagnostics) = crate::front_end(&request.source);
-    if !diagnostics.is_empty() {
+    // Errors only — a warning must not refuse to start a debug session (see `run_with_executor`).
+    if crate::blocking(&diagnostics) {
         return json!({ "compiled": false, "diagnostics": diagnostics }).to_string();
     }
 

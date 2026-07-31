@@ -89,8 +89,15 @@ pub fn impact_of_edit(old_src: &str, new_src: &str, edition: noeta_lexer::Editio
     let mut editions = noeta_lexer::EditionMap::new();
     editions.set(noeta_span::SourceId::FIRST, edition);
     let checked = noeta_check::check_all_with_editions(program, editions);
-    if !activated.diagnostics.is_empty() || !checked.diagnostics.is_empty() {
-        // Red code: the consumer's own run will surface the diagnostics.
+    if noeta_diagnostics::has_errors(
+        activated
+            .diagnostics
+            .iter()
+            .chain(checked.diagnostics.iter()),
+    ) {
+        // Red code: the consumer's own run will surface the diagnostics. A *warning* is not red —
+        // narrowing an edit that merely lints is still sound, and widening to `All` over one would
+        // silently cost the watcher its whole point.
         return Impact::All {
             reason: "the edit does not check".into(),
         };
@@ -513,7 +520,12 @@ impl ImpactSession {
                 ..noeta_check::CheckOptions::default()
             },
         );
-        if !activated.diagnostics.is_empty() || !checked.diagnostics.is_empty() {
+        if noeta_diagnostics::has_errors(
+            activated
+                .diagnostics
+                .iter()
+                .chain(checked.diagnostics.iter()),
+        ) {
             return Impact::All {
                 reason: "the edit does not check".into(),
             };

@@ -110,7 +110,7 @@ use effects::*;
 use env::*;
 use forwarding::*;
 use sites::SiteMaps;
-pub use sites::{DestructorRelevance, Sites};
+pub use sites::{DestructorRelevance, Sites, intern_type_arg_entry};
 use subst::*;
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both

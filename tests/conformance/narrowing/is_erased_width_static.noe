@@ -1,0 +1,71 @@
+// **A width type test is answered where the width is known, and warned where it is gone.**
+//
+// A width is a property of *storage*, not of a value: every integer width is the same runtime word,
+// and an `f64` is a `float` bit for bit. So the runtime matcher has no head to reach for `is i32` /
+// `is f64` on a scalar and comes back `false` whatever the value — which is the wrong answer
+// whenever the checker already knew the width. The checker therefore decides such a test itself
+// when the scrutinee's static type settles it (widths have identity-only subtyping, so equality is
+// the whole answer) and lowering emits the constant; both backends read the same decision, so M0
+// and M1 agree by construction.
+//
+// E0063 is left for the case that genuinely cannot be answered — a value laundered through `dyn`,
+// where the width was discarded and nothing on the value records it. That, and only that, is one
+// warning below; the program still runs and exits 0.
+//
+// `f32` needs no rule of its own and gets none: it is *reified* (its own runtime tag), so it is not
+// an erased width, nothing folds, and the runtime answers it correctly both directly and after a
+// launder. A container target is likewise untouched — a packed element's width lives once in the
+// buffer's schema, so `is List<i32>` was always a real test.
+// expect: error E0063 at 69:46
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "5"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+
+// --- the checker knows the width: the test is answered, not guessed ---
+a: i32 = 5
+echo a is i32   // true  — `a`'s static type IS `i32`
+echo a is i64   // false — a decided answer, not an erasure problem: `i32` is not `i64`
+echo a is u32   // false — signedness is part of the identity
+
+wide: f64 = 1.5
+echo wide is f64   // true
+narrow: float = 1.5
+echo narrow is f64 // false — `float` and `f64` are distinct static types, however alike the bits
+
+// Folding to `true` must not cost the narrowing the test would otherwise perform: `a` is still
+// seen as an `i32` in the branch, and the branch is still taken.
+if a is i32 {
+  same: i32 = a
+  echo same
+}
+
+// --- the width really is gone: the one case that warns (E0063) ---
+// `laundered` was built from `a`, but `dyn` keeps no width, so neither the runtime nor the checker
+// can say it was ever an `i32`. The test compiles, runs, and answers `false`.
+laundered: dyn = a
+echo has_i32_width(laundered)
+
+// --- `f32` is consistent, with no special case: it is reified, so the runtime answers it ---
+small: f32 = 1.5f32
+echo small is f32          // true  — and no fold: `f32` is not an erased width
+echo is_f32(1.5f32)        // true  — a launder does not lose a reified tag
+echo is_f32(1.5)           // false — a plain `float` is not an `f32`
+
+// --- a container target is unchanged: the element width lives in the buffer's schema ---
+widths: List<i32> = [1, 2]
+echo is_i32_list(widths)   // true
+echo is_i32_list(7)        // false
+
+fn has_i32_width(v: dyn): bool { return v is i32; }
+fn is_f32(v: dyn): bool { return v is f32; }
+fn is_i32_list(v: dyn): bool { return v is List<i32>; }

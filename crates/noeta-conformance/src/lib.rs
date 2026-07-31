@@ -107,7 +107,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
     let mut exit_code;
 
     if stage == Stage::Lexer {
-        exit_code = if diagnostics.is_empty() { 0 } else { 1 };
+        exit_code = if has_error(&diagnostics) { 1 } else { 0 };
     } else {
         let parsed = noeta_parser::parse_in(
             &source,
@@ -124,7 +124,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // One `check_all` yields both the gate diagnostics and the site bundle the eval backend
         // needs, so the checker runs once per case instead of again inside the backend.
         let mut sites = noeta_check::Sites::default();
-        if stage == Stage::Eval && diagnostics.is_empty() {
+        if stage == Stage::Eval && !has_error(&diagnostics) {
             let checked = noeta_check::check_all(&parsed.program);
             diagnostics.extend(checked.diagnostics);
             sites = checked.sites;
@@ -169,9 +169,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
 /// still reported (a case asserts it with the same `// expect: error <CODE> at …` header — the
 /// header names a diagnostic, whatever its severity), it simply does not stop the program.
 pub(crate) fn has_error(diagnostics: &[Diagnostic]) -> bool {
-    diagnostics
-        .iter()
-        .any(|d| d.severity == noeta_diagnostics::Severity::Error)
+    noeta_diagnostics::has_errors(diagnostics)
 }
 
 /// Map each diagnostic to its `(code, line, col)` expectation, resolved against `source`.

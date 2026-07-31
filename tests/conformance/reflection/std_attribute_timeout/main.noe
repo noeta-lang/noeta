@@ -1,0 +1,30 @@
+// `std.test.Timeout` — the `@test` runner's per-test deadline override (the test-timeout rail) — is
+// an ordinary namespaced native attribute, and this pins that it behaves like one in *both* backends
+// rather than being a runner-only string the checker never sees.
+//
+//   * It has to be imported (`use std.test.{Timeout}`), like the rest of the `std.test` metadata set.
+//   * Its shape reaches reflection: one mandatory `seconds: int` field (no default — a bare
+//     `#[Timeout]` would have to mean *something* about a bound, and every reading of that is a guess).
+//   * An application's argument round-trips as an int, which is what the runner reads to bound a test.
+//
+// The runner's own behavior (what a test that blows the bound reports) is a CLI concern and is
+// covered by the `noeta test` integration tests; this is the language-level half.
+//
+// A **directory** case, like its `std_attribute_group_import` sibling: applying a namespaced native
+// attribute by its imported short name needs the loader's rewrite tables, and the single-file
+// harness never links, so `#[Timeout(30)]` would reach `attributes_of` unqualified and match nothing.
+// expect: stdout "seconds Type.Int optional=false"
+// expect: stdout "30"
+// expect: exit 0
+use std.test.{Timeout}
+
+#[Timeout(30)]
+struct SlowThing { id: int }
+
+for s in field_specs_of::<std.test.Timeout>() {
+    echo "${s.name} ${s.type} optional=${s.optional}"
+}
+
+for a in attributes_of::<Timeout>() {
+    echo a.value.seconds;
+}

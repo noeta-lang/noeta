@@ -165,6 +165,12 @@ enum Command {
         /// runner does nothing.
         #[arg(long)]
         target: Option<String>,
+        /// Per-test deadline in seconds (default: 60). A test that does not finish within it is
+        /// reported `TIME` — it is neither a pass nor an assertion failure — and the rest of the
+        /// suite still runs and reports. Raise it for one test with `#[std.test.Timeout(N)]`
+        /// instead; `--timeout 0` removes the bound for the whole run.
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u64>,
     },
     /// Discover and run a program's `@bench` blocks, measuring each (object-model slice 6).
     Bench {
@@ -1148,6 +1154,7 @@ pub fn run_cli(
             names,
             json,
             target,
+            timeout,
         } => {
             tier_runner::set_test_opts(tier_runner::TestOpts {
                 fail_fast,
@@ -1156,6 +1163,7 @@ pub fn run_cli(
                 names,
                 json,
                 target,
+                timeout,
             });
             tier_runner::dispatch_std_tier("test", &file)
         }
@@ -1599,8 +1607,10 @@ pub(crate) fn run_declared_tier(
     activated: noeta_check::Activated,
     tier: noeta_check::DeclaredTier,
 ) -> u8 {
-    if !activated.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+    // Report, then gate on errors only: a warning inside a tier's blocks is advisory, exactly as it
+    // is in ordinary code, and must not stop the tier's runner.
+    emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+    if noeta_diagnostics::has_errors(&activated.diagnostics) {
         return 1;
     }
     // An expression tier has no runner semantics — its blocks are expressions in ordinary code,
@@ -1710,8 +1720,8 @@ pub(crate) fn run_declared_tier(
         ..noeta_check::CheckOptions::default()
     };
     let checked = context::check_under(&program, &opts);
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+    emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+    if noeta_diagnostics::has_errors(&checked.diagnostics) {
         return 1;
     }
     match execute_real_host(&program, &checked, std::env::args().collect(), true) {

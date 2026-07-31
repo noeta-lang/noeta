@@ -446,6 +446,8 @@ A program (or a dependency) can also declare its **own** tier with `@tier` — `
 
 All three accept `--target <NAME>`, which acts as a **gate**: if the named `noeta.toml` target does not make that tier live, the command prints a notice and no-ops with exit `0`. With no `--target`, they always proceed.
 
+`noeta test` additionally bounds **every test** by a per-test deadline — `--timeout <SECONDS>` (default `60`, `0` disables), overridden for one test with `#[std.test.Timeout(N)]`. A test that overruns is reported as its own `TIME` outcome rather than as a pass or a failure, the rest of the suite still runs and reports, and the run exits `1`; see [Testing → Timeouts](Testing#timeouts) for what the runner can and cannot do to a test that will not stop.
+
 ---
 
 ## Packages: `add`, `update`, `claim`, `publish`, `scope`, `audit`, `key`
