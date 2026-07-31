@@ -3354,17 +3354,23 @@ impl Printer<'_> {
         };
         // Optional column alignment of the `=>` arrows (config): pad each left column to the widest.
         let arrow_col = if self.config.match_arm_arrows == ArrowStyle::Align {
+            // A measuring render, thrown away — so the comment cursor is restored after it, or a
+            // comment inside a guard would be consumed by the measurement and emitted by no one.
+            let cursor = self.cursor.get();
             let mut widths = Vec::new();
             for a in arms {
                 widths.push(pattern_width(arm_left(a)?));
             }
+            self.cursor.set(cursor);
             widths.into_iter().max().unwrap_or(0)
         } else {
             0
         };
-        let render_arm = |a: &MatchArm| -> Result<Doc, FmtError> {
+        // One arm, without its separator: `pattern[ if guard][pad] => body`. `align` padding is
+        // applied only in the exploded form, where a column exists to align to.
+        let arm_doc = |a: &MatchArm, aligned: bool| -> Result<Doc, FmtError> {
             let pat = arm_left(a)?;
-            let pad = if self.config.match_arm_arrows == ArrowStyle::Align {
+            let pad = if aligned && self.config.match_arm_arrows == ArrowStyle::Align {
                 " ".repeat(arrow_col.saturating_sub(pattern_width_ref(&pat)))
             } else {
                 String::new()
@@ -3378,12 +3384,35 @@ impl Printer<'_> {
                 // `noeta fmt` is supposed to be safe; moving a comment across a brace is not.
                 ClosureBody::Block(stmts) => self.block(stmts, a.span.start, a.span.end)?,
             };
-            Ok(Doc::concat([
-                pat,
-                Doc::text(format!("{pad} => ")),
-                body,
-                Doc::text(","),
-            ]))
+            Ok(Doc::concat([pat, Doc::text(format!("{pad} => ")), body]))
+        };
+        // A `match` the author wrote on one line stays on one line (see [`Self::match_stays_flat`]).
+        // The arms are rendered before the decision is final, because an arm may itself have brought
+        // a hard break along — a block body, a closure, a multiline string — and then the flat form
+        // would not be flat, and would not be a fixed point.
+        if self.match_stays_flat(scrutinee.span().end, span) {
+            // The render is speculative, so the comment cursor is restored if it is thrown away —
+            // a comment consumed by a discarded arm would otherwise be emitted by nobody.
+            let cursor = self.cursor.get();
+            let mut arm_docs = Vec::with_capacity(arms.len());
+            for a in arms {
+                arm_docs.push(arm_doc(a, false)?);
+            }
+            let flat = Doc::concat([
+                head.clone(),
+                Doc::text(" { "),
+                Doc::join(arm_docs, Doc::text(", ")),
+                Doc::text(" }"),
+            ]);
+            if flat.never_breaks() {
+                return Ok(flat);
+            }
+            self.cursor.set(cursor);
+        }
+        // Exploded: one arm per line, each with a trailing comma (the parser accepts a uniform
+        // trailing one), so a comment can interleave between two arms on its own line.
+        let render_arm = |a: &MatchArm| -> Result<Doc, FmtError> {
+            Ok(Doc::concat([arm_doc(a, true)?, Doc::text(",")]))
         };
         let inner =
             self.interleave_comments(arms, scrutinee.span().end, span.end, |a| a.span, render_arm)?;
@@ -3394,6 +3423,44 @@ impl Printer<'_> {
             Doc::hardline(),
             Doc::text("}"),
         ]))
+    }
+
+    /// Whether a `match` keeps the single-line form the author wrote it in — `match e { A => 1, _ =>
+    /// 2 }` — instead of being exploded to one arm per line.
+    ///
+    /// This is the same rule the rest of the printer applies to every other delimited construct
+    /// (see [`Self::seq_broke`]), arriving late: `match` was the one sequence whose layout was
+    /// hard-coded to *always* break. Under `wrap = false` — the default, and what a package with no
+    /// `[fmt]` table gets — the documented policy "keeps the author's line breaks and only
+    /// normalizes indentation, spacing, blank lines and continuation" has no width in it at all, so
+    /// re-laying out a one-line `match` was an override of author layout at any width. Under
+    /// `wrap = true` layout is re-derived from [`FmtConfig::line_width`] and this yields, exactly as
+    /// [`Self::dot_link`] and [`Self::breaks_at_author_gaps`] do.
+    ///
+    /// The signal is the **whole node**, not just the gap after the `{`: flat iff the source from
+    /// `match` to the closing `}` holds no newline. That is stricter than `seq_broke`'s
+    /// "did they break after the delimiter", and deliberately so — a partially-broken `match`
+    /// (`match x { A => 1,⏎ B => 2 }`) has author breaks in it, and collapsing those is the very
+    /// thing this fixes. A newline that merely *leaked* out of an arm's own multi-line body also
+    /// lands here and yields the exploded form, which is the pre-existing behavior.
+    ///
+    /// It is a fixed point by construction: the flat form emits no newline anywhere between `match`
+    /// and `}` (asserted, not assumed — see [`Doc::never_breaks`]), so a second pass reads
+    /// `broke_between` as `false` again and re-derives the same answer; the exploded form always
+    /// breaks after `{`, so a second pass reads `true`.
+    ///
+    /// A pending comment inside the node forces the exploded form: a `//` comment on a joined line
+    /// would swallow every arm after it, and the flat path does not interleave comments at all, so
+    /// one written between arms would escape to the enclosing scope.
+    fn match_stays_flat(&self, region_start: u32, span: Span) -> bool {
+        if self.holds_comment(region_start, span.end) {
+            return false;
+        }
+        // A tier-body hole may not contain a newline at all, so flat is the only legal form there.
+        if self.force_flat.get() {
+            return true;
+        }
+        !self.config.wrap && !self.broke_between(span.start, span.end)
     }
 
     fn object(&self, obj: &ObjectLit) -> Result<Doc, FmtError> {
