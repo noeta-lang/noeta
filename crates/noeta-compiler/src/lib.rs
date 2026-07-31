@@ -774,7 +774,7 @@ impl SessionCompiler {
     fn install(
         &mut self,
         program: &Program,
-        sites: Option<Cow<'_, Sites>>,
+        mut sites: Option<Cow<'_, Sites>>,
         real_isolates: bool,
     ) -> Result<Vec<String>, Unsupported> {
         // ── front end ───────────────────────────────────────────────────────────────────────
@@ -799,7 +799,6 @@ impl SessionCompiler {
         // hands back the bundle with its `hidden_arg_sites` rewritten into this compiler's index
         // space — see its doc. An identity remap (an empty compiler, i.e. every cold compile, and
         // the append-only REPL case) borrows straight back, so nothing is cloned.
-        let mut sites = sites;
         let rewritten = sites
             .as_deref()
             .and_then(|bundle| match self.absorb_type_args(bundle) {
