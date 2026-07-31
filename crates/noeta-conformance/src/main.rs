@@ -145,6 +145,19 @@ fn cmd_wasm_differential(file: Option<&std::path::Path>, dir: &std::path::Path) 
     match noeta_conformance::run_wasm_differential(dir, file) {
         Ok(report) => {
             print!("{}", report.to_human());
+            // A whole-corpus run that executed NOTHING is a broken harness, not a pass: a wrong
+            // working directory, an empty `--dir`, or a corpus that stopped compiling would
+            // otherwise print "0 ran and agreed" and exit 0 — the same green-looking nothing that
+            // let this oracle sit red behind a SKIP. A `--file` run is exempt: narrowing to one
+            // case that the checker rejects legitimately runs zero programs.
+            if file.is_none() && report.matched == 0 {
+                eprintln!(
+                    "noeta-conformance: --wasm-differential ran ZERO programs over {} — \
+                     that is a broken harness, not a pass (wrong --dir?).",
+                    dir.display()
+                );
+                return ExitCode::FAILURE;
+            }
             if report.ok() {
                 ExitCode::SUCCESS
             } else {

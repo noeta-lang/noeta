@@ -84,6 +84,18 @@ fn main() -> ExitCode {
 /// `name` labels the synthetic source diagnostics render against; `program_argv` is what the
 /// program observes through `args.all()`.
 fn run(bytes: &[u8], name: &str, program_argv: Vec<String>, sandbox: bool) -> ExitCode {
+    // Seed the process-default extension registry with the std units. On native this happens for
+    // free: `noeta_stdlib` registers a fallback provider from a `#[ctor]`, so merely linking the
+    // crate gives the process a working default. That ctor is `cfg(not(target_family = "wasm"))` —
+    // its doc states that "every wasm driver assembles its registry explicitly", which the
+    // playground engine does and this runner did not. Unseeded, `default_registry()` answers `None`
+    // and every registry-keyed lookup silently takes its fallback path: `construct`'s native
+    // fielded-type resolution built `std.http.Frame` under the *qualified* name instead of the
+    // canonical short shape name and skipped the stamped reflected identity, so a constructed
+    // native value narrowed to `none` and compared unequal to the identical literal. Seeding here
+    // covers both entry shapes (stapled and two-file), before anything can look a name up.
+    noeta_stdlib::registry::default_seeded();
+
     let module = match noeta_bundle::read(bytes) {
         Ok(module) => module,
         Err(err) => {
@@ -110,6 +122,12 @@ fn run(bytes: &[u8], name: &str, program_argv: Vec<String>, sandbox: bool) -> Ex
 
     print!("{}", result.stdout);
     let _ = std::io::stdout().flush();
+
+    // The program's OWN stderr stream (`std.io`'s `err`/`errln`), buffered into `RunResult` exactly
+    // as stdout is, and written FIRST — the order every run tail uses: program stderr, then
+    // diagnostics, then the traceback (`noeta_runner::run_compiled_module`). Omitting it silently
+    // dropped every `err`/`errln` byte a wasm-hosted program wrote.
+    let _ = std::io::stderr().write_all(result.stderr.as_bytes());
 
     // A bundle ships no source: diagnostics and tracebacks render against a synthetic empty
     // source (message/code/file:line show, no snippet) — the `noeta run app.noeb` convention.

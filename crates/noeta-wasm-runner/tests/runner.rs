@@ -93,6 +93,37 @@ fn renders_an_abort_with_its_traceback() {
 }
 
 #[test]
+fn writes_the_programs_own_stderr_stream() {
+    // `std.io`'s `err`/`errln` are observable program output, buffered into `RunResult.stderr`
+    // exactly as `echo` is buffered into `stdout`. This tail wrote stdout and forgot stderr, so
+    // every byte a wasm-hosted program wrote to its error stream vanished — silently, with a zero
+    // exit. One of seven hand-written copies of this epilogue (plans/parallel-path-audit.md row 1);
+    // three of them still drop the stream, which is why this asserts the behaviour rather than
+    // trusting the shared helper it does not yet call.
+    let text = "use std.io\necho \"to stdout\"\nio.errln(\"to stderr\")\n";
+    let path = temp_bundle("streams.noeb", &build_bundle(text));
+    let out = runner().arg(path.path()).output().expect("runner runs");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "to stdout\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "to stderr\n");
+}
+
+#[test]
+fn program_stderr_precedes_the_traceback() {
+    // The order every run tail writes: the program's own stderr, then diagnostics, then the
+    // traceback. A program that reports progress on stderr and then aborts must not have its
+    // report appear *after* the failure that followed it.
+    let text = "use std.io\nio.errln(\"step one\")\npanic(\"kaboom\");\n";
+    let path = temp_bundle("order.noeb", &build_bundle(text));
+    let out = runner().arg(path.path()).output().expect("runner runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0));
+    let program = stderr.find("step one").expect("program stderr is written");
+    let abort = stderr.find("kaboom").expect("the traceback is written");
+    assert!(program < abort, "stderr out of order: {stderr:?}");
+}
+
+#[test]
 fn refuses_a_missing_file_and_a_non_bundle() {
     let out = runner()
         .arg("/nonexistent/app.noeb")

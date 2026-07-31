@@ -11,9 +11,11 @@
 //! calls the runner makes (`render_mapped` + `render_trace` against the synthetic empty source),
 //! keeping the equality structural rather than approximate.
 //!
-//! External tools are discovered, never assumed: the runner `.wasm` via `NOETA_WASM_RUNNER` (or
-//! the workspace-relative release path), wasmtime via `NOETA_WASMTIME` (or `$PATH`). Missing
-//! tooling is a loud setup error, not a skip — the oracle keeps the `0 skipped` posture.
+//! External tools are discovered, never assumed: the runner `.wasm` via `NOETA_WASM_RUNNER` (or the
+//! `wasm-release` path under `CARGO_TARGET_DIR`, which this repo always sets), wasmtime via
+//! `NOETA_WASMTIME` (or `$PATH`). Missing tooling is a loud setup error, not a skip — the oracle
+//! keeps the `0 skipped` posture, and `main` additionally fails a whole-corpus run that executed
+//! zero programs, so "green" can never mean "tested nothing".
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -100,7 +102,13 @@ fn discover_tools() -> Result<WasmTools, String> {
         .unwrap_or_else(|| {
             // The conformance binary runs from the workspace root; the runner's `wasm-release`
             // build is the deployment artifact, so the oracle exercises exactly what ships.
-            PathBuf::from("target/wasm32-wasip1/wasm-release/noeta-wasm-runner.wasm")
+            // `CARGO_TARGET_DIR` is honoured because this repo *requires* a per-agent target dir
+            // (AGENTS.md) — assuming a literal `target/` here meant the oracle could not find a
+            // runner that had just been built two steps earlier in the same gate run.
+            let target = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("target"));
+            target.join("wasm32-wasip1/wasm-release/noeta-wasm-runner.wasm")
         });
     if !runner.is_file() {
         return Err(format!(
