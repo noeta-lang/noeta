@@ -2582,6 +2582,7 @@ fn a_worker_ships_its_program_output_home() {
             None,
             false,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(noeta_stdlib::CancelWake::new()),
             noeta_span::Span::new(0, 0),
         )
     })
@@ -2758,7 +2759,7 @@ fn a_worker_arms_its_executor_against_its_own_cancellation() {
     });
     let wake = Arc::new(noeta_stdlib::CancelWake::new());
     wake.wake();
-    let outcome = std::thread::spawn(move || {
+    let report = std::thread::spawn(move || {
         crate::lifecycle::run_isolate_worker(
             &module,
             &factory,
@@ -2784,7 +2785,7 @@ fn a_worker_arms_its_executor_against_its_own_cancellation() {
         "the worker must arm its own executor against its cancellation before running the body"
     );
     assert!(
-        matches!(outcome, crate::lifecycle::IsolateOutcome::Done(_)),
+        matches!(report.outcome, crate::lifecycle::IsolateOutcome::Done(_)),
         "a wake with the flag unset is spurious: the worker re-polls and completes normally"
     );
 }
