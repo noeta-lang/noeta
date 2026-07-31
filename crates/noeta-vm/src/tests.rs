@@ -2521,7 +2521,7 @@ fn worker_teardown_reaps_stranded_reference_cycles() {
             noeta_span::Span::new(0, 0),
         );
         assert!(
-            matches!(result, crate::lifecycle::IsolateOutcome::Done(_)),
+            matches!(result.outcome, crate::lifecycle::IsolateOutcome::Done(_)),
             "spin returns an int"
         );
         noeta_value::live_count() as i64 - before as i64
@@ -2531,6 +2531,68 @@ fn worker_teardown_reaps_stranded_reference_cycles() {
     assert_eq!(
         residual, 0,
         "the worker's own teardown must reap its stranded cycles (residency 0)"
+    );
+}
+
+/// isolate-output: a worker isolate's **program output travels home with its outcome**.
+///
+/// A worker builds its own `Vm` on its own thread — its `RunOutput` is unreachable from the parent
+/// by construction — so an `echo` inside an isolate reached the parent's `RunResult` only if the
+/// buffers are explicitly handed back. They were not, and everything a worker wrote was dropped;
+/// this is the unit-level guard for the hand-back, driving `run_isolate_worker` directly (the only
+/// in-crate way to reach the real worker path — real isolates are CLI / out-of-oracle).
+///
+/// Nothing here depends on timing: one worker, run to completion on this thread's `join`, and the
+/// assertion is on the bytes it produced rather than on when they appeared.
+#[test]
+fn a_worker_ships_its_program_output_home() {
+    use std::sync::Arc;
+    let _ = noeta_stdlib::registry::default_seeded();
+    let src = "fn talk(n: int): int {\n\
+         echo \"worker says \" ~ n\n\
+         echo \"and then stops\"\n\
+         return n\n\
+         }\n";
+    let source = Source::new(SourceId::FIRST, "test.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let module = Arc::new(compile(&parsed.program).expect("in subset"));
+    let proto = module
+        .protos
+        .iter()
+        .position(|p| p.name.as_deref() == Some("talk"))
+        .expect("talk proto") as u32;
+    let factory: crate::IsolateFactory = Arc::new(|| {
+        (
+            Box::new(noeta_stdlib::SandboxHost::new()) as Box<dyn noeta_stdlib::Host>,
+            Box::new(noeta_stdlib::SandboxExecutor::new()) as Box<dyn noeta_stdlib::Executor>,
+        )
+    });
+    let report = std::thread::spawn(move || {
+        crate::lifecycle::run_isolate_worker(
+            &module,
+            &factory,
+            None,
+            proto,
+            vec![crate::isolate::IsoArg::Copied(crate::isolate::Wire::Int(7))],
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            noeta_span::Span::new(0, 0),
+        )
+    })
+    .join()
+    .unwrap();
+    assert!(
+        matches!(report.outcome, crate::lifecycle::IsolateOutcome::Done(_)),
+        "talk returns an int"
+    );
+    assert_eq!(
+        report.output.stdout, "worker says 7\nand then stops\n",
+        "the worker's own writes come home, in the worker's program order"
     );
 }
 
@@ -2602,7 +2664,7 @@ fn a_cancelled_worker_reports_cancelled_and_frees_its_heap() {
     .join()
     .unwrap();
     assert!(
-        matches!(outcome, crate::lifecycle::IsolateOutcome::Cancelled),
+        matches!(outcome.outcome, crate::lifecycle::IsolateOutcome::Cancelled),
         "an honored cancellation is its own outcome, not a value and not a failure"
     );
     assert_eq!(

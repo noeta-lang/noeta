@@ -1044,8 +1044,10 @@ fn test_a_wedged_test_is_asked_to_stop_and_its_destructors_run() {
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let marker = dir.join("stopped.log");
     let marker_path = marker.to_str().expect("utf-8 path");
-    // A timed-out case reports no captured stdout (its run produced no result), so the evidence has
-    // to reach real disk.
+    // The claim here is about *destructors*, which leave no trace in stdout, so the evidence has to
+    // reach real disk. (A stopped case's captured stdout does now reach the report — see
+    // `test_a_stopped_case_reports_the_output_it_managed_to_produce` — but a `destruct` running is
+    // not something a case can print from anyway.)
     let src = format!(
         "use std.fs\n\
          class Res {{ pub tag: string\n\
@@ -1147,6 +1149,161 @@ fn test_a_test_blocked_in_a_native_call_is_abandoned_and_the_run_still_ends() {
                 .and(predicate::str::contains("ok    second_passes"))
                 .and(predicate::str::contains(
                     "2 passed, 0 failed, 1 timed out, 3 total",
+                )),
+        );
+}
+
+// --- A worker isolate's output under `noeta test` (isolate-output) ------------------
+//
+// `noeta test` captures a case's stdout deliberately: hidden on a pass, shown on a failure. A real
+// isolate the case spawns writes into its *own* VM on its own thread, and that output used to be
+// dropped on the floor — the run's `RunResult` never saw it, so no report could. It now travels
+// home with the worker's outcome and lands in the case's stdout, which means it follows the same
+// rule as the case's own writes rather than inventing a third.
+//
+// **Nothing below races a worker against a clock.** Each program awaits its isolate, so the harvest
+// has already happened by the time the assertion runs, and each spawns one isolate per `concurrent`
+// block so the ordering claim is about the parent's program order rather than about which thread
+// won.
+
+/// One isolate, awaited: a passing case hides its worker's output and a failing case shows it —
+/// exactly the rule the case's own `echo` follows.
+const ISOLATE_OUTPUT_TESTS: &str = "async fn work(name: string, n: int): int {\n\
+         echo \"worker \" ~ name ~ \" ran\";\n\
+         return n * n;\n\
+     }\n\
+     async fn square(name: string, n: int): int {\n\
+         mut r = 0;\n\
+         concurrent { h = isolate work(name, n); r = h.await; }\n\
+         return r;\n\
+     }\n\
+     @test {\n\
+         async fn passes(): void { echo \"case says hello\"; assert(square(\"a\", 3).await == 9); }\n\
+         async fn fails(): void { echo \"case says hello\"; assert(square(\"b\", 3).await == 10, \"nine is not ten\"); }\n\
+     }\n";
+
+#[test]
+fn test_a_worker_isolates_output_is_captured_like_the_cases_own() {
+    let file = temp_program("test_isolate_output", ISOLATE_OUTPUT_TESTS);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            // The failing case shows both lines, the worker's included — and the worker's line is
+            // the whole point: before the fix it existed only inside the worker's own VM.
+            predicate::str::contains("FAIL  fails")
+                .and(predicate::str::contains("| case says hello"))
+                .and(predicate::str::contains("| worker b ran"))
+                // ...and the passing case shows neither, so the worker's output did not leak into a
+                // green report by taking some other route (the live-output door, say).
+                .and(predicate::str::contains("ok    passes"))
+                .and(predicate::str::contains("worker a ran").not())
+                .and(predicate::str::contains("1 passed, 1 failed, 2 total")),
+        );
+}
+
+/// `--json` is where the report *is* the product: an isolate's output has to be in the per-case
+/// `stdout` string for both outcomes, since a consumer (CI, the editor's test explorer) reads that
+/// field rather than the human table.
+///
+/// This is also the **ordering contract**, asserted byte-for-byte rather than by `contains`: a
+/// worker's output arrives as one contiguous block at the point the parent harvests it. The two
+/// isolates here are in *separate* `concurrent` blocks, so the second is not even spawned until the
+/// first has been joined — the order is fixed by the parent's program order, not by a race.
+#[test]
+fn test_isolate_output_lands_as_a_block_at_the_harvest_point_in_json() {
+    let src = "async fn work(name: string): int {\n\
+         echo \"worker \" ~ name ~ \" line one\";\n\
+         echo \"worker \" ~ name ~ \" line two\";\n\
+         return 1;\n\
+     }\n\
+     async fn two(): int {\n\
+         mut r = 0;\n\
+         echo \"parent before\";\n\
+         concurrent { a = isolate work(\"a\"); r = r + a.await; }\n\
+         echo \"parent between\";\n\
+         concurrent { b = isolate work(\"b\"); r = r + b.await; }\n\
+         echo \"parent after\";\n\
+         return r;\n\
+     }\n\
+     @test {\n\
+         async fn ordered(): void { assert(two().await == 2); }\n\
+     }\n";
+    let file = temp_program("test_isolate_output_order", src);
+    let assert = lang()
+        .arg("test")
+        .arg(&file)
+        .arg("--json")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let case = json["tests"]
+        .as_array()
+        .expect("tests array")
+        .iter()
+        .find(|t| t["name"] == "ordered")
+        .expect("the case is reported")
+        .clone();
+    assert_eq!(case["outcome"], "passed");
+    assert_eq!(
+        case["stdout"],
+        "parent before\n\
+         worker a line one\n\
+         worker a line two\n\
+         parent between\n\
+         worker b line one\n\
+         worker b line two\n\
+         parent after\n",
+        "each worker's writes stay contiguous and in its own program order, and the block lands \
+         where the parent joined it"
+    );
+}
+
+/// **The timed-out caveat, narrowed.** A timed-out case used to report no captured stdout at all,
+/// for two reasons: a stopped case's result was discarded, and an isolate's output never reached
+/// that result anyway. Both are fixed, so a case that *stopped* when asked now reports everything
+/// it wrote before it stopped — its worker's lines included, which is exactly the evidence a reader
+/// chasing a hang wants ("it got as far as the worker, then wedged").
+///
+/// The wedge is a `while true` with no exit but cancellation — structural, not a race against a
+/// fixed sleep — so the case can only ever end by being stopped, and a broken rail hangs into the
+/// harness rather than passing on a fast machine.
+#[test]
+fn test_a_stopped_case_reports_the_output_it_managed_to_produce() {
+    let src = "async fn work(): int { echo \"worker got there\"; return 1; }\n\
+         async fn wedge(): int {\n\
+             mut r = 0;\n\
+             concurrent { h = isolate work(); r = h.await; }\n\
+             mut i = 0;\n\
+             while true { i = i + 1; }\n\
+             return r;\n\
+         }\n\
+         @test {\n\
+             async fn wedges(): void { echo \"case got there\"; assert(wedge().await == 1); }\n\
+         }\n";
+    let file = temp_program("test_isolate_output_timeout", src);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--timeout", "2"])
+        // `assert_cmd` imposes no timeout of its own: a rail that stopped reporting would hang here
+        // rather than pass, which is the honest failure mode.
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("TIME  wedges")
+                .and(predicate::str::contains("| case got there"))
+                .and(predicate::str::contains("| worker got there"))
+                // A case that stopped when asked is not abandoned, so no warning about a leaked
+                // thread — and *that* is what makes its stdout complete enough to print.
+                .and(predicate::str::contains("its thread was abandoned").not())
+                .and(predicate::str::contains(
+                    "0 passed, 0 failed, 1 timed out, 1 total",
                 )),
         );
 }
