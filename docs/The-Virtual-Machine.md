@@ -138,6 +138,8 @@ Tier 1 has its own gate, separate from the eval↔VM differential: **`--jit-diff
 - **Zero heap residency** — no program leaks under native code.
 - **Zero refcount anomalies** — during cycle collection, every unreachable object's refcount must equal its in-edges from the garbage set (unreachable garbage can only reference itself). This closes a blind spot the residency check alone has: a *skipped* retain or release is caught even when teardown's backup sweep would have absorbed the orphan — exactly the failure mode of a wrong immediacy claim, and the check that made a latent mid-frame-entry bug reproducible (it also caught three unrelated interpreter refcount bugs on arrival).
 
+The oracle has a **second arm**, `--jit-differential --cancel-poll`, which runs the same corpus with a never-set cancellation flag armed on the JIT side. That is not a knob: a run that can be cancelled gets genuinely different native code — a cancellation poll at every loop header (see [Concurrency Internals](Concurrency-Internals#the-third-safepoint-a-jit-loop-header)) — and the two shapes are covered separately because testing either alone would leave the other unchecked.
+
 Because refcount exactness is the thing most likely to drift when native code manages the heap — and JIT-generated code cannot run under miri — these checks are as load-bearing as the output check. A historical snapshot from when this coverage was measured: 433 programs, 0 divergences, 0 leaks, 0 anomalies, and 893 of 894 prototypes compiled to real native code; the conformance corpus has grown substantially since, so treat those numbers as a snapshot, not a live count.
 
 > [!NOTE]

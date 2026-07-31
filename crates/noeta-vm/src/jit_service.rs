@@ -54,11 +54,20 @@ impl JitService {
     /// the VM and outlives the service). Returns `None` if the thread cannot spawn; engine
     /// construction failure inside the thread reports every request back as failed, so the
     /// mutator degrades to pure tier 0.
+    ///
+    /// `cancel` is the run's cancellation flag (isolate-cancel, JIT half) or `None`. It crosses as
+    /// the `Arc` rather than as an address — `Arc<AtomicBool>` is `Send`+`Sync`, and handing the
+    /// engine a *strong reference* is what makes the address it bakes into every loop header sound:
+    /// the flag is then owned by the same object that owns the code pages, on the same thread, and
+    /// outlives them by construction (see `noeta_jit::Jit::cancel_flag`). Shipping a bare `usize`
+    /// here would have worked in practice and been unsound in principle — the VM drops its own
+    /// clone the moment a cancellation is honored (`Vm::observe_cancel`).
     pub fn spawn(
         module: Arc<Module>,
         helpers: Vec<(&'static str, usize)>,
         layout: noeta_jit::FrameLayout,
         template_addr: usize,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Option<JitService> {
         let ready = Arc::new(Mutex::new(Vec::new()));
         let stats = Arc::new(Mutex::new(None));
@@ -75,7 +84,8 @@ impl JitService {
                     .map(|&(name, addr)| (name, addr as *const u8))
                     .collect();
                 let mut jit =
-                    noeta_jit::Jit::new(&helper_ptrs, layout, template_addr as *const u8).ok();
+                    noeta_jit::Jit::new(&helper_ptrs, layout, template_addr as *const u8, cancel)
+                        .ok();
                 while let Ok(proto) = rx.recv() {
                     let abandoned = stop_rx.load(std::sync::atomic::Ordering::Acquire);
                     let (entry, fast) = match jit.as_mut() {

@@ -42,7 +42,9 @@ pub use differential::{DiffReport, Mismatch, run_differential};
 pub use expectation::{ErrorExpectation, Expectations};
 pub use ir_corpus::{IrCorpusReport, run_ir_corpus};
 #[cfg(feature = "jit")]
-pub use jit_differential::{JitDiffReport, run_jit_differential};
+pub use jit_differential::{
+    Arm as JitDiffArm, JitDiffReport, run_jit_differential, run_jit_differential_with,
+};
 pub use leaks::{Leak, LeakReport, run_leak_check};
 pub use report::{CaseResult, CaseStatus, NotRun, Report};
 pub use wasm::{WasmDiffFailure, WasmDiffReport, run_wasm_differential};

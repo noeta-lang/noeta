@@ -12,19 +12,61 @@
 //! not even a dependency.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use noeta_backend::RunResult;
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId};
-use noeta_vm::VmBackend;
+use noeta_vm::{RunOptions, Tiering, VmBackend};
 
 use crate::collect_cases;
 use crate::differential::Mismatch;
 use crate::leaks::Leak;
 
+/// How the forced-JIT side of the oracle is armed — i.e. *which* native codegen is under test.
+///
+/// The JIT emits a cancellation poll at every loop header **only** when the run it was built for
+/// carries a cancellation flag (isolate-cancel, JIT half). That makes poll-bearing bodies a second
+/// shape of generated code, and a shape no ordinary corpus run would ever produce. Rather than a
+/// codegen-only knob, this arms the real thing: [`Arm::CancelPoll`] gives the forced-JIT run a
+/// genuine [`RunOptions::cancel`] flag that is simply **never set**, so the interpreter's own
+/// safepoints read `false`, every compiled loop header carries its poll, and the program must still
+/// produce the byte-identical result. The oracle is then asking exactly the right question: does a
+/// cancellable run that is never cancelled behave like an ordinary one?
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Arm {
+    /// Production shape: no cancellation flag anywhere, so the JIT emits no poll and the bodies are
+    /// byte-identical to the pre-poll compiler.
+    #[default]
+    Plain,
+    /// The cancellable shape: a never-set flag on the forced-JIT run, so every loop header polls.
+    CancelPoll,
+}
+
+impl Arm {
+    /// The flag to arm the forced-JIT run with — a fresh, never-set one per case.
+    fn flag(self) -> Option<Arc<AtomicBool>> {
+        match self {
+            Arm::Plain => None,
+            Arm::CancelPoll => Some(Arc::new(AtomicBool::new(false))),
+        }
+    }
+
+    /// How this arm names itself in the report.
+    fn label(self) -> &'static str {
+        match self {
+            Arm::Plain => "jit-differential",
+            Arm::CancelPoll => "jit-differential (cancel-poll)",
+        }
+    }
+}
+
 /// The outcome of a JIT differential run over a corpus.
 #[derive(Debug, Default)]
 pub struct JitDiffReport {
+    /// Which forced-JIT codegen this report covers.
+    pub arm: Arm,
     /// Programs both tiers actually RAN, and on which they agreed. Strictly execution coverage:
     /// a program the checker rejected never ran and is counted in [`not_run`], not here.
     pub matched: usize,
@@ -60,7 +102,8 @@ impl JitDiffReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "jit-differential: {} ran and agreed, {} not run ({}); {}/{} prototypes native (rest bail stubs)",
+            "{}: {} ran and agreed, {} not run ({}); {}/{} prototypes native (rest bail stubs)",
+            self.arm.label(),
             self.matched,
             self.not_run.total(),
             self.not_run.to_human(),
@@ -102,14 +145,23 @@ impl JitDiffReport {
 }
 
 /// Run the JIT differential oracle over every `.noe` file under `root` (optionally narrowed to one
-/// file).
+/// file), against the production (poll-free) forced-JIT codegen.
 pub fn run_jit_differential(root: &Path, only: Option<&Path>) -> JitDiffReport {
+    run_jit_differential_with(root, only, Arm::Plain)
+}
+
+/// [`run_jit_differential`] against a chosen forced-JIT [`Arm`] — see that type for why the
+/// poll-bearing codegen needs its own pass rather than replacing this one.
+pub fn run_jit_differential_with(root: &Path, only: Option<&Path>, arm: Arm) -> JitDiffReport {
     crate::ensure_std_registry();
     let mut cases = Vec::new();
     collect_cases(root, &mut cases);
     cases.sort_by(|a, b| a.entry.cmp(&b.entry));
 
-    let mut report = JitDiffReport::default();
+    let mut report = JitDiffReport {
+        arm,
+        ..JitDiffReport::default()
+    };
     for case in cases {
         if let Some(only) = only
             && case.entry != only
@@ -246,7 +298,17 @@ fn run_and_compare(name: &str, module: &noeta_bytecode::Module, report: &mut Jit
     // integer fast path leaves every register an immediate, so residency must match the interpreter.
     let before = noeta_value::live_count() as i64;
     noeta_value::reset_refcount_anomalies();
-    let (jit, stats) = VmBackend::new().run_module_jit_with_stats(module);
+    // `Arm::Plain` is exactly `run_module_jit_with_stats`; `Arm::CancelPoll` is the same run with a
+    // never-set cancellation flag, which is what makes the JIT emit its loop-header polls.
+    let out = VmBackend::new().run_module_with(
+        module,
+        RunOptions {
+            tiering: Tiering::Forced,
+            cancel: report.arm.flag(),
+            ..RunOptions::default()
+        },
+    );
+    let (jit, stats) = (out.result, out.stats);
     let residual = noeta_value::live_count() as i64 - before;
     // A refcount anomaly (skipped release/retain) is invisible to end-of-run residency — the
     // teardown's final backup sweep reclaims orphans and cycles alike — so the teardown measures
