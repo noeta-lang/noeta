@@ -1,0 +1,38 @@
+// isolate-output — **what an isolate prints is part of the program's output, and it arrives as one
+// contiguous block at the point the awaiting code joins it.**
+//
+// A real (OS-thread) isolate has its own heap and its own output buffers, so its writes have to be
+// handed back with its result; they used to be dropped, and everything a worker echoed vanished
+// from the run's result. That path is CLI-only and out of the oracle, so what this case pins is the
+// *contract* both paths now satisfy — each worker's two lines stay adjacent and in its own order,
+// and each block sits exactly where the parent awaited it, between the parent's own lines.
+//
+// The isolates are in separate `concurrent` blocks on purpose: the second is not spawned until the
+// first has been joined, so the transcript is fixed by the parent's program order rather than by
+// which unit finishes first. Concurrent isolates have no order between them and this case does not
+// pretend otherwise.
+// expect: stdout "parent before"
+// expect: stdout "worker a line one"
+// expect: stdout "worker a line two"
+// expect: stdout "parent between"
+// expect: stdout "worker b line one"
+// expect: stdout "worker b line two"
+// expect: stdout "parent after"
+// expect: exit 0
+async fn work(name: string): int {
+    echo "worker " ~ name ~ " line one"
+    echo "worker " ~ name ~ " line two"
+    return 1
+}
+mut n = 0
+echo "parent before"
+concurrent {
+    a = isolate work("a")
+    n = n + a.await
+}
+echo "parent between"
+concurrent {
+    b = isolate work("b")
+    n = n + b.await
+}
+echo "parent after"

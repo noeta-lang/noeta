@@ -58,6 +58,15 @@ enum ChainOp<'a> {
     Index(&'a Expr),
 }
 
+/// One dot-link segment of a member chain: the link itself plus the postfixes bound to it
+/// (`.method(args)[0]?`), whether the author broke the line before its `.`, and any own-line
+/// comments the author wrote in the gap before it (see [`Printer::chain_segments`]).
+struct ChainSeg {
+    broke: bool,
+    comments: Vec<Doc>,
+    docs: Vec<Doc>,
+}
+
 /// A struct/class body member, unified so comments interleave across them in source order.
 enum Member<'a> {
     Field(&'a FieldDecl),
@@ -2026,12 +2035,7 @@ impl Printer<'_> {
 
     /// Whether `op` is a dot-link the author broke before (see [`DotAnchor`]).
     fn dot_broke(&self, op: &ChainOp) -> bool {
-        match op {
-            ChainOp::Member(_, a) | ChainOp::TupleIndex(_, a) | ChainOp::Await(a) => {
-                self.broke_between(a.recv_end, a.link_start)
-            }
-            ChainOp::Try | ChainOp::Call(..) | ChainOp::Index(_) => false,
-        }
+        dot_gap(op).is_some_and(|(recv_end, link_start)| self.broke_between(recv_end, link_start))
     }
 
     /// Flatten a postfix/member chain from `e` inward into its base receiver and the ordered
@@ -2099,9 +2103,21 @@ impl Printer<'_> {
     fn member_chain(&self, e: &Expr) -> Result<Doc, FmtError> {
         let (head, links) = self.chain_segments(e)?;
         let mut tail = Vec::new();
-        for (_, link) in links {
-            tail.push(Doc::softline());
-            tail.push(Doc::concat(link));
+        for link in links {
+            // A comment written between two links pins the chain open: it has to sit on its own
+            // line, and a `//` would swallow the rest of the chain if the group laid out flat. The
+            // hardlines force the enclosing group to break, which is the honest outcome — the width
+            // is no longer the only thing deciding this chain's layout.
+            if link.comments.is_empty() {
+                tail.push(Doc::softline());
+            } else {
+                for c in link.comments {
+                    tail.push(Doc::hardline());
+                    tail.push(c);
+                }
+                tail.push(Doc::hardline());
+            }
+            tail.push(Doc::concat(link.docs));
         }
         Ok(Doc::concat([
             Doc::concat(head),
@@ -2131,11 +2147,21 @@ impl Printer<'_> {
     fn source_chain(&self, e: &Expr) -> Result<Doc, FmtError> {
         let (head, links) = self.chain_segments(e)?;
         let mut tail = Vec::new();
-        for (broke, link) in links {
-            if broke {
+        for link in links {
+            // A comment in the gap before this link is emitted here, on its own line, above the link
+            // it was written above. Without this the expression printer never looked at comments at
+            // all and every one of them fell through to the enclosing statement sequence, which
+            // re-emitted it *after* the whole statement — a note explaining `.with_max_turns(6)`
+            // ended up below the function that contains it. A comment also forces the break even
+            // where the author had not: a `//` cannot share a line with what follows it.
+            if link.broke || !link.comments.is_empty() {
+                for c in link.comments {
+                    tail.push(Doc::hardline());
+                    tail.push(c);
+                }
                 tail.push(Doc::hardline());
             }
-            tail.push(Doc::concat(link));
+            tail.push(Doc::concat(link.docs));
         }
         Ok(Doc::concat([
             Doc::concat(head),
@@ -2149,24 +2175,63 @@ impl Printer<'_> {
     /// broke before it; the postfixes that follow it (`(args)`, `[i]`, `?`) attach to that segment,
     /// so a segment is the whole unit a break may precede. Postfixes before the first dot-link
     /// belong to the head.
-    #[allow(clippy::type_complexity)]
-    fn chain_segments(&self, e: &Expr) -> Result<(Vec<Doc>, Vec<(bool, Vec<Doc>)>), FmtError> {
+    /// The comments in each dot-link's gap are taken here, before that link's own doc is built, so
+    /// they come out in source order and the shared comment cursor stays monotone.
+    fn chain_segments(&self, e: &Expr) -> Result<(Vec<Doc>, Vec<ChainSeg>), FmtError> {
         let (base, ops) = self.chain_ops(e);
         let mut head: Vec<Doc> = vec![self.receiver(base)?];
-        let mut links: Vec<(bool, Vec<Doc>)> = Vec::new();
+        let mut links: Vec<ChainSeg> = Vec::new();
         for op in &ops {
             let broke = self.dot_broke(op);
             let is_dot = is_dot_link(op);
+            let comments = match dot_gap(op) {
+                Some((start, end)) => self.take_comments_in(start, end),
+                None => Vec::new(),
+            };
             let doc = self.chain_op_doc(op)?;
             if is_dot {
-                links.push((broke, vec![doc]));
+                links.push(ChainSeg {
+                    broke,
+                    comments,
+                    docs: vec![doc],
+                });
             } else if let Some(last) = links.last_mut() {
-                last.1.push(doc);
+                last.docs.push(doc);
             } else {
                 head.push(doc);
             }
         }
         Ok((head, links))
+    }
+
+    /// Take every pending own-line comment starting in `[start, end)` — the gap before a dot-link —
+    /// off the cursor, as docs in source order.
+    ///
+    /// A `// fmt: off` / `// fmt: on` marker is deliberately **not** taken: the verbatim-region
+    /// machinery is statement-granular ([`Self::collect_fmt_off_region`]) and has no meaning inside
+    /// an expression, so a marker is left pending for the enclosing scope exactly as before.
+    fn take_comments_in(&self, start: u32, end: u32) -> Vec<Doc> {
+        let mut out = Vec::new();
+        while let Some(c) = self
+            .comments
+            .get(self.cursor.get())
+            .filter(|c| c.span.start >= start && c.span.start < end)
+            .filter(|c| self.comment_marker(c).is_none())
+        {
+            out.push(self.comment_doc(c));
+            self.cursor.set(self.cursor.get() + 1);
+        }
+        out
+    }
+
+    /// Whether the chain rooted at `e` has a pending comment in one of its dot-link gaps — the
+    /// signal that routes an otherwise-unbroken chain to [`Self::source_chain`], which is the only
+    /// path that emits those comments in place.
+    fn chain_holds_comment(&self, e: &Expr) -> bool {
+        let (_, ops) = self.chain_ops(e);
+        ops.iter()
+            .filter_map(dot_gap)
+            .any(|(start, end)| self.holds_comment(start, end))
     }
 
     /// One postfix operation of a member chain as a `Doc` (see [`Printer::chain_ops`]).
@@ -2186,31 +2251,36 @@ impl Printer<'_> {
     fn expr(&self, expr: &Expr) -> Result<Doc, FmtError> {
         Ok(match expr {
             // Width-driven member-chain wrapping (`a.b().c()…`): routed here only when `wrap` is on
-            // and the chain is long enough to benefit (>= 2 dot-links); every other postfix form
-            // falls through to its own arm below (including the `#{…}` set-literal resugar).
+            // and the chain is long enough to benefit (>= 2 dot-links) — or holds a comment between
+            // two of its links, which only the chain layout can emit in place. Every other postfix
+            // form falls through to its own arm below (including the `#{…}` set-literal resugar).
             e @ (Expr::Call { .. }
             | Expr::Member { .. }
             | Expr::Index { .. }
             | Expr::TupleIndex { .. }
             | Expr::Try { .. }
             | Expr::Await { .. })
-                if self.config.wrap && self.is_wrappable_chain(e) =>
+                if self.config.wrap
+                    && (self.is_wrappable_chain(e) || self.chain_holds_comment(e)) =>
             {
                 self.member_chain(e)?
             }
             // Source-directed member-chain layout (the `wrap = false` default): a chain the author
-            // broke across lines keeps its breaks. Routed from here, on the chain's **outermost**
-            // node, so the whole chain is laid out at once — see [`Printer::source_chain`] for why
-            // a per-node break would mis-nest a call's arguments. A chain with no author break, a
-            // tier-body hole (`force_flat`, where no newline may be emitted at all), and the
-            // width-driven arm above all fall through to the per-node arms unchanged.
+            // broke across lines keeps its breaks, and a comment written between two links is
+            // emitted where it was written. Routed from here, on the chain's **outermost** node, so
+            // the whole chain is laid out at once — see [`Printer::source_chain`] for why a per-node
+            // break would mis-nest a call's arguments. A chain with no author break and no interior
+            // comment, a tier-body hole (`force_flat`, where no newline may be emitted at all), and
+            // the width-driven arm above all fall through to the per-node arms unchanged.
             e @ (Expr::Call { .. }
             | Expr::Member { .. }
             | Expr::Index { .. }
             | Expr::TupleIndex { .. }
             | Expr::Try { .. }
             | Expr::Await { .. })
-                if !self.config.wrap && !self.force_flat.get() && self.chain_broke(e) =>
+                if !self.config.wrap
+                    && !self.force_flat.get()
+                    && (self.chain_broke(e) || self.chain_holds_comment(e)) =>
             {
                 self.source_chain(e)?
             }
@@ -3354,17 +3424,23 @@ impl Printer<'_> {
         };
         // Optional column alignment of the `=>` arrows (config): pad each left column to the widest.
         let arrow_col = if self.config.match_arm_arrows == ArrowStyle::Align {
+            // A measuring render, thrown away — so the comment cursor is restored after it, or a
+            // comment inside a guard would be consumed by the measurement and emitted by no one.
+            let cursor = self.cursor.get();
             let mut widths = Vec::new();
             for a in arms {
                 widths.push(pattern_width(arm_left(a)?));
             }
+            self.cursor.set(cursor);
             widths.into_iter().max().unwrap_or(0)
         } else {
             0
         };
-        let render_arm = |a: &MatchArm| -> Result<Doc, FmtError> {
+        // One arm, without its separator: `pattern[ if guard][pad] => body`. `align` padding is
+        // applied only in the exploded form, where a column exists to align to.
+        let arm_doc = |a: &MatchArm, aligned: bool| -> Result<Doc, FmtError> {
             let pat = arm_left(a)?;
-            let pad = if self.config.match_arm_arrows == ArrowStyle::Align {
+            let pad = if aligned && self.config.match_arm_arrows == ArrowStyle::Align {
                 " ".repeat(arrow_col.saturating_sub(pattern_width_ref(&pat)))
             } else {
                 String::new()
@@ -3378,12 +3454,35 @@ impl Printer<'_> {
                 // `noeta fmt` is supposed to be safe; moving a comment across a brace is not.
                 ClosureBody::Block(stmts) => self.block(stmts, a.span.start, a.span.end)?,
             };
-            Ok(Doc::concat([
-                pat,
-                Doc::text(format!("{pad} => ")),
-                body,
-                Doc::text(","),
-            ]))
+            Ok(Doc::concat([pat, Doc::text(format!("{pad} => ")), body]))
+        };
+        // A `match` the author wrote on one line stays on one line (see [`Self::match_stays_flat`]).
+        // The arms are rendered before the decision is final, because an arm may itself have brought
+        // a hard break along — a block body, a closure, a multiline string — and then the flat form
+        // would not be flat, and would not be a fixed point.
+        if self.match_stays_flat(scrutinee.span().end, span) {
+            // The render is speculative, so the comment cursor is restored if it is thrown away —
+            // a comment consumed by a discarded arm would otherwise be emitted by nobody.
+            let cursor = self.cursor.get();
+            let mut arm_docs = Vec::with_capacity(arms.len());
+            for a in arms {
+                arm_docs.push(arm_doc(a, false)?);
+            }
+            let flat = Doc::concat([
+                head.clone(),
+                Doc::text(" { "),
+                Doc::join(arm_docs, Doc::text(", ")),
+                Doc::text(" }"),
+            ]);
+            if flat.never_breaks() {
+                return Ok(flat);
+            }
+            self.cursor.set(cursor);
+        }
+        // Exploded: one arm per line, each with a trailing comma (the parser accepts a uniform
+        // trailing one), so a comment can interleave between two arms on its own line.
+        let render_arm = |a: &MatchArm| -> Result<Doc, FmtError> {
+            Ok(Doc::concat([arm_doc(a, true)?, Doc::text(",")]))
         };
         let inner =
             self.interleave_comments(arms, scrutinee.span().end, span.end, |a| a.span, render_arm)?;
@@ -3394,6 +3493,44 @@ impl Printer<'_> {
             Doc::hardline(),
             Doc::text("}"),
         ]))
+    }
+
+    /// Whether a `match` keeps the single-line form the author wrote it in — `match e { A => 1, _ =>
+    /// 2 }` — instead of being exploded to one arm per line.
+    ///
+    /// This is the same rule the rest of the printer applies to every other delimited construct
+    /// (see [`Self::seq_broke`]), arriving late: `match` was the one sequence whose layout was
+    /// hard-coded to *always* break. Under `wrap = false` — the default, and what a package with no
+    /// `[fmt]` table gets — the documented policy "keeps the author's line breaks and only
+    /// normalizes indentation, spacing, blank lines and continuation" has no width in it at all, so
+    /// re-laying out a one-line `match` was an override of author layout at any width. Under
+    /// `wrap = true` layout is re-derived from [`FmtConfig::line_width`] and this yields, exactly as
+    /// [`Self::dot_link`] and [`Self::breaks_at_author_gaps`] do.
+    ///
+    /// The signal is the **whole node**, not just the gap after the `{`: flat iff the source from
+    /// `match` to the closing `}` holds no newline. That is stricter than `seq_broke`'s
+    /// "did they break after the delimiter", and deliberately so — a partially-broken `match`
+    /// (`match x { A => 1,⏎ B => 2 }`) has author breaks in it, and collapsing those is the very
+    /// thing this fixes. A newline that merely *leaked* out of an arm's own multi-line body also
+    /// lands here and yields the exploded form, which is the pre-existing behavior.
+    ///
+    /// It is a fixed point by construction: the flat form emits no newline anywhere between `match`
+    /// and `}` (asserted, not assumed — see [`Doc::never_breaks`]), so a second pass reads
+    /// `broke_between` as `false` again and re-derives the same answer; the exploded form always
+    /// breaks after `{`, so a second pass reads `true`.
+    ///
+    /// A pending comment inside the node forces the exploded form: a `//` comment on a joined line
+    /// would swallow every arm after it, and the flat path does not interleave comments at all, so
+    /// one written between arms would escape to the enclosing scope.
+    fn match_stays_flat(&self, region_start: u32, span: Span) -> bool {
+        if self.holds_comment(region_start, span.end) {
+            return false;
+        }
+        // A tier-body hole may not contain a newline at all, so flat is the only legal form there.
+        if self.force_flat.get() {
+            return true;
+        }
+        !self.config.wrap && !self.broke_between(span.start, span.end)
     }
 
     fn object(&self, obj: &ObjectLit) -> Result<Doc, FmtError> {
@@ -3573,6 +3710,17 @@ fn is_dot_link(op: &ChainOp) -> bool {
         op,
         ChainOp::Member(..) | ChainOp::TupleIndex(..) | ChainOp::Await(..)
     )
+}
+
+/// The source gap before `op`'s `.` — `(receiver end, link start)` — for the dot-links that have
+/// one; `None` for a postfix that binds to the link before it.
+fn dot_gap(op: &ChainOp) -> Option<(u32, u32)> {
+    match op {
+        ChainOp::Member(_, a) | ChainOp::TupleIndex(_, a) | ChainOp::Await(a) => {
+            Some((a.recv_end, a.link_start))
+        }
+        ChainOp::Try | ChainOp::Call(..) | ChainOp::Index(_) => None,
+    }
 }
 
 /// The [`DotAnchor`] for a dot-link applied to `receiver`, whose name (or, for a span-less link like
