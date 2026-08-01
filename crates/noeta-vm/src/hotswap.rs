@@ -183,8 +183,10 @@ impl Default for HotChannel {
 /// mid-request) unable to lose a plan it has not applied.
 #[derive(Debug)]
 struct PlanQueue {
-    /// Generation → the plan, or `None` once every consumer has drained past it.
-    plans: Vec<Option<HotFragment>>,
+    /// Generation → the plan, or `None` once every consumer has drained past it. Shared behind an
+    /// [`Arc`] so every worker of a fleet installs the *same* fragment rather than its own deep
+    /// clone of it, and so a drain holds the queue lock only for pointer bumps.
+    plans: Vec<Option<Arc<HotFragment>>>,
     /// One cursor per declared consumer: the generation it drains from next. [`RETIRED`] once its
     /// VM has finished running, so a dead worker cannot pin the prefix for the rest of the session.
     cursors: Vec<usize>,
@@ -214,11 +216,11 @@ impl HotChannel {
         }
     }
 
-    /// Deposit one ready-to-apply plan (the watcher thread's half). Blocks on the queue lock: a
-    /// deposit is rare and must not be dropped, unlike a consumer's opportunistic drain.
+    /// Deposit one ready-to-apply plan (the watcher thread's half). Blocks on the queue lock, as
+    /// every operation on this queue does: a deposit is rare and must not be dropped.
     pub fn deposit(&self, plan: HotFragment) {
         if let Ok(mut q) = self.queue.lock() {
-            q.plans.push(Some(plan));
+            q.plans.push(Some(Arc::new(plan)));
         }
     }
 
@@ -276,34 +278,54 @@ impl HotChannel {
     }
 
     /// Take everything consumer `slot` has not yet drained, advance its cursor past them, and
-    /// reclaim the payload of every generation the whole fleet has now passed.
+    /// reclaim the payload of every generation the whole fleet has now passed. `None` when there is
+    /// nothing pending for this consumer.
     ///
-    /// `None` when there is nothing pending **or** the queue is momentarily contended: this runs at
-    /// a scheduler safepoint inside a serving program, so it never blocks — the next tick retries,
-    /// and the cursor makes the retry lossless.
-    pub(crate) fn drain(&self, slot: usize) -> Option<Vec<HotFragment>> {
-        let mut q = self.queue.try_lock().ok()?;
+    /// **This blocks on the queue lock, and that is the point** (fleet-wake). It used to `try_lock`
+    /// and give up on contention, on the reasoning that "the next tick retries, and the cursor makes
+    /// the retry lossless" — and the second half is true while the first is not. A worker of an
+    /// *idle* `serve --parallel N --watch` fleet gets exactly **one** tick per wake: the watcher's
+    /// `notify_waiters` rouses all N at once, each runs one scheduler iteration, and one that finds
+    /// nothing else to do parks again on its accept. So the N−1 losers of the `try_lock` race had no
+    /// next tick until a request arrived, and each answered exactly one request with pre-swap code.
+    /// The measured wake reach of an idle fleet was 1–2 workers whatever N was — the lock winner,
+    /// plus whichever worker happened to consume the single stored `notify_one` permit and got a
+    /// second iteration out of it.
+    ///
+    /// Blocking is affordable because the critical section is Arc bumps: the queue owns each plan
+    /// behind an [`Arc`], so a drain clones pointers, never the program-sized fragment AST and its
+    /// `FragmentSites` bundle. (It used to deep-clone the fragment *per worker* under the lock,
+    /// which is both what made the section long enough to lose and N whole-AST copies per swap.)
+    /// The lock is a leaf — nothing is called while it is held — so a safepoint can wait on it.
+    pub(crate) fn drain(&self, slot: usize) -> Option<Vec<Arc<HotFragment>>> {
+        let mut q = self.queue.lock().ok()?;
         let from = *q.cursors.get(slot)?;
         if from >= q.plans.len() {
             return None;
         }
-        let pending: Vec<HotFragment> = q.plans[from..]
+        let pending: Vec<Arc<HotFragment>> = q.plans[from..]
             .iter()
             .map(|plan| {
-                plan.clone().expect(
+                Arc::clone(plan.as_ref().expect(
                     "a generation a live consumer has not passed is never reclaimed — see PlanQueue",
-                )
+                ))
             })
             .collect();
         q.cursors[slot] = q.plans.len();
-        q.collect();
+        // Freeing a reclaimed generation means dropping a program-sized AST and a `FragmentSites`
+        // bundle, so the tombstoning hands the payloads back and they are dropped *after* the guard
+        // — the whole point of blocking here is that the section stays pointer-sized.
+        let reclaimed = q.collect();
+        drop(q);
+        drop(reclaimed);
         Some(pending)
     }
 }
 
 impl PlanQueue {
-    /// Tombstone every generation below the slowest consumer's cursor. The caller holds the lock.
-    fn collect(&mut self) {
+    /// Tombstone every generation below the slowest consumer's cursor, handing back what they held
+    /// so the caller can free it outside the lock. The caller holds the lock.
+    fn collect(&mut self) -> Vec<Arc<HotFragment>> {
         let frontier = self
             .cursors
             .iter()
@@ -311,12 +333,14 @@ impl PlanQueue {
             .min()
             .unwrap_or(0)
             .min(self.plans.len());
-        for slot in &mut self.plans[self.reclaimed..frontier] {
-            // Drops the fragment AST and the last local reference to this check's whole-program
-            // `Sites` bundle — the retention this whole mechanism exists for.
-            *slot = None;
-        }
+        // Takes the fragment AST and the last local reference to this check's whole-program `Sites`
+        // bundle — the retention this whole mechanism exists for.
+        let freed: Vec<Arc<HotFragment>> = self.plans[self.reclaimed..frontier]
+            .iter_mut()
+            .filter_map(Option::take)
+            .collect();
         self.reclaimed = self.reclaimed.max(frontier);
+        freed
     }
 }
 
@@ -338,15 +362,15 @@ impl<'m> Vm<'m> {
         let Some(HotConsumer { mailbox, slot }) = &self.hot_mailbox else {
             return;
         };
-        // Drain the broadcast queue from this VM's own cursor (server-hmr F5): clone the plans it
-        // has not applied yet (the lock is held only for the clone, never across the apply), then
-        // apply each in order. N workers each drain the same queue independently, and the drain
-        // reclaims whatever the slowest of them has now passed (server-hmr H5 retention).
+        // Drain the broadcast queue from this VM's own cursor (server-hmr F5): take a handle on each
+        // plan it has not applied yet (the lock is held for the pointer bumps only, never across the
+        // apply), then apply each in order. N workers each drain the same queue independently, and
+        // the drain reclaims whatever the slowest of them has now passed (server-hmr H5 retention).
         let Some(pending) = mailbox.drain(*slot) else {
             return;
         };
         for plan in pending {
-            self.apply_one_swap(plan);
+            self.apply_one_swap(&plan);
             // Count the generation as applied even if the fragment errored at run time (the
             // watcher already gated parse/check): a re-attempt would re-run the same fragment.
             self.applied_swaps += 1;
@@ -355,7 +379,7 @@ impl<'m> Vm<'m> {
 
     /// Apply a single swap plan to the live session (server-hmr W1/H1; the per-plan body the F5
     /// queue drain calls). Failures report to stderr and keep the previous version serving.
-    fn apply_one_swap(&mut self, plan: HotFragment) {
+    fn apply_one_swap(&mut self, plan: &HotFragment) {
         // Slots the re-run overwrites — resolved against the session compiler BEFORE the fragment
         // extends it, so only pre-existing bindings (the ones with old nodes) are collected.
         let rebound: Vec<u32> = if plan.rerun_top_level {

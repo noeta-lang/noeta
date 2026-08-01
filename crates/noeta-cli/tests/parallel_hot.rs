@@ -119,18 +119,24 @@ fn an_edit_broadcasts_to_every_worker() {
 /// is exactly the behavior the wake exists to beat.
 const IDLE: Duration = Duration::from_millis(3000);
 
-/// How many requests each phase makes — enough to fan across a 3-worker fleet several times over.
-const FAN: usize = 9;
+/// How many requests each phase makes: enough that **every** worker of the fleet is hit, several
+/// times over. It scales with N because the assertion below is now zero-stale rather than a bound,
+/// and a worker no request reaches is a worker the assertion never asked about — at a fixed 9, a
+/// 5-worker fleet leaves one untouched roughly two rounds in three. Six per worker puts that under
+/// a percent, and a loopback request costs microseconds.
+fn fan(workers: usize) -> usize {
+    6 * workers.max(2)
+}
 
 /// What one idle-swap round trip observed.
 struct Swap {
-    /// The tags served before the edit. All `v1`, in both shapes.
+    /// The tags served before the edit. All `v1`, in every shape.
     before: Vec<String>,
     /// The tag served by the **single request made after the edit and the idle wait**: the wake's
     /// own assertion for the single worker, made with no retry.
     first_after_idle: String,
     /// How many post-idle responses came back stale (`v1`) before the swap had reached every
-    /// consumer. Zero for a single worker. See the test for what bounds it in a fleet.
+    /// consumer. **Zero in every shape** — see the test.
     stale_after_idle: usize,
     /// Whether every consumer settled on the new code within the bound below.
     settled: bool,
@@ -139,6 +145,7 @@ struct Swap {
 /// One idle-swap round trip against `noeta serve --watch`, in the fleet (`Some(n)`) or alone
 /// (`None`).
 fn idle_swap_round_trip(parallel: Option<usize>) -> Result<Swap, String> {
+    let fan = fan(parallel.unwrap_or(1));
     let dir = noeta_test_temp::TempDir::new("hot-install-idle");
     let app_path = dir.join("app.noe");
     std::fs::write(&app_path, app("v1")).map_err(|e| e.to_string())?;
@@ -179,7 +186,7 @@ fn idle_swap_round_trip(parallel: Option<usize>) -> Result<Swap, String> {
             return Err("server did not accept within 4s".to_string());
         }
         let mut before = Vec::new();
-        for _ in 0..FAN {
+        for _ in 0..fan {
             before.push(get(&addr)?);
         }
         std::fs::write(&app_path, app("v2")).map_err(|e| e.to_string())?;
@@ -193,7 +200,7 @@ fn idle_swap_round_trip(parallel: Option<usize>) -> Result<Swap, String> {
         let mut settled = false;
         for _ in 0..40 {
             let mut round = Vec::new();
-            for _ in 0..FAN {
+            for _ in 0..fan {
                 round.push(get(&addr)?);
             }
             let stale = round.iter().filter(|r| *r != "v2").count();
@@ -234,55 +241,64 @@ fn idle_swap_round_trip(parallel: Option<usize>) -> Result<Swap, String> {
 /// The two paths used to be two hand-written copies of one nine-step install, free to differ in any
 /// step, and they did — the parallel one took a `SourceMap` it had no code to use, because the step
 /// that consumes one was never copied across. They are one `HotRig` now, and this is what keeps
-/// them one: the same edit against the same program, once across three worker isolates and once
-/// alone, judged by the same assertions. Every step of the install is under it — a dropped mailbox
+/// them one: the same edit against the same program, alone and across fleets of 1, 2, 3 and 5
+/// worker isolates, judged by the same assertions. Every step of the install is under it — a
+/// dropped mailbox
 /// or an unarmed watcher means no swap at all; a dropped `set_wake` means the idle request still
 /// serves `v1` and the *next* one serves `v2`, which is precisely the one-request lag the wake was
 /// added to remove; a fleet that registered one consumer instead of N loses the swap for the other
 /// workers; and a restart-in-disguise cannot happen with the wrapper killed.
 ///
-/// The one asymmetry is measured, not assumed, and is a finding this row records rather than fixes
-/// (see `watch::wake_all`). The wake reaches exactly two workers of an idle fleet whatever N is, so
-/// the single worker is held to **zero** stale responses after an idle swap and a fleet to *fewer
-/// than one per worker*. Both bounds are what a dropped `set_wake` breaks — without it every worker
-/// answers exactly one request with pre-swap code, measured 1 of 1 and 3 of 3 — so the mutation
-/// fails this test on both shapes rather than on neither.
+/// **The assertion is zero stale responses in every shape, and it used to be a bound.** It read
+/// `fleet.stale_after_idle < WORKERS`, written when nobody knew what the real number was — and a
+/// bound a bug satisfies is how the bug stayed invisible: an idle fleet was applying the swap in one
+/// or two workers whatever N was (0 stale at N=1 and 2, 1–2 at N=3, 3–4 at N=5), comfortably under
+/// the bound at every N, for as long as the bound was the test. Every shape now has to reach zero,
+/// which is a claim a fleet either meets or fails.
+///
+/// The shapes are N = 1, 2, 3 and 5 plus the bare single worker, because the defect was invisible
+/// below three: the drain race it came from needs three simultaneous wakes before anybody loses it
+/// (`noeta_vm::HotChannel::drain`). A single worker and a fleet of two agreed on zero throughout.
 #[test]
-#[ignore = "spawns two CLI servers, binds real sockets and edits real files; run explicitly"]
-fn a_fleet_and_a_single_worker_apply_an_idle_swap_identically() {
-    const WORKERS: usize = 3;
-    let fleet = idle_swap_round_trip(Some(WORKERS)).expect("the fleet's round trip");
-    let single = idle_swap_round_trip(None).expect("the single worker's round trip");
+#[ignore = "spawns five CLI servers, binds real sockets and edits real files; run explicitly"]
+fn an_idle_swap_reaches_every_worker_before_the_next_request() {
+    // `None` is the bare single worker (its program binds its own socket); the rest are fleets over
+    // one pre-bound listener. Five spawns, ~4s each.
+    const SHAPES: [Option<usize>; 5] = [None, Some(1), Some(2), Some(3), Some(5)];
+    let runs: Vec<(String, Swap)> = SHAPES
+        .iter()
+        .map(|shape| {
+            let what = match shape {
+                None => "the single worker".to_string(),
+                Some(n) => format!("the {n}-worker fleet"),
+            };
+            let swap =
+                idle_swap_round_trip(*shape).unwrap_or_else(|e| panic!("{what}'s round trip: {e}"));
+            (what, swap)
+        })
+        .collect();
 
-    let all_v1: Vec<String> = std::iter::repeat_n("v1".to_string(), FAN).collect();
-    for (what, swap) in [("fleet", &fleet), ("single worker", &single)] {
-        assert_eq!(swap.before, all_v1, "the {what} did not start on v1");
+    for (what, swap) in &runs {
+        let all_v1: Vec<String> =
+            std::iter::repeat_n("v1".to_string(), swap.before.len()).collect();
+        assert_eq!(swap.before, all_v1, "{what} did not start on v1");
         assert!(
             swap.settled,
-            "the {what} never settled on the new code — the swap did not reach every consumer"
+            "{what} never settled on the new code — the swap did not reach every consumer"
+        );
+        // The wake, stated directly and with no retry: the swap was deposited into a server with
+        // nothing in flight, so it must be installed BEFORE the next request rather than during it.
+        assert_eq!(
+            swap.first_after_idle, "v2",
+            "{what} served stale code on the very first request after an idle swap — the watcher's \
+             deposit did not rouse it (`RealExecutor::set_wake`, server-hmr L3)"
+        );
+        assert_eq!(
+            swap.stale_after_idle, 0,
+            "{what} served {} stale response(s) after an idle wake — a worker that was roused, lost \
+             the race for the swap queue, and parked again with no second tick to retry on \
+             (`noeta_vm::HotChannel::drain`)",
+            swap.stale_after_idle
         );
     }
-    // The two installs are one install, so they agree on where they started and where they ended.
-    assert_eq!(
-        fleet.before, single.before,
-        "the fleet and the single worker disagreed before any edit"
-    );
-    // The wake, stated directly and with no retry: the swap was deposited into a server with
-    // nothing in flight, so it must be installed BEFORE the next request rather than during it.
-    assert_eq!(
-        single.first_after_idle, "v2",
-        "the single worker served stale code on the very first request after an idle swap — the \
-         watcher's deposit did not rouse it (`RealExecutor::set_wake`, server-hmr L3)"
-    );
-    assert_eq!(
-        single.stale_after_idle, 0,
-        "the single worker served stale code at some point after an idle wake"
-    );
-    assert!(
-        fleet.stale_after_idle < WORKERS,
-        "the fleet served {} stale responses after an idle wake, one for every one of its \
-         {WORKERS} workers — that is the un-woken one-request lag on every consumer, i.e. the wake \
-         reached none of them",
-        fleet.stale_after_idle
-    );
 }
