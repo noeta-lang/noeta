@@ -7,9 +7,12 @@
 //! (L1.3): the only variable is "native VM vs the same VM compiled to wasm32-wasip1", so any
 //! divergence is a wasm-portability bug (width, float formatting, libm, …), not a program bug.
 //! The runner's `--sandbox` mode pins the deterministic `SandboxHost`/`SandboxExecutor` pair, so
-//! the comparison is well-defined; the expected stderr is composed through the *same* rendering
-//! calls the runner makes (`render_mapped` + `render_trace` against the synthetic empty source),
-//! keeping the equality structural rather than approximate.
+//! the comparison is well-defined; the expected output is the *same value* the runner emits — one
+//! [`noeta_backend::RunTail`] over the native result — rather than a re-derivation of it. That
+//! matters here specifically: this oracle used to compose the expected stderr by hand and forgot
+//! the program's own stream, exactly as four of the seven run tails did, so both sides dropped it
+//! and agreed (`plans/parallel-path-audit.md` row 1). Sharing the tail is what makes the equality
+//! structural rather than approximate.
 //!
 //! External tools are discovered, never assumed: the runner `.wasm` via `NOETA_WASM_RUNNER` (or the
 //! `wasm-release` path under `CARGO_TARGET_DIR`, which this repo always sets), wasmtime via
@@ -321,35 +324,32 @@ fn compare(
         Err(e) => return Some(format!("wasmtime failed to launch: {e}")),
     };
     let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, source_name, "")]);
-    let mut expected_stderr = String::new();
-    // The program's OWN stderr stream first (`std.io`'s `err`/`errln`), in the order every run tail
-    // writes it: program stderr, then diagnostics, then traceback (`noeta_runner::
-    // run_compiled_module`). This is program output buffered into `RunResult.stderr` exactly as
-    // stdout is — leaving it out of the expected string made the whole stream unobserved on both
-    // sides at once, so `tests/conformance/io/streams.noe` ran here with a vacuous assertion.
-    expected_stderr.push_str(&native.stderr);
-    if !native.diagnostics.is_empty() {
-        expected_stderr.push_str(&noeta_diagnostics::render_mapped(
-            &sources,
-            native.diagnostics.iter(),
-        ));
-    }
-    if trace.len() >= 2 {
-        expected_stderr.push_str(&noeta_vm::render_trace(trace, &sources));
-    }
-    let expected_exit = exit_code_byte(native);
+    // The expected output is the shared run tail over the native result — the SAME value the wasm
+    // runner emits, not a re-derivation of it.
+    //
+    // This was the eighth copy of the epilogue, and it failed the way the other seven did: it
+    // composed the expected stderr from the diagnostics and the traceback and forgot
+    // `native.stderr`, so the program's own stream was unobserved on *both* sides at once and
+    // `tests/conformance/io/streams.noe` — which exists to pin exactly that — ran here with a
+    // vacuous assertion. Building a `RunTail` means the oracle's idea of "what a run prints" cannot
+    // drift from the runner's again, and a new output component reaches the comparison by
+    // construction rather than by whoever adds it remembering this file.
+    let expected = noeta_backend::RunTail::render(native, trace, &sources);
+    let expected_stderr = expected.text_for(noeta_backend::Stream::Stderr);
+    let expected_stdout = expected.text_for(noeta_backend::Stream::Stdout);
+    let expected_exit = expected.status();
 
     let wasm_stdout = String::from_utf8_lossy(&out.stdout);
     let wasm_stderr = String::from_utf8_lossy(&out.stderr);
-    if wasm_stdout != native.stdout {
+    if wasm_stdout != expected_stdout {
         Some(format!(
             "stdout: native {:?}, wasm {:?}",
-            native.stdout, wasm_stdout
+            expected_stdout, wasm_stdout
         ))
     } else if out.status.code() != Some(i32::from(expected_exit)) {
         Some(format!(
             "exit: native {} (as byte {expected_exit}), wasm {:?} — stderr: {wasm_stderr}",
-            native.exit_code,
+            expected.exit_code(),
             out.status.code(),
         ))
     } else if wasm_stderr != expected_stderr {
@@ -360,9 +360,4 @@ fn compare(
     } else {
         None
     }
-}
-
-/// The process exit byte the runner maps a [`RunResult`] to (`u8::try_from(...).unwrap_or(1)`).
-fn exit_code_byte(result: &RunResult) -> u8 {
-    u8::try_from(result.exit_code).unwrap_or(1)
 }

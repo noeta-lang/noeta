@@ -1719,14 +1719,11 @@ pub(crate) fn run_declared_tier(
         return 1;
     }
     match execute_real_host(&program, &checked, std::env::args().collect(), true, None) {
+        // The shared run epilogue (audit row 1). This tail used to write stdout, diagnostics and
+        // the traceback but *not* the program's own `stderr` stream, so a declared-tier run silently
+        // swallowed every `std.io` `err`/`errln` byte.
         Ok((result, trace)) => {
-            print!("{}", result.stdout);
-            let _ = io::stdout().flush();
-            emit_diagnostics_mapped(&linked.sources, result.diagnostics.iter());
-            if trace.len() >= 2 {
-                eprint!("{}", noeta_vm::render_trace(&trace, &linked.sources));
-            }
-            result.exit_code.clamp(0, 255) as u8
+            noeta_backend::RunTail::render(&result, &trace, &linked.sources).emit_status()
         }
         // `to_text` yields the pre-rendered failure and its `u8` code — the tier subsystem's exit
         // type — where `CompileFailure::report` would hand back a `std::process::ExitCode`.

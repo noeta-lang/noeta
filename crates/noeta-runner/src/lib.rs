@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use noeta_backend::RunResult;
+use noeta_backend::{RunResult, RunTail};
 use noeta_bytecode::Module;
 use noeta_diagnostics::render_mapped;
 use noeta_span::{Source, SourceId, SourceMap};
@@ -21,6 +21,9 @@ use noeta_vm::{JitReport, TraceFrame, VmBackend};
 pub mod compile;
 
 pub use compile::{CompileFailure, Compiled, compile_real, compile_whole_file, resolve_providers};
+/// The shared run epilogue — re-exported so a surface already on `noeta-runner` reaches it without
+/// naming `noeta-backend` (see `plans/parallel-path-audit.md` row 1).
+pub use noeta_backend::{Component as TailComponent, Part as TailPart, Stream as TailStream};
 
 /// Run an already-compiled [`Module`] against the real host — the shared execution core of the
 /// CLI's source-run path and the `.noeb` bundle runner (P-AOT L1.2), which loads a module directly
@@ -82,6 +85,10 @@ pub fn run_module_real_host(
 /// standalone runner so both present identical output. `app_id` threads through to
 /// [`run_module_real_host`]; `jit_stats` requests the tier-1 report (a JIT-less binary says so
 /// rather than print nothing).
+///
+/// The epilogue itself is [`RunTail`] (`noeta-backend`), which every execution surface shares — this
+/// function is the *host-selecting* half, which is why the wasm runner and the AOT runtime call the
+/// tail directly instead of calling this.
 pub fn run_compiled_module(
     module: Arc<Module>,
     sources: &SourceMap,
@@ -90,33 +97,38 @@ pub fn run_compiled_module(
     jit_stats: bool,
 ) -> ExitCode {
     // Live: this is a foreground run whose output a human is reading. Anything the program already
-    // streamed has left the buffer, so the `print!` below renders only the unterminated tail.
+    // streamed has left the buffer, so the tail renders only the unterminated remainder.
     let (result, trace, report) =
         run_module_real_host(Arc::clone(&module), args, app_id, jit_stats, true, None);
-    print!("{}", result.stdout);
-    let _ = std::io::stdout().flush();
-    // The program's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout is
-    // flushed and before any diagnostics/traceback/report — the same ordering `noeta run` uses.
-    let _ = std::io::stderr().write_all(result.stderr.as_bytes());
-    let _ =
-        std::io::stderr().write_all(render_mapped(sources, result.diagnostics.iter()).as_bytes());
-    if trace.len() >= 2 {
-        eprint!("{}", noeta_vm::render_trace(&trace, sources));
-    }
-    // `--jit-stats`: the report renders after the program's own output, to stderr (it is
-    // diagnostics, not program output). A JIT-less binary produces no report — say so rather than
-    // print nothing.
-    match report {
-        Some(report) => eprint!("{}", render_jit_report(&report, &module, sources)),
-        None if jit_stats => {
-            eprintln!("noeta: --jit-stats: this binary was built without the JIT (no report)");
-        }
-        None => {}
-    }
-    exit_code(result.exit_code)
+    RunTail::render(&result, &trace, sources)
+        .with_report(jit_stats_report(
+            report.as_ref(),
+            &module,
+            sources,
+            jit_stats,
+        ))
+        .emit()
 }
 
-/// The process exit code for a program result, clamping out-of-`u8` codes to 1.
+/// The `--jit-stats` trailer, as the tail's report component. A JIT-less binary asked for a report
+/// produces no [`JitReport`] — say so rather than print nothing.
+fn jit_stats_report(
+    report: Option<&JitReport>,
+    module: &Module,
+    sources: &SourceMap,
+    requested: bool,
+) -> String {
+    match report {
+        Some(report) => render_jit_report(report, module, sources),
+        None if requested => {
+            "noeta: --jit-stats: this binary was built without the JIT (no report)\n".to_string()
+        }
+        None => String::new(),
+    }
+}
+
+/// The process exit code for a program result, clamping out-of-`u8` codes to 1. A thin alias over
+/// [`RunTail::status`]'s rule so there is exactly one such conversion in the tree.
 pub fn exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }

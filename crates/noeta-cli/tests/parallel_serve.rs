@@ -114,3 +114,74 @@ fn parallel_workers_share_the_listener_and_drain_together() {
     let _ = std::fs::remove_dir_all(&dir);
     outcome.expect("parallel serve round trip");
 }
+
+#[test]
+#[ignore = "binds a real socket across worker threads; run explicitly"]
+fn a_worker_that_aborts_reports_its_diagnostics_and_its_stack() {
+    // The `--parallel` worker tail (plans/parallel-path-audit.md row 1). It wrote the program's two
+    // streams and then, for an abort, the five words `[worker] aborted` — no diagnostic, no stack —
+    // in a project that ships production stack traces on both backends. The worker's run epilogue is
+    // now the shared `RunTail`, so a worker that dies says what killed it and where.
+    //
+    // The abort is at program top level, before `server.serve` is reached, so the fleet dies without
+    // needing a client: the listener is bound once up front and each worker aborts on entry. That
+    // keeps the test to a bind and a wait — but it is still a real port, hence `#[ignore]` and
+    // `scripts/hot-e2e.sh`.
+    let dir = noeta_test_temp::TempDir::new("parallel-serve-abort");
+    let app_path = dir.join("app.noe");
+    std::fs::write(
+        &app_path,
+        "use std.io\n\
+         use std.http.{Request, Response}\n\
+         use std.http.server\n\
+         fn detonate(): int {\n\
+         \x20   panic(\"worker kaboom\")\n\
+         }\n\
+         fn fetch(req: Request): Response {\n\
+         \x20   return server.response(200, \"ok\")\n\
+         }\n\
+         io.errln(\"worker speaking\")\n\
+         echo detonate()\n",
+    )
+    .unwrap();
+
+    let port = noeta_test_temp::free_port();
+    let out = Command::new(env!("CARGO_BIN_EXE_noeta"))
+        .args([
+            "serve",
+            app_path.to_str().unwrap(),
+            "--port",
+            &port.to_string(),
+            "--parallel",
+            "2",
+        ])
+        .output()
+        .expect("run `noeta serve --parallel 2`");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "an aborting fleet exits non-zero"
+    );
+    // The program's own stderr stream survives the worker tail …
+    assert!(
+        stderr.contains("worker speaking"),
+        "the worker dropped the program's own stderr stream:\n{stderr}"
+    );
+    // … the diagnostic that killed it is rendered …
+    assert!(
+        stderr.contains("worker kaboom"),
+        "the worker rendered no diagnostic:\n{stderr}"
+    );
+    // … and so is the stack that led there, which is the part `[worker] aborted` never said.
+    assert!(
+        stderr.contains("stack trace"),
+        "the worker rendered no traceback:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("detonate"),
+        "the traceback names no frame:\n{stderr}"
+    );
+}
