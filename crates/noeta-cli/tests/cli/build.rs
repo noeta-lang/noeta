@@ -260,6 +260,44 @@ fn build_native_reports_an_out_of_range_exit_code_as_a_failure() {
     let _ = std::fs::remove_file(&app);
 }
 
+/// A `--native` binary exits with the code the program asked for, not merely a nonzero one.
+#[test]
+#[cfg(feature = "jit")]
+fn build_native_reports_the_programs_own_exit_code() {
+    // Two independent narrowings sat on this path, and fixing either alone left it wrong. The tail
+    // converted with `result.exit_code as u8` (so 256 became 0); and downstream of that,
+    // `run_embedded_with_extensions` mapped `ExitCode::SUCCESS` to 0 and *everything else* to 1,
+    // because `ExitCode` has no getter — so once the number was inside one it was gone, and
+    // `os.exit(3)` exited 1. The audit's row 1 fixed the first; the AOT differential built by row 9
+    // is what turned the second from a plausible reading of the code into a failing case.
+    //
+    // `assert_ne!(0)` would pass on the bug. Pin the number.
+    let file = temp_program(
+        "build_native_exit_code",
+        "use std.os
+os.exit(3)
+",
+    );
+    let app = file.parent().unwrap().join("app_native_exit_code");
+    if build_native(&file, &app).is_none() {
+        return;
+    }
+    let reference = lang().arg("run").arg(&file).output().expect("noeta runs");
+    assert_eq!(
+        reference.status.code(),
+        Some(3),
+        "the source run is the truth"
+    );
+    let native = Command::new(&app).output().expect("the native binary runs");
+    assert_eq!(
+        native.status.code(),
+        Some(3),
+        "`--native` reported {:?} for a program that asked for 3 — a narrowing is back on this path",
+        native.status.code()
+    );
+    let _ = std::fs::remove_file(&app);
+}
+
 /// The names of every section in an ELF64 (LE) image — enough to assert a binary was stripped.
 /// Hand-rolled so the test needs no `object`/`goblin` dependency; returns `None` for a non-ELF64
 /// input (e.g. a macOS Mach-O host), letting the caller skip rather than false-fail.

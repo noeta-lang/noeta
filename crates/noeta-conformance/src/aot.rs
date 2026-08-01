@@ -131,11 +131,13 @@ pub struct AotDiffFailure {
 ///
 /// `crates/noeta-aot-runtime/src/lib.rs` writes `result.stdout`, the diagnostics and the traceback,
 /// and nothing else: the program's own `std.io` `err`/`errln` stream (`RunResult.stderr`) is dropped,
-/// which is parallel-path audit row 1's finding — four of seven run tails drop it. And its exit code
-/// goes through `ExitCode::from(result.exit_code as u8)` and then through a C bridge that reports
-/// `ExitCode::SUCCESS` as 0 and *anything else as 1*, so a program exiting 3 exits 1. (Note for
-/// whoever fixes it: repairing only the documented `as u8` truncation is not enough — the
-/// `ExitCode` → `c_int` collapse in `run_embedded_with_extensions` is the binding constraint.)
+/// which is parallel-path audit row 1's finding — four of seven run tails drop it.
+///
+/// `std/os_exit.noe` was here too, and is not any more: `os.exit(3)` exited **1**, because the tail's
+/// `as u8` truncation was only half of it and the `ExitCode` → `c_int` collapse in
+/// `run_embedded_with_extensions` was the binding constraint — `RunTail::status()` had the right byte
+/// and `emit()` threw it away one call later. This oracle is what turned that from a plausible
+/// reading of the code into a failing case with a number attached.
 ///
 /// The list is an **expect-fail ratchet**, not a suppression: the oracle asserts the failure set is
 /// *exactly* this list, so a new divergence fails **and a fixed one fails too**, with instructions to
@@ -144,7 +146,6 @@ pub struct AotDiffFailure {
 pub const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     ("io/streams.noe", "stderr"),
     ("io/to_string_parity.noe", "stderr"),
-    ("std/os_exit.noe", "exit"),
     // NOT a tail gap — a live `--native` crash this oracle found on its first full-corpus run, and
     // the reason row 9 exists. The linked artifact aborts every time with a Rust panic at
     // `noeta-vm/src/dispatch.rs`'s `&chunk.code[pc]`, where `pc` is a pointer-shaped value: after
