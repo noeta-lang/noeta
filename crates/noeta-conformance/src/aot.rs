@@ -84,7 +84,7 @@ const AOT_SOURCE: &str = "<aot>";
 const RUN_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The outcome of an AOT differential run over a corpus.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AotDiffReport {
     /// Programs whose linked native artifact was byte-identical to the interpreted run.
     pub matched: usize,
@@ -114,6 +114,34 @@ pub struct AotDiffReport {
     /// the [`KNOWN_DIVERGENCES`] rows it did not run, so the stale-row half of the ratchet is only
     /// asserted for a whole-corpus run.
     pub narrowed: bool,
+    /// The expect-fail list this report is judged against — [`KNOWN_DIVERGENCES`] on every real run.
+    ///
+    /// It is a field rather than a direct read of the const so the ratchet's **own** tests can pose
+    /// a list to it. They used to derive their fixtures from the const (`KNOWN_DIVERGENCES.skip(1)`),
+    /// which meant the self-retiring half stopped testing anything the moment the last row was
+    /// deleted — precisely the state the ratchet exists to reach, and the one where the rule must
+    /// still hold.
+    pub listed: &'static [(&'static str, &'static str)],
+}
+
+impl Default for AotDiffReport {
+    fn default() -> Self {
+        Self {
+            matched: 0,
+            not_run: crate::NotRun::default(),
+            nondeterministic: Vec::new(),
+            timed_out: Vec::new(),
+            reordered: Vec::new(),
+            failures: Vec::new(),
+            compile_ms: 0,
+            link_ms: 0,
+            run_ms: 0,
+            truth_ms: 0,
+            native_protos: 0,
+            narrowed: false,
+            listed: KNOWN_DIVERGENCES,
+        }
+    }
 }
 
 /// One program whose native artifact diverged.
@@ -129,7 +157,18 @@ pub struct AotDiffFailure {
 /// **Known divergences**: defects this oracle found or confirmed, which are not its to fix, listed
 /// so it can land green while still failing on anything new.
 ///
-/// **Three rows have already left this list, and the ratchet is why.**
+/// **Four rows have already left this list, and the ratchet is why.**
+///
+/// `modules/derived_package_path/main.noe` was the one crash — and it was the row this list existed
+/// for. The linked artifact aborted every time at `dispatch.rs`'s `&chunk.code[pc]` with a
+/// pointer-shaped `pc`. The mechanism was the S4.1 direct-call convention tag: `jit_prepare_call`
+/// marks a fast-convention callee by setting bit 0 of the entry pointer, and Cranelift's object
+/// backend aligns function bodies to **1** on x86-64, so a body could land on an odd address —
+/// `ff | 1` said nothing, the caller's `& !1` called `ff - 1`, that `ret` handed the address back as
+/// the callee's outcome, and `jit_after_call` wrote it into the callee frame as a resume pc. Fixed
+/// at the root by asking Cranelift for a real function alignment on both ISAs, with `jit_install`
+/// refusing any entry the tag cannot describe. The in-process AOT-bodies arm never saw it because
+/// the runtime JIT allocates each body through its own finalize, which hands out aligned memory.
 ///
 /// `io/streams.noe` and `io/to_string_parity.noe` were here because the AOT tail dropped the
 /// program's own `std.io` `err`/`errln` stream. `std/os_exit.noe` was here because `os.exit(3)`
@@ -146,27 +185,17 @@ pub struct AotDiffFailure {
 ///
 /// The list is an **expect-fail ratchet**, not a suppression: the oracle asserts the failure set is
 /// *exactly* this list, so a new divergence fails **and a fixed one fails too**, with instructions to
-/// delete the row. A stale entry cannot outlive the bug it describes. Read the rows: one of them is a
-/// crash, and it should be the shortest-lived entry here.
-pub const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    // NOT a tail gap — a live `--native` crash this oracle found on its first full-corpus run, and
-    // the reason row 9 exists. The linked artifact aborts every time with a Rust panic at
-    // `noeta-vm/src/dispatch.rs`'s `&chunk.code[pc]`, where `pc` is a pointer-shaped value: after
-    // returning from a linked native body the interpreter resumes at an address instead of a
-    // program counter. The SAME module agrees with tier 0 under the in-process AOT-bodies arm, so
-    // the codegen is not the variable — the linked dispatch bind is, which is the seam that already
-    // produced one AOT-only soundness bug (`0f9752d4c`, the misaligned dispatch table).
-    // Reproduce: `NOETA_AOT_KEEP=1 cargo run -p noeta-conformance --features jit -- \
-    //   --aot-differential --file modules/derived_package_path/main.noe`, then run the kept `app`.
-    ("modules/derived_package_path/main.noe", "crash"),
-];
+/// delete the row. A stale entry cannot outlive the bug it describes. The list is currently
+/// **empty**: every corpus program's linked artifact runs byte-identically to `noeta run`, and the
+/// next entry added here should be as short-lived as the crash row was.
+pub const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 impl AotDiffReport {
     /// Divergences that are not a known, tracked tail gap — the ones that fail this oracle.
     pub fn unexpected(&self) -> Vec<&AotDiffFailure> {
         self.failures
             .iter()
-            .filter(|f| !KNOWN_DIVERGENCES.contains(&(f.name.as_str(), f.stream)))
+            .filter(|f| !self.listed.contains(&(f.name.as_str(), f.stream)))
             .collect()
     }
 
@@ -176,7 +205,7 @@ impl AotDiffReport {
         if self.narrowed {
             return Vec::new();
         }
-        KNOWN_DIVERGENCES
+        self.listed
             .iter()
             .filter(|(name, stream)| {
                 !self
@@ -1154,7 +1183,12 @@ fn describe(truth: &Output, native: &Output) -> (&'static str, String) {
 mod tests {
     use super::*;
 
-    /// A report carrying exactly the failures `names` describes.
+    /// A two-row expect-fail list to pose the ratchet's rules against. The rules are tested over
+    /// *this*, never over [`KNOWN_DIVERGENCES`]: the list's whole purpose is to empty itself, and a
+    /// test derived from it stops asserting anything the moment it does.
+    const LISTED: &[(&str, &str)] = &[("some/known_a.noe", "stdout"), ("some/known_b.noe", "exit")];
+
+    /// A report judged against [`LISTED`], carrying exactly the failures `failures` describes.
     fn report_with(failures: &[(&str, &'static str)]) -> AotDiffReport {
         AotDiffReport {
             failures: failures
@@ -1165,14 +1199,25 @@ mod tests {
                     detail: String::new(),
                 })
                 .collect(),
+            listed: LISTED,
             ..AotDiffReport::default()
         }
+    }
+
+    /// A real run is judged against the real list — the wiring, so posing [`LISTED`] to the rules
+    /// below can never mean the shipped oracle consults something else.
+    #[test]
+    fn a_default_report_is_judged_against_the_shipped_list() {
+        assert!(std::ptr::eq(
+            AotDiffReport::default().listed,
+            KNOWN_DIVERGENCES
+        ));
     }
 
     /// The ratchet's happy state: every known divergence reproduced, nothing else diverged.
     #[test]
     fn reproducing_exactly_the_known_divergences_is_green() {
-        let report = report_with(KNOWN_DIVERGENCES);
+        let report = report_with(LISTED);
         assert!(report.unexpected().is_empty());
         assert!(report.stale_gaps().is_empty());
         assert!(report.ok(), "{}", report.to_human());
@@ -1181,7 +1226,7 @@ mod tests {
     /// A NEW divergence fails, and names itself.
     #[test]
     fn an_unlisted_divergence_fails() {
-        let mut rows = KNOWN_DIVERGENCES.to_vec();
+        let mut rows = LISTED.to_vec();
         rows.push(("some/new_case.noe", "stdout"));
         let report = report_with(&rows);
         assert_eq!(report.unexpected().len(), 1);
@@ -1193,7 +1238,7 @@ mod tests {
     /// because someone fixed it, which is the point — fails too, so the row cannot be left behind.
     #[test]
     fn a_fixed_known_divergence_fails_until_its_row_is_deleted() {
-        let rows: Vec<_> = KNOWN_DIVERGENCES.iter().skip(1).copied().collect();
+        let rows: Vec<_> = LISTED.iter().skip(1).copied().collect();
         let report = report_with(&rows);
         assert!(report.unexpected().is_empty());
         assert_eq!(report.stale_gaps().len(), 1);
