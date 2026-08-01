@@ -561,6 +561,16 @@ fn hot_watcher(
 /// Rouse every worker executor parked on the shared wake (server-hmr F5): `notify_waiters` wakes
 /// all currently-parked accepts at once, and `notify_one` leaves a stored permit for a worker
 /// racing into its wait.
+///
+/// **Measured reach, audit-10.** With the wake armed, an idle `--parallel N` fleet applies a
+/// deposited swap in exactly two of its workers before the next request; the remaining `N - 2` each
+/// answer one request with pre-swap code and swap at the tick after it. Without it, *every* worker
+/// does (1 of 1, 3 of 3) — so the wake works, it just does not reach a worker that is not awaiting
+/// it. Giving each consumer its own `Notify` was tried and changed nothing at N = 1, 2, 3 and 5,
+/// which rules the `notify_one` single-permit race out as the explanation and points at where an
+/// idle worker with a pre-bound listener actually blocks. `parallel_hot` pins both the guarantee
+/// (the single worker never serves stale code after an idle swap) and the bound (a fleet serves
+/// fewer stale responses than it has workers, which is what fails if the wake is dropped).
 fn wake_all(wake: &noeta_host_real::Notify) {
     wake.notify_waiters();
     wake.notify_one();

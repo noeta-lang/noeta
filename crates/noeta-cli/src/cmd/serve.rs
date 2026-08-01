@@ -741,3 +741,123 @@ pub(crate) fn run_program_hot(
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    //! The install is written **once** (audit-10).
+    //!
+    //! Nine steps, two implementations, and the only real difference between them was one consumer
+    //! versus N — that was the shape of this row, and folding the two into [`HotRig`] is only half a
+    //! fix. Nothing stops the next feature from growing a third copy beside it, and the previous two
+    //! looked perfectly reasonable at every commit that made them diverge. So each step of the hot
+    //! install is censused here by the one call that performs it: a second `HotChannel::new`, a
+    //! second `set_wake`, a second `RealHost::new` in these two files means a second install, and
+    //! the census names the step rather than leaving it to be found by a swap that quietly stopped
+    //! reaching one worker.
+    //!
+    //! Comments and doc comments are stripped before counting, and the census stops at this module.
+    //! `tests/cli/automation.rs` records why: a gate a *comment* can satisfy reads as coverage and
+    //! is worse than no gate. Every token below therefore matches real code or nothing.
+
+    /// The hot-install source: `cmd/serve.rs` and `watch.rs`, comment-free, up to this module.
+    fn install_source() -> String {
+        let serve = include_str!("serve.rs");
+        let watch = include_str!("../watch.rs");
+        let mut text = String::new();
+        for file in [serve, watch] {
+            for line in file.lines() {
+                let trimmed = line.trim_start();
+                // Everything from the test module down is census scaffolding, not the install.
+                if trimmed.starts_with("#[cfg(test)]") {
+                    break;
+                }
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+        text
+    }
+
+    /// Each step of the hot install, and the single call that performs it.
+    ///
+    /// `spawn_hot_watcher` is 2: its definition in `watch.rs` and the one call from `HotRig::arm`.
+    /// Everything else is exactly one occurrence in the pair of files.
+    const INSTALL_STEPS: &[(&str, usize, &str)] = &[
+        (
+            "compile_with_sites_session(",
+            1,
+            "step 3: each isolate compiles its own session",
+        ),
+        (
+            "HotChannel::new(",
+            1,
+            "step 4: the mailbox, sized for its consumer count — the ONE genuine difference \
+             between the single worker and the fleet, and therefore a parameter, not a copy",
+        ),
+        (
+            "Notify::new(",
+            1,
+            "step 5: the wake that rouses a blocked executor when the watcher deposits",
+        ),
+        (
+            "spawn_hot_watcher(",
+            2,
+            "step 6: the watcher — its definition, and the one call from HotRig::arm",
+        ),
+        (
+            "RealHost::new(",
+            1,
+            "step 7: the real host, which is where `with_live_output` was twice forgotten",
+        ),
+        (
+            "set_wake(",
+            1,
+            "step 8: the executor is given the rig's wake",
+        ),
+        ("run_module_hot(", 1, "step 9a: the hot VM run itself"),
+        (
+            "RunTail::render(",
+            1,
+            "step 9b: the run tail (audit row 1's chokepoint)",
+        ),
+    ];
+
+    #[test]
+    fn every_step_of_the_hot_install_is_performed_in_exactly_one_place() {
+        let source = install_source();
+        for (token, want, step) in INSTALL_STEPS {
+            let found = source.matches(token).count();
+            assert_eq!(
+                found, *want,
+                "`{token}` occurs {found} time(s) in the serve/watch pair, expected {want} — \
+                 {step}.\nA second occurrence is a second hot install: route the new caller \
+                 through `HotRig` instead. A change that legitimately moves this step must update \
+                 the census."
+            );
+        }
+    }
+
+    /// The front half is shared too, and the way it used to drift was that each site called the
+    /// loader and the resolver *itself*. Both now go through `context::load_entry_with_tail`, so
+    /// neither name appears in these files at all.
+    #[test]
+    fn the_serve_front_half_resolves_and_links_through_the_shared_seam() {
+        let source = install_source();
+        for token in [
+            "load_with_deps_appending(",
+            "load_with_deps(",
+            "resolve_graph(",
+        ] {
+            assert_eq!(
+                source.matches(token).count(),
+                0,
+                "`{token}` is called directly in the serve/watch pair — the front half is \
+                 `context::load_entry_with_tail`, which resolves through the runner's `FrontFacts` \
+                 firewall and lets the hot re-link reuse the boot's graph (audit-10)"
+            );
+        }
+    }
+}
