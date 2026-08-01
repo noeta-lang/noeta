@@ -216,8 +216,8 @@ impl HotChannel {
         }
     }
 
-    /// Deposit one ready-to-apply plan (the watcher thread's half). Blocks on the queue lock: a
-    /// deposit is rare and must not be dropped, unlike a consumer's opportunistic drain.
+    /// Deposit one ready-to-apply plan (the watcher thread's half). Blocks on the queue lock, as
+    /// every operation on this queue does: a deposit is rare and must not be dropped.
     pub fn deposit(&self, plan: HotFragment) {
         if let Ok(mut q) = self.queue.lock() {
             q.plans.push(Some(Arc::new(plan)));
@@ -312,14 +312,20 @@ impl HotChannel {
             })
             .collect();
         q.cursors[slot] = q.plans.len();
-        q.collect();
+        // Freeing a reclaimed generation means dropping a program-sized AST and a `FragmentSites`
+        // bundle, so the tombstoning hands the payloads back and they are dropped *after* the guard
+        // — the whole point of blocking here is that the section stays pointer-sized.
+        let reclaimed = q.collect();
+        drop(q);
+        drop(reclaimed);
         Some(pending)
     }
 }
 
 impl PlanQueue {
-    /// Tombstone every generation below the slowest consumer's cursor. The caller holds the lock.
-    fn collect(&mut self) {
+    /// Tombstone every generation below the slowest consumer's cursor, handing back what they held
+    /// so the caller can free it outside the lock. The caller holds the lock.
+    fn collect(&mut self) -> Vec<Arc<HotFragment>> {
         let frontier = self
             .cursors
             .iter()
@@ -327,12 +333,14 @@ impl PlanQueue {
             .min()
             .unwrap_or(0)
             .min(self.plans.len());
-        for slot in &mut self.plans[self.reclaimed..frontier] {
-            // Drops the fragment AST and the last local reference to this check's whole-program
-            // `Sites` bundle — the retention this whole mechanism exists for.
-            *slot = None;
-        }
+        // Takes the fragment AST and the last local reference to this check's whole-program `Sites`
+        // bundle — the retention this whole mechanism exists for.
+        let freed: Vec<Arc<HotFragment>> = self.plans[self.reclaimed..frontier]
+            .iter_mut()
+            .filter_map(Option::take)
+            .collect();
         self.reclaimed = self.reclaimed.max(frontier);
+        freed
     }
 }
 
