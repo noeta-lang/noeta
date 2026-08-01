@@ -16,7 +16,7 @@
 //! superseded result is never delivered (audit-4 finding 9).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use noeta_ide::{DocumentStore, Encoding, LineIndex, TOP_LEVEL, completion, inlay, semtokens};
@@ -1524,6 +1524,12 @@ impl LanguageServer for Backend {
                     let checked = store.project_check(root);
                     for entry in &checked.diagnostics {
                         let source = entry.sources.source(entry.diagnostic.span.source);
+                        // Compile-time-generated code has a display name, not a file — there is
+                        // nothing for the client to open, so it is left to the per-document view,
+                        // which re-blames it on the directive that produced it.
+                        if !Path::new(source.name()).is_absolute() {
+                            continue;
+                        }
                         let index = LineIndex::new(source.text());
                         let uri = format!("file://{}", source.name());
                         let Ok(parsed) = uri.parse::<Uri>() else {
