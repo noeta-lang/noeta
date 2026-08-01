@@ -1549,9 +1549,14 @@ mod tests {
         assert!(!kws.contains(&"type_of"), "offered as a keyword: {kws:?}");
     }
 
-    /// The three intrinsics with no bare call form insert their turbofish; the other ten insert
-    /// their label. A bare `construct` is a legitimate call head (`construct(name, fields)`), a bare
-    /// `type_name` is a parse error in every program that could ever exist.
+    /// The intrinsics with no bare call form insert their turbofish; the rest insert their label. A
+    /// bare `construct` is a legitimate call head (`construct(name, fields)`), a bare `type_name` is
+    /// a parse error in every program that could ever exist.
+    ///
+    /// **The set is derived, not listed**, and it has already changed once: `attributes_of` carried
+    /// a `::<` until it gained a name-keyed arm, and stopped the moment the table recorded that
+    /// arm — no edit here, no edit in `reflection_intrinsics`. The two assertions this test makes by
+    /// hand are the endpoints of the rule, not the rule.
     #[test]
     fn only_the_turbofish_only_intrinsics_carry_insert_text() {
         let src = "fn f() { x = 1 }";
@@ -1564,12 +1569,28 @@ mod tests {
                 .insert_text
                 .clone()
         };
+        for intrinsic in noeta_builtins::REFLECTION_INTRINSICS {
+            let expected = intrinsic
+                .requires_turbofish()
+                .then(|| format!("{}::<", intrinsic.name));
+            assert_eq!(
+                insert(intrinsic.name),
+                expected,
+                "`{}` has {} bare form",
+                intrinsic.name,
+                if intrinsic.requires_turbofish() {
+                    "no"
+                } else {
+                    "a"
+                }
+            );
+        }
+        // The endpoints, spelled out: `type_name` can only ever be written with a turbofish, and
+        // `attributes_of` — which could not, until the manifest queries grew their dynamic arms —
+        // now can be written without one.
         assert_eq!(insert("type_name").as_deref(), Some("type_name::<"));
-        assert_eq!(insert("attributes_of").as_deref(), Some("attributes_of::<"));
-        assert_eq!(insert("from_bytes").as_deref(), Some("from_bytes::<"));
+        assert_eq!(insert("attributes_of"), None);
         assert_eq!(insert("construct"), None);
-        assert_eq!(insert("roles_of"), None);
-        assert_eq!(insert("type_of"), None);
     }
 
     #[test]

@@ -1804,11 +1804,7 @@ impl DocumentStore {
                 // `tests/reflection_intrinsics.rs`. Checked first only for clarity: a user function
                 // can never be spelled `construct`, because the lexer reserves the word.
                 if let Some(intrinsic) = noeta_builtins::reflection_intrinsic(&call.callee) {
-                    return Some(signature::from_intrinsic(
-                        intrinsic,
-                        call.turbofish,
-                        call.active,
-                    ));
+                    return Some(signature::from_intrinsic(intrinsic, &call));
                 }
                 let decl = top_level_fn(program, &call.callee)?;
                 Some(signature::from_decl(decl, call.active))

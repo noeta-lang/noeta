@@ -103,12 +103,15 @@ fn call_expr(intrinsic: &ReflectionIntrinsic, form: &ReflectForm) -> String {
     format!("{}{turbofish}({})", intrinsic.name, args.join(", "))
 }
 
-/// The result the table claims for `form`, with the form's type-parameter name replaced by the
-/// concrete type the probe passes — `List<Attributed<T>>` against `Marker` is
-/// `List<Attributed<Marker>>`.
+/// The result **this form** claims, with the form's own type-parameter name replaced by the concrete
+/// type the probe passes — `List<Attributed<T>>` against `Marker` is `List<Attributed<Marker>>`.
+///
+/// A form binds at most its own parameter, so a bare form's result is taken verbatim. That is the
+/// substitution the per-intrinsic result could not express: `attributes_of`'s two forms differ
+/// precisely here, one substituting a `T` and the other having none to substitute.
 fn expected_result(intrinsic: &ReflectionIntrinsic, form: &ReflectForm) -> String {
     match form.turbofish {
-        Some(param) => intrinsic
+        Some(param) => form
             .result
             .split_inclusive(|c: char| !c.is_ascii_alphanumeric() && c != '_')
             .map(|chunk| {
@@ -124,7 +127,7 @@ fn expected_result(intrinsic: &ReflectionIntrinsic, form: &ReflectForm) -> Strin
                 }
             })
             .collect(),
-        None => intrinsic.result.to_string(),
+        None => form.result.to_string(),
     }
 }
 
@@ -315,7 +318,7 @@ fn every_intrinsic_completes_and_signature_helps() {
                 .signature_help(&uri, position, Encoding::Utf8)
                 .unwrap_or_else(|| panic!("no signature help inside `{expr}`"));
             assert!(
-                data.label.starts_with(&intrinsic.render_form(form)),
+                data.label.starts_with(&form.render(intrinsic.name)),
                 "`{expr}` shows `{}`, not this form",
                 data.label
             );
@@ -356,6 +359,53 @@ fn signature_help_follows_the_argument_being_typed() {
     let second = sig("target, ".len() as u32);
     assert_eq!(second.parameters, ["name: string", "args: List<dyn>"]);
     assert_eq!(second.active_param, 1);
+}
+
+/// **An empty argument list is a shape, not a cursor position** — end to end, over a live buffer.
+///
+/// `roles_of()` asks for the whole role index and `roles_of(name)` for one enum's. Both put the
+/// cursor in *argument 0* — zero top-level commas — so a picker keyed on the active argument index
+/// cannot tell them apart, and it resolved the tie by arity, rendering the empty call as
+/// `roles_of(name: string)`: a signature for an operand the user had not written and could not get
+/// rid of without deleting the call.
+///
+/// `roles_of` is the first intrinsic with two same-turbofish-ness forms of arity 0 and 1, so nothing
+/// could reach this before its dynamic arm landed. The property version lives beside the picker in
+/// `noeta-builtins`; this is the measurement that the fact survives the token scan, which is the
+/// half that had no way to carry it.
+#[test]
+fn an_empty_call_is_not_a_first_argument() {
+    let cases = [
+        // (written call, expected rendered form)
+        ("roles_of()", "roles_of(): List<RoleBinding>"),
+        (
+            "roles_of(target)",
+            "roles_of(name: string): List<RoleBinding>",
+        ),
+        (
+            "roles_of::<WebRole>()",
+            "roles_of::<RoleEnum>(): List<RoleBinding>",
+        ),
+    ];
+    for (i, (expr, expected)) in cases.into_iter().enumerate() {
+        let source = probe_source(expr);
+        let uri = format!("file:///empty_{i}.noe");
+        let store = store_with(&uri, &source);
+        // Just before the closing `)` — for the empty calls that is the instant after the `(` was
+        // typed, and for the one-operand call it is the end of the operand. Every one of the three
+        // is "argument 0"; only what has been *written* between the parens differs.
+        let mut position = position_of(&source, expr);
+        position.character += expr.len() as u32 - 1;
+        let data = store
+            .signature_help(&uri, position, Encoding::Utf8)
+            .unwrap_or_else(|| panic!("no signature help inside `{expr}`"));
+        assert_eq!(data.active_param, 0, "`{expr}` is not on argument 0");
+        assert!(
+            data.label.starts_with(expected),
+            "`{expr}` shows `{}`, expected `{expected}`",
+            data.label
+        );
+    }
 }
 
 /// A turbofish head is a call head. `construct::<Point>(` gets signature help for the turbofish
