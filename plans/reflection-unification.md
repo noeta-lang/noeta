@@ -1,8 +1,10 @@
-# The reflection intrinsics — one operand contract, then a namespace
+# The reflection intrinsics — adopt the chokepoint that already exists
 
 Status: **scoping**. No code changed. The measurements below are from a read-only survey of `main` at `d6db1de24`; verify before acting on any line number.
 
-The question that prompted this: *should the reflection primitives move under a standard-library namespace?* The answer is yes eventually, and **that is the second half of the work, not the first**. The first half is smaller, cheaper, fixes every known bug in this surface, and is a prerequisite for the second anyway.
+The question that prompted this: *should the reflection primitives move under a standard-library namespace?* **No — or at least, not for any reason in this document.** The namespace move buys no bug fix, and the nearest precedent (reactivity leaving the prelude) accepted a measured **48.8%** regression as the price of three boundary crossings per operation. The defects here are all in-tree, and so is the fix.
+
+What the surface actually needs is to stop being special. Everything below is internal: no boundary crossing, no ABI change, no library.
 
 ---
 
@@ -38,103 +40,85 @@ That is the parallel-path shape precisely: not thirteen copies of one function, 
 
 ---
 
-## What this is *not*
+## The chokepoint already exists, and three of the thirteen adopted it
 
-Three tempting framings the survey rules out.
+`noeta_ast::TypeOperand` is `Static(TypeRef) | Dynamic(Box<Expr>)`, and its own doc already states the channel behaviour: a bare type parameter *"has no compile-time name and still resolves… lowering reads the name off that channel instead of folding a constant, so this arm means `field_specs_of(type_name::<T>())` there — the same answer, one arm."*
 
-**It is not the thirteen match arms.** Adding a fourteenth intrinsic costs ~38 edits across 20 files in 12 crates, and ~30 of those are mechanical (span, `mentions`, `has_await`, qualify, liveness, freevars, regalloc, disassembly, state-machine). That is real friction, but collapsing it needs a shared *node shape* (one `Expr::Reflect { which, operand }`), which is a separate refactor with its own risk and no bug attached to it. Do it later or never; it is not why anything is broken.
+| adopted `TypeOperand` | kept a bare `TypeRef` |
+|---|---|
+| `field_specs_of` ✅ | `attributes_of` ⚠️ |
+| `variants_of` ✅ | `roles_of` ⚠️ (`Option<TypeRef>`) |
+| `construct` ✅ | `from_bytes` ⚠️ |
+| | `type_name` (two bespoke per-channel ops) |
 
-**It is not the parser.** Every one of the thirteen has a call-shaped surface the general grammar already covers — `Expr::Call` for the value-operand forms, `Expr::TypedCall` (the `typed_fn_call` production that already serves `gen::<T>(x)`) for the turbofish forms. Delete the thirteen `#[token]` attributes tomorrow and **nothing fails to parse.** The tree-sitter grammar already documents this: it has no rule for them at all, allow-listed with the reason *"a reflection primitive is not a grammar token."*
+**The three that adopted it work. The four that did not are the four with gaps.** So this is not a design exercise — the contract exists, it is documented, it is proven by the intrinsics using it, and the fix is adoption.
 
-**It is not blocked on the extern ABI.** A native function can receive a type argument today — `TypedDispatch`/`TypedTypeDispatch` with `RetTy::TypeArg`, live in-tree for `json.parse::<T>` and `resp.json::<T>()`. But see the caveats in stage 3; the ABI carries a *structural recipe*, not a type identity, and that gap is the real cost of the namespace move.
+Both open questions from the first draft settle in favour of doing it:
+
+- **`materialize_roles(Option<&str>)`** filters the whole `reflection.roles` table at run time (`r.enum_name == e`), and `derive_roles` builds that table from the entire manifest — not from what a compile-time query mentioned. **Total on an arbitrary enum name.**
+- **`materialize_attributes(&str)`** already takes a string in **both** backends. No `NameId`-only precondition.
+
+So the backends need no work at all. Only the operand path does.
 
 ---
 
-## Stage 1 — one operand contract *(the whole point)*
+## Step 1 — adopt `TypeOperand`
 
-**Move `attributes_of`, `roles_of` and `from_bytes` onto the string-name operand contract the other five already use.**
+`attributes_of`, `roles_of` and `from_bytes` take `TypeOperand` instead of a bare `TypeRef`; `type_name`'s two bespoke ops become the shared name-resolution path rather than two ops written for one caller.
 
-That is the entire fix. It is not a library move, it needs no new mechanism, and it makes the receiver-tag channel arrive at all thirteen without touching any of them individually — because they would all be reading the one helper that already reaches both channels.
+Consequences, in order of what they unblock:
 
-Sequenced by what unblocks what:
+1. **`Op::AttributesOf`'s `dynamic` operand becomes a name-string register.** It currently holds an `int` index and indexes `module.type_args` itself, which is why it cannot consume what `Op::TypeArgName` produces. Bytecode contract change ⇒ `FORMAT_VERSION` + `MODULE_LAYOUT_DIGEST` bump, plus VM, reference interpreter, regalloc, liveness, disassembly.
+2. **`Op::RolesOf` gains a register operand.** Today it is `NameId`-only with no register.
+3. **`from_bytes` is the honest maybe.** It bakes a `PackedLayout` at check time, so it may genuinely need the layout rather than the name. If it does, the right outcome is a *tailored* `E0058` rather than today's "requires a packable element type", which sends the author to fix the wrong thing.
 
-1. **`Op::AttributesOf`'s `dynamic` operand becomes a name-string register.** This is the contract change the previous agent scoped out of. `materialize_attributes` already takes `&str`, which is promising but unverified (see open question 3). Bytecode contract change ⇒ `FORMAT_VERSION` + `MODULE_LAYOUT_DIGEST` bump, VM + reference interpreter + regalloc + liveness + disassembly.
-2. **`roles_of` gains a register operand.** Currently `NameId`-only with no register. Blocked on open question 2 — whether the roles index is fully present at runtime for an arbitrary enum name, or filtered at build time to the names a compile-time query mentioned. **Settle this first; it decides whether stage 1 is three intrinsics or two.**
-3. **`from_bytes`** bakes a `PackedLayout` at check time, so it is the odd one out: it may genuinely need the layout rather than the name. If so, the honest outcome is a *tailored* `E0058` rather than the current "requires a packable element type", which sends the author to fix the wrong thing.
-4. **Retire `Op::TypeArgName`/`Op::TypeSlotName` as `type_name`-specific.** Once every intrinsic reads a name, these are the shared name-resolution ops, not two ops written for one caller.
+**Two live defects close as a side effect**, both currently misdiagnosed rather than wrong:
 
-**The gate that makes this stick.** A census in the shape of `crates/noeta-check/tests/site_policies.rs`: one row per intrinsic, classified by operand contract, asserting that every intrinsic taking a type-name operand resolves it through the shared helper — so a fourteenth cannot quietly invent a sixth contract. That is the difference between fixing four bugs and closing the class.
-
-**Two live defects close as a side effect** (both found by the survey, both currently misdiagnosed rather than wrong):
-
-- `roles_of::<E>()` on a forwarded parameter reports *"requires a `@semantic` enum, but `E` is not one"* — `E` may well be one at every call site; the real reason is that no channel carries it.
+- `roles_of::<E>()` on a forwarded parameter reports *"requires a `@semantic` enum, but `E` is not one"*. `E` may well be one at every call site; the real reason is that no channel carries it.
 - `from_bytes::<T>()` reports *"requires a packable element type"* for the same reason.
 
-`plans/backlog.md` claims both *"stay clean checker errors"*. That claim is stale.
-
-**Size:** ~1 op contract change, ~2 checker arms, ~1 census. Bytecode format bump. Call it a week of careful work, most of it in the two backends.
+`plans/backlog.md` records both as *"clean checker errors"*. That claim is stale.
 
 ---
 
-## Stage 2 — de-reserve the words
+## Step 2 — one node, one exhaustive enum
 
-Delete the thirteen `#[token]` attributes; let the existing `Expr::Call`/`Expr::TypedCall` productions carry them.
+Collapse the thirteen `Expr` variants (and their `Rvalue` and `Op` twins) into:
 
-Three things break, all downstream of parsing, and only the third is real work:
+```rust
+Expr::Reflect { which: ReflectKind, operand: TypeOperand, span: Span }
+```
 
-1. Thirteen dead parser productions and five `choice`-tuple slots — **which frees arity headroom the tuple is currently capped against**, a standing tax on adding any new production.
-2. **The reserved-name diagnostic stops firing.** `fn look(type_name: string)` is currently rejected with "this name is taken". After stage 2 the words are shadowable. That is arguably correct — it is what `signal`/`sleep` did — but it is a deliberate language decision, not a side effect to discover later.
-3. **There is no resolution mechanism to replace them.** `Ident("type_of")` must resolve to *something*. This is what stage 3 provides, which is why stage 2 alone is not shippable.
+with `ReflectKind` a **fieldless enum**. This is the answer to "can the string matching be an exhaustive match on an enum": the *intrinsic selector* can and should be, and then every dispatch over it is exhaustive by construction — a fourteenth kind is a **compile error**, not a silent gap. Exactly what audit row 7 did for jump targets.
 
-Everything else is cheaper than it looks, because audit row 11 already made the vocabulary derived: IDE completion and highlight are **unaffected** (they ask the lexer), and `highlights.scm` + `noeta.tmLanguage.json` regenerate with one command rather than two hand-edits.
+The *type name* cannot be an enum and should not be: type names are open-world, users declare them. It is already interned as `NameId(u32)`, which is the correct form. The problem was never the string — it was that `attributes_of` took an int index where the others took a name.
 
----
+**What this buys.** Adding a fourteenth intrinsic today costs **~38 edits across 20 files in 12 crates**, of which ~30 are mechanical — `span`, `mentions`, `has_await`, qualify, liveness, freevars, regalloc, disassembly, state-machine — differing only in the variant name and which sub-expression they recurse into. With one node they become one arm each, and the marginal cost drops to roughly four edits: an enum variant, a checker arm, a lowering arm, a backend implementation.
 
-## Stage 3 — `use std.reflect`
+It also frees the parser's `choice` tuple, which is **at its arity cap** — a standing tax on adding any new production, paid by every future feature, not just this surface.
 
-The namespace move proper. **This is where the real cost is, and it is not where the bugs are.**
-
-The ABI seam exists but is narrower than it looks. `TypedDispatch` hands a native function a `&TypeRecipe` — a *structural build recipe*, not a type identity:
-
-- `T = int` arrives as `TypeRecipe::Int` with **no name at all**, and every name-keyed reflection registry keys on a name.
-- `Checker::type_to_recipe` **declines** classes, generic structs, extern types, traits, non-string-keyed maps and payload-carrying enum variants. A declined `T` is a checker error and the native function never runs — so a `std.reflect` on today's ABI would be *less* capable than the intrinsics it replaces.
-- `RetTy::TypeArg` pins the return to `T`/`Option<T>`/`Result<T,E>`. `attributes_of::<T>(): List<Attributed<T>>` is inexpressible.
-- The forwarded path already resolves the `Module::type_args` entry and then **drops `entry.name`** before the boundary.
-
-**The missing piece is small and additive**: a dispatch signature receiving the whole `TypeArgInfo { name, recipe }` rather than `&TypeRecipe`. The data already sits in `Module::type_args`; the boundary just projects the name away. Do that and stage 3 becomes a migration rather than a new machine.
-
-**Precedent, and an honest warning.** Four constructs have left the prelude or the keyword set:
-
-| construct | mechanism | cost |
-|---|---|---|
-| `signal`/`computed`/`effect` | virtual modules, then a full native `Extension` | 26 files; deleted `Value::Reactive`, `HeapKind::Reactive`, three `Builtin`s and the whole virtual-module mechanism. **Measured `r_set_flush +48.8%`, which missed its ≤35% gate and was accepted** as "the structural floor of 3 boundary crossings" |
-| `sleep`/`all`/`race` | `std.task` + `NativeCtx` | 12 files; six per-backend drive loops deleted. Named `task` not `async` *because* `async` is a keyword and `use std.async` would not parse |
-| `len`/`map`/`filter` | methods on builtin collections | 36 files; `Builtin::{Len,Map,Filter,Sum}` still exist — a surface change, not de-intrinsification |
-| `channel` | lexer stopped emitting the token; parser recognises it contextually | **5 files** — but it kept `Expr::Channel` and the whole IR path |
-
-**No commit in-tree has ever moved a lexer keyword *and* its `Expr::` variant into a namespaced library function.** Stage 3 would be the first, combining `channel`'s lexer technique with the reactivity migration's registry work. The reactivity precedent is the one to weigh: it accepted a measured 48.8% regression on a hot path as the price of removing the special case. Reflection is not on a hot path, which is the argument for expecting a better outcome — but the number should be measured, not assumed.
-
-**Corpus cost:** 170 `.noe` files use at least one intrinsic (97 in `tests/conformance/reflection/` alone). Each needs one `use` line; the call spellings survive. That is the same shape the reactivity and task moves paid, at ~10× the file count.
+**Do step 1 first.** Collapsing the node while four operand contracts still disagree would bake the disagreement into the shared shape.
 
 ---
 
-## Recommendation
+## Step 3 — the census that closes the class
 
-**Do stage 1. Then decide about 2 and 3 with the bugs already gone.**
+One row per `ReflectKind`, in the shape of `crates/noeta-check/tests/site_policies.rs`: every kind that names a type resolves its operand through the shared helper, and no kind carries a bespoke operand type. A fourteenth cannot invent a fifth contract without the gate saying so.
 
-Stage 1 is where every known defect lives, it is a fraction of the cost, and it is a prerequisite for the others regardless — a `std.reflect` whose functions disagreed about how to name a type would ship the same class of bug into a new mechanism, which is the outcome this whole exercise exists to avoid.
-
-Stages 2 and 3 buy real things: thirteen names returned to users, parser arity headroom, and the removal of a special case that the audit's own evidence says is where drift breeds. But they buy no bug fixes, and they carry a measured precedent of accepting a performance regression to remove a special case. That trade deserves its own decision, made when it is the only thing on the table.
+Without this, steps 1 and 2 fix today's four bugs and leave the mechanism that produced them.
 
 ---
 
-## Open questions, in the order they block work
+## Not doing, and why
 
-1. **Is the roles index complete at runtime for an arbitrary enum name, or filtered at build time to the names a compile-time query mentioned?** Decides whether stage 1 covers three intrinsics or two. Settled by reading `materialize_roles` and `ReflectionInfo`'s role-binding table. **Most load-bearing unknown in this document.**
-2. **Is `materialize_attributes` total on a runtime name?** It takes `&str` today, which is promising, but the interned-`NameId` path may carry a precondition the string path lacks. Settled by reading both backends' implementations.
-3. **Does `para.aether.openapi` use turbofish reflection forms, and at how many call sites?** `para` is a sibling repo, not in this tree, so the survey could not check. Affects stage 3's migration cost only.
+**The namespace move (`use std.reflect`).** Buys no bug fix. The extern ABI hands a native function a `TypeRecipe` — a structural build recipe, not a type identity — so `T = int` arrives with **no name at all**, `Checker::type_to_recipe` declines classes and generic structs outright, and `RetTy::TypeArg` cannot express `attributes_of::<T>(): List<Attributed<T>>`. A `std.reflect` on today's ABI would be *less* capable than the intrinsics it replaces. Revisit only if the ABI grows a `TypeArgInfo { name, recipe }` boundary for its own reasons.
 
-## Found while surveying, not fixed
+**De-reserving the thirteen words.** Independent of everything above and cheap — `channel` did it in **5 files** by having the parser recognise it contextually while keeping the IR path. Worth doing for the thirteen names it returns to users (`construct`, `invoke`, `params_of`, `type_name` are all plausible identifiers), but it is a language-surface decision with a deprecation story, and it fixes nothing. Note it also removes the "this name is taken" diagnostic, making the words shadowable.
 
-- `noeta-ide/src/lib.rs`'s `tier_name_at::in_expr` ends in `_ => None` and **already misses twelve `Expr` variants** — so `@html { … }` tier hover inside `construct::<T>(@html{…})` silently returns nothing today. Low severity, exactly the shape audit row 7 fixed for jump targets, and the only remaining silent-miss wildcard the survey found in this surface.
-- `plans/backlog.md`'s claim that `roles_of`/`from_bytes` "stay clean checker errors" is stale; both misdiagnose.
+---
+
+## Follow-on: the LSP
+
+Confirm the reflection surface behaves in the editor — hover, completion, go-to-definition, and tier hover — on each of the thirteen and on both channels. One gap is already known:
+
+`noeta-ide/src/lib.rs`'s `tier_name_at::in_expr` ends in `_ => None` and **already misses twelve `Expr` variants**, so `@html { … }` tier hover inside `construct::<T>(@html{…})` silently returns nothing today. Step 2 dissolves this specific instance — one `Expr::Reflect` arm replaces twelve missing ones — which is a good illustration of why the collapse is worth more than the sum of its edits.
