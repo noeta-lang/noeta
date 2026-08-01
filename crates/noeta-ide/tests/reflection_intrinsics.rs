@@ -215,9 +215,10 @@ fn the_call_surfaces_are_the_parsers_own() {
                 let parses = parses_as_written(&expr);
                 assert_eq!(
                     parses, claimed,
-                    "`{expr}`: the grammar {} it, REFLECTION_INTRINSICS {} a form of that shape",
+                    "`{expr}`: the grammar {} it, and REFLECTION_INTRINSICS {} a form of that \
+                     shape — add or remove the entry's form to match",
                     if parses { "accepts" } else { "rejects" },
-                    if claimed { "has" } else { "has no" },
+                    if claimed { "claims" } else { "does not claim" },
                 );
             }
         }
