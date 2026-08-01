@@ -96,23 +96,19 @@ pub(crate) fn load_linked(
         }),
     )
     .map_err(|f| report_u8(&f))?;
-    // The loader has no manifest data, so it leaves `package_uses` empty; fill it from the resolved
-    // facts (which hold the per-package `@`-name tables) so `loaded(..)`’s check resolves directives.
-    let mut linked = noeta_runner::compile::load_linked(file, &facts).map_err(|f| report_u8(&f))?;
-    linked.package_uses = facts.package_uses;
-    Ok(linked)
+    // The dep-aware loader carries the resolved `@name` tables through on `Linked::provenance`, so
+    // there is nothing left to patch in afterwards — the field it used to be patched into is gone.
+    noeta_runner::compile::load_linked(file, &facts).map_err(|f| report_u8(&f))
 }
 
 /// Rewrap a linker result as the runner's [`Loaded`], so type-checking goes through
 /// [`Loaded::check`] — the editions/provenance threading choke point — instead of a hand-paired
-/// `check_all_with_editions(&linked.program, linked.editions.clone())`.
+/// `check_all_with_editions(&linked.program, linked.provenance.editions.clone())`.
 pub(crate) fn loaded(linked: noeta_loader::Linked) -> Loaded {
     Loaded {
         program: linked.program,
         sources: linked.sources,
-        editions: linked.editions,
-        packages: linked.packages,
-        package_uses: linked.package_uses,
+        provenance: linked.provenance,
         // A raw link performs no tier activation, so there is nothing advisory to carry yet — the
         // caller's own check supplies whatever warnings there are.
         warnings: Vec::new(),
@@ -227,11 +223,7 @@ pub(crate) fn tier_prologue(
     // Activate the tier: inline its `@<tier>` blocks as ordinary top-level declarations and
     // collect the tier fns. An unknown-tier block is an E0036 (a typo must not silently vanish).
     // Each `@name` resolves per the package that wrote it (per-package naming arc).
-    let ctx = noeta_check::TierContext {
-        uses: &linked.package_uses,
-        packages: &linked.packages,
-    };
-    let activated = noeta_check::activate_tiers_with(&linked.program, &[tier], &ctx);
+    let activated = noeta_check::activate_tiers(&linked.program, &[tier], &linked.provenance);
     let mut activated = match provider_escape(tier, &linked, activated, &providers) {
         Ok(activated) => activated,
         Err(code) => return Prologue::Ran(code),
@@ -248,17 +240,13 @@ pub(crate) fn tier_prologue(
     // here rather than redundantly inside every per-case run.
     let noeta_loader::Linked {
         sources,
-        editions,
-        packages,
-        package_uses,
+        provenance,
         ..
     } = linked;
     let checking = Loaded {
         program: activated.program,
         sources,
-        editions,
-        packages,
-        package_uses,
+        provenance,
         // Activation's own diagnostics were reported above; nothing left to carry.
         warnings: Vec::new(),
     };
@@ -272,9 +260,7 @@ pub(crate) fn tier_prologue(
     let diverging = checked.diverging_stmts;
     let Loaded {
         program,
-        editions,
-        packages,
-        package_uses,
+        provenance,
         sources,
         // Empty by construction here (this `Loaded` was built above with none), and activation's own
         // diagnostics were already reported.
@@ -285,11 +271,6 @@ pub(crate) fn tier_prologue(
         activated,
         diverging,
         sources,
-        opts: noeta_check::CheckOptions {
-            editions,
-            packages,
-            package_uses,
-            ..noeta_check::CheckOptions::default()
-        },
+        opts: noeta_check::CheckOptions::for_workspace(provenance),
     }))
 }

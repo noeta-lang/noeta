@@ -436,7 +436,7 @@ mod tests {
             "must parse cleanly: {:?}",
             parsed.diagnostics
         );
-        let checked = check_all_with(&parsed.program, CheckOptions::default());
+        let checked = check_all_with(&parsed.program, CheckOptions::for_program());
         assert!(
             checked
                 .diagnostics

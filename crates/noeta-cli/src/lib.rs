@@ -1521,11 +1521,7 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     )
     .ok()?
     .ok()?;
-    let ctx = noeta_check::TierContext {
-        uses: &linked.package_uses,
-        packages: &linked.packages,
-    };
-    let activated = noeta_check::activate_tiers_with(&linked.program, &[&name], &ctx);
+    let activated = noeta_check::activate_tiers(&linked.program, &[&name], &linked.provenance);
     // A tier the ROOT renamed in `[tiers]` (`crit = "depB:fuzz"`, or a collision it disambiguated)
     // must dispatch by **identity**, not by the literal local name: the runner is registered under
     // what the provider exported (`fuzz` on `depB`), so `find_tier_runner(&"crit")` /
@@ -1535,14 +1531,15 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     // `[tiers]` entry and falls through to the ambient path below — a std tier, a real-named
     // third-party tier, or a program `@tier` of that bare name — so nothing that works today changes.
     let bound = linked
-        .package_uses
+        .provenance
+        .uses
         .get(&noeta_span::PackageOrigin::Root, &name)
         .is_some()
         .then(|| {
             match activated.registry.resolve_at(
                 &name,
                 Some(&noeta_span::PackageOrigin::Root),
-                &linked.package_uses,
+                &linked.provenance.uses,
             ) {
                 // A native extension runner (`std:test`, a third-party tier that ships one).
                 Some(noeta_check::ResolvedTier::Ext(t, root)) => {
@@ -1715,16 +1712,7 @@ pub(crate) fn run_declared_tier(
     // runner's signature, and the synthesized call all validate together — under the project's
     // per-package editions and package provenance (the user code keeps its source ids; the
     // synthesized nodes are default/unattributed).
-    let opts = noeta_check::CheckOptions {
-        editions: linked.editions.clone(),
-        packages: linked.packages.clone(),
-        // The `@name` tables belong with the package map they are keyed by: empty means "no package
-        // binds any extension `@name`", so a project that *renames* one (`[directives] gen =
-        // "para:openapi"`) would see it resolve to nothing here and report a spurious E0036 — on a
-        // declared-tier run of a project `noeta check` calls clean.
-        package_uses: linked.package_uses.clone(),
-        ..noeta_check::CheckOptions::default()
-    };
+    let opts = noeta_check::CheckOptions::for_workspace(linked.provenance.clone());
     let checked = context::check_under(&program, &opts);
     emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
     if noeta_diagnostics::has_errors(&checked.diagnostics) {

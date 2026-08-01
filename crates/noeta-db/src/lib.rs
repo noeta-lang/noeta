@@ -385,12 +385,9 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
     from_check_output(noeta_check::check_all_cancellable(
         &parsed.0.program,
-        noeta_check::CheckOptions {
-            // A single-source check has no package graph, so provenance stays unknown and the
-            // orphan rule stands down; the whole-workspace queries below carry the real map.
-            editions: source_edition_map(db, src),
-            ..noeta_check::CheckOptions::default()
-        },
+        // A single-source check has no package graph, so provenance stays unknown and the orphan
+        // rule stands down; the whole-workspace queries below carry the real map.
+        noeta_check::CheckOptions::for_sources(source_edition_map(db, src)),
         &|| db.unwind_if_revision_cancelled(),
     ))
 }
@@ -405,11 +402,7 @@ pub fn checked_ide(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
     from_check_output(noeta_check::check_all_cancellable(
         &parsed.0.program,
-        noeta_check::CheckOptions {
-            record_expr_types: true,
-            editions: source_edition_map(db, src),
-            ..noeta_check::CheckOptions::default()
-        },
+        noeta_check::CheckOptions::for_sources(source_edition_map(db, src)).with_expr_types(),
         &|| db.unwind_if_revision_cancelled(),
     ))
 }
@@ -1184,6 +1177,22 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> &LinkedProgram {
     linked_from(db, ws, workspace_entry(db, ws))
 }
 
+/// **The whole workspace's [`Provenance`](noeta_check::Provenance) — the one query every consumer
+/// should call.**
+///
+/// [`workspace_editions`], [`workspace_packages`] and `Workspace::package_uses` are the three halves
+/// (yes, three) of one answer, and asking for them separately is how `noeta-ide`'s impact session and
+/// `noeta-mcp`'s `test` tool each ended up passing two of the three: an empty `uses` does not read as
+/// "unknown", it reads as *no package binds any `@name`*, and every `@directive` in the project then
+/// reports a spurious `E0036`. One query, so there is nothing to half-ask for.
+pub fn workspace_provenance(db: &dyn salsa::Database, ws: Workspace) -> noeta_check::Provenance {
+    noeta_check::Provenance::of(
+        workspace_editions(db, ws),
+        workspace_packages(db, ws),
+        ws.package_uses(db).0.clone(),
+    )
+}
+
 /// The per-source [`EditionMap`](noeta_lexer::EditionMap) for a whole workspace — every member
 /// source (and dependency module) under its own package's edition, keyed by `SourceId`. The salsa
 /// analogue of the loader's `Linked::editions`, so [`linked_checked_from`] applies each package's
@@ -1238,12 +1247,7 @@ pub fn linked_checked_from(
         // `expr_types`/`f32_literal_sites` and the prelude-redesign handle-site maps.
         Ok(program) => from_check_output(noeta_check::check_all_cancellable(
             program,
-            noeta_check::CheckOptions {
-                editions: workspace_editions(db, ws),
-                packages: workspace_packages(db, ws),
-                package_uses: ws.package_uses(db).0.clone(),
-                ..noeta_check::CheckOptions::default()
-            },
+            noeta_check::CheckOptions::for_workspace(workspace_provenance(db, ws)),
             &|| db.unwind_if_revision_cancelled(),
         )),
         Err(diags) => Checked {
@@ -1274,13 +1278,8 @@ pub fn linked_checked_ide_from(
     match &linked_from(db, ws, entry).program {
         Ok(program) => from_check_output(noeta_check::check_all_cancellable(
             program,
-            noeta_check::CheckOptions {
-                record_expr_types: true,
-                editions: workspace_editions(db, ws),
-                packages: workspace_packages(db, ws),
-                package_uses: ws.package_uses(db).0.clone(),
-                ..noeta_check::CheckOptions::default()
-            },
+            noeta_check::CheckOptions::for_workspace(workspace_provenance(db, ws))
+                .with_expr_types(),
             &|| db.unwind_if_revision_cancelled(),
         )),
         Err(diags) => Checked {
@@ -1363,16 +1362,7 @@ pub fn entry_code_tiers(
     entry: SourceProgram,
 ) -> Vec<String> {
     match &linked_from(db, ws, entry).program {
-        Ok(program) => {
-            let packages = workspace_packages(db, ws);
-            noeta_check::code_tiers_in(
-                program,
-                &noeta_check::TierContext {
-                    uses: &ws.package_uses(db).0,
-                    packages: &packages,
-                },
-            )
-        }
+        Ok(program) => noeta_check::code_tiers_in(program, &workspace_provenance(db, ws)),
         Err(_) => Vec::new(),
     }
 }
@@ -1388,14 +1378,10 @@ pub fn tier_activated_from(
 ) -> TierActivated {
     match &linked_from(db, ws, entry).program {
         Ok(program) => {
-            let packages = workspace_packages(db, ws);
-            let activated = noeta_check::activate_tiers_with(
+            let activated = noeta_check::activate_tiers(
                 program,
                 &[tier.as_str()],
-                &noeta_check::TierContext {
-                    uses: &ws.package_uses(db).0,
-                    packages: &packages,
-                },
+                &workspace_provenance(db, ws),
             );
             TierActivated {
                 program: Some(activated.program),
@@ -1435,12 +1421,7 @@ pub fn tier_checked_from(
     };
     let mut checked = from_check_output(noeta_check::check_all_cancellable(
         program,
-        noeta_check::CheckOptions {
-            editions: workspace_editions(db, ws),
-            packages: workspace_packages(db, ws),
-            package_uses: ws.package_uses(db).0.clone(),
-            ..noeta_check::CheckOptions::default()
-        },
+        noeta_check::CheckOptions::for_workspace(workspace_provenance(db, ws)),
         &|| db.unwind_if_revision_cancelled(),
     ));
     // Activation's own `E0036` (a block naming an unknown tier) is part of what this shape reports.

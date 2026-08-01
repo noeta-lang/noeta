@@ -1335,17 +1335,6 @@ pub struct Activated {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// The per-package resolution context activation needs to judge each `@name` occurrence *by identity*
-/// rather than by its local spelling (per-package naming arc): the whole program's `[tiers]`/
-/// `[directives]` bindings and the span→package map that says which package wrote each block. Both are
-/// empty for a single-program preview (the IDE/MCP `activate_tiers` path), which then resolves every
-/// `@name` ambiently — the behaviour that predates per-package naming.
-#[derive(Clone, Copy, Debug)]
-pub struct TierContext<'a> {
-    pub uses: &'a noeta_span::PackageUses,
-    pub packages: &'a noeta_span::PackageMap,
-}
-
 /// Every **code** tier `program`'s own `@<tier> { … }` blocks name, in first-appearance order — the
 /// shapes a tool can still build out of this source *besides* the stripped, shipping one.
 ///
@@ -1364,7 +1353,7 @@ pub struct TierContext<'a> {
 /// - a name resolving to nothing is skipped: it is already `E0036`, and activating it inlines nothing;
 /// - a **text** tier (`@doc`, `@css` — a body the lexer captured verbatim) and an **expression** tier
 ///   carry no statements to type-check, so neither is a shape.
-pub fn code_tiers_in(program: &Program, ctx: &TierContext) -> Vec<String> {
+pub fn code_tiers_in(program: &Program, prov: &Provenance) -> Vec<String> {
     let registry = TierRegistry::collect(program);
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1372,12 +1361,12 @@ pub fn code_tiers_in(program: &Program, ctx: &TierContext) -> Vec<String> {
         // Provenance is per source: `None` is the lone-file case (no package map at all), which is
         // the root by definition.
         if !matches!(
-            ctx.packages.at(span),
+            prov.packages.at(span),
             None | Some(noeta_span::PackageOrigin::Root)
         ) {
             return;
         }
-        let Some(resolved) = registry.resolve_at(tier, ctx.packages.at(span), ctx.uses) else {
+        let Some(resolved) = registry.resolve_at(tier, prov.packages.at(span), &prov.uses) else {
             return;
         };
         if resolved.is_code() && seen.insert(tier.to_string()) {
@@ -1469,24 +1458,16 @@ fn visit_tier_blocks(stmts: &[Stmt], f: &mut impl FnMut(&str, Span)) {
 /// branch). Active blocks are inlined in place; inactive blocks are dropped; every block's name is
 /// validated. The `@test` fns among the activated *top-level* blocks are collected as roots the runner
 /// invokes. This is the single-program form — every `@name` resolves ambiently (no per-package bindings).
-pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
-    let uses = noeta_span::PackageUses::new();
-    let packages = noeta_span::PackageMap::default();
-    activate_tiers_with(
-        program,
-        active,
-        &TierContext {
-            uses: &uses,
-            packages: &packages,
-        },
-    )
-}
-
-/// [`activate_tiers`] resolving each `@name` **per the package that wrote it** ([`TierContext`]): the
-/// active set and every block are judged by their canonical [`TierId`], so a renamed tier (`@crit`
-/// bound to `criterion:bench`) activates and stamps exactly the provider it names — the identity-based
-/// replacement for the old `active.contains("test")` / provider-map dispatch.
-pub fn activate_tiers_with(program: &Program, active: &[&str], ctx: &TierContext) -> Activated {
+///
+/// Each `@name` resolves **per the package that wrote it** — the active set and every block are judged
+/// by their canonical [`TierId`], so a renamed tier (`@crit` bound to `criterion:bench`) activates and
+/// stamps exactly the provider it names, rather than by local spelling. That is what `prov` carries.
+/// A program with no package graph passes [`Provenance::unattributed`], which resolves every `@name`
+/// ambiently — the behaviour that predates per-package naming, and correct for a lone file because no
+/// manifest could have said otherwise. Until 2026-08-01 there was a second, argument-less
+/// `activate_tiers` that hardcoded that choice, and its four callers were four surfaces that *had* a
+/// package graph and silently did not use it.
+pub fn activate_tiers(program: &Program, active: &[&str], prov: &Provenance) -> Activated {
     let mut roots = Roots::default();
     let mut diagnostics = Vec::new();
     // The tier name-space: built-ins ∪ the program's own `@tier` declarations (imported packages'
@@ -1500,7 +1481,7 @@ pub fn activate_tiers_with(program: &Program, active: &[&str], ctx: &TierContext
     // provides) simply contribute no identity.
     let active_ids: std::collections::HashSet<TierId> = active
         .iter()
-        .filter_map(|n| registry.resolve_id(n, Some(&noeta_span::PackageOrigin::Root), ctx.uses))
+        .filter_map(|n| registry.resolve_id(n, Some(&noeta_span::PackageOrigin::Root), &prov.uses))
         .collect();
     // With the `doc` tier live, a declaration-attached `@doc` block (adjacency-resolved on the
     // *input* program, before its blocks are gone) stamps `#[Doc("…")]` onto its declaration —
@@ -1526,7 +1507,7 @@ pub fn activate_tiers_with(program: &Program, active: &[&str], ctx: &TierContext
         std::collections::BTreeMap::new();
     for block in resolve_texts(program) {
         let Some(resolved) =
-            registry.resolve_at(&block.tier, ctx.packages.at(block.span), ctx.uses)
+            registry.resolve_at(&block.tier, prov.packages.at(block.span), &prov.uses)
         else {
             continue;
         };
@@ -1543,7 +1524,7 @@ pub fn activate_tiers_with(program: &Program, active: &[&str], ctx: &TierContext
         &program.stmts,
         &active_ids,
         &registry,
-        ctx,
+        prov,
         &mut diagnostics,
         &mut roots,
         true,
@@ -1602,7 +1583,7 @@ pub fn activate_tiers_with(program: &Program, active: &[&str], ctx: &TierContext
                 // the std `test`/`bench` tiers become runnable roots when live, whatever local name a
                 // rename gave them. Any other tier at a method site collects no root (as before).
                 let Some(id) =
-                    registry.resolve_id(&dir.name, ctx.packages.at(dir.name_span), ctx.uses)
+                    registry.resolve_id(&dir.name, prov.packages.at(dir.name_span), &prov.uses)
                 else {
                     continue;
                 };
@@ -1723,7 +1704,7 @@ fn resolve_block(
     stmts: &[Stmt],
     active_ids: &std::collections::HashSet<TierId>,
     registry: &TierRegistry,
-    ctx: &TierContext,
+    prov: &Provenance,
     diagnostics: &mut Vec<Diagnostic>,
     roots: &mut Roots,
     collect_roots: bool,
@@ -1742,7 +1723,7 @@ fn resolve_block(
                 stmt,
                 active_ids,
                 registry,
-                ctx,
+                prov,
                 diagnostics,
             ));
             continue;
@@ -1750,7 +1731,7 @@ fn resolve_block(
 
         // Resolve the block's `@name` in the package that wrote it (its `tier_span`'s origin), then
         // judge everything below by the resolved tier's identity — not the local spelling.
-        let resolved = registry.resolve_at(tier, ctx.packages.at(*tier_span), ctx.uses);
+        let resolved = registry.resolve_at(tier, prov.packages.at(*tier_span), &prov.uses);
         let config: Option<String> = resolved
             .as_ref()
             .and_then(|r| r.config().map(str::to_string));
@@ -1791,7 +1772,7 @@ fn resolve_block(
             items,
             active_ids,
             registry,
-            ctx,
+            prov,
             diagnostics,
             roots,
             collect_roots,
@@ -1845,7 +1826,7 @@ fn resolve_children(
     stmt: &Stmt,
     active_ids: &std::collections::HashSet<TierId>,
     registry: &TierRegistry,
-    ctx: &TierContext,
+    prov: &Provenance,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Stmt {
     let mut stmt = stmt.clone();
@@ -1853,7 +1834,7 @@ fn resolve_children(
         // Nested statement lists never produce runnable roots (`collect_roots = false`); the sink is
         // a throwaway.
         let mut sink = Roots::default();
-        resolve_block(stmts, active_ids, registry, ctx, diags, &mut sink, false)
+        resolve_block(stmts, active_ids, registry, prov, diags, &mut sink, false)
     };
     match &mut stmt {
         Stmt::If {
@@ -2521,7 +2502,7 @@ mod tests {
              fn is_zero() { assert(Point {}.x == 0); }\n\
              }\n",
         );
-        let out = activate_tiers(&program, &["test"]);
+        let out = activate_tiers(&program, &["test"], &Provenance::unattributed());
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert_eq!(
             out.tests
@@ -2550,7 +2531,7 @@ mod tests {
                  fn more() { assert(add(2, 2) == 4); }\n\
              }\n",
         );
-        let out = activate_tiers(&program, &["test"]);
+        let out = activate_tiers(&program, &["test"], &Provenance::unattributed());
         assert!(out.diagnostics.is_empty());
         assert_eq!(
             out.tests
@@ -2577,7 +2558,7 @@ mod tests {
             "fn add(a: int, b: int): int { return a + b; }\n\
              @test { fn adds() { assert(add(1, 2) == 3); } }\n",
         );
-        let out = activate_tiers(&program, &[]);
+        let out = activate_tiers(&program, &[], &Provenance::unattributed());
         assert!(out.diagnostics.is_empty());
         assert!(out.tests.is_empty());
         assert_eq!(out.program.stmts.len(), 1);
@@ -2698,7 +2679,7 @@ mod tests {
              fn run_fuzz(roots: List<TierRoot>): void { return; }\n\
              @fuzz(cases: 9) { fn probe(): void { return; } }\n",
         );
-        let out = activate_tiers(&program, &["fuzz"]);
+        let out = activate_tiers(&program, &["fuzz"], &Provenance::unattributed());
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let tier = out.registry.declared("fuzz").expect("declared");
         assert_eq!(tier.runner, "run_fuzz");
@@ -2711,7 +2692,7 @@ mod tests {
         // The activated program (stamp included) type-checks through the ordinary gates.
         assert!(crate::check_all(&out.program).diagnostics.is_empty());
         // Inactive: the block strips like any tier.
-        let stripped = activate_tiers(&program, &[]);
+        let stripped = activate_tiers(&program, &[], &Provenance::unattributed());
         assert!(stripped.custom.is_empty());
         assert!(stripped.diagnostics.is_empty());
     }
@@ -2791,7 +2772,7 @@ mod tests {
                 _ => None,
             })
         };
-        let active = activate_tiers(&program, &["doc"]);
+        let active = activate_tiers(&program, &["doc"], &Provenance::unattributed());
         let attr = doc_attr_of(&active).expect("Doc attr stamped");
         assert!(
             matches!(&attr.args[0].value, noeta_ast::AttrValue::Str(t) if t.contains("Adds two ints")),
@@ -2801,7 +2782,7 @@ mod tests {
         // The stamped attribute passes the ordinary construction gate.
         assert!(crate::check_all(&active.program).diagnostics.is_empty());
         // Inactive: no stamp, block stripped.
-        let inactive = activate_tiers(&program, &[]);
+        let inactive = activate_tiers(&program, &[], &Provenance::unattributed());
         assert!(doc_attr_of(&inactive).is_none());
         assert_eq!(inactive.program.stmts.len(), 1);
     }
@@ -2875,7 +2856,7 @@ mod tests {
     #[test]
     fn the_doc_stamp_reaches_every_legal_declaration_kind() {
         let program = parse_program(EVERY_DOC_SITE);
-        let active = activate_tiers(&program, &["doc"]);
+        let active = activate_tiers(&program, &["doc"], &Provenance::unattributed());
         assert!(active.diagnostics.is_empty(), "{:?}", active.diagnostics);
         let mut docs = doc_manifest(&active.program);
         docs.sort();
@@ -2907,7 +2888,7 @@ mod tests {
     #[test]
     fn an_inactive_doc_tier_stamps_no_declaration_kind() {
         let program = parse_program(EVERY_DOC_SITE);
-        let inactive = activate_tiers(&program, &[]);
+        let inactive = activate_tiers(&program, &[], &Provenance::unattributed());
         assert_eq!(doc_manifest(&inactive.program), Vec::new());
     }
 
@@ -2925,7 +2906,7 @@ mod tests {
                  }\n\
              }\n",
         );
-        let active = activate_tiers(&program, &["doc"]);
+        let active = activate_tiers(&program, &["doc"], &Provenance::unattributed());
         let class = active
             .program
             .stmts
@@ -2954,7 +2935,7 @@ mod tests {
                  fn m(): int { return 2; }\n\
              }\n",
         );
-        let active = activate_tiers(&program, &["doc"]);
+        let active = activate_tiers(&program, &["doc"], &Provenance::unattributed());
         assert_eq!(
             doc_manifest(&active.program),
             vec![("K.m".to_string(), "From the attribute.".to_string())]
@@ -2975,7 +2956,7 @@ mod tests {
                  fn tuned(): void { return; }\n\
              }\n",
         );
-        let out = activate_tiers(&program, &["bench"]);
+        let out = activate_tiers(&program, &["bench"], &Provenance::unattributed());
         assert!(out.diagnostics.is_empty());
         let knob = |name: &str| {
             let bench = out.benches.iter().find(|b| b.name == name).expect(name);
@@ -2999,7 +2980,7 @@ mod tests {
     #[test]
     fn bad_bench_arg_fails_both_paths() {
         let program = parse_program("@bench(iterations: true) { fn b(): void { return; } }\n");
-        let activated = activate_tiers(&program, &["bench"]);
+        let activated = activate_tiers(&program, &["bench"], &Provenance::unattributed());
         assert!(activated.diagnostics.is_empty(), "stamping itself is clean");
         assert!(
             !crate::check_all(&activated.program).diagnostics.is_empty(),
@@ -3016,7 +2997,7 @@ mod tests {
     #[test]
     fn args_on_a_knobless_tier_are_e0037() {
         let program = parse_program("@test(1) { fn t(): void { return; } }\n");
-        let out = activate_tiers(&program, &["test"]);
+        let out = activate_tiers(&program, &["test"], &Provenance::unattributed());
         assert_eq!(out.diagnostics.len(), 1);
         assert_eq!(
             out.diagnostics[0].code,
@@ -3040,13 +3021,16 @@ mod tests {
             "class Account { mut balance: int  fn new(b: int): Account { return Account { balance: b }; } }\n\
              @test fn touches(): void { mut a = Account { balance: 0 }; a.balance = 5; assert(a.balance == 5); }\n",
         );
-        let active = crate::check_all(&activate_tiers(&program, &["test"]).program);
+        let active = crate::check_all(
+            &activate_tiers(&program, &["test"], &Provenance::unattributed()).program,
+        );
         assert!(
             active.diagnostics.is_empty(),
             "white-box dev-tier fn must not raise E0035: {:?}",
             active.diagnostics
         );
-        let inactive = crate::check_all(&activate_tiers(&program, &[]).program);
+        let inactive =
+            crate::check_all(&activate_tiers(&program, &[], &Provenance::unattributed()).program);
         assert!(inactive.diagnostics.is_empty());
     }
 
@@ -3069,7 +3053,7 @@ mod tests {
     #[test]
     fn unknown_tier_reports_e0036() {
         let program = parse_program("@tset { fn x() { echo \"hi\"; } }\n");
-        let out = activate_tiers(&program, &["test"]);
+        let out = activate_tiers(&program, &["test"], &Provenance::unattributed());
         assert_eq!(out.diagnostics.len(), 1);
         assert_eq!(out.diagnostics[0].code, DiagnosticCode::UnknownDirective);
         assert!(out.tests.is_empty());
@@ -3108,10 +3092,10 @@ mod tests {
              }\n",
         );
         // Inactive: only the unconditional `echo` survives in the body.
-        let stripped = activate_tiers(&program, &[]);
+        let stripped = activate_tiers(&program, &[], &Provenance::unattributed());
         assert_eq!(echoes_in_fn(&stripped.program.stmts[0]), 1);
         // Active: the `@debug` echo is inlined too — two echoes in the body.
-        let active = activate_tiers(&program, &["debug"]);
+        let active = activate_tiers(&program, &["debug"], &Provenance::unattributed());
         assert_eq!(echoes_in_fn(&active.program.stmts[0]), 2);
         // An active nested `@debug` block does not produce test roots.
         assert!(active.tests.is_empty());
@@ -3136,11 +3120,11 @@ mod tests {
              }\n",
         );
         // Stripped: both `@debug` layers drop, leaving only the unconditional `echo "always"`.
-        let stripped = activate_tiers(&program, &[]);
+        let stripped = activate_tiers(&program, &[], &Provenance::unattributed());
         assert_eq!(echoes_in_fn(&stripped.program.stmts[0]), 1);
         assert!(stripped.tests.is_empty());
         // Active: the doubly-nested `@debug` echo is inlined in place — two echoes in the body.
-        let active = activate_tiers(&program, &["debug"]);
+        let active = activate_tiers(&program, &["debug"], &Provenance::unattributed());
         assert_eq!(echoes_in_fn(&active.program.stmts[0]), 2);
         // A nested `@debug` block produces no test roots, however many layers deep it sits.
         assert!(active.tests.is_empty());
@@ -3166,15 +3150,7 @@ mod code_tier_tests {
     fn tiers_of(text: &str) -> Vec<String> {
         noeta_stdlib::registry::default_seeded();
         let program = parse_program(text);
-        let uses = PackageUses::new();
-        let packages = PackageMap::default();
-        code_tiers_in(
-            &program,
-            &TierContext {
-                uses: &uses,
-                packages: &packages,
-            },
-        )
+        code_tiers_in(&program, &Provenance::unattributed())
     }
 
     /// The shapes a tool can still build: each code tier once, in first-appearance order, whether the
@@ -3221,21 +3197,12 @@ mod code_tier_tests {
     fn a_dependencys_block_is_not_the_consumers_shape() {
         noeta_stdlib::registry::default_seeded();
         let program = parse_program("@test {\n    fn a(): void { assert(true) }\n}\n");
-        let uses = PackageUses::new();
         let mut packages = PackageMap::default();
         packages.set(
             SourceId::FIRST,
             PackageOrigin::Dependency("dep".to_string()),
         );
-        assert!(
-            code_tiers_in(
-                &program,
-                &TierContext {
-                    uses: &uses,
-                    packages: &packages,
-                },
-            )
-            .is_empty()
-        );
+        let prov = Provenance::of(Default::default(), packages, PackageUses::new());
+        assert!(code_tiers_in(&program, &prov).is_empty());
     }
 }

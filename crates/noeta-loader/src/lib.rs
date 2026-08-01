@@ -49,30 +49,24 @@ pub struct Linked {
     /// that module's `SourceId`, so it resolves to the right file through this map rather than
     /// always rendering against the entry.
     pub sources: SourceMap,
-    /// Which language [`Edition`](noeta_lexer::Edition) each source was written against, keyed by
-    /// `SourceId` — the parallel of [`Self::sources`] for editions. The entry and its siblings take
-    /// the root package's edition; each dependency package's modules take that package's own
-    /// edition. The checker consults this per declaration (via a span's `SourceId`) so a merged
-    /// program applies each package's own edition rules — the editions compiler arc's whole point.
-    pub editions: noeta_lexer::EditionMap,
-    /// Which **package** each source was read from, keyed by `SourceId` — the provenance the merged
-    /// program otherwise destroys. The entry and its siblings are [`PackageOrigin::Root`]; each
-    /// dependency package's modules carry that package's global key. The checker consults this per
-    /// declaration (via a span's `SourceId`) to enforce the package orphan rule — an
-    /// `impl Trait for Type` must live in the same package as the trait or as the type.
+    /// **Where every source came from** — its [`Edition`](noeta_lexer::Edition), the **package** that
+    /// wrote it, and that package's extension `@name` bindings, as one
+    /// [`Provenance`](noeta_lexer::Provenance). The parallel of [`Self::sources`]: a merged program
+    /// destroys this information, and every rule that recovers it does so from a span's `SourceId`.
+    /// The checker applies each package's own edition rules per declaration (the editions arc), and
+    /// enforces the package orphan rule — an `impl Trait for Type` must live in the same package as
+    /// the trait or as the type — against the same map.
     ///
-    /// **Compile-time expansion sources are deliberately absent.** Generated code is attributed to
-    /// no package, so an impl a directive synthesized is never judged by the orphan rule: the
-    /// generating directive may sit on a *dependency's* declaration, which would make "the root
-    /// package" the wrong answer rather than merely a missing one.
-    pub packages: noeta_span::PackageMap,
-    /// Per-package `@`-name resolution tables (`[directives]` and `[tiers]` alike), keyed by
-    /// [`PackageOrigin`](noeta_span::PackageOrigin) — the parallel of [`Self::packages`] for
-    /// extension `@name` resolution. Built by the package manager from each package's manifest in
-    /// its own dependency context; the checker resolves a `@name` by the package that wrote it.
-    /// The loader itself has no manifest data, so its own constructions leave this empty; the
-    /// driver that resolved the graph fills it in (it holds the resolved tables).
-    pub package_uses: noeta_span::PackageUses,
+    /// **Compile-time expansion sources are deliberately absent from `packages`.** Generated code is
+    /// attributed to no package, so an impl a directive synthesized is never judged by the orphan
+    /// rule: the generating directive may sit on a *dependency's* declaration, which would make "the
+    /// root package" the wrong answer rather than merely a missing one.
+    ///
+    /// One field rather than three since 2026-08-01, because every consumer needs all three and two
+    /// surfaces had shipped a wrong answer from having only two. An empty `uses` is still the right
+    /// answer on the deps-free [`link`] path — no manifest exists there, so no package binds any
+    /// `@name` — but it is now written as that claim rather than as a field nobody filled.
+    pub provenance: noeta_lexer::Provenance,
     /// Every **non-Noeta file** a compile-time directive expansion read (an OpenAPI spec and the
     /// documents it `$ref`s, say), as the hooks reported them.
     ///
@@ -794,9 +788,9 @@ pub fn link(
         program,
         entry,
         sources: SourceMap::new(sources),
-        editions,
-        packages,
-        package_uses: noeta_span::PackageUses::new(),
+        // Deps-free: entry + siblings are one package and there is no manifest, so nothing binds an
+        // extension `@name`. That is a fact about this path, not a field left empty.
+        provenance: noeta_lexer::Provenance::of(editions, packages, noeta_span::PackageUses::new()),
         reads,
     })
 }
@@ -1103,12 +1097,7 @@ pub fn link_with_deps_appending(
         program,
         entry,
         sources: SourceMap::new(sources),
-        editions,
-        packages,
-        // Carry the resolved per-package `@name` tables through, so a caller reading `linked.package_uses`
-        // (the tier-name CLI fallback, the checker's activation) resolves `@name`s per the package that
-        // wrote them rather than reaching an empty table — the same map that drove the text-tier lex above.
-        package_uses: package_uses.clone(),
+        provenance: noeta_lexer::Provenance::of(editions, packages, package_uses.clone()),
         reads,
     })
 }
@@ -3659,27 +3648,31 @@ mod tests {
         .unwrap();
 
         // Every source is recorded — the map was populated, not left empty.
-        assert_eq!(linked.editions.len(), 3, "entry + two dep modules");
-        assert!(!linked.editions.is_empty());
+        assert_eq!(
+            linked.provenance.editions.len(),
+            3,
+            "entry + two dep modules"
+        );
+        assert!(!linked.provenance.editions.is_empty());
         // The entry takes the root edition; each dependency module takes its package's edition.
         assert_eq!(
-            linked.editions.source_edition(SourceId(0)),
+            linked.provenance.editions.source_edition(SourceId(0)),
             noeta_lexer::Edition::E2026,
             "entry under the root edition"
         );
         assert_eq!(
-            linked.editions.source_edition(SourceId(1)),
+            linked.provenance.editions.source_edition(SourceId(1)),
             noeta_lexer::Edition::E2026,
             "dep a's module"
         );
         assert_eq!(
-            linked.editions.source_edition(SourceId(2)),
+            linked.provenance.editions.source_edition(SourceId(2)),
             noeta_lexer::Edition::E2026,
             "dep b's module"
         );
         // An unrecorded source falls back to the default edition.
         assert_eq!(
-            linked.editions.source_edition(SourceId(99)),
+            linked.provenance.editions.source_edition(SourceId(99)),
             noeta_lexer::Edition::DEFAULT
         );
     }
@@ -4629,23 +4622,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            linked.packages.source_package(SourceId(0)),
+            linked.provenance.packages.source_package(SourceId(0)),
             Some(&PackageOrigin::Root),
             "the entry is the root package"
         );
         assert_eq!(
-            linked.packages.source_package(SourceId(1)),
+            linked.provenance.packages.source_package(SourceId(1)),
             Some(&PackageOrigin::Root),
             "a sibling module is the SAME package as the entry — the orphan rule\'s boundary is \
              the package, not the file"
         );
         assert_eq!(
-            linked.packages.source_package(SourceId(2)),
+            linked.provenance.packages.source_package(SourceId(2)),
             Some(&PackageOrigin::Dependency("geo".to_string())),
             "a dependency module carries its package\'s global key (not its own root segment)"
         );
         // Never guessed: a source the loader did not read is unknown, not "the root package".
-        assert_eq!(linked.packages.source_package(SourceId(9)), None);
+        assert_eq!(linked.provenance.packages.source_package(SourceId(9)), None);
     }
 
     #[test]
@@ -4662,11 +4655,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            linked.packages.source_package(SourceId(0)),
+            linked.provenance.packages.source_package(SourceId(0)),
             Some(&PackageOrigin::Root)
         );
         assert_eq!(
-            linked.packages.source_package(SourceId(1)),
+            linked.provenance.packages.source_package(SourceId(1)),
             Some(&PackageOrigin::Root)
         );
     }

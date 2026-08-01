@@ -2587,7 +2587,11 @@ impl DocumentStore {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
-        let activated = noeta_check::activate_tiers(program, &["test"]);
+        let activated = noeta_check::activate_tiers(
+            program,
+            &["test"],
+            &noeta_db::workspace_provenance(db, cache.workspace),
+        );
         let index = LineIndex::new(self.source_text(cache, source)?);
         Some(
             activated

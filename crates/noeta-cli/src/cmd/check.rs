@@ -225,17 +225,14 @@ pub(crate) fn cmd_check(
                     // Package provenance needs no expansion twin: generated sources are
                     // deliberately unattributed, so the directory's map covers every source the
                     // orphan rule may judge (see `ParsedDir::packages`).
-                    let opts = noeta_check::CheckOptions {
-                        editions: editions.unwrap_or_else(|| parsed.editions().clone()),
-                        packages: parsed.packages().clone(),
-                        package_uses: package_uses.clone(),
-                        ..noeta_check::CheckOptions::default()
-                    };
+                    let opts =
+                        noeta_check::CheckOptions::for_workspace(noeta_check::Provenance::of(
+                            editions.unwrap_or_else(|| parsed.editions().clone()),
+                            parsed.packages().clone(),
+                            package_uses.clone(),
+                        ));
                     let program = linked.program;
-                    let ctx = noeta_check::TierContext {
-                        uses: &opts.package_uses,
-                        packages: &opts.packages,
-                    };
+
                     // Every **shape** this entry is checked in. The first is the caller's
                     // explicit `--tier`/`--target` selection, empty by default — the stripped
                     // shape that ships. After it, one shape per code tier the entry's *own*
@@ -243,7 +240,7 @@ pub(crate) fn cmd_check(
                     // `noeta test`/`noeta bench`/`noeta <tier>` compiles. One tier per shape,
                     // never all at once — a joint pass would inline `@test` and `@bench`
                     // together, which no build does, and invent collisions between them.
-                    let sweep = noeta_check::code_tiers_in(&program, &ctx);
+                    let sweep = noeta_check::code_tiers_in(&program, &opts.provenance);
                     let mut shapes: Vec<Vec<&str>> = vec![active_refs.clone()];
                     for tier in &sweep {
                         // Reported as covered either way: the selection may already have
@@ -259,7 +256,8 @@ pub(crate) fn cmd_check(
                         let program_diags = if shape.is_empty() {
                             crate::context::check_under(&program, &opts).diagnostics
                         } else {
-                            let activated = noeta_check::activate_tiers_with(&program, shape, &ctx);
+                            let activated =
+                                noeta_check::activate_tiers(&program, shape, &opts.provenance);
                             let mut ds = activated.diagnostics;
                             ds.extend(
                                 crate::context::check_under(&activated.program, &opts).diagnostics,

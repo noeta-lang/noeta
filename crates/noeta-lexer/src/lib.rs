@@ -15,7 +15,7 @@ use noeta_span::{Source, Span};
 /// fmt, conformance, check) can name the edition it threads into [`lex_in`] /
 /// `noeta_parser::parse_in`, and the per-source map it builds/consumes, without a separate
 /// dependency on `noeta-edition`.
-pub use noeta_edition::{Edition, EditionMap};
+pub use noeta_edition::{Edition, EditionMap, Provenance};
 
 /// The lexical category of a token. Declarative `logos` definitions keep the lexer
 /// fast and the token set legible. `logos` resolves overlaps by longest match (so `==`
