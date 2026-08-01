@@ -3327,8 +3327,18 @@ fn method_decl_at(
 
 /// The `(name, tier-name span)` of the `@<name> { … }` tier block/expression whose tier name
 /// covers `offset` in file `source`, if any (expr-tiers/text-tiers hover). Walks statement bodies
-/// and the expression positions a `TierExpr` can occupy — a block is usually a binding value,
-/// `echo`, `return`, or call argument.
+/// and the expression positions a `TierExpr` can occupy — which is **every** expression position,
+/// because `@sql { … }` is an ordinary expression.
+///
+/// Both matches below are **exhaustive on purpose**. They used to end in `_ => None`, and that
+/// wildcard was silently swallowing 25 of the 50 `Expr` variants and 6 of the 21 `Stmt` ones — so
+/// `@json { … }` inside `construct(…)`, `invoke(…)`, `params_of(…)`, `field_specs_of(…)`, a
+/// string interpolation hole, a `channel(…)`, a turbofish call, or the body of a standalone
+/// `impl` hovered as nothing at all, with no way for the miss to announce itself. Naming every
+/// variant makes the *next* one a compile error here rather than a quiet hole in hover; the
+/// deliberate no-ops are grouped at the end of each match with the reason they carry nothing to
+/// walk. This is `ast_walk_coverage`'s rule applied to an editor walk — the same rule, and the
+/// same bug class it was written for.
 fn tier_name_at(
     program: &noeta_ast::Program,
     offset: u32,
@@ -3374,6 +3384,11 @@ fn tier_name_at(
             Stmt::Struct(d) => d.methods.iter().find_map(|m| in_fn(m, offset, source)),
             Stmt::Class(d) => d.methods.iter().find_map(|m| in_fn(m, offset, source)),
             Stmt::Enum(d) => d.methods.iter().find_map(|m| in_fn(m, offset, source)),
+            // A standalone `impl Trait for T { … }` writes ordinary method bodies outside the
+            // type's own declaration, and a trait's default-bodied method is an ordinary body too
+            // — both were unreachable while the wildcard stood.
+            Stmt::Impl(d) => d.methods.iter().find_map(|m| in_fn(m, offset, source)),
+            Stmt::Trait(d) => d.methods.iter().find_map(|m| in_fn(&m.sig, offset, source)),
             Stmt::If {
                 cond,
                 then_body,
@@ -3389,11 +3404,16 @@ fn tier_name_at(
                 in_expr(cond, offset, source).or_else(|| in_stmts(body, offset, source))
             }
             Stmt::Concurrent { body, .. } => in_stmts(body, offset, source),
-            _ => None,
+            // Module statements and loop jumps carry neither an expression nor a body, so no tier
+            // block can be written inside one.
+            Stmt::Namespace { .. }
+            | Stmt::Use { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. } => None,
         }
     }
     fn in_expr(expr: &noeta_ast::Expr, offset: u32, source: SourceId) -> Option<(String, Span)> {
-        use noeta_ast::{ClosureBody, Expr};
+        use noeta_ast::{ClosureBody, Expr, StrPart};
         // Only recurse into an expression whose extent covers the cursor — the fast reject.
         if !covers(expr.span(), offset, source) {
             return None;
@@ -3466,8 +3486,61 @@ fn tier_name_at(
             | Expr::TypeOf { value: expr, .. }
             | Expr::FieldsOf { value: expr, .. }
             | Expr::TraitsOf { value: expr, .. }
+            | Expr::ParamsOf { target: expr, .. }
+            | Expr::ReturnsOf { target: expr, .. }
+            | Expr::Channel { capacity: expr, .. }
+            | Expr::InstantiatedType { recv: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => in_expr(expr, offset, source),
-            _ => None,
+            // A `"${ … }"` hole is an ordinary expression; the static text between holes is not.
+            Expr::Interp { parts, .. } => parts.iter().find_map(|part| match part {
+                StrPart::Hole(e) => in_expr(e, offset, source),
+                StrPart::Literal(_) => None,
+            }),
+            // The name-keyed reflection queries: a turbofish operand is a *type*, so only the
+            // dynamic (expression) arm can hold a tier block.
+            Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
+                name.dynamic().and_then(|e| in_expr(e, offset, source))
+            }
+            Expr::Construct { name, fields, .. } => name
+                .dynamic()
+                .and_then(|e| in_expr(e, offset, source))
+                .or_else(|| in_expr(fields, offset, source)),
+            Expr::Invoke {
+                recv, name, args, ..
+            } => recv
+                .as_ref()
+                .and_then(|r| in_expr(r, offset, source))
+                .or_else(|| in_expr(name, offset, source))
+                .or_else(|| in_expr(args, offset, source)),
+            // The turbofish call forms — the type arguments are types; the value arguments are
+            // ordinary expressions.
+            Expr::TypedCall { args, .. } => {
+                noeta_ast::CallArg::values(args).find_map(|a| in_expr(a, offset, source))
+            }
+            Expr::TypedMethodCall { recv, args, .. } | Expr::TypedModuleCall { recv, args, .. } => {
+                in_expr(recv, offset, source).or_else(|| {
+                    noeta_ast::CallArg::values(args).find_map(|a| in_expr(a, offset, source))
+                })
+            }
+            Expr::FieldSet {
+                receiver, value, ..
+            } => in_expr(receiver, offset, source).or_else(|| in_expr(value, offset, source)),
+            // Leaves: a literal has no sub-expression, an identifier names one thing, and the
+            // three operand-free reflection queries take a *type* (or nothing) rather than a
+            // value — none of them can contain a `@<tier> { … }`. `NativeFnRef` is synthesized by
+            // the compiler and never appears in parsed source.
+            Expr::Str { .. }
+            | Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::F32 { .. }
+            | Expr::F64 { .. }
+            | Expr::IntN { .. }
+            | Expr::Bool { .. }
+            | Expr::Ident { .. }
+            | Expr::NativeFnRef { .. }
+            | Expr::AttributesOf { .. }
+            | Expr::TypeName { .. }
+            | Expr::RolesOf { .. } => None,
         }
     }
     in_stmts(&program.stmts, offset, source)
