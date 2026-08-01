@@ -172,13 +172,28 @@ fn diff_file(
                 // there can shift what any consumer observes.
                 return FileDiff::All("top-level statements changed".into());
             }
+            // A MOVED declaration region changes no definition — `changed`/`added`/`removed` are
+            // all empty — but it re-registers every declaration in the region, and re-registering
+            // re-orders the source-ordered reflection records a test can pin (`attributes_of`,
+            // `roles_of`, `params_of`). So a reorder seeds the region it moved. Reading the
+            // fragment only under that flag is deliberate: for a body edit the fragment also holds
+            // the *type* whose method changed, and seeding `Counter` for an edit to `Counter.bump`
+            // would rerun every test that so much as mentions the type. False positives rerun
+            // harmlessly, but this engine's whole value is not producing them.
+            let reordered = if plan.declarations_reordered {
+                plan.fragment_declarations()
+            } else {
+                Vec::new()
+            };
             FileDiff::Names {
                 names: plan
                     .changed
                     .iter()
                     .chain(&plan.added)
                     .chain(&plan.removed)
-                    .cloned()
+                    .map(String::as_str)
+                    .chain(reordered)
+                    .map(ToString::to_string)
                     .collect(),
                 namespace,
             }
@@ -631,6 +646,32 @@ mod tests {
         assert_eq!(
             decls(impact_of_edit(V1, &v2, noeta_lexer::Edition::DEFAULT)),
             Vec::<String>::new()
+        );
+    }
+
+    /// A **reordered declaration region** is not inert, even though no definition changed. The
+    /// differ hands the whole region to the fragment so the reflection artifact ends up in the new
+    /// order, which means every declaration is re-registered — and an ordered `attributes_of` /
+    /// `roles_of` listing a test pins moves with it. Seeding from the fragment keeps that on the
+    /// "false positives rerun harmlessly" side; seeding from `changed`/`added` alone reported
+    /// *nothing to rerun* for an edit that can change a test's output.
+    #[test]
+    fn a_declaration_reorder_impacts_the_declarations_it_moved() {
+        seed();
+        let v2 = "fn other(): int { return 2; }\n\
+                  fn leaf(): int { return 1; }\n\
+                  fn mid(): int { return leaf(); }\n\
+                  @test fn t_mid(): void { assert(mid() == 1); }\n\
+                  @test fn t_other(): void { assert(other() == 2); }\n";
+        assert_eq!(
+            decls(impact_of_edit(V1, v2, noeta_lexer::Edition::DEFAULT)),
+            vec![
+                "leaf".to_string(),
+                "mid".to_string(),
+                "other".to_string(),
+                "t_mid".to_string(),
+                "t_other".to_string(),
+            ]
         );
     }
 
