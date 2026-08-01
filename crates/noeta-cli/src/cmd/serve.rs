@@ -531,8 +531,14 @@ pub(crate) fn run_worker(
 ) -> u8 {
     let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
         Ok(h) => Box::new(
+            // Live output, like every other foreground run surface (`noeta run`, the single-worker
+            // `serve` path through `run_program`). Without it a server — which by construction
+            // never exits on its own — buffers every byte it prints for its whole lifetime, so
+            // `echo` from a request handler appears never (audit row 1's live-output half, found on
+            // the worker paths as well as the AOT one).
             h.with_args(args.clone())
                 .with_p2p_app(app_id.clone())
+                .with_live_output(true)
                 .with_prebound_listener(listener),
         ),
         Err(e) => {
@@ -553,7 +559,8 @@ pub(crate) fn run_worker(
             noeta_host_real::RealHost::new()
                 .expect("cannot start a nested isolate's runtime")
                 .with_args(args.clone())
-                .with_p2p_app(app_id_for_factory.clone()),
+                .with_p2p_app(app_id_for_factory.clone())
+                .with_live_output(true),
         );
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
             noeta_host_real::RealExecutor::new().expect("cannot start a nested isolate's executor"),
@@ -656,8 +663,14 @@ pub(crate) fn run_worker_hot(
         };
     let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
         Ok(h) => Box::new(
+            // Live output, like every other foreground run surface (`noeta run`, the single-worker
+            // `serve` path through `run_program`). Without it a server — which by construction
+            // never exits on its own — buffers every byte it prints for its whole lifetime, so
+            // `echo` from a request handler appears never (audit row 1's live-output half, found on
+            // the worker paths as well as the AOT one).
             h.with_args(args)
                 .with_p2p_app(app_id)
+                .with_live_output(true)
                 .with_prebound_listener(listener),
         ),
         Err(e) => {
@@ -682,18 +695,32 @@ pub(crate) fn run_worker_hot(
 
 /// The shared run epilogue for one `--parallel` worker (audit row 1): the program's stdout, its own
 /// stderr stream, the run's diagnostics and — the part both worker paths were missing — the abort
-/// traceback. A worker that dies inside a request handler now says *where*, prefixed so the line is
-/// attributable in a fleet's interleaved output.
+/// traceback, which used to be the five words `[worker] aborted` and no stack.
+///
+/// This writes the tail's [`parts`](noeta_backend::RunTail::parts) rather than calling
+/// `emit_status`, because a worker labels its failure: the `[worker] aborted` banner belongs after
+/// the program's own stdout and before everything the runtime has to say about the abort. Reading
+/// the parts is what makes that possible without re-deriving the epilogue — and a component added
+/// to a run lands in the right half of this split with no edit here.
 fn emit_worker_tail(
     result: &noeta_backend::RunResult,
     trace: &[noeta_vm::TraceFrame],
     sources: &SourceMap,
 ) -> u8 {
     let tail = noeta_backend::RunTail::render(result, trace, sources);
-    if tail.aborted() {
-        eprintln!("[worker] aborted");
+    let (mut out, mut err) = (io::stdout(), io::stderr());
+    for part in tail.parts_for(noeta_backend::Stream::Stdout) {
+        let _ = out.write_all(part.text.as_bytes());
     }
-    tail.emit_status()
+    let _ = out.flush();
+    if tail.aborted() {
+        let _ = writeln!(err, "[worker] aborted");
+    }
+    for part in tail.parts_for(noeta_backend::Stream::Stderr) {
+        let _ = err.write_all(part.text.as_bytes());
+    }
+    let _ = err.flush();
+    tail.status()
 }
 
 /// Run an entry-call program with **in-process hot reload** (server-hmr W1) — `noeta serve
@@ -750,7 +777,12 @@ pub(crate) fn run_program_hot(
     let args: Vec<String> = std::env::args().collect();
     let app_id = p2p_app_namespace(&args);
     let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
-        Ok(host) => Box::new(host.with_args(args).with_p2p_app(app_id)),
+        // Live output: `serve --watch`'s hot mode is a foreground server too (see the worker paths).
+        Ok(host) => Box::new(
+            host.with_args(args)
+                .with_p2p_app(app_id)
+                .with_live_output(true),
+        ),
         Err(e) => {
             eprintln!("noeta: cannot start the runtime: {e}");
             return 1;
