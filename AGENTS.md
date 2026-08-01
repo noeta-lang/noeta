@@ -64,7 +64,7 @@ Each stage is its own crate with explicit input/output types and no hidden share
 | `noeta-cache` | Default-on bytecode cache (`~/.cache/noeta/*.noeb`, build-identity-keyed). |
 | `noeta-reactive` | Signals/computed/effects: the reactive graph, topological flush, E0045 runaway guard. |
 | `noeta-jit-abi` | The frozen native↔interpreter calling-convention vocabulary shared by `noeta-vm`/`noeta-jit`. |
-| `noeta-aot-runtime` / `noeta-bundle` | Native AOT builds (`noeta build --native`): runtime support + self-contained artifact bundling (per-ring stdlib + DCE). |
+| `noeta-aot-runtime` / `noeta-bundle` | Native AOT builds (`noeta build --native`): runtime support + self-contained artifact bundling (per-ring stdlib + DCE). Gated by the two AOT oracles — `--jit-differential --aot-bodies` (the codegen, per-commit) and `--aot-differential` (the linked artifact vs `noeta run`, gate tier). |
 | `noeta-ide` | Shared IDE engine (hover/def/refs/outline/call+role graph) over the salsa db; reused by the LSP and MCP servers. |
 | `noeta-lsp` | `noeta lsp`: tower-lsp language server. |
 | `noeta-dap` | `noeta dap`: debug adapter driving the production VM via a per-op debug hook. |
