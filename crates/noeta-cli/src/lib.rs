@@ -89,13 +89,16 @@ enum Command {
     /// `.vscode/` run profiles the Noeta extension understands, and the agent surface —
     /// `AGENTS.md` (how to drive the toolchain, CLI and MCP) plus `SYNTAX.md`, the full
     /// language reference generated from the embedded guide. Never overwrites an existing
-    /// file, so it is safe in a non-empty directory.
+    /// file, so it is safe in a non-empty directory — and safe to re-run inside a package it
+    /// already scaffolded: it creates whatever is missing and leaves the rest untouched, so
+    /// deleting a stale `SYNTAX.md` after a toolchain upgrade and re-running regenerates it.
     Init {
         /// Directory to initialize (default: the current directory; created if missing).
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Package name as `company/package` (default: `local/<directory-name>` — change
-        /// `local` to your registry scope before publishing).
+        /// `local` to your registry scope before publishing). Ignored when the directory
+        /// already has a `noeta.toml`; rename an existing package by editing it.
         #[arg(long)]
         name: Option<String>,
         /// Skip `git init` when the directory is not already inside a git repository.

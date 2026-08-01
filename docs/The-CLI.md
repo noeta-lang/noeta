@@ -61,7 +61,9 @@ What it writes — never overwriting a file that already exists, so it is safe i
 - **`AGENTS.md`** — how an AI agent should drive this project: the CLI feedback loop and the [`noeta mcp`](Editor-and-AI-Tooling) tool surface.
 - **`SYNTAX.md`** — the full language reference, assembled from the same embedded guide `noeta mcp`'s `docs_search` serves, so it always matches the installed compiler. Delete and re-run `noeta init` after upgrading to refresh it.
 
-A fresh directory also gets `git init` (skipped inside an existing repository, or with `--no-git`). A directory that already holds a `noeta.toml` is refused.
+A fresh directory also gets `git init` (skipped inside an existing repository, or with `--no-git`).
+
+Re-running it inside a package it already scaffolded is **additive**, not an error: every missing file is created, every existing one — the manifest included — is left byte-identical, and a run with nothing left to create says so and exits 0. That is how the generated `SYNTAX.md` above is refreshed: delete it, re-run `noeta init`. `--name` is ignored (with a warning) once a `noeta.toml` exists — rename the package by editing it.
 
 ```console
 $ noeta init webapp

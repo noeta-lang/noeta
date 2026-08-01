@@ -1,5 +1,6 @@
 //! `noeta init`: the scaffold is complete, immediately usable by every tier tool, safe on
-//! non-empty directories, and its manifest round-trips through the real parser.
+//! non-empty directories, additive when re-run inside a package it already scaffolded, and
+//! its manifest round-trips through the real parser.
 
 use crate::support::*;
 
@@ -10,6 +11,17 @@ fn scratch(name: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("create scratch dir");
     dir
 }
+
+/// Every file the scaffold writes, in the order `init` reports them.
+const SCAFFOLD: &[&str] = &[
+    "noeta.toml",
+    "src/main.noe",
+    ".gitignore",
+    ".vscode/launch.json",
+    ".vscode/extensions.json",
+    "AGENTS.md",
+    "SYNTAX.md",
+];
 
 fn init_in(dir: &std::path::Path, extra: &[&str]) -> assert_cmd::assert::Assert {
     let mut cmd = lang();
@@ -25,15 +37,7 @@ fn init_scaffolds_a_runnable_project() {
         .stdout(predicate::str::contains("created noeta.toml"))
         .stdout(predicate::str::contains("initialized Noeta package"));
 
-    for rel in [
-        "noeta.toml",
-        "src/main.noe",
-        ".gitignore",
-        ".vscode/launch.json",
-        ".vscode/extensions.json",
-        "AGENTS.md",
-        "SYNTAX.md",
-    ] {
+    for rel in SCAFFOLD {
         assert!(dir.join(rel).exists(), "missing scaffold file {rel}");
     }
 
@@ -100,13 +104,93 @@ fn init_manifest_parses_with_both_targets() {
     assert!(prod.is_empty(), "production must make no tiers live");
 }
 
+/// Re-running `init` in a package is additive, not a refusal: the generated `SYNTAX.md` goes
+/// stale between releases and the documented way to refresh it is to delete it and re-run.
+/// A pre-existing `noeta.toml` used to abort the whole run, so that recipe could not work.
 #[test]
-fn init_refuses_an_existing_package() {
-    let dir = scratch("init_refuse");
+fn init_refills_a_gap_in_an_existing_package() {
+    let dir = scratch("init_refill");
     init_in(&dir, &[]).success();
+    let manifest = std::fs::read_to_string(dir.join("noeta.toml")).unwrap();
+    let main = std::fs::read_to_string(dir.join("src/main.noe")).unwrap();
+    // The user edits their entry file, then deletes the stale language reference.
+    std::fs::write(
+        dir.join("src/main.noe"),
+        "fn main() {\n  print(\"mine\")\n}\n",
+    )
+    .unwrap();
+    std::fs::remove_file(dir.join("SYNTAX.md")).unwrap();
+
     init_in(&dir, &[])
-        .failure()
-        .stderr(predicate::str::contains("already a Noeta package"));
+        .success()
+        .stdout(predicate::str::contains("created SYNTAX.md"))
+        .stdout(predicate::str::contains("exists  noeta.toml"))
+        .stdout(predicate::str::contains("updated Noeta package `local/"))
+        .stdout(predicate::str::contains("1 created, 6 left unchanged"));
+
+    assert!(
+        dir.join("SYNTAX.md").exists(),
+        "SYNTAX.md must be regenerated"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("noeta.toml")).unwrap(),
+        manifest,
+        "an existing manifest must never be rewritten"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("src/main.noe")).unwrap(),
+        "fn main() {\n  print(\"mine\")\n}\n",
+        "the user's edited entry file must survive untouched"
+    );
+    assert_ne!(main, "fn main() {\n  print(\"mine\")\n}\n");
+}
+
+/// A fully scaffolded package is a no-op that says so and succeeds — nothing rewritten.
+#[test]
+fn init_is_a_no_op_in_a_complete_package() {
+    let dir = scratch("init_noop");
+    init_in(&dir, &[]).success();
+    let before: Vec<(String, String)> = SCAFFOLD
+        .iter()
+        .map(|rel| {
+            (
+                (*rel).to_string(),
+                std::fs::read_to_string(dir.join(rel)).unwrap(),
+            )
+        })
+        .collect();
+
+    init_in(&dir, &[])
+        .success()
+        .stdout(predicate::str::contains("already fully scaffolded"))
+        .stdout(predicate::str::contains("7 files left unchanged"))
+        .stdout(predicate::str::contains("created").not());
+
+    for (rel, contents) in before {
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&rel)).unwrap(),
+            contents,
+            "{rel} must be byte-identical after a no-op init"
+        );
+    }
+}
+
+/// `--name` cannot rename a package that already has a manifest: it is reported as ignored
+/// and the manifest keeps its own name.
+#[test]
+fn init_ignores_name_for_an_existing_package() {
+    let dir = scratch("init_rename");
+    init_in(&dir, &["--name", "acme/webapp"]).success();
+    std::fs::remove_file(dir.join("AGENTS.md")).unwrap();
+
+    init_in(&dir, &["--name", "other/thing"])
+        .success()
+        .stderr(predicate::str::contains("ignoring --name"))
+        .stdout(predicate::str::contains(
+            "updated Noeta package `acme/webapp`",
+        ));
+    let manifest = std::fs::read_to_string(dir.join("noeta.toml")).unwrap();
+    assert!(manifest.contains("name = \"acme/webapp\""), "{manifest}");
 }
 
 #[test]
