@@ -1176,6 +1176,19 @@ impl Clock for RealHost {
         self.clock = self.clock.saturating_add(ms.max(0) as u64);
     }
 
+    /// The real host is the one that has real time to elapse, so this is the one that blocks.
+    ///
+    /// The logical clock advances too, and by the same amount, so `monotonic` and `unix_ms` agree
+    /// with what the caller just waited through — a delay that moved the wall clock but not the
+    /// counter would make the two views disagree about the same wait.
+    fn clock_delay(&mut self, ms: i64) {
+        let ms = ms.max(0) as u64;
+        self.clock = self.clock.saturating_add(ms);
+        if ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
+
     fn clock_unix_ms(&mut self) -> u64 {
         // A clock before 1970 would need a deliberately broken host; saturate to 0 rather
         // than panic in that case.

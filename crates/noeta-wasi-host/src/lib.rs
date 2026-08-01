@@ -303,6 +303,16 @@ impl Clock for WasiHost {
         self.clock = self.clock.saturating_add(ms.max(0) as u64);
     }
 
+    /// WASI has a real clock and `std::thread::sleep` reaches it through `poll_oneoff`, so a
+    /// `build --wasm` artifact backs off like a native one rather than like the playground.
+    fn clock_delay(&mut self, ms: i64) {
+        let ms = ms.max(0) as u64;
+        self.clock = self.clock.saturating_add(ms);
+        if ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
+
     fn clock_unix_ms(&mut self) -> u64 {
         // WASI's wall clock through std. Saturate to 0 on a pre-1970 host clock rather than panic.
         std::time::SystemTime::now()

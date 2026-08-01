@@ -114,6 +114,9 @@ macro_rules! __delegate_host_capability {
             fn clock_sleep(&mut self, ms: i64) {
                 self.$field.clock_sleep(ms)
             }
+            fn clock_delay(&mut self, ms: i64) {
+                self.$field.clock_delay(ms)
+            }
             fn clock_unix_ms(&mut self) -> u64 {
                 self.$field.clock_unix_ms()
             }

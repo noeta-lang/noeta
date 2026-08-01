@@ -152,6 +152,13 @@ impl Clock for DeterministicClock {
         self.ms = self.ms.saturating_add(ms.max(0) as u64);
     }
 
+    /// The sandbox has no real time to elapse, so a delay IS the logical advance. Not a shortcut:
+    /// blocking here would make a retrying program's wall-clock cost real while its observable
+    /// behaviour stayed identical, which is the opposite of what the deterministic host is for.
+    fn clock_delay(&mut self, ms: i64) {
+        self.clock_sleep(ms);
+    }
+
     fn clock_unix_ms(&mut self) -> u64 {
         self.unix_ms()
     }
