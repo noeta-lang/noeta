@@ -20,6 +20,22 @@ fn seed() {
     noeta_stdlib::registry::default_seeded();
 }
 
+/// **The two surfaces' answers, asserted equal** — naming the entry and the local `@tier` under
+/// test, because a bare `left != right` over two code lists says nothing about *which* body was
+/// lexed twice.
+fn agreeing_diagnostics(app: &Path, entry: &Path, tier: &str) -> Vec<String> {
+    let (salsa, loader) = both_surfaces(app, entry);
+    assert_eq!(
+        salsa,
+        loader,
+        "`{}` disagrees about the body of `@{tier}`: `noeta check` says {salsa:?}, the loader \
+         (`noeta run`/`build`/`test`) says {loader:?} — one of them lexed it as prose and the \
+         other as code",
+        entry.display(),
+    );
+    salsa
+}
+
 /// **Both answers about one project**, as sorted, deduplicated diagnostic codes: first the salsa
 /// surface (`noeta check` and the LSP, `noeta_ide::project_check`), then the batch loader every
 /// *executing* verb goes through (`noeta_loader::load_with_deps`, over the same resolved graph).
@@ -277,14 +293,25 @@ fn a_renamed_dependency_text_tier_captures_for_the_editor_and_the_loader_alike()
         TEXT_TIER_DECL,
     );
     let entry = app.join("main.noe");
-    let (salsa, loader) = both_surfaces(&app, &entry);
+    // Non-vacuity, asserted rather than hoped for: the fixture's own manifest really does bind
+    // `@notes` onto a verbatim tier. A parity test whose fixture renamed nothing would pass on two
+    // empty answers, which is the shape this repo has shipped three times.
+    let graph = noeta_pm::graph::resolve_graph_query(&entry).expect("the fixture's graph resolves");
     assert_eq!(
-        salsa, loader,
-        "the two surfaces must lex the same project the same way"
+        noeta_loader::renamed_text_tier_locals(
+            &graph.package_uses,
+            [("speckit".to_string(), vec!["spec".to_string()])],
+            &noeta_loader::ExtTiers::from_process_registry(),
+        )
+        .get(&noeta_span::PackageOrigin::Root),
+        Some(&vec!["notes".to_string()]),
+        "the fixture must actually produce a renamed text tier, or this test proves nothing"
     );
+
+    let diags = agreeing_diagnostics(&app, &entry, "notes");
     assert!(
-        salsa.is_empty(),
-        "a bound text tier captures its body verbatim, so the project is clean: {salsa:?}"
+        diags.is_empty(),
+        "a bound text tier captures its body verbatim, so the project is clean: {diags:?}"
     );
     drop(root);
 }
@@ -297,14 +324,10 @@ fn a_tier_body_only_captures_because_the_binding_says_so() {
     seed();
     let (root, app) = tier_project("agreement-tier-unbound", "", TEXT_TIER_DECL);
     let entry = app.join("main.noe");
-    let (salsa, loader) = both_surfaces(&app, &entry);
-    assert_eq!(
-        salsa, loader,
-        "the two surfaces must lex the same project the same way"
-    );
+    let diags = agreeing_diagnostics(&app, &entry, "notes");
     assert!(
-        salsa.contains(&"E0002".to_string()),
-        "without the binding the prose is code, and code it is not: {salsa:?}"
+        diags.contains(&"E0002".to_string()),
+        "without the binding the prose is code, and code it is not: {diags:?}"
     );
     drop(root);
 }
@@ -327,14 +350,10 @@ fn a_binding_onto_a_dependency_code_tier_is_not_captured_by_a_natives_name() {
         CODE_TIER_DECL,
     );
     let entry = app.join("main.noe");
-    let (salsa, loader) = both_surfaces(&app, &entry);
-    assert_eq!(
-        salsa, loader,
-        "the editor must not swallow a body the compiler lexes as code"
-    );
+    let diags = agreeing_diagnostics(&app, &entry, "notes");
     assert!(
-        salsa.contains(&"E0002".to_string()),
-        "the bound tier is a CODE tier, so its body is code — and this body is not: {salsa:?}"
+        diags.contains(&"E0002".to_string()),
+        "the bound tier is a CODE tier, so its body is code — and this body is not: {diags:?}"
     );
     drop(root);
 }

@@ -1594,7 +1594,7 @@ impl ExtTiers {
     pub fn is_verbatim_scoped(&self, provider_roots: &[String], exported: &str) -> bool {
         self.0
             .iter()
-            .find(|t| t.name == exported && provider_roots.iter().any(|r| *r == t.root))
+            .find(|t| t.name == exported && provider_roots.contains(&t.root))
             .is_some_and(|t| t.verbatim)
     }
 }
