@@ -18,7 +18,7 @@
 #
 #   scripts/gate.sh --quick     the inner loop  — fmt + both clippy splits           1m20s / 2m10s
 #   scripts/gate.sh             the merge gate  — + tests, doc samples, JIT oracles    ~15m / 35m
-#   scripts/gate.sh --full      full CI parity  — + wasm, miri, editor tooling         +2m and up
+#   scripts/gate.sh --full      full CI parity  — + wasm, AOT, miri, editor tooling    +2m and up
 #
 # The merge tier also runs the `#[ignore]`d real-socket suites (`scripts/hot-e2e.sh` — hot reload,
 # LiveView, graceful drain) against the JIT-enabled CLI it has already built. Measured at 5s warm,
@@ -357,10 +357,12 @@ has_target() {
 #                                     doc samples, the JIT's own differential, and the `#[ignore]`d
 #                                     real-socket end-to-end suites (hot reload, LiveView, drain).
 #                                     This is the set a merge to `main` must clear.
-#   wasm/miri/editors (tier 3)       — portability, `unsafe` soundness, and the editor grammars.
-#                                     Real gates, but they need wasmtime/nightly+miri/npm and they
-#                                     dominate the runtime, so they are opt-in per merge, not per
-#                                     commit. `--full` is what you run before a release tag.
+#   wasm/aot/miri/editors (tier 3)   — portability, the linked `--native` differential, `unsafe`
+#                                     soundness, and the editor grammars. Real gates, but they need
+#                                     wasmtime/a C toolchain/nightly+miri/npm and they dominate the
+#                                     runtime (the AOT one links a binary per corpus program), so
+#                                     they are opt-in per merge, not per commit. `--full` is what
+#                                     you run before a release tag.
 
 if ((LIST_ONLY)); then
     echo "gate: plan for tier $TIER (toolchain: $TC)"
@@ -415,6 +417,12 @@ step 2 jit "JIT differential (coverage summary)" -- \
     "${CARGO[@]}" run -p noeta-conformance --features jit --locked -- --jit-differential
 step 2 jit "JIT differential (cancel-poll arm)" -- \
     "${CARGO[@]}" run -p noeta-conformance --features jit --locked -- --jit-differential --cancel-poll
+# The AOT arm: `noeta build --native` emits a third shape of native code (inline caches off, null
+# call sites, no poll). Three comments in the tree claimed it was "proven corpus-wide by the
+# NOETA_JIT_AOT oracle" — an environment variable that ran in no gate and no workflow. It is now a
+# run option, so this arm is the same corpus at the same cost as the two above, with no linker.
+step 2 jit "JIT differential (AOT-bodies arm)" -- \
+    "${CARGO[@]}" run -p noeta-conformance --features jit --locked -- --jit-differential --aot-bodies
 step 2 jit "JIT-enabled CLI (integration + doc samples)" -- \
     "${CARGO[@]}" test -p noeta-cli --locked
 # The `#[ignore]`d real-socket suites — hot reload, LiveView, graceful drain. The step above builds
@@ -424,6 +432,35 @@ step 2 jit "JIT-enabled CLI (integration + doc samples)" -- \
 # server that is actually serving. See scripts/hot-e2e.sh for what it covers and what it asserts.
 step 2 jit "hot-reload e2e (#[ignore]d real-socket suites)" -- \
     env "NOETA_GATE_TOOLCHAIN=$TC" bash "$ROOT/scripts/hot-e2e.sh"
+
+# --- aot: the LINKED `--native` differential ---------------------------------------------------
+#
+# The in-process arm above proves the AOT *codegen*. This proves the artifact: for every corpus
+# program, `cc`-link the AOT object against the real `libnoeta_aot.a`, staple the bundle on, run the
+# binary, and compare it against `noeta run` over the same module — stdout, stderr and exit code.
+# That is the only thing watching the linker, the dispatch table's layout (an AOT-only soundness bug
+# once lived exactly there: `0f9752d4c`) and the AOT run tail.
+#
+# Tier 3, not 2: a link per program is minutes, not seconds — measured and recorded in the oracle's
+# own summary line, which prints the wall-clock split every run. Its one prerequisite is a C
+# toolchain, named with the command that installs it rather than skipped in silence.
+CC_BIN="${NOETA_CC:-cc}"
+if have "$CC_BIN"; then
+    # The archive is its own step so a failure to BUILD it does not read as an oracle failure. The
+    # oracle re-runs the same `cargo rustc` (a no-op once built) to read the `native-static-libs`
+    # line, which is how `noeta build --native` itself learns the link line.
+    step 3 aot "build the AOT runtime archive (libnoeta_aot.a)" -- \
+        "${CARGO[@]}" rustc -p noeta-aot-runtime --locked -- --print native-static-libs
+    # The truth side is the shipped `noeta` binary, so it must exist before the oracle runs.
+    step 3 aot "build the noeta CLI (the AOT oracle's truth side)" -- \
+        "${CARGO[@]}" build -p noeta-cli --locked
+    step 3 aot "AOT differential (linked --native artifacts vs noeta run)" -- \
+        "${CARGO[@]}" run -p noeta-conformance --features jit --locked -- --aot-differential
+else
+    skip 3 aot "AOT differential (linked --native artifacts vs noeta run)" \
+        "no C toolchain: \`$CC_BIN\` is not on PATH" \
+        "sudo apt install build-essential   # or set NOETA_CC=/path/to/cc"
+fi
 
 # --- wasm: the portability invariant + the wasm/browser/serve oracles --------------------------
 #

@@ -209,6 +209,26 @@ That is why the AOT tail's dropped stderr and truncated exit code went unnoticed
 
 **Chokepoint.** `crates/noeta-conformance/src/aot.rs` shaped like `bundle.rs`: for every corpus program that compiles, build the `--native` artifact and assert the whole `RunResult` matches the native VM run; plus a `NOETA_JIT_AOT` arm in `gate.sh`/`ci.yml`. **Size: ~200 lines for the oracle — link time is the real cost, so it may have to be a gate-only rather than per-commit arm — and ~4 lines for the JIT arm.** Also change `report.native_protos > 0` (`corpus.rs:216`, `:259`) from a floor to a ratchet: a regression in `is_fast_op` that dropped 2600 prototypes to bail stubs passes today.
 
+**Done (2026-08-01, `audit/aot-oracle`).** Both arms exist, and the split is the one the row guessed at:
+
+* **Per-commit, no linker.** The `NOETA_JIT_AOT` environment knob became `RunOptions::aot_bodies`, so the AOT body shape can be armed for *one run* instead of one process — which is what lets it be a `cargo test` arm rather than a shell-only one. `JitDiffArm::AotBodies` runs the whole corpus through it (`jit_differential_aot_bodies_agree`), and it is green: **821 programs, 2633/2640 prototypes native, ~48s** against the plain arm's ~32s. In `gate.sh` (tier 2) and `ci.yml`'s jit job. The three comments claiming the codegen was "proven corpus-wide by the `NOETA_JIT_AOT` oracle" are now true.
+* **Gate-only, linked.** `--aot-differential` builds the real artifact per corpus program — AOT object, `cc`-link against `libnoeta_aot.a`, staple, run — and compares it against `noeta run` over the same module's bundle. The bundle is written to a file literally named `<aot>` so both tails render diagnostics against the same synthetic source name and the stderr comparison is byte-for-byte. Tier 3 in `gate.sh` (its own `aot` group, with the C-toolchain prerequisite named), and a step in `ci.yml`'s jit job.
+
+**It found a live `--native` crash on its first full-corpus run.** `modules/derived_package_path/main.noe` — three prototypes, two cross-module calls inside one interpolation — produces a linked artifact that aborts **every time** with a Rust panic in `noeta-vm/src/dispatch.rs` at `&chunk.code[pc]`: `the len is 3 but the index is 94253172131408`. The index is a pointer (it varies with ASLR run to run), so after returning from a linked native body the interpreter resumes at a *code address* instead of a program counter. `noeta run` over the identical module prints `deep + root` and exits 0.
+
+The variable is isolated: the **same module agrees with tier 0 under the in-process AOT-bodies arm**, which emits the same bodies and installs them through `jit_install` — so the codegen is not the difference. What differs is the linked path: entries bound from the `noeta_aot_dispatch` table into a VM with no engine at all (`tier1.jit == None`, `tier1.aot == true`). That is the seam that already produced one AOT-only soundness bug (`0f9752d4c`, the misaligned dispatch table), and it is the seam nothing was watching. Reproduce with `NOETA_AOT_KEEP=1 … --aot-differential --file modules/derived_package_path/main.noe` and run the kept `app` — it aborts 12 times out of 12.
+
+Worth recording how nearly it hid: a Rust panic prints an ASLR-varying address, so on the first pass the case looked like a program that *does not reproduce itself* and was classified as nondeterministic — the oracle would have gone green over a crash. Host-level aborts (a signal, an exit ≥ 128, `panicked at` in stderr) are now checked **before** the reproducibility test, because "it fell over differently each time" is not an excuse.
+
+**It also found row 1's AOT tail, on the real artifact, immediately**: `io/streams.noe` and `io/to_string_parity.noe` print nothing on stderr from a `--native` binary (`RunResult.stderr` is dropped), and `std/os_exit.noe` exits **1** where `noeta run` exits 3. The exit-code half is worse than the row states: `result.exit_code as u8` is not the binding constraint — `run_embedded_with_extensions` maps the resulting `ExitCode` to `0` for success and **`1` for everything else**, so *every* nonzero exit code collapses to 1, and fixing only the documented `as u8` line will not move this case. Those three, plus the crash above, live in `KNOWN_DIVERGENCES` — an expect-fail ratchet, not a suppression: the oracle fails on anything new **and** on a listed row that stops reproducing, so no row can outlive the bug it names.
+
+Two things the row did not anticipate, both now measured rather than assumed:
+
+* **Real host means real sockets.** Every other oracle runs the corpus under the sandbox executor, where time is fake and the whole corpus is instant. A `--native` artifact runs on the real host, so the server cases block. Each side is capped (20s, `NOETA_AOT_TIMEOUT_SECS`) and a case that outlives it is `timed_out` — excluded, counted, **named**.
+* **Nondeterminism is measured, not listed.** A case that disagrees gets one truth re-run; if the truth does not reproduce *itself* (clock, RNG, ports) it is `nondeterministic` — excluded, counted, named. No hand-maintained exclusion list to rot.
+
+The `native_protos > 0` floor is now `assert_native_proto_ratchet` (floor 2550, measured 2633) on all three arms, with the failure message spelling out why an all-bail tier 1 still *agrees* with tier 0.
+
 ---
 
 ## 10. `noeta serve`'s three hot paths — confirmed, and it has already dropped a feature
@@ -273,6 +293,12 @@ Two instances of one shape: an artifact written and read by independent hand-wri
 Row 9 records the consequence from the other end: `--native` is the one execution surface with no differential oracle, so this divergence is unobserved by construction. The two rows are the same finding seen from opposite sides, and doing row 9 first is what would make this one falsifiable.
 
 **Chokepoint.** `RunOptions` grows the dispatch table as an option — a newtype carrying the safety contract, so the `unsafe` stays at the boundary where the caller asserts it rather than justifying a parallel function — and `run_module_aot` becomes the twelfth preset. **Size: ~40 lines.** Then add a census in the shape of `lowerer_field_census.rs`: every `RunOptions` field is consumed by `run_module_with`, and every `run_module_*` method reaches it.
+
+**Done (2026-08-01, `audit/aot-oracle`).** `RunOptions::aot_dispatch: Option<AotDispatch>`, where `AotDispatch::new` is the one `unsafe fn` and carries the whole contract; the core runner binds it after the tiering arm and before the run. `run_module_aot` keeps its signature, its safety doc and its callers, and is now twelve lines of preset. It picked up `cancel`, `hot_mailbox`, the profiler seam, `gc_threshold` and the debug-session arena by construction.
+
+`crates/noeta-vm/tests/run_options_census.rs` holds the line with three properties: completeness (an exhaustive destructuring — the compiler — *and* the field list parsed out of `backend.rs` — the text), consumption (every field appears as `opts.<field>` inside `run_module_with`), and reachability (every `run_module_*` reaches the core, transitively). All three were mutation-verified: an unconsumed field fails completeness, then consumption once it is classified; restoring the pre-fix parallel body fails reachability by name.
+
+What the census **cannot** catch, recorded so nobody assumes otherwise: it reads `opts.<field>` as text, so a field consumed by being *mentioned* but not acted on still passes, and it says nothing about the ORDER of the init steps — the hot-mailbox cursor being claimed before the run can drain is a comment, not a checked property.
 
 ---
 
