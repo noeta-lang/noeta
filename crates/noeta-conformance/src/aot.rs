@@ -1529,7 +1529,7 @@ mod tests {
     /// It takes the full run of clean re-runs to earn the exclusion — not a first clean one.
     #[test]
     fn one_clean_re_run_does_not_clear_an_abort() {
-        assert!(ABORT_REPEATS > 1, "a single re-run cannot clear an abort");
+        const { assert!(ABORT_REPEATS > 1, "a single re-run cannot clear an abort") };
         let mut runs = repeated(1, clean);
         runs.push(Ran::Done(panicked()));
         assert_eq!(reproduce_abort(scripted(runs)), Abort::Reproduced);
@@ -1537,9 +1537,13 @@ mod tests {
 
     /// An abort is judged with MORE evidence than an output disagreement, not less — the inversion
     /// that made this the load-sensitive arm of the gate.
+    ///
+    /// A `const` block, so the inversion cannot even be *built*, let alone reach a test run. Clippy
+    /// asked for this and it is the better shape: a guard over two constants has no business waiting
+    /// for a test binary to execute.
     #[test]
     fn an_abort_buys_more_samples_than_a_disagreement() {
-        assert!(ABORT_REPEATS >= STABILITY_REPEATS);
+        const { assert!(ABORT_REPEATS >= STABILITY_REPEATS) };
     }
 
     /// `exit None` and an empty detail names the absence of the answer. The report says which
