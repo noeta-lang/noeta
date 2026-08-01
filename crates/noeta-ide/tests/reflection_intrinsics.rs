@@ -217,7 +217,7 @@ fn the_call_surfaces_are_the_parsers_own() {
                 };
                 let args = vec!["v"; arity].join(", ");
                 let expr = format!("{head}({args})");
-                let parses = parses_as_written(&expr);
+                let parses = parses_as_written(&expr, intrinsic.name);
                 assert_eq!(
                     parses,
                     claimed,
@@ -237,7 +237,7 @@ fn the_call_surfaces_are_the_parsers_own() {
 /// that recovered into some other node (a call of an ordinary identifier, say) would be a false
 /// positive for a surface that does not exist. So the statement is: no parse errors, and the bound
 /// value is the intrinsic's own AST node.
-fn parses_as_written(expr: &str) -> bool {
+fn parses_as_written(expr: &str, keyword: &str) -> bool {
     let text = format!("probed = {expr}\n");
     let source = Source::new(SourceId::FIRST, "grid.noe", &text);
     let lexed = noeta_lexer::lex(&source);
@@ -251,22 +251,25 @@ fn parses_as_written(expr: &str) -> bool {
     let Some(noeta_ast::Stmt::Binding { value, .. }) = parsed.program.stmts.first() else {
         return false;
     };
-    matches!(
-        value,
-        noeta_ast::Expr::AttributesOf { .. }
-            | noeta_ast::Expr::TypeOf { .. }
-            | noeta_ast::Expr::TypeName { .. }
-            | noeta_ast::Expr::FieldsOf { .. }
-            | noeta_ast::Expr::TraitsOf { .. }
-            | noeta_ast::Expr::FromBytes { .. }
-            | noeta_ast::Expr::RolesOf { .. }
-            | noeta_ast::Expr::ParamsOf { .. }
-            | noeta_ast::Expr::ReturnsOf { .. }
-            | noeta_ast::Expr::Invoke { .. }
-            | noeta_ast::Expr::FieldSpecsOf { .. }
-            | noeta_ast::Expr::VariantsOf { .. }
-            | noeta_ast::Expr::Construct { .. }
-    ) && parsed.program.stmts.len() == 1
+    // **Which** query, not merely "a reflection node". Before the collapse this could only assert
+    // membership in a thirteen-variant list, so a snippet that parsed into the *wrong* intrinsic
+    // passed. One node with a `which` discriminant makes the stronger assertion the cheap one, and
+    // it is the assertion the grid actually wants: `attributes_of::<T>()` must parse as
+    // `attributes_of`.
+    let noeta_ast::Expr::Reflect { which, operand, .. } = value else {
+        return false;
+    };
+    // Every node the parser builds must satisfy its kind's declared operand contract. This is the
+    // parser half of the census: the grid drives all thirteen keywords through the whole
+    // (turbofish? × arity) space, so any production that built a shape its kind does not admit
+    // fails here rather than at a `panic!` deep in the checker.
+    assert!(
+        which.shape().admits(operand),
+        "`{expr}` parsed into a `{}` node whose operand its {:?} shape does not admit",
+        which.keyword(),
+        which.shape()
+    );
+    which.keyword() == keyword && parsed.program.stmts.len() == 1
 }
 
 /// **All thirteen, both features, over live buffers** — the row's deliverable, measured rather than

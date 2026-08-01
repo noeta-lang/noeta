@@ -614,22 +614,11 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
                 f(name);
             }
         }
-        Rvalue::Try { operand, .. }
-        | Rvalue::TypeOf { operand, .. }
-        | Rvalue::TypeArgName { operand, .. }
-        | Rvalue::FieldsOf { operand, .. }
-        | Rvalue::TraitsOf { operand, .. } => f(operand),
+        Rvalue::Try { operand, .. } | Rvalue::TypeArgName { operand, .. } => f(operand),
         Rvalue::TypeSlotName { slot, .. } => f(slot),
-        Rvalue::ParamsOf { target, .. } | Rvalue::ReturnsOf { target, .. } => f(target),
-        Rvalue::FieldSpecsOf { name, .. }
-        | Rvalue::VariantsOf { name, .. }
-        | Rvalue::AttributesOf { name, .. } => f(name),
-        // `roles_of()`'s scope is optional; the atom is a name like every other when present.
-        Rvalue::RolesOf { name, .. } => name.iter().for_each(&mut *f),
-        Rvalue::Construct { name, fields, .. } => {
-            f(name);
-            f(fields);
-        }
+        // One arm for the whole reflection surface: values, target strings, type names and
+        // `invoke`'s three parts are all just operand atoms once lowering has run.
+        Rvalue::Reflect { args, .. } => args.for_each_atom(f),
         Rvalue::DecodeTyped { name, text, .. } => {
             f(name);
             f(text);
@@ -647,16 +636,6 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             args.iter().for_each(f);
         }
         Rvalue::MakeChannel { capacity, .. } => f(capacity),
-        Rvalue::FromBytes { blob, .. } => f(blob),
-        Rvalue::Invoke {
-            recv, name, args, ..
-        } => {
-            if let Some(recv) = recv {
-                f(recv);
-            }
-            f(name);
-            f(args);
-        }
         Rvalue::TypedModuleCall { args, dynamic, .. } => {
             args.iter().for_each(&mut *f);
             // The hidden type-argument slot (F2b) is a read — a closure inside a forwarding fn

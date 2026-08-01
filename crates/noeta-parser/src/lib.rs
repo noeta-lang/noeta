@@ -34,8 +34,8 @@ use noeta_ast::{
     AssocTypeDecl, AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, CallArg, ClassDecl,
     ClosureBody, Decorators, DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern,
     ImplBlock, MatchArm, MethodDirective, Name, ObjectLit, PackedDirective, PackedLayout, Param,
-    Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod,
-    TypeOperand, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
+    Pattern, Program, ReflectKind, ReflectOperand, RoleTag, Stmt, StructDecl, TierDecl, TraitBound,
+    TraitDecl, TraitMethod, TypeOperand, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::Edition;
@@ -3023,88 +3023,97 @@ where
                 desugar_if_then_else(cond, then_expr, else_expr, ctx.to_span(e.span()))
             });
 
-        // `attributes_of::<T>()` / `attributes_of(name)` — the reflection manifest query. Two
-        // disjoint surfaces under one keyword, told apart by the token after it, exactly as
-        // `field_specs_of` spells them: `::` opens the turbofish (a static attribute type), `(`
-        // opens the dynamic string operand. They stay disjoint in the AST as the two arms of
-        // `TypeOperand` and converge at lowering on one name-keyed runtime node — the manifest is
-        // keyed on the type NAME, so the two arms ask the same question.
+        // **The name-keyed reflection surface, as one grammar.** `attributes_of`, `field_specs_of`
+        // and `variants_of` spell one query under three keywords: `::` opens the turbofish (a static
+        // type), `(` opens the dynamic string operand, and the two stay disjoint in the AST as the
+        // two arms of `TypeOperand`, converging at lowering on one name-keyed runtime node.
         //
-        // The turbofish `T` stays a real `TypeRef` here for the same reason every other one does:
-        // namespace qualification runs later, in the linker, and rewrites `TypeRef`s.
-        let attributes_of = just(T::AttributesOfKw)
-            .ignore_then(choice((
-                just(T::ColonColon)
-                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
-                    .then_ignore(just(T::LParen))
-                    .then_ignore(just(T::RParen))
-                    .map(TypeOperand::Static),
-                sub.clone()
-                    .delimited_by(just(T::LParen), just(T::RParen))
-                    .map(|e| TypeOperand::Dynamic(Box::new(e))),
-            )))
-            .map_with(move |ty, e| Expr::AttributesOf {
-                ty,
-                span: ctx.to_span(e.span()),
-            });
+        // Written once rather than three times because it *is* one contract
+        // (`ReflectShape::Type`) — three copies of a grammar are three chances for one to drift,
+        // which is the shape this whole node exists to close.
+        //
+        // The turbofish `T` is deliberately NOT flattened to a string literal here. Namespace
+        // qualification runs later, in the linker, and rewrites `TypeRef`s — a string would be
+        // invisible to it and `field_specs_of::<Todo>()` under a `namespace` would silently query
+        // the unqualified key.
+        let name_keyed = |kw: T, which: ReflectKind| {
+            just(kw)
+                .ignore_then(choice((
+                    just(T::ColonColon)
+                        .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                        .then_ignore(just(T::LParen))
+                        .then_ignore(just(T::RParen))
+                        .map(TypeOperand::Static),
+                    sub.clone()
+                        .delimited_by(just(T::LParen), just(T::RParen))
+                        .map(|e| TypeOperand::Dynamic(Box::new(e))),
+                )))
+                .map_with(move |ty, e| Expr::Reflect {
+                    which,
+                    operand: ReflectOperand::Type(ty),
+                    span: ctx.to_span(e.span()),
+                })
+        };
 
-        // `type_name::<T>()` — a type's qualified runtime identity as a `string`. Exactly
-        // `attributes_of`'s surface (keyword + turbofish + `()`), and exactly its AST discipline: `T`
-        // stays a real `TypeRef` so the linker's namespace rewrite reaches it, and only IR lowering
-        // resolves it to a name. That is the whole feature — flattening it to a string here would
-        // put it beyond qualification and hand back the *unqualified* name, which is the bug
+        // **The value-operand reflection surface, as one grammar.** `type_of`, `fields_of`,
+        // `traits_of`, `params_of` and `returns_of` are a keyword plus one parenthesized operand —
+        // a value for the first three, a runtime `string` naming a callable for the last two. The
+        // *checker* is what distinguishes those; the grammar is genuinely identical
+        // (`ReflectShape::Value`), so it is written once.
+        let value_operand = |kw: T, which: ReflectKind| {
+            just(kw)
+                .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
+                .map_with(move |value, e| Expr::Reflect {
+                    which,
+                    operand: ReflectOperand::Value(Box::new(value)),
+                    span: ctx.to_span(e.span()),
+                })
+        };
+
+        let attributes_of = name_keyed(T::AttributesOfKw, ReflectKind::AttributesOf);
+        let field_specs_of = name_keyed(T::FieldSpecsOfKw, ReflectKind::FieldSpecsOf);
+        let variants_of = name_keyed(T::VariantsOfKw, ReflectKind::VariantsOf);
+
+        let type_of = value_operand(T::TypeOfKw, ReflectKind::TypeOf);
+        let fields_of = value_operand(T::FieldsOfKw, ReflectKind::FieldsOf);
+        let traits_of = value_operand(T::TraitsOfKw, ReflectKind::TraitsOf);
+        let params_of = value_operand(T::ParamsOfKw, ReflectKind::ParamsOf);
+        let returns_of = value_operand(T::ReturnsOfKw, ReflectKind::ReturnsOf);
+
+        // `type_name::<T>()` — a type's qualified runtime identity as a `string`. Keyword +
+        // turbofish + `()`, and the same AST discipline as the name-keyed surface: `T` stays a real
+        // `TypeRef` so the linker's namespace rewrite reaches it, and only IR lowering resolves it
+        // to a name. That is the whole feature — flattening it to a string here would put it beyond
+        // qualification and hand back the *unqualified* name, which is the bug
         // `field_specs_of::<T>()` had.
         //
         // There is deliberately no `type_name(expr)` surface: a runtime-string form would be the
-        // identity function on its argument.
+        // identity function on its argument. That is what `ReflectShape::StaticType` records.
         let type_name = just(T::TypeNameKw)
             .ignore_then(just(T::ColonColon))
             .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
             .then_ignore(just(T::LParen))
             .then_ignore(just(T::RParen))
-            .map_with(move |ty, e| Expr::TypeName {
-                ty,
+            .map_with(move |ty, e| Expr::Reflect {
+                which: ReflectKind::TypeName,
+                operand: ReflectOperand::StaticType(ty),
                 span: ctx.to_span(e.span()),
             });
 
-        // `type_of(value)` — the runtime reflection query. A keyword + parenthesized operand (like a
-        // call surface), yielding the value's `Type` descriptor.
-        let type_of = just(T::TypeOfKw)
-            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
-            .map_with(move |value, e| Expr::TypeOf {
-                value: Box::new(value),
-                span: ctx.to_span(e.span()),
-            });
-
-        // `fields_of(value)` — the value-level reflection query (derive layer 3): a struct/class
-        // instance's fields as `List<FieldEntry>`. Same surface shape as `type_of`.
-        let fields_of = just(T::FieldsOfKw)
-            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
-            .map_with(move |value, e| Expr::FieldsOf {
-                value: Box::new(value),
-                span: ctx.to_span(e.span()),
-            });
-
-        // `traits_of(value)` — the trait-membership reflection query: the qualified trait names the
-        // value's nominal type has a registered `impl` for, as a sorted `List<string>`. Same
-        // surface shape as `fields_of`.
-        let traits_of = just(T::TraitsOfKw)
-            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
-            .map_with(move |value, e| Expr::TraitsOf {
-                value: Box::new(value),
-                span: ctx.to_span(e.span()),
-            });
-
-        // `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>`. Combines the
-        // turbofish type argument (like `attributes_of`) with a parenthesized operand (like
-        // `type_of`); the element type must be named because the byte buffer is opaque.
+        // `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>`. A turbofish type
+        // argument plus a parenthesized operand; the element type must be named because the byte
+        // buffer is opaque, and it must be a *static* type because decoding needs the packed layout
+        // rather than the name (`ReflectShape::StaticTypeWith`).
         let from_bytes = just(T::FromBytesKw)
             .ignore_then(just(T::ColonColon))
             .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
             .then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
-            .map_with(move |(ty, blob), e| Expr::FromBytes {
-                ty,
-                blob: Box::new(blob),
+            .map_with(move |(ty, blob), e| Expr::Reflect {
+                which: ReflectKind::FromBytes,
+                operand: ReflectOperand::StaticTypeWith {
+                    ty,
+                    arg: Box::new(blob),
+                },
                 span: ctx.to_span(e.span()),
             });
 
@@ -3215,6 +3224,10 @@ where
         // runtime string. Bare `roles_of()` (no scope at all) spans all role-tagged attributes.
         // Yields `List<RoleBinding>`.
         //
+        // `roles_of()` / `roles_of::<E>()` / `roles_of(name)` — the semantic-role index, optionally
+        // scoped to one role enum. The only `ReflectShape::OptionalType` surface, and the reason
+        // that shape exists: the operand is genuinely optional in the grammar.
+        //
         // The turbofish arm commits on the `::`; the other two both open on `(`, so the ORDER is
         // what tells them apart — the empty-parens arm is tried last, reached only once parsing an
         // expression between the parens has failed. A `roles_of()` therefore stays the unscoped
@@ -3225,34 +3238,17 @@ where
                     .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
                     .then_ignore(just(T::LParen))
                     .then_ignore(just(T::RParen))
-                    .map(|ty| Some(TypeOperand::Static(ty))),
+                    .map(|ty| ReflectOperand::Type(TypeOperand::Static(ty))),
                 sub.clone()
                     .delimited_by(just(T::LParen), just(T::RParen))
-                    .map(|e| Some(TypeOperand::Dynamic(Box::new(e)))),
-                just(T::LParen).ignore_then(just(T::RParen)).map(|_| None),
+                    .map(|e| ReflectOperand::Type(TypeOperand::Dynamic(Box::new(e)))),
+                just(T::LParen)
+                    .ignore_then(just(T::RParen))
+                    .map(|_| ReflectOperand::Nothing),
             )))
-            .map_with(move |ty, e| Expr::RolesOf {
-                ty,
-                span: ctx.to_span(e.span()),
-            });
-
-        // `params_of(target)` — the parameter-list reflection query. A keyword + parenthesized
-        // operand (like `type_of`); the operand is a runtime `string` naming a fn or method. Yields
-        // `List<ParamInfo>`.
-        let params_of = just(T::ParamsOfKw)
-            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
-            .map_with(move |target, e| Expr::ParamsOf {
-                target: Box::new(target),
-                span: ctx.to_span(e.span()),
-            });
-
-        // `returns_of(target)` — the return-type reflection query. Same surface shape as
-        // `params_of`: a keyword + one parenthesized runtime `string` operand naming a fn or method.
-        // Yields `?Type` — the option is what tells a mistyped target apart from a `void` return.
-        let returns_of = just(T::ReturnsOfKw)
-            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
-            .map_with(move |target, e| Expr::ReturnsOf {
-                target: Box::new(target),
+            .map_with(move |operand, e| Expr::Reflect {
+                which: ReflectKind::RolesOf,
+                operand,
                 span: ctx.to_span(e.span()),
             });
 
@@ -3291,66 +3287,22 @@ where
                     let args = it.next().expect("two operands");
                     (None, name, args)
                 };
-                Expr::Invoke {
-                    recv,
-                    name: Box::new(name),
-                    args: Box::new(args),
+                Expr::Reflect {
+                    which: ReflectKind::Invoke,
+                    operand: ReflectOperand::Dispatch {
+                        recv,
+                        name: Box::new(name),
+                        args: Box::new(args),
+                    },
                     span,
                 }
             });
 
-        // `field_specs_of::<T>()` / `field_specs_of(name)` — the TYPE-level field-schema query. Two
-        // disjoint surfaces under one keyword, told apart by the token after it: `::` opens the
-        // turbofish (a static type), `(` opens the dynamic string operand. They stay disjoint in the
-        // AST as the two arms of `TypeOperand`, and converge only at lowering, on one name-keyed
-        // runtime node — exactly the string-keyed shape `params_of` takes.
-        //
-        // The turbofish `T` is deliberately NOT flattened to a string literal here. Namespace
-        // qualification runs later, in the linker, and rewrites `TypeRef`s — a string would be
-        // invisible to it and `field_specs_of::<Todo>()` under a `namespace` would silently query the
-        // unqualified key. Keeping it a type until lowering is the same convention every other
-        // turbofish in this grammar follows (`attributes_of`, `from_bytes`, `channel`, `roles_of`,
-        // the typed call forms).
-        let field_specs_of = just(T::FieldSpecsOfKw)
-            .ignore_then(choice((
-                just(T::ColonColon)
-                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
-                    .then_ignore(just(T::LParen))
-                    .then_ignore(just(T::RParen))
-                    .map(TypeOperand::Static),
-                sub.clone()
-                    .delimited_by(just(T::LParen), just(T::RParen))
-                    .map(|e| TypeOperand::Dynamic(Box::new(e))),
-            )))
-            .map_with(move |name, e| Expr::FieldSpecsOf {
-                name,
-                span: ctx.to_span(e.span()),
-            });
-
-        // `variants_of::<T>()` / `variants_of(name)` — the TYPE-level variant schema, the enum twin of
-        // `field_specs_of`. Identical surface shape by construction (same two arms, same reason the
-        // turbofish stays a `TypeRef` until lowering so the linker's namespace qualification can see
-        // it), so the two productions differ only in their keyword and node.
-        let variants_of = just(T::VariantsOfKw)
-            .ignore_then(choice((
-                just(T::ColonColon)
-                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
-                    .then_ignore(just(T::LParen))
-                    .then_ignore(just(T::RParen))
-                    .map(TypeOperand::Static),
-                sub.clone()
-                    .delimited_by(just(T::LParen), just(T::RParen))
-                    .map(|e| TypeOperand::Dynamic(Box::new(e))),
-            )))
-            .map_with(move |name, e| Expr::VariantsOf {
-                name,
-                span: ctx.to_span(e.span()),
-            });
-
         // `construct::<T>(fields)` / `construct(name, fields)` — the dynamic struct constructor. The
-        // turbofish carries the type as a `TypeOperand::Static` (like `field_specs_of`, and for the
-        // same qualification reason) plus a single `fields` operand; the string form takes the type
-        // name and the fields list as two operands. Both converge on one node `{ name, fields }`.
+        // turbofish carries the type as a `TypeOperand::Static` (like the name-keyed surface, and
+        // for the same qualification reason) plus a single `fields` operand; the string form takes
+        // the type name and the fields list as two operands. Both converge on one
+        // `ReflectShape::TypeWith` operand.
         let construct = just(T::ConstructKw)
             .ignore_then(choice((
                 just(T::ColonColon)
@@ -3369,11 +3321,35 @@ where
                         (TypeOperand::Dynamic(Box::new(name)), fields)
                     }),
             )))
-            .map_with(move |(name, fields), e| Expr::Construct {
-                name,
-                fields: Box::new(fields),
+            .map_with(move |(ty, fields), e| Expr::Reflect {
+                which: ReflectKind::Construct,
+                operand: ReflectOperand::TypeWith {
+                    ty,
+                    arg: Box::new(fields),
+                },
                 span: ctx.to_span(e.span()),
             });
+
+        // **All thirteen intrinsics, one `atom` slot.** Every one commits on its leading reserved
+        // word, so the order among them is immaterial and the whole surface costs the choice tuple
+        // one entry instead of six. The tuple is at its arity cap, and it was the reflection surface
+        // paying most of that tax — a standing cost on every future grammar production, which the
+        // collapse pays down rather than merely relocating.
+        let reflection = choice((
+            attributes_of,
+            type_name,
+            type_of,
+            fields_of,
+            traits_of,
+            from_bytes,
+            roles_of,
+            params_of,
+            returns_of,
+            invoke,
+            field_specs_of,
+            variants_of,
+            construct,
+        ));
 
         let atom = choice((
             int,
@@ -3389,21 +3365,9 @@ where
             closure,
             if_then_else,
             match_,
-            // One choice-tuple slot for the two keyword+turbofish+`()` queries (the tuple is at
-            // its arity cap): identical surface shape, disjoint keywords.
-            attributes_of.or(type_name),
-            // One choice-tuple slot for the two value-reflection queries (the tuple is at its
-            // arity cap): same surface shape, disjoint keywords.
-            type_of.or(fields_of).or(traits_of),
-            from_bytes,
+            // The whole reflection surface, in one slot.
+            reflection,
             channel,
-            roles_of,
-            // The tuple is at its arity cap, so each keyword-led reflection query shares a slot with
-            // a disjoint sibling: the two signature queries `params_of`/`returns_of` with the two
-            // type-level schema queries `field_specs_of`/`variants_of`, and the by-name `invoke` with
-            // the by-name `construct`. All six commit on their leading keyword.
-            params_of.or(returns_of).or(field_specs_of).or(variants_of),
-            invoke.or(construct),
             // One choice-tuple slot for the two user turbofish forms (the tuple is at its arity
             // cap): the module form (`json.parse::<T>(s)`, needs a `.`) wins over the free-function
             // form (`f::<T>(args)`).

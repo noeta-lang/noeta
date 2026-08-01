@@ -12,8 +12,8 @@
 use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
     FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective,
-    ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod,
-    TypeOperand, TypeParam, TypeRef, UseName, VariantDecl,
+    ObjectLit, Param, Pattern, Program, ReflectOperand, Stmt, StrPart, StructDecl, TraitDecl,
+    TraitMethod, TypeOperand, TypeParam, TypeRef, UseName, VariantDecl,
 };
 use std::cell::Cell;
 
@@ -2562,89 +2562,69 @@ impl Printer<'_> {
             Expr::TypeTest { expr, ty, .. } => {
                 Doc::concat([self.receiver(expr)?, Doc::text(" is "), self.type_ref(ty)?])
             }
-            // Two arms, printed as written — the same reconstruction `field_specs_of` gets below,
-            // because it is the same operand contract.
-            Expr::AttributesOf { ty, .. } => match ty {
-                TypeOperand::Static(ty) => Doc::concat([
-                    Doc::text("attributes_of::<"),
-                    self.type_ref(ty)?,
-                    Doc::text(">()"),
-                ]),
-                TypeOperand::Dynamic(e) => {
-                    Doc::concat([Doc::text("attributes_of("), self.expr(e)?, Doc::text(")")])
+            // **One arm for all thirteen intrinsics**, and the formatter is where the collapse is
+            // most visible: printing a reflection call is the keyword plus the operand *as written*,
+            // and the operand shape is the only thing that varies. It was thirteen near-identical
+            // arms, four of which had to be edited in lockstep whenever the two-arm operand contract
+            // moved.
+            //
+            // The turbofish surface keeps its `T` as a type operand and is reconstructed verbatim; a
+            // dynamic operand (a variable, a computed string, a literal) prints as the call form.
+            // Both parse back to the same node, and formatting never changes which form was written
+            // — for `invoke` and `construct` the arity IS the surface distinction.
+            Expr::Reflect { which, operand, .. } => {
+                let kw = which.keyword();
+                match operand {
+                    ReflectOperand::Nothing => Doc::text(format!("{kw}()")),
+                    ReflectOperand::Type(TypeOperand::Static(ty))
+                    | ReflectOperand::StaticType(ty) => Doc::concat([
+                        Doc::text(format!("{kw}::<")),
+                        self.type_ref(ty)?,
+                        Doc::text(">()"),
+                    ]),
+                    ReflectOperand::Type(TypeOperand::Dynamic(e)) => {
+                        Doc::concat([Doc::text(format!("{kw}(")), self.expr(e)?, Doc::text(")")])
+                    }
+                    ReflectOperand::Value(e) => {
+                        Doc::concat([Doc::text(format!("{kw}(")), self.expr(e)?, Doc::text(")")])
+                    }
+                    ReflectOperand::TypeWith {
+                        ty: TypeOperand::Static(ty),
+                        arg,
+                    }
+                    | ReflectOperand::StaticTypeWith { ty, arg } => Doc::concat([
+                        Doc::text(format!("{kw}::<")),
+                        self.type_ref(ty)?,
+                        Doc::text(">("),
+                        self.expr(arg)?,
+                        Doc::text(")"),
+                    ]),
+                    ReflectOperand::TypeWith {
+                        ty: TypeOperand::Dynamic(e),
+                        arg,
+                    } => Doc::concat([
+                        Doc::text(format!("{kw}(")),
+                        self.expr(e)?,
+                        Doc::text(", "),
+                        self.expr(arg)?,
+                        Doc::text(")"),
+                    ]),
+                    // The receiver, when there is one, prints as a leading operand; the free-fn form
+                    // prints the two it has.
+                    ReflectOperand::Dispatch { recv, name, args } => {
+                        let mut parts = vec![Doc::text(format!("{kw}("))];
+                        if let Some(recv) = recv {
+                            parts.push(self.expr(recv)?);
+                            parts.push(Doc::text(", "));
+                        }
+                        parts.push(self.expr(name)?);
+                        parts.push(Doc::text(", "));
+                        parts.push(self.expr(args)?);
+                        parts.push(Doc::text(")"));
+                        Doc::concat(parts)
+                    }
                 }
-            },
-            // Turbofish only — there is no call form to resugar into, by design.
-            Expr::TypeName { ty, .. } => Doc::concat([
-                Doc::text("type_name::<"),
-                self.type_ref(ty)?,
-                Doc::text(">()"),
-            ]),
-            Expr::TypeOf { value, .. } => {
-                Doc::concat([Doc::text("type_of("), self.expr(value)?, Doc::text(")")])
             }
-            Expr::FieldsOf { value, .. } => {
-                Doc::concat([Doc::text("fields_of("), self.expr(value)?, Doc::text(")")])
-            }
-            Expr::TraitsOf { value, .. } => {
-                Doc::concat([Doc::text("traits_of("), self.expr(value)?, Doc::text(")")])
-            }
-            Expr::ParamsOf { target, .. } => {
-                Doc::concat([Doc::text("params_of("), self.expr(target)?, Doc::text(")")])
-            }
-            Expr::ReturnsOf { target, .. } => {
-                Doc::concat([Doc::text("returns_of("), self.expr(target)?, Doc::text(")")])
-            }
-            // The turbofish surface `field_specs_of::<T>()` keeps its `T` as a type operand, so it is
-            // reconstructed verbatim; a dynamic operand (a variable, a computed string, a literal)
-            // prints as the call form `field_specs_of(name)`. Both parse back to the same node.
-            Expr::FieldSpecsOf { name, .. } => match name {
-                TypeOperand::Static(ty) => Doc::concat([
-                    Doc::text("field_specs_of::<"),
-                    self.type_ref(ty)?,
-                    Doc::text(">()"),
-                ]),
-                TypeOperand::Dynamic(e) => {
-                    Doc::concat([Doc::text("field_specs_of("), self.expr(e)?, Doc::text(")")])
-                }
-            },
-            // `variants_of` prints through the identical two-arm reconstruction — one surface, so
-            // one shape.
-            Expr::VariantsOf { name, .. } => match name {
-                TypeOperand::Static(ty) => Doc::concat([
-                    Doc::text("variants_of::<"),
-                    self.type_ref(ty)?,
-                    Doc::text(">()"),
-                ]),
-                TypeOperand::Dynamic(e) => {
-                    Doc::concat([Doc::text("variants_of("), self.expr(e)?, Doc::text(")")])
-                }
-            },
-            // `construct::<T>(fields)` reconstructs its turbofish likewise; the dynamic form prints
-            // both operands as `construct(name, fields)`.
-            Expr::Construct { name, fields, .. } => match name {
-                TypeOperand::Static(ty) => Doc::concat([
-                    Doc::text("construct::<"),
-                    self.type_ref(ty)?,
-                    Doc::text(">("),
-                    self.expr(fields)?,
-                    Doc::text(")"),
-                ]),
-                TypeOperand::Dynamic(e) => Doc::concat([
-                    Doc::text("construct("),
-                    self.expr(e)?,
-                    Doc::text(", "),
-                    self.expr(fields)?,
-                    Doc::text(")"),
-                ]),
-            },
-            Expr::FromBytes { ty, blob, .. } => Doc::concat([
-                Doc::text("from_bytes::<"),
-                self.type_ref(ty)?,
-                Doc::text(">("),
-                self.expr(blob)?,
-                Doc::text(")"),
-            ]),
             Expr::Channel { elem, capacity, .. } => Doc::concat([
                 Doc::text("channel::<"),
                 self.type_ref(elem)?,
@@ -2733,36 +2713,6 @@ impl Printer<'_> {
                     parts.push(self.type_ref(t)?);
                 }
                 parts.push(Doc::text(">"));
-                Doc::concat(parts)
-            }
-            Expr::RolesOf {
-                ty: Some(TypeOperand::Static(ty)),
-                ..
-            } => Doc::concat([
-                Doc::text("roles_of::<"),
-                self.type_ref(ty)?,
-                Doc::text(">()"),
-            ]),
-            Expr::RolesOf {
-                ty: Some(TypeOperand::Dynamic(e)),
-                ..
-            } => Doc::concat([Doc::text("roles_of("), self.expr(e)?, Doc::text(")")]),
-            Expr::RolesOf { ty: None, .. } => Doc::text("roles_of()"),
-            Expr::Invoke {
-                recv, name, args, ..
-            } => {
-                // The receiver, when there is one, prints as a leading operand; the free-fn form
-                // prints the two it has. Formatting never changes which form was written — the
-                // arity IS the surface distinction.
-                let mut parts = vec![Doc::text("invoke(")];
-                if let Some(recv) = recv {
-                    parts.push(self.expr(recv)?);
-                    parts.push(Doc::text(", "));
-                }
-                parts.push(self.expr(name)?);
-                parts.push(Doc::text(", "));
-                parts.push(self.expr(args)?);
-                parts.push(Doc::text(")"));
                 Doc::concat(parts)
             }
             Expr::FieldSet {

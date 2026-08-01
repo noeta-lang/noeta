@@ -1556,28 +1556,16 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         | Expr::Try { expr: inner, .. }
         | Expr::Await { expr: inner, .. }
         | Expr::Spawn { future: inner, .. }
-        | Expr::TypeOf { value: inner, .. }
-        | Expr::FieldsOf { value: inner, .. }
-        | Expr::TraitsOf { value: inner, .. }
-        | Expr::ParamsOf { target: inner, .. }
-        | Expr::ReturnsOf { target: inner, .. }
         | Expr::As { expr: inner, .. }
         | Expr::TypeTest { expr: inner, .. }
-        | Expr::FromBytes { blob: inner, .. }
         | Expr::Channel {
             capacity: inner, ..
         } => collect_nested_fns_in_expr(inner, out),
-        // A turbofish operand is a type — no expression, so no nested fn; a dynamic one is ordinary.
-        Expr::FieldSpecsOf { name, .. } | Expr::VariantsOf { name, .. } => {
-            if let Some(e) = name.dynamic() {
-                collect_nested_fns_in_expr(e, out);
-            }
-        }
-        Expr::Construct { name, fields, .. } => {
-            if let Some(e) = name.dynamic() {
-                collect_nested_fns_in_expr(e, out);
-            }
-            collect_nested_fns_in_expr(fields, out);
+        // One arm for the whole reflection surface. A turbofish operand is a type — no expression,
+        // so no nested fn — which `for_each_expr` already knows; three of the thirteen used to sit
+        // in the leaf group below, where a dynamic operand's nested fn would have been missed.
+        Expr::Reflect { operand, .. } => {
+            operand.for_each_expr(&mut |e| collect_nested_fns_in_expr(e, out));
         }
         Expr::Binary { lhs: a, rhs: b, .. }
         | Expr::Pipeline {
@@ -1616,15 +1604,6 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         Expr::TypedCall { args, .. } => {
             noeta_ast::CallArg::values(args).for_each(|a| collect_nested_fns_in_expr(a, out));
         }
-        Expr::Invoke {
-            recv, name, args, ..
-        } => {
-            if let Some(recv) = recv {
-                collect_nested_fns_in_expr(recv, out);
-            }
-            collect_nested_fns_in_expr(name, out);
-            collect_nested_fns_in_expr(args, out);
-        }
         Expr::List { items, .. } | Expr::Tuple { items, .. } => items
             .iter()
             .for_each(|i| collect_nested_fns_in_expr(i, out)),
@@ -1646,9 +1625,6 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
             .for_each(|h| collect_nested_fns_in_expr(h, out)),
         Expr::Ident { .. }
         | Expr::NativeFnRef { .. }
-        | Expr::AttributesOf { .. }
-        | Expr::TypeName { .. }
-        | Expr::RolesOf { .. }
         | Expr::Str { .. }
         | Expr::Int { .. }
         | Expr::Float { .. }

@@ -631,26 +631,6 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
             isolate: _,
             span: _,
         }
-        | Expr::TypeOf {
-            value: inner,
-            span: _,
-        }
-        | Expr::FieldsOf {
-            value: inner,
-            span: _,
-        }
-        | Expr::TraitsOf {
-            value: inner,
-            span: _,
-        }
-        | Expr::ParamsOf {
-            target: inner,
-            span: _,
-        }
-        | Expr::ReturnsOf {
-            target: inner,
-            span: _,
-        }
         | Expr::As {
             expr: inner,
             ty: _,
@@ -661,32 +641,18 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
             ty: _,
             span: _,
         }
-        | Expr::FromBytes {
-            ty: _,
-            blob: inner,
-            span: _,
-        }
         | Expr::Channel {
             elem: _,
             capacity: inner,
             span: _,
         } => bound_in_expr(inner, names),
-        // A turbofish operand is a type, never a binding; a dynamic one is an ordinary expression.
-        Expr::FieldSpecsOf { name, span: _ } | Expr::VariantsOf { name, span: _ } => {
-            if let Some(e) = name.dynamic() {
-                bound_in_expr(e, names);
-            }
-        }
-        Expr::Construct {
-            name,
-            fields,
+        // One arm for the whole reflection surface. A turbofish operand is a type, never a binding;
+        // a dynamic one is an ordinary expression — the distinction `for_each_expr` already draws.
+        Expr::Reflect {
+            which: _,
+            operand,
             span: _,
-        } => {
-            if let Some(e) = name.dynamic() {
-                bound_in_expr(e, names);
-            }
-            bound_in_expr(fields, names);
-        }
+        } => operand.for_each_expr(&mut |e| bound_in_expr(e, names)),
         Expr::Binary {
             op: _,
             lhs: a,
@@ -766,18 +732,6 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
             type_args: _,
             span: _,
         } => bound_in_expr(recv, names),
-        Expr::Invoke {
-            recv,
-            name,
-            args,
-            span: _,
-        } => {
-            if let Some(recv) = recv {
-                bound_in_expr(recv, names);
-            }
-            bound_in_expr(name, names);
-            bound_in_expr(args, names);
-        }
         Expr::List { items, span: _ } | Expr::Tuple { items, span: _ } => {
             items.iter().for_each(|i| bound_in_expr(i, names))
         }
@@ -807,9 +761,6 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
             func: _,
             span: _,
         }
-        | Expr::AttributesOf { ty: _, span: _ }
-        | Expr::TypeName { ty: _, span: _ }
-        | Expr::RolesOf { ty: _, span: _ }
         | Expr::Str { value: _, span: _ }
         | Expr::Int { value: _, span: _ }
         | Expr::Float { value: _, span: _ }
@@ -1280,17 +1231,24 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_expr(expr, visit);
             q_typeref(ty, visit);
         }
-        // `type_name::<T>()` holds a real type reference and qualifies here. That rewrite IS the
-        // feature: the string it yields is the *qualified* identity precisely because the type
-        // survives to lowering as a type.
-        Expr::TypeName { ty, span: _ } => q_typeref(ty, visit),
-        // `attributes_of`'s operand qualifies through the same `TypeOperand` split every other
-        // name-keyed surface takes — the turbofish arm is a type and rewrites, the dynamic arm is a
-        // runtime string and must not.
-        Expr::AttributesOf { ty, span: _ } => q_type_operand(ty, visit),
-        Expr::FromBytes { ty, blob, span: _ } => {
-            q_typeref(ty, visit);
-            q_expr(blob, visit);
+        // **The reflection surface, one arm.** A *turbofish* operand is a real type reference and
+        // qualifies here like any other — that rewrite IS the feature: `type_name::<T>()` yields the
+        // *qualified* identity precisely because the type survives to lowering as a type, and
+        // `field_specs_of::<Todo>()` under `namespace app.storage` queries the qualified key instead
+        // of silently answering with the empty schema. A *dynamic* operand is a runtime string and
+        // must NOT be rewritten: a literal `field_specs_of("Todo")` that happens to spell a local
+        // type name means the string `Todo`, and rewriting it would be a different bug.
+        //
+        // `for_each_type_ref_mut` draws exactly that line, so neither half can be forgotten for one
+        // query while the others keep it — which is the shape of the three silent-wrong-answer bugs
+        // this file's coverage gate was built for.
+        Expr::Reflect {
+            which: _,
+            operand,
+            span: _,
+        } => {
+            operand.for_each_type_ref_mut(&mut |ty| q_typeref(ty, visit));
+            operand.for_each_expr_mut(&mut |e| q_expr(e, visit));
         }
         Expr::Channel {
             elem,
@@ -1499,44 +1457,6 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_expr(value, visit);
             q_expr(fallback, visit);
         }
-        Expr::TypeOf { value, span: _ } => q_expr(value, visit),
-        Expr::FieldsOf { value, span: _ } | Expr::TraitsOf { value, span: _ } => {
-            q_expr(value, visit)
-        }
-        // The target is a runtime string, not a type, so nothing to qualify beyond the operand expr.
-        Expr::ParamsOf { target, span: _ } | Expr::ReturnsOf { target, span: _ } => {
-            q_expr(target, visit)
-        }
-        // The three name-keyed reflection surfaces. A *turbofish* operand is a real type reference,
-        // so it qualifies here like any other — that is what makes `field_specs_of::<Todo>()` (and
-        // `variants_of::<Priority>()`) under `namespace app.storage` query the qualified identity
-        // rather than silently answering with the empty schema. A *dynamic* operand is a runtime
-        // string and is walked as the ordinary expression it is: a literal `field_specs_of("Todo")`
-        // means the string `Todo`, and rewriting it because it happens to spell a local type name
-        // would be a different bug.
-        Expr::FieldSpecsOf { name, span: _ } | Expr::VariantsOf { name, span: _ } => {
-            q_type_operand(name, visit)
-        }
-        Expr::Construct {
-            name,
-            fields,
-            span: _,
-        } => {
-            q_type_operand(name, visit);
-            q_expr(fields, visit);
-        }
-        Expr::Invoke {
-            recv,
-            name,
-            args,
-            span: _,
-        } => {
-            if let Some(recv) = recv {
-                q_expr(recv, visit);
-            }
-            q_expr(name, visit);
-            q_expr(args, visit);
-        }
         Expr::FieldSet {
             receiver,
             // A member name on the receiver's type, not a declaration.
@@ -1583,13 +1503,6 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             span: _,
         }
         | Expr::Bool { value: _, span: _ } => {}
-        // The optional `roles_of::<E>()` enum, like `attributes_of`'s type, may be a namespace-
-        // qualified user enum, so qualify it (a bare `roles_of()` has nothing to qualify).
-        Expr::RolesOf { ty, span: _ } => {
-            if let Some(ty) = ty {
-                q_type_operand(ty, visit);
-            }
-        }
     }
 }
 
@@ -1710,6 +1623,17 @@ mod tests {
             parsed.diagnostics
         );
         parsed.program.stmts
+    }
+
+    /// The named-type operand of a reflection call, for the tests below: both the name-keyed
+    /// queries and `construct` carry one, in the two arms the qualifier must tell apart.
+    fn reflect_operand_type(expr: &Expr) -> Option<&noeta_ast::TypeOperand> {
+        let Expr::Reflect { operand, .. } = expr else {
+            return None;
+        };
+        operand
+            .as_type()
+            .or_else(|| operand.as_type_with().map(|(ty, _)| ty))
     }
 
     fn map(pairs: &[(&str, &str)]) -> UnitMap {
@@ -1948,7 +1872,7 @@ mod tests {
         let Stmt::Binding { value, .. } = &stmts[0] else {
             panic!("binding")
         };
-        let Expr::FieldSpecsOf { name, .. } = value else {
+        let Some(name) = reflect_operand_type(value) else {
             panic!("field_specs_of")
         };
         assert!(
@@ -1957,7 +1881,7 @@ mod tests {
         let Stmt::Binding { value, .. } = &stmts[1] else {
             panic!("binding")
         };
-        let Expr::Construct { name, .. } = value else {
+        let Some(name) = reflect_operand_type(value) else {
             panic!("construct")
         };
         assert!(
@@ -1981,14 +1905,14 @@ mod tests {
         let Stmt::Binding { value, .. } = &stmts[0] else {
             panic!("binding")
         };
-        let Expr::FieldSpecsOf { name, .. } = value else {
+        let Some(name) = reflect_operand_type(value) else {
             panic!("field_specs_of")
         };
         assert!(matches!(name.dynamic(), Some(Expr::Str { value, .. }) if value == "Todo"));
         let Stmt::Binding { value, .. } = &stmts[1] else {
             panic!("binding")
         };
-        let Expr::Construct { name, .. } = value else {
+        let Some(name) = reflect_operand_type(value) else {
             panic!("construct")
         };
         assert!(matches!(name.dynamic(), Some(Expr::Str { value, .. }) if value == "Todo"));
@@ -2007,8 +1931,11 @@ mod tests {
         let Stmt::Binding { value, .. } = &stmts[0] else {
             panic!("binding")
         };
-        let Expr::TypeName { ty, .. } = value else {
+        let Expr::Reflect { operand, .. } = value else {
             panic!("type_name")
+        };
+        let Some(ty) = operand.as_static_type() else {
+            panic!("type_name names a static type")
         };
         assert!(matches!(ty, TypeRef::Named { name, .. } if name == "app.storage.Todo"));
         assert_eq!(ty.head_name(), "app.storage.Todo");

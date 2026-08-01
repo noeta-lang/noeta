@@ -33,8 +33,8 @@ use noeta_ext_abi::NominalType;
 use noeta_span::Span;
 
 use crate::{
-    Atom, Block, ClassDef, Const, Decl, EnumDef, Func, InterpPart, Program, Rvalue, Stmt,
-    StructDef, Temp, Thunk,
+    Atom, Block, ClassDef, Const, Decl, EnumDef, Func, InterpPart, Program, ReflectArgs, Rvalue,
+    Stmt, StructDef, Temp, Thunk,
 };
 
 mod state_machine;
@@ -2009,6 +2009,121 @@ impl Lowerer<'_> {
         }
     }
 
+    /// **Lower a reflection query** — one dispatch for all thirteen intrinsics, over
+    /// [`ReflectKind`].
+    ///
+    /// The thirteen used to be thirteen arms of `lower_expr`, and they had converged on three
+    /// operand resolutions between them: [`Self::lower_type_operand`] for a named type, an ordinary
+    /// [`Self::lower_expr`] for a runtime operand, and a checker-recorded site lookup for
+    /// `from_bytes`' packed layout. Once the surface admits that, the per-kind work is a
+    /// [`ReflectArgs`] shape and nothing else, so it is written once.
+    ///
+    /// `type_name` is the one kind that emits no [`Rvalue::Reflect`]: it *is* the name-resolution
+    /// step the others use as an operand, so it returns that atom directly.
+    fn lower_reflect(
+        &mut self,
+        which: noeta_ast::ReflectKind,
+        operand: &noeta_ast::ReflectOperand,
+        span: &Span,
+        out: &mut Vec<Stmt>,
+    ) -> Result<Atom, Unsupported> {
+        use noeta_ast::{ReflectKind as K, ReflectOperand as Op};
+
+        // A shape mismatch is a compiler bug — the parser is an `Expr::Reflect`'s only constructor
+        // and the census asserts the whole (kind × arm) grid — so it is reported as one, not turned
+        // into an `Unsupported` the backends would then have to explain to a user.
+        let mismatch = || -> ! {
+            panic!(
+                "`{}` carries a {:?} operand and the parser is its only constructor",
+                which.keyword(),
+                which.shape()
+            )
+        };
+        let args = match which {
+            // `type_name::<T>()` — a **compile-time constant string**, with no runtime node at all:
+            // by the time lowering runs the program is linked, so this `TypeRef` already carries its
+            // qualified identity (`app.storage.Todo`) and there is nothing left to look up. Resolved
+            // through the same `TypeRef::head_name` the name-keyed queries use, which is what makes
+            // the two agree by construction rather than by convention.
+            //
+            // …unless the checker recognized `T` as a parameter of an ENCLOSING generic (a type's,
+            // read off the receiver's reflected tag — Gap B; or a fn's own, read off the hidden
+            // type-argument slot — F2b). One compiled body serves every instantiation, so there is
+            // no constant to fold: the name arrives per call, from `type_param_name_atom` — the same
+            // helper the narrow surfaces read, so `type_name::<T>()` and `v.as<T>()` agree on `T`.
+            K::TypeName => {
+                let Op::StaticType(ty) = operand else {
+                    mismatch()
+                };
+                return Ok(self.static_type_name_atom(ty, span, out));
+            }
+            // The name-keyed queries: the turbofish arm folds to a constant name (or reads a
+            // per-instantiation channel), the dynamic arm is the operand as written. One helper,
+            // so the two surfaces of one query cannot answer differently.
+            K::AttributesOf | K::FieldSpecsOf | K::VariantsOf => {
+                let Op::Type(ty) = operand else { mismatch() };
+                ReflectArgs::One(self.lower_type_operand(ty, span, out)?)
+            }
+            // The same, with the operand optional: no atom at all for the unscoped `roles_of()`.
+            K::RolesOf => match operand {
+                Op::Nothing => ReflectArgs::Nothing,
+                Op::Type(ty) => ReflectArgs::One(self.lower_type_operand(ty, span, out)?),
+                _ => mismatch(),
+            },
+            // The value queries: one ordinary operand, evaluated as written.
+            K::TypeOf | K::FieldsOf | K::TraitsOf | K::ParamsOf | K::ReturnsOf => {
+                let Op::Value(e) = operand else { mismatch() };
+                ReflectArgs::One(self.lower_expr(e, out)?)
+            }
+            K::Construct => {
+                let Op::TypeWith { ty, arg } = operand else {
+                    mismatch()
+                };
+                let name = self.lower_type_operand(ty, span, out)?;
+                let arg = self.lower_expr(arg, out)?;
+                ReflectArgs::Two { name, arg }
+            }
+            K::Invoke => {
+                let Op::Dispatch { recv, name, args } = operand else {
+                    mismatch()
+                };
+                let recv = match recv {
+                    Some(recv) => Some(self.lower_expr(recv, out)?),
+                    None => None,
+                };
+                let name = self.lower_expr(name, out)?;
+                let args = self.lower_expr(args, out)?;
+                ReflectArgs::Dispatch { recv, name, args }
+            }
+            K::FromBytes => {
+                let Op::StaticTypeWith { ty: _, arg } = operand else {
+                    mismatch()
+                };
+                let blob = self.lower_expr(arg, out)?;
+                // The element layout was recorded by the checker at this span in the same channel
+                // list literals use (`packed_list_sites`); `None` means T was not packable (already
+                // a checker error), and the backend then fails cleanly rather than mis-decoding.
+                let layout = self.sites.packed_list_sites.get(span).cloned();
+                // Validation arc: the checker marked this site if `T` implements `Validate`.
+                let validate = self.sites.from_bytes_validated.contains(span);
+                ReflectArgs::Bytes {
+                    blob,
+                    layout,
+                    validate,
+                }
+            }
+        };
+        Ok(self.emit(
+            out,
+            Rvalue::Reflect {
+                which,
+                args,
+                span: *span,
+            },
+            *span,
+        ))
+    }
+
     /// The **name a reflection surface keys on** for a statically written type: its linked head
     /// name, with a leaf-imported native type's short spelling resolved to the qualified identity
     /// the reflection artifact registers it under (see [`Lowerer::native_type_imports`]).
@@ -2102,17 +2217,6 @@ impl Lowerer<'_> {
             // emits byte-for-byte what `Repo.new(x)` emits.
             Expr::InstantiatedType { recv, .. } => self.lower_expr(recv, out),
             Expr::Str { value, .. } => Ok(Atom::Const(Const::Str(value.clone()))),
-            // `type_name::<T>()` — a **compile-time constant string**, with no runtime node at all:
-            // by the time lowering runs the program is linked, so this `TypeRef` already carries its
-            // qualified identity (`app.storage.Todo`) and there is nothing left to look up. Resolved
-            // through the same `TypeRef::head_name` the name-keyed reflection queries use, which is
-            // what makes the two agree by construction rather than by convention.
-            // …unless the checker recognized `T` as a parameter of an ENCLOSING generic (a type's,
-            // read off the receiver's reflected tag — Gap B; or a fn's own, read off the hidden
-            // type-argument slot — F2b). One compiled body serves every instantiation, so there is
-            // no constant to fold: the name arrives per call, from `type_param_name_atom` — the same
-            // helper the narrow surfaces read, so `type_name::<T>()` and `v.as<T>()` agree on `T`.
-            Expr::TypeName { ty, span } => Ok(self.static_type_name_atom(ty, span, out)),
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
             // magnitude's bit pattern is the runtime i64 word (a `u64` with the high bit set boxes as
@@ -3062,58 +3166,6 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
-            Expr::TypeOf { value, span } => {
-                let operand = self.lower_expr(value, out)?;
-                Ok(self.emit(
-                    out,
-                    Rvalue::TypeOf {
-                        operand,
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
-            Expr::FieldsOf { value, span } => {
-                let operand = self.lower_expr(value, out)?;
-                Ok(self.emit(
-                    out,
-                    Rvalue::FieldsOf {
-                        operand,
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
-            Expr::TraitsOf { value, span } => {
-                let operand = self.lower_expr(value, out)?;
-                Ok(self.emit(
-                    out,
-                    Rvalue::TraitsOf {
-                        operand,
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
-            Expr::FromBytes { blob, span, .. } => {
-                let blob = self.lower_expr(blob, out)?;
-                // The element layout was recorded by the checker at this span in the same channel
-                // list literals use (`packed_list_sites`); `None` means T was not packable (already
-                // a checker error), and the backend then fails cleanly rather than mis-decoding.
-                let layout = self.sites.packed_list_sites.get(span).cloned();
-                // Validation arc: the checker marked this site if `T` implements `Validate`.
-                let validate = self.sites.from_bytes_validated.contains(span);
-                Ok(self.emit(
-                    out,
-                    Rvalue::FromBytes {
-                        blob,
-                        layout,
-                        validate,
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
             Expr::TypedModuleCall {
                 recv,
                 func,
@@ -3195,83 +3247,15 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
-            Expr::AttributesOf { ty, span } => {
-                let name = self.lower_type_operand(ty, span, out)?;
-                Ok(self.emit(out, Rvalue::AttributesOf { name, span: *span }, *span))
-            }
-            Expr::RolesOf { ty, span } => {
-                let name = match ty {
-                    Some(ty) => Some(self.lower_type_operand(ty, span, out)?),
-                    None => None,
-                };
-                Ok(self.emit(out, Rvalue::RolesOf { name, span: *span }, *span))
-            }
-            Expr::ParamsOf { target, span } => {
-                let target = self.lower_expr(target, out)?;
-                Ok(self.emit(
-                    out,
-                    Rvalue::ParamsOf {
-                        target,
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
-            Expr::ReturnsOf { target, span } => {
-                let target = self.lower_expr(target, out)?;
-                Ok(self.emit(
-                    out,
-                    Rvalue::ReturnsOf {
-                        target,
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
-            Expr::FieldSpecsOf { name, span } => {
-                let name = self.lower_type_operand(name, span, out)?;
-                Ok(self.emit(out, Rvalue::FieldSpecsOf { name, span: *span }, *span))
-            }
-            Expr::VariantsOf { name, span } => {
-                let name = self.lower_type_operand(name, span, out)?;
-                Ok(self.emit(out, Rvalue::VariantsOf { name, span: *span }, *span))
-            }
-            Expr::Construct { name, fields, span } => {
-                let name = self.lower_type_operand(name, span, out)?;
-                let fields = self.lower_expr(fields, out)?;
-                Ok(self.emit(
-                    out,
-                    Rvalue::Construct {
-                        name,
-                        fields,
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
-            Expr::Invoke {
-                recv,
-                name,
-                args,
+            // **The whole reflection surface, one arm.** Every operand resolution the thirteen
+            // queries do is now the same three cases (`lower_type_operand`, an ordinary expression,
+            // a checker-recorded layout), so what used to be thirteen near-identical arms is one
+            // dispatch — see `lower_reflect`.
+            Expr::Reflect {
+                which,
+                operand,
                 span,
-            } => {
-                let recv = match recv {
-                    Some(recv) => Some(self.lower_expr(recv, out)?),
-                    None => None,
-                };
-                let name = self.lower_expr(name, out)?;
-                let args = self.lower_expr(args, out)?;
-                Ok(self.emit(
-                    out,
-                    Rvalue::Invoke {
-                        recv,
-                        name,
-                        args,
-                        span: *span,
-                    },
-                    *span,
-                ))
-            }
+            } => self.lower_reflect(*which, operand, span, out),
             // The return annotation is runtime-erased (the checker has already used it); lowering
             // ignores it, exactly as it ignores parameter type annotations. An arrow body lowers like
             // a value-returning expression; a block body lowers exactly like a named function's body.

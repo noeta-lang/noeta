@@ -3496,42 +3496,28 @@ fn tier_name_at(
             | Expr::Spawn { future: expr, .. }
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
-            | Expr::TypeOf { value: expr, .. }
-            | Expr::FieldsOf { value: expr, .. }
-            | Expr::TraitsOf { value: expr, .. }
-            | Expr::ParamsOf { target: expr, .. }
-            | Expr::ReturnsOf { target: expr, .. }
             | Expr::Channel { capacity: expr, .. }
-            | Expr::InstantiatedType { recv: expr, .. }
-            | Expr::FromBytes { blob: expr, .. } => in_expr(expr, offset, source),
+            | Expr::InstantiatedType { recv: expr, .. } => in_expr(expr, offset, source),
             // A `"${ … }"` hole is an ordinary expression; the static text between holes is not.
             Expr::Interp { parts, .. } => parts.iter().find_map(|part| match part {
                 StrPart::Hole(e) => in_expr(e, offset, source),
                 StrPart::Literal(_) => None,
             }),
-            // The name-keyed reflection queries: a turbofish operand is a *type*, so only the
-            // dynamic (expression) arm can hold a tier block.
-            Expr::FieldSpecsOf { name, .. }
-            | Expr::VariantsOf { name, .. }
-            | Expr::AttributesOf { ty: name, .. } => {
-                name.dynamic().and_then(|e| in_expr(e, offset, source))
+            // **One arm for the whole reflection surface.** A turbofish operand is a *type*, so
+            // only a dynamic (expression) arm can hold a tier block — the line `for_each_expr`
+            // already draws.
+            //
+            // This walk is why the collapse is worth more than the sum of its edits: it used to end
+            // in a `_ => None` that swallowed twenty-five `Expr` variants, so `@html { … }` hover
+            // inside `construct::<T>(@html{…})` silently returned nothing. Closing the wildcard made
+            // the twelve reflection variants twelve more arms to maintain; there is now one.
+            Expr::Reflect { operand, .. } => {
+                let mut found = None;
+                operand.for_each_expr(&mut |e| {
+                    found = found.take().or_else(|| in_expr(e, offset, source));
+                });
+                found
             }
-            // `roles_of()` is the same operand, optional — bare `roles_of()` has none at all.
-            Expr::RolesOf { ty: name, .. } => name
-                .as_ref()
-                .and_then(|n| n.dynamic())
-                .and_then(|e| in_expr(e, offset, source)),
-            Expr::Construct { name, fields, .. } => name
-                .dynamic()
-                .and_then(|e| in_expr(e, offset, source))
-                .or_else(|| in_expr(fields, offset, source)),
-            Expr::Invoke {
-                recv, name, args, ..
-            } => recv
-                .as_ref()
-                .and_then(|r| in_expr(r, offset, source))
-                .or_else(|| in_expr(name, offset, source))
-                .or_else(|| in_expr(args, offset, source)),
             // The turbofish call forms — the type arguments are types; the value arguments are
             // ordinary expressions.
             Expr::TypedCall { args, .. } => {
@@ -3545,10 +3531,9 @@ fn tier_name_at(
             Expr::FieldSet {
                 receiver, value, ..
             } => in_expr(receiver, offset, source).or_else(|| in_expr(value, offset, source)),
-            // Leaves: a literal has no sub-expression, an identifier names one thing, and
-            // `type_name::<T>()` takes a *type* rather than a value — none of them can contain a
-            // `@<tier> { … }`. `NativeFnRef` is synthesized by the compiler and never appears in
-            // parsed source.
+            // Leaves: a literal has no sub-expression and an identifier names one thing, so
+            // neither can contain a `@<tier> { … }`. `NativeFnRef` is synthesized by the compiler
+            // and never appears in parsed source.
             Expr::Str { .. }
             | Expr::Int { .. }
             | Expr::Float { .. }
@@ -3557,8 +3542,7 @@ fn tier_name_at(
             | Expr::IntN { .. }
             | Expr::Bool { .. }
             | Expr::Ident { .. }
-            | Expr::NativeFnRef { .. }
-            | Expr::TypeName { .. } => None,
+            | Expr::NativeFnRef { .. } => None,
         }
     }
     in_stmts(&program.stmts, offset, source)

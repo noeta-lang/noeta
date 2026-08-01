@@ -1519,7 +1519,7 @@ impl TypeRef {
 ///   `field_specs_of::<Todo>()` under `namespace app.storage` would query the unqualified key `Todo`
 ///   and silently answer with the empty schema. Keeping `T` a [`TypeRef`] until lowering puts it on
 ///   the one path that qualifies every other type reference — the same convention
-///   [`Expr::FromBytes`], [`Expr::Channel`] and [`Expr::AttributesOf`] already follow.
+///   [`Expr::Reflect`] and [`Expr::Channel`] already follow.
 /// * The dynamic arm is a genuine runtime `string` (a framework holding a `Type.Struct(name, _)` it
 ///   just reflected). It must NOT be qualified — a literal `field_specs_of("Todo")` that happens to
 ///   spell a local type name means the string `Todo`, and nothing else. Modelling the two as one
@@ -1571,6 +1571,405 @@ impl TypeOperand {
         match self {
             TypeOperand::Static(ty) => ty.span(),
             TypeOperand::Dynamic(e) => e.span(),
+        }
+    }
+}
+
+/// **Which reflection query** — the thirteen intrinsics as one fieldless enum, the discriminant of
+/// the single [`Expr::Reflect`] node.
+///
+/// Fieldless is the whole point. Every dispatch over the reflection surface is now an *exhaustive
+/// match on this enum*, so a fourteenth intrinsic is a compile error at every site that must decide
+/// something about it, rather than a silent gap at the sites nobody remembered. It is audit row 7's
+/// technique ([`for_each_jump_pc`](../noeta_bytecode/enum.Op.html#method.for_each_jump_pc)) applied
+/// to the surface that most needed it: thirteen `Expr` variants had accumulated thirteen independent
+/// answers to "how do I name the type I am asked about", and a capability added to one could not
+/// propagate to the others.
+///
+/// What is **not** an enum, deliberately, is the type *name* a query resolves. Type names are
+/// open-world — users declare them — and they are already interned as [`Name`]. The defect was never
+/// that a name was a string; it was that the operand *contracts* disagreed. Those are closed here,
+/// by [`ReflectShape`].
+///
+/// The order is the lexer's token-table order, which is also
+/// [`REFLECTION_INTRINSICS`](../noeta_builtins/reflection/constant.REFLECTION_INTRINSICS.html)'s, so
+/// the three lists read side by side. `noeta-builtins`' census holds all three to each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ReflectKind {
+    /// `attributes_of::<T>()` / `attributes_of(name)` — the build manifest's materialized
+    /// `#[T(...)]` attributes, each paired with its annotated target.
+    AttributesOf,
+    /// `type_name::<T>()` — a type's qualified runtime identity as a `string`.
+    TypeName,
+    /// `type_of(value)` — a value's runtime `Type` descriptor.
+    TypeOf,
+    /// `fields_of(value)` — a struct/class instance's fields as `List<FieldEntry>`.
+    FieldsOf,
+    /// `traits_of(value)` — the qualified trait names a value's nominal type has an `impl` for.
+    TraitsOf,
+    /// `from_bytes::<T>(blob)` — decode a `bytes` buffer into a flat `List<T>`.
+    FromBytes,
+    /// `roles_of()` / `roles_of::<E>()` / `roles_of(name)` — the `(declaration, Role)` index.
+    RolesOf,
+    /// `params_of(target)` — a callable's declared parameter list.
+    ParamsOf,
+    /// `returns_of(target)` — a callable's declared return type, as a `?Type`.
+    ReturnsOf,
+    /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch.
+    Invoke,
+    /// `field_specs_of::<T>()` / `field_specs_of(name)` — a declared type's field schema.
+    FieldSpecsOf,
+    /// `variants_of::<T>()` / `variants_of(name)` — a declared enum's variant schema.
+    VariantsOf,
+    /// `construct::<T>(fields)` / `construct(name, fields)` — build a struct value at run time.
+    Construct,
+}
+
+impl ReflectKind {
+    /// **Every** reflection kind, in the lexer's order. The census walks this; so does anything that
+    /// needs to enumerate the surface (completion, the parser grid, the operand-contract gate).
+    pub const ALL: [ReflectKind; 13] = [
+        ReflectKind::AttributesOf,
+        ReflectKind::TypeName,
+        ReflectKind::TypeOf,
+        ReflectKind::FieldsOf,
+        ReflectKind::TraitsOf,
+        ReflectKind::FromBytes,
+        ReflectKind::RolesOf,
+        ReflectKind::ParamsOf,
+        ReflectKind::ReturnsOf,
+        ReflectKind::Invoke,
+        ReflectKind::FieldSpecsOf,
+        ReflectKind::VariantsOf,
+        ReflectKind::Construct,
+    ];
+
+    /// The reserved word this kind is written as, exactly as the lexer spells it. The one place the
+    /// spelling lives on this side of the compiler — diagnostics, pretty-printing and the formatter
+    /// all read it here rather than restating it.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            ReflectKind::AttributesOf => "attributes_of",
+            ReflectKind::TypeName => "type_name",
+            ReflectKind::TypeOf => "type_of",
+            ReflectKind::FieldsOf => "fields_of",
+            ReflectKind::TraitsOf => "traits_of",
+            ReflectKind::FromBytes => "from_bytes",
+            ReflectKind::RolesOf => "roles_of",
+            ReflectKind::ParamsOf => "params_of",
+            ReflectKind::ReturnsOf => "returns_of",
+            ReflectKind::Invoke => "invoke",
+            ReflectKind::FieldSpecsOf => "field_specs_of",
+            ReflectKind::VariantsOf => "variants_of",
+            ReflectKind::Construct => "construct",
+        }
+    }
+
+    /// **This kind's operand contract** — which arms of [`ReflectOperand`] a well-formed node of
+    /// this kind may carry.
+    ///
+    /// The parser is the only constructor, so this is a fact about the grammar rather than a runtime
+    /// check; its value is that it is *written down once* and gated. Before the collapse the contract
+    /// existed only as thirteen separate variant declarations, which is exactly how four of them
+    /// drifted into shapes a type parameter could not reach.
+    pub fn shape(self) -> ReflectShape {
+        match self {
+            ReflectKind::TypeOf
+            | ReflectKind::FieldsOf
+            | ReflectKind::TraitsOf
+            | ReflectKind::ParamsOf
+            | ReflectKind::ReturnsOf => ReflectShape::Value,
+            ReflectKind::AttributesOf | ReflectKind::FieldSpecsOf | ReflectKind::VariantsOf => {
+                ReflectShape::Type
+            }
+            ReflectKind::RolesOf => ReflectShape::OptionalType,
+            ReflectKind::TypeName => ReflectShape::StaticType,
+            ReflectKind::Construct => ReflectShape::TypeWith,
+            ReflectKind::FromBytes => ReflectShape::StaticTypeWith,
+            ReflectKind::Invoke => ReflectShape::Dispatch,
+        }
+    }
+}
+
+/// **The operand contracts of the reflection surface** — the closed set of shapes a
+/// [`ReflectKind`] may take its operand in.
+///
+/// Seven shapes for thirteen kinds, and the ratio is the finding: eight of the thirteen share
+/// [`ReflectShape::Type`] or [`ReflectShape::Value`], which is why a capability added to one of
+/// those reached the rest for free. The other five differ for reasons that are *stated* here rather
+/// than implied by a variant declaration — and a fourteenth kind that wants an eighth shape has to
+/// add it here, in front of the census, instead of inventing one in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReflectShape {
+    /// One runtime operand, no type named: `type_of(v)`, `fields_of(v)`, `traits_of(v)`,
+    /// `params_of(s)`, `returns_of(s)`. Carried as [`ReflectOperand::Value`].
+    Value,
+    /// A named type, in the two arms of [`TypeOperand`]: `attributes_of`, `field_specs_of`,
+    /// `variants_of`. Carried as [`ReflectOperand::Type`]. This is the contract a type parameter can
+    /// reach on either per-instantiation channel.
+    Type,
+    /// A named type **or nothing** — `roles_of()` asks for the whole index and both turbofish and
+    /// runtime-string forms narrow it. Carried as [`ReflectOperand::Type`] or
+    /// [`ReflectOperand::Nothing`]; the only shape admitting two arms, because the operand really is
+    /// optional in the grammar.
+    OptionalType,
+    /// A statically written type with no dynamic arm: `type_name::<T>()`, whose dynamic form would
+    /// be the identity function on its argument. Carried as [`ReflectOperand::StaticType`].
+    StaticType,
+    /// A named type plus one runtime argument: `construct::<T>(fields)` / `construct(name, fields)`.
+    /// Carried as [`ReflectOperand::TypeWith`].
+    TypeWith,
+    /// A statically written type plus one runtime argument: `from_bytes::<T>(blob)`. Carried as
+    /// [`ReflectOperand::StaticTypeWith`].
+    ///
+    /// Distinct from [`ReflectShape::TypeWith`] because decoding an opaque buffer needs the
+    /// element's packed **layout**, not its name, and no per-instantiation channel carries one — see
+    /// [`Expr::Reflect`]. That makes a type parameter here an `E0058` with its own message rather
+    /// than a resolvable name.
+    StaticTypeWith,
+    /// `invoke(recv, name, args)` / `invoke(name, args)`. Carried as [`ReflectOperand::Dispatch`].
+    ///
+    /// Its own shape because the receiver is an `Option` rather than a sentinel expression: the two
+    /// forms resolve `name` in **different namespaces** (a type's method table vs. the top-level
+    /// function namespace), so every reader has to decide which one it is.
+    Dispatch,
+}
+
+impl ReflectShape {
+    /// Whether a type named in this shape's operand is resolved **by name**, and therefore whether a
+    /// bare type parameter written there can be answered on a per-instantiation channel.
+    ///
+    /// True of every shape that names a type except [`ReflectShape::StaticTypeWith`] — which is
+    /// exactly `from_bytes`, and exactly why that shape exists: decoding an opaque buffer needs the
+    /// element's packed *layout*, and neither channel carries one. Vacuously true of the shapes that
+    /// name no type at all, which have nothing to forward.
+    ///
+    /// The type-parameter forwarding walk keys on this. Stating it here is what stops it from being
+    /// re-derived, differently, at each consumer — the drift that made `from_bytes::<T>()` and
+    /// `roles_of::<E>()` report the wrong reason for the same missing channel.
+    pub fn resolves_type_by_name(self) -> bool {
+        match self {
+            ReflectShape::Value
+            | ReflectShape::Type
+            | ReflectShape::OptionalType
+            | ReflectShape::StaticType
+            | ReflectShape::TypeWith
+            | ReflectShape::Dispatch => true,
+            ReflectShape::StaticTypeWith => false,
+        }
+    }
+
+    /// Whether `operand` is an arm this shape admits. The predicate the census evaluates over the
+    /// whole (kind × operand-arm) grid, and the reason [`ReflectKind::shape`] is worth writing down:
+    /// without it, "which operands may `roles_of` carry" is answerable only by reading the parser.
+    pub fn admits(self, operand: &ReflectOperand) -> bool {
+        match (self, operand) {
+            (ReflectShape::Value, ReflectOperand::Value(_))
+            | (ReflectShape::Type, ReflectOperand::Type(_))
+            | (ReflectShape::OptionalType, ReflectOperand::Type(_) | ReflectOperand::Nothing)
+            | (ReflectShape::StaticType, ReflectOperand::StaticType(_))
+            | (ReflectShape::TypeWith, ReflectOperand::TypeWith { .. })
+            | (ReflectShape::StaticTypeWith, ReflectOperand::StaticTypeWith { .. })
+            | (ReflectShape::Dispatch, ReflectOperand::Dispatch { .. }) => true,
+            (
+                ReflectShape::Value
+                | ReflectShape::Type
+                | ReflectShape::OptionalType
+                | ReflectShape::StaticType
+                | ReflectShape::TypeWith
+                | ReflectShape::StaticTypeWith
+                | ReflectShape::Dispatch,
+                _,
+            ) => false,
+        }
+    }
+}
+
+/// **What a reflection query is asked about** — the one operand carrier of [`Expr::Reflect`], whose
+/// arms are the [`ReflectShape`]s.
+///
+/// This is where the collapse pays. Every generic walk over the AST — free variables, awaits, name
+/// qualification, nested-fn hoisting, pretty-printing, the IDE's tier and inlay passes — used to
+/// need thirteen arms that differed only in which field they recursed into. They now need one, which
+/// delegates to [`ReflectOperand::for_each_expr`] / [`for_each_type_ref_mut`](Self::for_each_type_ref_mut).
+/// The walks are still exhaustive, because the exhaustiveness moved *here*.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReflectOperand {
+    /// No operand: the bare `roles_of()`.
+    Nothing,
+    /// A named type, in [`TypeOperand`]'s two arms.
+    Type(TypeOperand),
+    /// One runtime value or string operand.
+    Value(Box<Expr>),
+    /// A statically written type, kept a real [`TypeRef`] all the way to lowering so the linker's
+    /// qualification pass rewrites it like every other type reference.
+    StaticType(TypeRef),
+    /// A named type plus one runtime argument (`construct`'s field list).
+    TypeWith { ty: TypeOperand, arg: Box<Expr> },
+    /// A statically written type plus one runtime argument (`from_bytes`' blob).
+    StaticTypeWith { ty: TypeRef, arg: Box<Expr> },
+    /// `invoke`'s optional receiver, name and argument list.
+    Dispatch {
+        recv: Option<Box<Expr>>,
+        name: Box<Expr>,
+        args: Box<Expr>,
+    },
+}
+
+impl ReflectOperand {
+    /// Visit every **sub-expression** of this operand, in source order. The static type arms hold no
+    /// expression at all and visit nothing — which is the correct answer for a free-variable or
+    /// await walk, and the reason a turbofish operand must stay a [`TypeRef`] rather than becoming a
+    /// synthesized string.
+    pub fn for_each_expr<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
+        match self {
+            ReflectOperand::Nothing | ReflectOperand::StaticType(_) => {}
+            ReflectOperand::Type(ty) => {
+                if let Some(e) = ty.dynamic() {
+                    f(e);
+                }
+            }
+            ReflectOperand::Value(e) => f(e),
+            ReflectOperand::TypeWith { ty, arg } => {
+                if let Some(e) = ty.dynamic() {
+                    f(e);
+                }
+                f(arg);
+            }
+            ReflectOperand::StaticTypeWith { ty: _, arg } => f(arg),
+            ReflectOperand::Dispatch { recv, name, args } => {
+                if let Some(r) = recv {
+                    f(r);
+                }
+                f(name);
+                f(args);
+            }
+        }
+    }
+
+    /// [`ReflectOperand::for_each_expr`], mutably — for the rewriting walks (qualification,
+    /// nested-fn hoisting, capture rewriting).
+    pub fn for_each_expr_mut(&mut self, f: &mut impl FnMut(&mut Expr)) {
+        match self {
+            ReflectOperand::Nothing | ReflectOperand::StaticType(_) => {}
+            ReflectOperand::Type(ty) => {
+                if let Some(e) = ty.dynamic_mut() {
+                    f(e);
+                }
+            }
+            ReflectOperand::Value(e) => f(e),
+            ReflectOperand::TypeWith { ty, arg } => {
+                if let Some(e) = ty.dynamic_mut() {
+                    f(e);
+                }
+                f(arg);
+            }
+            ReflectOperand::StaticTypeWith { ty: _, arg } => f(arg),
+            ReflectOperand::Dispatch { recv, name, args } => {
+                if let Some(r) = recv {
+                    f(r);
+                }
+                f(name);
+                f(args);
+            }
+        }
+    }
+
+    /// Visit every **type reference** this operand names. A dynamic operand names none: a runtime
+    /// string is the name it spells, not a type reference.
+    pub fn for_each_type_ref<'a>(&'a self, f: &mut impl FnMut(&'a TypeRef)) {
+        match self {
+            ReflectOperand::Nothing
+            | ReflectOperand::Value(_)
+            | ReflectOperand::Dispatch { .. } => {}
+            ReflectOperand::StaticType(ty) | ReflectOperand::StaticTypeWith { ty, arg: _ } => f(ty),
+            ReflectOperand::Type(ty) | ReflectOperand::TypeWith { ty, arg: _ } => {
+                if let TypeOperand::Static(t) = ty {
+                    f(t);
+                }
+            }
+        }
+    }
+
+    /// [`ReflectOperand::for_each_type_ref`], mutably — what the linker's qualification pass
+    /// rewrites.
+    pub fn for_each_type_ref_mut(&mut self, f: &mut impl FnMut(&mut TypeRef)) {
+        match self {
+            ReflectOperand::Nothing
+            | ReflectOperand::Value(_)
+            | ReflectOperand::Dispatch { .. } => {}
+            ReflectOperand::StaticType(ty) | ReflectOperand::StaticTypeWith { ty, arg: _ } => f(ty),
+            ReflectOperand::Type(ty) | ReflectOperand::TypeWith { ty, arg: _ } => {
+                if let TypeOperand::Static(t) = ty {
+                    f(t);
+                }
+            }
+        }
+    }
+
+    /// Whether any sub-expression satisfies `pred` — [`ReflectOperand::for_each_expr`] as a
+    /// predicate, for the `mentions`/`has_await` family.
+    pub fn any_expr(&self, mut pred: impl FnMut(&Expr) -> bool) -> bool {
+        let mut hit = false;
+        self.for_each_expr(&mut |e| hit |= pred(e));
+        hit
+    }
+
+    /// The [`ReflectShape::Type`] operand, or `None` for every other arm.
+    pub fn as_type(&self) -> Option<&TypeOperand> {
+        match self {
+            ReflectOperand::Type(ty) => Some(ty),
+            _ => None,
+        }
+    }
+
+    /// The [`ReflectShape::OptionalType`] operand: `Some(None)` for the bare `roles_of()`,
+    /// `Some(Some(ty))` for a scoped one, `None` if this is not that shape.
+    pub fn as_optional_type(&self) -> Option<Option<&TypeOperand>> {
+        match self {
+            ReflectOperand::Nothing => Some(None),
+            ReflectOperand::Type(ty) => Some(Some(ty)),
+            _ => None,
+        }
+    }
+
+    /// The [`ReflectShape::Value`] operand, or `None` for every other arm.
+    pub fn as_value(&self) -> Option<&Expr> {
+        match self {
+            ReflectOperand::Value(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// The [`ReflectShape::StaticType`] operand, or `None` for every other arm.
+    pub fn as_static_type(&self) -> Option<&TypeRef> {
+        match self {
+            ReflectOperand::StaticType(ty) => Some(ty),
+            _ => None,
+        }
+    }
+
+    /// The [`ReflectShape::TypeWith`] operand's two halves, or `None` for every other arm.
+    pub fn as_type_with(&self) -> Option<(&TypeOperand, &Expr)> {
+        match self {
+            ReflectOperand::TypeWith { ty, arg } => Some((ty, arg)),
+            _ => None,
+        }
+    }
+
+    /// The [`ReflectShape::StaticTypeWith`] operand's two halves, or `None` for every other arm.
+    pub fn as_static_type_with(&self) -> Option<(&TypeRef, &Expr)> {
+        match self {
+            ReflectOperand::StaticTypeWith { ty, arg } => Some((ty, arg)),
+            _ => None,
+        }
+    }
+
+    /// The [`ReflectShape::Dispatch`] operand's three parts, or `None` for every other arm.
+    pub fn as_dispatch(&self) -> Option<(Option<&Expr>, &Expr, &Expr)> {
+        match self {
+            ReflectOperand::Dispatch { recv, name, args } => Some((recv.as_deref(), name, args)),
+            _ => None,
         }
     }
 }
@@ -1732,71 +2131,32 @@ pub enum Expr {
         ty: TypeRef,
         span: Span,
     },
-    /// The reflection query `attributes_of::<T>()` / `attributes_of(name)` — a lookup into the build
-    /// manifest that returns the materialized `#[T(...)]` attributes (each as a real `T` struct
-    /// paired with its annotated target).
+    /// **The reflection surface** — all thirteen intrinsics as one node: `which` says which query,
+    /// `operand` says what it is asked about.
     ///
-    /// `ty` is the two arms of [`TypeOperand`], exactly as [`Expr::FieldSpecsOf`] carries them: the
-    /// turbofish surface names the attribute type statically (and a bare type parameter of an
-    /// enclosing generic resolves per instantiation, through whichever of the two channels reaches
-    /// the body), the dynamic surface takes a runtime `string`. The manifest is **name-keyed**
-    /// either way — `materialize_attributes` takes a `&str` in both backends and answers the empty
-    /// list for a name it holds nothing for — so nothing about the query needs the compile-time
-    /// type; only the `@attribute` capability gate does, and that gate applies where a compile-time
-    /// type exists.
-    AttributesOf { ty: TypeOperand, span: Span },
-    /// The reflection query `type_name::<T>()` — a type's **qualified runtime identity** as a
-    /// `string` (`"app.storage.Todo"`). The same name [`Expr::TypeOf`] reports for a value of that
-    /// type, and the same key the name-keyed registries ([`Expr::FieldSpecsOf`], [`Expr::Construct`],
-    /// [`Expr::Invoke`]) are stored under — so it is the compile-checked way to *write* that key.
+    /// It was thirteen variants, and the collapse is the fix for a measured drift class rather than
+    /// a tidying. Each variant had reached its own answer to "how do I name the type I am asked
+    /// about", and by the time anyone counted, five took a name string, four took a value, two took
+    /// a compile-time `NameId` with no register at all, one took an *index* into `Module::type_args`,
+    /// and one had two bespoke opcodes written for it alone. The four with known bugs were exactly
+    /// the four whose operand contract was its own: a capability added to one form — reaching a type
+    /// parameter through a per-instantiation channel — structurally could not propagate to the rest.
     ///
-    /// `ty` stays a real [`TypeRef`] all the way to lowering, which resolves it with
-    /// [`TypeRef::head_name`]. That is the whole point: namespace qualification runs in the linker
-    /// and rewrites type references, so the name this yields follows a `namespace`, a `use … as`
-    /// alias, and a rename — none of which a hand-written string literal does. Flattening it to a
-    /// string in the parser would put it beyond that rewrite, which is exactly the bug
-    /// `field_specs_of::<T>()` had.
+    /// So the contracts are closed to [`ReflectShape`] (seven, for thirteen kinds), the selector is
+    /// a fieldless [`ReflectKind`], and every generic walk over the tree is one arm delegating to
+    /// [`ReflectOperand::for_each_expr`]. Adding a fourteenth intrinsic no longer touches ~30 walks
+    /// that differ only in a field name; it touches the enum, the checker, lowering, and the
+    /// backends — the four places that genuinely have something to say about it.
     ///
-    /// Turbofish only, with no dynamic string surface: `type_name(s)` would be the identity function
-    /// on `s`. An unresolvable `T` is an `E0013`; a type *parameter* resolves wherever one of the two
-    /// per-instantiation channels carries its name into the body, and is an `E0058` where neither
-    /// does — the same judgment the other name-keyed surfaces make, through the same helper.
-    TypeName { ty: TypeRef, span: Span },
-    /// The reflection query `type_of(value)` — the runtime [`Type`] descriptor of a value. At this
-    /// fidelity (B) it is the **head constructor** (`type_of([1])` is `List(Dyn)`, generics erased);
-    /// the compile-time full-fidelity path rides the same `Expr` (P2.3). `value` is the operand.
-    TypeOf { value: Box<Expr>, span: Span },
-    /// The reflection query `fields_of(value)` — a struct/class instance's fields as
-    /// `List<FieldEntry>` (`{ name: string, value: dyn }`, declaration order), the value-level
-    /// counterpart of `type_of` (derive layer 3): what lets a fully-defaulted trait implement
-    /// structural behavior over `self` without a macro system. A non-object value yields the
-    /// empty list.
-    FieldsOf { value: Box<Expr>, span: Span },
-    /// The reflection query `traits_of(value)` — the qualified trait names the value's nominal
-    /// type has a registered `impl` for (user `impl`/`@derive` and native ABI-advertised impls
-    /// alike), as a sorted, deduped `List<string>`. Reads the same shared membership table
-    /// (`ReflectionInfo::trait_impls`) the precise `x is dyn Trait` narrowing tests, so the two
-    /// surfaces cannot disagree. A non-nominal value (scalar/collection/function) yields the
-    /// empty list, mirroring `fields_of`'s non-object answer.
-    TraitsOf { value: Box<Expr>, span: Span },
-    /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>` (P-PACK 4.4). `ty` is
-    /// the element type (turbofish; must be a `@packed` struct), `blob` the `bytes` operand. The byte
-    /// buffer is opaque, so the element type must be named at the call site.
-    ///
-    /// **The one reflection surface that is not a [`TypeOperand`], and deliberately.** Every other
-    /// one keys on a type *name*, which is exactly what the two per-instantiation channels deliver,
-    /// so their turbofish arm resolves a type parameter at run time and their dynamic arm takes a
-    /// runtime string. Decoding an opaque buffer needs the element's packed **layout** — field kinds
-    /// and bit widths — and no channel carries one: the hidden type-argument slot carries a name and
-    /// an optional JSON decode recipe, the receiver's reflected tag carries a name. A name-keyed
-    /// lookup would also trade a compile-time guarantee for a runtime abort, since nothing in the
-    /// language can bound `T` to a packable type — where `attributes_of`/`roles_of` lose nothing,
-    /// their manifest queries being total on an arbitrary name. So the turbofish stays a `TypeRef`,
-    /// a type parameter here is an `E0058` with its own message, and the checker keeps the layout it
-    /// resolves at the site.
-    FromBytes {
-        ty: TypeRef,
-        blob: Box<Expr>,
+    /// **Both per-instantiation channels reach here.** A bare type parameter in the static arm of
+    /// [`TypeOperand`] has no compile-time name and still resolves: the checker records the site and
+    /// lowering reads the name off whichever channel carries it — the receiver's reflected type tag,
+    /// or the hidden type-argument slot. [`ReflectShape::StaticTypeWith`] is the documented
+    /// exception, and `from_bytes` is its only member: decoding an opaque buffer needs the element's
+    /// packed **layout**, which no channel carries.
+    Reflect {
+        which: ReflectKind,
+        operand: ReflectOperand,
         span: Span,
     },
     /// `channel::<T>(capacity)` — construct a bounded, typed channel (isolates milestone I.1),
@@ -1870,101 +2230,6 @@ pub enum Expr {
     InstantiatedType {
         recv: Box<Expr>,
         type_args: Vec<TypeRef>,
-        span: Span,
-    },
-    /// The reflection query `roles_of()` / `roles_of::<RoleEnum>()` — the compiler-built
-    /// `(declaration, Role)` index (P2.7), returned as a `List<RoleBinding>` (each
-    /// `{ target: string, role: Role }`). Compile-time resolved from the attribute manifest's
-    /// `@role(...)` tags. The optional turbofish scopes the query to a single role enum (mirroring
-    /// `attributes_of::<T>()`): `roles_of::<Semantic>()` returns only bindings whose role is a
-    /// `Semantic` variant; bare `roles_of()` (`ty = None`) returns the whole index.
-    ///
-    /// The scope, when present, is the two arms of [`TypeOperand`] like every other name-keyed
-    /// surface — `roles_of::<E>()` names the enum statically (a bare type parameter resolving per
-    /// instantiation), `roles_of(name)` scopes by a runtime `string`. `materialize_roles` filters
-    /// the whole index by `enum_name == e` in both backends, so it is total on an arbitrary name
-    /// and the dynamic arm costs the query nothing.
-    RolesOf { ty: Option<TypeOperand>, span: Span },
-    /// The reflection query `params_of(target)` — a callable's declared parameter list, returned as a
-    /// `List<ParamInfo>` (each `{ name: string, type: Type, optional: bool }`). `target` is a runtime `string`
-    /// naming a function or method (a bare fn name, or a qualified `Type.method`), the same target
-    /// keying the attribute manifest. Built from the same compiler-built parameter index both
-    /// backends read; surfaces a controller method's declared parameter types for dependency injection.
-    ParamsOf { target: Box<Expr>, span: Span },
-    /// The reflection query `returns_of(target)` — a callable's declared **return type**, returned as
-    /// a `?Type`. `target` is a runtime `string` naming a function or method, keyed exactly as
-    /// [`Expr::ParamsOf`]'s is (a bare fn name, or a qualified `Type.method`), and read from the same
-    /// compiler-built signature index, so reflecting a callable's parameters and its return type is
-    /// two projections of one record.
-    ///
-    /// The result is an **option**, unlike `params_of`'s "empty list for an unknown target": an empty
-    /// parameter list is a legitimate answer, but there is no return type that means "no such
-    /// callable" — `void` is a real return type — so the missing case needs its own `none`. That is
-    /// what lets a framework deriving response schemas notice a mistyped target instead of silently
-    /// deriving a `void` response.
-    ///
-    /// An `async fn f(): T` reports `T`, the type written in the declaration, not the `Future<T>` a
-    /// call to it evaluates to — reflection reports declared types throughout (a parameter's type is
-    /// its annotation, too).
-    ReturnsOf { target: Box<Expr>, span: Span },
-    /// The reflection invocation `invoke(recv, name, args)` / `invoke(name, args)` — fallible
-    /// by-name dispatch. `name` is a runtime `string`; `args` is a runtime `List`. Evaluates to
-    /// `Result<dyn, dyn>` — `Ok(retval)` on a hit, `Err(msg)` when the name is unknown or the arity
-    /// is wrong (P2.6).
-    ///
-    /// `recv` distinguishes the two surface forms, and it is an `Option` rather than a sentinel
-    /// receiver expression *deliberately*: the two forms resolve `name` in **different namespaces**
-    /// (a type's method table vs. the top-level function namespace), so every reader of this node
-    /// has to decide which one it is. A synthesized "unit receiver" would let a reader fall through
-    /// to the method path and silently look up a free function among a type's methods.
-    ///
-    /// - `Some(recv)` — the three-argument form. `recv` is a value (→ instance method) or a bare
-    ///   type name (→ associated function).
-    /// - `None` — the two-argument form `invoke(name, args)`. `name` names a **top-level function**,
-    ///   the same string that keys [`Expr::ParamsOf`] for a free fn, so reflecting a signature and
-    ///   then calling it round-trips on one name.
-    Invoke {
-        recv: Option<Box<Expr>>,
-        name: Box<Expr>,
-        args: Box<Expr>,
-        span: Span,
-    },
-    /// The reflection query `field_specs_of::<T>()` / `field_specs_of(name)` — a declared struct or
-    /// class TYPE's field schema, returned as a `List<FieldSpec>` (each
-    /// `{ name: string, type: Type, optional: bool }`, declaration order). The **type-level** twin of
-    /// [`Expr::FieldsOf`]: `fields_of(v)` reflects an *instance*'s field *values*, this reflects the
-    /// *declaration*, so each `type` is the field's precise declared type and `optional` reports
-    /// whether it declared a default. `name` is a runtime `string` naming the type — the same
-    /// string-keyed shape [`Expr::ParamsOf`] takes — so a framework holding a type name only as a
-    /// runtime string (`Type.Struct(name, _)`) can query it. The turbofish surface
-    /// `field_specs_of::<T>()` names the type statically; the two surfaces are the two arms of
-    /// [`TypeOperand`], and both converge on one name-keyed runtime node.
-    FieldSpecsOf { name: TypeOperand, span: Span },
-    /// The reflection query `variants_of::<T>()` / `variants_of(name)` — a declared enum TYPE's
-    /// variant schema, returned as a `List<VariantSpec>` (each `{ name: string, payload:
-    /// List<FieldSpec>, backing: ?dyn }`, declaration order). The **enum twin** of
-    /// [`Expr::FieldSpecsOf`], with the same two surfaces (the two arms of [`TypeOperand`]), the same
-    /// name-keyed convergence, and the same lenient contract: a name that is not a declared enum
-    /// yields the empty list.
-    ///
-    /// It exists because `field_specs_of` alone left an enum **indistinguishable from a field-less
-    /// struct** — both answered with the empty list — so anything walking a type to build a schema
-    /// recursed into an enum-typed field, found nothing, and emitted an empty object. Asking both
-    /// queries makes that case loud: variants present ⇒ an enum, and empty/empty ⇒ genuinely nothing
-    /// known about the name.
-    VariantsOf { name: TypeOperand, span: Span },
-    /// The reflection constructor `construct::<T>(fields)` / `construct(name, fields)` — build a
-    /// struct value from field values at runtime, reusing the SAME construction path as a `T { … }`
-    /// literal (field defaults and full-initialization honored). `name` is a runtime `string` naming
-    /// the struct/class type; `fields` is a runtime `List<dyn>` of field values in declaration order
-    /// (a list shorter than the field count fills the remaining fields from their defaults). Evaluates
-    /// to a `Result<dyn, string>` — `Ok(value)` on success, `Err(msg)` for an unknown type, an
-    /// arity/type-mismatch, or a missing non-defaulted field — recoverable like [`Expr::Invoke`]. The
-    /// turbofish surface `construct::<T>(fields)` names the type statically — the two surfaces are
-    /// the two arms of [`TypeOperand`].
-    Construct {
-        name: TypeOperand,
-        fields: Box<Expr>,
         span: Span,
     },
     /// The type-test operator: `expr is T` is a `bool` — `true` if the runtime value is a `T`.
@@ -2311,24 +2576,12 @@ impl Expr {
             | Expr::Spawn { span, .. }
             | Expr::Coalesce { span, .. }
             | Expr::As { span, .. }
-            | Expr::AttributesOf { span, .. }
-            | Expr::TypeName { span, .. }
-            | Expr::TypeOf { span, .. }
-            | Expr::FieldsOf { span, .. }
-            | Expr::TraitsOf { span, .. }
-            | Expr::FromBytes { span, .. }
+            | Expr::Reflect { span, .. }
             | Expr::Channel { span, .. }
             | Expr::TypedModuleCall { span, .. }
             | Expr::TypedCall { span, .. }
             | Expr::TypedMethodCall { span, .. }
             | Expr::InstantiatedType { span, .. }
-            | Expr::RolesOf { span, .. }
-            | Expr::ParamsOf { span, .. }
-            | Expr::ReturnsOf { span, .. }
-            | Expr::Invoke { span, .. }
-            | Expr::FieldSpecsOf { span, .. }
-            | Expr::VariantsOf { span, .. }
-            | Expr::Construct { span, .. }
             | Expr::TypeTest { span, .. }
             | Expr::FieldSet { span, .. }
             | Expr::TierExpr { span, .. }
@@ -2356,8 +2609,7 @@ impl Expr {
             | Expr::Float { .. }
             | Expr::F32 { .. }
             | Expr::F64 { .. }
-            | Expr::Bool { .. }
-            | Expr::TypeName { .. } => false,
+            | Expr::Bool { .. } => false,
             Expr::Ident { name: n, .. } => n == name,
             Expr::Unary { operand, .. } => operand.mentions(name),
             Expr::Binary { lhs, rhs, .. }
@@ -2421,34 +2673,12 @@ impl Expr {
             | Expr::Await { expr, .. }
             | Expr::Spawn { future: expr, .. }
             | Expr::As { expr, .. }
-            | Expr::TypeTest { expr, .. }
-            | Expr::TypeOf { value: expr, .. }
-            | Expr::FieldsOf { value: expr, .. }
-            | Expr::TraitsOf { value: expr, .. }
-            | Expr::ParamsOf { target: expr, .. }
-            | Expr::ReturnsOf { target: expr, .. }
-            | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
+            | Expr::TypeTest { expr, .. } => expr.mentions(name),
             Expr::Channel { capacity, .. } => capacity.mentions(name),
-            // A turbofish operand is a type, never a value binding; only a dynamic one can mention.
-            Expr::FieldSpecsOf { name: n, .. }
-            | Expr::VariantsOf { name: n, .. }
-            | Expr::AttributesOf { ty: n, .. } => n.dynamic().is_some_and(|e| e.mentions(name)),
-            Expr::RolesOf { ty: n, .. } => n
-                .as_ref()
-                .is_some_and(|n| n.dynamic().is_some_and(|e| e.mentions(name))),
-            Expr::Construct {
-                name: n, fields, ..
-            } => n.dynamic().is_some_and(|e| e.mentions(name)) || fields.mentions(name),
-            Expr::Invoke {
-                recv,
-                name: n,
-                args,
-                ..
-            } => {
-                recv.as_ref().is_some_and(|r| r.mentions(name))
-                    || n.mentions(name)
-                    || args.mentions(name)
-            }
+            // One arm for all thirteen intrinsics. A turbofish operand is a *type*, never a value
+            // binding, so `for_each_expr` visits nothing there — the same judgement the thirteen
+            // arms used to make thirteen times.
+            Expr::Reflect { operand, .. } => operand.any_expr(|e| e.mentions(name)),
             Expr::TypedModuleCall { recv, args, .. } => recv.mentions(name) || any_args(args),
             // The callee is a top-level fn name, never a local binding, so only the arguments count.
             Expr::TypedCall { args, .. } => any_args(args),
@@ -2483,7 +2713,6 @@ impl Expr {
             | Expr::F64 { .. }
             | Expr::Bool { .. }
             | Expr::Ident { .. }
-            | Expr::TypeName { .. }
             // A closure is a separate callable: its own `.await`s are not this level's (they are
             // E0040 unless the closure is itself async, which builtins' callbacks are not).
             | Expr::Closure { .. }
@@ -2544,30 +2773,9 @@ impl Expr {
             Expr::Try { expr, .. }
             | Expr::Spawn { future: expr, .. }
             | Expr::As { expr, .. }
-            | Expr::TypeTest { expr, .. }
-            | Expr::TypeOf { value: expr, .. }
-            | Expr::FieldsOf { value: expr, .. }
-            | Expr::TraitsOf { value: expr, .. }
-            | Expr::ParamsOf { target: expr, .. }
-            | Expr::ReturnsOf { target: expr, .. }
-            | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
+            | Expr::TypeTest { expr, .. } => expr.has_await(),
             Expr::Channel { capacity, .. } => capacity.has_await(),
-            Expr::FieldSpecsOf { name, .. }
-            | Expr::VariantsOf { name, .. }
-            | Expr::AttributesOf { ty: name, .. } => name.dynamic().is_some_and(Expr::has_await),
-            Expr::RolesOf { ty: name, .. } => name
-                .as_ref()
-                .is_some_and(|n| n.dynamic().is_some_and(Expr::has_await)),
-            Expr::Construct { name, fields, .. } => {
-                name.dynamic().is_some_and(Expr::has_await) || fields.has_await()
-            }
-            Expr::Invoke {
-                recv, name, args, ..
-            } => {
-                recv.as_ref().is_some_and(|r| r.has_await())
-                    || name.has_await()
-                    || args.has_await()
-            }
+            Expr::Reflect { operand, .. } => operand.any_expr(Expr::has_await),
             Expr::TypedModuleCall { recv, args, .. } => recv.has_await() || any_args(args),
             Expr::TypedCall { args, .. } => any_args(args),
             Expr::TypedMethodCall { recv, args, .. } => recv.has_await() || any_args(args),

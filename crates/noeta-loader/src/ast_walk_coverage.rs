@@ -98,8 +98,8 @@ use noeta_ast::{
     AssocTypeDecl, AttrArg, AttrValue, Attribute, CallArg, ClassDecl, ClosureBody, Decorators,
     DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, ForeignDirective,
     ImplBlock, ImplDecl, MatchArm, MemberBinding, MethodDirective, ObjectLit, Param, Pattern,
-    RoleTag, Stmt, StrPart, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod, TypeOperand,
-    TypeParam, TypeRef, UnaryOp, UseName,
+    ReflectKind, ReflectOperand, RoleTag, Stmt, StrPart, StructDecl, TierDecl, TraitBound,
+    TraitDecl, TraitMethod, TypeOperand, TypeParam, TypeRef, UnaryOp, UseName,
 };
 use noeta_span::{SourceId, Span};
 
@@ -582,6 +582,7 @@ const NODES: &[&str] = &[
     "ClosureBody",
     "StrPart",
     "TypeOperand",
+    "ReflectOperand",
     "MatchArm",
     "ObjectLit",
     "FieldInit",
@@ -938,35 +939,62 @@ fn expr_variants() -> Vec<Expr> {
             ty: tref(&n("As"), "ty"),
             span: SP,
         },
-        Expr::AttributesOf {
-            ty: TypeOperand::Static(tref(&n("AttributesOf"), "ty")),
+        // **The reflection surface**: one `Expr::Reflect` per `ReflectOperand` arm, rather than one
+        // per intrinsic. That is the point of the collapse — the qualifier's obligation is a
+        // function of the *operand shape*, not of which query is being asked, so probing thirteen
+        // keywords would have been thirteen probes of seven behaviours.
+        //
+        // `which` is inert (a fieldless enum); `operand` is the carrier.
+        Expr::Reflect {
+            which: ReflectKind::AttributesOf,
+            operand: ReflectOperand::Type(TypeOperand::Static(tref("ReflectOperand::Type", "0"))),
             span: SP,
         },
         // The dynamic arm of the same operand — a runtime string, which must be recursed into and
         // must NOT be rewritten as a type name.
-        Expr::AttributesOf {
-            ty: TypeOperand::Dynamic(bx("TypeOperand::Dynamic", "0")),
+        Expr::Reflect {
+            which: ReflectKind::AttributesOf,
+            operand: ReflectOperand::Type(TypeOperand::Dynamic(bx("TypeOperand::Dynamic", "0"))),
             span: SP,
         },
-        Expr::TypeName {
-            ty: tref(&n("TypeName"), "ty"),
+        Expr::Reflect {
+            which: ReflectKind::RolesOf,
+            operand: ReflectOperand::Nothing,
             span: SP,
         },
-        Expr::TypeOf {
-            value: bx(&n("TypeOf"), "value"),
+        Expr::Reflect {
+            which: ReflectKind::TypeName,
+            operand: ReflectOperand::StaticType(tref("ReflectOperand::StaticType", "0")),
             span: SP,
         },
-        Expr::FieldsOf {
-            value: bx(&n("FieldsOf"), "value"),
+        Expr::Reflect {
+            which: ReflectKind::TypeOf,
+            operand: ReflectOperand::Value(bx("ReflectOperand::Value", "0")),
             span: SP,
         },
-        Expr::TraitsOf {
-            value: bx(&n("TraitsOf"), "value"),
+        Expr::Reflect {
+            which: ReflectKind::FromBytes,
+            operand: ReflectOperand::StaticTypeWith {
+                ty: tref("ReflectOperand::StaticTypeWith", "ty"),
+                arg: bx("ReflectOperand::StaticTypeWith", "arg"),
+            },
             span: SP,
         },
-        Expr::FromBytes {
-            ty: tref(&n("FromBytes"), "ty"),
-            blob: bx(&n("FromBytes"), "blob"),
+        Expr::Reflect {
+            which: ReflectKind::Construct,
+            operand: ReflectOperand::TypeWith {
+                ty: TypeOperand::Static(tref("ReflectOperand::TypeWith", "ty")),
+                arg: bx("ReflectOperand::TypeWith", "arg"),
+            },
+            span: SP,
+        },
+        Expr::Reflect {
+            which: ReflectKind::Invoke,
+            operand: ReflectOperand::Dispatch {
+                recv: Some(bx("ReflectOperand::Dispatch", "recv")),
+                name: bx("ReflectOperand::Dispatch", "name"),
+                args: bx("ReflectOperand::Dispatch", "args"),
+            },
             span: SP,
         },
         Expr::Channel {
@@ -1002,44 +1030,24 @@ fn expr_variants() -> Vec<Expr> {
             type_args: vec![tref(&n("InstantiatedType"), "type_args")],
             span: SP,
         },
-        Expr::RolesOf {
-            ty: Some(TypeOperand::Static(tref(&n("RolesOf"), "ty"))),
+        // The `TypeWith` operand's dynamic arm — the name is an expression, the argument still an
+        // expression.
+        Expr::Reflect {
+            which: ReflectKind::Construct,
+            operand: ReflectOperand::TypeWith {
+                ty: TypeOperand::Dynamic(bx("TypeOperand::Dynamic", "0")),
+                arg: Box::new(Expr::Int { value: 0, span: SP }),
+            },
             span: SP,
         },
-        Expr::RolesOf {
-            ty: Some(TypeOperand::Dynamic(bx("TypeOperand::Dynamic", "0"))),
-            span: SP,
-        },
-        Expr::ParamsOf {
-            target: bx(&n("ParamsOf"), "target"),
-            span: SP,
-        },
-        Expr::ReturnsOf {
-            target: bx(&n("ReturnsOf"), "target"),
-            span: SP,
-        },
-        Expr::Invoke {
-            recv: Some(bx(&n("Invoke"), "recv")),
-            name: bx(&n("Invoke"), "name"),
-            args: bx(&n("Invoke"), "args"),
-            span: SP,
-        },
-        Expr::FieldSpecsOf {
-            name: TypeOperand::Static(tref(&n("FieldSpecsOf"), "name")),
-            span: SP,
-        },
-        Expr::VariantsOf {
-            name: TypeOperand::Static(tref(&n("VariantsOf"), "name")),
-            span: SP,
-        },
-        Expr::Construct {
-            name: TypeOperand::Dynamic(bx("TypeOperand::Dynamic", "0")),
-            fields: bx(&n("Construct"), "fields"),
-            span: SP,
-        },
-        Expr::Construct {
-            name: TypeOperand::Static(tref(&n("Construct"), "name")),
-            fields: Box::new(Expr::Int { value: 0, span: SP }),
+        // `invoke`'s free-function form: no receiver at all.
+        Expr::Reflect {
+            which: ReflectKind::Invoke,
+            operand: ReflectOperand::Dispatch {
+                recv: None,
+                name: Box::new(Expr::Int { value: 0, span: SP }),
+                args: Box::new(Expr::Int { value: 0, span: SP }),
+            },
             span: SP,
         },
         Expr::TypeTest {
@@ -1066,9 +1074,10 @@ fn expr_variants() -> Vec<Expr> {
             func: f("NativeFnRef", "func"),
             span: SP,
         },
-        // `TypeOperand::Static` — its own row, distinct from the `FieldSpecsOf::name` one above.
-        Expr::FieldSpecsOf {
-            name: TypeOperand::Static(tref("TypeOperand::Static", "0")),
+        // `TypeOperand::Static` — its own row, distinct from the `ReflectOperand::Type` one above.
+        Expr::Reflect {
+            which: ReflectKind::FieldSpecsOf,
+            operand: ReflectOperand::Type(TypeOperand::Static(tref("TypeOperand::Static", "0"))),
             span: SP,
         },
         // `ClosureBody::Block` and `ClosureBody::Expr`.
@@ -1762,6 +1771,7 @@ const SCANNED_ENUMS: &[&str] = &[
     "Pattern",
     "TypeRef",
     "TypeOperand",
+    "ReflectOperand",
     "ClosureBody",
     "StrPart",
     "AttrValue",

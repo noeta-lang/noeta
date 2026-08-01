@@ -52,8 +52,8 @@ use noeta_bytecode::{
     Module, NameId, NarrowTarget, Op, Reg, ReuseCheck, StrPart,
 };
 use noeta_ir::{
-    Atom, Block, Const as IrConst, Decl, ForPattern, Func, InterpPart, Pattern, Rvalue, Stmt, Temp,
-    Thunk,
+    Atom, Block, Const as IrConst, Decl, ForPattern, Func, InterpPart, Pattern, ReflectArgs,
+    Rvalue, Stmt, Temp, Thunk,
 };
 
 mod freevars;
@@ -4110,35 +4110,6 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            Rvalue::FromBytes {
-                blob,
-                layout,
-                validate,
-                span,
-            } => {
-                // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4). Intern element T's
-                // schema from the layout the checker recorded (the same channel list literals use). A
-                // `None` layout means T was not packable — the checker already emitted E0038, so this
-                // program never runs; load unit to keep the register defined.
-                let src = self.atom_reg(blob)?;
-                match layout {
-                    Some(layout) => {
-                        let schema = self.module.intern_packed_schema(layout);
-                        self.code.push(Op::FromBytes {
-                            dst,
-                            src,
-                            schema,
-                            validate: *validate,
-                            span: *span,
-                        });
-                    }
-                    None => {
-                        let k = self.add_const(Const::Unit);
-                        self.code.push(Op::LoadConst { dst, k });
-                    }
-                }
-                Ok(())
-            }
             // `type_name::<T>()` over the enclosing generic type's parameter: the name is read off
             // the receiver's reflected type tag at run time — one compiled body serves every
             // instantiation, so there is no constant to bake.
@@ -4170,103 +4141,16 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            Rvalue::TypeOf { operand, span } => {
-                // Evaluate the operand for its side effects in both fidelities. When the checker
-                // resolved a concrete static type for this site, bake the precise `Type` constant
-                // (fidelity A); otherwise classify the runtime value's head constructor (fidelity B).
-                let src = self.atom_reg(operand)?;
-                match self.module.type_of_sites.get(span) {
-                    Some(repr) => self.code.push(Op::TypeOfStatic {
-                        dst,
-                        repr: Box::new(repr.clone()),
-                    }),
-                    None => self.code.push(Op::TypeOf { dst, src }),
-                }
-                Ok(())
-            }
-            Rvalue::FieldsOf { operand, .. } => {
-                let src = self.atom_reg(operand)?;
-                self.code.push(Op::FieldsOf { dst, src });
-                Ok(())
-            }
-            Rvalue::TraitsOf { operand, .. } => {
-                let src = self.atom_reg(operand)?;
-                self.code.push(Op::TraitsOf { dst, src });
-                Ok(())
-            }
-            Rvalue::AttributesOf { name, .. } => {
-                // The attribute type's name is a runtime string, exactly as `FieldSpecsOf`'s is:
-                // a folded constant for a written type, or the per-instantiation channel read for a
-                // type parameter. The VM reads the matching manifest entries from
-                // `Module::reflection` under that name and materializes them.
-                let src = self.atom_reg(name)?;
-                self.code.push(Op::AttributesOf { dst, src });
-                Ok(())
-            }
-            Rvalue::RolesOf { name, .. } => {
-                // Optional scope (mirrors `AttributesOf`, through the same operand path): the VM
-                // keeps only bindings whose role enum matches the name in `src`. `None` = all.
-                let src = match name {
-                    Some(name) => Some(self.atom_reg(name)?),
-                    None => None,
-                };
-                self.code.push(Op::RolesOf { dst, src });
-                Ok(())
-            }
-            Rvalue::ParamsOf { target, .. } => {
-                // The target is a runtime string; the VM reads the matching parameter records from
-                // `Module::reflection` and materializes them. Load the operand into a register.
-                let src = self.atom_reg(target)?;
-                self.code.push(Op::ParamsOf { dst, src });
-                Ok(())
-            }
-            Rvalue::ReturnsOf { target, .. } => {
-                // The target is a runtime string; the VM reads the matching signature record from
-                // `Module::reflection` and materializes its return type as a `?Type`. Load the
-                // operand into a register, exactly as `ParamsOf` does.
-                let src = self.atom_reg(target)?;
-                self.code.push(Op::ReturnsOf { dst, src });
-                Ok(())
-            }
-            Rvalue::FieldSpecsOf { name, .. } => {
-                // The name is a runtime string; the VM reads the type's field schema from
-                // `Module::reflection` and materializes them. Load the operand into a register.
-                let src = self.atom_reg(name)?;
-                self.code.push(Op::FieldSpecsOf { dst, src });
-                Ok(())
-            }
-            Rvalue::VariantsOf { name, .. } => {
-                // The enum twin, emitted identically: the name is a runtime string and the VM reads
-                // the variant schema off the same `Module::reflection`.
-                let src = self.atom_reg(name)?;
-                self.code.push(Op::VariantsOf { dst, src });
-                Ok(())
-            }
-            Rvalue::Construct {
-                name, fields, span, ..
-            } => {
-                let name = self.atom_reg(name)?;
-                let fields = self.atom_reg(fields)?;
-                // The `Result<dyn, string>` wrapper shapes, interned exactly as `Op::Invoke` interns
-                // them — the VM builds `Ok(value)` / `Err(message)` from the same two shapes.
-                let ok_shape = self.module.builtin_enum_shape("Result", "Ok");
-                let err_shape = self.module.builtin_enum_shape("Result", "Err");
-                self.code.push(Op::Construct {
-                    dst,
-                    name,
-                    fields,
-                    ok_shape,
-                    err_shape,
-                    span: *span,
-                });
-                Ok(())
-            }
-            Rvalue::Invoke {
-                recv,
-                name,
-                args,
-                span,
-            } => self.lower_invoke(recv.as_ref(), name, args, dst, *span),
+            // **The reflection surface, one arm.** The queries whose operand is a single register
+            // are emitted by one loop over `ReflectArgs::One`; the three that carry more — the
+            // `Result`-wrapping `construct`/`invoke` and the schema-carrying `from_bytes` — keep
+            // their own opcodes, because an opcode is a *wire format* with a size budget and those
+            // three genuinely carry more than a register.
+            //
+            // That is the line this collapse deliberately stops at. The thirteen `Expr` variants and
+            // twelve `Rvalue` variants existed to be walked, and the walks are what drifted; an `Op`
+            // is dispatched, not walked, and its consumers (regalloc, liveness) already share arms.
+            Rvalue::Reflect { which, args, span } => self.compile_reflect(*which, args, dst, *span),
             Rvalue::TypedModuleCall {
                 module,
                 func,
@@ -5215,6 +5099,181 @@ impl<'m> FnCompiler<'m> {
     /// type-name receiver becomes a first-class type handle; any other receiver compiles normally;
     /// the free-fn form emits no receiver register at all. All flow through the runtime-dispatched
     /// `Op::Invoke`.
+
+    /// **Emit a reflection query.** One dispatch for the twelve kinds that reach the backend, over
+    /// [`ReflectKind`] — so a thirteenth does not compile until it says which opcode it becomes.
+    ///
+    /// The opcodes themselves are *not* collapsed, and that is a deliberate stopping point. The
+    /// thirteen `Expr` variants and twelve `Rvalue` variants existed to be **walked**, by ~30 passes
+    /// that differed only in a field name, and those walks are what drifted. An `Op` is dispatched
+    /// rather than walked: its consumers (regalloc's def/use, liveness, the disassembler) already
+    /// share arms, the VM's work is irreducibly per-query, and an opcode is a serialized wire format
+    /// with a size budget. Collapsing it would buy a handful of lines and cost a bytecode format
+    /// break.
+    fn compile_reflect(
+        &mut self,
+        which: noeta_ast::ReflectKind,
+        args: &ReflectArgs,
+        dst: Reg,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        use noeta_ast::ReflectKind as K;
+
+        // A shape mismatch is a compiler bug: lowering builds these and the census asserts the
+        // (kind × shape) grid.
+        let mismatch = || -> ! {
+            panic!(
+                "`{}` reached the backend with the wrong operand shape",
+                which.keyword()
+            )
+        };
+        // The operand of every single-register query, resolved once.
+        let one = |me: &mut Self| -> Result<Reg, Unsupported> {
+            match args {
+                ReflectArgs::One(a) => me.atom_reg(a),
+                _ => mismatch(),
+            }
+        };
+        match which {
+            // Not a runtime query at all: `type_name::<T>()` is the name-resolution step the others
+            // use as an *operand*, and lowering already turned it into a constant or a channel read
+            // (`Rvalue::TypeArgName` / `Rvalue::TypeSlotName`). No `Rvalue::Reflect` ever names it.
+            K::TypeName => mismatch(),
+            K::TypeOf => {
+                // Evaluate the operand for its side effects in both fidelities. When the checker
+                // resolved a concrete static type for this site, bake the precise `Type` constant
+                // (fidelity A); otherwise classify the runtime value's head constructor (fidelity B).
+                let src = one(self)?;
+                match self.module.type_of_sites.get(&span) {
+                    Some(repr) => self.code.push(Op::TypeOfStatic {
+                        dst,
+                        repr: Box::new(repr.clone()),
+                    }),
+                    None => self.code.push(Op::TypeOf { dst, src }),
+                }
+                Ok(())
+            }
+            K::FieldsOf => {
+                let src = one(self)?;
+                self.code.push(Op::FieldsOf { dst, src });
+                Ok(())
+            }
+            K::TraitsOf => {
+                let src = one(self)?;
+                self.code.push(Op::TraitsOf { dst, src });
+                Ok(())
+            }
+            K::AttributesOf => {
+                // The attribute type's name is a runtime string, exactly as `FieldSpecsOf`'s is:
+                // a folded constant for a written type, or the per-instantiation channel read for a
+                // type parameter. The VM reads the matching manifest entries from
+                // `Module::reflection` under that name and materializes them.
+                let src = one(self)?;
+                self.code.push(Op::AttributesOf { dst, src });
+                Ok(())
+            }
+            K::RolesOf => {
+                // Optional scope (mirrors `AttributesOf`, through the same operand path): the VM
+                // keeps only bindings whose role enum matches the name in `src`. `None` = all.
+                let src = match args {
+                    ReflectArgs::Nothing => None,
+                    ReflectArgs::One(a) => Some(self.atom_reg(a)?),
+                    _ => mismatch(),
+                };
+                self.code.push(Op::RolesOf { dst, src });
+                Ok(())
+            }
+            K::ParamsOf => {
+                // The target is a runtime string; the VM reads the matching parameter records from
+                // `Module::reflection` and materializes them. Load the operand into a register.
+                let src = one(self)?;
+                self.code.push(Op::ParamsOf { dst, src });
+                Ok(())
+            }
+            K::ReturnsOf => {
+                // The target is a runtime string; the VM reads the matching signature record from
+                // `Module::reflection` and materializes its return type as a `?Type`. Load the
+                // operand into a register, exactly as `ParamsOf` does.
+                let src = one(self)?;
+                self.code.push(Op::ReturnsOf { dst, src });
+                Ok(())
+            }
+            K::FieldSpecsOf => {
+                // The name is a runtime string; the VM reads the type's field schema from
+                // `Module::reflection` and materializes them. Load the operand into a register.
+                let src = one(self)?;
+                self.code.push(Op::FieldSpecsOf { dst, src });
+                Ok(())
+            }
+            K::VariantsOf => {
+                // The enum twin, emitted identically: the name is a runtime string and the VM reads
+                // the variant schema off the same `Module::reflection`.
+                let src = one(self)?;
+                self.code.push(Op::VariantsOf { dst, src });
+                Ok(())
+            }
+            K::Construct => {
+                let ReflectArgs::Two { name, arg } = args else {
+                    mismatch()
+                };
+                let name = self.atom_reg(name)?;
+                let fields = self.atom_reg(arg)?;
+                // The `Result<dyn, string>` wrapper shapes, interned exactly as `Op::Invoke` interns
+                // them — the VM builds `Ok(value)` / `Err(message)` from the same two shapes.
+                let ok_shape = self.module.builtin_enum_shape("Result", "Ok");
+                let err_shape = self.module.builtin_enum_shape("Result", "Err");
+                self.code.push(Op::Construct {
+                    dst,
+                    name,
+                    fields,
+                    ok_shape,
+                    err_shape,
+                    span,
+                });
+                Ok(())
+            }
+            K::Invoke => {
+                let ReflectArgs::Dispatch { recv, name, args } = args else {
+                    mismatch()
+                };
+                self.lower_invoke(recv.as_ref(), name, args, dst, span)
+            }
+            K::FromBytes => {
+                let ReflectArgs::Bytes {
+                    blob,
+                    layout,
+                    validate,
+                } = args
+                else {
+                    mismatch()
+                };
+
+                // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4). Intern element T's
+                // schema from the layout the checker recorded (the same channel list literals use). A
+                // `None` layout means T was not packable — the checker already emitted E0038, so this
+                // program never runs; load unit to keep the register defined.
+                let src = self.atom_reg(blob)?;
+                match layout {
+                    Some(layout) => {
+                        let schema = self.module.intern_packed_schema(layout);
+                        self.code.push(Op::FromBytes {
+                            dst,
+                            src,
+                            schema,
+                            validate: *validate,
+                            span,
+                        });
+                    }
+                    None => {
+                        let k = self.add_const(Const::Unit);
+                        self.code.push(Op::LoadConst { dst, k });
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn lower_invoke(
         &mut self,
         recv: Option<&Atom>,

@@ -602,82 +602,29 @@ pub enum Rvalue {
     /// cannot arise from a checked program (the checker resolves every slot at the instantiating
     /// call); the backends treat it as the corrupt-slot abort the recipe path already does.
     TypeSlotName { slot: Atom, span: Span },
-    /// `type_of(value)` — the runtime `Type` descriptor of a value.
-    TypeOf { operand: Atom, span: Span },
-    /// `fields_of(value)` — a struct/class instance's fields as `List<FieldEntry>` (derive
-    /// layer 3); the empty list for any other value.
-    FieldsOf { operand: Atom, span: Span },
-    /// `traits_of(value)` — the qualified trait names the value's nominal type has a registered
-    /// `impl` for, as a sorted, deduped `List<string>` (the shared membership table the precise
-    /// `is dyn Trait` narrowing tests); the empty list for a non-nominal value.
-    TraitsOf { operand: Atom, span: Span },
-    /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4).
-    /// `blob` is the byte operand; `layout` is element `T`'s packed layout (looked up by the lowering
-    /// in the `packed_list_sites` channel — the same one list literals use). `None` if the checker
-    /// did not record a layout (T not packable — already an error), letting the backend fail cleanly.
-    FromBytes {
-        blob: Atom,
-        layout: Option<noeta_ast::reflect::PackedLayout>,
-        /// Whether element type `T` implements `Validate` (validation arc): when set, the backend
-        /// runs `validate()` on each decoded element and aborts at `[i]` on the first rejection —
-        /// the abort door, consistent with a shape mismatch.
-        validate: bool,
+    /// **The reflection surface** — twelve of the thirteen intrinsics as one rvalue: `which` says
+    /// which query, `args` its already-lowered operands.
+    ///
+    /// The IR twin of [`noeta_ast::Expr::Reflect`], and collapsed for the same reason. Eight of the
+    /// twelve carry exactly one [`Atom`], and before the collapse those eight were eight variants
+    /// that every operand walk — free variables, liveness, printing — had to list by name. They are
+    /// one arm now, and the shapes that genuinely differ are named in [`ReflectArgs`].
+    ///
+    /// [`ReflectKind::TypeName`](noeta_ast::ReflectKind::TypeName) is the one kind that never
+    /// appears here, and it is not an omission: `type_name::<T>()` is either a compile-time constant
+    /// (the program is linked by now, so the `TypeRef` already carries its qualified identity) or a
+    /// read of whichever per-instantiation channel carries `T` — [`Rvalue::TypeArgName`] or
+    /// [`Rvalue::TypeSlotName`]. It has no runtime query of its own to name. The census records
+    /// that.
+    Reflect {
+        which: noeta_ast::ReflectKind,
+        args: ReflectArgs,
         span: Span,
     },
     /// `channel::<T>(capacity)` — construct a bounded channel (isolates I.1), yielding a
     /// `(Sender, Receiver)` tuple of scheduler-owned endpoint ids. The message type `T` is a
     /// checker-only concern (the runtime channel is untyped), so only `capacity` reaches here.
     MakeChannel { capacity: Atom, span: Span },
-    /// `attributes_of::<T>()` / `attributes_of(name)` — the manifest's `#[T(...)]` attributes for
-    /// the attribute type named by the runtime `name` string.
-    ///
-    /// One name operand, exactly as [`Rvalue::FieldSpecsOf`] takes one: the manifest is name-keyed,
-    /// so the turbofish arm folds to a constant name, the dynamic arm is the operand as written,
-    /// and a type parameter of an enclosing generic arrives as the very
-    /// [`Rvalue::TypeArgName`]/[`Rvalue::TypeSlotName`] that answers `type_name::<T>()` — the same
-    /// three cases `Lowerer::lower_type_operand` produces for every name-keyed surface.
-    AttributesOf { name: Atom, span: Span },
-    /// `roles_of()` / `roles_of::<RoleEnum>()` / `roles_of(name)` — the `(declaration, Role)` index,
-    /// optionally scoped to a single role enum by NAME. `None` is the unscoped query (the whole
-    /// index); `Some` carries the same name atom [`Rvalue::AttributesOf`] does, from the same helper.
-    RolesOf { name: Option<Atom>, span: Span },
-    /// `params_of(target)` — the declared parameter list of the fn/method named by the runtime
-    /// `target` string, materialized as `List<ParamInfo>`.
-    ParamsOf { target: Atom, span: Span },
-    /// `returns_of(target)` — the declared return type of the fn/method named by the runtime
-    /// `target` string, materialized as a `?Type`: `some(t)` for a known callable, `none` when no
-    /// callable of that name is known. Reads the SAME signature record `ParamsOf` reads, so the two
-    /// queries agree about which callables exist.
-    ReturnsOf { target: Atom, span: Span },
-    /// `field_specs_of::<T>()` / `field_specs_of(name)` — the declared field schema of the struct/class
-    /// named by the runtime `name` string, materialized as `List<FieldSpec>` (empty for an unknown or
-    /// non-fielded type). The turbofish form reaches here identically — the parser lowered `T` to its
-    /// name string — so there is only ever a runtime name operand.
-    FieldSpecsOf { name: Atom, span: Span },
-    /// `variants_of::<T>()` / `variants_of(name)` — the declared variant schema of the enum named by
-    /// the runtime `name` string, materialized as `List<VariantSpec>` (empty for an unknown type, or
-    /// for one that is not an enum). The enum twin of [`Rvalue::FieldSpecsOf`], reached the same way:
-    /// the parser lowered a turbofish `T` to its name string, so there is only ever a runtime name
-    /// operand.
-    VariantsOf { name: Atom, span: Span },
-    /// `construct::<T>(fields)` / `construct(name, fields)` — build a struct value of the type named by
-    /// the runtime `name` string from `fields` (a runtime `List<dyn>` of field values in declaration
-    /// order), reusing the same construction path as a `T { … }` literal. Materializes a
-    /// `Result<dyn, string>` — `Ok(value)` or a recoverable `Err(message)`.
-    Construct {
-        name: Atom,
-        fields: Atom,
-        span: Span,
-    },
-    /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch. `recv` is
-    /// `None` for the free-function form, where `name` resolves in the top-level function namespace
-    /// instead of a type's method table.
-    Invoke {
-        recv: Option<Atom>,
-        name: Atom,
-        args: Atom,
-        span: Span,
-    },
     /// A **call-site-typed** native module call — the turbofish form (`json.parse::<T>(args)`)
     /// only; an ordinary module call (`http.get(url)`) lowers as `CallMethod` on a first-class
     /// module value. `recipe` is the turbofish `T` resolved by the checker (baked here from
@@ -737,6 +684,73 @@ pub enum Rvalue {
     /// as a direct import would — keeping AOT ring DCE (which keys on the concrete identity) intact.
     /// A method call on the result dispatches through the ordinary native-module path.
     NativeModule { module: String, span: Span },
+}
+
+/// **The lowered operands of a reflection query** — the IR twin of
+/// [`ReflectShape`](noeta_ast::ReflectShape), and the reason [`Rvalue::Reflect`] can be one variant.
+///
+/// Four shapes for twelve kinds, against the AST's seven for thirteen: lowering has already
+/// resolved the static/dynamic distinction that the surface has to keep (a turbofish type and a
+/// runtime string both arrive here as *a name atom*), which is exactly what the two
+/// per-instantiation channels made possible. What survives are the genuine differences in operand
+/// count and payload.
+#[derive(Debug, Clone)]
+pub enum ReflectArgs {
+    /// No operand — the unscoped `roles_of()`.
+    Nothing,
+    /// One operand. Eight of the twelve: a value (`type_of`, `fields_of`, `traits_of`), a runtime
+    /// string naming a callable (`params_of`, `returns_of`), or a **type name** — which is what
+    /// `attributes_of`, `field_specs_of`, `variants_of` and the scoped `roles_of` all reduce to,
+    /// whichever surface they were written in and whichever channel carried a type parameter.
+    One(Atom),
+    /// A type name plus one runtime argument — `construct(name, fields)`.
+    Two { name: Atom, arg: Atom },
+    /// `invoke(recv, name, args)` / `invoke(name, args)`. `recv` is `None` for the free-function
+    /// form, where `name` resolves in the top-level function namespace instead of a type's method
+    /// table — the distinction every reader must make, so it stays an `Option` rather than a
+    /// sentinel.
+    Dispatch {
+        recv: Option<Atom>,
+        name: Atom,
+        args: Atom,
+    },
+    /// `from_bytes::<T>(blob)`: the byte operand plus element `T`'s packed layout, looked up by
+    /// lowering in the `packed_list_sites` channel — the same one list literals use. `layout` is
+    /// `None` if the checker recorded none (`T` not packable — already an error), letting the
+    /// backend fail cleanly.
+    ///
+    /// The layout, not a name, is why `from_bytes` is the one query a per-instantiation channel
+    /// cannot answer: both channels carry names.
+    Bytes {
+        blob: Atom,
+        layout: Option<noeta_ast::reflect::PackedLayout>,
+        /// Whether element type `T` implements `Validate` (validation arc): when set, the backend
+        /// runs `validate()` on each decoded element and aborts at `[i]` on the first rejection —
+        /// the abort door, consistent with a shape mismatch.
+        validate: bool,
+    },
+}
+
+impl ReflectArgs {
+    /// Visit every operand [`Atom`], in evaluation order — the one walk free-variable collection
+    /// and liveness both need, and which they each used to spell as twelve arms.
+    pub fn for_each_atom(&self, f: &mut impl FnMut(&Atom)) {
+        match self {
+            ReflectArgs::Nothing => {}
+            ReflectArgs::One(a) | ReflectArgs::Bytes { blob: a, .. } => f(a),
+            ReflectArgs::Two { name, arg } => {
+                f(name);
+                f(arg);
+            }
+            ReflectArgs::Dispatch { recv, name, args } => {
+                if let Some(recv) = recv {
+                    f(recv);
+                }
+                f(name);
+                f(args);
+            }
+        }
+    }
 }
 
 /// A statement in an IR [`Block`]. The `let`/`eval`/`bind`/`echo`/`return` forms are
