@@ -1,6 +1,16 @@
 # The reflection intrinsics — adopt the chokepoint that already exists
 
-Status: **scoping**. No code changed. The measurements below are from a read-only survey of `main` at `d6db1de24`; verify before acting on any line number.
+Status: **DONE**. Steps 1, 2 and 3 are landed. The measurements below are from the original read-only survey of `main` at `d6db1de24` and are kept as the record of what was found; the line-level details no longer describe the tree.
+
+**What shipped, and where it stopped.**
+
+* **Step 1** — `attributes_of`, `roles_of` and `from_bytes` adopted the operand contract; `Op::AttributesOf` took a name-string register instead of a `Module::type_args` index.
+* **Step 2** — one `Expr::Reflect { which: ReflectKind, operand: ReflectOperand }`, one `Rvalue::Reflect { which, args: ReflectArgs }`, and one dispatch per layer. The seven `ReflectOperand` arms are the closed set of contracts `ReflectKind::shape()` assigns; the ~30 mechanical walks became one arm each, delegating to `for_each_expr` / `for_each_type_ref`.
+* **Step 3** — `crates/noeta-builtins/tests/reflect_surface.rs`. Its first run found three things, which is the usual result of writing one of these down: `ReflectKind::ALL` was not in the lexer order it claimed to be in, and both oracles it stands on were named wrong.
+
+**The opcodes deliberately did not collapse**, and the reasoning generalizes. The `Expr` and `Rvalue` variants existed to be *walked* — by passes that differed only in a field name, which is what drifted. An `Op` is dispatched rather than walked: its consumers (regalloc def/use, liveness, the disassembler) already shared arms, the VM's work is irreducibly per-query, and an opcode is a serialized wire format with a size budget. Collapsing it would have bought a handful of lines and cost a bytecode format break. **The collapse is worth what the walks cost, and nothing more.**
+
+**Two latent gaps closed on the way, both the same shape.** `attributes_of`, `type_name` and `roles_of` sat in the *leaf* group of the nested-fn collectors (the checker's and the state machine's), so a nested `fn` inside a dynamic operand would never have been hoisted. Neither had been reported. One arm cannot make that mistake — which is the argument for the collapse in miniature.
 
 The question that prompted this: *should the reflection primitives move under a standard-library namespace?* **No — or at least, not for any reason in this document.** The namespace move buys no bug fix, and the nearest precedent (reactivity leaving the prelude) accepted a measured **48.8%** regression as the price of three boundary crossings per operation. The defects here are all in-tree, and so is the fix.
 

@@ -27,55 +27,43 @@ use noeta_ast::{ReflectKind, ReflectOperand, TypeOperand};
 /// [`ReflectKind::shape`], and the census asserts the whole (kind × arm) grid. A mismatch is a
 /// compiler bug, and a bug the user cannot cause should not be spelled as a diagnostic the user
 /// cannot act on.
-fn expect_type<'a>(which: ReflectKind, operand: &'a ReflectOperand) -> &'a TypeOperand {
+fn expect_type(which: ReflectKind, operand: &ReflectOperand) -> &TypeOperand {
     operand.as_type().unwrap_or_else(|| mismatch(which))
 }
 
 /// The operand of a [`ReflectShape::OptionalType`](noeta_ast::ReflectShape::OptionalType) kind:
 /// `None` for the unscoped `roles_of()`.
-fn expect_optional_type<'a>(
-    which: ReflectKind,
-    operand: &'a ReflectOperand,
-) -> Option<&'a TypeOperand> {
+fn expect_optional_type(which: ReflectKind, operand: &ReflectOperand) -> Option<&TypeOperand> {
     operand
         .as_optional_type()
         .unwrap_or_else(|| mismatch(which))
 }
 
 /// The operand of a [`ReflectShape::Value`](noeta_ast::ReflectShape::Value) kind.
-fn expect_value<'a>(which: ReflectKind, operand: &'a ReflectOperand) -> &'a Expr {
+fn expect_value(which: ReflectKind, operand: &ReflectOperand) -> &Expr {
     operand.as_value().unwrap_or_else(|| mismatch(which))
 }
 
 /// The operand of a [`ReflectShape::StaticType`](noeta_ast::ReflectShape::StaticType) kind.
-fn expect_static_type<'a>(which: ReflectKind, operand: &'a ReflectOperand) -> &'a TypeRef {
+fn expect_static_type(which: ReflectKind, operand: &ReflectOperand) -> &TypeRef {
     operand.as_static_type().unwrap_or_else(|| mismatch(which))
 }
 
 /// The two halves of a [`ReflectShape::TypeWith`](noeta_ast::ReflectShape::TypeWith) operand.
-fn expect_type_with<'a>(
-    which: ReflectKind,
-    operand: &'a ReflectOperand,
-) -> (&'a TypeOperand, &'a Expr) {
+fn expect_type_with(which: ReflectKind, operand: &ReflectOperand) -> (&TypeOperand, &Expr) {
     operand.as_type_with().unwrap_or_else(|| mismatch(which))
 }
 
 /// The two halves of a
 /// [`ReflectShape::StaticTypeWith`](noeta_ast::ReflectShape::StaticTypeWith) operand.
-fn expect_static_type_with<'a>(
-    which: ReflectKind,
-    operand: &'a ReflectOperand,
-) -> (&'a TypeRef, &'a Expr) {
+fn expect_static_type_with(which: ReflectKind, operand: &ReflectOperand) -> (&TypeRef, &Expr) {
     operand
         .as_static_type_with()
         .unwrap_or_else(|| mismatch(which))
 }
 
 /// The three parts of a [`ReflectShape::Dispatch`](noeta_ast::ReflectShape::Dispatch) operand.
-fn expect_dispatch<'a>(
-    which: ReflectKind,
-    operand: &'a ReflectOperand,
-) -> (Option<&'a Expr>, &'a Expr, &'a Expr) {
+fn expect_dispatch(which: ReflectKind, operand: &ReflectOperand) -> (Option<&Expr>, &Expr, &Expr) {
     operand.as_dispatch().unwrap_or_else(|| mismatch(which))
 }
 

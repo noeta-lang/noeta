@@ -62,7 +62,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use noeta_ast::{
     AttrValue, Attribute, CallArg, ClosureBody, Expr, FieldDecl, FnDecl, ImplBlock, ImplDecl, Name,
-    Param, Pattern, Stmt, StrPart, TypeOperand, TypeParam, TypeRef, VariantDecl,
+    Param, Pattern, Stmt, StrPart, TypeParam, TypeRef, VariantDecl,
 };
 
 /// A module's qualification map: a **local** type name (an in-module declaration's short name, or an
@@ -152,15 +152,6 @@ enum NameKind {
     /// kind the local-binding suppression applies to, because module aliases are lowercase and
     /// collide with ordinary locals.
     ValueChain,
-}
-
-/// Rewrite a reflection surface's type operand: the turbofish arm is a genuine type reference (so it
-/// qualifies), the dynamic arm a runtime-string expression (so it does not).
-fn q_type_operand(op: &mut TypeOperand, visit: &mut NameVisitor) {
-    match op {
-        TypeOperand::Static(ty) => q_typeref(ty, visit),
-        TypeOperand::Dynamic(e) => q_expr(e, visit),
-    }
 }
 
 /// Rewrite every named type inside a [`TypeRef`], recursively — so `List<User>`, `?User`,

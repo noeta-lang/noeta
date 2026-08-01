@@ -5095,13 +5095,9 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch. A bare
-    /// type-name receiver becomes a first-class type handle; any other receiver compiles normally;
-    /// the free-fn form emits no receiver register at all. All flow through the runtime-dispatched
-    /// `Op::Invoke`.
-
-    /// **Emit a reflection query.** One dispatch for the twelve kinds that reach the backend, over
-    /// [`ReflectKind`] — so a thirteenth does not compile until it says which opcode it becomes.
+    /// **Emit a reflection query.** One dispatch over [`ReflectKind`], covering the twelve kinds
+    /// that reach a backend — so a fourteenth intrinsic does not compile until it says which opcode
+    /// it becomes.
     ///
     /// The opcodes themselves are *not* collapsed, and that is a deliberate stopping point. The
     /// thirteen `Expr` variants and twelve `Rvalue` variants existed to be **walked**, by ~30 passes
@@ -5274,6 +5270,10 @@ impl<'m> FnCompiler<'m> {
         }
     }
 
+    /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch. A bare
+    /// type-name receiver becomes a first-class type handle; any other receiver compiles normally;
+    /// the free-fn form emits no receiver register at all. All flow through the runtime-dispatched
+    /// `Op::Invoke`.
     fn lower_invoke(
         &mut self,
         recv: Option<&Atom>,

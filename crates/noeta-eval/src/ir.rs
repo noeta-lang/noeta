@@ -988,8 +988,8 @@ impl Interpreter {
         })
     }
 
-    /// **Evaluate a reflection query** — one dispatch for the twelve kinds that reach a backend,
-    /// over [`ReflectKind`].
+    /// **Evaluate a reflection query** — one dispatch over [`ReflectKind`], covering the twelve
+    /// kinds that reach a backend.
     ///
     /// The twin of the VM's dispatch arms and of `noeta_compiler::compile_reflect`. Being one
     /// exhaustive match is what makes "the reference interpreter and the VM answer the same query"
