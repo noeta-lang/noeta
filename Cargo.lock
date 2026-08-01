@@ -2447,7 +2447,13 @@ name = "noeta-bundle"
 version = "0.2.3"
 dependencies = [
  "miniz_oxide",
+ "noeta-ast",
  "noeta-bytecode",
+ "noeta-diagnostics",
+ "noeta-ext-abi",
+ "noeta-object",
+ "noeta-span",
+ "sha2",
  "walrus",
 ]
 
