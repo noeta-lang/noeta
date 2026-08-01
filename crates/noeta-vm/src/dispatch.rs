@@ -4022,6 +4022,16 @@ pub(crate) fn runtime_narrow_target(
     regs[fbase + reg as usize].with_str(NarrowTarget::from_runtime_name)
 }
 
+/// Overwrite a register, releasing the value it held.
+///
+/// `#[inline(always)]`, not a plain hint: this is four instructions behind ~125 call sites in
+/// `dispatch_inner`, and it inlined into all of them until `dispatch_inner` grew past LLVM's
+/// inlining budget for a caller that large. Measured when it stopped: 3.0% of the interpreter
+/// `loop` profile appeared as a *call* to a leaf this small, and the tier-0 benchmarks moved
+/// 7–11% in instructions retired. The budget only ever gets tighter as the dispatch loop takes
+/// on more ops, so the attribute states the requirement rather than re-earning it each release —
+/// the same reason `MapKey::cmp` carries one.
+#[inline(always)]
 pub(crate) fn set_reg(regs: &mut [Value], base: usize, dst: u16, value: Value) {
     let idx = base + dst as usize;
     let old = regs[idx];
