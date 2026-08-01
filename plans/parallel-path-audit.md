@@ -260,6 +260,20 @@ Two instances of one shape: an artifact written and read by independent hand-wri
 
 ---
 
+## 13. `run_module_aot` is a sixth VM setup that does not go through the core, and it says so
+
+**Found 2026-08-01 while surveying row 3's `..Default::default()` class. No live defect proven; the same shape as row 1 one layer down.**
+
+`Vm::run_module_with` is the run core, and it is a real one: nine or so mandatory init steps — collector mode, the safepoint-GC arm, the debug-session arena, the hot-mailbox consumer cursor (whose comment explains that claiming it *before* the run can drain is what stops a worker losing a swap), the isolate module handle, the cancel flag, the profiler seam. Eleven `run_module_*` methods are thin `RunOptions` presets over it.
+
+`run_module_aot` (`crates/noeta-vm/src/backend.rs`) is not. It hand-rolls `Vm::load`, sets three isolate fields and `tier1.aot`, binds the dispatch table and calls `run_and_teardown` — and its own doc states the reason: *"Stays off the `RunOptions` core: the dispatch bind is an unsafe pre-run step no other mode has."* That is a true statement about `unsafe`, and it is also the entire mechanism by which this path stopped receiving `cancel`, `hot_mailbox` and the profiler. All three are N/A for a `--native` binary **today**; the point is that nothing makes the twelfth caller reconsider when a tenth init step is added to the core.
+
+Row 9 records the consequence from the other end: `--native` is the one execution surface with no differential oracle, so this divergence is unobserved by construction. The two rows are the same finding seen from opposite sides, and doing row 9 first is what would make this one falsifiable.
+
+**Chokepoint.** `RunOptions` grows the dispatch table as an option — a newtype carrying the safety contract, so the `unsafe` stays at the boundary where the caller asserts it rather than justifying a parallel function — and `run_module_aot` becomes the twelfth preset. **Size: ~40 lines.** Then add a census in the shape of `lowerer_field_census.rs`: every `RunOptions` field is consumed by `run_module_with`, and every `run_module_*` method reaches it.
+
+---
+
 ## Already tracked elsewhere — not re-reported
 
 **The formatter's safety proxy** is `plans/fmt-structural-safety-gate.md`, which is a better write-up of that parallel path than this file would manage. Its §A (the corpus structural property, `crates/noeta-fmt/tests/structural.rs`) landed; §B (`zero_spans` + derived `PartialEq`) has not. Worth noting only that the run-time gate does hold the line for the printer's 19 `_ =>` arms: a miss at `crates/noeta-fmt/src/print.rs:3536` (`_ => u8::MAX` in the precedence table — a new `Expr` variant defaults to "never parenthesise") is a *refusal to format*, not a corruption, because `crates/noeta-fmt/src/lib.rs:316-329` reparses its own output and returns `FmtError::Safety` on mismatch.
