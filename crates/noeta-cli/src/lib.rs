@@ -29,8 +29,6 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use noeta_ast::Expr;
-// `render` is re-exported here for `watch`'s diagnostic rendering (`crate::render`).
-use noeta_diagnostics::render;
 
 // The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.

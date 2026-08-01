@@ -400,20 +400,26 @@ fn relevant_path(path: &Path, reads: &[PathBuf]) -> bool {
 /// the entry unit of the program the VM **actually compiled** — the diff baseline, handed over
 /// rather than re-derived here, so it cannot disagree with what is running and so nothing slow
 /// stands between this thread starting and its file watcher being armed.
+///
+/// `front` is the **boot's own resolved dependency graph** (audit-10), handed over for the same
+/// reason `applied` is: a re-link must link against the graph the running program was built with.
+/// This used to re-resolve from scratch on every edit — see [`relink_entry_unit`].
 pub(crate) fn spawn_hot_watcher(
     entry: std::path::PathBuf,
     tail: Vec<noeta_ast::Stmt>,
     applied: EntryUnit,
+    front: std::sync::Arc<noeta_runner::compile::FrontFacts>,
     mailbox: noeta_vm::HotSwapMailbox,
     wake: std::sync::Arc<noeta_host_real::Notify>,
 ) {
-    std::thread::spawn(move || hot_watcher(entry, tail, applied, mailbox, wake));
+    std::thread::spawn(move || hot_watcher(entry, tail, applied, front, mailbox, wake));
 }
 
 fn hot_watcher(
     entry: std::path::PathBuf,
     tail: Vec<noeta_ast::Stmt>,
     mut applied: EntryUnit,
+    front: std::sync::Arc<noeta_runner::compile::FrontFacts>,
     mailbox: noeta_vm::HotSwapMailbox,
     wake: std::sync::Arc<noeta_host_real::Notify>,
 ) {
@@ -483,7 +489,7 @@ fn hot_watcher(
         // The transactional gate: red code never swaps; the old version keeps serving. The
         // rendered diagnostics also ride the channel's error slot to live LiveView clients
         // (the browser overlay, server-hmr L3) — waking the run thread to deliver promptly.
-        let (new_unit, sites) = match relink_entry_unit(&entry, &tail) {
+        let (new_unit, sites) = match relink_entry_unit(&entry, &tail, &front) {
             Ok(checked) => checked,
             Err(err) => {
                 eprint!("{}", err.text());
@@ -555,6 +561,16 @@ fn hot_watcher(
 /// Rouse every worker executor parked on the shared wake (server-hmr F5): `notify_waiters` wakes
 /// all currently-parked accepts at once, and `notify_one` leaves a stored permit for a worker
 /// racing into its wait.
+///
+/// **Measured reach, audit-10.** With the wake armed, an idle `--parallel N` fleet applies a
+/// deposited swap in exactly two of its workers before the next request; the remaining `N - 2` each
+/// answer one request with pre-swap code and swap at the tick after it. Without it, *every* worker
+/// does (1 of 1, 3 of 3) — so the wake works, it just does not reach a worker that is not awaiting
+/// it. Giving each consumer its own `Notify` was tried and changed nothing at N = 1, 2, 3 and 5,
+/// which rules the `notify_one` single-permit race out as the explanation and points at where an
+/// idle worker with a pre-bound listener actually blocks. `parallel_hot` pins both the guarantee
+/// (the single worker never serves stale code after an idle swap) and the bound (a fleet serves
+/// fewer stale responses than it has workers, which is what fails if the wake is dropped).
 fn wake_all(wake: &noeta_host_real::Notify) {
     wake.notify_waiters();
     wake.notify_one();
@@ -611,11 +627,43 @@ impl RelinkError {
             RelinkError::Unreadable(text) | RelinkError::Diagnostics(text) => text,
         }
     }
+
+    /// A shared-front-half failure ([`crate::context::load_entry_with_tail`]) as a relink verdict.
+    ///
+    /// The split is by *kind*, not by exit code: the two diagnostic-carrying variants are red code
+    /// (report, keep serving the old version, put them under the browser overlay); everything else
+    /// is a project that could not be read at all — a half-written file mid-save, an unresolvable
+    /// graph — which is no verdict, so the next event's finished text decides.
+    fn from_link(failure: noeta_runner::CompileFailure) -> RelinkError {
+        let (text, _) = failure.to_text();
+        match failure {
+            noeta_runner::CompileFailure::Load(_)
+            | noeta_runner::CompileFailure::Diagnostics { .. } => RelinkError::Diagnostics(text),
+            noeta_runner::CompileFailure::Message(_)
+            | noeta_runner::CompileFailure::Unreadable(_) => {
+                RelinkError::Unreadable(format!("[hot] {text}"))
+            }
+        }
+    }
 }
 
-/// Re-link the project exactly as the serve boot linked it — dependency graph → loader (with the
-/// driver's `tail`) → whole-program check — and return the **entry unit** (the entry file's own
-/// statements, qualified) together with **that check's [`noeta_check::Sites`]**.
+/// Re-link the project exactly as the serve boot linked it — [`crate::context::load_entry_with_tail`],
+/// the same front half the boot ran, with the same `tail` — then check it, and return the **entry
+/// unit** (the entry file's own statements, qualified) together with **that check's
+/// [`noeta_check::Sites`]**.
+///
+/// "Exactly as the boot linked it" is literal since audit-10: `front` is the boot's own
+/// [`noeta_runner::compile::FrontFacts`], reused rather than re-resolved. It used to call
+/// `resolve_graph` itself on every edit, which was wrong in three ways and slow in a fourth. It
+/// **re-solved the dependency graph per keystroke-save**; with `[trust].require_transparency` set
+/// that solve is by definition a live registry round trip, so a hot reload made a network call per
+/// save and a transient failure came back as `Unreadable` — "no verdict", printed and skipped, the
+/// developer's edit silently discarded. It refreshed `noeta.lock` on that path (harmless only
+/// because the writer skips an unchanged write). And it could in principle link the swap candidate
+/// against a *different* graph than the running program was built from. None of that buys any
+/// freshness: a change to `noeta.toml`, `noeta.lock`, or any file but the entry never reaches here
+/// at all — the watcher above exits with [`HOT_RESTART_CODE`] and the wrapper restarts the process,
+/// which resolves the graph again from scratch. Dependency freshness is the *restart's* job.
 ///
 /// The bundle is not a by-product: it is the codegen half of the check the gate already runs. A
 /// swap installed without it compiles checkerless — no packed-list layouts, no `type_of` fidelity,
@@ -636,36 +684,15 @@ impl RelinkError {
 fn relink_entry_unit(
     entry: &Path,
     tail: &[noeta_ast::Stmt],
+    front: &std::sync::Arc<noeta_runner::compile::FrontFacts>,
 ) -> Result<(EntryUnit, noeta_check::Sites), RelinkError> {
-    let (deps, package_uses) = match noeta_pm::graph::resolve_graph(entry) {
-        Ok(graph) => (graph.packages, graph.package_uses),
-        Err(err) => return Err(RelinkError::Unreadable(format!("[hot] {err}\n"))),
-    };
-    let linked = match noeta_loader::load_with_deps_appending(
+    let program = crate::context::load_entry_with_tail(
         entry,
-        noeta_pm::manifest::root_edition(entry),
-        &deps,
-        &package_uses,
-        noeta_pm::sources::package_root(entry).as_ref(),
         tail,
-    ) {
-        Err(err) => {
-            return Err(RelinkError::Unreadable(format!(
-                "[hot] cannot read {}: {err}\n",
-                entry.display()
-            )));
-        }
-        Ok(Err(load_diagnostics)) => {
-            let mut rendered = String::new();
-            for ld in &load_diagnostics {
-                rendered.push_str(&crate::render(&ld.source, &ld.diagnostic));
-            }
-            return Err(RelinkError::Diagnostics(rendered));
-        }
-        Ok(Ok(linked)) => linked,
-    };
-    let entry_source = linked.entry.clone();
-    let loaded = crate::context::loaded(linked);
+        crate::context::Front::Given(std::sync::Arc::clone(front)),
+    )
+    .map_err(RelinkError::from_link)?;
+    let (loaded, entry_source, _) = program.into_loaded();
     let checked = loaded.check();
     // Only errors block a hot swap. A warning still reaches the developer — printed here, since the
     // edit that introduced it is the moment it is worth seeing — but the edit swaps in regardless.
@@ -727,6 +754,15 @@ mod tests {
         }]
     }
 
+    /// The boot's resolved front for a fixture — what the serve boot hands the watcher. Resolved
+    /// once here exactly as the boot resolves it, so a test re-link runs the production path.
+    fn boot_front(entry: &Path) -> std::sync::Arc<noeta_runner::compile::FrontFacts> {
+        std::sync::Arc::new(
+            noeta_runner::compile::resolve_front_with(entry, &[], &None, None)
+                .expect("the fixture's dependency graph resolves"),
+        )
+    }
+
     fn fn_names(program: &noeta_ast::Program) -> Vec<String> {
         program
             .stmts
@@ -764,7 +800,7 @@ mod tests {
         )
         .unwrap();
 
-        let (unit, _sites) = match relink_entry_unit(&entry, &fake_tail()) {
+        let (unit, _sites) = match relink_entry_unit(&entry, &fake_tail(), &boot_front(&entry)) {
             Ok(checked) => checked,
             Err(err) => panic!("the fixture should link green, got:\n{}", err.text()),
         };
@@ -786,7 +822,7 @@ mod tests {
         let entry = dir.join("app.noe");
         std::fs::write(&entry, "fn body(): int {\n    return 1\n}\n").unwrap();
 
-        let (unit, _sites) = match relink_entry_unit(&entry, &fake_tail()) {
+        let (unit, _sites) = match relink_entry_unit(&entry, &fake_tail(), &boot_front(&entry)) {
             Ok(checked) => checked,
             Err(err) => panic!("the fixture should link green, got:\n{}", err.text()),
         };
@@ -811,7 +847,7 @@ mod tests {
         let entry = dir.join("app.noe");
         std::fs::write(&entry, "fn body(): int {\n    return nope\n}\n").unwrap();
 
-        match relink_entry_unit(&entry, &[]) {
+        match relink_entry_unit(&entry, &[], &boot_front(&entry)) {
             Err(RelinkError::Diagnostics(rendered)) => assert!(rendered.contains("nope")),
             Err(RelinkError::Unreadable(text)) => panic!("expected diagnostics, got: {text}"),
             Ok(_) => panic!("red code linked green"),

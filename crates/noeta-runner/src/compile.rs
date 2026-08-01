@@ -313,12 +313,31 @@ pub fn load_linked(
     file: &Path,
     facts: &FrontFacts,
 ) -> Result<noeta_loader::Linked, CompileFailure> {
-    match noeta_loader::load_with_deps(
+    load_linked_appending(file, facts, &[])
+}
+
+/// As [`load_linked`], appending `tail` — a **driver's synthesized entry call** (`noeta serve`'s
+/// `server.serve(port, fetch, host)`, `noeta migrate`'s `migrations.emit(…)`) — to the entry
+/// program *before* it links, exactly as [`noeta_loader::load_with_deps_appending`] documents.
+///
+/// The tail is the only thing an entry-call command's load does differently from `run`'s, so it is
+/// the only thing this takes: everything else — which dependency packages, which per-package `@`
+/// tables, which edition — comes out of the same [`FrontFacts`] the plain run resolves, through the
+/// same loader call. Before this existed, `noeta serve`'s three load sites each called the loader
+/// directly with a hand-assembled argument list (audit-10), which is how they came to be the only
+/// load sites in the tree that never went through the front-facts firewall.
+pub fn load_linked_appending(
+    file: &Path,
+    facts: &FrontFacts,
+    tail: &[noeta_ast::Stmt],
+) -> Result<noeta_loader::Linked, CompileFailure> {
+    match noeta_loader::load_with_deps_appending(
         file,
         facts.edition,
         &facts.deps,
         &facts.package_uses,
         noeta_pm::sources::package_root(file).as_ref(),
+        tail,
     ) {
         Err(err) => Err(CompileFailure::Unreadable(format!(
             "cannot read {}: {err}",
