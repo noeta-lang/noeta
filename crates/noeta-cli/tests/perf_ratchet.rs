@@ -24,7 +24,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -265,5 +265,4 @@ fn the_script_is_executable() {
             script.display()
         );
     }
-    let _: &Path = script.as_path();
 }
